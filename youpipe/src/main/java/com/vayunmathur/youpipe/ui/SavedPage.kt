@@ -38,9 +38,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -110,7 +108,6 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
         topBar = {
             TopAppBar(title = { Text(stringResource(R.string.title_saved)) })
         },
-        bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.Saved) },
         floatingActionButton = {
             FloatingActionButton(onClick = { backStack.add(Route.CreatePlaylist) }) {
                 IconAdd()

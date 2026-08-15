@@ -51,7 +51,7 @@ class MetadataPreviews {
     fun Preview1Home() {
         DynamicTheme(darkTheme = true) {
             SearchScreen(
-                backStack = rememberNavBackStack<Route>(Route.SearchPage),
+                backStack = rememberNavBackStack<Route>(Route.Main(0)),
                 state = SearchUiState(
                     recommendations = listOf(
                         VideoRowState(
@@ -132,7 +132,7 @@ class MetadataPreviews {
     fun Preview4Subscriptions() {
         DynamicTheme(darkTheme = true) {
             SubscriptionVideosScreen(
-                backStack = rememberNavBackStack<Route>(Route.SubscriptionsPage),
+                backStack = rememberNavBackStack<Route>(Route.Main(1)),
                 state = SubscriptionFeedUiState(
                     videos = listOf(
                         VideoRowState(

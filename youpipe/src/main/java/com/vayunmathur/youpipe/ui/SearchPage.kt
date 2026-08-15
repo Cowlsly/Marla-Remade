@@ -39,9 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.ui.invisibleClickable
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.SearchActions
@@ -223,7 +221,6 @@ fun SearchScreen(
                 }
             }
         },
-        bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.SearchPage) }
     ) { paddingValues ->
         if (state.recommendationsLoading) {
             Box(Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {

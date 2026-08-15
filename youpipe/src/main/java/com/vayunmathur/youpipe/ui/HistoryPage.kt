@@ -21,8 +21,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.BottomNavBar
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
 
@@ -51,7 +49,6 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
                 }
             }
         },
-        bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.History) },
     ) { paddingValues ->
         LazyColumn(Modifier.padding(paddingValues)) {
             items(history, key = { it.id }) { historyItem ->

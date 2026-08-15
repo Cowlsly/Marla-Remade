@@ -25,9 +25,7 @@ import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconEdit
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -44,7 +42,7 @@ fun SubscriptionsPage(
     val fetchProgress by youPipeViewModel.fetchProgress.collectAsState()
     val context = androidx.compose.ui.platform.LocalContext.current
 
-    Scaffold(bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.SubscriptionsPage) }) { paddingValues ->
+    Scaffold { paddingValues ->
         LazyColumn(Modifier.padding(paddingValues)) {
             if (fetchProgress in 0f..1f) {
                 item {

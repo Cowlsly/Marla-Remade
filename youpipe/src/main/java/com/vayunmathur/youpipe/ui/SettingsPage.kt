@@ -12,9 +12,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.SettingsRow
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.RecommendationPreset
@@ -36,7 +34,6 @@ fun SettingsPage(
 
     AppScaffold(
         title = stringResource(UiR.string.settings),
-        bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.Settings) },
     ) { padding ->
         Column(
             Modifier

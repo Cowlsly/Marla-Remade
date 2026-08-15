@@ -35,8 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.BottomNavBar
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.DownloadManager
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -92,11 +90,6 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
                 }
             )
         },
-        bottomBar = { 
-            if (!isSelectionMode) {
-                BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.Saved) 
-            }
-        }
     ) { paddingValues ->
         LazyColumn(Modifier.padding(paddingValues)) {
             // Active downloads

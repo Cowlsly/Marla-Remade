@@ -26,8 +26,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.invisibleClickable
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.BottomNavBar
-import com.vayunmathur.youpipe.MAIN_BOTTOM_BAR_ITEMS
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.SubscriptionFeedActions
 import com.vayunmathur.youpipe.util.SubscriptionFeedUiState
@@ -87,7 +85,7 @@ fun SubscriptionVideosPage(
 }
 
 /**
- * Stateless subscription feed. [backStack] is here only to drive [BottomNavBar]; taps on the
+ * Stateless subscription feed. [backStack] is here only for preview tooling; taps on the
  * list itself go through [actions].
  */
 @Composable
@@ -96,7 +94,7 @@ fun SubscriptionVideosScreen(
     state: SubscriptionFeedUiState,
     actions: SubscriptionFeedActions,
 ) {
-    Scaffold(bottomBar = { BottomNavBar(backStack, MAIN_BOTTOM_BAR_ITEMS, Route.SubscriptionsPage) }) { paddingValues ->
+    Scaffold { paddingValues ->
         LazyColumn(Modifier.padding(paddingValues)) {
             if (state.fetchProgress in 0f..1f) {
                 item {

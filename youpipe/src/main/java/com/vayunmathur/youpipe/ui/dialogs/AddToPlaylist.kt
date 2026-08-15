@@ -1,31 +1,16 @@
 package com.vayunmathur.youpipe.ui.dialogs
 
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.vayunmathur.library.ui.AddToListDialog
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.Checkbox
-import com.vayunmathur.library.ui.IconAdd
-import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.R
@@ -35,8 +20,9 @@ import com.vayunmathur.youpipe.util.YouPipeViewModel
 
 /**
  * Add-to-playlist dialog opened from the video page. Lists Watch later + the user's playlists
- * (Downloads is not a playlist and is excluded), each with a membership [Checkbox]. A "New
- * playlist" field at the bottom creates a playlist and adds the current video in one step.
+ * (Downloads is not a playlist and is excluded), each with a membership checkbox. A "New
+ * playlist" field creates a playlist and adds the current video in one step. Membership is
+ * staged and applied on OK.
  */
 @Composable
 fun AddToPlaylist(
@@ -68,63 +54,35 @@ fun AddToPlaylist(
         allItems.filter { it.videoItem.videoID == videoID }.map { it.playlistId }.toSet()
     }
 
-    var newPlaylistName by remember { mutableStateOf("") }
-
-    Dialog({ backStack.pop() }) {
-        Card {
-            Column(Modifier.padding(16.dp)) {
-                Text(
-                    stringResource(R.string.add_to_playlist),
-                    style = MaterialTheme.typography.titleLarge,
-                )
-                Spacer(Modifier.height(8.dp))
-                LazyColumn(Modifier.weight(1f, fill = false)) {
-                    items(playlists, key = { it.id }) { playlist ->
-                        val checked = playlist.id in membership
-                        val label = if (playlist.mandatory) {
-                            stringResource(R.string.playlist_watch_later)
-                        } else {
-                            playlist.name
-                        }
-                        ListItem(
-                            content = { Text(label) },
-                            trailingContent = {
-                                Checkbox(checked, { isChecked ->
-                                    if (isChecked) {
-                                        youPipeViewModel.addVideoToPlaylist(playlist.id, video)
-                                    } else {
-                                        allItems.firstOrNull {
-                                            it.playlistId == playlist.id && it.videoItem.videoID == videoID
-                                        }?.let { youPipeViewModel.removeFromPlaylist(it) }
-                                    }
-                                })
-                            },
-                        )
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    OutlinedTextField(
-                        newPlaylistName,
-                        { newPlaylistName = it },
-                        label = { Text(stringResource(R.string.new_playlist)) },
-                        modifier = Modifier.weight(1f),
-                    )
-                    IconButton(
-                        onClick = {
-                            youPipeViewModel.createPlaylistAndAddVideo(newPlaylistName.trim(), video)
-                            newPlaylistName = ""
-                        },
-                        enabled = newPlaylistName.isNotBlank() &&
-                            newPlaylistName.trim() !in allPlaylists.map { it.name },
-                    ) {
-                        IconAdd()
-                    }
+    val watchLaterLabel = stringResource(R.string.playlist_watch_later)
+    AddToListDialog(
+        title = stringResource(R.string.add_to_playlist),
+        options = playlists,
+        itemLabel = { playlist ->
+            if (playlist.mandatory) watchLaterLabel else playlist.name
+        },
+        confirmLabel = stringResource(android.R.string.ok),
+        dismissLabel = stringResource(android.R.string.cancel),
+        itemKey = { it.id },
+        initiallyChecked = { it.id in membership },
+        createLabel = stringResource(R.string.new_playlist),
+        canCreate = { name -> name.isNotBlank() && allPlaylists.none { it.name == name.trim() } },
+        onCreate = { name -> youPipeViewModel.createPlaylistAndAddVideo(name.trim(), video) },
+        onConfirm = { selected ->
+            val selectedIds = selected.map { it.id }.toSet()
+            playlists.forEach { playlist ->
+                val wasMember = playlist.id in membership
+                val nowMember = playlist.id in selectedIds
+                if (nowMember && !wasMember) {
+                    youPipeViewModel.addVideoToPlaylist(playlist.id, video)
+                } else if (!nowMember && wasMember) {
+                    allItems.firstOrNull {
+                        it.playlistId == playlist.id && it.videoItem.videoID == videoID
+                    }?.let { youPipeViewModel.removeFromPlaylist(it) }
                 }
             }
-        }
-    }
+            backStack.pop()
+        },
+        onDismiss = { backStack.pop() },
+    )
 }
