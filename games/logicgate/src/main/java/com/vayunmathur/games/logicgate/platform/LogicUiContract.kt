@@ -1,4 +1,4 @@
-package com.vayunmathur.games.logicgate.util
+package com.vayunmathur.games.logicgate.platform
 
 import androidx.compose.ui.geometry.Offset
 import com.vayunmathur.games.logicgate.data.WireEnd

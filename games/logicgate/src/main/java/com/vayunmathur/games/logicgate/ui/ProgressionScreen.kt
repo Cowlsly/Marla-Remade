@@ -9,7 +9,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.runtime.*
+import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -26,7 +26,6 @@ import com.vayunmathur.games.logicgate.R
 import com.vayunmathur.games.logicgate.data.ChapterId
 import com.vayunmathur.games.logicgate.data.ChipLibrary
 import com.vayunmathur.games.logicgate.data.Levels
-import com.vayunmathur.games.logicgate.util.LogicViewModel
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
@@ -35,7 +34,6 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text as LibText
 import com.vayunmathur.library.ui.TopAppBar
-import com.vayunmathur.library.util.NavBackStack
 
 private sealed class TimelineItem {
     data class ChapterHeader(val chapterId: ChapterId) : TimelineItem()
@@ -56,20 +54,6 @@ private fun buildTimelineItems(): List<TimelineItem> {
         items.add(TimelineItem.LevelRow(row))
     }
     return items
-}
-
-/** Binds [LogicViewModel] to the stateless [ProgressionScreen]. */
-@Composable
-fun ProgressionPage(
-    backStack: NavBackStack<com.vayunmathur.games.logicgate.Route>,
-    viewModel: LogicViewModel
-) {
-    val completed by viewModel.completedIds.collectAsState()
-    ProgressionScreen(
-        completed = completed,
-        onOpenLevel = { lvlId -> backStack.add(com.vayunmathur.games.logicgate.Route.Game(lvlId)) },
-        onOpenGameCenter = { backStack.add(com.vayunmathur.games.logicgate.Route.GameCenter) },
-    )
 }
 
 /**
@@ -169,7 +153,6 @@ fun ProgressionScreen(
                             color = Color(0xFF7FD8BE)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
-                        // progress bar 6dp height 80% width
                         Box(
                             modifier = Modifier.fillMaxWidth(0.8f).height(6.dp).clip(RoundedCornerShape(3.dp)).background(Color(0xFF2A3A4A))
                         ) {
@@ -238,8 +221,6 @@ private fun LevelNode(levelId: String, isCompleted: Boolean, isAvailable: Boolea
     val targetDef = try { ChipLibrary.get(def.targetChipId) } catch (_: Exception) { null }
     val busW = targetDef?.dominantBusWidth() ?: def.inputWidths.maxOrNull() ?: 1
     val busColor = when (busW) { 4 -> Color(0xFFF59E0B); 8 -> Color(0xFF60A5FA); else -> Color(0xFF7ED8B6) }
-
-    // Touch target >=72dp: outer Column 108dp min width, 96dp min height clickable
     Column(
         modifier = Modifier
             .widthIn(min = 108.dp)

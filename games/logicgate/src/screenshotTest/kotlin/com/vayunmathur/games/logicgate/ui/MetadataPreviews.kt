@@ -3,16 +3,16 @@ package com.vayunmathur.games.logicgate.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
-import com.vayunmathur.games.logicgate.GameScreen
 import com.vayunmathur.games.logicgate.data.Circuit
 import com.vayunmathur.games.logicgate.data.IoPos
 import com.vayunmathur.games.logicgate.data.OutputMapping
 import com.vayunmathur.games.logicgate.data.PlacedChip
 import com.vayunmathur.games.logicgate.data.Wire
 import com.vayunmathur.games.logicgate.data.WireEnd
-import com.vayunmathur.games.logicgate.util.EvalStatus
-import com.vayunmathur.games.logicgate.util.LogicActions
-import com.vayunmathur.games.logicgate.util.UiState
+import com.vayunmathur.games.logicgate.platform.EvalStatus
+import com.vayunmathur.games.logicgate.platform.LogicActions
+import com.vayunmathur.games.logicgate.platform.UiState
+import com.vayunmathur.games.logicgate.ui.GameScreen
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"

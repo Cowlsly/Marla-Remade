@@ -1,4 +1,4 @@
-package com.vayunmathur.games.logicgate.util
+package com.vayunmathur.games.logicgate.platform
 
 import com.vayunmathur.library.util.BaseBackupAgent
 

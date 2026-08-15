@@ -1,6 +1,6 @@
 @file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
 
-package com.vayunmathur.games.logicgate.util
+package com.vayunmathur.games.logicgate.platform
 
 import kotlin.uuid.Uuid
 import android.app.Application
