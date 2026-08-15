@@ -242,7 +242,22 @@ class LocationTrackingService : Service(), SensorEventListener {
             User(" ", null, "Unknown Location", false, RequestStatus.AWAITING_REQUEST, Clock.System.now(), null, it)
         })
 
+        // Snapshot the previous latest-per-user BEFORE persisting the new fixes, so the
+        // battery-threshold and self-waypoint comparisons below still see the prior state
+        // rather than the fix we're about to store.
         val latestMap = repository.latestLocationsOnce().associateBy { it.userid }
+
+        // Persist the raw fixes immediately, before any enrichment. Everything after this
+        // (waypoint detection, reverse-geocoding via fetchAddress, notifications) is
+        // best-effort: the geocoder is a slow network call, any of it can throw, and the
+        // whole delivery is cancelled when the live socket reconnects mid-batch (the caller
+        // also swallows exceptions). Persisting last meant a slow/failed/cancelled
+        // enrichment step silently dropped the location, so getLatest() kept serving stale
+        // fixes even across a force-stop. Writing here makes the fix durable no matter what
+        // follows.
+        repository.upsertLocations(locList)
+        Log.d("FF-Heartbeat", "upsertAll ${locList.size} locations done")
+
         currentUsers.forEach { user ->
             // Self never receives its own published location, so fall back to the latest
             // stored fix; otherwise "me" never gets its waypoint recomputed.
@@ -298,8 +313,6 @@ class LocationTrackingService : Service(), SensorEventListener {
                 }
             }
         }
-        repository.upsertLocations(locList)
-        Log.d("FF-Heartbeat", "upsertAll ${locList.size} locations done")
     }
 
     /**
