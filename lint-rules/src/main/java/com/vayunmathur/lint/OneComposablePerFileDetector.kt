@@ -86,7 +86,7 @@ class OneComposablePerFileDetector : Detector(), SourceCodeScanner {
                 """.trimIndent(),
             category = Category.PRODUCTIVITY,
             priority = 5,
-            severity = Severity.WARNING,
+            severity = Severity.ERROR,
             implementation = Implementation(
                 OneComposablePerFileDetector::class.java,
                 Scope.JAVA_FILE_SCOPE,

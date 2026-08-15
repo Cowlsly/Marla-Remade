@@ -40,6 +40,7 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
             override fun visitFile(node: UFile) {
                 val packageName = node.packageName
                 if (packageName.isEmpty()) return
+                if (isJniException(node)) return
                 if (isExcluded(packageName)) return
                 if (!packageName.startsWith("com.vayunmathur.")) return
 
@@ -67,7 +68,7 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
                             append("`? ")
                         }
                         append(" See docs/package-structure.md §2.")
-                        append(" (If this is a JNI FQN exception, add it to the exception list in lint.xml.)")
+                        append(" (If this is a JNI FQN exception, add the `// PACKAGE STRUCTURE EXCEPTION (JNI)` marker comment to the file.)")
                     }
 
                     context.report(
@@ -116,6 +117,37 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
 
         fun isExcluded(packageName: String): Boolean =
             EXCLUDED_PREFIXES.any { packageName == it || packageName.startsWith("$it.") }
+
+        // JNI carve-out: a handful of classes have their fully-qualified name frozen
+        // because the native side binds to it via RegisterNatives / C++ symbol mangling.
+        // Renaming or re-nesting them would break the JNI linkage, so they are exempt
+        // from the root-package / root-file contracts.
+        //
+        // Primary mechanism (self-documenting): any file carrying the marker comment
+        // below is skipped, so a future JNI file only needs to add the comment.
+        // Belt-and-suspenders: an explicit allow-set of the currently-frozen FQNs acts
+        // as a fallback in case the marker is ever accidentally dropped.
+        private const val JNI_MARKER = "// PACKAGE STRUCTURE EXCEPTION (JNI)"
+
+        private val JNI_EXEMPT_FQNS = setOf(
+            "com.vayunmathur.euicc.EuiccNative",
+            "com.vayunmathur.games.voxels.util.VoxelsNative",
+            "com.vayunmathur.measure.domain.MeasureNative",
+            "com.vayunmathur.passwords.util.KdbxNative",
+            "com.vayunmathur.share.protocol.ShareNative",
+            "com.vayunmathur.vpn.util.VpnNative",
+            "com.vayunmathur.web.shields.ShieldsNative",
+        )
+
+        fun isJniException(node: UFile): Boolean {
+            val text = (node.sourcePsi as? KtFile)?.text ?: node.sourcePsi?.text
+            if (text != null && text.contains(JNI_MARKER)) return true
+            val pkg = node.packageName
+            return node.classes.any { clazz ->
+                val name = clazz.name ?: return@any false
+                "$pkg.$name" in JNI_EXEMPT_FQNS
+            }
+        }
 
         /**
          * Derives the app base package and the first segment after it.
@@ -436,7 +468,7 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
                 """.trimIndent(),
             category = Category.CORRECTNESS,
             priority = 8,
-            severity = Severity.WARNING,
+            severity = Severity.ERROR,
             implementation = Implementation(
                 PackageStructureDetector::class.java,
                 Scope.JAVA_FILE_SCOPE,
