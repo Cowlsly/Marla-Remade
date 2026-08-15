@@ -22,9 +22,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Current
-import com.vayunmathur.weather.util.WindUnit
-import com.vayunmathur.weather.util.compassDirection
-import com.vayunmathur.weather.util.formatWind
+import com.vayunmathur.weather.domain.WindUnit
+import com.vayunmathur.weather.domain.compassDirection
+import com.vayunmathur.weather.domain.formatWind
 import androidx.compose.ui.res.stringResource
 
 /**

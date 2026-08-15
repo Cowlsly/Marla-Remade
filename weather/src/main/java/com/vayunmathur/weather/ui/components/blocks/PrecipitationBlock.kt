@@ -16,7 +16,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
-import com.vayunmathur.weather.util.mmToInches
+import com.vayunmathur.weather.domain.mmToInches
 import java.util.Locale
 
 /**

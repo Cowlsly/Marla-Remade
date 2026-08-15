@@ -36,10 +36,6 @@ data class ForecastUiState(
     val fetchedAtEpochMs: Long = 0,
 )
 
-sealed interface SelectedDateOrTime {
-    data class Time(val isoTime: String) : SelectedDateOrTime
-    data class Day(val isoDate: String) : SelectedDateOrTime
-}
 
 class WeatherViewModel(
     application: Application,

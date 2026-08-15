@@ -20,8 +20,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Current
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.formatTemperatureCompact
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.formatTemperatureCompact
 import androidx.compose.ui.res.stringResource
 
 /**

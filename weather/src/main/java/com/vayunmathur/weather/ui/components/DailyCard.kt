@@ -27,9 +27,9 @@ import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.util.localizedDayOfWeekNames
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Daily
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.formatTemperatureCompact
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.formatTemperatureCompact
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import kotlinx.datetime.DayOfWeek
 import kotlinx.datetime.LocalDate
 

@@ -17,9 +17,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.formatTemperatureCompact
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.formatTemperatureCompact
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
 

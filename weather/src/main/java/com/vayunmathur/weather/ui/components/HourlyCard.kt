@@ -36,11 +36,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Hourly
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.formatStripHour
-import com.vayunmathur.weather.util.formatTemperatureCompact
-import com.vayunmathur.weather.util.parseLocalIsoToEpochSec
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.formatStripHour
+import com.vayunmathur.weather.domain.formatTemperatureCompact
+import com.vayunmathur.weather.domain.parseLocalIsoToEpochSec
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import androidx.compose.ui.unit.sp
 import kotlinx.datetime.DateTimeUnit
 import kotlinx.datetime.TimeZone

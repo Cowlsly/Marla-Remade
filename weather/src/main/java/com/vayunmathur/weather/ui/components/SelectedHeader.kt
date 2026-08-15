@@ -14,9 +14,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.network.ForecastResponse
-import com.vayunmathur.weather.util.SelectedDateOrTime
-import com.vayunmathur.weather.util.formatDayMonthLabel
-import com.vayunmathur.weather.util.formatSelectedHourLabel
+import com.vayunmathur.weather.domain.SelectedDateOrTime
+import com.vayunmathur.weather.domain.formatDayMonthLabel
+import com.vayunmathur.weather.domain.formatSelectedHourLabel
 
 /**
  * Prominent banner shown at the top of the page when the user is inspecting a

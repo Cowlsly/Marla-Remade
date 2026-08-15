@@ -26,10 +26,10 @@ import com.vayunmathur.weather.ui.components.blocks.SunBlock
 import com.vayunmathur.weather.ui.components.blocks.UvIndexBlock
 import com.vayunmathur.weather.ui.components.blocks.VisibilityBlock
 import com.vayunmathur.weather.ui.components.blocks.WindBlock
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.PressureUnit
-import com.vayunmathur.weather.util.WeatherMetric
-import com.vayunmathur.weather.util.WindUnit
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.PressureUnit
+import com.vayunmathur.weather.domain.WeatherMetric
+import com.vayunmathur.weather.domain.WindUnit
 
 /**
  * Port of WeatherMaster's `WeatherBlocks` grid (simplified): adaptive 140 dp

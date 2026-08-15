@@ -16,8 +16,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.ForecastResponse
-import com.vayunmathur.weather.util.TemperatureUnit
-import com.vayunmathur.weather.util.computeDaySummary
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.platform.computeDaySummary
 
 /**
  * Port of WeatherMaster's `SummaryCard`. `Surface(shape = extraLarge,

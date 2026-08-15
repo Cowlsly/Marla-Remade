@@ -23,8 +23,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.data.SavedLocation
-import com.vayunmathur.weather.util.WeatherCondition
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.WeatherCondition
+import com.vayunmathur.weather.domain.weatherConditionForCode
 
 /**
  * Direct port of WeatherMaster's `LocationItem`. Pill or extraLarge

@@ -9,7 +9,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.weather.util.WeatherCondition
+import com.vayunmathur.weather.domain.WeatherCondition
 
 /**
  * Reusable weather-icon renderer. Same role as WeatherMaster's

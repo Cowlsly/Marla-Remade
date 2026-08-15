@@ -57,8 +57,8 @@ import com.vayunmathur.weather.ui.components.MetricGraphSheet
 import com.vayunmathur.weather.ui.components.SelectedDateTimeHeader
 import com.vayunmathur.weather.ui.components.SummaryCard
 import com.vayunmathur.weather.ui.components.WeatherBlocks
-import com.vayunmathur.weather.domain.DisplayUnits
-import com.vayunmathur.weather.domain.LocationUiState
+import com.vayunmathur.weather.platform.DisplayUnits
+import com.vayunmathur.weather.platform.LocationUiState
 import com.vayunmathur.weather.domain.SelectedDateOrTime
 import com.vayunmathur.weather.domain.WeatherMetric
 import com.vayunmathur.weather.domain.formatHourAxisLabel

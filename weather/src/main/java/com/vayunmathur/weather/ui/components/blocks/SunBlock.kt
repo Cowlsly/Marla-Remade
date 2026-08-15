@@ -22,7 +22,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
-import com.vayunmathur.weather.util.formatClockTime
+import com.vayunmathur.weather.domain.formatClockTime
 import kotlin.math.cos
 import kotlin.math.sin
 

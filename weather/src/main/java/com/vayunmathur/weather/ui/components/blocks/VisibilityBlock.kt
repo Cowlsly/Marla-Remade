@@ -15,7 +15,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Current
-import com.vayunmathur.weather.util.metersToMiles
+import com.vayunmathur.weather.domain.metersToMiles
 import kotlin.math.roundToInt
 
 /**

@@ -29,7 +29,7 @@ import com.vayunmathur.library.ui.IconKeyboardArrowUp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.weather.R
-import com.vayunmathur.weather.util.formatClockTime
+import com.vayunmathur.weather.domain.formatClockTime
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.cos

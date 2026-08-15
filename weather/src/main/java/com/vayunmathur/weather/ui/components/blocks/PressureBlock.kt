@@ -15,8 +15,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Current
-import com.vayunmathur.weather.util.PressureUnit
-import com.vayunmathur.weather.util.hpaToInHg
+import com.vayunmathur.weather.domain.PressureUnit
+import com.vayunmathur.weather.domain.hpaToInHg
 import java.util.Locale
 
 /**
