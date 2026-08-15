@@ -10,7 +10,7 @@
     <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="weather_widget_description">Ilmateave ja kellaaeg ühe vaatena - klõpsa ja vaata ennustust</string>
     <string name="no_matches">Vasteid pole</string>
-    <string name="couldn_t_determine_location">Asukoha tuvastamine ei õnenstunud</string>
+    <string name="couldn_t_determine_location">Asukoha tuvastamine ei õnnestunud</string>
     <string name="location_permission_denied">Asukoha tuvastamine pole lubatud</string>
     <string name="max_min">Maks <xliff:g id="max" example="28°C">%1$s</xliff:g> Min <xliff:g id="min" example="14°C">%2$s</xliff:g></string>
     <string name="feels_like">Tundub nagu <xliff:g id="temp" example="26°C">%1$s</xliff:g></string>
