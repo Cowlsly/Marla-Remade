@@ -25,4 +25,60 @@
     <string name="archiving_started">Arhiivifaili loomine algas…</string>
     <string name="archive">Tee arhiivifail</string>
     <string name="unzipping_started_to">Lahtipakkimine algas kausta: <xliff:g id="dest_name" example="Allalaadimised">%1$s</xliff:g></string>
+    <string name="move_failed">Teisaldamine õnnestunud: <xliff:g id="error" example="Õigused on puudu">%1$s</xliff:g></string>
+    <string name="could_not_open_zip">ZIP-faili avamine ei õnnestunud: <xliff:g id="error" example="Vigane vorming">%1$s</xliff:g></string>
+    <string name="no_app_found_to_open_file">Salle faili avamiseks ei leidu rakendust</string>
+    <string name="zip_browse_only">Failide kasutamine ZIP-faili sees on piiratud vaid sirvimisega</string>
+    <string name="install_permission_needed">Luba rakendusel Failid paigaldada tundmatuid rakendusi ja siis klõpsa APK-faili uuesti</string>
+    <string name="install_permission_denied">Rakenduste paigaldamise õigused jäid lubamata</string>
+    <string name="file_fallback">Fail</string>
+    <string name="home">Avaleht</string>
+    <string name="grid_view">Ruudustikuvaade</string>
+    <string name="list_view">Loendivaade</string>
+    <string name="select_all">Vali kõik</string>
+    <string name="copy">Kopeeri</string>
+    <string name="cut">Lõika</string>
+    <string name="paste">Aseta</string>
+    <string name="share">Jaga</string>
+    <string name="new_name_label">Uus nimi</string>
+    <string name="bookmark_added">Järjehoidja on lisatud</string>
+    <string name="cat_images">Pildid</string>
+    <string name="cat_videos">Videod</string>
+    <string name="cat_audio">Helifailid</string>
+    <string name="cat_documents">Dokumendid</string>
+    <string name="cat_downloads">Allalaadimised</string>
+    <string name="internal_storage">Sisemine andmeruum</string>
+    <string name="categories">Kategooriad</string>
+    <string name="bookmarks">Järjehoidjad</string>
+    <string name="recent_files">Hiljutised failid</string>
+    <string name="storage_usage"><xliff:g id="used" example="12 GB">%1$s</xliff:g> kogumahust <xliff:g id="total" example="128 GB">%2$s</xliff:g></string>
+    <string name="prop_type">Tüüp</string>
+    <string name="prop_size">Suurus</string>
+    <string name="prop_modified">Muudetud</string>
+    <string name="prop_items">Sisu</string>
+    <string name="type_folder">Kaust</string>
+    <string name="type_file">Fail</string>
+    <string name="items_count"><xliff:g id="count" example="12">%1$d</xliff:g> objekt(i)</string>
+    <string name="saf_title_open">Vali fail</string>
+    <string name="saf_title_create">Salvesta fail</string>
+    <string name="saf_title_tree">Vali kaust</string>
+    <string name="saf_use_this_folder">Kasuta seda kausta</string>
+    <string name="saf_save">Salvesta</string>
+    <string name="saf_select_count">Vali mitu faili (<xliff:g id="count" example="3">%1$d</xliff:g>)</string>
+    <string name="unzip_channel_name">Tegevused lahtipakkimisel</string>
+    <string name="unzipping">Lahtipakkimisel…</string>
+    <string name="zip_channel_name">Tegevused pakkimisel</string>
+    <string name="archiving">Pakin kokku…</string>
+    <string name="files_saved">Failide salvestamine õnnestus</string>
+    <string name="search_files">Otsi faile…</string>
+    <string name="sort_name">Nime alusel</string>
+    <string name="sort_date">Kuupäeva alusel</string>
+    <string name="sort_size">Suuruse alusel</string>
+    <string name="sort_type">Tüübi alusel</string>
+    <string name="sort_ascending">Järjesta kasvavalt</string>
+    <string name="sort_descending">Järjesta kahanevalt</string>
+    <string name="copied_n"><xliff:g id="count" example="3">%1$d</xliff:g> objekt(i) on kopeeritud</string>
+    <string name="cut_n"><xliff:g id="count" example="3">%1$d</xliff:g> objekt(i) on lõigatud</string>
+    <string name="ready_to_paste"><xliff:g id="count" example="3">%1$d</xliff:g> objekt(i) on valmis asetamiseks</string>
+    <string name="create_failed">Faili või kausta loomine ei õnnestunud</string>
 </resources>
