@@ -49,7 +49,8 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.parseMarkdown
+
+// -------
 
 // ---------------------------------------------------------------------------
 // Note type list
@@ -346,8 +347,8 @@ private fun TemplatePreview(draft: TemplateDraft, fields: List<String>, isCloze:
     )
     Column(Modifier.padding(top = 8.dp)) {
         Text(stringResource(R.string.preview), style = MaterialTheme.typography.labelMedium)
-        Text(parseMarkdown(front, showMarkers = false), style = MaterialTheme.typography.bodyMedium)
+        MarkdownContent(text = front, style = MaterialTheme.typography.bodyMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Start)
         HorizontalDivider(Modifier.padding(vertical = 6.dp))
-        Text(parseMarkdown(back, showMarkers = false), style = MaterialTheme.typography.bodyMedium)
+        MarkdownContent(text = back, style = MaterialTheme.typography.bodyMedium, textAlign = androidx.compose.ui.text.style.TextAlign.Start)
     }
 }

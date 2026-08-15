@@ -19,5 +19,6 @@ android {
 dependencies {
     implementRoom(libs)
     implementation(project(":library:room"))
+    implementation(project(":library:image"))
     implementation(libs.androidx.work.runtime.ktx)
 }

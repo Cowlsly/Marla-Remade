@@ -125,4 +125,70 @@
         <item quantity="one">%d card is due for review</item>
         <item quantity="other">%d cards are due for review</item>
     </plurals>
+
+    <!-- Generic actions -->
+    <string name="deleted">Deleted</string>
+    <string name="undo">Undo</string>
+    <string name="done">Done</string>
+
+    <!-- Suspend / leech -->
+    <string name="suspend">Suspend</string>
+    <string name="unsuspend">Unsuspend</string>
+    <string name="suspend_card">Suspend card</string>
+    <string name="suspended_badge">Suspended</string>
+    <string name="leech_suspended">Card suspended (leech)</string>
+
+    <!-- Bulk actions (note list selection mode) -->
+    <string name="selected_count">%1$d selected</string>
+    <string name="move_to_deck">Move to deck</string>
+    <string name="add_tag">Add tag</string>
+    <string name="remove_tag">Remove tag</string>
+    <string name="tag_name">Tag</string>
+    <string name="reset_scheduling">Reset scheduling</string>
+    <string name="reset_scheduling_message">Reset these cards back to new? Their review history will be cleared.</string>
+    <string name="export_csv">Export CSV</string>
+
+    <!-- Custom study -->
+    <string name="custom_study">Custom study</string>
+    <string name="custom_study_ahead">Study ahead</string>
+    <string name="custom_study_lapses">Review lapses only</string>
+    <string name="custom_study_new">New cards only</string>
+    <string name="custom_study_cram">Cram (ignore schedule)</string>
+    <string name="custom_study_count">Card count</string>
+    <string name="custom_study_days">Days ahead</string>
+    <string name="start">Start</string>
+
+    <!-- Review extras -->
+    <string name="speak">Speak</string>
+    <string name="type_answer">Type the answer</string>
+    <string name="check">Check</string>
+    <string name="swipe_hint">Swipe to grade, or use the buttons</string>
+
+    <!-- Settings additions -->
+    <string name="setting_auto_play">Auto-play audio</string>
+    <string name="setting_auto_play_hint">Read the front of each card aloud</string>
+
+    <!-- Note editor toolbar -->
+    <string name="insert_image">Insert image</string>
+    <string name="insert_cloze">Cloze deletion</string>
+
+    <!-- Stats additions -->
+    <string name="stat_forecast">Due forecast</string>
+    <string name="stat_retention_by_interval">Retention by interval</string>
+    <string name="stat_heatmap">Review activity</string>
+
+    <!-- Deck presets -->
+    <string name="settings_presets">Deck presets</string>
+    <string name="save_preset">Save preset</string>
+    <string name="apply_preset">Apply preset</string>
+    <string name="preset_name">Preset name</string>
+    <string name="preset_saved">Preset saved</string>
+    <string name="preset_applied">Preset applied</string>
+
+    <!-- FSRS optimizer -->
+    <string name="optimize_fsrs">Optimize FSRS parameters</string>
+    <string name="optimize_fsrs_hint">Estimates better scheduling from your review history (needs at least %1$d reviews)</string>
+    <string name="optimize_fsrs_too_few">Not enough reviews to optimize yet (%1$d of %2$d)</string>
+    <string name="optimize_fsrs_done">Updated FSRS parameters from %1$d reviews</string>
+    <string name="optimize_fsrs_running">Optimizing…</string>
 </resources>

@@ -132,6 +132,11 @@ class MetadataPreviews {
         val today = LocalDate.now().toEpochDay()
         val counts = listOf(6, 14, 9, 21, 3, 17, 11, 25, 8, 19, 13, 22, 7, 16)
         val daily = counts.mapIndexed { i, c -> DailyStat(today - (counts.size - 1 - i), c) }
+        val forecast = (0 until 30).map { DailyStat(today + it, (it * 7 + 3) % 18) }
+        val retention = listOf(
+            "≤1" to 0.72f, "2–3" to 0.81f, "4–7" to 0.88f,
+            "8–14" to 0.91f, "15–30" to 0.86f, "31+" to 0.79f,
+        )
         DynamicTheme(darkTheme = true) {
             StatsScreen(
                 state = StatsUiState(
@@ -146,6 +151,9 @@ class MetadataPreviews {
                     streakDays = 14,
                     matureCards = 52,
                     totalCards = 84,
+                    forecast = forecast,
+                    retentionBuckets = retention,
+                    heatmap = daily,
                 ),
                 actions = StatsActions.Noop,
             )

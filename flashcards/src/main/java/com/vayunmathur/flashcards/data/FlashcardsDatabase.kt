@@ -117,6 +117,9 @@ interface NoteDao {
     @Query("SELECT * FROM Note WHERE id = :id")
     suspend fun getById(id: Long): Note?
 
+    @Query("SELECT * FROM Note WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<Note>
+
     @Query("SELECT * FROM Note WHERE id = :id")
     fun getByIdFlow(id: Long): Flow<Note?>
 
@@ -128,6 +131,9 @@ interface NoteDao {
 
     @Delete
     suspend fun delete(value: Note): Int
+
+    @Query("DELETE FROM Note WHERE id IN (:ids)")
+    suspend fun deleteByIds(ids: List<Long>)
 
     @Query("DELETE FROM Note WHERE deckId = :deckId")
     suspend fun deleteByDeck(deckId: Long)
@@ -147,14 +153,20 @@ interface CardDao {
     @Query("SELECT * FROM Card WHERE deckId = :deckId")
     suspend fun getByDeck(deckId: Long): List<Card>
 
-    @Query("SELECT * FROM Card WHERE deckId = :deckId AND dueDate <= :now")
+    @Query("SELECT * FROM Card WHERE deckId = :deckId AND dueDate <= :now AND suspended = 0")
     fun getDueByDeckFlow(deckId: Long, now: Long): Flow<List<Card>>
 
     @Query("SELECT * FROM Card WHERE id = :id")
     fun getByIdFlow(id: Long): Flow<Card?>
 
+    @Query("SELECT * FROM Card WHERE id IN (:ids)")
+    suspend fun getByIds(ids: List<Long>): List<Card>
+
     @Query("SELECT * FROM Card WHERE noteId = :noteId")
     suspend fun getByNote(noteId: Long): List<Card>
+
+    @Query("SELECT * FROM Card WHERE noteId IN (:noteIds)")
+    suspend fun getByNotes(noteIds: List<Long>): List<Card>
 
     @Upsert
     suspend fun upsert(value: Card): Long
@@ -165,11 +177,23 @@ interface CardDao {
     @Delete
     suspend fun delete(value: Card): Int
 
+    @Query("UPDATE Card SET suspended = :value WHERE id IN (:ids)")
+    suspend fun setSuspended(ids: List<Long>, value: Int)
+
+    @Query("UPDATE Card SET suspended = :value WHERE noteId IN (:noteIds)")
+    suspend fun setSuspendedByNotes(noteIds: List<Long>, value: Int)
+
+    @Query("UPDATE Card SET deckId = :deckId WHERE noteId IN (:noteIds)")
+    suspend fun moveByNotes(noteIds: List<Long>, deckId: Long)
+
     @Query("DELETE FROM Card WHERE deckId = :deckId")
     suspend fun deleteByDeck(deckId: Long)
 
     @Query("DELETE FROM Card WHERE noteId = :noteId")
     suspend fun deleteByNote(noteId: Long)
+
+    @Query("DELETE FROM Card WHERE noteId IN (:noteIds)")
+    suspend fun deleteByNotes(noteIds: List<Long>)
 
     @Query("DELETE FROM Card WHERE noteId = :noteId AND templateOrd NOT IN (:keepOrds)")
     suspend fun deleteRemovedTemplates(noteId: Long, keepOrds: List<Int>)
@@ -183,6 +207,9 @@ interface ReviewLogDao {
     @Query("SELECT * FROM ReviewLog WHERE deckId = :deckId")
     fun getByDeckFlow(deckId: Long): Flow<List<ReviewLog>>
 
+    @Query("SELECT * FROM ReviewLog WHERE deckId = :deckId ORDER BY cardId, reviewedAt")
+    suspend fun getByDeckOrdered(deckId: Long): List<ReviewLog>
+
     @Query("SELECT * FROM ReviewLog WHERE cardId = :cardId")
     suspend fun getByCard(cardId: Long): List<ReviewLog>
 
@@ -191,6 +218,9 @@ interface ReviewLogDao {
 
     @Query("DELETE FROM ReviewLog WHERE id = :id")
     suspend fun deleteById(id: Long)
+
+    @Query("DELETE FROM ReviewLog WHERE cardId IN (:cardIds)")
+    suspend fun deleteByCards(cardIds: List<Long>)
 
     @Query("DELETE FROM ReviewLog WHERE deckId = :deckId")
     suspend fun deleteByDeck(deckId: Long)
@@ -206,7 +236,7 @@ interface ReviewLogDao {
         CardTemplate::class,
         Note::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false,
 )
 abstract class FlashcardsDatabase : RoomDatabase() {
@@ -247,6 +277,7 @@ abstract class FlashcardsDatabase : RoomDatabase() {
                 )
             },
             MIGRATION_2_3,
+            MIGRATION_3_4,
         )
     }
 }
@@ -370,4 +401,16 @@ val MIGRATION_2_3 = Migration(2, 3) { db ->
             "dueDate, easeFactor, intervalDays, repetitions, position FROM Card_old",
     )
     db.execSQL("DROP TABLE `Card_old`")
+}
+
+/**
+ * Adds suspend/leech + per-deck FSRS columns. Plain `ALTER TABLE ADD COLUMN`s with
+ * defaults so legacy rows populate correctly; the entity fields carry no
+ * `@ColumnInfo(defaultValue=…)`, so Room skips the default-value comparison on open
+ * (same pattern as [MIGRATION_2_3]).
+ */
+val MIGRATION_3_4 = Migration(3, 4) { db ->
+    db.execSQL("ALTER TABLE Card ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0")
+    db.execSQL("ALTER TABLE Deck ADD COLUMN fsrsWeights TEXT NOT NULL DEFAULT ''")
+    db.execSQL("ALTER TABLE Deck ADD COLUMN leechThreshold INTEGER NOT NULL DEFAULT 8")
 }

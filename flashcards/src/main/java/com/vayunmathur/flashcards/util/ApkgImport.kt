@@ -65,12 +65,36 @@ object ApkgImport {
 
             val db = SQLiteDatabase.openDatabase(anki2.absolutePath, null, SQLiteDatabase.OPEN_READONLY)
             try {
-                return importCollection(db, deckDao, noteTypeDao, fieldDao, templateDao, noteDao, cardDao)
+                val result = importCollection(db, deckDao, noteTypeDao, fieldDao, templateDao, noteDao, cardDao)
+                importMedia(context, work)
+                return result
             } finally {
                 db.close()
             }
         } finally {
             work.deleteRecursively()
+        }
+    }
+
+    /**
+     * Copies numbered media entries out of the unzipped [work] dir into the app's
+     * `filesDir/media`, using the names from the `media` JSON manifest so that the
+     * `<img src="name">` → `![](name)` conversion resolves. Existing files with the
+     * same name are overwritten (imports normally land in a fresh media dir).
+     */
+    private fun importMedia(context: Context, work: File) {
+        val manifest = File(work, "media")
+        if (!manifest.exists()) return
+        val map = runCatching { JSONObject(manifest.readText()) }.getOrNull() ?: return
+        val store = MediaStore(context)
+        val keys = map.keys()
+        while (keys.hasNext()) {
+            val key = keys.next()
+            val name = map.optString(key)
+            val src = File(work, key)
+            if (name.isNotBlank() && src.exists()) {
+                runCatching { store.resolve(name).writeBytes(src.readBytes()) }
+            }
         }
     }
 

@@ -118,7 +118,13 @@ sealed interface Route : NavKey {
     data class NoteEdit(val deckId: Long, val noteId: Long) : Route
 
     @Serializable
-    data class Review(val deckId: Long) : Route
+    data class Review(
+        val deckId: Long,
+        val mode: Int = 0,
+        val count: Int = 20,
+        val daysAhead: Int = 3,
+        val tags: List<String> = emptyList(),
+    ) : Route
 }
 
 @Composable
@@ -148,6 +154,6 @@ fun Navigation(viewModel: FlashcardsViewModel) {
         entry<Route.NoteTypeEdit> { NoteTypeEditPage(backStack, viewModel, it.noteTypeId) }
         entry<Route.CardList> { NoteListPage(backStack, viewModel, it.deckId) }
         entry<Route.NoteEdit> { NoteEditPage(backStack, viewModel, it.deckId, it.noteId) }
-        entry<Route.Review> { ReviewPage(backStack, viewModel, it.deckId) }
+        entry<Route.Review> { ReviewPage(backStack, viewModel, it.deckId, it.mode, it.count, it.daysAhead, it.tags) }
     }
 }

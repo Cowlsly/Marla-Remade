@@ -109,4 +109,47 @@ class ReviewSessionTest {
         val session = ReviewSession(emptyList(), newPerDay = 20, maxReviews = 200, now = now, desiredRetention = 0.9)
         assertNull(session.undo())
     }
+
+    @Test
+    fun suspendedCardsAreExcluded() {
+        val cards = listOf(
+            newCard(1, 1.0),
+            newCard(2, 2.0).copy(suspended = 1),
+        )
+        val session = ReviewSession(cards, newPerDay = 20, maxReviews = 200, now = now, desiredRetention = 0.9)
+        assertEquals(1, session.totalCards)
+    }
+
+    @Test
+    fun newOnlyModeTakesOnlyNewCards() {
+        val cards = listOf(newCard(1, 1.0), dueReviewCard(2), newCard(3, 3.0))
+        val session = ReviewSession(
+            cards, newPerDay = 20, maxReviews = 200, now = now, desiredRetention = 0.9,
+            params = StudyParams(mode = StudyMode.NEW_ONLY, count = 10),
+        )
+        assertEquals(2, session.totalCards)
+        assertEquals(2, session.newCount)
+    }
+
+    @Test
+    fun cramModeIsPreviewOnlyAndTakesByCount() {
+        val cards = (1..5L).map { newCard(it, it.toDouble()) }
+        val session = ReviewSession(
+            cards, newPerDay = 20, maxReviews = 200, now = now, desiredRetention = 0.9,
+            params = StudyParams(mode = StudyMode.CRAM, count = 3),
+        )
+        assertEquals(3, session.totalCards)
+        assertTrue(session.previewOnly)
+    }
+
+    @Test
+    fun lapsesModeSelectsLapsedCards() {
+        val lapsed = dueReviewCard(1).copy(lapses = 2)
+        val clean = dueReviewCard(2)
+        val session = ReviewSession(
+            listOf(lapsed, clean), newPerDay = 20, maxReviews = 200, now = now, desiredRetention = 0.9,
+            params = StudyParams(mode = StudyMode.LAPSES, count = 10),
+        )
+        assertEquals(1, session.totalCards)
+    }
 }

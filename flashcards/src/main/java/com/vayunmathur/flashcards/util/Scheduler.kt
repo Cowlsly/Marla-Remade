@@ -118,8 +118,9 @@ object Scheduler {
         grade: Grade,
         now: Long,
         desiredRetention: Double = 0.9,
+        weights: DoubleArray = DEFAULT_W,
     ): Card {
-        val w = DEFAULT_W
+        val w = if (weights.size == DEFAULT_W.size) weights else DEFAULT_W
         val firstReview = card.reps == 0 || card.state == CardState.NEW
         val elapsedDays =
             if (card.lastReview > 0) (now - card.lastReview).toDouble() / DAY_MS else 0.0
@@ -182,7 +183,25 @@ object Scheduler {
         grade: Grade,
         now: Long,
         desiredRetention: Double = 0.9,
-    ): String = formatDuration(schedule(card, grade, now, desiredRetention).dueDate - now)
+        weights: DoubleArray = DEFAULT_W,
+    ): String = formatDuration(schedule(card, grade, now, desiredRetention, weights).dueDate - now)
+
+    /**
+     * Parses a JSON array string of 19 doubles into FSRS weights. Returns
+     * [DEFAULT_W] on a blank input, a parse failure, or a wrong length. Kept
+     * dependency-free (no `org.json`) so it is usable from pure JVM tests.
+     */
+    fun parseWeights(json: String): DoubleArray {
+        if (json.isBlank()) return DEFAULT_W
+        val nums = json.trim().removePrefix("[").removeSuffix("]")
+            .split(",")
+            .mapNotNull { it.trim().toDoubleOrNull() }
+        return if (nums.size == DEFAULT_W.size) nums.toDoubleArray() else DEFAULT_W
+    }
+
+    /** Serializes FSRS [weights] to a JSON array string for storage. */
+    fun weightsToJson(weights: DoubleArray): String =
+        weights.joinToString(prefix = "[", postfix = "]", separator = ",")
 
     private fun formatDuration(ms: Long): String {
         val minutes = ms / MINUTE_MS

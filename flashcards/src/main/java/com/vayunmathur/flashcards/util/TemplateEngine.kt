@@ -18,10 +18,15 @@ object TemplateEngine {
 
     private val clozeRegex = Regex("""\{\{c(\d+)::(.*?)(?:::(.*?))?\}\}""", RegexOption.DOT_MATCHES_ALL)
     private val clozeFieldRegex = Regex("""\{\{cloze:([^}]+)\}\}""")
+    private val typeRegex = Regex("""\{\{type:([^}]+)\}\}""")
     private val sectionRegex = Regex(
         """\{\{([#^])([^}]+)\}\}((?:(?!\{\{[#^/]).)*?)\{\{/([^}]+)\}\}""",
         RegexOption.DOT_MATCHES_ALL,
     )
+
+    /** The field name a `{{type:Field}}` marker in [qfmt] targets, or null if none. */
+    fun typeField(qfmt: String): String? =
+        typeRegex.find(qfmt)?.groupValues?.get(1)?.trim()
 
     /** Returns the rendered (frontMarkdown, backMarkdown) pair. */
     fun render(
@@ -45,6 +50,11 @@ object TemplateEngine {
         text = clozeFieldRegex.replace(text) { match ->
             val fieldName = match.groupValues[1].trim()
             renderCloze(fields[fieldName] ?: "", clozeOrd, isBack = frontSide != null)
+        }
+        // `{{type:Field}}`: blank on the front (the UI shows an input); the field
+        // value on the back (the UI also shows a typed-vs-actual diff).
+        text = typeRegex.replace(text) { match ->
+            if (frontSide == null) "" else fields[match.groupValues[1].trim()] ?: ""
         }
         if (frontSide != null) {
             text = text.replace("{{FrontSide}}", frontSide)

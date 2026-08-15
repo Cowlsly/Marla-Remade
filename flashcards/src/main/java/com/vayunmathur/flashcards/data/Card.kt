@@ -49,10 +49,15 @@ data class Card(
     val easeFactor: Double = 2.5,
     val intervalDays: Int = 0,
     val repetitions: Int = 0,
+    /** 0 = active, 1 = suspended (excluded from every study queue). */
+    val suspended: Int = 0,
     override val position: Double = 0.0,
 ) : ReorderableDatabaseItem<Card> {
     override fun withPosition(position: Double) = copy(position = position)
 
     /** True while the card has never been graded. */
     val isNew: Boolean get() = state == CardState.NEW
+
+    /** True while the card is suspended and excluded from study. */
+    val isSuspended: Boolean get() = suspended == 1
 }

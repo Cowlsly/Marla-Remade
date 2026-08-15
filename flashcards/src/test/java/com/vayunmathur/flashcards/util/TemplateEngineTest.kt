@@ -114,4 +114,21 @@ class TemplateEngineTest {
         )
         assertTrue(back.startsWith("Q => A"))
     }
+
+    @Test
+    fun typeFieldDetection() {
+        assertEquals("Back", TemplateEngine.typeField("{{Front}}\n{{type:Back}}"))
+        assertEquals(null, TemplateEngine.typeField("{{Front}}"))
+    }
+
+    @Test
+    fun typeMarkerBlankOnFrontAnswerOnBack() {
+        val (front, back) = TemplateEngine.render(
+            qfmt = "{{Front}} {{type:Back}}",
+            afmt = "{{FrontSide}}\n{{type:Back}}",
+            fields = mapOf("Front" to "capital?", "Back" to "Paris"),
+        )
+        assertEquals("capital?", front.trim())
+        assertTrue(back.contains("Paris"), "answer should appear on the back: $back")
+    }
 }

@@ -1,8 +1,12 @@
 package com.vayunmathur.flashcards.ui
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -16,8 +20,10 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.input.TextFieldValue
@@ -27,6 +33,7 @@ import com.vayunmathur.flashcards.R
 import com.vayunmathur.flashcards.Route
 import com.vayunmathur.flashcards.util.DeckOption
 import com.vayunmathur.flashcards.util.FlashcardsViewModel
+import com.vayunmathur.flashcards.util.MediaStore
 import com.vayunmathur.flashcards.util.NoteEditActions
 import com.vayunmathur.flashcards.util.NoteEditUiState
 import com.vayunmathur.flashcards.util.NoteTypeConfig
@@ -35,13 +42,20 @@ import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconDelete
+import com.vayunmathur.library.ui.IconImage
+import com.vayunmathur.library.ui.IconRestore
 import com.vayunmathur.library.ui.IconSave
+import com.vayunmathur.library.ui.IconVisibilityOff
 import com.vayunmathur.library.ui.MarkdownEditor
 import com.vayunmathur.library.ui.MarkdownFormatToolbar
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.util.NavBackStack
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Binds the note with [noteId] (0 for a new note) in [deckId] to the stateless
@@ -58,9 +72,29 @@ fun NoteEditPage(
         .collectAsStateWithLifecycle(null)
     val noteTypes by viewModel.noteTypes.collectAsStateWithLifecycle()
     val decks by viewModel.decks.collectAsStateWithLifecycle()
+    val allCards by viewModel.cards.collectAsStateWithLifecycle()
 
     val configs = noteTypes.map { NoteTypeConfig(it.noteType.id, it.noteType.name, it.fields.map { f -> f.name }) }
     val isNew = noteId == 0L
+    val noteCards = allCards.filter { it.noteId == noteId }
+    val suspended = noteCards.isNotEmpty() && noteCards.all { it.isSuspended }
+
+    val context = LocalContext.current
+    val media = remember { MediaStore(context) }
+    val scope = rememberCoroutineScope()
+    var pendingInsert by remember { mutableStateOf<((String) -> Unit)?>(null) }
+    val imagePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia(),
+    ) { uri ->
+        val callback = pendingInsert
+        pendingInsert = null
+        if (uri != null && callback != null) {
+            scope.launch {
+                val name = withContext(Dispatchers.IO) { media.import(context, uri) }
+                if (name != null) callback(name)
+            }
+        }
+    }
 
     val actions = remember(backStack, viewModel, deckId, noteId) {
         object : NoteEditActions {
@@ -73,6 +107,9 @@ fun NoteEditPage(
                 dbNote?.let { viewModel.deleteNote(it) }
                 backStack.pop()
             }
+            override fun setSuspended(suspended: Boolean) {
+                viewModel.setNoteSuspended(noteId, suspended)
+            }
         }
     }
 
@@ -83,10 +120,17 @@ fun NoteEditPage(
             initialFieldValues = dbNote?.fieldList ?: emptyList(),
             initialTags = dbNote?.tags.orEmpty(),
             isNew = isNew,
+            isSuspended = suspended,
             noteTypes = configs,
             decks = decks.map { DeckOption(it.id, it.name) },
         ),
         actions = actions,
+        onPickImage = { insert ->
+            pendingInsert = insert
+            imagePicker.launch(
+                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+            )
+        },
     )
 }
 
@@ -99,6 +143,7 @@ fun NoteEditPage(
 fun NoteEditScreen(
     state: NoteEditUiState,
     actions: NoteEditActions,
+    onPickImage: (insert: (String) -> Unit) -> Unit = {},
 ) {
     var typeId by remember { mutableLongStateOf(state.initialNoteTypeId) }
     var deckId by remember { mutableLongStateOf(state.initialDeckId) }
@@ -116,6 +161,34 @@ fun NoteEditScreen(
         fields.forEach { name -> fieldTfv.add(TextFieldValue(values[name].orEmpty())) }
     }
 
+    /** Inserts [text] at the active field's cursor (replacing any selection). */
+    fun insertAtCursor(text: String) {
+        val i = activeField
+        if (i !in fieldTfv.indices) return
+        val tfv = fieldTfv[i]
+        val sel = tfv.selection
+        val body = tfv.text
+        val newText = body.substring(0, sel.start) + text + body.substring(sel.end)
+        fieldTfv[i] = tfv.copy(text = newText, selection = TextRange(sel.start + text.length))
+        values[currentFields()[i]] = newText
+    }
+
+    /** Wraps the active field's selection in the next `{{cN::…}}` cloze. */
+    fun insertCloze() {
+        val i = activeField
+        if (i !in fieldTfv.indices) return
+        val tfv = fieldTfv[i]
+        val sel = tfv.selection
+        val body = tfv.text
+        val next = (Regex("""\{\{c(\d+)::""").findAll(body)
+            .mapNotNull { it.groupValues[1].toIntOrNull() }.maxOrNull() ?: 0) + 1
+        val selected = body.substring(sel.start, sel.end)
+        val wrapped = "{{c$next::$selected}}"
+        val newText = body.substring(0, sel.start) + wrapped + body.substring(sel.end)
+        fieldTfv[i] = tfv.copy(text = newText, selection = TextRange(sel.start + wrapped.length))
+        values[currentFields()[i]] = newText
+    }
+
     LaunchedEffect(state) {
         typeId = state.initialNoteTypeId
         deckId = state.initialDeckId
@@ -131,6 +204,9 @@ fun NoteEditScreen(
         onNavigateBack = { actions.back() },
         actions = {
             if (!state.isNew) {
+                IconButton(onClick = { actions.setSuspended(!state.isSuspended) }) {
+                    if (state.isSuspended) IconRestore() else IconVisibilityOff()
+                }
                 IconButton(onClick = { actions.deleteNote() }) { IconDelete() }
             }
             IconButton(onClick = {
@@ -141,13 +217,23 @@ fun NoteEditScreen(
         bottomBar = {
             val index = activeField
             if (index in fieldTfv.indices) {
-                MarkdownFormatToolbar(
-                    value = fieldTfv[index],
-                    onValueChange = {
-                        fieldTfv[index] = it
-                        values[currentFields()[index]] = it.text
-                    },
-                )
+                Column {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp)) {
+                        IconButton(onClick = { onPickImage { name -> insertAtCursor("![]($name)") } }) {
+                            IconImage()
+                        }
+                        TextButton(onClick = { insertCloze() }) {
+                            Text(stringResource(R.string.insert_cloze))
+                        }
+                    }
+                    MarkdownFormatToolbar(
+                        value = fieldTfv[index],
+                        onValueChange = {
+                            fieldTfv[index] = it
+                            values[currentFields()[index]] = it.text
+                        },
+                    )
+                }
             }
         },
     ) { paddingValues ->

@@ -271,3 +271,47 @@ private fun BoxScope.yAxisLabel(
             .padding(start = 4.dp),
     )
 }
+
+/**
+ * A GitHub-style activity heatmap: [weeks] columns of 7 day-cells, the last cell
+ * being today, with each cell's opacity scaled by its review count over the max.
+ * Built from a `byDay` list of [DailyStat].
+ */
+@Composable
+fun ReviewHeatmap(
+    days: List<com.vayunmathur.flashcards.util.DailyStat>,
+    modifier: Modifier = Modifier,
+    weeks: Int = 26,
+    color: Color = MaterialTheme.colorScheme.primary,
+) {
+    val counts = remember(days) { days.associate { it.epochDay to it.count } }
+    val maxCount = (days.maxOfOrNull { it.count } ?: 0).coerceAtLeast(1)
+    val today = java.time.LocalDate.now().toEpochDay()
+    val emptyColor = color.copy(alpha = 0.10f)
+
+    BoxWithConstraints(modifier.fillMaxWidth()) {
+        val density = LocalDensity.current
+        val cell = with(density) { (maxWidth.toPx() / weeks) }
+        Canvas(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(with(density) { (cell * 7).toDp() }),
+        ) {
+            val gap = cell * 0.14f
+            val total = weeks * 7
+            for (i in 0 until total) {
+                val epochDay = today - (total - 1 - i)
+                val col = i / 7
+                val row = i % 7
+                val count = counts[epochDay] ?: 0
+                val alpha = if (count <= 0) 0f else 0.2f + 0.8f * (count.toFloat() / maxCount)
+                drawRoundRect(
+                    color = if (count <= 0) emptyColor else color.copy(alpha = alpha),
+                    topLeft = Offset(col * cell + gap / 2, row * cell + gap / 2),
+                    size = Size(cell - gap, cell - gap),
+                    cornerRadius = CornerRadius(2.dp.toPx(), 2.dp.toPx()),
+                )
+            }
+        }
+    }
+}

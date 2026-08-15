@@ -43,14 +43,35 @@ object ApkgExport {
         } finally {
             db.close()
         }
-        File(work, "media").writeText("{}")
+
+        // Copy referenced images as numbered entries and build the media manifest.
+        val mediaStore = MediaStore(context)
+        val referenced = notes.flatMap { MediaStore.referenced(it.flds) }.distinct()
+        val mediaMap = JSONObject()
+        val mediaFiles = mutableListOf<File>()
+        var mediaIndex = 0
+        referenced.forEach { fileName ->
+            val src = mediaStore.resolve(fileName)
+            if (src.exists()) {
+                val dest = File(work, mediaIndex.toString())
+                src.copyTo(dest, overwrite = true)
+                mediaMap.put(mediaIndex.toString(), fileName)
+                mediaFiles.add(dest)
+                mediaIndex++
+            }
+        }
+        File(work, "media").writeText(mediaMap.toString())
 
         val outDir = File(context.cacheDir, "shared_decks").apply { mkdirs() }
         val safeName = name.ifBlank { "collection" }.replace(Regex("[^A-Za-z0-9._-]"), "_")
         val apkg = File(outDir, "$safeName.apkg")
         if (apkg.exists()) apkg.delete()
         apkg.outputStream().use { out ->
-            BackupHelper.zipFiles(listOf(File(work, "collection.anki2"), File(work, "media")), work, out)
+            BackupHelper.zipFiles(
+                listOf(File(work, "collection.anki2"), File(work, "media")) + mediaFiles,
+                work,
+                out,
+            )
         }
         work.deleteRecursively()
         return apkg

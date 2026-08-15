@@ -7,6 +7,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.flashcards.R
 import com.vayunmathur.flashcards.data.Card
 import com.vayunmathur.flashcards.data.CardDao
 import com.vayunmathur.flashcards.data.CardState
@@ -24,6 +25,7 @@ import com.vayunmathur.flashcards.data.NoteTypeFieldDao
 import com.vayunmathur.flashcards.data.NoteTypeKind
 import com.vayunmathur.flashcards.data.ReviewLog
 import com.vayunmathur.flashcards.data.ReviewLogDao
+import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -34,6 +36,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -112,6 +115,9 @@ class FlashcardsViewModel(
     }
         .combine(ds.booleanFlow(KEY_REMINDER_ENABLED)) { core, enabled -> core to enabled }
         .combine(ds.longFlow(KEY_REMINDER_MINUTES, 20L * 60)) { (core, enabled), minutes ->
+            Triple(core, enabled, minutes)
+        }
+        .combine(ds.booleanFlow(KEY_AUTO_PLAY)) { (core, enabled, minutes), autoPlay ->
             SettingsUiState(
                 desiredRetention = (core[0] as Double).takeIf { it > 0.0 } ?: 0.9,
                 newPerDay = (core[1] as Long).toInt(),
@@ -120,6 +126,7 @@ class FlashcardsViewModel(
                 reminderEnabled = enabled,
                 reminderHour = (minutes / 60).toInt(),
                 reminderMinute = (minutes % 60).toInt(),
+                autoPlay = autoPlay,
             )
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
@@ -132,6 +139,80 @@ class FlashcardsViewModel(
     fun setMaxReviews(value: Int) = launchIo { ds.setLong(KEY_MAX_REVIEWS, value.toLong()) }
 
     fun setThemeMode(mode: Int) = launchIo { ds.setLong(KEY_THEME_MODE, mode.toLong()) }
+
+    fun setAutoPlay(enabled: Boolean) = launchIo { ds.setBoolean(KEY_AUTO_PLAY, enabled) }
+
+    // -- Deck presets ------------------------------------------------------
+
+    val deckPresets: StateFlow<List<DeckPreset>> = ds.stringFlow(KEY_DECK_PRESETS)
+        .map { parsePresets(it) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Saves the current study settings under [name] as a reusable preset. */
+    fun saveDeckPreset(name: String) = launchIo {
+        val clean = name.trim()
+        if (clean.isEmpty()) return@launchIo
+        val s = settings.value
+        val map = parsePresets(ds.getString(KEY_DECK_PRESETS).orEmpty())
+            .associateBy { it.name }
+            .toMutableMap()
+        map[clean] = DeckPreset(clean, s.newPerDay, s.maxReviews, s.desiredRetention)
+        ds.setString(KEY_DECK_PRESETS, presetsToJson(map.values.toList()))
+        AppMessages.show(getApplication<Application>().getString(R.string.preset_saved))
+    }
+
+    /** Applies preset [name] to the global defaults and every existing deck. */
+    fun applyDeckPreset(name: String) = launchIo {
+        val preset = parsePresets(ds.getString(KEY_DECK_PRESETS).orEmpty())
+            .firstOrNull { it.name == name } ?: return@launchIo
+        ds.setLong(KEY_NEW_PER_DAY, preset.newPerDay.toLong())
+        ds.setLong(KEY_MAX_REVIEWS, preset.maxReviews.toLong())
+        ds.setDouble(KEY_RETENTION, preset.desiredRetention)
+        deckDao.getAll().forEach { deck ->
+            deckDao.upsert(
+                deck.copy(
+                    newPerDay = preset.newPerDay,
+                    maxReviewsPerDay = preset.maxReviews,
+                    desiredRetention = preset.desiredRetention,
+                ),
+            )
+        }
+        AppMessages.show(getApplication<Application>().getString(R.string.preset_applied))
+    }
+
+    fun deleteDeckPreset(name: String) = launchIo {
+        val remaining = parsePresets(ds.getString(KEY_DECK_PRESETS).orEmpty()).filterNot { it.name == name }
+        ds.setString(KEY_DECK_PRESETS, presetsToJson(remaining))
+    }
+
+    // -- FSRS optimization -------------------------------------------------
+
+    /**
+     * Runs the pragmatic [FsrsOptimizer] on every deck with enough review history,
+     * saving the tuned weights per deck. Reports the outcome via [AppMessages].
+     */
+    fun optimizeAllDecks() = launchIo {
+        val ctx = getApplication<Application>()
+        var optimizedReviews = 0
+        var optimizedDecks = 0
+        var mostReviews = 0
+        deckDao.getAll().forEach { deck ->
+            val logs = reviewLogDao.getByDeckOrdered(deck.id)
+            mostReviews = maxOf(mostReviews, logs.size)
+            val byCard = logs.groupBy { it.cardId }.values.toList()
+            if (FsrsOptimizer.hasEnough(byCard)) {
+                val weights = withContext(Dispatchers.Default) { FsrsOptimizer.optimize(byCard) }
+                deckDao.upsert(deck.copy(fsrsWeights = Scheduler.weightsToJson(weights)))
+                optimizedReviews += logs.size
+                optimizedDecks++
+            }
+        }
+        if (optimizedDecks > 0) {
+            AppMessages.show(ctx.getString(R.string.optimize_fsrs_done, optimizedReviews))
+        } else {
+            AppMessages.show(ctx.getString(R.string.optimize_fsrs_too_few, mostReviews, FsrsOptimizer.MIN_REVIEWS))
+        }
+    }
 
     fun setReminderEnabled(enabled: Boolean) = launchIo {
         ds.setBoolean(KEY_REMINDER_ENABLED, enabled)
@@ -161,10 +242,25 @@ class FlashcardsViewModel(
     }
 
     fun deleteDeck(deck: Deck) = launchIo {
+        val notes = noteDao.getByDeck(deck.id)
+        val cards = cardDao.getByDeck(deck.id)
+        val logs = reviewLogDao.getByDeckOrdered(deck.id)
         cardDao.deleteByDeck(deck.id)
         noteDao.deleteByDeck(deck.id)
         reviewLogDao.deleteByDeck(deck.id)
         deckDao.delete(deck)
+        AppMessages.show(
+            getApplication<Application>().getString(R.string.deleted),
+            actionLabel = getApplication<Application>().getString(R.string.undo),
+            duration = AppMessages.Duration.Long,
+        ) {
+            launchIo {
+                deckDao.upsert(deck)
+                if (notes.isNotEmpty()) noteDao.upsertAll(notes)
+                if (cards.isNotEmpty()) cardDao.upsertAll(cards)
+                logs.forEach { reviewLogDao.insert(it) }
+            }
+        }
     }
 
     fun reorderDecks(decks: List<Deck>) = launchIo { decks.forEach { deckDao.upsert(it) } }
@@ -206,11 +302,153 @@ class FlashcardsViewModel(
     }
 
     fun deleteNote(note: Note) = launchIo {
+        val cards = cardDao.getByNote(note.id)
+        val logs = cards.flatMap { reviewLogDao.getByCard(it.id) }
         cardDao.deleteByNote(note.id)
+        if (cards.isNotEmpty()) reviewLogDao.deleteByCards(cards.map { it.id })
         noteDao.delete(note)
+        AppMessages.show(
+            getApplication<Application>().getString(R.string.deleted),
+            actionLabel = getApplication<Application>().getString(R.string.undo),
+            duration = AppMessages.Duration.Long,
+        ) {
+            launchIo {
+                noteDao.upsert(note)
+                if (cards.isNotEmpty()) cardDao.upsertAll(cards)
+                logs.forEach { reviewLogDao.insert(it) }
+            }
+        }
+    }
+
+    /** Suspends or unsuspends every card of [noteId], and tracks the leech tag. */
+    fun setNoteSuspended(noteId: Long, suspended: Boolean) = launchIo {
+        cardDao.setSuspendedByNotes(listOf(noteId), if (suspended) 1 else 0)
+    }
+
+    /** Suspends the card currently shown in the review session and advances. */
+    fun suspendCurrentCard() = launchIo {
+        val s = session ?: return@launchIo
+        val card = s.removeCurrent() ?: return@launchIo
+        cardDao.setSuspended(listOf(card.id), 1)
+        publishReview()
     }
 
     fun reorderNotes(notes: List<Note>) = launchIo { noteDao.upsertAll(notes) }
+
+    // -- Bulk note operations ---------------------------------------------
+
+    /** Deletes multiple notes (and their cards/logs) with a single undo action. */
+    fun deleteNotes(noteIds: List<Long>) = launchIo {
+        if (noteIds.isEmpty()) return@launchIo
+        val notes = noteDao.getByIds(noteIds)
+        val cards = cardDao.getByNotes(noteIds)
+        val logs = cards.flatMap { reviewLogDao.getByCard(it.id) }
+        cardDao.deleteByNotes(noteIds)
+        if (cards.isNotEmpty()) reviewLogDao.deleteByCards(cards.map { it.id })
+        noteDao.deleteByIds(noteIds)
+        AppMessages.show(
+            getApplication<Application>().getString(R.string.deleted),
+            actionLabel = getApplication<Application>().getString(R.string.undo),
+            duration = AppMessages.Duration.Long,
+        ) {
+            launchIo {
+                noteDao.upsertAll(notes)
+                if (cards.isNotEmpty()) cardDao.upsertAll(cards)
+                logs.forEach { reviewLogDao.insert(it) }
+            }
+        }
+    }
+
+    /** Moves notes (and their cards) to another deck. */
+    fun moveNotes(noteIds: List<Long>, deckId: Long) = launchIo {
+        if (noteIds.isEmpty()) return@launchIo
+        val notes = noteDao.getByIds(noteIds)
+        var position = noteDao.getByDeck(deckId).maxOfOrNull { it.position } ?: 0.0
+        val moved = notes.map { note ->
+            position += 1.0
+            note.copy(deckId = deckId, position = position)
+        }
+        noteDao.upsertAll(moved)
+        cardDao.moveByNotes(noteIds, deckId)
+    }
+
+    fun addTag(noteIds: List<Long>, tag: String) = launchIo {
+        val clean = tag.trim()
+        if (clean.isEmpty() || noteIds.isEmpty()) return@launchIo
+        val updated = noteDao.getByIds(noteIds).map { note ->
+            val tags = note.tags.split(" ").filter { it.isNotBlank() }.toMutableSet()
+            tags.add(clean)
+            note.copy(tags = tags.joinToString(" "))
+        }
+        noteDao.upsertAll(updated)
+    }
+
+    fun removeTag(noteIds: List<Long>, tag: String) = launchIo {
+        val clean = tag.trim()
+        if (clean.isEmpty() || noteIds.isEmpty()) return@launchIo
+        val updated = noteDao.getByIds(noteIds).map { note ->
+            val tags = note.tags.split(" ").filter { it.isNotBlank() && it != clean }
+            note.copy(tags = tags.joinToString(" "))
+        }
+        noteDao.upsertAll(updated)
+    }
+
+    fun setNotesSuspended(noteIds: List<Long>, suspended: Boolean) = launchIo {
+        if (noteIds.isEmpty()) return@launchIo
+        cardDao.setSuspendedByNotes(noteIds, if (suspended) 1 else 0)
+    }
+
+    /** Resets scheduling for every card of the given notes back to new. */
+    fun resetSchedulingForNotes(noteIds: List<Long>) = launchIo {
+        if (noteIds.isEmpty()) return@launchIo
+        val cards = cardDao.getByNotes(noteIds)
+        resetCards(cards)
+    }
+
+    /** Resets scheduling for every card in a deck back to new. */
+    fun resetSchedulingForDeck(deckId: Long) = launchIo {
+        resetCards(cardDao.getByDeck(deckId))
+    }
+
+    private suspend fun resetCards(cards: List<Card>) {
+        if (cards.isEmpty()) return
+        cardDao.upsertAll(
+            cards.map {
+                it.copy(
+                    state = CardState.NEW,
+                    stability = 0.0,
+                    difficulty = 0.0,
+                    reps = 0,
+                    lapses = 0,
+                    dueDate = 0,
+                    lastReview = 0,
+                )
+            },
+        )
+        reviewLogDao.deleteByCards(cards.map { it.id })
+    }
+
+    /** Exports a deck's notes as `front,back` CSV and shares it. */
+    fun exportCsv(deckId: Long) = launchIo {
+        val context = getApplication<Application>()
+        val notes = noteDao.getByDeck(deckId).sortedBy { it.position }
+        val rows = notes.map { note ->
+            val fields = note.fieldList
+            stripText(fields.getOrNull(0).orEmpty()) to stripText(fields.getOrNull(1).orEmpty())
+        }
+        val uri = withContext(Dispatchers.IO) {
+            val dir = java.io.File(context.cacheDir, "shared_decks").apply { mkdirs() }
+            val deck = deckDao.getById(deckId)
+            val safe = (deck?.name ?: "deck").replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val file = java.io.File(dir, "$safe.csv")
+            file.writeText(DeckIo.writeCsv(rows))
+            FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        }
+        _shareRequests.emit(uri)
+    }
+
+    private fun stripText(md: String): String =
+        Regex("<[^>]+>").replace(md, "").replace("\n", " ").trim()
 
     // -- Note type CRUD ----------------------------------------------------
 
@@ -262,13 +500,29 @@ class FlashcardsViewModel(
     private var session: ReviewSession? = null
     private var lastLogId: Long? = null
     private var sessionNotes: Map<Long, Note> = emptyMap()
+    private var sessionDeck: Deck? = null
     private val _review = MutableStateFlow(ReviewUiState())
     val review: StateFlow<ReviewUiState> = _review.asStateFlow()
 
-    fun startSession(deckId: Long) = launchIo {
+    fun startSession(
+        deckId: Long,
+        params: StudyParams = StudyParams(),
+        tagFilter: Set<String> = emptySet(),
+    ) = launchIo {
         val deck = deckDao.getById(deckId) ?: return@launchIo
-        val cards = cardDao.getByDeck(deckId)
-        sessionNotes = noteDao.getByDeck(deckId).associateBy { it.id }
+        val notes = noteDao.getByDeck(deckId)
+        sessionNotes = notes.associateBy { it.id }
+        sessionDeck = deck
+        val allCards = cardDao.getByDeck(deckId)
+        val cards = if (tagFilter.isEmpty()) {
+            allCards
+        } else {
+            val allowedNoteIds = notes
+                .filter { note -> note.tags.split(" ").any { it in tagFilter } }
+                .map { it.id }
+                .toSet()
+            allCards.filter { it.noteId in allowedNoteIds }
+        }
         val now = System.currentTimeMillis()
         session = ReviewSession(
             cards = cards,
@@ -276,6 +530,8 @@ class FlashcardsViewModel(
             maxReviews = deck.maxReviewsPerDay,
             now = now,
             desiredRetention = deck.desiredRetention,
+            weights = Scheduler.parseWeights(deck.fsrsWeights),
+            params = params,
         )
         lastLogId = null
         publishReview()
@@ -286,8 +542,15 @@ class FlashcardsViewModel(
         val original = s.current ?: return@launchIo
         val now = System.currentTimeMillis()
         val prevLastReview = original.lastReview
+        val wasReview = original.state == CardState.REVIEW
         val updated = s.grade(grade, now) ?: return@launchIo
+        // Cram mode is preview-only: don't persist scheduling or a review log.
+        if (s.previewOnly) {
+            publishReview()
+            return@launchIo
+        }
         cardDao.upsert(updated)
+        maybeMarkLeech(updated, grade, wasReview)
         val elapsedDays =
             if (prevLastReview > 0) (now - prevLastReview).toDouble() / Scheduler.DAY_MS else 0.0
         val scheduledDays = (updated.dueDate - now).toDouble() / Scheduler.DAY_MS
@@ -305,6 +568,24 @@ class FlashcardsViewModel(
         publishReview()
     }
 
+    /**
+     * Auto-suspends a card the first time it reaches `leechThreshold` lapses (Anki's
+     * leech behaviour): tags its note, evicts the just-re-queued copy from the
+     * in-session queue, and surfaces a message. Only fires on the crossing lapse.
+     */
+    private suspend fun maybeMarkLeech(updated: Card, grade: Grade, wasReview: Boolean) {
+        val threshold = sessionDeck?.leechThreshold ?: 0
+        if (threshold <= 0 || grade != Grade.AGAIN || !wasReview) return
+        if (updated.lapses != threshold) return
+        cardDao.setSuspended(listOf(updated.id), 1)
+        session?.removeFromQueue(updated.id)
+        val note = noteDao.getById(updated.noteId)
+        if (note != null && !note.tags.split(" ").contains(LEECH_TAG)) {
+            noteDao.upsert(note.copy(tags = (note.tags + " " + LEECH_TAG).trim()))
+        }
+        AppMessages.show(getApplication<Application>().getString(R.string.leech_suspended))
+    }
+
     fun undoReview() = launchIo {
         val s = session ?: return@launchIo
         val restored = s.undo() ?: return@launchIo
@@ -316,6 +597,32 @@ class FlashcardsViewModel(
         publishReview()
     }
 
+    // -- Text-to-speech ----------------------------------------------------
+
+    private var tts: TtsSpeaker? = null
+
+    /** Speaks [text] aloud (markdown/HTML stripped). No-op on blank. */
+    fun speak(text: String) {
+        val clean = Regex("<[^>]+>").replace(text, "")
+            .replace(Regex("""[*_`#>\[\]]"""), "")
+            .trim()
+        if (clean.isEmpty()) return
+        val speaker = tts ?: TtsSpeaker(getApplication()).also { tts = it }
+        speaker.speak(clean)
+    }
+
+    override fun onCleared() {
+        tts?.shutdown()
+        super.onCleared()
+    }
+
+    private data class RenderedCard(
+        val front: String,
+        val back: String,
+        val typeField: String?,
+        val typeAnswer: String?,
+    )
+
     private fun publishReview() {
         val s = session
         _review.value = if (s == null) {
@@ -323,10 +630,11 @@ class FlashcardsViewModel(
         } else {
             val now = System.currentTimeMillis()
             val current = s.current
-            val (front, back) = current?.let { renderCard(it) } ?: ("" to "")
+            val rendered = current?.let { renderCard(it) }
+                ?: RenderedCard("", "", null, null)
             ReviewUiState(
-                front = front,
-                back = back,
+                front = rendered.front,
+                back = rendered.back,
                 remaining = s.remaining,
                 done = s.done,
                 newCount = s.newCount,
@@ -335,25 +643,29 @@ class FlashcardsViewModel(
                 progress = s.progress,
                 intervalLabels = s.previewLabels(now),
                 canUndo = s.canUndo,
+                typeField = rendered.typeField,
+                typeAnswer = rendered.typeAnswer,
+                autoPlay = settings.value.autoPlay,
             )
         }
     }
 
-    /** Renders a card's (front, back) markdown from its note and template. */
-    private fun renderCard(card: Card): Pair<String, String> {
-        val note = sessionNotes[card.noteId] ?: return "" to ""
+    /** Renders a card's markdown (+ any type-in field) from its note and template. */
+    private fun renderCard(card: Card): RenderedCard {
+        val note = sessionNotes[card.noteId] ?: return RenderedCard("", "", null, null)
         val cfg = noteTypes.value.firstOrNull { it.noteType.id == note.noteTypeId }
-            ?: return note.sortField to ""
+            ?: return RenderedCard(note.sortField, "", null, null)
         val values = note.fieldValues(cfg.fields)
-        return if (cfg.noteType.type == NoteTypeKind.CLOZE) {
-            val template = cfg.templates.firstOrNull() ?: return note.sortField to ""
-            TemplateEngine.render(template.qfmt, template.afmt, values, clozeOrd = card.templateOrd)
+        val template = if (cfg.noteType.type == NoteTypeKind.CLOZE) {
+            cfg.templates.firstOrNull()
         } else {
-            val template = cfg.templates.firstOrNull { it.ord == card.templateOrd }
-                ?: cfg.templates.firstOrNull()
-                ?: return note.sortField to ""
-            TemplateEngine.render(template.qfmt, template.afmt, values, clozeOrd = null)
-        }
+            cfg.templates.firstOrNull { it.ord == card.templateOrd } ?: cfg.templates.firstOrNull()
+        } ?: return RenderedCard(note.sortField, "", null, null)
+        val clozeOrd = if (cfg.noteType.type == NoteTypeKind.CLOZE) card.templateOrd else null
+        val (front, back) = TemplateEngine.render(template.qfmt, template.afmt, values, clozeOrd)
+        val typeField = TemplateEngine.typeField(template.qfmt)
+        val typeAnswer = typeField?.let { values[it] }
+        return RenderedCard(front, back, typeField, typeAnswer)
     }
 
     // -- Import / export / share ------------------------------------------
@@ -467,6 +779,37 @@ class FlashcardsViewModel(
     private fun launchIo(block: suspend () -> Unit) =
         viewModelScope.launch(Dispatchers.IO) { block() }
 
+    private fun parsePresets(json: String): List<DeckPreset> {
+        if (json.isBlank()) return emptyList()
+        return runCatching {
+            val arr = org.json.JSONArray(json)
+            (0 until arr.length()).map { i ->
+                val o = arr.getJSONObject(i)
+                DeckPreset(
+                    name = o.optString("name"),
+                    newPerDay = o.optInt("newPerDay", 20),
+                    maxReviews = o.optInt("maxReviews", 200),
+                    desiredRetention = o.optDouble("desiredRetention", 0.9),
+                )
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun presetsToJson(presets: List<DeckPreset>): String {
+        val arr = org.json.JSONArray()
+        presets.forEach { p ->
+            arr.put(
+                org.json.JSONObject().apply {
+                    put("name", p.name)
+                    put("newPerDay", p.newPerDay)
+                    put("maxReviews", p.maxReviews)
+                    put("desiredRetention", p.desiredRetention)
+                },
+            )
+        }
+        return arr.toString()
+    }
+
     companion object {
         const val KEY_RETENTION = "desired_retention"
         const val KEY_NEW_PER_DAY = "new_per_day"
@@ -474,9 +817,14 @@ class FlashcardsViewModel(
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_REMINDER_ENABLED = "reminder_enabled"
         const val KEY_REMINDER_MINUTES = "reminder_minutes"
+        const val KEY_AUTO_PLAY = "auto_play_audio"
+        const val KEY_DECK_PRESETS = "deck_presets"
 
         const val BASIC_NOTE_TYPE_ID = 1L
         val BUILT_IN_NOTE_TYPE_IDS = setOf(1L, 2L, 3L)
+
+        /** Tag added to a note when one of its cards is auto-suspended as a leech. */
+        const val LEECH_TAG = "leech"
 
         private fun nowSeconds(): Long = System.currentTimeMillis() / 1000
 

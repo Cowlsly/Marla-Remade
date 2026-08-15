@@ -14,6 +14,7 @@ object HtmlConvert {
     private val bold = Regex("""\*\*(.+?)\*\*""")
     private val italic = Regex("""(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)""")
     private val code = Regex("`(.+?)`")
+    private val image = Regex("""!\[(.*?)]\((.*?)\)""")
     private val link = Regex("""\[(.*?)]\((.*?)\)""")
 
     // -- HTML -> Markdown --------------------------------------------------
@@ -26,9 +27,14 @@ object HtmlConvert {
         s = Regex("""(?is)<a[^>]*?href="([^"]*)"[^>]*>(.*?)</a>""").replace(s) {
             "[${it.groupValues[2]}](${it.groupValues[1]})"
         }
-        // Images -> alt text.
-        s = Regex("""(?is)<img[^>]*?alt="([^"]*)"[^>]*>""").replace(s) { it.groupValues[1] }
-        s = Regex("""(?is)<img[^>]*>""").replace(s, "")
+        // Images -> markdown image, keeping only the basename of the src (the
+        // media file is copied alongside on import/export).
+        s = Regex("""(?is)<img[^>]*?>""").replace(s) { match ->
+            val tag = match.value
+            val src = Regex("""src="([^"]*)"""").find(tag)?.groupValues?.get(1).orEmpty()
+            val alt = Regex("""alt="([^"]*)"""").find(tag)?.groupValues?.get(1).orEmpty()
+            if (src.isBlank()) "" else "![$alt](${src.substringAfterLast('/')})"
+        }
         s = Regex("""(?i)<br\s*/?>""").replace(s, "\n")
         s = Regex("""(?i)<hr[^>]*/?>""").replace(s, "\n---\n")
         for (level in 1..6) {
@@ -89,6 +95,8 @@ object HtmlConvert {
         s = code.replace(s) { "<code>${it.groupValues[1]}</code>" }
         s = bold.replace(s) { "<b>${it.groupValues[1]}</b>" }
         s = italic.replace(s) { "<i>${it.groupValues[1]}</i>" }
+        // Images before links: an image `![]()` also matches the link pattern.
+        s = image.replace(s) { "<img src=\"${it.groupValues[2]}\" alt=\"${it.groupValues[1]}\">" }
         s = link.replace(s) { "<a href=\"${it.groupValues[2]}\">${it.groupValues[1]}</a>" }
         return s
     }

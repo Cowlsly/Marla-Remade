@@ -4,6 +4,24 @@ package com.vayunmathur.flashcards.util
 object DeckIo {
 
     /**
+     * Serializes notes to `front,back` CSV. [rows] are (front, back) pairs already
+     * stripped of HTML/markers by the caller. A header row is written first.
+     */
+    fun writeCsv(rows: List<Pair<String, String>>): String {
+        val sb = StringBuilder("front,back\n")
+        rows.forEach { (front, back) ->
+            sb.append(escapeCsv(front)).append(',').append(escapeCsv(back)).append('\n')
+        }
+        return sb.toString()
+    }
+
+    private fun escapeCsv(field: String): String {
+        val needsQuoting = field.contains(',') || field.contains('"') || field.contains('\n')
+        if (!needsQuoting) return field
+        return "\"" + field.replace("\"", "\"\"") + "\""
+    }
+
+    /**
      * Parses CSV text into (front, back) pairs. Accepts two columns per row; a
      * standard-quoted first line of `front,back` is skipped as a header. Handles
      * double-quoted fields with embedded commas and escaped quotes.

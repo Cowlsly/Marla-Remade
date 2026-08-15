@@ -71,6 +71,34 @@ fun StatsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel) {
 
     val deckCards = if (selectedDeckId == null) cards else cards.filter { it.deckId == selectedDeckId }
 
+    // Cards becoming due per day over the next 30 days (overdue lumped into today).
+    val forecast = (0 until 30).map { offset ->
+        val day = today + offset
+        val count = deckCards.count { card ->
+            if (card.isNew || card.isSuspended) return@count false
+            val due = java.time.Instant.ofEpochMilli(card.dueDate).atZone(zone).toLocalDate().toEpochDay()
+            if (offset == 0) due <= day else due == day
+        }
+        DailyStat(day, count)
+    }
+
+    // Pass rate bucketed by the elapsed interval at review time.
+    val buckets = listOf(
+        "≤1" to 1.0,
+        "2–3" to 3.0,
+        "4–7" to 7.0,
+        "8–14" to 14.0,
+        "15–30" to 30.0,
+        "31+" to Double.MAX_VALUE,
+    )
+    var lower = 0.0
+    val retentionBuckets = buckets.map { (label, upper) ->
+        val inBucket = recalls.filter { it.elapsedDays > lower && it.elapsedDays <= upper }
+        lower = upper
+        val rate = if (inBucket.isEmpty()) 0f else inBucket.count { it.grade > 1 }.toFloat() / inBucket.size
+        label to rate
+    }
+
     StatsScreen(
         state = StatsUiState(
             deckOptions = deckOptions,
@@ -81,6 +109,9 @@ fun StatsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel) {
             streakDays = streak,
             matureCards = deckCards.count { it.state == CardState.REVIEW },
             totalCards = deckCards.size,
+            forecast = forecast,
+            retentionBuckets = retentionBuckets,
+            heatmap = daily,
         ),
         actions = object : StatsActions {
             override fun back() { backStack.pop() }
@@ -144,8 +175,45 @@ fun StatsScreen(state: StatsUiState, actions: StatsActions) {
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                 )
             }
+
+            ChartSection(stringResource(R.string.stat_heatmap)) {
+                ReviewHeatmap(
+                    days = state.heatmap,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+                )
+            }
+
+            if (state.forecast.any { it.count > 0 }) {
+                ChartSection(stringResource(R.string.stat_forecast)) {
+                    ReviewBarChart(
+                        data = state.forecast.map {
+                            LocalDate.ofEpochDay(it.epochDay).dayOfMonth.toString() to it.count.toDouble()
+                        },
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    )
+                }
+            }
+
+            if (state.retentionBuckets.any { it.second > 0f }) {
+                ChartSection(stringResource(R.string.stat_retention_by_interval)) {
+                    ReviewBarChart(
+                        data = state.retentionBuckets.map { it.first to (it.second * 100).toDouble() },
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    )
+                }
+            }
         }
     }
+}
+
+@Composable
+private fun ChartSection(title: String, content: @Composable () -> Unit) {
+    Text(
+        title,
+        style = MaterialTheme.typography.titleMedium,
+        modifier = Modifier.padding(start = 16.dp, top = 8.dp, end = 16.dp),
+    )
+    content()
 }
 
 @Composable

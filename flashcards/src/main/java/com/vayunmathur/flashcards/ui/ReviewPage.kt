@@ -3,6 +3,7 @@ package com.vayunmathur.flashcards.ui
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -22,8 +23,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.flashcards.R
@@ -32,6 +39,8 @@ import com.vayunmathur.flashcards.util.FlashcardsViewModel
 import com.vayunmathur.flashcards.util.Grade
 import com.vayunmathur.flashcards.util.ReviewActions
 import com.vayunmathur.flashcards.util.ReviewUiState
+import com.vayunmathur.flashcards.util.StudyMode
+import com.vayunmathur.flashcards.util.StudyParams
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
@@ -39,11 +48,14 @@ import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconUndo
+import com.vayunmathur.library.ui.IconVisibilityOff
+import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.util.parseMarkdown
+import kotlin.math.abs
 
 /** Binds an in-memory review session over [deckId] to the stateless [ReviewScreen]. */
 @Composable
@@ -51,8 +63,19 @@ fun ReviewPage(
     backStack: NavBackStack<Route>,
     viewModel: FlashcardsViewModel,
     deckId: Long,
+    mode: Int = 0,
+    count: Int = 20,
+    daysAhead: Int = 3,
+    tags: List<String> = emptyList(),
 ) {
-    LaunchedEffect(deckId) { viewModel.startSession(deckId) }
+    LaunchedEffect(deckId, mode, count, daysAhead, tags) {
+        val params = StudyParams(
+            mode = StudyMode.entries.getOrElse(mode) { StudyMode.DUE },
+            count = count,
+            daysAhead = daysAhead,
+        )
+        viewModel.startSession(deckId, params, tags.toSet())
+    }
     val state by viewModel.review.collectAsStateWithLifecycle()
 
     ReviewScreen(
@@ -61,6 +84,8 @@ fun ReviewPage(
             override fun back() { backStack.pop() }
             override fun grade(grade: Grade) { viewModel.gradeCurrent(grade) }
             override fun undo() { viewModel.undoReview() }
+            override fun suspend() { viewModel.suspendCurrentCard() }
+            override fun speak(text: String) { viewModel.speak(text) }
         },
     )
 }
@@ -77,7 +102,19 @@ fun ReviewScreen(
     initialRevealed: Boolean = false,
 ) {
     var revealed by remember { mutableStateOf(initialRevealed) }
-    LaunchedEffect(state.front, state.done) { revealed = initialRevealed }
+    var typed by remember { mutableStateOf(TextFieldValue("")) }
+    LaunchedEffect(state.front, state.done) {
+        revealed = initialRevealed
+        typed = TextFieldValue("")
+    }
+
+    // Auto-play: speak the front as each card appears, and the back on reveal.
+    LaunchedEffect(state.front) {
+        if (state.autoPlay && !state.done && state.front.isNotBlank()) actions.speak(state.front)
+    }
+    LaunchedEffect(revealed) {
+        if (revealed && state.autoPlay && state.back.isNotBlank()) actions.speak(state.back)
+    }
 
     AppScaffold(
         title = {
@@ -95,6 +132,12 @@ fun ReviewScreen(
         },
         onNavigateBack = { actions.back() },
         actions = {
+            if (!state.done) {
+                IconButton(onClick = { actions.speak(if (revealed) state.back else state.front) }) {
+                    IconVolumeUp()
+                }
+                IconButton(onClick = { actions.suspend() }) { IconVisibilityOff() }
+            }
             if (state.canUndo) {
                 IconButton(onClick = { actions.undo() }) { IconUndo() }
             }
@@ -118,8 +161,39 @@ fun ReviewScreen(
                 front = state.front,
                 back = state.back,
                 revealed = revealed,
-                modifier = Modifier.weight(1f).fillMaxWidth().clickable { revealed = true },
+                typeField = state.typeField,
+                typeAnswer = state.typeAnswer,
+                typed = typed.text,
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth()
+                    .clickable { revealed = true }
+                    .then(
+                        if (revealed) {
+                            Modifier.pointerInput(state.front) {
+                                var total = androidx.compose.ui.geometry.Offset.Zero
+                                detectDragGestures(
+                                    onDragStart = { total = androidx.compose.ui.geometry.Offset.Zero },
+                                    onDrag = { change, delta -> change.consume(); total += delta },
+                                    onDragEnd = {
+                                        gradeForSwipe(total.x, total.y)?.let(actions::grade)
+                                    },
+                                )
+                            }
+                        } else {
+                            Modifier
+                        },
+                    ),
             )
+            if (state.typeField != null && !revealed) {
+                OutlinedTextField(
+                    value = typed,
+                    onValueChange = { typed = it },
+                    label = { Text(stringResource(R.string.type_answer)) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                )
+            }
             if (revealed) {
                 GradeButtons(state = state, onGrade = { actions.grade(it) })
             } else {
@@ -134,11 +208,25 @@ fun ReviewScreen(
     }
 }
 
+/** Maps a drag displacement to a grade: left=Again, right=Good, up=Easy, down=Hard. */
+private fun gradeForSwipe(dx: Float, dy: Float): Grade? {
+    val threshold = 120f
+    if (abs(dx) < threshold && abs(dy) < threshold) return null
+    return if (abs(dx) > abs(dy)) {
+        if (dx < 0) Grade.AGAIN else Grade.GOOD
+    } else {
+        if (dy < 0) Grade.EASY else Grade.HARD
+    }
+}
+
 @Composable
 private fun FlipCard(
     front: String,
     back: String,
     revealed: Boolean,
+    typeField: String?,
+    typeAnswer: String?,
+    typed: String,
     modifier: Modifier = Modifier,
 ) {
     val rotation by animateFloatAsState(
@@ -155,29 +243,73 @@ private fun FlipCard(
     ) {
         if (rotation <= 90f) {
             CardFace {
-                Text(
-                    parseMarkdown(front, showMarkers = false),
+                MarkdownContent(
+                    text = front,
                     style = MaterialTheme.typography.headlineSmall,
-                    textAlign = TextAlign.Center,
                 )
             }
         } else {
             // Counter-rotate so the back face reads correctly.
             Box(Modifier.graphicsLayer { rotationY = 180f }) {
                 CardFace {
-                    Text(
-                        parseMarkdown(front, showMarkers = false),
+                    MarkdownContent(
+                        text = front,
                         style = MaterialTheme.typography.titleMedium,
-                        textAlign = TextAlign.Center,
                     )
+                    if (typeField != null && typeAnswer != null) {
+                        HorizontalDivider(Modifier.padding(vertical = 12.dp))
+                        Text(
+                            diffAnnotated(typed, typeAnswer),
+                            style = MaterialTheme.typography.titleMedium,
+                            textAlign = TextAlign.Center,
+                        )
+                    }
                     HorizontalDivider(Modifier.padding(vertical = 20.dp))
-                    Text(
-                        parseMarkdown(back, showMarkers = false),
+                    MarkdownContent(
+                        text = back,
                         style = MaterialTheme.typography.bodyLarge,
-                        textAlign = TextAlign.Center,
                     )
                 }
             }
+        }
+    }
+}
+
+/**
+ * Highlights [typed] against [expected] char-by-char via a longest-common-subsequence:
+ * matched characters are green, unmatched typed characters red.
+ */
+private fun diffAnnotated(typed: String, expected: String): AnnotatedString {
+    val n = typed.length
+    val m = expected.length
+    val lcs = Array(n + 1) { IntArray(m + 1) }
+    for (i in n - 1 downTo 0) {
+        for (j in m - 1 downTo 0) {
+            lcs[i][j] = if (typed[i] == expected[j]) {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                maxOf(lcs[i + 1][j], lcs[i][j + 1])
+            }
+        }
+    }
+    val matched = BooleanArray(n)
+    var i = 0
+    var j = 0
+    while (i < n && j < m) {
+        when {
+            typed[i] == expected[j] -> { matched[i] = true; i++; j++ }
+            lcs[i + 1][j] >= lcs[i][j + 1] -> i++
+            else -> j++
+        }
+    }
+    val green = SpanStyle(color = Color(0xFF2E7D32))
+    val red = SpanStyle(color = Color(0xFFC62828))
+    return buildAnnotatedString {
+        if (typed.isEmpty()) {
+            withStyle(red) { append("—") }
+        }
+        typed.forEachIndexed { index, c ->
+            withStyle(if (matched[index]) green else red) { append(c.toString()) }
         }
     }
 }

@@ -33,6 +33,10 @@ import com.vayunmathur.flashcards.util.ThemeMode
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconDelete
+import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSwitchRow
@@ -47,6 +51,7 @@ import kotlin.math.roundToInt
 @Composable
 fun SettingsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel) {
     val settings by viewModel.settings.collectAsStateWithLifecycle()
+    val presets by viewModel.deckPresets.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -72,6 +77,7 @@ fun SettingsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel)
         override fun setNewPerDay(value: Int) { viewModel.setNewPerDay(value) }
         override fun setMaxReviews(value: Int) { viewModel.setMaxReviews(value) }
         override fun setThemeMode(mode: Int) { viewModel.setThemeMode(mode) }
+        override fun setAutoPlay(enabled: Boolean) { viewModel.setAutoPlay(enabled) }
         override fun setReminderEnabled(enabled: Boolean) {
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
@@ -81,17 +87,22 @@ fun SettingsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel)
         override fun setReminderTime(hour: Int, minute: Int) {
             viewModel.setReminderTime(hour, minute)
         }
+        override fun saveDeckPreset(name: String) { viewModel.saveDeckPreset(name) }
+        override fun applyDeckPreset(name: String) { viewModel.applyDeckPreset(name) }
+        override fun deleteDeckPreset(name: String) { viewModel.deleteDeckPreset(name) }
+        override fun optimizeFsrs() { viewModel.optimizeAllDecks() }
         override fun manageNoteTypes() { backStack.add(Route.NoteTypeList) }
         override fun exportCollection() { viewModel.exportApkg(null) }
     }
 
-    SettingsScreen(state = settings, actions = actions)
+    SettingsScreen(state = settings.copy(presets = presets), actions = actions)
 }
 
 /** The settings screen. ViewModel-free so previews can render it. */
 @Composable
 fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
     var showTimePicker by remember { mutableStateOf(false) }
+    var showPresetDialog by remember { mutableStateOf(false) }
 
     AppScaffold(
         title = stringResource(R.string.nav_settings),
@@ -127,6 +138,12 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                     range = 0f..500f,
                     steps = 0,
                     onChange = { actions.setMaxReviews((it / 10).roundToInt() * 10) },
+                )
+                SettingsSwitchRow(
+                    title = stringResource(R.string.setting_auto_play),
+                    supportingText = stringResource(R.string.setting_auto_play_hint),
+                    checked = state.autoPlay,
+                    onCheckedChange = { actions.setAutoPlay(it) },
                 )
             }
 
@@ -165,8 +182,49 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                     supportingText = stringResource(R.string.export_collection_hint),
                     onClick = { actions.exportCollection() },
                 )
+                SettingsRow(
+                    title = stringResource(R.string.optimize_fsrs),
+                    supportingText = stringResource(R.string.optimize_fsrs_hint, FSRS_MIN_REVIEWS),
+                    onClick = { actions.optimizeFsrs() },
+                )
+            }
+
+            SettingsSection(title = stringResource(R.string.settings_presets)) {
+                SettingsRow(
+                    title = stringResource(R.string.save_preset),
+                    onClick = { showPresetDialog = true },
+                )
+                state.presets.forEach { preset ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Text(preset.name)
+                            Text(
+                                "${preset.newPerDay} · ${preset.maxReviews} · ${(preset.desiredRetention * 100).roundToInt()}%",
+                                style = MaterialTheme.typography.bodySmall,
+                            )
+                        }
+                        TextButton(onClick = { actions.applyDeckPreset(preset.name) }) {
+                            Text(stringResource(R.string.apply_preset))
+                        }
+                        IconButton(onClick = { actions.deleteDeckPreset(preset.name) }) { IconDelete() }
+                    }
+                }
             }
         }
+    }
+
+    if (showPresetDialog) {
+        PresetNameDialog(
+            onConfirm = { name ->
+                actions.saveDeckPreset(name)
+                showPresetDialog = false
+            },
+            onDismiss = { showPresetDialog = false },
+        )
     }
 
     if (showTimePicker) {
@@ -213,6 +271,35 @@ private fun SliderRow(
         )
     }
 }
+
+@Composable
+private fun PresetNameDialog(onConfirm: (String) -> Unit, onDismiss: () -> Unit) {
+    var name by remember { mutableStateOf("") }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(stringResource(R.string.save_preset)) },
+        text = {
+            OutlinedTextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text(stringResource(R.string.preset_name)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { if (name.isNotBlank()) onConfirm(name.trim()) }) {
+                Text(stringResource(R.string.save))
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(R.string.cancel)) }
+        },
+    )
+}
+
+/** Minimum review count before FSRS optimization is meaningful. Mirrors the VM guard. */
+private const val FSRS_MIN_REVIEWS = 200
 
 @Composable
 private fun TimePickerDialog(

@@ -25,8 +25,21 @@ class HtmlConvertTest {
     }
 
     @Test
-    fun imageBecomesAltText() {
-        assertEquals("a cat", HtmlConvert.htmlToMarkdown("""<img src="c.png" alt="a cat">"""))
+    fun imageBecomesMarkdownImage() {
+        assertEquals("![a cat](c.png)", HtmlConvert.htmlToMarkdown("""<img src="c.png" alt="a cat">"""))
+    }
+
+    @Test
+    fun imageUsesBasenameOfSrc() {
+        assertEquals("![](pic.jpg)", HtmlConvert.htmlToMarkdown("""<img src="media/sub/pic.jpg">"""))
+    }
+
+    @Test
+    fun imageRoundTrip() {
+        val md = "![a cat](c.png)"
+        val html = HtmlConvert.markdownFieldToHtml(md)
+        assertTrue(html.contains("<img src=\"c.png\""), "should produce an img tag: $html")
+        assertEquals(md, HtmlConvert.htmlToMarkdown(html))
     }
 
     @Test

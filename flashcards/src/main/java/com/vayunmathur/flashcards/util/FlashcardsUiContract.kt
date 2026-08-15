@@ -55,6 +55,8 @@ interface DeckListActions {
 data class NoteRow(
     val note: Note,
     val cardCount: Int = 1,
+    /** True when every card of this note is suspended. */
+    val suspended: Boolean = false,
 )
 
 /** Everything the note list draws for a single deck. */
@@ -62,6 +64,10 @@ data class NoteListUiState(
     val deckName: String = "",
     val notes: List<NoteRow> = emptyList(),
     val dueCount: Int = 0,
+    /** Distinct tags across the deck's notes, for the filter row. */
+    val tags: List<String> = emptyList(),
+    /** Decks available as move-to targets (excludes the current deck). */
+    val decks: List<DeckOption> = emptyList(),
 )
 
 interface NoteListActions {
@@ -69,10 +75,19 @@ interface NoteListActions {
     fun openNote(id: Long) {}
     fun addNote() {}
     fun deleteNote(note: Note) {}
-    fun study() {}
+    fun study(tags: Set<String>) {}
+    fun customStudy(params: StudyParams, tags: Set<String>) {}
     fun reorder(notes: List<Note>) {}
     fun openStats() {}
     fun share() {}
+    fun exportCsv() {}
+    // Bulk (selection-mode) actions, operating on a set of note ids.
+    fun deleteNotes(ids: List<Long>) {}
+    fun moveNotes(ids: List<Long>, deckId: Long) {}
+    fun addTag(ids: List<Long>, tag: String) {}
+    fun removeTag(ids: List<Long>, tag: String) {}
+    fun setSuspended(ids: List<Long>, suspended: Boolean) {}
+    fun resetScheduling(ids: List<Long>) {}
 
     companion object {
         val Noop: NoteListActions = object : NoteListActions {}
@@ -98,6 +113,7 @@ data class NoteEditUiState(
     val initialFieldValues: List<String> = emptyList(),
     val initialTags: String = "",
     val isNew: Boolean = true,
+    val isSuspended: Boolean = false,
     val noteTypes: List<NoteTypeConfig> = emptyList(),
     val decks: List<DeckOption> = emptyList(),
 )
@@ -106,6 +122,8 @@ interface NoteEditActions {
     fun back() {}
     fun save(noteTypeId: Long, deckId: Long, fieldValues: List<String>, tags: String) {}
     fun deleteNote() {}
+    fun setSuspended(suspended: Boolean) {}
+    fun insertImage(fieldIndex: Int) {}
 
     companion object {
         val Noop: NoteEditActions = object : NoteEditActions {}
@@ -181,6 +199,34 @@ data class NoteTypeWithConfig(
 // Review session
 // ---------------------------------------------------------------------------
 
+/** The kind of study session to build (custom study / cram). */
+enum class StudyMode {
+    /** Normal: due review cards + capped new cards. */
+    DUE,
+
+    /** Include review cards due within [StudyParams.daysAhead] days. */
+    AHEAD,
+
+    /** Only cards that have lapsed (relearning or lapses > 0). */
+    LAPSES,
+
+    /** Only new cards. */
+    NEW_ONLY,
+
+    /** Ignore due dates; take [StudyParams.count] cards by position, no schedule writes. */
+    CRAM,
+}
+
+/** Parameters for a custom study session. */
+data class StudyParams(
+    val mode: StudyMode = StudyMode.DUE,
+    val count: Int = 20,
+    val daysAhead: Int = 3,
+) {
+    /** True when grading must not persist scheduling changes to cards. */
+    val previewOnly: Boolean get() = mode == StudyMode.CRAM
+}
+
 /** Everything a review session draws for the current card. */
 data class ReviewUiState(
     val front: String = "",
@@ -196,6 +242,12 @@ data class ReviewUiState(
     /** Predicted next-interval label per grade button (e.g. "10m", "4d"). */
     val intervalLabels: Map<Grade, String> = emptyMap(),
     val canUndo: Boolean = false,
+    /** The field name a `{{type:Field}}` template expects, or null when not a type-in card. */
+    val typeField: String? = null,
+    /** The expected answer for a `{{type:Field}}` card, shown after reveal. */
+    val typeAnswer: String? = null,
+    /** When true, the front is read aloud automatically as each card appears. */
+    val autoPlay: Boolean = false,
 ) {
     fun label(grade: Grade): String = intervalLabels[grade] ?: ""
 }
@@ -204,6 +256,8 @@ interface ReviewActions {
     fun back() {}
     fun grade(grade: Grade) {}
     fun undo() {}
+    fun suspend() {}
+    fun speak(text: String) {}
 
     companion object {
         val Noop: ReviewActions = object : ReviewActions {}
@@ -230,6 +284,12 @@ data class StatsUiState(
     val streakDays: Int = 0,
     val matureCards: Int = 0,
     val totalCards: Int = 0,
+    /** Cards becoming due per day over the next ~30 days. */
+    val forecast: List<DailyStat> = emptyList(),
+    /** Pass rate (0..1) bucketed by the elapsed interval at review time. */
+    val retentionBuckets: List<Pair<String, Float>> = emptyList(),
+    /** Daily review counts for the activity heatmap (~26 weeks). */
+    val heatmap: List<DailyStat> = emptyList(),
 )
 
 interface StatsActions {
@@ -251,6 +311,14 @@ object ThemeMode {
     const val DARK = 2
 }
 
+/** A named bundle of per-deck study settings, saved/applied from Settings. */
+data class DeckPreset(
+    val name: String,
+    val newPerDay: Int,
+    val maxReviews: Int,
+    val desiredRetention: Double,
+)
+
 data class SettingsUiState(
     val desiredRetention: Double = 0.9,
     val newPerDay: Int = 20,
@@ -259,6 +327,10 @@ data class SettingsUiState(
     val reminderHour: Int = 20,
     val reminderMinute: Int = 0,
     val themeMode: Int = ThemeMode.SYSTEM,
+    val autoPlay: Boolean = false,
+    val presets: List<DeckPreset> = emptyList(),
+    /** True when the deck has enough review history for FSRS optimization. */
+    val canOptimize: Boolean = false,
 )
 
 interface SettingsActions {
@@ -269,6 +341,11 @@ interface SettingsActions {
     fun setReminderEnabled(enabled: Boolean) {}
     fun setReminderTime(hour: Int, minute: Int) {}
     fun setThemeMode(mode: Int) {}
+    fun setAutoPlay(enabled: Boolean) {}
+    fun saveDeckPreset(name: String) {}
+    fun applyDeckPreset(name: String) {}
+    fun deleteDeckPreset(name: String) {}
+    fun optimizeFsrs() {}
     fun manageNoteTypes() {}
     fun exportCollection() {}
 
