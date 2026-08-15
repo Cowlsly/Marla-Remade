@@ -219,25 +219,24 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                     fontWeight = FontWeight.Bold,
                     modifier = Modifier.padding(bottom = 8.dp)
                 )
-                Text(
-                    text = stringResource(R.string.default_save_location_summary),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(bottom = 8.dp)
+                SettingsSelectRow(
+                    title = stringResource(R.string.default_save_location),
+                    selected = defaultTarget,
+                    options = listOf(ContactViewModel.ContactDraftTarget.DEVICE, ContactViewModel.ContactDraftTarget.SIM),
+                    label = { target ->
+                        when (target) {
+                            ContactViewModel.ContactDraftTarget.DEVICE -> stringResource(R.string.device)
+                            ContactViewModel.ContactDraftTarget.SIM -> stringResource(R.string.sim_card)
+                            else -> target.name
+                        }
+                    },
+                    onSelect = { target ->
+                        if (target == ContactViewModel.ContactDraftTarget.SIM && !hasSim) return@SettingsSelectRow
+                        viewModel.setDefaultContactTarget(target)
+                    },
+                    supportingText = stringResource(R.string.default_save_location_summary),
+                    enabled = hasSim || defaultTarget == ContactViewModel.ContactDraftTarget.DEVICE,
                 )
-                Row(modifier = Modifier.fillMaxSize(), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
-                    FilterChip(
-                        selected = defaultTarget == ContactViewModel.ContactDraftTarget.DEVICE,
-                        onClick = { viewModel.setDefaultContactTarget(ContactViewModel.ContactDraftTarget.DEVICE) },
-                        label = { Text(stringResource(R.string.device)) }
-                    )
-                    FilterChip(
-                        selected = defaultTarget == ContactViewModel.ContactDraftTarget.SIM,
-                        onClick = { if (hasSim) viewModel.setDefaultContactTarget(ContactViewModel.ContactDraftTarget.SIM) },
-                        enabled = hasSim,
-                        label = { Text(stringResource(R.string.sim_card)) }
-                    )
-                }
                 if (!hasSim) {
                     Text(stringResource(R.string.no_sim_available), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
                 }
