@@ -3,9 +3,9 @@ package com.vayunmathur.files
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
-import com.vayunmathur.files.util.FileBrowserItem
-import com.vayunmathur.files.util.FilesActions
-import com.vayunmathur.files.util.FilesUiState
+import com.vayunmathur.files.platform.FileBrowserItem
+import com.vayunmathur.files.platform.FilesActions
+import com.vayunmathur.files.platform.FilesUiState
 import com.vayunmathur.library.ui.DynamicTheme
 import java.io.File
 

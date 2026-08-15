@@ -1,4 +1,4 @@
-package com.vayunmathur.files.saf
+package com.vayunmathur.files.data.saf
 
 import android.content.ClipData
 import android.content.Intent
@@ -37,8 +37,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.files.R
-import com.vayunmathur.files.util.FileBrowserItem
-import com.vayunmathur.files.util.FilesViewModel
+import com.vayunmathur.files.platform.FileBrowserItem
+import com.vayunmathur.files.platform.FilesViewModel
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api

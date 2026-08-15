@@ -1,4 +1,4 @@
-package com.vayunmathur.files.util
+package com.vayunmathur.files.platform
 import android.content.Context
 import androidx.work.WorkerParameters
 import com.vayunmathur.files.R

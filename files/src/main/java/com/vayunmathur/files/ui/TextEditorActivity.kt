@@ -31,7 +31,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.files.R
-import com.vayunmathur.files.util.TextEditorViewModel
+import com.vayunmathur.files.platform.TextEditorViewModel
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconSave

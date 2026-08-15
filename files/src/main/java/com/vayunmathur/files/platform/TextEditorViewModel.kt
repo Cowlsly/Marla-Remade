@@ -1,4 +1,4 @@
-package com.vayunmathur.files.util
+package com.vayunmathur.files.platform
 
 import android.app.Application
 import android.net.Uri

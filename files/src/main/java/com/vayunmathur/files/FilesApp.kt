@@ -3,7 +3,7 @@ package com.vayunmathur.files
 import android.app.Application
 import android.content.ComponentName
 import android.content.pm.PackageManager
-import com.vayunmathur.files.saf.DocumentPickerActivity
+import com.vayunmathur.files.data.saf.DocumentPickerActivity
 
 /**
  * Toggles the SAF [DocumentPickerActivity] on exactly when Files is acting as the system
