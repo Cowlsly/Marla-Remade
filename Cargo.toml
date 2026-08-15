@@ -15,7 +15,6 @@ members = [
   "library/jni-http/src/main/rust",
   "library/vision/src/main/rust",
   "measure/src/main/rust",
-  "messages/src/main/rust",
   "communicate/src/main/rust",
   "youpipe/src/main/rust",
   "web/src/main/rust",
