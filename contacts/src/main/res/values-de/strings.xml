@@ -1,83 +1,237 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="contact_photo">Foto</string>
-    <string name="add_date">Datum hinzufügen</string>
-    <string name="select_contact_hint">Wähle einen Kontakt aus um Details zu sehen</string>
-    <string name="account_name">Kontaktlisten Name</string>
-    <string name="remove_email">E-Mail löschen</string>
-    <string name="on_device">Auf dem Gerät</string>
-    <string name="remove_address">Adresse löschen</string>
-    <string name="edit_contact">Kontakt Bearbeiten</string>
-    <string name="change_picture">Ändern</string>
-    <string name="company">Firma</string>
-    <string name="contact_photo_description">%1$s Foto</string>
-    <string name="contact_not_found">Kontakt nicht gefunden</string>
-    <string name="birthday">Geburtstag</string>
-    <string name="email">E-Mail</string>
-    <string name="import_contacts">Kontakte Importieren</string>
-    <string name="action_video">Video</string>
-    <string name="add_picture">Foto hinzifügen</string>
-    <string name="remove_phone">Telefonnummer löschen</string>
-    <string name="nickname">Spitzname</string>
-    <string name="delete_contact_confirm">Sind Sie sicher, dass Sie diesen Kontakt Löschen möchtest? Es kann nicht rückgängig gemacht werden.</string>
-    <string name="phone">Telefonnummer</string>
-    <string name="export_contacts">Alle Kontakte exportieren</string>
-    <string name="account">Account</string>
-    <string name="add_contact">Kontakt Hinzufüge</string>
-    <string name="dates">Daten</string>
-    <string name="visible_accounts">Angezeigte Accounts</string>
-    <string name="addresses">Adressen</string>
-    <string name="enter_account_name">Name für eine neue lokales Kontaktliste:</string>
-    <string name="last_name">Nachname</string>
-    <string name="share_contact">Kontakt teilen</string>
-    <string name="favorites">Favoriten</string>
-    <string name="add_address">Adresse hinzufüge</string>
-    <string name="add_phone">Telefonnummer hinzufügen</string>
-    <string name="remove_picture">Löschen</string>
-    <string name="delete_contact_name_confirm">Sind Sie sicher, dass Sie \"%1$s\" löschen möchtest? Das kann nicht rückgängig gemacht werden.</string>
-    <string name="first_name">Vorname</string>
-    <string name="add_contacts_account">Kontaktaccount hinzufügen</string>
-    <string name="action_call">Anrufen</string>
-    <string name="about_name">Über %1$s</string>
-    <string name="delete_contact_title">Kontakt löschen</string>
-    <string name="middle_name">Zweitname</string>
+    <!-- App name displayed in launcher -->
     <string name="app_name">Kontakte</string>
-    <string name="add_email">E-Mail hinzufügen</string>
-    <string name="action_message">Nachricht</string>
-    <string name="grant_contacts_permission">Bitte erlaube die Kontaktberechtigung</string>
+
+    <!-- ContactDetailsPage: details screen -->
+    <!-- Error/empty state when contact id not found in provider -->
+    <string name="contact_not_found">Kontakt nicht gefunden</string>
+    <!-- Display name format combining name and nickname, used in list rows. %1$s = full name, %2$s = nickname -->
     <string name="name_nickname_format">%1$s (%2$s)</string>
+    <!-- Content description for contact avatar image: accessibility. %1$s = contact name -->
+    <string name="contact_photo_description">%1$s Foto</string>
+    <!-- Action to share contact as VCF via chooser. Chooser title. -->
+    <string name="share_contact">Kontakt teilen</string>
+    <!-- Section header: details about person. %1$s = first name -->
+    <string name="about_name">Über %1$s</string>
+    <!-- Field label for birthday date -->
+    <string name="birthday">Geburtstag</string>
+    <!-- Section header and field label for freeform notes -->
     <string name="note">Notiz</string>
+    <!-- ContactList: section header above starred contacts -->
+    <string name="favorites">Favoriten</string>
+    <!-- Settings: button to export all contacts to VCF file -->
+    <string name="export_contacts">Alle Kontakte exportieren</string>
+    <!-- Fallback account name meaning local on-device storage, not synced -->
+    <string name="on_device">Auf dem Gerät</string>
+    <!-- TopAppBar title for creating new contact -->
+    <string name="add_contact">Kontakt hinzufügen</string>
+    <!-- TopAppBar title for editing existing contact -->
+    <string name="edit_contact">Kontakt bearbeiten</string>
+    <!-- Text field label for first/given name -->
+    <string name="first_name">Vorname</string>
+    <!-- Text field label for middle name -->
+    <string name="middle_name">Zweiter Vorname</string>
+    <!-- Text field label for last/family name -->
+    <string name="last_name">Nachname</string>
+    <!-- Text field label for nickname -->
+    <string name="nickname">Spitzname</string>
+    <!-- Text field label for company/organization name -->
+    <string name="company">Firma</string>
+    <!-- Field label and picker for contacts account (e.g. Google, Local) -->
+    <string name="account">Account</string>
+    <!-- Account picker dropdown item format. %1$s = account name or On-Device, %2$s = account type -->
     <string name="account_display_format">%1$s (%2$s)</string>
+    <!-- Button below phone section to add another phone number. Verb. -->
+    <string name="add_phone">Telefonnummer hinzufügen</string>
+    <!-- Button/accessibility to remove phone field entry. Verb. -->
+    <string name="remove_phone">Telefonnummer entfernen</string>
+    <!-- Button to add another email address -->
+    <string name="add_email">E-Mail hinzufügen</string>
+    <!-- Button to remove email field entry -->
+    <string name="remove_email">E-Mail entfernen</string>
+    <!-- Button to add another postal address -->
+    <string name="add_address">Adresse hinzufügen</string>
+    <!-- Button to remove address field entry -->
+    <string name="remove_address">Adresse entfernen</string>
+    <!-- Button to add another date (e.g. anniversary) -->
+    <string name="add_date">Datum hinzufügen</string>
+    <!-- Section header for other important dates -->
+    <string name="dates">Daten</string>
+    <!-- Field label and section header for phone numbers -->
+    <string name="phone">Telefonnummer</string>
+    <!-- Field label and section header for email addresses -->
+    <string name="email">E-Mail</string>
+    <!-- Section header for postal addresses -->
+    <string name="addresses">Adressen</string>
+    <!-- Content description for contact photo placeholder/avatar when viewing -->
+    <string name="contact_photo">Foto</string>
+    <!-- Button below avatar to add a photo when none exists -->
+    <string name="add_picture">Foto hinzufügen</string>
+    <!-- Button to change existing contact photo. Short, verb. Keep short -->
+    <string name="change_picture">Ändern</string>
+    <!-- Button to remove contact photo -->
+    <string name="remove_picture">Entfernen</string>
+
+    <!-- SettingsPage -->
+    <!-- Settings section header: which accounts are visible in list -->
+    <string name="visible_accounts">Angezeigte Accounts</string>
+    <!-- Settings button to add a new local contacts account -->
+    <string name="add_contacts_account">Account hinzufügen</string>
+    <!-- Dialog prompt to enter name for new local account -->
+    <string name="enter_account_name">Name für einen neuen lokalen Account:</string>
+    <!-- Text field label for account name input -->
+    <string name="account_name">Accountname</string>
+
+    <!-- Delete contact flow -->
+    <!-- Dialog title for delete single contact confirmation -->
+    <string name="delete_contact_title">Kontakt löschen</string>
+    <!-- Confirmation message for deleting contact without showing name -->
+    <string name="delete_contact_confirm">Sind Sie sicher, dass Sie diesen Kontakt löschen möchten? Dies kann nicht rückgängig gemacht werden.</string>
+    <!-- Confirmation message with contact name quoted. %1$s = contact display name -->
+    <string name="delete_contact_name_confirm">Sind Sie sicher, dass Sie \"%1$s\" löschen möchten? Dies kann nicht rückgängig gemacht werden.</string>
+
+    <!-- MainActivity permissions and hints -->
+    <!-- Permission screen message when contacts permission not granted -->
+    <string name="grant_contacts_permission">Bitte erlaube die Kontaktberechtigung</string>
+    <!-- Two-pane layout hint on tablets: prompt to select contact from list -->
+    <string name="select_contact_hint">Wähle einen Kontakt aus um Details zu sehen</string>
+
+    <!-- Import / Export VCF -->
+    <!-- Settings and screen title for importing contacts from VCF -->
+    <string name="import_contacts">Kontakte importieren</string>
+    <!-- Quick action chip: call contact. Verb. -->
+    <string name="action_call">Anrufen</string>
+    <!-- Quick action chip: message contact. Verb. -->
+    <string name="action_message">Nachricht</string>
+    <!-- Quick action chip: video call contact. Noun/Verb. -->
+    <string name="action_video">Video</string>
+    <!-- Settings section header for calendar sync of birthdays -->
     <string name="calendar_sync">Kalendersynchronisation</string>
-    <string name="sync_contacts_calendar">Geburtstage in Kalender anzeigen</string>
+    <!-- Settings row: toggle to show contact birthdays in calendar app -->
+    <string name="sync_contacts_calendar">Geburtstage im Kalender anzeigen</string>
+    <!-- Calendar name used when creating contacts birthday calendar -->
     <string name="contacts_calendar_name">Kontakte</string>
+    <!-- Field label for anniversary date -->
     <string name="anniversary">Jubiläum</string>
+    <!-- Settings section header for backup options -->
     <string name="backup_and_export">Sichern und Exportieren</string>
-    <string name="grant_calendar_permissions">Erlaube Kalenderberechtigung</string>
+    <!-- Settings button when calendar permissions needed for birthday sync -->
+    <string name="grant_calendar_permissions">Erlaube die Kalenderberechtigung</string>
+    <!-- Dialog title for deleting multiple selected contacts -->
     <string name="delete_selected_contacts_title">Ausgewählte Kontake löschen</string>
+    <!-- Confirmation for bulk delete. %1$d = number of selected contacts -->
     <plurals name="delete_selected_contacts_confirm">
-        <item quantity="other">Sind Sie sich sicher, dass sie die %1$d ausgewählten Kontake löschen möchten? Diese Aktion kann nicht rückgängig gemacht werden.</item>
+        <item quantity="one">Sind Sie sich sicher, dass sie den %1$d ausgewählten Kontakt löschen möchten? Diese Aktion kann nicht rückgängig gemacht werden.</item>
+        <item quantity="other">Sind Sie sich sicher, dass sie die %1$d ausgewählten Kontakte löschen möchten? Diese Aktion kann nicht rückgängig gemacht werden.</item>
     </plurals>
+    <!-- Top bar title in multi-select mode showing selection count. %1$d = count -->
     <string name="selected_count">%1$d ausgewählt</string>
+    <!-- Settings section header for display preferences -->
     <string name="display">Anzeige</string>
-    <string name="show_account_labels">Kontaktkonten anzeigen</string>
-    <string name="search_contacts">Kontakte durchsuchen</string>
+    <!-- Settings toggle: show account label chips in contact list -->
+    <string name="show_account_labels">Account anzeigen</string>
+    <!-- Search bar hint text to filter contacts -->
+    <string name="search_contacts">In Kontakte suchen</string>
+    <!-- EventDatePickerDialog: toggle whether year is included for birthday (yearless birthdays) -->
     <string name="include_year">Jahr hinzufügen</string>
-    <string name="system_default">Systemeinstellungen</string>
+    <!-- Dropdown option: use system default app for calling/messaging -->
+    <string name="system_default">Systemstandard</string>
+    <!-- App label: Signal messenger -->
     <string name="signal">Signal</string>
+    <!-- App label: WhatsApp messenger -->
     <string name="whatsapp">WhatsApp</string>
+    <!-- App label: Telegram messenger -->
+    <string name="telegram">Telegram</string>
+    <!-- App label: Google Meet video calling -->
+    <string name="google_meet">Google Meet</string>
+
+    <!-- Bottom navigation -->
+    <!-- Bottom nav label: contacts list tab -->
     <string name="contacts">Kontakte</string>
+    !-- Bottom nav label: groups tab -->
     <string name="groups">Gruppen</string>
+    <!-- Two-pane hint for groups screen on tablets -->
     <string name="select_group_hint">Gruppe auswählen um Kontakte anzuschauen</string>
-    <string name="add_to_group">Zu Gruppe hinzufügen</string>
+
+    <!-- Groups management -->
+    <!-- Dialog title and action to add selected contacts to a group -->
+    <string name="add_to_group">Zur Gruppe hinzufügen</string>
+    <!-- Dialog title and button to create new group -->
     <string name="add_group">Gruppe hinzufügen</string>
+    <!-- Hint text for group name input field -->
     <string name="enter_group_name">Gruppenname eingeben</string>
+    <!-- Dialog title for deleting a group -->
     <string name="delete_group_title">Gruppe löschen</string>
+    <!-- Confirmation message for deleting group, contacts not deleted -->
     <string name="delete_group_confirm">Sind Sie sich sicher, dass sie diese Gruppe löschen wollen? Die Kontakte werden nicht gelöscht.</string>
-    <string name="no_groups_found">Keine Gruppen gefunden. Erstelle eine im Gruppen-Tab.</string>
+
+    <!-- Import VCF screen and common toasts -->
+    <!-- Empty state for groups screen when no groups exist -->
+    <string name="no_groups_found">Keine Gruppe gefunden. Erstelle eine Gruppe im Gruppen-Tab.</string>
+    <!-- Settings row and header: import .vcf file for contacts -->
+    <string name="import_vcf_file">vCard-Datei (VCF) importieren</string>
+    <!-- Import flow: option to import into existing account -->
+    <string name="import_to_existing_account">In einen existierenden Account importieren</string>
+    <!-- Import flow: option to create new account for imported contacts -->
+    <string name="create_new_account_option">Neuen Account erstellen</string>
+    <!-- Empty state when VCF file contains no contacts -->
+    <string name="no_contacts_found">Keine Kontakte gefunden</string>
+    <!-- Summary showing number of contacts parsed from VCF ready to import. %1$d = contact count -->
+    <plurals name="import_summary_contacts">
+        <item quantity="one">%1$d Kontakt zum Importieren verfügbar</item>
+        <item quantity="other">%1$d Kontakte zum Importieren verfügbar</item>
+    </plurals>
+    <!-- Dialog title: select account from list -->
+    <string name="select_account">Account auswählen</string>
+    <!-- Placeholder when contact has no name -->
+    <string name="no_name">(Kein Name)</string>
+    <!-- Contacts count label in account section. %1$d = number of contacts -->
     <plurals name="contacts_count">
+        <item quantity="one">%1$d Kontakt</item>
         <item quantity="other">%1$d Kontakte</item>
     </plurals>
-    <string name="telegram">Telegram</string>
-    <string name="google_meet">Google Meet</string>
+    <!-- Action when incoming call from unknown number: add number to existing contact -->
+    <string name="add_number_to_contact">Telefonnummer zum Kontakt hinzufügen</string>
+    <!-- Action when incoming call from unknown number: create brand new contact -->
+    <string name="create_new_contact">Neuen Kontakt erstellen</string>
+
+    <!-- CropPhotoScreen -->
+    <!-- TopAppBar title for cropping contact photo -->
+    <string name="crop_photo">Foto zuschneiden</string>
+    <!-- Settings: row label for importing contacts from VCF files -->
+    <string name="import_contacts_from_vcf_files">Kontakte von einer vCard-Datei (VCF) importieren</string>
+
+    <!-- Custom label support -->
+    <!-- Label for custom label text field -->
+    <string name="custom_label">Benutzerdefiniertes Label</string>
+    <!-- Placeholder / description for entering custom label -->
+    <string name="enter_custom_label">Labelname</string>
+
+    <string name="sim_contacts">SIM-Kontakte</string>
+    <string name="sim_card">SIM-Karte</string>
+    <string name="device">Gerät</string>
+    <string name="save_to">Kontakt speichern in</string>
+    <string name="sim_slot">SIM-Steckplatz</string>
+    <string name="sim_name">Name</string>
+    <string name="sim_phone">Telefon</string>
+    <string name="sim_email">E-Mail</string>
+    <string name="sim_limited_fields_hint">SIM-Kontakte speichern nur Name, Telefon und E-Mail.</string>
+    <string name="sim_name_or_phone_required">Name und Telefonnummer eingeben</string>
+    <string name="save_failed">Speichern fehlgeschlagen</string>
+    <string name="no_sim_available">Keine SIM-Karte verfügbar</string>
+    <string name="no_sim_inserted">Keine SIM-Karte eingelegt oder Berechtigung nicht erlaubt.</string>
+    <string name="no_sim_contacts">Keine Kontakte auf SIM.</string>
+    <string name="import_all">Alle importieren</string>
+    <string name="export_to_sim">Auf SIM exportieren</string>
+    <string name="import_from_sim">Von SIM importieren</string>
+    <string name="default_save_location">Standard Speicherort</string>
+    <string name="default_save_location_summary">Wo sollen neue Kontakte gespeichert werden</string>
+    <string name="import_sim_contacts">SIM-Kontakte importieren</string>
+    <string name="importing">Importiert…</string>
+    <string name="exporting_to_sim">Exportiert auf SIM…</string>
+    <string name="sim_import_success">Importiert %1$d Kontakt(e) von SIM</string>
+    <string name="sim_import_failed">Import von SIM fehlgeschlagen</string>
+    <string name="sim_export_success">Export auf SIM erfolgreich</string>
+    <string name="sim_export_failed">Export auf SIM fehlgeschlagen (SIM-Speicher voll oder nicht verfügbar)</string>
 </resources>
