@@ -93,4 +93,17 @@
     <string name="command_palette">Käsupalett</string>
     <string name="command_palette_hint">Sisesta käsk</string>
     <string name="delete_title">Kas kustutad „%1$s“?</string>
+    <string name="terminal_needs_folder">Terminali kasutamiseks ava kaust.</string>
+    <string name="exit_unsaved_message">Sul on salvestamata muudatusi. Kas salvestad nad enne lahkumist?</string>
+    <string name="user_snippets">Kasutaja koodilõigud</string>
+    <string name="manage_snippets">Halda koodilõike</string>
+    <string name="add_snippet">Lisa koodilõik</string>
+    <string name="edit_snippet">Muuda koodilõiku</string>
+    <string name="no_snippets">Koodilõike veel pole. Lisa mõni ja saad neid sisestamisel kasutada.</string>
+    <string name="snippet_template">Mall</string>
+    <string name="snippet_trigger">Päästik</string>
+    <string name="snippet_caret_hint">Kasuta $0 märkimaks kohta, kuhu sisestusmärk peaks pudenema.</string>
+    <string name="problems">Vead ja probleemid</string>
+    <string name="fold_all">Lappa kõik kokku</string>
+    <string name="unfold_all">Lappa kõik lahti</string>
 </resources>
