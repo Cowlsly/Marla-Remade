@@ -10,6 +10,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -25,9 +26,11 @@ import com.vayunmathur.library.ui.IconLocalOffer
 import com.vayunmathur.library.ui.IconPackage
 import com.vayunmathur.library.ui.IconPerson
 import com.vayunmathur.library.ui.IconShoppingCart
-import com.vayunmathur.library.util.BottomBarItem
-import com.vayunmathur.library.util.BottomNavBar
+import com.vayunmathur.library.ui.PagerTab
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.fooddelivery.api.BitesApi
@@ -47,11 +50,7 @@ import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 
 sealed interface Route : NavKey {
-    @Serializable data object Home : Route
-    @Serializable data object Cart : Route
-    @Serializable data object Deals : Route
-    @Serializable data object Orders : Route
-    @Serializable data object Account : Route
+    @Serializable data class Main(val initialTab: Int = 0) : Route
     @Serializable data class Restaurant(val id: Int) : Route
     @Serializable data object Checkout : Route
     @Serializable data class OrderTracking(val orderId: Int) : Route
@@ -115,7 +114,7 @@ private fun Intent.trackOrderIdOrNull(): Int? =
 @Composable
 private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>) {
     val context = LocalContext.current
-    val backStack = rememberNavBackStack<Route>(Route.Home)
+    val backStack = rememberNavBackStack<Route>(Route.Main())
 
     // A notification tap deep-links to that order's tracking screen.
     LaunchedEffect(trackOrderId.value) {
@@ -123,54 +122,14 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>) {
         backStack.add(Route.OrderTracking(id))
         trackOrderId.value = null
     }
-    val currentPage = backStack.backStack.last()
     val cart = remember { mutableStateListOf<CartItem>().also { it.addAll(CartStore.getAll(context)) } }
 
-    val pages = listOf(
-        BottomBarItem("Home", Route.Home) { IconHome() },
-        BottomBarItem("Cart", Route.Cart) { IconShoppingCart() },
-        BottomBarItem("Deals", Route.Deals) { IconLocalOffer() },
-        BottomBarItem("Orders", Route.Orders) { IconPackage() },
-        BottomBarItem("Account", Route.Account) { IconPerson() },
-    )
-
-    MainNavigation(
-        backStack = backStack,
-        bottomBar = { BottomNavBar(backStack, pages, currentPage) }
-    ) {
-        entry<Route.Home> {
-            HomeScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
-        }
-        entry<Route.Cart> {
-            CartScreen(
-                items = cart,
-                onRemoveItem = { cart.removeAt(it); CartStore.save(context, cart) },
-                onCheckout = { backStack.add(Route.Checkout) },
-                onEditModifiers = { index, modifiers ->
-                    cart[index] = cart[index].copy(selectedModifiers = modifiers)
-                    CartStore.save(context, cart)
-                },
-            )
-        }
-        entry<Route.Deals> {
-            DealsScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
-        }
-        entry<Route.Orders> {
-            OrdersScreen(onTrackOrder = { id -> backStack.add(Route.OrderTracking(id)) })
-        }
-        entry<Route.OrderTracking> { route ->
-            OrderTrackingScreen(orderId = route.orderId, onBack = { backStack.pop() })
-        }
-        entry<Route.Account> { AccountScreen() }
-        entry<Route.Checkout> {
-            CheckoutScreen(
-                items = cart,
-                onBack = { backStack.pop() },
-                onOrderPlaced = {
-                    cart.clear()
-                    CartStore.clear(context)
-                    backStack.reset(Route.Orders)
-                },
+    MainNavigation(backStack) {
+        entry<Route.Main> { route ->
+            FoodDeliveryTabs(
+                initialTab = route.initialTab,
+                backStack = backStack,
+                cart = cart,
             )
         }
         entry<Route.Restaurant> { route ->
@@ -180,5 +139,59 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>) {
                 onAddToCart = { item -> cart.add(item); CartStore.save(context, cart) }
             )
         }
+        entry<Route.Checkout> {
+            CheckoutScreen(
+                items = cart,
+                onBack = { backStack.pop() },
+                onOrderPlaced = {
+                    cart.clear()
+                    CartStore.clear(context)
+                    backStack.reset(Route.Main(initialTab = 3))
+                },
+            )
+        }
+        entry<Route.OrderTracking> { route ->
+            OrderTrackingScreen(orderId = route.orderId, onBack = { backStack.pop() })
+        }
     }
+}
+
+/**
+ * The five bottom-nav tabs, hosted in a swipeable pager (see [TabbedPagerScaffold]).
+ * Restaurant, Checkout and OrderTracking are pushed on top of this host as ordinary routes.
+ */
+@Composable
+private fun FoodDeliveryTabs(
+    initialTab: Int,
+    backStack: NavBackStack<Route>,
+    cart: androidx.compose.runtime.snapshots.SnapshotStateList<CartItem>,
+) {
+    val context = LocalContext.current
+    val pagerState = rememberPagerState(initialPage = initialTab.coerceIn(0, 4), pageCount = { 5 })
+    val tabs = listOf(
+        PagerTab("Home", { IconHome() }) {
+            HomeScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
+        },
+        PagerTab("Cart", { IconShoppingCart() }) {
+            CartScreen(
+                items = cart,
+                onRemoveItem = { cart.removeAt(it); CartStore.save(context, cart) },
+                onCheckout = { backStack.add(Route.Checkout) },
+                onEditModifiers = { index, modifiers ->
+                    cart[index] = cart[index].copy(selectedModifiers = modifiers)
+                    CartStore.save(context, cart)
+                },
+            )
+        },
+        PagerTab("Deals", { IconLocalOffer() }) {
+            DealsScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
+        },
+        PagerTab("Orders", { IconPackage() }) {
+            OrdersScreen(onTrackOrder = { id -> backStack.add(Route.OrderTracking(id)) })
+        },
+        PagerTab("Account", { IconPerson() }) {
+            AccountScreen()
+        },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
