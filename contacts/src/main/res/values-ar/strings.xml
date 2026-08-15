@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
-    </resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="selected_count">تم تحديد <xliff:g id="count" example="3">%1$d</xliff:g></string>
+    <string name="app_name">جهات الاتصال</string>
+    <string name="contact_not_found">لم يتم العثور على جهة اتصال</string>
+    <string name="name_nickname_format"><xliff:g id="name" example="John Doe">%1$s</xliff:g> (<xliff:g id="nickname" example="Johnny">%2$s</xliff:g>)</string>
+</resources>
