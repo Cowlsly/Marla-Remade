@@ -1,4 +1,4 @@
-package com.vayunmathur.vpn.util
+package com.vayunmathur.vpn.platform
 
 import android.content.Context
 import com.vayunmathur.library.util.DataStoreUtils

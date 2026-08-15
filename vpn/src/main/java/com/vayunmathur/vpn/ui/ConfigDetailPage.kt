@@ -21,7 +21,7 @@ import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.vpn.Route
 import com.vayunmathur.vpn.data.WgConfigParser
-import com.vayunmathur.vpn.util.VpnViewModel
+import com.vayunmathur.vpn.platform.VpnViewModel
 import com.vayunmathur.library.util.NavBackStack
 
 /**

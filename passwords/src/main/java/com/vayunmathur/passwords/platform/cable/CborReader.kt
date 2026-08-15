@@ -2,7 +2,7 @@ package com.vayunmathur.passwords.platform.cable
 
 /**
  * Minimal CBOR (RFC 8949) decoder, companion to the canonical encoder in
- * [com.vayunmathur.passwords.util.Cbor]. Covers exactly what caBLE / CTAP2 / COSE need:
+ * [com.vayunmathur.passwords.domain.Cbor]. Covers exactly what caBLE / CTAP2 / COSE need:
  * unsigned + negative integers, byte strings, text strings, arrays, maps, and the
  * `true`/`false`/`null` simple values.
  *

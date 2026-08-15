@@ -1,4 +1,4 @@
-package com.vayunmathur.vpn.util
+package com.vayunmathur.vpn.platform
 
 import android.app.Activity
 import android.app.Application
@@ -26,6 +26,7 @@ import com.vayunmathur.vpn.data.toModel
 import com.vayunmathur.vpn.service.AppResolver
 import com.vayunmathur.vpn.service.ConnectionTracker
 import com.vayunmathur.vpn.service.VpnTunnelService
+import com.vayunmathur.vpn.util.VpnNative
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow

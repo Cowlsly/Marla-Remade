@@ -29,7 +29,7 @@ import com.vayunmathur.vpn.ui.components.AppIconImage
 import com.vayunmathur.vpn.ui.components.BypassApp
 import com.vayunmathur.vpn.ui.components.LockdownWarning
 import com.vayunmathur.vpn.ui.components.loadApps
-import com.vayunmathur.vpn.util.BypassList
+import com.vayunmathur.vpn.platform.BypassList
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 

@@ -5,7 +5,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.vpn.Route
-import com.vayunmathur.vpn.util.VpnViewModel
+import com.vayunmathur.vpn.platform.VpnViewModel
 
 @Composable
 fun LoggingPage(backStack: NavBackStack<Route>, vm: VpnViewModel) {

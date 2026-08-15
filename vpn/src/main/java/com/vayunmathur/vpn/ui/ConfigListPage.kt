@@ -16,7 +16,7 @@ import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.Route
 import com.vayunmathur.vpn.service.VpnTunnelService
-import com.vayunmathur.vpn.util.VpnViewModel
+import com.vayunmathur.vpn.platform.VpnViewModel
 import kotlinx.coroutines.launch
 
 @Composable

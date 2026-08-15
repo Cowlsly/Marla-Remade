@@ -20,7 +20,7 @@ import com.vayunmathur.vpn.data.VpnDatabase
 import com.vayunmathur.vpn.data.endpointHost
 import com.vayunmathur.vpn.data.endpointPort
 import com.vayunmathur.vpn.data.toModel
-import com.vayunmathur.vpn.util.BypassList
+import com.vayunmathur.vpn.platform.BypassList
 import com.vayunmathur.vpn.util.VpnNative
 import java.io.FileInputStream
 import java.io.FileOutputStream
