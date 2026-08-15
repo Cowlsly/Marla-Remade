@@ -15,13 +15,14 @@ import com.vayunmathur.library.util.AppMessages
 import androidx.core.net.toUri
 import com.vayunmathur.library.ui.R as UiR
 
+internal fun uriName(context: android.content.Context, uri: android.net.Uri): String =
     runCatching {
         context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME), null, null, null)?.use {
             if (it.moveToFirst()) it.getString(0) else null
         }
     }.getOrNull() ?: uri.lastPathSegment ?: "attachment"
 
-private fun uriSize(context: android.content.Context, uri: android.net.Uri): Long =
+internal fun uriSize(context: android.content.Context, uri: android.net.Uri): Long =
     runCatching {
         context.contentResolver.query(uri, arrayOf(android.provider.OpenableColumns.SIZE), null, null, null)?.use {
             if (it.moveToFirst() && !it.isNull(0)) it.getLong(0) else 0L
@@ -29,7 +30,7 @@ private fun uriSize(context: android.content.Context, uri: android.net.Uri): Lon
     }.getOrNull() ?: 0L
 
 /** Epoch millis for [hour]:00 today (or tomorrow if that time already passed, or sameDay=false forces next day). */
-private fun scheduleTime(hour: Int, sameDay: Boolean): Long {
+internal fun scheduleTime(hour: Int, sameDay: Boolean): Long {
     val c = java.util.Calendar.getInstance()
     c.set(java.util.Calendar.HOUR_OF_DAY, hour)
     c.set(java.util.Calendar.MINUTE, 0)
@@ -42,14 +43,14 @@ private fun scheduleTime(hour: Int, sameDay: Boolean): Long {
 }
 
 /** Append an email to a comma-separated recipient field, avoiding duplicates. */
-private fun appendRecipient(field: String, email: String): String {
+internal fun appendRecipient(field: String, email: String): String {
     val existing = field.split(",").map { it.trim() }.filter { it.isNotEmpty() }
     if (existing.any { it.equals(email, ignoreCase = true) }) return field
     return if (existing.isEmpty()) email else existing.joinToString(", ") + ", " + email
 }
 
 /** Read the email address from a contact-picker result URI (granted per-item, no permission needed). */
-private fun contactEmail(context: android.content.Context, uri: android.net.Uri): String? =
+internal fun contactEmail(context: android.content.Context, uri: android.net.Uri): String? =
     runCatching {
         context.contentResolver.query(
             uri,

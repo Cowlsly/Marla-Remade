@@ -55,5 +55,3 @@ fun DraftsScreen(
         }
     }
 }
-
-private fun uriName(context: android.content.Context, uri: android.net.Uri): String =

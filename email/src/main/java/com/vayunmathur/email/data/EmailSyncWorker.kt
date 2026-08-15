@@ -5,9 +5,9 @@ import android.util.Log
 import androidx.core.content.edit
 import androidx.work.*
 import com.vayunmathur.email.network.imap.ImapClient
-import com.vayunmathur.email.data.imapServer
-import com.vayunmathur.email.data.loginUser
-import com.vayunmathur.email.data.resolveAuth
+import com.vayunmathur.email.platform.imapServer
+import com.vayunmathur.email.platform.loginUser
+import com.vayunmathur.email.platform.resolveAuth
 import com.vayunmathur.email.widget.EmailWidget
 import androidx.glance.appwidget.updateAll
 import java.util.concurrent.TimeUnit

@@ -5,11 +5,11 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
-import com.vayunmathur.email.data.EmailManager
-import com.vayunmathur.email.data.resolveAuth
+import com.vayunmathur.email.platform.EmailManager
+import com.vayunmathur.email.platform.resolveAuth
 import com.vayunmathur.email.data.EmailRepository
-import com.vayunmathur.email.data.imapServer
-import com.vayunmathur.email.data.loginUser
+import com.vayunmathur.email.platform.imapServer
+import com.vayunmathur.email.platform.loginUser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

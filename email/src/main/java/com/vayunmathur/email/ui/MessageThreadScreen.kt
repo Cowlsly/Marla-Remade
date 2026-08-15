@@ -44,7 +44,7 @@ import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.platform.EmailViewModel
 import com.vayunmathur.email.platform.EmlUtils
 import com.vayunmathur.email.platform.MessageThreadActions
-import com.vayunmathur.email.platform.UnsubscribeMethod
+import com.vayunmathur.email.data.UnsubscribeMethod
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
@@ -309,14 +309,4 @@ private fun performUnsubscribe(method: UnsubscribeMethod, context: android.conte
         }
         is UnsubscribeMethod.SendMail -> onCompose(method.address, "Unsubscribe")
     }
-}
-
-private fun scheduleTime(hour: Int, sameDay: Boolean): Long {
-    val c = java.util.Calendar.getInstance()
-    c.set(java.util.Calendar.HOUR_OF_DAY, hour)
-    c.set(java.util.Calendar.MINUTE, 0)
-    c.set(java.util.Calendar.SECOND, 0)
-    c.set(java.util.Calendar.MILLISECOND, 0)
-    if (!sameDay || c.timeInMillis <= System.currentTimeMillis()) c.add(java.util.Calendar.DAY_OF_YEAR, 1)
-    return c.timeInMillis
 }

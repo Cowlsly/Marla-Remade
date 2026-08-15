@@ -20,7 +20,7 @@ import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.ui.R as UiR
 
 @Composable
-private fun EmailComposerFormatToolbar(
+internal fun EmailComposerFormatToolbar(
     controller: com.vayunmathur.email.ui.composer.EmailHtmlEditorController,
     onInsertImage: () -> Unit,
 ) {
@@ -252,7 +252,7 @@ private fun EmailColorPickerDialog(
     )
 }
 
-private fun copyInlineToCache(context: android.content.Context, uri: Uri, name: String): Uri? {
+internal fun copyInlineToCache(context: android.content.Context, uri: Uri, name: String): Uri? {
     return try {
         val dir = java.io.File(context.cacheDir, "inline").also { it.mkdirs() }
         val safeName = name.replace(Regex("[/\\\\]"), "_").ifBlank { "image_${System.currentTimeMillis()}.jpg" }

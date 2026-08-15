@@ -130,7 +130,7 @@ private fun OutboxRow(entry: OutboxEntry, onDelete: () -> Unit) {
 }
 
 /** The signature block (HTML) appended to an outgoing message body, or "" if none. */
-private fun signatureBlockHtml(acc: com.vayunmathur.email.data.EmailAccount?): String {
+internal fun signatureBlockHtml(acc: com.vayunmathur.email.data.EmailAccount?): String {
     val s = acc?.signature?.trim().orEmpty()
     if (s.isEmpty()) return ""
     val escaped = s.htmlEncode().replace("\n", "<br>")

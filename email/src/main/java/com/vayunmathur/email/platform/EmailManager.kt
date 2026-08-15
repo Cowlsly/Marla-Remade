@@ -4,6 +4,10 @@ import android.content.Context
 import android.net.Uri
 import com.vayunmathur.email.ui.composer.InlineAttachment
 import com.vayunmathur.email.data.CredentialCrypto
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.Attachment
 import com.vayunmathur.email.data.OutlookOAuth
 import com.vayunmathur.email.network.imap.ImapClient
 import com.vayunmathur.email.network.smtp.SmtpClient

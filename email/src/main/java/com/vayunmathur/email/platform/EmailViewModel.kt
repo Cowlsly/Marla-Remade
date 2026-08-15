@@ -8,9 +8,15 @@ import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.Attachment
+import com.vayunmathur.email.data.previewText
+import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.data.EmailSyncState
 import com.vayunmathur.email.data.EmailSyncWorker
+import com.vayunmathur.email.data.OutboxEntry
 import com.vayunmathur.email.data.OutboxManager
 import com.vayunmathur.email.data.OutboxSendWorker
 import com.vayunmathur.email.platform.MessageListActions

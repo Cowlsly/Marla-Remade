@@ -24,9 +24,9 @@ import androidx.glance.text.*
 import androidx.glance.unit.ColorProvider
 import com.vayunmathur.email.MainActivity
 import com.vayunmathur.email.data.EmailMessage
-import com.vayunmathur.email.accountColor
-import com.vayunmathur.email.previewText
-import com.vayunmathur.email.senderDisplayName
+import com.vayunmathur.email.data.accountColor
+import com.vayunmathur.email.data.previewText
+import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.library.widgets.DynamicThemeGlance
 import kotlinx.coroutines.Dispatchers

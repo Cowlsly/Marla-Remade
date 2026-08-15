@@ -1,6 +1,6 @@
 package com.vayunmathur.email.data
 
-import com.vayunmathur.email.ServerConfig
+import com.vayunmathur.email.platform.ServerConfig
 
 /**
  * Built-in email provider with pre-filled IMAP/SMTP server settings + a short

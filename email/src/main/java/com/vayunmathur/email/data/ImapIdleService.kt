@@ -23,9 +23,9 @@ import com.vayunmathur.email.network.imap.ImapAuthException
 import com.vayunmathur.email.network.imap.ImapClient
 import com.vayunmathur.email.network.imap.RawImapConnection
 import com.vayunmathur.email.network.imap.TrustAll
-import com.vayunmathur.email.data.resolveAuth
-import com.vayunmathur.email.data.imapServer
-import com.vayunmathur.email.data.loginUser
+import com.vayunmathur.email.platform.resolveAuth
+import com.vayunmathur.email.platform.imapServer
+import com.vayunmathur.email.platform.loginUser
 import com.vayunmathur.email.platform.AppLifecycleTracker
 import com.vayunmathur.email.platform.EmailNotifications
 import com.vayunmathur.email.widget.EmailWidget

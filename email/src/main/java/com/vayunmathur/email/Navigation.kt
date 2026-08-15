@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
@@ -19,6 +20,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.email.data.accountColor
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.OutboxEntry
 import com.vayunmathur.email.platform.EmailViewModel
 import com.vayunmathur.email.platform.IntentState
 import com.vayunmathur.email.ui.AddAccountScreen
