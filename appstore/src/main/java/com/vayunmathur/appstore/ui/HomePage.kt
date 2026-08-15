@@ -30,6 +30,7 @@ import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.appstore.util.HomeActions
 import com.vayunmathur.appstore.util.HomeUiState
 import com.vayunmathur.appstore.util.SectionLayout
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
@@ -43,9 +44,7 @@ import com.vayunmathur.library.ui.IconPackage
 import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 
 /** Binds [AppStoreViewModel] to the stateless [HomeScreen]. */
 @Composable
@@ -84,18 +83,14 @@ fun HomeScreen(
     onOpenUpdates: () -> Unit = {},
     onOpenSources: () -> Unit = {},
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    IconButton(onClick = { actions.refresh() }, enabled = !state.isSyncing) {
-                        IconRefresh()
-                    }
-                    IconButton(onClick = onOpenSources) { IconSettings() }
-                },
-            )
-        }
+    AppScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            IconButton(onClick = { actions.refresh() }, enabled = !state.isSyncing) {
+                IconRefresh()
+            }
+            IconButton(onClick = onOpenSources) { IconSettings() }
+        },
     ) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),

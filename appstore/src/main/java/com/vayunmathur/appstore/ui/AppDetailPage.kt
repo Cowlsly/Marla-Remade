@@ -42,14 +42,14 @@ import com.vayunmathur.appstore.util.AppDetailActions
 import com.vayunmathur.appstore.util.AppDetailUiState
 import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.library.image.compose.AsyncImage
-import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppBarAlignment
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.CenterAlignedTopAppBar
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDownload
@@ -60,7 +60,6 @@ import com.vayunmathur.library.ui.IconShare
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.R as UiR
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 
@@ -95,18 +94,13 @@ fun AppDetailScreen(
     val app = state.app ?: return
     var showUninstallConfirm by remember { mutableStateOf(false) }
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = {
-                    Text(app.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                },
-                navigationIcon = { IconButton(onClick = onBack) { IconBack() } },
-                actions = {
-                    IconButton(onClick = { actions.shareApp(app) }) { IconShare() }
-                },
-            )
-        }
+    AppScaffold(
+        title = { Text(app.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        onNavigateBack = onBack,
+        alignment = AppBarAlignment.Center,
+        actions = {
+            IconButton(onClick = { actions.shareApp(app) }) { IconShare() }
+        },
     ) { padding ->
         Column(
             Modifier
@@ -130,21 +124,14 @@ fun AppDetailScreen(
     }
 
     if (showUninstallConfirm) {
-        AlertDialog(
-            onDismissRequest = { showUninstallConfirm = false },
-            title = { Text(stringResource(R.string.uninstall_3, app.name)) },
-            text = { Text(stringResource(R.string.this_will_uninstall_you_can_reinstall_la, app.packageName)) },
-            confirmButton = {
-                Button(onClick = {
-                    showUninstallConfirm = false
-                    actions.uninstallApp(app.packageName)
-                }) { Text(stringResource(R.string.uninstall)) }
-            },
-            dismissButton = {
-                TextButton(onClick = { showUninstallConfirm = false }) {
-                    Text(stringResource(UiR.string.cancel))
-                }
-            },
+        ConfirmDialog(
+            title = stringResource(R.string.uninstall_3, app.name),
+            message = stringResource(R.string.this_will_uninstall_you_can_reinstall_la, app.packageName),
+            confirmLabel = stringResource(R.string.uninstall),
+            dismissLabel = stringResource(UiR.string.cancel),
+            onConfirm = { actions.uninstallApp(app.packageName) },
+            onDismiss = { showUninstallConfirm = false },
+            destructive = true,
         )
     }
 }

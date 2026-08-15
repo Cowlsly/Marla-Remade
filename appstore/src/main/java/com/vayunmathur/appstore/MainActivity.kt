@@ -7,10 +7,12 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
@@ -35,12 +37,14 @@ import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconPackage
 import com.vayunmathur.library.ui.IconSearch
-import com.vayunmathur.library.util.BottomBarItem
-import com.vayunmathur.library.util.BottomNavBar
+import com.vayunmathur.library.ui.PagerTab
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.serialization.Serializable
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
@@ -108,10 +112,7 @@ class MainActivity : ComponentActivity() {
 
 @Serializable
 sealed interface Route : NavKey {
-    @Serializable data object Home : Route
-    @Serializable data object Search : Route
-    @Serializable data object Updates : Route
-    @Serializable data object Library : Route
+    @Serializable data object Main : Route
     @Serializable data object Sources : Route
     @Serializable data object Trust : Route
     @Serializable data object Detail : Route
@@ -131,8 +132,7 @@ private fun AppRoot(
     externalPackage: String?,
     onExternalPackageHandled: () -> Unit,
 ) {
-    val backStack = rememberNavBackStack<Route>(Route.Home)
-    val current = backStack.last()
+    val backStack = rememberNavBackStack<Route>(Route.Main)
 
     LaunchedEffect(externalPackage) {
         val pkg = externalPackage ?: return@LaunchedEffect
@@ -146,41 +146,13 @@ private fun AppRoot(
         if (backStack.last() !is Route.Detail) backStack.add(Route.Detail)
     }
 
-    MainNavigation(
-        backStack,
-        bottomBar = {
-            if (current is Route.Home || current is Route.Search ||
-                current is Route.Updates || current is Route.Library
-            ) {
-                BottomNavBar(
-                    backStack,
-                    listOf(
-                        BottomBarItem(stringResource(R.string.nav_home), Route.Home) { IconHome() },
-                        BottomBarItem(stringResource(R.string.nav_search), Route.Search) { IconSearch() },
-                        BottomBarItem(stringResource(R.string.nav_updates), Route.Updates) { IconDownload() },
-                        BottomBarItem(stringResource(R.string.nav_library), Route.Library) { IconPackage() },
-                    ),
-                    current,
-                )
-            }
-        }
-    ) {
-        entry<Route.Home> {
-            HomePage(
+    MainNavigation(backStack) {
+        entry<Route.Main> {
+            AppTabs(
                 viewModel = viewModel,
                 onAppClick = ::openDetail,
-                onOpenUpdates = { backStack.reset(Route.Updates) },
                 onOpenSources = { backStack.add(Route.Sources) },
             )
-        }
-        entry<Route.Search> {
-            SearchPage(viewModel = viewModel, onAppClick = ::openDetail)
-        }
-        entry<Route.Updates> {
-            UpdatesPage(viewModel = viewModel, onAppClick = ::openDetail)
-        }
-        entry<Route.Library> {
-            LibraryPage(viewModel = viewModel, onAppClick = ::openDetail)
         }
         entry<Route.Sources> {
             SourcesPage(
@@ -206,4 +178,38 @@ private fun AppRoot(
             )
         }
     }
+}
+
+/**
+ * The four bottom-nav tabs, hosted in a swipeable pager (see [TabbedPagerScaffold]).
+ * Sources, Trust and Detail are pushed on top of this host as ordinary routes.
+ */
+@Composable
+private fun AppTabs(
+    viewModel: AppStoreViewModel,
+    onAppClick: (UnifiedApp) -> Unit,
+    onOpenSources: () -> Unit,
+) {
+    val pagerState = rememberPagerState(pageCount = { 4 })
+    val scope = rememberCoroutineScope()
+    val tabs = listOf(
+        PagerTab(stringResource(R.string.nav_home), { IconHome() }) {
+            HomePage(
+                viewModel = viewModel,
+                onAppClick = onAppClick,
+                onOpenUpdates = { scope.launch { pagerState.animateScrollToPage(2) } },
+                onOpenSources = onOpenSources,
+            )
+        },
+        PagerTab(stringResource(R.string.nav_search), { IconSearch() }) {
+            SearchPage(viewModel = viewModel, onAppClick = onAppClick)
+        },
+        PagerTab(stringResource(R.string.nav_updates), { IconDownload() }) {
+            UpdatesPage(viewModel = viewModel, onAppClick = onAppClick)
+        },
+        PagerTab(stringResource(R.string.nav_library), { IconPackage() }) {
+            LibraryPage(viewModel = viewModel, onAppClick = onAppClick)
+        },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
