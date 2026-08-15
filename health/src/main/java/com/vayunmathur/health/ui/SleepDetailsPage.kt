@@ -25,8 +25,8 @@ import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.Record
 import com.vayunmathur.health.data.SleepData
 import com.vayunmathur.health.data.SleepStage
-import com.vayunmathur.health.ui.components.GroupedSection
 import com.vayunmathur.health.ui.components.hypnogramColors
+import com.vayunmathur.library.ui.DashboardSection
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.displayString
 import com.vayunmathur.library.ui.AppScaffold
@@ -283,7 +283,7 @@ fun SleepStageGraph(record: Record) {
 fun SleepStageBreakdown(data: SleepData) {
     val context = LocalContext.current
     val colors = hypnogramColors()
-    GroupedSection(title = "Stages", accentColor = HealthColors.Sleep) {
+    DashboardSection(title = "Stages", accentColor = HealthColors.Sleep) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             StageRow(
                 stringResource(R.string.label_awake),
