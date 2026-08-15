@@ -38,4 +38,5 @@
     <string name="audio_source_voice_communication_label">Głos</string>
     <string name="audio_source_voice_communication_description">Redukcja szumów i echa</string>
     <string name="audio_source_unprocessed_label">Nieprzetworzone</string>
+    <string name="audio_source_unprocessed_description">Surowy, bez obróbki</string>
 </resources>
