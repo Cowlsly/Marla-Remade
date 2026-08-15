@@ -1,6 +1,7 @@
-package com.vayunmathur.musicbrainz.library
+package com.vayunmathur.musicbrainz.data.library
 
 import com.vayunmathur.musicbrainz.data.LocalTrack
+import com.vayunmathur.musicbrainz.domain.library.MatchKeys
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow

@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.download
+package com.vayunmathur.musicbrainz.platform.download
 
 import android.content.Context
 import androidx.work.Data

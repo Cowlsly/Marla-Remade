@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.util
+package com.vayunmathur.musicbrainz.platform
 
 import android.content.Context
 import androidx.datastore.core.DataStore

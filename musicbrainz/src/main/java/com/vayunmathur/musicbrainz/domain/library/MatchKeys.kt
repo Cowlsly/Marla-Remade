@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.library
+package com.vayunmathur.musicbrainz.domain.library
 
 import java.text.Normalizer
 

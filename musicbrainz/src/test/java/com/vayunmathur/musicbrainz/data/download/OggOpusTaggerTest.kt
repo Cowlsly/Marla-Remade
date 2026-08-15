@@ -1,6 +1,6 @@
-package com.vayunmathur.musicbrainz.download
+package com.vayunmathur.musicbrainz.data.download
 
-import com.vayunmathur.musicbrainz.library.TagReader
+import com.vayunmathur.musicbrainz.data.library.TagReader
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import kotlin.test.Test
@@ -199,3 +199,4 @@ class OggOpusTaggerTest {
         assertNull(tags.recordingId)
     }
 }
+

@@ -1,22 +1,22 @@
-package com.vayunmathur.musicbrainz.util
+package com.vayunmathur.musicbrainz.platform
 
 import android.app.Application
 import android.content.Intent
 import androidx.core.net.toUri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.musicbrainz.api.CoverArt
-import com.vayunmathur.musicbrainz.api.MbRecording
-import com.vayunmathur.musicbrainz.api.MbRelease
-import com.vayunmathur.musicbrainz.api.MbReleaseGroup
-import com.vayunmathur.musicbrainz.api.MusicBrainzApi
-import com.vayunmathur.musicbrainz.api.display
-import com.vayunmathur.musicbrainz.download.DownloadQueue
-import com.vayunmathur.musicbrainz.download.DownloadRequest
-import com.vayunmathur.musicbrainz.library.LibraryIndex
-import com.vayunmathur.musicbrainz.library.LibrarySnapshot
-import com.vayunmathur.musicbrainz.library.LibraryScanner
-import com.vayunmathur.musicbrainz.library.SafTree
+import com.vayunmathur.musicbrainz.data.library.LibraryIndex
+import com.vayunmathur.musicbrainz.data.library.LibraryScanner
+import com.vayunmathur.musicbrainz.data.library.LibrarySnapshot
+import com.vayunmathur.musicbrainz.network.api.CoverArt
+import com.vayunmathur.musicbrainz.network.api.MbRecording
+import com.vayunmathur.musicbrainz.network.api.MbRelease
+import com.vayunmathur.musicbrainz.network.api.MbReleaseGroup
+import com.vayunmathur.musicbrainz.network.api.MusicBrainzApi
+import com.vayunmathur.musicbrainz.network.api.display
+import com.vayunmathur.musicbrainz.platform.download.DownloadQueue
+import com.vayunmathur.musicbrainz.platform.download.DownloadRequest
+import com.vayunmathur.musicbrainz.platform.SafTree
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -87,7 +87,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
             )
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), ReleaseUiState())
 
-    val downloads: StateFlow<Map<String, com.vayunmathur.musicbrainz.download.DownloadItem>> =
+    val downloads: StateFlow<Map<String, com.vayunmathur.musicbrainz.platform.download.DownloadItem>> =
         DownloadQueue.items
 
     val settings: StateFlow<SettingsUiState> = combine(
@@ -224,7 +224,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     // release group can carry dozens of promos and bootlegs otherwise.
                     releases = releases
                         .sortedWith(
-                            compareByDescending<com.vayunmathur.musicbrainz.api.MbReleaseSummary> {
+                            compareByDescending<com.vayunmathur.musicbrainz.network.api.MbReleaseSummary> {
                                 it.status == "Official"
                             }.thenBy { it.date.orEmpty() },
                         )
@@ -450,3 +450,4 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         SafTree.rootDocumentId(uri.toUri()).substringAfterLast(':').ifEmpty { uri }
     }.getOrDefault(uri)
 }
+

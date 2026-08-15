@@ -32,11 +32,14 @@ import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
-import com.vayunmathur.musicbrainz.Route
-import com.vayunmathur.musicbrainz.util.MusicBrainzActions
-import com.vayunmathur.musicbrainz.util.MusicBrainzViewModel
-import com.vayunmathur.musicbrainz.util.SearchTab
-import com.vayunmathur.musicbrainz.util.SearchUiState
+import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
+import com.vayunmathur.musicbrainz.ui.components.durationLabel
+import com.vayunmathur.musicbrainz.ui.components.TrackTrailing
+import com.vayunmathur.musicbrainz.ui.components.SecondaryText
+import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
+import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
+import com.vayunmathur.musicbrainz.platform.SearchTab
+import com.vayunmathur.musicbrainz.platform.SearchUiState
 
 @Composable
 fun SearchPage(backStack: NavBackStack<Route>, viewModel: MusicBrainzViewModel) {
@@ -193,3 +196,7 @@ private fun SearchTab.labelRes(): Int = when (this) {
     SearchTab.Artists -> R.string.tab_artists
     SearchTab.Recordings -> R.string.tab_recordings
 }
+
+
+
+

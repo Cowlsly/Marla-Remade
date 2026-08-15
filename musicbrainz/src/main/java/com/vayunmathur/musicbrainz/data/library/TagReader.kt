@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.library
+package com.vayunmathur.musicbrainz.data.library
 
 import android.content.Context
 import android.net.Uri

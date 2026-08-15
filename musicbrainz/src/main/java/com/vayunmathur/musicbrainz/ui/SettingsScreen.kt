@@ -23,9 +23,9 @@ import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
-import com.vayunmathur.musicbrainz.util.MusicBrainzActions
-import com.vayunmathur.musicbrainz.util.MusicBrainzViewModel
-import com.vayunmathur.musicbrainz.util.SettingsUiState
+import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
+import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
+import com.vayunmathur.musicbrainz.platform.SettingsUiState
 
 /**
  * Binds the settings screen to the ViewModel.
@@ -108,3 +108,4 @@ fun SettingsScreen(
         }
     }
 }
+

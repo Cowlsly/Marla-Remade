@@ -3,7 +3,7 @@ package com.vayunmathur.musicbrainz
 import android.app.Application
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
-import com.vayunmathur.musicbrainz.download.MbDownloader
+import com.vayunmathur.musicbrainz.data.download.MbDownloader
 import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.localization.Localization
 import java.util.Locale

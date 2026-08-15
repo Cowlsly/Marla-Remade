@@ -25,10 +25,13 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
-import com.vayunmathur.musicbrainz.Route
-import com.vayunmathur.musicbrainz.util.MusicBrainzActions
-import com.vayunmathur.musicbrainz.util.MusicBrainzViewModel
-import com.vayunmathur.musicbrainz.util.ReleaseUiState
+import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
+import com.vayunmathur.musicbrainz.ui.components.durationLabel
+import com.vayunmathur.musicbrainz.ui.components.TrackTrailing
+import com.vayunmathur.musicbrainz.ui.components.SecondaryText
+import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
+import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
+import com.vayunmathur.musicbrainz.platform.ReleaseUiState
 
 @Composable
 fun ReleasePage(backStack: NavBackStack<Route>, viewModel: MusicBrainzViewModel, releaseId: String) {
@@ -129,3 +132,7 @@ fun ReleaseScreen(
         }
     }
 }
+
+
+
+

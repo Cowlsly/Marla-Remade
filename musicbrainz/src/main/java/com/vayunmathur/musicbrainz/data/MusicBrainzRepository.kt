@@ -2,7 +2,7 @@ package com.vayunmathur.musicbrainz.data
 
 import android.content.Context
 import com.vayunmathur.library.room.RoomRepository
-import com.vayunmathur.musicbrainz.library.LibraryScanner
+import com.vayunmathur.musicbrainz.data.library.LibraryScanner
 
 class MusicBrainzRepository private constructor(context: Context) :
     RoomRepository<MusicBrainzDatabase>(context, MusicBrainzDatabase::class, LibraryScanner.DB_NAME) {

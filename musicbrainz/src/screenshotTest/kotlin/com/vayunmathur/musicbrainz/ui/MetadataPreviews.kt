@@ -6,15 +6,15 @@ import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.Route
-import com.vayunmathur.musicbrainz.download.DownloadItem
-import com.vayunmathur.musicbrainz.download.DownloadState
-import com.vayunmathur.musicbrainz.util.ArtistUiState
-import com.vayunmathur.musicbrainz.util.MusicBrainzActions
-import com.vayunmathur.musicbrainz.util.ReleaseGroupRow
-import com.vayunmathur.musicbrainz.util.ReleaseUiState
-import com.vayunmathur.musicbrainz.util.SearchTab
-import com.vayunmathur.musicbrainz.util.SearchUiState
-import com.vayunmathur.musicbrainz.util.TrackRow
+import com.vayunmathur.musicbrainz.platform.download.DownloadItem
+import com.vayunmathur.musicbrainz.platform.download.DownloadState
+import com.vayunmathur.musicbrainz.platform.ArtistUiState
+import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
+import com.vayunmathur.musicbrainz.platform.ReleaseGroupRow
+import com.vayunmathur.musicbrainz.platform.ReleaseUiState
+import com.vayunmathur.musicbrainz.platform.SearchTab
+import com.vayunmathur.musicbrainz.platform.SearchUiState
+import com.vayunmathur.musicbrainz.platform.TrackRow
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi - comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
@@ -187,3 +187,4 @@ class MetadataPreviews {
         }
     }
 }
+

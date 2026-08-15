@@ -19,11 +19,12 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
-import com.vayunmathur.musicbrainz.Route
-import com.vayunmathur.musicbrainz.download.DownloadItem
-import com.vayunmathur.musicbrainz.download.DownloadState
-import com.vayunmathur.musicbrainz.util.MusicBrainzActions
-import com.vayunmathur.musicbrainz.util.MusicBrainzViewModel
+import com.vayunmathur.musicbrainz.ui.components.SecondaryText
+import com.vayunmathur.musicbrainz.ui.components.TrackTrailing
+import com.vayunmathur.musicbrainz.platform.download.DownloadItem
+import com.vayunmathur.musicbrainz.platform.download.DownloadState
+import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
+import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
 
 @Composable
 fun DownloadsPage(backStack: NavBackStack<Route>, viewModel: MusicBrainzViewModel) {
@@ -92,3 +93,7 @@ private fun DownloadState.labelRes(): Int = when (this) {
     DownloadState.Done -> R.string.state_done
     DownloadState.Failed -> R.string.state_failed
 }
+
+
+
+

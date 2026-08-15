@@ -1,6 +1,6 @@
-package com.vayunmathur.musicbrainz.util
+package com.vayunmathur.musicbrainz.platform
 
-import com.vayunmathur.musicbrainz.download.DownloadItem
+import com.vayunmathur.musicbrainz.platform.download.DownloadItem
 
 /**
  * The contract between [MusicBrainzViewModel] and the screens.
