@@ -122,7 +122,6 @@ fun ContactDetailsPage(
     val context = LocalContext.current
     val contactsList by viewModel.contacts.collectAsStateWithLifecycle()
     val contactFromFlow by remember { viewModel.getContactFlow(contactId) }.collectAsStateWithLifecycle(initialValue = null)
-    // Fall back to direct provider query if not in memory list yet (e.g., cold start via intent, or hidden account filter race)
     val contactFromProvider by produceState<Contact?>(initialValue = null, contactId, contactsList.size) {
         value = withContext(Dispatchers.IO) {
             viewModel.getContact(contactId) ?: com.vayunmathur.contacts.data.Contact.getContact(context, contactId)
@@ -131,7 +130,6 @@ fun ContactDetailsPage(
     val contact = contactFromFlow ?: contactFromProvider
 
     if (contact == null) {
-        // Show loading while contacts list is still populating, only show "not found" once list is loaded
         if (contactsList.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = androidx.compose.ui.Alignment.Center) {
                 CircularProgressIndicator()
@@ -144,8 +142,6 @@ fun ContactDetailsPage(
         return
     }
 
-    // Which messaging apps know this contact is a package-manager question, so it is
-    // resolved here rather than inside the screen.
     val platforms by produceState(ContactPlatforms(), contactId, contact.details) {
         value = withContext(Dispatchers.IO) { PackageUtils.getContactPlatforms(context, contactId) }
     }
@@ -153,13 +149,9 @@ fun ContactDetailsPage(
         value = withContext(Dispatchers.IO) { PackageUtils.isGoogleMeetInstalled(context) }
     }
     val groups by viewModel.groups.collectAsStateWithLifecycle()
-    val hasSim by viewModel.hasSim.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
-    val messenger = rememberMessenger()
     val shareContactLabel = stringResource(R.string.share_contact)
-    val simExportSuccess = stringResource(R.string.sim_export_success)
-    val simExportFailed = stringResource(R.string.sim_export_failed)
 
     ContactDetailsScreen(
         state = ContactDetailsUiState(
@@ -180,18 +172,12 @@ fun ContactDetailsPage(
             }
         },
         showBackButton = showBackButton,
-        hasSim = hasSim,
-        onExportToSim = { c ->
-            viewModel.exportContactToSim(c) { ok ->
-                messenger.show(if (ok) simExportSuccess else simExportFailed)
-            }
-        },
     )
 }
 
 /**
  * The contact details page, with no dependency on the ViewModel so it can be rendered from
- * a `@Preview` — see `src/screenshotTest`, which is where the store listing images come from.
+ * a `@Preview`.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -199,8 +185,6 @@ fun ContactDetailsScreen(
     state: ContactDetailsUiState,
     actions: ContactsActions,
     showBackButton: Boolean = true,
-    hasSim: Boolean = false,
-    onExportToSim: ((Contact) -> Unit)? = null,
 ) {
     val context = LocalContext.current
     val contact = state.contact
@@ -225,12 +209,6 @@ fun ContactDetailsScreen(
                         actions.shareContacts(listOf(contact), "${contact.name.value.replace(' ', '_')}.vcf")
                     }) {
                         IconShare()
-                    }
-                    OverflowMenu(icon = { IconMoreVert() }) {
-                        Item(
-                            text = stringResource(R.string.export_to_sim),
-                            enabled = hasSim,
-                        ) { onExportToSim?.invoke(contact) }
                     }
                     IconButton(onClick = { actions.confirmDeleteContact(contact) }) {
                         IconDelete()
@@ -679,11 +657,6 @@ fun DetailItem(
     onClick: (() -> Unit)? = null,
     dropdownContent: (@Composable () -> Unit)? = null,
     trailingDropdownContent: (@Composable () -> Unit)? = null,
-    /**
-     * Outer shape of the card. Pass [groupShape] when this item is part of a
-     * vertically stacked sibling group so corners between siblings are
-     * squared off while the group's outer corners stay rounded.
-     */
     shape: androidx.compose.ui.graphics.Shape = RoundedCornerShape(16.dp),
 ) {
     val clipboard = LocalClipboard.current
@@ -724,10 +697,6 @@ fun DetailItem(
 
 enum class CommunicationType { CALL, SMS }
 
-/**
- * Outer shape for a card that sits at a given [index] inside a vertically
- * stacked sibling group of [size] items.
- */
 fun groupShape(
     index: Int,
     size: Int,

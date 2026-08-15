@@ -6,7 +6,6 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -40,6 +39,7 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
     val hiddenAccounts by viewModel.hiddenAccounts.collectAsStateWithLifecycle()
     val isCalendarSyncEnabled by viewModel.isCalendarSyncEnabled.collectAsStateWithLifecycle()
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
+    val simLabels by viewModel.simAccountLabels.collectAsStateWithLifecycle()
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -52,11 +52,6 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
             viewModel.setCalendarSyncEnabled(true)
         }
     }
-
-    val hasSim by viewModel.hasSim.collectAsStateWithLifecycle()
-    val simContacts by viewModel.simContacts.collectAsStateWithLifecycle()
-    val defaultTarget by viewModel.defaultContactTarget.collectAsStateWithLifecycle()
-    var simMessage by remember { mutableStateOf<String?>(null) }
 
     val exportLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("text/vcard"),
@@ -181,66 +176,6 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                     }
                 )
                 HorizontalDivider()
-                // SIM import/export
-                ListItem(
-                    content = { Text(stringResource(R.string.sim_contacts)) },
-                    supportingContent = {
-                        Text(
-                            if (!hasSim) stringResource(R.string.no_sim_inserted)
-                            else if (simContacts.isEmpty()) stringResource(R.string.no_sim_contacts)
-                            else "${simContacts.size} " + stringResource(R.string.sim_contacts)
-                        )
-                    },
-                    trailingContent = {
-                        Row {
-                            IconButton(onClick = { viewModel.loadSimContacts() }) { IconRefresh() }
-                            IconButton(
-                                enabled = hasSim && simContacts.isNotEmpty(),
-                                onClick = {
-                                    viewModel.importAllSimContacts { count ->
-                                        simMessage = if (count > 0) context.getString(R.string.sim_import_success, count) else context.getString(R.string.sim_import_failed)
-                                    }
-                                }
-                            ) { IconDownload() }
-                        }
-                    }
-                )
-                if (simMessage != null) {
-                    Text(simMessage!!, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(start = 16.dp, top = 4.dp))
-                }
-                HorizontalDivider()
-            }
-
-            item {
-                Spacer(modifier = Modifier.height(16.dp))
-                Text(
-                    text = stringResource(R.string.default_save_location),
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.Bold,
-                    modifier = Modifier.padding(bottom = 8.dp)
-                )
-                SettingsSelectRow(
-                    title = stringResource(R.string.default_save_location),
-                    selected = defaultTarget,
-                    options = listOf(ContactViewModel.ContactDraftTarget.DEVICE, ContactViewModel.ContactDraftTarget.SIM),
-                    label = { target ->
-                        when (target) {
-                            ContactViewModel.ContactDraftTarget.DEVICE -> stringResource(R.string.device)
-                            ContactViewModel.ContactDraftTarget.SIM -> stringResource(R.string.sim_card)
-                            else -> target.name
-                        }
-                    },
-                    onSelect = { target ->
-                        if (target == ContactViewModel.ContactDraftTarget.SIM && !hasSim) return@SettingsSelectRow
-                        viewModel.setDefaultContactTarget(target)
-                    },
-                    supportingText = stringResource(R.string.default_save_location_summary),
-                    enabled = hasSim || defaultTarget == ContactViewModel.ContactDraftTarget.DEVICE,
-                )
-                if (!hasSim) {
-                    Text(stringResource(R.string.no_sim_available), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 4.dp))
-                }
-                HorizontalDivider(modifier = Modifier.padding(top = 12.dp))
             }
 
             item {
@@ -253,15 +188,20 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                 )
             }
             items(accounts, key = { "${it.type}|${it.name}" }) { account ->
-                val isVisible = account.name !in hiddenAccounts
+                val key = "${account.type}|${account.name}"
+                val legacyKey = account.name
+                val isHidden = key in hiddenAccounts || legacyKey in hiddenAccounts
+                val isVisible = !isHidden
                 val onDevice = stringResource(R.string.on_device)
+                val simLabel = simLabels[key]
+                val displayName = simLabel ?: account.name.ifEmpty { onDevice }
                 ListItem(
-                    content = { Text(account.name.ifEmpty { onDevice }) },
+                    content = { Text(displayName) },
                     supportingContent = { Text(account.type) },
                     trailingContent = {
                         Checkbox(
                             checked = isVisible,
-                            onCheckedChange = { viewModel.setAccountVisibility(account.name, it) }
+                            onCheckedChange = { viewModel.setAccountVisibility(account, it) }
                         )
                     }
                 )

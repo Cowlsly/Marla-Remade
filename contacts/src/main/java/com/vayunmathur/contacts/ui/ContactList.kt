@@ -66,7 +66,6 @@ import com.vayunmathur.contacts.util.ContactSorting.groupKey
 import com.vayunmathur.contacts.util.ContactSorting.sortedLocale
 import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.contacts.util.ContactsActions
-import com.vayunmathur.contacts.util.SimContactsActions
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -99,15 +98,12 @@ fun ContactList(
     LaunchedEffect(Unit) {
         viewModel.loadContacts()
         viewModel.loadAccounts()
-        viewModel.loadSimContacts()
     }
 
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val showAccountLabels by viewModel.showAccountLabels.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
-    val simContacts by viewModel.simSearchResults.collectAsStateWithLifecycle()
-    val hasSim by viewModel.hasSim.collectAsStateWithLifecycle()
 
     val last = backStack.last()
 
@@ -123,8 +119,6 @@ fun ContactList(
                 else -> null
             },
             showAddButton = last !is Route.EditContact,
-            simContacts = simContacts,
-            hasSim = hasSim,
         ),
         actions = object : ContactsActions by viewModel {
             override fun openContact(contact: Contact) = onContactClick(contact)
@@ -139,12 +133,6 @@ fun ContactList(
                 shareContactsAsVcf(scope, context, contacts, filename, resources.getString(R.string.share_contact))
             }
         },
-        simActions = object : SimContactsActions {
-            override fun importSimContact(simContact: com.vayunmathur.contacts.data.SimContact) { viewModel.importSimContact(simContact) }
-            override fun deleteSimContact(simContact: com.vayunmathur.contacts.data.SimContact) { viewModel.deleteSimContact(simContact) }
-            override fun importAllSimContacts() { viewModel.importAllSimContacts() }
-            override fun refreshSim() { viewModel.loadSimContacts() }
-        }
     )
 }
 
@@ -154,7 +142,7 @@ fun ContactList(
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simActions: com.vayunmathur.contacts.util.SimContactsActions = com.vayunmathur.contacts.util.SimContactsActions.Noop) {
+fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
     val contacts = state.contacts
     val selectedIds = remember { mutableStateListOf<Long>() }
     val isSelectionMode = selectedIds.isNotEmpty()
@@ -199,14 +187,10 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simAc
 
     val selectedID = state.openContactId
 
-    // While the search bar has text, intercept back to clear it instead of
-    // popping the screen. Empty search → back propagates normally.
     androidx.activity.compose.BackHandler(enabled = state.searchQuery.isNotEmpty() && !isSelectionMode) {
         actions.setSearchQuery("")
     }
 
-    // When contacts are selected (selection mode), intercept back to unselect
-    // instead of closing the app.
     androidx.activity.compose.BackHandler(enabled = isSelectionMode) {
         selectedIds.clear()
     }
@@ -246,12 +230,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simAc
                             placeholder = stringResource(R.string.search_contacts),
                             padding = PaddingValues(0.dp),
                             modifier = Modifier
-                                // Start non-focusable so the field doesn't grab
-                                // focus (and raise the keyboard) on screen entry.
                                 .focusProperties { canFocus = isFocusableBySystem }
-                                // Enable focus on the initial press, before the
-                                // text field's own tap handling runs, without
-                                // consuming the event so the tap still focuses it.
                                 .pointerInput(Unit) {
                                     awaitPointerEventScope {
                                         while (true) {
@@ -260,7 +239,6 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simAc
                                         }
                                     }
                                 }
-                                // Block automatic focus again once focus is lost.
                                 .onFocusChanged { focusState ->
                                     if (!focusState.isFocused) {
                                         isFocusableBySystem = false
@@ -334,18 +312,6 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simAc
                             )
                         }
                     }
-                }
-
-                item(key = "sim-section") {
-                    SimContactsSection(
-                        simContacts = state.simContacts,
-                        hasSim = state.hasSim,
-                        onImportOne = { simActions.importSimContact(it) },
-                        onDeleteOne = { simActions.deleteSimContact(it) },
-                        onImportAll = { simActions.importAllSimContacts() },
-                        onRefresh = { simActions.refreshSim() },
-                        modifier = Modifier.padding(top = 8.dp)
-                    )
                 }
             }
         }
@@ -463,7 +429,7 @@ fun FavoritesHeader(modifier: Modifier = Modifier) {
 fun LetterHeader(letter: Char, modifier: Modifier = Modifier) {
     Text(
         text = letter.toString(),
-        modifier = modifier.padding(vertical = 8.dp, horizontal = 4.dp), // Add slight horizontal padding
+        modifier = modifier.padding(vertical = 8.dp, horizontal = 4.dp),
         style = MaterialTheme.typography.titleSmall,
         fontWeight = FontWeight.Bold,
         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -483,15 +449,6 @@ fun getAvatarColor(id: Long): Color {
     return colors[index]
 }
 
-/**
- * Grouped-cards pattern: each row is its own rounded [Surface], but the
- * corners that meet a sibling in the same group are flattened so the group
- * reads as one section while remaining visually distinct cards. Mirrors what
- * [DetailItem]+[groupShape] does on the contact details page.
- *
- * [row] should render a flat row (e.g. [ContactItem] with `embeddedInCard =
- * true`) — the outer Surface handles the background and clipping.
- */
 @Composable
 fun GroupedContactSection(
     count: Int,
@@ -519,7 +476,6 @@ fun ContactItem(
     showAccountLabels: Boolean,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Every group in the app; the row labels itself with the ones this contact is in. */
     allGroups: List<ContactGroup> = emptyList(),
     decodePhoto: ((String) -> Bitmap?)? = null,
     onLongClick: (() -> Unit)? = null,
@@ -557,10 +513,6 @@ fun ContactItem(
                 embeddedInCard -> Color.Transparent
                 else -> MaterialTheme.colorScheme.surfaceVariant
             }
-            // A plain Row/Column layout is used instead of Material3 ListItem
-            // because ListItem queries its children's baseline alignment lines,
-            // which throws a framework NPE when remeasured inside the Navigation3
-            // adaptive lookahead pass on configuration change (rotation).
             Row(
                 modifier = itemModifier
                     .fillMaxWidth()

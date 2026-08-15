@@ -207,31 +207,8 @@
     <!-- Placeholder / description for entering custom label -->
     <string name="enter_custom_label">Enter custom label</string>
 
-    <!-- SIM contacts -->
-    <string name="sim_contacts">SIM contacts</string>
-    <string name="sim_card">SIM card</string>
-    <string name="device">Device</string>
-    <string name="save_to">Save to</string>
-    <string name="sim_slot">SIM slot</string>
-    <string name="sim_name">Name</string>
-    <string name="sim_phone">Phone</string>
-    <string name="sim_email">Email</string>
+    <!-- SIM contacts (now virtual accounts) -->
     <string name="sim_limited_fields_hint">SIM contacts only store name, phone, and email.</string>
-    <string name="sim_name_or_phone_required">Enter a name or phone number</string>
     <string name="save_failed">Save failed</string>
-    <string name="no_sim_available">No SIM card available</string>
-    <string name="no_sim_inserted">No SIM card inserted or permission not granted.</string>
-    <string name="no_sim_contacts">No contacts on SIM.</string>
-    <string name="import_all">Import all</string>
-    <string name="export_to_sim">Export to SIM</string>
-    <string name="import_from_sim">Import from SIM</string>
-    <string name="default_save_location">Default save location</string>
-    <string name="default_save_location_summary">Where new contacts are saved by default</string>
-    <string name="import_sim_contacts">Import SIM contacts</string>
     <string name="importing">Importing…</string>
-    <string name="exporting_to_sim">Exporting to SIM…</string>
-    <string name="sim_import_success">Imported %1$d contact(s) from SIM</string>
-    <string name="sim_import_failed">Failed to import from SIM</string>
-    <string name="sim_export_success">Exported to SIM</string>
-    <string name="sim_export_failed">Failed to export to SIM (full or unavailable)</string>
 </resources>

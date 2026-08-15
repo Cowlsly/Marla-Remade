@@ -36,7 +36,6 @@ import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
-import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.FormDetailGroup
 import com.vayunmathur.library.ui.FormSection
 import com.vayunmathur.library.ui.IconButton
@@ -83,6 +82,7 @@ import com.vayunmathur.contacts.data.Event
 import com.vayunmathur.contacts.data.GroupMembership
 import com.vayunmathur.contacts.data.PhoneNumber
 import com.vayunmathur.contacts.data.Photo
+import com.vayunmathur.contacts.data.SIM_ACCOUNT_TYPE
 import com.vayunmathur.contacts.data.formatDisplay
 import com.vayunmathur.contacts.util.ContactAccount
 import com.vayunmathur.contacts.util.ContactViewModel
@@ -105,8 +105,6 @@ import kotlin.io.encoding.Base64
 fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel, editRoute: Route.EditContact, onExit: () -> Unit = { backStack.pop() }) {
     val contactId = editRoute.contactId
     val context = LocalContext.current
-    val hasSim by viewModel.hasSim.collectAsStateWithLifecycle()
-    val simSubs by viewModel.simSubscriptions.collectAsStateWithLifecycle()
     var saveError by remember { mutableStateOf<String?>(null) }
     var isSaving by remember { mutableStateOf(false) }
 
@@ -119,6 +117,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
     }
     val draft by viewModel.editDraft.collectAsStateWithLifecycle()
     val accounts by viewModel.accounts.collectAsStateWithLifecycle()
+    val simLabels by viewModel.simAccountLabels.collectAsStateWithLifecycle()
     val isNewContact = contactId == null
 
     val pickMedia = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
@@ -129,6 +128,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
     }
 
     val currentDraft = draft ?: return
+    val isSimAccount = currentDraft.accountType == SIM_ACCOUNT_TYPE
     // Markdown note editor backed by the shared ODF editor; stored content stays markdown.
     val noteController = key(contactId) {
         com.vayunmathur.library.ui.rememberOdfMarkdownEditorController(initialMarkdown = currentDraft.noteContent) { content ->
@@ -150,13 +150,6 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 actions = {
                     Button(onClick = {
                         if (isSaving) return@Button
-                        // Validate duplicate behavior handled by editor
-                        if (currentDraft.target == ContactViewModel.ContactDraftTarget.SIM) {
-                            if (currentDraft.simName.isBlank() && currentDraft.simPhone.isBlank()) {
-                                saveError = context.getString(R.string.sim_name_or_phone_required)
-                                return@Button
-                            }
-                        }
                         isSaving = true
                         viewModel.saveEditDraft { ok, err ->
                             isSaving = false
@@ -169,7 +162,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             )
         },
         bottomBar = {
-            if (currentDraft.target == ContactViewModel.ContactDraftTarget.DEVICE && noteController.focused) {
+            if (noteController.focused) {
                 com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(noteController)
             }
         }
@@ -187,55 +180,30 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 Spacer(Modifier.height(8.dp))
             }
 
-            // Storage target chooser (new contacts only, when SIM available)
+            // Account chooser for new contacts (SIM accounts appear here as normal accounts)
             if (isNewContact) {
-                SimTargetChooser(
-                    selected = currentDraft.target,
-                    enabled = hasSim,
-                    simSubscriptions = simSubs,
-                    selectedSubId = currentDraft.simSubscriptionId,
-                    onTargetChange = { t -> viewModel.updateEditDraft { it.copy(target = t) } },
-                    onSubIdChange = { id -> viewModel.updateEditDraft { it.copy(simSubscriptionId = id) } }
-                )
-                Spacer(Modifier.height(12.dp))
-                // Account chooser only for Device target
-                if (currentDraft.target == ContactViewModel.ContactDraftTarget.DEVICE) {
-                    AccountChooser(currentDraft.accountName, accounts) { name, type ->
-                        viewModel.updateEditDraft { it.copy(accountName = name, accountType = type) }
-                        viewModel.setLastSelectedAccount(name, type)
-                    }
-                    Spacer(Modifier.height(16.dp))
+                AccountChooser(currentDraft.accountName, currentDraft.accountType, accounts, simLabels) { name, type ->
+                    viewModel.updateEditDraft { it.copy(accountName = name, accountType = type) }
+                    viewModel.setLastSelectedAccount(name, type)
                 }
-            }
-
-            // SIM mode: limited form only
-            if (currentDraft.target == ContactViewModel.ContactDraftTarget.SIM && isNewContact) {
+                Spacer(Modifier.height(16.dp))
+                if (isSimAccount) {
+                    Text(
+                        stringResource(R.string.sim_limited_fields_hint),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    Spacer(Modifier.height(8.dp))
+                }
+            } else if (isSimAccount) {
                 Text(
                     stringResource(R.string.sim_limited_fields_hint),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth()
                 )
-                FormSection {
-                    LabeledTextField(
-                        value = currentDraft.simName,
-                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simName = v) } },
-                        label = stringResource(R.string.sim_name),
-                    )
-                    LabeledTextField(
-                        value = currentDraft.simPhone,
-                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simPhone = v) } },
-                        label = stringResource(R.string.sim_phone),
-                        keyboardType = KeyboardType.Phone,
-                    )
-                    LabeledTextField(
-                        value = currentDraft.simEmail,
-                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simEmail = v) } },
-                        label = stringResource(R.string.sim_email),
-                        keyboardType = KeyboardType.Email,
-                    )
-                }
-                return@Column
+                Spacer(Modifier.height(8.dp))
             }
 
             Spacer(Modifier.height(8.dp))
@@ -421,14 +389,23 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
 @Composable
 fun AccountChooser(
     accountName: String,
+    accountType: String,
     accounts: List<ContactAccount>,
+    simLabels: Map<String, String> = emptyMap(),
     onAccountChange: (String, String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
     val onDevice = stringResource(R.string.on_device)
+    val currentKey = "${accountType}|${accountName}"
+    val displayValue = when {
+        accountName.isEmpty() && accountType.isEmpty() -> onDevice
+        simLabels.containsKey(currentKey) -> simLabels[currentKey]!!
+        accountName.isNotEmpty() -> accountName
+        else -> onDevice
+    }
     Box(Modifier.fillMaxWidth()) {
         OutlinedTextField(
-            value = accountName.ifEmpty { onDevice },
+            value = displayValue,
             onValueChange = {},
             readOnly = true,
             label = { Text(stringResource(R.string.account)) },
@@ -450,8 +427,10 @@ fun AccountChooser(
                 )
             }
             accounts.forEach { account ->
+                val key = "${account.type}|${account.name}"
+                val label = simLabels[key] ?: account.name.ifEmpty { onDevice }
                 DropdownMenuItem(
-                    text = { Text(stringResource(R.string.account_display_format, account.name.ifEmpty { onDevice }, account.type)) },
+                    text = { Text(if (simLabels.containsKey(key)) label else stringResource(R.string.account_display_format, label, account.type)) },
                     onClick = {
                         onAccountChange(account.name, account.type)
                         expanded = false
@@ -703,65 +682,6 @@ private fun ColumnScope.GroupMembershipSection(
     }
 }
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun SimTargetChooser(
-    selected: ContactViewModel.ContactDraftTarget,
-    enabled: Boolean,
-    simSubscriptions: List<Int>,
-    selectedSubId: Int?,
-    onTargetChange: (ContactViewModel.ContactDraftTarget) -> Unit,
-    onSubIdChange: (Int?) -> Unit
-) {
-    Column(Modifier.fillMaxWidth()) {
-        Text(
-            stringResource(R.string.save_to),
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-            FilterChip(
-                selected = selected == ContactViewModel.ContactDraftTarget.DEVICE,
-                onClick = { onTargetChange(ContactViewModel.ContactDraftTarget.DEVICE) },
-                label = { Text(stringResource(R.string.device)) }
-            )
-            FilterChip(
-                selected = selected == ContactViewModel.ContactDraftTarget.SIM,
-                onClick = { if (enabled) onTargetChange(ContactViewModel.ContactDraftTarget.SIM) },
-                enabled = enabled,
-                label = { Text(stringResource(R.string.sim_card)) }
-            )
-        }
-        if (!enabled) {
-            Text(
-                stringResource(R.string.no_sim_available),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-        } else if (selected == ContactViewModel.ContactDraftTarget.SIM && simSubscriptions.size > 1) {
-            Spacer(Modifier.height(8.dp))
-            var expanded by remember { mutableStateOf(false) }
-            Box {
-                OutlinedTextField(
-                    value = selectedSubId?.let { "SIM $it" } ?: "SIM ${simSubscriptions.first()}",
-                    onValueChange = {},
-                    readOnly = true,
-                    label = { Text(stringResource(R.string.sim_slot)) },
-                    trailingIcon = { IconButton(onClick = { expanded = true }) { IconArrowDropDown() } },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                DropdownMenu(expanded, { expanded = false }) {
-                    simSubscriptions.forEach { sid ->
-                        DropdownMenuItem(text = { Text("SIM $sid") }, onClick = { onSubIdChange(sid); expanded = false })
-                    }
-                }
-                Box(Modifier.matchParentSize().clickable { expanded = true })
-            }
-        }
-    }
-}
-
 @Composable
 private fun AddPictureSection(
     photo: String?,
@@ -778,7 +698,6 @@ private fun AddPictureSection(
             contentAlignment = Alignment.Center
         ) {
             if (photo != null) {
-                // Decode once via the VM cache, not on every recomposition.
                 val bitmap = remember(photo) { viewModel.decodePhoto(photo) }
                 if (bitmap != null) {
                     Image(
