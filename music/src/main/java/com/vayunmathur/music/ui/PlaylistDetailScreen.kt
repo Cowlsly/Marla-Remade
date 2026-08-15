@@ -21,6 +21,9 @@ import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.music.ui.component.PlayShuffleRow
+import com.vayunmathur.music.ui.component.PlayingBottomBar
+import com.vayunmathur.music.ui.component.TrackListItem
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.MusicViewModel
 import com.vayunmathur.music.R
