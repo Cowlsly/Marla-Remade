@@ -24,9 +24,8 @@ import com.vayunmathur.health.data.ExerciseLapData
 import com.vayunmathur.health.data.ExerciseSegmentData
 import com.vayunmathur.health.data.Record
 import com.vayunmathur.health.data.RecordType
-import com.vayunmathur.health.ui.components.GroupedSection
-import com.vayunmathur.health.ui.components.GroupedSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
+import com.vayunmathur.library.ui.DashboardSection
 import com.vayunmathur.health.util.exerciseSegmentTypeName
 import com.vayunmathur.health.util.exerciseTypeName
 import com.vayunmathur.library.ui.DateString
@@ -116,7 +115,7 @@ private fun ExerciseSessionCard(record: Record) {
         }
     }
 
-    GroupedSection(accentColor = HealthColors.Activity) {
+    DashboardSection(accentColor = HealthColors.Activity) {
         Column(Modifier.padding(16.dp)) {
             // Header: icon + name + duration
             Row(verticalAlignment = Alignment.CenterVertically) {
