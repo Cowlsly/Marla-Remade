@@ -31,6 +31,12 @@ class OneComposablePerFileDetector : Detector(), SourceCodeScanner {
     override fun createUastHandler(context: JavaContext): UElementHandler =
         object : UElementHandler() {
             override fun visitFile(node: UFile) {
+                // App-screen rule only: skip shared library / e2ee / sdk / games /
+                // tools / personal modules (same exclusion set as PackageStructure).
+                // The library/ui Material+icon shim is many-composables-per-file by
+                // design, and games splits were deliberately deferred.
+                if (LintPackageExclusions.isExcluded(node.packageName)) return
+
                 // Names of public top-level composables already seen in this file.
                 // The first is allowed; each additional *distinct* name is a violation.
                 // Overloads reuse a name, so they never trip the check.

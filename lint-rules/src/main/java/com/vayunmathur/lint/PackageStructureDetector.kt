@@ -107,16 +107,12 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
             "service", "provider", "widget", "notifications", "auth", "sync", "telephony"
         )
 
-        private val EXCLUDED_PREFIXES = listOf(
-            "com.vayunmathur.library",
-            "com.vayunmathur.sdk",
-            "com.vayunmathur.games",
-            "com.vayunmathur.tools",
-            "com.vayunmathur.personal",
-        )
-
+        // Shared with OneComposablePerFileDetector via [LintPackageExclusions] so
+        // both app-structure lints skip the same non-app modules (shared library,
+        // e2ee crypto lib, sdk, games, tools, personal). See that file for the
+        // per-prefix rationale.
         fun isExcluded(packageName: String): Boolean =
-            EXCLUDED_PREFIXES.any { packageName == it || packageName.startsWith("$it.") }
+            LintPackageExclusions.isExcluded(packageName)
 
         // JNI carve-out: a handful of classes have their fully-qualified name frozen
         // because the native side binds to it via RegisterNatives / C++ symbol mangling.
