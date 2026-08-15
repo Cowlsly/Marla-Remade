@@ -1,12 +1,12 @@
-package com.vayunmathur.email.smtp
+package com.vayunmathur.email.network.smtp
 
 import android.content.Context
 import android.net.Uri
 import android.util.Log
-import com.vayunmathur.email.EmailManager
-import com.vayunmathur.email.ServerConfig
-import com.vayunmathur.email.composer.InlineAttachment
-import com.vayunmathur.email.imap.TrustAll
+import com.vayunmathur.email.platform.EmailManager
+import com.vayunmathur.email.platform.ServerConfig
+import com.vayunmathur.email.ui.composer.InlineAttachment
+import com.vayunmathur.email.network.imap.TrustAll
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 

@@ -11,12 +11,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.vayunmathur.email.util.BootReceiver
+import com.vayunmathur.email.platform.BootReceiver
 
 /**
  * Retry worker that attempts to start [ImapIdleService] when network is available.
  * Uses expedited work with OUT_OF_QUOTA so it can try even if quota exhausted.
- * Scheduled from [BootReceiver] on S+ boot as fallback, and from [com.vayunmathur.email.util.AppLifecycleTracker]
+ * Scheduled from [BootReceiver] on S+ boot as fallback, and from [com.vayunmathur.email.platform.AppLifecycleTracker]
  * foreground path if direct start fails.
  */
 class ImapIdleRetryWorker(appContext: Context, params: WorkerParameters) : CoroutineWorker(appContext, params) {

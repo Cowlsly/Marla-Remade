@@ -1,4 +1,4 @@
-package com.vayunmathur.email.composer
+package com.vayunmathur.email.ui.composer
 
 import android.net.Uri
 import kotlinx.serialization.Serializable

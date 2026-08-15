@@ -1,6 +1,6 @@
 @file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
 
-package com.vayunmathur.email.composer
+package com.vayunmathur.email.ui.composer
 
 import kotlin.uuid.Uuid
 import android.content.Context

@@ -4,7 +4,7 @@ import android.content.Context
 import android.util.Log
 import androidx.core.content.edit
 import androidx.work.*
-import com.vayunmathur.email.imap.ImapClient
+import com.vayunmathur.email.network.imap.ImapClient
 import com.vayunmathur.email.imapServer
 import com.vayunmathur.email.loginUser
 import com.vayunmathur.email.resolveAuth
@@ -78,9 +78,9 @@ class EmailSyncWorker(appContext: Context, workerParams: WorkerParameters) :
                             if (folder.fullName == ImapClient.INBOX && messages.isNotEmpty()) {
                                 val lastSeen = lastSeenPrefs(applicationContext)
                                     .getLong(lastSeenKey(account.email, folder.fullName), -1L)
-                                if (lastSeen >= 0L && !com.vayunmathur.email.util.AppLifecycleTracker.isAppInForeground) {
+                                if (lastSeen >= 0L && !com.vayunmathur.email.platform.AppLifecycleTracker.isAppInForeground) {
                                     val notifiable = messages.filter { it.id > lastSeen }
-                                    com.vayunmathur.email.util.EmailNotifications.postForNewMessages(
+                                    com.vayunmathur.email.platform.EmailNotifications.postForNewMessages(
                                         applicationContext, account.email, notifiable,
                                     )
                                 }

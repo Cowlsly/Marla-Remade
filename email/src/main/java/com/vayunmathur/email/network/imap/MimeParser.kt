@@ -1,9 +1,9 @@
-package com.vayunmathur.email.imap
+package com.vayunmathur.email.network.imap
 
 import android.content.Context
 import android.util.Base64
 import android.util.Log
-import com.vayunmathur.email.Attachment
+import com.vayunmathur.email.data.Attachment
 import com.vayunmathur.email.util.EmlAttachment
 import com.vayunmathur.email.util.ParsedEml
 import java.io.ByteArrayOutputStream
@@ -218,7 +218,7 @@ object MimeParser {
         val listUnsub = headers["list-unsubscribe"]
         val listUnsubPost = headers["list-unsubscribe-post"]
 
-        val emailMessage = com.vayunmathur.email.EmailMessage(
+        val emailMessage = com.vayunmathur.email.data.EmailMessage(
             accountEmail = "eml-viewer",
             folderName = "EML",
             id = syntheticId,

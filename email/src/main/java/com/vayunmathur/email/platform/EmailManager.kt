@@ -1,12 +1,12 @@
-package com.vayunmathur.email
+package com.vayunmathur.email.platform
 
 import android.content.Context
 import android.net.Uri
-import com.vayunmathur.email.composer.InlineAttachment
+import com.vayunmathur.email.ui.composer.InlineAttachment
 import com.vayunmathur.email.data.CredentialCrypto
 import com.vayunmathur.email.data.OutlookOAuth
-import com.vayunmathur.email.imap.ImapClient
-import com.vayunmathur.email.smtp.SmtpClient
+import com.vayunmathur.email.network.imap.ImapClient
+import com.vayunmathur.email.network.smtp.SmtpClient
 import java.io.File
 import java.io.OutputStream
 

@@ -29,11 +29,11 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.core.net.toUri
-import com.vayunmathur.email.accountColor
-import com.vayunmathur.email.senderDisplayName
-import com.vayunmathur.email.util.EmlAttachment
-import com.vayunmathur.email.util.EmlUtils
-import com.vayunmathur.email.util.ParsedEml
+import com.vayunmathur.email.data.accountColor
+import com.vayunmathur.email.data.senderDisplayName
+import com.vayunmathur.email.platform.EmlAttachment
+import com.vayunmathur.email.platform.EmlUtils
+import com.vayunmathur.email.platform.ParsedEml
 import com.vayunmathur.library.ui.HtmlText
 import com.vayunmathur.library.ui.IconForward
 import com.vayunmathur.library.ui.IconNavigation

@@ -1,11 +1,11 @@
-package com.vayunmathur.email
+package com.vayunmathur.email.data
 
 import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.core.text.HtmlCompat
 import kotlinx.serialization.Serializable
-import com.vayunmathur.email.imap.MimeParser
+import com.vayunmathur.email.network.imap.MimeParser
 
 @Serializable
 @Entity(primaryKeys = ["accountEmail", "fullName"])

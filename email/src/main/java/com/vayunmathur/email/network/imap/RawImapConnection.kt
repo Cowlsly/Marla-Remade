@@ -1,8 +1,8 @@
-package com.vayunmathur.email.imap
+package com.vayunmathur.email.network.imap
 
 import android.util.Base64
 import android.util.Log
-import com.vayunmathur.email.ServerConfig
+import com.vayunmathur.email.platform.ServerConfig
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream

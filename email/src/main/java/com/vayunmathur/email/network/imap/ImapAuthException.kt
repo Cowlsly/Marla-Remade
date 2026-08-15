@@ -1,4 +1,4 @@
-package com.vayunmathur.email.imap
+package com.vayunmathur.email.network.imap
 
 import java.io.IOException
 

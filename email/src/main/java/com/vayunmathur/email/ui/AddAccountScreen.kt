@@ -20,10 +20,10 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
-import com.vayunmathur.email.EmailAccount
-import com.vayunmathur.email.EmailManager
 import com.vayunmathur.email.R
-import com.vayunmathur.email.ServerConfig
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.platform.EmailManager
+import com.vayunmathur.email.platform.ServerConfig
 import com.vayunmathur.email.data.CredentialCrypto
 import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.data.EmailSyncWorker
@@ -354,7 +354,7 @@ private suspend fun testAndPersistAccount(
         EmailManager().fetchFolders(server = imap, user = loginUser, auth = EmailManager.AuthType.Password(password))
     } catch (e: Exception) {
         val msg = e.message?.lowercase() ?: ""
-        val isAuth = e is com.vayunmathur.email.imap.ImapAuthException || msg.contains("auth") && (msg.contains("failed") || msg.contains("invalid") || msg.contains("no") || msg.contains("login"))
+        val isAuth = e is com.vayunmathur.email.network.imap.ImapAuthException || msg.contains("auth") && (msg.contains("failed") || msg.contains("invalid") || msg.contains("no") || msg.contains("login"))
         if (isAuth) return@withContext "Authentication failed — check your email and app password."
         return@withContext "Couldn't reach ${imap.host}:${imap.port} — ${e.javaClass.simpleName}: ${e.message ?: "unknown"}"
     }

@@ -1,4 +1,4 @@
-package com.vayunmathur.email.composer
+package com.vayunmathur.email.ui.composer
 
 import android.graphics.Typeface
 import android.text.Spanned

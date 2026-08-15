@@ -1,4 +1,4 @@
-package com.vayunmathur.email
+package com.vayunmathur.email.platform
 
 import android.app.Application
 import android.content.ComponentName
@@ -13,8 +13,8 @@ import com.vayunmathur.email.data.EmailSyncState
 import com.vayunmathur.email.data.EmailSyncWorker
 import com.vayunmathur.email.data.OutboxManager
 import com.vayunmathur.email.data.OutboxSendWorker
-import com.vayunmathur.email.util.MessageListActions
-import com.vayunmathur.email.util.MessageThreadActions
+import com.vayunmathur.email.platform.MessageListActions
+import com.vayunmathur.email.platform.MessageThreadActions
 import com.vayunmathur.library.util.SecureResultReceiver
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Dispatchers
@@ -94,7 +94,7 @@ class EmailViewModel(application: Application) :
         cc: String? = null,
         bcc: String? = null,
         attachments: List<Uri> = emptyList(),
-        inlineImages: List<com.vayunmathur.email.composer.InlineAttachment> = emptyList(),
+        inlineImages: List<com.vayunmathur.email.ui.composer.InlineAttachment> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         scheduledAt: Long,
@@ -358,7 +358,7 @@ class EmailViewModel(application: Application) :
         cc: String? = null,
         bcc: String? = null,
         attachments: List<Uri> = emptyList(),
-        inlineImages: List<com.vayunmathur.email.composer.InlineAttachment> = emptyList(),
+        inlineImages: List<com.vayunmathur.email.ui.composer.InlineAttachment> = emptyList(),
         inReplyTo: String? = null,
         references: String? = null,
         asHtml: Boolean = false,

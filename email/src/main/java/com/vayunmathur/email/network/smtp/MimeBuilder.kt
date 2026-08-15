@@ -1,10 +1,10 @@
-package com.vayunmathur.email.smtp
+package com.vayunmathur.email.network.smtp
 
 import android.content.Context
 import android.net.Uri
 import android.util.Base64
 import android.util.Log
-import com.vayunmathur.email.composer.InlineAttachment
+import com.vayunmathur.email.ui.composer.InlineAttachment
 import java.io.File
 import java.security.SecureRandom
 

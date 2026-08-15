@@ -11,12 +11,13 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.vayunmathur.email.EmailManager
-import com.vayunmathur.email.OutboxEntry
-import com.vayunmathur.email.composer.InlineAttachment
-import com.vayunmathur.email.loginUser
-import com.vayunmathur.email.resolveAuth
-import com.vayunmathur.email.smtpServer
+import com.vayunmathur.email.data.OutboxEntry
+import com.vayunmathur.email.platform.EmailManager
+import com.vayunmathur.email.platform.imapServer
+import com.vayunmathur.email.platform.loginUser
+import com.vayunmathur.email.platform.resolveAuth
+import com.vayunmathur.email.platform.smtpServer
+import com.vayunmathur.email.ui.composer.InlineAttachment
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.File
@@ -101,8 +102,8 @@ class OutboxSendWorker(
 
     private suspend fun trySend(
         manager: EmailManager,
-        account: com.vayunmathur.email.EmailAccount,
-        entry: com.vayunmathur.email.OutboxEntry,
+        account: EmailAccount,
+        entry: OutboxEntry,
         uris: List<android.net.Uri>,
         inline: List<InlineAttachment>,
     ): SendResult = runCatching {

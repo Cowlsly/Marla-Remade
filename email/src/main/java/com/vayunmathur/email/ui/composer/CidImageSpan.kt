@@ -1,4 +1,4 @@
-package com.vayunmathur.email.composer
+package com.vayunmathur.email.ui.composer
 
 import android.graphics.drawable.Drawable
 import android.net.Uri

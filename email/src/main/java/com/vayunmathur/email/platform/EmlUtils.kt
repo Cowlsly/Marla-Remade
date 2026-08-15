@@ -2,7 +2,8 @@ package com.vayunmathur.email.util
 
 import android.content.Context
 import android.net.Uri
-import com.vayunmathur.email.imap.MimeParser
+import com.vayunmathur.email.network.imap.MimeParser
+import com.vayunmathur.email.data.EmailMessage
 import java.io.File
 
 data class EmlAttachment(
@@ -12,7 +13,7 @@ data class EmlAttachment(
 )
 
 data class ParsedEml(
-    val message: com.vayunmathur.email.EmailMessage,
+    val message: EmailMessage,
     val emlAttachments: List<EmlAttachment>,
     val inlineCidMap: Map<String, File> = emptyMap(),
 )

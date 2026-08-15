@@ -1,9 +1,9 @@
-package com.vayunmathur.email.smtp
+package com.vayunmathur.email.network.smtp
 
 import android.util.Base64
 import android.util.Log
-import com.vayunmathur.email.ServerConfig
-import com.vayunmathur.email.imap.TrustAll
+import com.vayunmathur.email.platform.ServerConfig
+import com.vayunmathur.email.network.imap.TrustAll
 import java.io.BufferedReader
 import java.io.BufferedWriter
 import java.io.IOException

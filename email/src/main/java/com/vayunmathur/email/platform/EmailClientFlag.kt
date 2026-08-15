@@ -1,9 +1,9 @@
-package com.vayunmathur.email
+package com.vayunmathur.email.platform
 
 /**
  * Raw IMAP/SMTP is now permanent — legacy Jakarta Mail path removed in Phase 5.
- * All transport goes through [com.vayunmathur.email.imap.ImapClient] and
- * [com.vayunmathur.email.smtp.SmtpClient].
+ * All transport goes through [com.vayunmathur.email.network.imap.ImapClient] and
+ * [com.vayunmathur.email.network.smtp.SmtpClient].
  */
 object EmailClientFlag {
     /** Always true — raw socket clients are the only implementation. */

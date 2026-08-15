@@ -1,15 +1,15 @@
-package com.vayunmathur.email.imap
+package com.vayunmathur.email.network.imap
 
 import android.content.ContentValues
 import android.content.Context
 import android.os.Environment
 import android.provider.MediaStore
 import android.util.Log
-import com.vayunmathur.email.Attachment
-import com.vayunmathur.email.EmailFolder
-import com.vayunmathur.email.EmailManager
-import com.vayunmathur.email.EmailMessage
-import com.vayunmathur.email.ServerConfig
+import com.vayunmathur.email.data.Attachment
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.platform.EmailManager
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.platform.ServerConfig
 import java.io.File
 import java.io.OutputStream
 import kotlinx.coroutines.Dispatchers
