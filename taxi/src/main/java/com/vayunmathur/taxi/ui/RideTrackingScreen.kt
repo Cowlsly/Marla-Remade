@@ -73,51 +73,6 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * The "Current ride" tab. Checks for an in-progress ride once; if there is one, shows live
- * tracking, otherwise a simple "no ride" message. Deliberately minimal state — no cross-tab
- * navigation or ride mutations happen here beyond the explicit Cancel button inside tracking.
- */
-@Composable
-fun CurrentRideScreen() {
-    val context = LocalContext.current
-    var rideId by remember { mutableStateOf<String?>(null) }
-    var loading by remember { mutableStateOf(true) }
-
-    LaunchedEffect(Unit) {
-        val lyft = LyftProvider(context.applicationContext)
-        rideId = if (lyft.isSignedIn()) {
-            (lyft.activeRide() as? RideStatusResult.Active)?.ride?.rideId
-        } else {
-            null
-        }
-        loading = false
-    }
-
-    val id = rideId
-    if (id != null) {
-        RideTrackingScreen(rideId = id)
-        return
-    }
-
-    AppScaffold(title = stringResource(R.string.nav_current_ride)) { padding ->
-        Box(
-            Modifier.fillMaxSize().padding(padding).padding(24.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            if (loading) {
-                CircularProgressIndicator(Modifier.size(24.dp), strokeWidth = 2.dp)
-            } else {
-                Text(
-                    stringResource(R.string.no_current_ride),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-/**
  * Live tracking for one ride: the driver's position against the pickup and destination, the
  * current status, an ETA, and the driver/vehicle details — laid out as a full-bleed map with a
  * rounded card floating over the bottom (mirrors fooddelivery's OrderTrackingScreen).
