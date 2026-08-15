@@ -43,8 +43,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.logicgate.data.*
-import com.vayunmathur.games.logicgate.displayInputLabel
-import com.vayunmathur.games.logicgate.displayOutputLabel
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
