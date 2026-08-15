@@ -14,6 +14,7 @@ import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.Route
+import com.vayunmathur.vpn.ui.components.openVpnSettings
 import com.vayunmathur.vpn.util.VpnViewModel
 
 @Composable
