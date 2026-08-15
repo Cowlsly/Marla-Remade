@@ -10,8 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import com.vayunmathur.library.ui.DynamicTheme
@@ -81,6 +84,22 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         handleIntentUrl(intent)
+    }
+
+    @Composable
+    private fun AppRoot(
+        factory: WebViewModelFactory,
+        pendingExternalUrl: String?,
+        onExternalUrlConsumed: () -> Unit,
+    ) {
+        val viewModel: WebViewModel = viewModel(factory = factory)
+        LaunchedEffect(pendingExternalUrl) {
+            if (pendingExternalUrl != null) {
+                viewModel.externalIntentUrl(pendingExternalUrl)
+                onExternalUrlConsumed()
+            }
+        }
+        Navigation(viewModel)
     }
 
     private fun handleIntentUrl(intent: Intent?) {

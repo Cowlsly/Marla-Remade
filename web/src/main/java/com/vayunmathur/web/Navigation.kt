@@ -1,13 +1,10 @@
 package com.vayunmathur.web
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.web.platform.WebViewModel
-import com.vayunmathur.web.platform.WebViewModelFactory
 import com.vayunmathur.web.ui.BookmarksPage
 import com.vayunmathur.web.ui.BrowserPage
 import com.vayunmathur.web.ui.DownloadsPage
@@ -16,22 +13,6 @@ import com.vayunmathur.web.ui.InstalledSitesPage
 import com.vayunmathur.web.ui.SettingsPage
 import com.vayunmathur.web.ui.ShieldsPage
 import com.vayunmathur.web.ui.SiteDataPage
-
-@Composable
-internal fun AppRoot(
-    factory: WebViewModelFactory,
-    pendingExternalUrl: String?,
-    onExternalUrlConsumed: () -> Unit,
-) {
-    val viewModel: WebViewModel = viewModel(factory = factory)
-    LaunchedEffect(pendingExternalUrl) {
-        if (pendingExternalUrl != null) {
-            viewModel.externalIntentUrl(pendingExternalUrl)
-            onExternalUrlConsumed()
-        }
-    }
-    Navigation(viewModel)
-}
 
 @Composable
 fun Navigation(viewModel: WebViewModel) {
