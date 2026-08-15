@@ -6,9 +6,9 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.util.ClockUiState
-import com.vayunmathur.clock.util.ClockViewModel
-import com.vayunmathur.clock.util.WorldClock
+import com.vayunmathur.clock.platform.ClockUiState
+import com.vayunmathur.clock.platform.ClockViewModel
+import com.vayunmathur.clock.platform.WorldClock
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.TimeZone

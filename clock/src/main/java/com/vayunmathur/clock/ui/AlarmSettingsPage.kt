@@ -19,7 +19,7 @@ import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.ui.components.AlarmOptionControls
 import com.vayunmathur.clock.ui.components.ringtonePickerIntent
 import com.vayunmathur.clock.ui.components.ringtonePickerResult
-import com.vayunmathur.clock.util.ClockViewModel
+import com.vayunmathur.clock.platform.ClockViewModel
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconButton

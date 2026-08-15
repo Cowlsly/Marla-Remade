@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
-import com.vayunmathur.clock.util.AlarmActions
+import com.vayunmathur.clock.platform.AlarmActions
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.DateString

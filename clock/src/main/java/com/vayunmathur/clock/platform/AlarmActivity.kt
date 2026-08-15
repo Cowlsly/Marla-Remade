@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.ui
+package com.vayunmathur.clock.platform
 import android.app.AlarmManager
 import android.app.KeyguardManager
 import android.app.NotificationManager
@@ -11,8 +11,7 @@ import com.vayunmathur.clock.R
 import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.ui.components.AlarmRingingScreen
 import com.vayunmathur.clock.ui.components.formatAlarmTime
-import com.vayunmathur.clock.util.AlarmReceiver
-import com.vayunmathur.clock.util.AlarmSoundService
+import com.vayunmathur.clock.service.AlarmSoundService
 import com.vayunmathur.library.ui.DynamicTheme
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes

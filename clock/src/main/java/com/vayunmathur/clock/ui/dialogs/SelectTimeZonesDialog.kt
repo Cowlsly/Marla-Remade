@@ -30,7 +30,7 @@ import androidx.compose.ui.window.Dialog
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.util.ClockViewModel
+import com.vayunmathur.clock.platform.ClockViewModel
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext

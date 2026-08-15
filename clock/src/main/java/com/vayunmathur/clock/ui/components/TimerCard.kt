@@ -22,8 +22,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.util.TimerActions
-import com.vayunmathur.clock.util.timerRemaining
+import com.vayunmathur.clock.platform.TimerActions
+import com.vayunmathur.clock.platform.timerRemaining
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.AssistChipDefaults
 import com.vayunmathur.library.ui.Card

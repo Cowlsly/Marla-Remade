@@ -8,9 +8,9 @@ import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Timer
 import com.vayunmathur.clock.ui.components.sendTimerNotification
-import com.vayunmathur.clock.util.ClockViewModel
-import com.vayunmathur.clock.util.TimerActions
-import com.vayunmathur.clock.util.TimerUiState
+import com.vayunmathur.clock.platform.ClockViewModel
+import com.vayunmathur.clock.platform.TimerActions
+import com.vayunmathur.clock.platform.TimerUiState
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.time.Clock
 import kotlin.time.Duration

@@ -21,7 +21,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.clock.R
-import com.vayunmathur.clock.util.RINGTONE_SILENT
+import com.vayunmathur.clock.service.RINGTONE_SILENT
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.MaterialTheme

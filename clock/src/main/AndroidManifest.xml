@@ -46,25 +46,25 @@
             </intent-filter>
         </activity>
         <receiver
-            android:name=".util.TimerReceiver"
+            android:name=".platform.TimerReceiver"
             android:enabled="true"
             android:exported="false" />
         <receiver
-            android:name=".util.TimerActionReceiver"
+            android:name=".platform.TimerActionReceiver"
             android:enabled="true"
             android:exported="false" />
         <receiver
-            android:name=".util.StopwatchActionReceiver"
+            android:name=".platform.StopwatchActionReceiver"
             android:enabled="true"
             android:exported="false" />
         <receiver
-            android:name=".util.AlarmReceiver"
+            android:name=".platform.AlarmReceiver"
             android:enabled="true"
             android:directBootAware="true"
             android:exported="false">
         </receiver>
         <receiver
-            android:name=".util.BootReceiver"
+            android:name=".platform.BootReceiver"
             android:enabled="true"
             android:directBootAware="true"
             android:exported="true">
@@ -75,7 +75,7 @@
             </intent-filter>
         </receiver>
         <activity
-            android:name=".ui.AlarmActivity"
+            android:name=".platform.AlarmActivity"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
             android:directBootAware="true"
@@ -93,7 +93,7 @@
             android:theme="@android:style/Theme.NoDisplay"
             android:permission="com.vayunmathur.clock.permissions.ACCESS_CLOCK" />
         <service
-            android:name=".util.AlarmSoundService"
+            android:name=".service.AlarmSoundService"
             android:foregroundServiceType="mediaPlayback"
             android:directBootAware="true"
             android:exported="false" />

@@ -15,7 +15,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.util.ClockUiState
+import com.vayunmathur.clock.platform.ClockUiState
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api

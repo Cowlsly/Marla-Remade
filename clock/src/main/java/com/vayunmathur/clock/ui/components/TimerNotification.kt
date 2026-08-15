@@ -9,7 +9,7 @@ import androidx.core.app.NotificationCompat
 import com.vayunmathur.clock.MainActivity
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.util.TimerReceiver
+import com.vayunmathur.clock.platform.TimerReceiver
 import kotlin.time.Clock
 
 fun sendTimerNotification(context: Context, timer: Timer, isStarting: Boolean) {
@@ -36,10 +36,10 @@ fun sendTimerNotification(context: Context, timer: Timer, isStarting: Boolean) {
     val remaining = if (timer.isRunning) timer.remainingLength - (Clock.System.now() - timer.remainingStartTime) else timer.remainingLength
     val endTimestamp = System.currentTimeMillis() + remaining.inWholeMilliseconds
 
-    val pauseIntent = PendingIntent.getBroadcast(context, notificationId + 1, Intent(context, com.vayunmathur.clock.util.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.util.TimerActionReceiver.ACTION_PAUSE; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    val resumeIntent = PendingIntent.getBroadcast(context, notificationId + 2, Intent(context, com.vayunmathur.clock.util.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.util.TimerActionReceiver.ACTION_RESUME; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    val cancelIntent = PendingIntent.getBroadcast(context, notificationId + 3, Intent(context, com.vayunmathur.clock.util.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.util.TimerActionReceiver.ACTION_CANCEL; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
-    val resetIntent = PendingIntent.getBroadcast(context, notificationId + 4, Intent(context, com.vayunmathur.clock.util.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.util.TimerActionReceiver.ACTION_RESET; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val pauseIntent = PendingIntent.getBroadcast(context, notificationId + 1, Intent(context, com.vayunmathur.clock.platform.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.platform.TimerActionReceiver.ACTION_PAUSE; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val resumeIntent = PendingIntent.getBroadcast(context, notificationId + 2, Intent(context, com.vayunmathur.clock.platform.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.platform.TimerActionReceiver.ACTION_RESUME; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val cancelIntent = PendingIntent.getBroadcast(context, notificationId + 3, Intent(context, com.vayunmathur.clock.platform.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.platform.TimerActionReceiver.ACTION_CANCEL; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+    val resetIntent = PendingIntent.getBroadcast(context, notificationId + 4, Intent(context, com.vayunmathur.clock.platform.TimerActionReceiver::class.java).apply { action = com.vayunmathur.clock.platform.TimerActionReceiver.ACTION_RESET; putExtra("timer_id", timer.id) }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
     val contentIntent = PendingIntent.getActivity(context, notificationId + 5, Intent(context, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP }, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 

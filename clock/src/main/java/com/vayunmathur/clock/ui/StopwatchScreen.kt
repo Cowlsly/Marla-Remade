@@ -28,8 +28,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.ui.components.LapRow
-import com.vayunmathur.clock.util.StopwatchActions
-import com.vayunmathur.clock.util.StopwatchUiState
+import com.vayunmathur.clock.platform.StopwatchActions
+import com.vayunmathur.clock.platform.StopwatchUiState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.HorizontalDivider

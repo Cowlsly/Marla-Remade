@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.util
+package com.vayunmathur.clock.platform
 
 import android.content.BroadcastReceiver
 import android.content.Context

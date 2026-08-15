@@ -4,8 +4,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.util.ClockViewModel
-import com.vayunmathur.clock.util.StopwatchUiState
+import com.vayunmathur.clock.platform.ClockViewModel
+import com.vayunmathur.clock.platform.StopwatchUiState
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [ClockViewModel] to the stateless [StopwatchScreen]. */

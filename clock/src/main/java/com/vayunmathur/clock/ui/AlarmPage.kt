@@ -14,10 +14,10 @@ import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
 import com.vayunmathur.clock.ui.components.ringtonePickerIntent
 import com.vayunmathur.clock.ui.components.ringtonePickerResult
-import com.vayunmathur.clock.util.AlarmActions
-import com.vayunmathur.clock.util.AlarmScheduler
-import com.vayunmathur.clock.util.AlarmUiState
-import com.vayunmathur.clock.util.ClockViewModel
+import com.vayunmathur.clock.platform.AlarmActions
+import com.vayunmathur.clock.platform.AlarmScheduler
+import com.vayunmathur.clock.platform.AlarmUiState
+import com.vayunmathur.clock.platform.ClockViewModel
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.LocalTime
 

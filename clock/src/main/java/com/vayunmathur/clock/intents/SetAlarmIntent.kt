@@ -2,7 +2,7 @@ package com.vayunmathur.clock.intents
 
 import com.vayunmathur.clock.data.Alarm
 import com.vayunmathur.clock.data.ClockRepository
-import com.vayunmathur.clock.util.AlarmScheduler
+import com.vayunmathur.clock.platform.AlarmScheduler
 import com.vayunmathur.library.intents.clock.SetAlarmData
 import com.vayunmathur.library.util.AssistantIntent
 import kotlinx.datetime.LocalTime

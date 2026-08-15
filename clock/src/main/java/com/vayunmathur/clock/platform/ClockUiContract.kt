@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.util
+package com.vayunmathur.clock.platform
 
 import com.vayunmathur.clock.data.Alarm
 import com.vayunmathur.clock.data.Timer
