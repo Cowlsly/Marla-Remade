@@ -426,11 +426,11 @@ fun BrowserPage(
                 onNewIncognitoTab = { viewModel.newTab(isPrivate = true) },
                 onNewWindow = {
                     viewModel.showTabSwitcher = false
-                    com.vayunmathur.web.launchNewWebWindow(context, incognito = false)
+                    com.vayunmathur.web.platform.launchNewWebWindow(context, incognito = false)
                 },
                 onNewIncognitoWindow = {
                     viewModel.showTabSwitcher = false
-                    com.vayunmathur.web.launchNewWebWindow(context, incognito = true)
+                    com.vayunmathur.web.platform.launchNewWebWindow(context, incognito = true)
                 },
                 isIncognitoWindow = viewModel.incognito || viewModel.activeTab?.isPrivate == true,
                 onDismiss = { viewModel.showTabSwitcher = false },

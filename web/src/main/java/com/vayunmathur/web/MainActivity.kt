@@ -149,23 +149,3 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_INCOGNITO = "com.vayunmathur.web.INCOGNITO"
     }
 }
-
-/**
- * Opens a brand-new browser window as its own task (separate Recents entry) with an
- * independent set of tabs. Incognito windows keep everything private and unpersisted.
- */
-fun launchNewWebWindow(context: android.content.Context, incognito: Boolean) {
-    val windowId = java.util.UUID.randomUUID().toString()
-    val intent = Intent(context, MainActivity::class.java).apply {
-        putExtra(MainActivity.EXTRA_WINDOW_ID, windowId)
-        putExtra(MainActivity.EXTRA_INCOGNITO, incognito)
-        // Unique data keeps each window a distinct document task in Recents.
-        data = android.net.Uri.parse("web-window://$windowId")
-        addFlags(
-            Intent.FLAG_ACTIVITY_NEW_TASK or
-                Intent.FLAG_ACTIVITY_MULTIPLE_TASK or
-                Intent.FLAG_ACTIVITY_NEW_DOCUMENT
-        )
-    }
-    context.startActivity(intent)
-}
