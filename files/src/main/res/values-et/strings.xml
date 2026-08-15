@@ -13,4 +13,7 @@
     <string name="prop_path">Asukoht</string>
     <string name="new_folder">Uus kaust</string>
     <string name="close">Sulge</string>
+    <string name="rename">Muuda nime</string>
+    <string name="app_name">Failid</string>
+    <string name="enable_notifications">Kas lubad kasutada teavitusi?</string>
 </resources>
