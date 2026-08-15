@@ -17,7 +17,7 @@ import com.vayunmathur.files.data.saf.DocumentPickerActivity
  *
  * The call is idempotent, so running it on every process start is cheap.
  */
-class FilesApp : Application() {
+class FilesApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         syncDocumentPickerAvailability()

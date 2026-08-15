@@ -1,4 +1,4 @@
-package com.vayunmathur.games.wordmaker.util
+package com.vayunmathur.games.wordmaker.domain
 import android.content.Context
 import java.nio.ByteBuffer
 import org.brotli.dec.BrotliInputStream

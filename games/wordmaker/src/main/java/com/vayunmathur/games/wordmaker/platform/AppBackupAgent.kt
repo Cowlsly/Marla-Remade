@@ -1,4 +1,4 @@
-package com.vayunmathur.games.wordmaker.util
+package com.vayunmathur.games.wordmaker.platform
 
 import com.vayunmathur.library.util.BaseBackupAgent
 

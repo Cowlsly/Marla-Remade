@@ -1,4 +1,4 @@
-package com.vayunmathur.games.wordmaker.util
+package com.vayunmathur.games.wordmaker.platform
 
 import com.vayunmathur.games.wordmaker.data.CrosswordData
 import com.vayunmathur.games.wordmaker.data.Difficulty

@@ -1,4 +1,4 @@
-package com.vayunmathur.games.wordmaker.util
+package com.vayunmathur.games.wordmaker.platform
 
 import android.content.Context
 import com.vayunmathur.games.wordmaker.data.LevelDataStore

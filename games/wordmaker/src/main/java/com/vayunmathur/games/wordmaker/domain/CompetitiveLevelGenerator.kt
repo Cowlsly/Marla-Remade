@@ -1,4 +1,4 @@
-package com.vayunmathur.games.wordmaker.util
+package com.vayunmathur.games.wordmaker.domain
 
 import android.content.Context
 import com.vayunmathur.games.wordmaker.data.CrosswordData
