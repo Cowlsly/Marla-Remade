@@ -73,7 +73,7 @@
              OPEN_DOCUMENT_TREE actions are only ever routed by the framework to the configured
              documents UI package, so they are inert elsewhere regardless. -->
         <activity
-            android:name=".data.data.saf.DocumentPickerActivity"
+            android:name=".data.saf.DocumentPickerActivity"
             android:enabled="false"
             android:exported="true"
             android:excludeFromRecents="true"
