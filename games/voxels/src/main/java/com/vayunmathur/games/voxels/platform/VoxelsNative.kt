@@ -1,3 +1,5 @@
+// PACKAGE STRUCTURE EXCEPTION (JNI): FQN frozen for native RegisterNatives/symbol mangling
+// NOTE: file lives under platform/ but package is ...voxels.util to match the native symbol
 package com.vayunmathur.games.voxels.util
 
 import android.util.Log
