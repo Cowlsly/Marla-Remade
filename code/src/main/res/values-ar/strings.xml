@@ -2,4 +2,7 @@
 <resources>
     <string name="all">الكل</string>
     <string name="font_size">حجم الخط</string>
+    <string name="reload">إعادة التحميل</string>
+    <string name="new_folder">مجلد جديد</string>
+    <string name="create">إنشاء</string>
 </resources>
