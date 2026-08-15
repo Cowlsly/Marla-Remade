@@ -22,9 +22,9 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.health.R
 import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.RecordType
-import com.vayunmathur.health.ui.components.GroupedSection
-import com.vayunmathur.health.ui.components.GroupedSectionDivider
 import com.vayunmathur.health.ui.components.MetricRow
+import com.vayunmathur.library.ui.DashboardSection
+import com.vayunmathur.library.ui.DashboardSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.round
@@ -81,7 +81,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
         ) {
             // Today
             item {
-                GroupedSection(
+                DashboardSection(
                     title = stringResource(R.string.section_today_activity),
                     accentColor = HealthColors.Activity,
                 ) {
@@ -93,7 +93,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.Steps),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.STEPS)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_active),
                         value = activeCaloriesToday.toString(),
@@ -102,7 +102,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.CaloriesActive),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.ACTIVE_CALORIES)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_distance),
                         value = distanceToday.round(2).toString(),
@@ -111,7 +111,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.Distance),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.DISTANCE)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_floors),
                         value = floorsToday.round(1).toString(),
@@ -120,7 +120,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.Floors),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.FLOORS)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_elevation),
                         value = elevationToday.round(1).toString(),
@@ -129,7 +129,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.Elevation),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.ELEVATION)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_wheelchair_pushes),
                         value = wheelchairToday.toString(),
@@ -138,7 +138,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         leadingTint = colorFor(RecordType.Wheelchair),
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.WHEELCHAIR_PUSHES)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_exercise),
                         value = exerciseToday.toString(),
@@ -152,7 +152,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
 
             // This week (sparklines stubbed — TODO wire HealthAPI.getListOfSums for 7-day arrays)
             item {
-                GroupedSection(
+                DashboardSection(
                     title = stringResource(R.string.section_this_week),
                     accentColor = HealthColors.Activity,
                 ) {
@@ -165,7 +165,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         sparkline = emptyList(), // TODO: HealthAPI.getListOfSums for 7d
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.STEPS)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_active),
                         value = activeCaloriesToday.toString(),
@@ -175,7 +175,7 @@ fun ActivityPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                         sparkline = emptyList(), // TODO
                         onClick = { backStack.add(Route.BarChartDetails(HealthMetricConfig.ACTIVE_CALORIES)) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_distance),
                         value = distanceToday.round(2).toString(),
