@@ -1,4 +1,4 @@
-package com.vayunmathur.games.solitaire.util
+package com.vayunmathur.games.solitaire.platform
 
 import android.app.Application
 import androidx.compose.ui.geometry.Offset
@@ -1141,3 +1141,4 @@ class SolitaireViewModel(application: Application) : AndroidViewModel(applicatio
         achievementsManager.onProgressUpdated("win_streak_5", statsRepository.getBestWinStreak())
     }
 }
+

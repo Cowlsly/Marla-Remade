@@ -23,7 +23,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import com.vayunmathur.games.solitaire.data.Card
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 /**
  * A card the player can pick up. [sourceId] identifies the pile position it comes from;
@@ -149,3 +149,4 @@ fun DropTarget(
         content()
     }
 }
+

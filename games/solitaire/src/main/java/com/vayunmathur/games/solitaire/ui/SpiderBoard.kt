@@ -16,7 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.solitaire.data.SpiderState
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.solitaire.R
 
@@ -74,3 +74,4 @@ fun SpiderBoard(state: SpiderState, actions: SolitaireActions, modifier: Modifie
         }
     }
 }
+

@@ -17,7 +17,7 @@ import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.solitaire.data.DrawMode
 import com.vayunmathur.games.solitaire.data.KlondikeState
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 @Composable
 fun KlondikeBoard(state: KlondikeState, actions: SolitaireActions, modifier: Modifier = Modifier) {
@@ -110,3 +110,4 @@ fun KlondikeBoard(state: KlondikeState, actions: SolitaireActions, modifier: Mod
         }
     }
 }
+

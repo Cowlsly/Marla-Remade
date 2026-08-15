@@ -5,7 +5,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.Dp
 import com.vayunmathur.games.solitaire.data.Card
 import com.vayunmathur.games.solitaire.data.Suit
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 @Composable
 fun FoundationSlot(
@@ -51,3 +51,4 @@ fun FreeCellSlot(
         }
     }
 }
+

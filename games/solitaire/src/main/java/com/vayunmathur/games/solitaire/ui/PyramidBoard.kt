@@ -19,7 +19,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.solitaire.data.PyramidState
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 private val SelectionColor = Color(0xFFFFC107)
 
@@ -125,3 +125,4 @@ private fun SelectableCard(
     }
     Box(m) { content() }
 }
+

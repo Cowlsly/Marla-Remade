@@ -1,8 +1,9 @@
-package com.vayunmathur.games.unblockjam.util
+package com.vayunmathur.games.solitaire.platform
 
 import com.vayunmathur.library.util.BaseBackupAgent
 
 class AppBackupAgent : BaseBackupAgent() {
     override val prefNames: List<String>
-        get() = listOf("level_stats", "daily_stats")
+        get() = listOf("solitaire_stats")
 }
+

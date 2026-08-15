@@ -1,6 +1,6 @@
 package com.vayunmathur.games.unblockjam.data
 
-import com.vayunmathur.games.unblockjam.util.RushHourSolver
+import com.vayunmathur.games.unblockjam.domain.RushHourSolver
 import kotlin.random.Random
 
 /**

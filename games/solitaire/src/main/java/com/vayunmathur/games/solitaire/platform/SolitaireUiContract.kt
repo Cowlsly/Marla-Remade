@@ -1,4 +1,4 @@
-package com.vayunmathur.games.solitaire.util
+package com.vayunmathur.games.solitaire.platform
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
@@ -11,8 +11,8 @@ import kotlinx.coroutines.flow.StateFlow
  *
  * The boards and the card widgets they share take this interface rather than the ViewModel
  * itself, so they can be rendered by a `@Preview` — which is what the store listing images
- * are generated from. It lives in `util` rather than next to the boards so the dependency
- * runs one way: `ui` depends on `util`, and the ViewModel implements this.
+ * are generated from. It lives in `platform` rather than next to the boards so the dependency
+ * runs one way: `ui` depends on `platform`, and the ViewModel implements this.
  *
  * Every member has a no-op default, so [Noop] is the whole implementation a preview needs.
  */
@@ -56,3 +56,4 @@ private val NoDrag: StateFlow<DragInfo?> = MutableStateFlow(null)
 
 /** Somewhere for a [SolitaireActions.Noop] board to register its drop zones and forget them. */
 private val DiscardedDropTargets: MutableMap<String, Rect> = mutableMapOf()
+

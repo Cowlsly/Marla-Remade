@@ -14,7 +14,7 @@ import com.vayunmathur.games.solitaire.data.SolitaireUiState
 import com.vayunmathur.games.solitaire.data.SpiderState
 import com.vayunmathur.games.solitaire.data.Suit
 import com.vayunmathur.games.solitaire.data.TableauPile
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
@@ -183,3 +183,4 @@ class MetadataPreviews {
     private fun faceDown(count: Int): List<Card> =
         List(count) { Card(Suit.SPADES, Rank.entries[it % Rank.entries.size]) }
 }
+

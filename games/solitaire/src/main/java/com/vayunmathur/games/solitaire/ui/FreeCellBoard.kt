@@ -12,7 +12,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.solitaire.data.FreeCellState
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 @Composable
 fun FreeCellBoard(state: FreeCellState, actions: SolitaireActions, modifier: Modifier = Modifier) {
@@ -57,3 +57,4 @@ fun FreeCellBoard(state: FreeCellState, actions: SolitaireActions, modifier: Mod
         }
     }
 }
+

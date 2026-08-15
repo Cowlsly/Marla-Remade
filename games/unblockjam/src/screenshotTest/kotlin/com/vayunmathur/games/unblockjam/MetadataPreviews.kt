@@ -10,8 +10,8 @@ import com.vayunmathur.games.unblockjam.data.LevelData
 import com.vayunmathur.games.unblockjam.data.LevelPack
 import com.vayunmathur.games.unblockjam.data.PackColorScheme
 import com.vayunmathur.games.unblockjam.ui.UnblockJamTheme
-import com.vayunmathur.games.unblockjam.util.GameActions
-import com.vayunmathur.games.unblockjam.util.GameUiState
+import com.vayunmathur.games.unblockjam.platform.GameActions
+import com.vayunmathur.games.unblockjam.platform.GameUiState
 import com.vayunmathur.library.util.LevelStats
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */

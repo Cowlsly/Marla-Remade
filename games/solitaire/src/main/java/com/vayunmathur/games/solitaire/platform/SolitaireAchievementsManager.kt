@@ -1,4 +1,4 @@
-package com.vayunmathur.games.solitaire.util
+package com.vayunmathur.games.solitaire.platform
 
 import android.content.Context
 import com.vayunmathur.games.solitaire.data.GameMode
@@ -29,3 +29,4 @@ class SolitaireAchievementsManager(
         onProgressUpdated("win_streak_5", statsRepository.getBestWinStreak())
     }
 }
+

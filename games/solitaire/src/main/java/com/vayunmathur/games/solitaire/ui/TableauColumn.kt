@@ -9,7 +9,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.solitaire.data.Card
 import com.vayunmathur.games.solitaire.data.TableauPile
-import com.vayunmathur.games.solitaire.util.SolitaireActions
+import com.vayunmathur.games.solitaire.platform.SolitaireActions
 
 private val FACE_DOWN_OVERLAP = 8.dp
 private val FACE_UP_OVERLAP = 22.dp
@@ -103,3 +103,4 @@ fun FreeCellTableauColumn(
         }
     }
 }
+
