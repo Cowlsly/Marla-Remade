@@ -6,11 +6,11 @@ import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.games.wordmaker.data.CrosswordData
 import com.vayunmathur.games.wordmaker.data.Difficulty
 import com.vayunmathur.games.wordmaker.data.GameMode
-import com.vayunmathur.games.wordmaker.util.CompetitiveLobbyActions
-import com.vayunmathur.games.wordmaker.util.CompetitiveLobbyUiState
-import com.vayunmathur.games.wordmaker.util.CompetitiveResult
-import com.vayunmathur.games.wordmaker.util.WordGameActions
-import com.vayunmathur.games.wordmaker.util.WordGameUiState
+import com.vayunmathur.games.wordmaker.platform.CompetitiveLobbyActions
+import com.vayunmathur.games.wordmaker.platform.CompetitiveLobbyUiState
+import com.vayunmathur.games.wordmaker.platform.CompetitiveResult
+import com.vayunmathur.games.wordmaker.platform.WordGameActions
+import com.vayunmathur.games.wordmaker.platform.WordGameUiState
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */

@@ -24,7 +24,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.games.wordmaker.R
-import com.vayunmathur.games.wordmaker.util.WordMakerViewModel
+import com.vayunmathur.games.wordmaker.platform.WordMakerViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
