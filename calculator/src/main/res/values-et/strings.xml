@@ -11,4 +11,20 @@
     <string name="feature_maximum">maksimum</string>
     <string name="feature_intersection">lõige</string>
     <string name="feature_y_intercept">y-telglõik</string>
+    <string name="units">Ühikud</string>
+    <string name="insert_unit">Sisesta ühik</string>
+    <string name="convert_to">Teisenda</string>
+    <string name="converter_value">Väärtus</string>
+    <string name="converter_from">Lähteväärtus</string>
+    <string name="converter_to">Sihtväärtus</string>
+    <string name="converter_result">Tulemus</string>
+    <string name="converter_swap">Vaheta ühikud</string>
+    <string name="key_date">Kuupäev</string>
+    <string name="key_time">Kellaaeg</string>
+    <string name="key_datetime">Kuupäev ja kellaaeg</string>
+    <string name="select_time">Vali kellaaeg</string>
+    <string name="ok">Sobib</string>
+    <string name="currency_loading">Laadin valuutakursse…</string>
+    <string name="currency_unavailable">Valuutakursid pole saadaval</string>
+    <string name="currency_retry">Proovi uuesti</string>
 </resources>
