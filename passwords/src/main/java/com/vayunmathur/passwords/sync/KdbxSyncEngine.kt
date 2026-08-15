@@ -13,7 +13,7 @@ import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.data.SyncSnapshot
 import com.vayunmathur.passwords.data.SyncSnapshotDao
 import com.vayunmathur.passwords.data.newSyncId
-import com.vayunmathur.passwords.domain.KdbxNative
+import com.vayunmathur.passwords.util.KdbxNative
 import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject

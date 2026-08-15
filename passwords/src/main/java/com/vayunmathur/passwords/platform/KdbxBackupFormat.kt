@@ -5,6 +5,7 @@ import com.vayunmathur.library.util.BackupFormat
 import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.data.newSyncId
 import com.vayunmathur.passwords.sync.EntryMapper
+import com.vayunmathur.passwords.util.KdbxNative
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.InputStream
