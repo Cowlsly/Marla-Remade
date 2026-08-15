@@ -18,4 +18,6 @@
     <string name="memories">Meeldejäetud sisu</string>
     <string name="no_memories_yet">Meeldejäetud sisu veel pole.</string>
     <string name="inference_service_label">Juurdepääs järeldusteenusele</string>
+    <string name="system_prompt">Süstemi viip</string>
+    <string name="reset_to_default">Lähtesta vaikimisi väärtusteks</string>
 </resources>
