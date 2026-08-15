@@ -24,6 +24,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
+import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.everysync.provider.ProviderRegistry
 import com.vayunmathur.library.util.NavBackStack
 

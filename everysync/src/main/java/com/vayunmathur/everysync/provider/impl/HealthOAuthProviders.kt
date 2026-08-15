@@ -12,8 +12,8 @@ import com.vayunmathur.everysync.provider.DataType
 import com.vayunmathur.everysync.provider.SyncDirection
 import com.vayunmathur.everysync.provider.SyncProvider
 import com.vayunmathur.everysync.provider.SyncState
-import com.vayunmathur.everysync.remote.GoogleHealthClient
-import com.vayunmathur.everysync.sink.HealthSink
+import com.vayunmathur.everysync.network.remote.GoogleHealthClient
+import com.vayunmathur.everysync.data.sink.HealthSink
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.ui.IconProvider
 import kotlinx.serialization.json.Json

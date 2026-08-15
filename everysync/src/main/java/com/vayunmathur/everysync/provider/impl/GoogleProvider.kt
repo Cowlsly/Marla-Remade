@@ -11,8 +11,8 @@ import com.vayunmathur.everysync.provider.AuthType
 import com.vayunmathur.everysync.provider.DataType
 import com.vayunmathur.everysync.provider.SyncDirection
 import com.vayunmathur.everysync.provider.SyncProvider
-import com.vayunmathur.everysync.remote.DavClient
-import com.vayunmathur.everysync.remote.DavSync
+import com.vayunmathur.everysync.network.remote.DavClient
+import com.vayunmathur.everysync.network.remote.DavSync
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.ui.IconProvider
 import kotlinx.serialization.json.Json

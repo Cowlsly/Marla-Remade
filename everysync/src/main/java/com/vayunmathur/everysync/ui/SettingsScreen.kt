@@ -28,9 +28,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
-import com.vayunmathur.everysync.Settings
-import com.vayunmathur.everysync.util.SettingsActions
-import com.vayunmathur.everysync.util.SettingsUiState
+import com.vayunmathur.everysync.data.Settings
+import com.vayunmathur.everysync.platform.EverySyncViewModel
+import com.vayunmathur.everysync.platform.SettingsActions
+import com.vayunmathur.everysync.platform.SettingsUiState
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [EverySyncViewModel] and the back stack to the stateless [SettingsScreen]. */

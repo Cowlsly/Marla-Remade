@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.model
+package com.vayunmathur.everysync.data
 
 /** A contact resolved from a remote source (CardDAV vCard or Google People). */
 data class RemoteContact(

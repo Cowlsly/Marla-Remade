@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.sink
+package com.vayunmathur.everysync.data.sink
 
 import android.content.ContentValues
 import android.content.Context
@@ -7,7 +7,7 @@ import android.provider.CalendarContract
 import android.util.Log
 import androidx.core.database.getStringOrNull
 import com.vayunmathur.everysync.auth.AccountStore
-import com.vayunmathur.everysync.model.RemoteEvent
+import com.vayunmathur.everysync.data.RemoteEvent
 
 /** A locally-edited event detected via the platform DIRTY/DELETED flags. */
 data class LocalEventChange(

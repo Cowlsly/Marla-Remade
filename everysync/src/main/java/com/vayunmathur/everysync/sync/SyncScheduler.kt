@@ -13,7 +13,7 @@ import androidx.work.NetworkType
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import com.vayunmathur.everysync.Settings
+import com.vayunmathur.everysync.data.Settings
 import com.vayunmathur.everysync.auth.AccountStore
 import java.util.concurrent.TimeUnit
 

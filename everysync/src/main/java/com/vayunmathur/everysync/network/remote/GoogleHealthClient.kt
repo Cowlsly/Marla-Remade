@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.remote
+package com.vayunmathur.everysync.network.remote
 
 import kotlin.time.Clock
 import kotlin.time.Instant
@@ -13,10 +13,10 @@ import android.net.Uri
 import android.util.Log
 import androidx.health.connect.client.records.ExerciseSessionRecord
 import androidx.health.connect.client.records.SleepSessionRecord
-import com.vayunmathur.everysync.model.MeasurementType
-import com.vayunmathur.everysync.model.RemoteMeasurement
-import com.vayunmathur.everysync.model.RemoteNutrition
-import com.vayunmathur.everysync.model.RemoteSleepStage
+import com.vayunmathur.everysync.data.MeasurementType
+import com.vayunmathur.everysync.data.RemoteMeasurement
+import com.vayunmathur.everysync.data.RemoteNutrition
+import com.vayunmathur.everysync.data.RemoteSleepStage
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.async

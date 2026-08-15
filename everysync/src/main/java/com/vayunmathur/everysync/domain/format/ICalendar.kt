@@ -1,6 +1,6 @@
-package com.vayunmathur.everysync.format
+package com.vayunmathur.everysync.domain.format
 
-import com.vayunmathur.everysync.model.RemoteEvent
+import com.vayunmathur.everysync.data.RemoteEvent
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone

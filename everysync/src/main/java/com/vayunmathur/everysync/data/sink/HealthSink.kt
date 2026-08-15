@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.sink
+package com.vayunmathur.everysync.data.sink
 
 import android.content.Context
 import android.util.Log
@@ -33,9 +33,9 @@ import androidx.health.connect.client.units.Mass
 import androidx.health.connect.client.units.Percentage
 import androidx.health.connect.client.units.Temperature
 import androidx.health.connect.client.units.Volume
-import com.vayunmathur.everysync.model.MeasurementType
-import com.vayunmathur.everysync.model.RemoteMeasurement
-import com.vayunmathur.everysync.model.RemoteNutrition
+import com.vayunmathur.everysync.data.MeasurementType
+import com.vayunmathur.everysync.data.RemoteMeasurement
+import com.vayunmathur.everysync.data.RemoteNutrition
 import java.time.Instant
 import java.time.ZoneId
 import kotlinx.coroutines.async

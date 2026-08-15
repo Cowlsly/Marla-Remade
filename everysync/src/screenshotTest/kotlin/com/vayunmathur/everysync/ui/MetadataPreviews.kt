@@ -3,16 +3,16 @@ package com.vayunmathur.everysync.ui
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
-import com.vayunmathur.everysync.Settings
+import com.vayunmathur.everysync.data.Settings
 import com.vayunmathur.everysync.provider.DataType
-import com.vayunmathur.everysync.util.AccountDetailActions
-import com.vayunmathur.everysync.util.AccountDetailUiState
-import com.vayunmathur.everysync.util.AccountRow
-import com.vayunmathur.everysync.util.AccountsActions
-import com.vayunmathur.everysync.util.AccountsUiState
-import com.vayunmathur.everysync.util.AddAccountActions
-import com.vayunmathur.everysync.util.SettingsActions
-import com.vayunmathur.everysync.util.SettingsUiState
+import com.vayunmathur.everysync.platform.AccountDetailActions
+import com.vayunmathur.everysync.platform.AccountDetailUiState
+import com.vayunmathur.everysync.platform.AccountRow
+import com.vayunmathur.everysync.platform.AccountsActions
+import com.vayunmathur.everysync.platform.AccountsUiState
+import com.vayunmathur.everysync.platform.AddAccountActions
+import com.vayunmathur.everysync.platform.SettingsActions
+import com.vayunmathur.everysync.platform.SettingsUiState
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */

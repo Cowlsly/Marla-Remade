@@ -174,7 +174,7 @@
 
         <!-- Re-schedules the periodic sync after reboot / app update. -->
         <receiver
-            android:name=".BootReceiver"
+            android:name=".platform.BootReceiver"
             android:exported="true"
             android:enabled="true">
             <intent-filter>

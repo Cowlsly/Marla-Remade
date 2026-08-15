@@ -1,9 +1,9 @@
-package com.vayunmathur.everysync.ui
+package com.vayunmathur.everysync.platform
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.everysync.Settings
+import com.vayunmathur.everysync.data.Settings
 import com.vayunmathur.everysync.auth.AccountConfig
 import com.vayunmathur.everysync.auth.AccountStore
 import com.vayunmathur.everysync.auth.DavCredentials
@@ -11,8 +11,8 @@ import com.vayunmathur.everysync.auth.OAuthManager
 import com.vayunmathur.everysync.auth.TokenStore
 import com.vayunmathur.everysync.provider.DataType
 import com.vayunmathur.everysync.provider.ProviderRegistry
-import com.vayunmathur.everysync.sink.CalendarSink
-import com.vayunmathur.everysync.sink.ContactsSink
+import com.vayunmathur.everysync.data.sink.CalendarSink
+import com.vayunmathur.everysync.data.sink.ContactsSink
 import com.vayunmathur.everysync.sync.SyncScheduler
 import com.vayunmathur.everysync.sync.SyncStatus
 import kotlinx.coroutines.Dispatchers

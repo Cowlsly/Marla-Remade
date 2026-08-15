@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.util
+package com.vayunmathur.everysync.platform
 
 import com.vayunmathur.everysync.provider.DataType
 

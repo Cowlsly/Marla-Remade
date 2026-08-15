@@ -19,7 +19,8 @@ import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
 import com.vayunmathur.everysync.provider.AuthType
 import com.vayunmathur.everysync.provider.ProviderRegistry
-import com.vayunmathur.everysync.util.AddAccountActions
+import com.vayunmathur.everysync.platform.AddAccountActions
+import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [EverySyncViewModel] and the back stack to the stateless [AddAccountScreen]. */

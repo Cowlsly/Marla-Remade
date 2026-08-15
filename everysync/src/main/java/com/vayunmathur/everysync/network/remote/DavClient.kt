@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.remote
+package com.vayunmathur.everysync.network.remote
 
 import android.util.Log
 import com.vayunmathur.everysync.auth.DavCredentials

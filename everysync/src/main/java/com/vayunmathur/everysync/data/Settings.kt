@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync
+package com.vayunmathur.everysync.data
 
 import android.content.Context
 import com.vayunmathur.library.util.DataStoreUtils

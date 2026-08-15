@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync.sink
+package com.vayunmathur.everysync.data.sink
 
 import android.content.ContentProviderOperation
 import android.content.Context
@@ -14,8 +14,8 @@ import android.provider.ContactsContract.CommonDataKinds.StructuredPostal
 import android.util.Log
 import androidx.core.database.getStringOrNull
 import com.vayunmathur.everysync.auth.AccountStore
-import com.vayunmathur.everysync.model.RemoteContact
-import com.vayunmathur.everysync.model.TypedValue
+import com.vayunmathur.everysync.data.RemoteContact
+import com.vayunmathur.everysync.data.TypedValue
 
 /** A locally-edited contact detected via the platform DIRTY/DELETED flags. */
 data class LocalContactChange(

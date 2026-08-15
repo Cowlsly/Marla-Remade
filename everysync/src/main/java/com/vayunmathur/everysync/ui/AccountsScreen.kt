@@ -35,9 +35,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
 import com.vayunmathur.everysync.provider.ProviderRegistry
-import com.vayunmathur.everysync.util.AccountRow
-import com.vayunmathur.everysync.util.AccountsActions
-import com.vayunmathur.everysync.util.AccountsUiState
+import com.vayunmathur.everysync.platform.AccountRow
+import com.vayunmathur.everysync.platform.AccountsActions
+import com.vayunmathur.everysync.platform.AccountsUiState
+import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.is24Hour

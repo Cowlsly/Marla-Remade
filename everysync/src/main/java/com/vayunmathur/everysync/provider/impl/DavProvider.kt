@@ -8,8 +8,8 @@ import com.vayunmathur.everysync.provider.AuthType
 import com.vayunmathur.everysync.provider.DataType
 import com.vayunmathur.everysync.provider.SyncDirection
 import com.vayunmathur.everysync.provider.SyncProvider
-import com.vayunmathur.everysync.remote.DavClient
-import com.vayunmathur.everysync.remote.DavSync
+import com.vayunmathur.everysync.network.remote.DavClient
+import com.vayunmathur.everysync.network.remote.DavSync
 
 /**
  * Base CalDAV/CardDAV provider. Resource hrefs are used as the local SOURCE_ID /

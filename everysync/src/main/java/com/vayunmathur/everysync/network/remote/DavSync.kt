@@ -1,14 +1,14 @@
 @file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
 
-package com.vayunmathur.everysync.remote
+package com.vayunmathur.everysync.network.remote
 
 import kotlin.uuid.Uuid
 import android.content.Context
-import com.vayunmathur.everysync.format.ICalendar
-import com.vayunmathur.everysync.format.VCard
+import com.vayunmathur.everysync.domain.format.ICalendar
+import com.vayunmathur.everysync.domain.format.VCard
 import com.vayunmathur.everysync.provider.SyncDirection
-import com.vayunmathur.everysync.sink.CalendarSink
-import com.vayunmathur.everysync.sink.ContactsSink
+import com.vayunmathur.everysync.data.sink.CalendarSink
+import com.vayunmathur.everysync.data.sink.ContactsSink
 
 /**
  * Shared two-way CalDAV/CardDAV sync routines against [ContactsSink] /

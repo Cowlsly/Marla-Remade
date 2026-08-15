@@ -25,8 +25,9 @@ import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
 import com.vayunmathur.everysync.provider.DataType
 import com.vayunmathur.everysync.provider.ProviderRegistry
-import com.vayunmathur.everysync.util.AccountDetailActions
-import com.vayunmathur.everysync.util.AccountDetailUiState
+import com.vayunmathur.everysync.platform.AccountDetailActions
+import com.vayunmathur.everysync.platform.AccountDetailUiState
+import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [EverySyncViewModel] and the back stack to the stateless [AccountDetailScreen]. */

@@ -1,10 +1,10 @@
-package com.vayunmathur.everysync.format
+package com.vayunmathur.everysync.domain.format
 
 import android.provider.ContactsContract.CommonDataKinds.Email
 import android.provider.ContactsContract.CommonDataKinds.Phone
 import android.provider.ContactsContract.CommonDataKinds.StructuredPostal
-import com.vayunmathur.everysync.model.RemoteContact
-import com.vayunmathur.everysync.model.TypedValue
+import com.vayunmathur.everysync.data.RemoteContact
+import com.vayunmathur.everysync.data.TypedValue
 
 /**
  * Minimal vCard 3.0/4.0 reader/writer covering the fields EverySync maps into

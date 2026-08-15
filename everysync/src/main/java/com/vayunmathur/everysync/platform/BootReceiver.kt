@@ -1,4 +1,4 @@
-package com.vayunmathur.everysync
+package com.vayunmathur.everysync.platform
 
 import android.content.BroadcastReceiver
 import android.content.Context
