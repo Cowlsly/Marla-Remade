@@ -125,7 +125,7 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
     fun resolveAmenity(
         amenity: AmenityEntity,
         db: com.vayunmathur.maps.data.AmenityDatabase,
-        onFeature: (SpecificFeature\.Restaurant\) -> Unit,
+        onFeature: (SpecificFeature.Restaurant) -> Unit,
     ) = resolveAmenity(amenity, AmenityRepository.get(getApplication()), onFeature)
 
     fun reset() {
