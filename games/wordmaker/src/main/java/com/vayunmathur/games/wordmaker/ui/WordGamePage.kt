@@ -6,11 +6,13 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import com.vayunmathur.games.wordmaker.data.CrosswordData
+import com.vayunmathur.games.wordmaker.data.GameMode
 import com.vayunmathur.games.wordmaker.platform.WordGameActions
 import com.vayunmathur.games.wordmaker.platform.WordGameUiState
 import com.vayunmathur.games.wordmaker.platform.WordMakerViewModel
 import com.vayunmathur.library.util.AchievementsManager
 
+@Composable
 fun WordGamePage(
     crosswordData: CrosswordData,
     currentLevel: Int,

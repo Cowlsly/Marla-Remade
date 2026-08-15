@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.R as UiR
 
+@Composable
 fun DefinitionDialog(word: String, definition: List<String>, onDismiss: () -> Unit) {
     AlertDialog(
         onDismissRequest = onDismiss,
@@ -40,6 +41,7 @@ fun DefinitionDialog(word: String, definition: List<String>, onDismiss: () -> Un
 }
 
 
+@Composable
 fun BonusWordsDialog(
     bonusWords: Set<String>,
     getDefinition: (String) -> List<String>,

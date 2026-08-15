@@ -66,12 +66,14 @@ import com.vayunmathur.games.wordmaker.ui.components.CompetitiveStatusBar
 import com.vayunmathur.games.wordmaker.ui.components.CrosswordBoard
 import com.vayunmathur.games.wordmaker.ui.components.DailyStatusBar
 import com.vayunmathur.games.wordmaker.ui.components.LetterChooser
+import com.vayunmathur.games.wordmaker.ui.components.WordMakerTopBar
 import com.vayunmathur.games.wordmaker.ui.dialogs.BonusWordsDialog
 import com.vayunmathur.games.wordmaker.ui.dialogs.DefinitionDialog
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.launch
 
+@Composable
 fun WordGameScreen(
     state: WordGameUiState,
     actions: WordGameActions,

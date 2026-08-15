@@ -31,6 +31,7 @@ data class AnimatedLetter(
 data class WordToAnimate(val word: String, val letterIds: List<Int>)
 
 
+@Composable
 fun SurfaceText(modifier: Modifier, surfaceShape: Shape, surfaceColor: Color, text: String, textModifier: Modifier, fontWeight: FontWeight? = null, fontSize: TextUnit = TextUnit.Unspecified, surfaceSize: Dp?, textColor: Color = Color.Unspecified) {
     val modifier2 = if(surfaceSize != null) modifier.size(surfaceSize) else modifier
     Surface(modifier2, surfaceShape, surfaceColor) {

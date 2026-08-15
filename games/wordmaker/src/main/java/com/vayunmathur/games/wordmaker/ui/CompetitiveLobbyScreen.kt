@@ -27,6 +27,7 @@ import com.vayunmathur.games.wordmaker.ui.components.DifficultyDropdown
 import com.vayunmathur.games.wordmaker.ui.components.WordMakerTopBar
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 
+@Composable
 fun CompetitiveLobbyPage(
     viewModel: WordMakerViewModel,
     onOpenGameCenter: () -> Unit,
@@ -51,6 +52,7 @@ fun CompetitiveLobbyPage(
 }
 
 
+@Composable
 fun CompetitiveLobbyScreen(
     state: CompetitiveLobbyUiState,
     actions: CompetitiveLobbyActions,

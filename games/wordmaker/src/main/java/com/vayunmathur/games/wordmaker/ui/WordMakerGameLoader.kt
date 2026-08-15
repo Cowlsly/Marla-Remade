@@ -19,6 +19,7 @@ import com.vayunmathur.games.wordmaker.rememberAchievementsManager
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.util.NavBackStack
 
+@Composable
 fun WordMakerGameLoader(backStack: NavBackStack<Route>, viewModel: WordMakerViewModel) {
     val currentLevel by viewModel.currentLevel.collectAsState()
     val crosswordData by viewModel.crosswordData.collectAsState()

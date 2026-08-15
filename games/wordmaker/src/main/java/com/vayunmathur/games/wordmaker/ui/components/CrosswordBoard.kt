@@ -33,6 +33,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.wordmaker.data.CrosswordData
 
+@Composable
 fun CrosswordBoard(
     foundWords: Set<String>,
     revealedHints: Set<Pair<Int, Int>>,

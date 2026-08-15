@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.TextButton
 
+@Composable
 fun GameModeDropdown(selected: GameMode, onSelected: (GameMode) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     Box {
@@ -58,13 +59,6 @@ private fun gameModeLabel(mode: GameMode) = when (mode) {
     GameMode.DAILY -> R.string.mode_daily
 }
 
-
-private fun gameModeLabel(mode: GameMode) = when (mode) {
-    GameMode.CASUAL -> R.string.mode_casual
-    GameMode.COMPETITIVE -> R.string.mode_competitive
-    GameMode.DAILY -> R.string.mode_daily
-}
-
 @Composable
 fun DailyStatusBar(streak: Long) {
     Row(
@@ -80,6 +74,7 @@ fun DailyStatusBar(streak: Long) {
 }
 
 
+@Composable
 fun DifficultyDropdown(selected: Difficulty, onSelected: (Difficulty) -> Unit) {
     var expanded by remember { mutableStateOf(false) }
     fun label(d: Difficulty) = when (d) {
@@ -140,6 +135,7 @@ fun WordMakerTopBar(
 }
 
 
+@Composable
 fun CompetitiveStatusBar(
     score: Int,
     remainingTimeMs: Long
