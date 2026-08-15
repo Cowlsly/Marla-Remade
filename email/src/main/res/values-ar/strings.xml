@@ -1,3 +1,124 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    </resources>
+    <string name="all_accounts">جميع الحسابات</string>
+    <string name="add_account">إضافة حساب</string>
+    <string name="logout_current_account">تسجيل الخروج من الحساب الحالي</string>
+    <string name="reply">رد</string>
+    <string name="forward">تحويل</string>
+    <string name="from_label">من</string>
+    <string name="select_account">اختر الحساب</string>
+    <string name="select_sender">اختر المرسل</string>
+    <string name="to_label">إلى</string>
+    <string name="subject_label">الموضوع</string>
+    <string name="body_label">النص</string>
+    <string name="outbox">صندوق الصادر</string>
+    <string name="drafts">المسودات</string>
+    <string name="send_now">إرسال الآن</string>
+    <string name="email_address">عنوان البريد الإلكتروني</string>
+    <string name="testing_connection">جارٍ اختبار الاتصال…</string>
+    <string name="test_connection_and_save">اختبار الاتصال و حفظ</string>
+    <string name="host_label">المضيف</string>
+    <string name="port_label">المنفذ</string>
+    <string name="ssl_tls">SSL/TLS</string>
+    <string name="starttls">STARTTLS</string>
+    <string name="listening_for_new_mail">جارٍ الاستماع لبريد جديد</string>
+    <string name="account_added">تمت إضافة الحساب</string>
+    <string name="oauth_sign_in">تسجيل الدخول عبر OAuth</string>
+    <string name="email_address_optional">عنوان البريد الإلكتروني (اختياري)</string>
+    <string name="use_app_password_instead">استخدم كلمة مرور تطبيق بدلاً من ذلك</string>
+    <string name="username">اسم المستخدم</string>
+    <string name="username_is_not_my_email">اسم المستخدم ليس بريدي الإلكتروني</string>
+    <string name="smtp_outgoing">SMTP (الصادر)</string>
+    <string name="imap_incoming">IMAP (الوارد)</string>
+    <string name="how_to_get_your_app_password">كيفية الحصول على كلمة مرور تطبيق خاصتك</string>
+    <string name="security">الأمان:</string>
+    <string name="no_recent_emails">لا رسائل بريد حديثه</string>
+    <string name="retry">إعادة المحاولة</string>
+    <string name="couldn_t_open_this_eml_file">تعذّر فتح ملف .eml هذا</string>
+    <string name="signature_saved">تم حفظ التوقيع</string>
+    <string name="couldn_t_open_unsubscribe_page">تعذّر فتح صفحة إلغاء الاشتراك</string>
+    <string name="unread">غير مقروء</string>
+    <string name="sender_blocked">تم حظر المرسل</string>
+    <string name="save_as_eml">حفظ كـ .eml</string>
+    <string name="none">لا يوجد</string>
+    <string name="unblock">إلغاء الحظر</string>
+    <string name="tomorrow_8_am">غدًا (٨ صباحًا)</string>
+    <string name="folders">المجلدات</string>
+    <string name="unsubscribe">إلغاء الاشتراك</string>
+    <string name="this_evening_6_pm">هذا المساء (٦ مساءً)</string>
+    <string name="no_app_can_open_this_file">لا تطبيق يمكنه فتح هذا الملف</string>
+    <string name="snooze">تأجيل</string>
+    <string name="signatures">التوقيعات</string>
+    <string name="later">لاحقًا</string>
+    <string name="unsubscribing">جارٍ إلغاء الاشتراك…</string>
+    <string name="accounts">الحسابات</string>
+    <string name="reading">جارٍ القراءة</string>
+    <string name="blocked_senders">المرسلون المحظورون</string>
+    <string name="snoozed">مؤجَّلة</string>
+    <string name="your_signature">توقيعك</string>
+    <string name="all">الكل</string>
+    <string name="attachments">المرفقات</string>
+    <string name="scheduled">مجدولة</string>
+    <string name="no_drafts">لا مسودات</string>
+    <string name="message_sent">تم إرسال الرسالة</string>
+    <string name="load_images">تحميل الصور</string>
+    <string name="ai_summary">ملخص الذكاء الاصطناعي</string>
+    <string name="deleted_from_outbox">تم حذفها من صندوق الصادر</string>
+    <string name="attachments_2">المرفقات:</string>
+    <string name="unified_inbox">صندوق وارد موحد</string>
+    <string name="saved_to_downloads">تم الحفظ في التنزيلات</string>
+    <string name="generating_summary">جارٍ إنشاء الملخص…</string>
+    <string name="block_sender">حظر المرسل</string>
+    <string name="choose_your_email_provider">اختر مزود بريدك الإلكتروني</string>
+    <string name="enter_imap_smtp_server_details_manually">أدخل تفاصيل خادم IMAP/SMTP يدويًا</string>
+    <string name="app_password">كلمة مرور تطبيق</string>
+    <string name="password">كلمة المرور</string>
+    <string name="hide">إخفاء</string>
+    <string name="show">إظهار</string>
+    <string name="e_mail_file">ملف البريد الإلكتروني</string>
+    <string name="unknown_error">خطأ غير معروف</string>
+    <string name="no_messages_found_pull_down_to_refresh">لم يتم العثور على رسائل. اسحب للأسفل للتحديث.</string>
+    <string name="conversation">المحادثة</string>
+    <string name="hide_quoted_text">إخفاء النص المقتبس</string>
+    <string name="show_quoted_text">إظهار النص المقتبس</string>
+    <string name="total_attachment_size_exceeds_25_mb_many">إجمالي حجم المرفق يتجاوز ٢٥ ميجابايت؛ سيرفضه العديد من مقدمي الخدمة.</string>
+    <string name="outbox_is_empty">صندوق الصادر فارغ</string>
+    <string name="cd_insert_image">إدراج صورة</string>
+    <string name="normal">عادي</string>
+    <string name="left">يسار</string>
+    <string name="center">وسط</string>
+    <string name="right">يمين</string>
+    <string name="justify"></string>
+    <string name="small">صغير</string>
+    <string name="large">كبير</string>
+    <string name="extra_large">كبير جدًا</string>
+    <string name="font_default">افتراضي</string>
+    <string name="monospace">خط أحادي المسافة</string>
+    <string name="alignment">المحاذاة</string>
+    <string name="blockquote">اقتباس كبير</string>
+    <string name="text_color">لون النص</string>
+    <string name="highlight">تمييز</string>
+    <string name="font_size">حجم الخط</string>
+    <string name="font_family">عائلة الخط</string>
+    <string name="clear_formatting">مسح التنسيق</string>
+    <string name="email_sync_channel_name">مزامنة البريد الإلكتروني في الخلفية</string>
+    <string name="email_sync_channel_desc">يحافظ على اتصال IMAP مفتوحًا حتى يصل البريد الجديد فورًا.</string>
+    <string name="unified_inbox_label">صندوق وارد موحد</string>
+    <string name="app_name">إيميل</string>
+    <string name="later_today_6_pm">اليوم لاحقًا (٦ مساءً)</string>
+    <string name="download_failed">فشل التنزيل: <xliff:g id="error" example="Network error">%1$s</xliff:g></string>
+    <string name="added">تم إضافة <xliff:g id="email" example="user@example.com">%1$s</xliff:g></string>
+    <string name="to">إلى: <xliff:g id="recipient" example="bob@example.com">%1$s</xliff:g></string>
+    <string name="open_app_password_help">فتح <xliff:g id="provider" example="Google">%1$s</xliff:g> مساعدة كلمة مرور تطبيق</string>
+    <string name="sign_in_with">تسجيل الدخول باستخدام <xliff:g id="provider" example="Microsoft">%1$s</xliff:g></string>
+    <string name="attachments_1">المرفقات (<xliff:g id="size" example="2.3 MB">%1$s</xliff:g>)</string>
+    <string name="no_content_1">(بدون محتوى)</string>
+    <string name="no_content">(بدون محتوى)</string>
+    <string name="no_subject">(بدون موضوع)</string>
+    <string name="to_me">إلى أنا</string>
+    <string name="from">من <xliff:g id="account" example="me@example.com">%1$s</xliff:g></string>
+    <string name="compose">إنشاء</string>
+    <string name="outbox_with_count">صندوق الصادر (<xliff:g id="count" example="2">%1$d</xliff:g>)</string>
+    <string name="selected_count">تم تحديد <xliff:g id="count" example="3">%1$d</xliff:g></string>
+    <string name="open">فتح</string>
+</resources>
