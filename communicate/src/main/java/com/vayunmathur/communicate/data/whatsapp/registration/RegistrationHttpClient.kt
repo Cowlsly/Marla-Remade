@@ -116,7 +116,7 @@ class RegistrationHttpClient(
     /** POST `/v2/register` — submit the OTP and finalize the primary line. */
     suspend fun register(cc: String, number: String, code: String): RegisterResult {
         val auth = WhatsAppAuthData.load(context)
-            ?: return RegisterResult("error", null, null, null, "no_keys", null, "missing key scaffold")
+            ?: return RegisterResult("error", null, null, null, "no_keys", null, null, "missing key scaffold")
         val p = RegParams()
         p.a01("cc", cc)
         p.a01("in", number)
@@ -133,7 +133,7 @@ class RegistrationHttpClient(
     /** POST `/v2/security` — submit the account's 2FA PIN when register returns `security_code`. */
     suspend fun submitTwoFactor(cc: String, number: String, pin: String): RegisterResult {
         val auth = WhatsAppAuthData.load(context)
-            ?: return RegisterResult("error", null, null, null, "no_keys", null, "missing key scaffold")
+            ?: return RegisterResult("error", null, null, null, "no_keys", null, null, "missing key scaffold")
         val p = RegParams()
         p.a01("cc", cc)
         p.a01("in", number)
