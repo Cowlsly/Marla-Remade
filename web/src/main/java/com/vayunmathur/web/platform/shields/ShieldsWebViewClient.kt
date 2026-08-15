@@ -14,6 +14,8 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.vayunmathur.web.domain.EffectiveShields
+import com.vayunmathur.web.domain.shields.ResourceTypes
+import com.vayunmathur.web.domain.shields.UrlCleaner
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.ByteArrayInputStream

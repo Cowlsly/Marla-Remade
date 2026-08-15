@@ -780,7 +780,7 @@ private fun QuickAccess(
 /** Already stateless — public only so the store-listing previews can render it. */
 @Composable
 private fun TabSwitcher(
-    tabs: List<com.vayunmathur.web.util.BrowserTab>,
+    tabs: List<com.vayunmathur.web.platform.BrowserTab>,
     activeTabId: String?,
     onSwitch: (String) -> Unit,
     onClose: (String) -> Unit,

@@ -260,7 +260,7 @@ private fun PwaBrowser(
                         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                             val scheme = request.url.scheme ?: return false
                             if (scheme !in setOf("http", "https", "about", "data", "blob", "javascript")) {
-                                return com.vayunmathur.web.util.openExternalUri(
+                                return com.vayunmathur.web.platform.openExternalUri(
                                     ctx,
                                     request.url.toString(),
                                 ) { fallback -> view.loadUrl(fallback) }

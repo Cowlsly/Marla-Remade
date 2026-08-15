@@ -90,7 +90,7 @@ fun PermissionPromptSheet(
 }
 
 @Composable
-private fun GeolocationPromptSheet(
+internal fun GeolocationPromptSheet(
     origin: String,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
@@ -111,7 +111,7 @@ private fun GeolocationPromptSheet(
 }
 
 @Composable
-private fun FileChooserSheet(
+internal fun FileChooserSheet(
     mimeTypes: List<String>,
     onFiles: (Array<Uri>?) -> Unit,
     onCancel: () -> Unit,
@@ -135,7 +135,7 @@ private fun FileChooserSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun SiteDataPage(
+internal fun SiteDataPage(
     viewModel: WebViewModel,
     backStack: NavBackStack<Route>,
 ) {

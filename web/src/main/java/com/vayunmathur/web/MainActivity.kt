@@ -17,7 +17,7 @@ import com.vayunmathur.library.network.TrustBundle
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.web.data.WebRepository
-import com.vayunmathur.web.domain.shields.ShieldsEngine
+import com.vayunmathur.web.platform.shields.ShieldsEngine
 import com.vayunmathur.web.platform.WebViewModel
 import com.vayunmathur.web.platform.WebViewModelFactory
 import kotlinx.coroutines.Dispatchers

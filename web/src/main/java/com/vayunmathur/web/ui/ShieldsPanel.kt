@@ -179,7 +179,7 @@ private val ShieldLevel.descriptionRes: Int
 /** Global shield defaults plus the list of sites that deviate from them. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ShieldsPage(
+internal fun ShieldsPage(
     viewModel: WebViewModel,
     backStack: NavBackStack<Route>,
 ) {

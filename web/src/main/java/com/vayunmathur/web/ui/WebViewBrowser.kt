@@ -208,7 +208,7 @@ fun WebViewBrowser(
                     override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
                         val scheme = request.url.scheme ?: return false
                         if (scheme !in setOf("http", "https", "about", "data", "blob", "javascript")) {
-                            return com.vayunmathur.web.util.openExternalUri(
+                            return com.vayunmathur.web.platform.openExternalUri(
                                 ctx,
                                 request.url.toString(),
                             ) { fallback -> view.loadUrl(fallback) }
@@ -480,7 +480,7 @@ private fun applySettings(webView: WebView, viewModel: WebViewModel) {
 
     // Aggressive shields refuse plaintext subresources outright; otherwise stay permissive
     // so pages with a few http:// images still render.
-    val globalShields = com.vayunmathur.web.util.EffectiveShields.resolve(viewModel.shields)
+    val globalShields = com.vayunmathur.web.domain.EffectiveShields.resolve(viewModel.shields)
     settings.mixedContentMode = if (globalShields.httpsOnly) {
         WebSettings.MIXED_CONTENT_NEVER_ALLOW
     } else {

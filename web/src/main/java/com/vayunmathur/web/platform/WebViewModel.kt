@@ -22,6 +22,9 @@ import com.vayunmathur.web.data.SitePermission
 import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.data.ShieldSetting
 import com.vayunmathur.web.data.StorageInfo
+import com.vayunmathur.web.domain.EffectiveShields
+import com.vayunmathur.web.domain.ShieldLevel
+import com.vayunmathur.web.domain.ShieldsSettings
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow

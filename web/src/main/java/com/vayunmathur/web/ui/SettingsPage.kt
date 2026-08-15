@@ -128,8 +128,8 @@ fun SettingsPage(
                         Text(
                             stringResource(
                                 when (viewModel.shields.level) {
-                                    com.vayunmathur.web.util.ShieldLevel.OFF -> R.string.shields_level_off_desc
-                                    com.vayunmathur.web.util.ShieldLevel.STANDARD -> R.string.shields_level_standard_desc
+                                    com.vayunmathur.web.domain.ShieldLevel.OFF -> R.string.shields_level_off_desc
+                                    com.vayunmathur.web.domain.ShieldLevel.STANDARD -> R.string.shields_level_standard_desc
                                     else -> R.string.shields_level_aggressive_desc
                                 }
                             )
