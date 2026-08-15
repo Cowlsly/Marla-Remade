@@ -162,4 +162,32 @@
     <string name="source_fdroid_pin">Przypięto do klucza podpisu listy aplikacji F-Droid</string>
     <string name="source_play">Sklep Play (anonimowy)</string>
     <string name="source_play_pin">Nic do przypięcia: Google ma klucz do podpisu</string>
+    <string name="source_chip_grapheneos">GrapheneOS</string>
+    <string name="source_chip_accrescent">Accrescent</string>
+    <string name="section_sandboxed_google_play">Google Play w trybie piaskownicy</string>
+    <string name="section_sandboxed_google_play_subtitle">Komponenty Google Play jako zwykłe, nieuprzywilejowane aplikacje</string>
+    <string name="section_accrescent">Na Accrescent</string>
+    <string name="section_accrescent_subtitle">Aplikacje podpisane przez deweloperów z listy podpisanych aplikacji Accrescent</string>
+    <string name="action_install_all">Zainstaluj wszystko</string>
+    <string name="setting_auto_install_updates_title">Automatyczna instalacja aktualizacji</string>
+    <string name="setting_auto_install_updates_summary">Samodzielnie sprawdzaj i instaluj aktualizacje, bez dotykania. Dotyczy to tylko aplikacji zainstalowanych w tym sklepie i mogących aktualizować się po cichu; wszystkie inne aplikacje nadal będą Cię powiadamiać.</string>
+    <plurals name="updates_installing">
+        <item quantity="one">Instalowanie %1$d aktualizacji…</item>
+        <item quantity="few">Instalowanie %1$d aktualizacji…</item>
+        <item quantity="many">Instalowanie %1$d aktualizacji…</item>
+        <item quantity="other">Instalowanie %1$d aktualizacji…</item>
+    </plurals>
+    <plurals name="updates_installed">
+        <item quantity="one">Zainstalowano %1$d aktualizację</item>
+        <item quantity="few">Zainstalowano %1$d aktualizacje</item>
+        <item quantity="many">Zainstalowano %1$d aktualizacji</item>
+        <item quantity="other">Zainstalowano %1$d aktualizacji</item>
+    </plurals>
+    <string name="trust_accrescent_title">Accrescent</string>
+    <string name="trust_accrescent_summary">Aplikacje podpisane przez ich własnych programistów, umieszczone na liście dozwolonych aplikacji ed25519-signed firmy Accrescent, która przypisuje klucz podpisu każdej aplikacji i najniższą dozwoloną wersję.</string>
+    <string name="trust_accrescent_practice_developer_key">Każda aplikacja jest podpisana własnym kluczem dewelopera, a nie kluczem Accrescent</string>
+    <string name="trust_accrescent_practice_min_version">Na liście zapisywana jest minimalna wersja każdej aplikacji, więc nie można przywrócić starej wersji</string>
+    <string name="trust_accrescent_check_list_signed">Lista aplikacji jest podpisana i sprawdzana na podstawie klucza wbudowanego w ten sklep, z sygnaturą czasową, której nie można cofnąć</string>
+    <string name="trust_accrescent_check_key">Pobieranie jest podpisane dokładnie tym kluczem, co podpisano na liście nazw dla tej aplikacji</string>
+    <string name="trust_accrescent_check_min_version">Wersja do pobrania jest równa lub wyższa od minimalnej wersji dozwolonej na liście podpisów</string>
 </resources>
