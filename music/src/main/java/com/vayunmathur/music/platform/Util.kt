@@ -15,8 +15,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import com.vayunmathur.library.ui.IconAlbum
-import com.vayunmathur.library.ui.IconMoreVert
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -32,8 +30,6 @@ import androidx.core.graphics.createBitmap
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.image.Size as CoilSize
-import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Album
 import com.vayunmathur.music.data.Artist
 import com.vayunmathur.music.data.Music
@@ -256,13 +252,6 @@ fun createCollageBitmap(context: Context, uris: List<Uri>): Bitmap {
     }
 
     return result
-}
-
-@Composable
-fun AddToPlaylistButton(backStack: NavBackStack<Route>, music: Music) {
-    IconButton(onClick = { backStack.add(Route.AddToPlaylistDialog(music.id)) }) {
-        IconMoreVert()
-    }
 }
 
 private inline fun <T> withAudioMetadata(

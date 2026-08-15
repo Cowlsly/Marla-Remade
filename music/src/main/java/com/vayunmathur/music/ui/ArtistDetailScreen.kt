@@ -35,8 +35,8 @@ import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.music.ui.components.PlayShuffleRow
 import com.vayunmathur.music.ui.components.PlayingBottomBar
 import com.vayunmathur.music.ui.components.TrackListItem
-import com.vayunmathur.music.platform.AddToPlaylistButton
 import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.ui.components.AddToPlaylistButton
 import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Album

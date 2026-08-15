@@ -23,8 +23,8 @@ import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
 import com.vayunmathur.music.ui.components.ShufflePlayFab
-import com.vayunmathur.music.platform.AddToPlaylistButton
 import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.ui.components.AddToPlaylistButton
 import com.vayunmathur.music.platform.MusicActions
 import com.vayunmathur.music.platform.SongsUiState
 
