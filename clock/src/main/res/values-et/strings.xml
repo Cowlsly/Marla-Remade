@@ -56,4 +56,5 @@
     <string name="vibrate">Vibreeri</string>
     <string name="snooze_length">Edasilükkamise kestus</string>
     <string name="gradually_increase_volume">Keera helivaljus aegamööda valjemaks</string>
+    <string name="alarm_label_hint">Äratuse nimi (kui tahad lisada)</string>
 </resources>
