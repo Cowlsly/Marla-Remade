@@ -1,6 +1,6 @@
 @file:OptIn(kotlin.io.encoding.ExperimentalEncodingApi::class)
 
-package com.vayunmathur.games.voxels
+package com.vayunmathur.games.voxels.platform
 
 import android.content.ClipData
 import android.content.ClipboardManager
@@ -26,10 +26,10 @@ import com.vayunmathur.games.voxels.ui.WorldCreatorScreen
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.util.rememberIsOnline
-import com.vayunmathur.games.voxels.util.VoxelsRoles
-import com.vayunmathur.games.voxels.util.VoxelsSync
-import com.vayunmathur.games.voxels.util.WorldInfo
-import com.vayunmathur.games.voxels.util.WorldManager
+import com.vayunmathur.games.voxels.network.VoxelsRoles
+import com.vayunmathur.games.voxels.network.VoxelsSync
+import com.vayunmathur.games.voxels.data.WorldInfo
+import com.vayunmathur.games.voxels.data.WorldManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

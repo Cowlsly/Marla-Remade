@@ -29,9 +29,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
-import com.vayunmathur.games.voxels.util.WorldInfo
-import com.vayunmathur.games.voxels.util.VoxelsRoles
-import com.vayunmathur.games.voxels.util.VoxelsSync
+import com.vayunmathur.games.voxels.data.WorldInfo
+import com.vayunmathur.games.voxels.network.VoxelsRoles
+import com.vayunmathur.games.voxels.network.VoxelsSync
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.Button

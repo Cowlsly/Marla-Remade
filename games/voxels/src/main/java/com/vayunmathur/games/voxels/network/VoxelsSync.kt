@@ -1,6 +1,6 @@
 @file:OptIn(kotlin.uuid.ExperimentalUuidApi::class)
 
-package com.vayunmathur.games.voxels.util
+package com.vayunmathur.games.voxels.network
 
 import kotlin.uuid.Uuid
 import android.content.Context

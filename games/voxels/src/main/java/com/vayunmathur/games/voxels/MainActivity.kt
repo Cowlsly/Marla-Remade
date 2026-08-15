@@ -20,9 +20,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vayunmathur.games.voxels.ui.*
-import com.vayunmathur.games.voxels.util.VoxelsAchievements
+import com.vayunmathur.games.voxels.platform.VoxelsAchievements
 import com.vayunmathur.games.voxels.util.VoxelsNative
-import com.vayunmathur.games.voxels.util.VoxelsSync
+import com.vayunmathur.games.voxels.network.VoxelsSync
 import com.vayunmathur.e2ee.Pqc
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.GameHubComposeHook
@@ -59,8 +59,8 @@ class MainActivity : ComponentActivity() {
             // Put the engine in host/client mode before the render thread starts ticking.
             if (online) try { VoxelsNative.nativeSetRole(netRole) } catch (_: Exception) {}
         }
-        com.vayunmathur.games.voxels.util.SoundFx.init(this)
-        com.vayunmathur.games.voxels.util.MusicFx.startAmbient(this)
+        com.vayunmathur.games.voxels.platform.SoundFx.init(this)
+        com.vayunmathur.games.voxels.platform.MusicFx.startAmbient(this)
         setContent {
             VoxelsTheme {
                 var inventoryJson by remember { mutableStateOf("""{"selected":0,"slots":[{"id":3,"count":64},{"id":2,"count":64},{"id":1,"count":64},{"id":4,"count":16},{"id":10,"count":32},{"id":6,"count":32},{"id":7,"count":16},{"id":8,"count":16},{"id":9,"count":16}]}""") }
@@ -113,14 +113,14 @@ class MainActivity : ComponentActivity() {
                                     val amb = org.json.JSONObject(VoxelsNative.getAmbienceJson())
                                     val stepN = amb.optInt("stepN", prevStep)
                                     if (prevStep >= 0 && stepN != prevStep) {
-                                        com.vayunmathur.games.voxels.util.SoundFx.playStep(amb.optInt("stepMat", 0))
+                                        com.vayunmathur.games.voxels.platform.SoundFx.playStep(amb.optInt("stepMat", 0))
                                     }
                                     prevStep = stepN
                                     val cueN = amb.optInt("cueN", prevCue)
                                     if (prevCue >= 0 && cueN != prevCue) {
                                         when (amb.optInt("cueKind", 0)) {
-                                            1 -> com.vayunmathur.games.voxels.util.SoundFx.playCave()
-                                            2 -> com.vayunmathur.games.voxels.util.SoundFx.playStalk()
+                                            1 -> com.vayunmathur.games.voxels.platform.SoundFx.playCave()
+                                            2 -> com.vayunmathur.games.voxels.platform.SoundFx.playStalk()
                                         }
                                     }
                                     prevCue = cueN
@@ -138,8 +138,8 @@ class MainActivity : ComponentActivity() {
                                     healthJson = VoxelsNative.getHealthJson()
                                     val hp = org.json.JSONObject(healthJson).optDouble("hp", prevHp.toDouble()).toFloat()
                                     if (hp < prevHp - 0.5f) {
-                                        if (prevHp - hp > 6f) com.vayunmathur.games.voxels.util.SoundFx.playExplode()
-                                        else com.vayunmathur.games.voxels.util.SoundFx.playHurt()
+                                        if (prevHp - hp > 6f) com.vayunmathur.games.voxels.platform.SoundFx.playExplode()
+                                        else com.vayunmathur.games.voxels.platform.SoundFx.playHurt()
                                     }
                                     prevHp = hp
                                 } catch (_: Exception) {}
@@ -332,7 +332,7 @@ class MainActivity : ComponentActivity() {
                             onPlace = { off -> try {
                                 val code = VoxelsNative.placeBlockAt(off.x, off.y)
                                 when (code) {
-                                    1 -> com.vayunmathur.games.voxels.util.SoundFx.playPlace()
+                                    1 -> com.vayunmathur.games.voxels.platform.SoundFx.playPlace()
                                     11 -> { invStartTab = 2; inventoryOpen = true } // crafting table
                                     12, 14 -> { // furnace / blast furnace
                                         furnaceIsBlast = code == 14
@@ -342,7 +342,7 @@ class MainActivity : ComponentActivity() {
                                     13 -> { // jukebox: play the held disc (or stop)
                                         val inv = try { com.vayunmathur.games.voxels.ui.voxelsJson.decodeFromString<com.vayunmathur.games.voxels.ui.InventoryState>(inventoryJson) } catch (_: Exception) { null }
                                         val held = inv?.slots?.getOrNull(inv.selected)?.id ?: 0
-                                        com.vayunmathur.games.voxels.util.MusicFx.toggle(this@MainActivity, com.vayunmathur.games.voxels.ui.discTrack[held])
+                                        com.vayunmathur.games.voxels.platform.MusicFx.toggle(this@MainActivity, com.vayunmathur.games.voxels.ui.discTrack[held])
                                     }
                                     15 -> stonecutterOpen = true // stonecutter
                                     // Every villager has its own profession and level, so the stall is
@@ -356,12 +356,12 @@ class MainActivity : ComponentActivity() {
                                         chestOpen = true
                                         // Online clients mirror host state: ask for the real contents.
                                         if (online) try { VoxelsNative.netRequestContainer() } catch (_: Exception) {}
-                                        com.vayunmathur.games.voxels.util.SoundFx.playPlace()
+                                        com.vayunmathur.games.voxels.platform.SoundFx.playPlace()
                                     }
-                                    41 -> com.vayunmathur.games.voxels.util.SoundFx.playPlace() // ignited a portal
+                                    41 -> com.vayunmathur.games.voxels.platform.SoundFx.playPlace() // ignited a portal
                                 }
                             } catch (_: Exception) {} },
-                            onBreak = { off -> try { if (VoxelsNative.breakBlockAt(off.x, off.y)) com.vayunmathur.games.voxels.util.SoundFx.playBreak() } catch (_: Exception) {} }
+                            onBreak = { off -> try { if (VoxelsNative.breakBlockAt(off.x, off.y)) com.vayunmathur.games.voxels.platform.SoundFx.playBreak() } catch (_: Exception) {} }
                         )
                     }
 
@@ -522,7 +522,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
-        com.vayunmathur.games.voxels.util.MusicFx.stop()
+        com.vayunmathur.games.voxels.platform.MusicFx.stop()
         VoxelsSync.stopLive()
         if (VoxelsNative.isAvailable) {
             try { VoxelsNative.nativeSetRole(0) } catch (_: Exception) {}

@@ -1,4 +1,4 @@
-package com.vayunmathur.games.voxels.util
+package com.vayunmathur.games.voxels.platform
 
 import android.content.Context
 import android.media.SoundPool
