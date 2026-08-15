@@ -8,6 +8,7 @@ import com.vayunmathur.backup.data.backend.BackupRepository
 import com.vayunmathur.backup.domain.crypto.Crypto
 import com.vayunmathur.backup.platform.crypto.KeyManager
 import com.vayunmathur.backup.data.BackupConfig
+import com.vayunmathur.backup.data.files.FileBackupManager
 import com.vayunmathur.library.work.startRepeatedTask
 import kotlinx.coroutines.flow.first
 import kotlin.time.Duration.Companion.hours
