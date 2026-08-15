@@ -3,8 +3,8 @@ package com.vayunmathur.share.discovery
 import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
-import android.os.Build
 import android.util.Log
+import java.security.SecureRandom
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -13,30 +13,33 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.callbackFlow
 
 /**
- * Nearby Share mDNS service type.
+ * Modern mDNS service type for Share (BetoCore migration).
  *
- * The Quick Share / Nearby Connections stack advertises and discovers this
- * service type over mDNS (via NsdManager) on the LAN so peers on the same
- * Wi-Fi can find each other without a cloud relay. The service type value
- * here mirrors what Nearby Share uses — the same one referenced in the task
- * description (_FC9F5ED42C8A._tcp). Tweak via constructor if a different
- * interop variant is needed.
+ * GMS-analysis findings: Quick Share advertises/browses `_up._tcp` on WiFi-LAN and
+ * each advertisement is keyed by a random 16-byte ServiceId (hex). Identity is NOT
+ * carried in TXT/endpoint_info — it comes from the BLE Nearby Presence advert.
+ *
+ * Legacy `_FC9F5ED42C8A._tcp` + plaintext PCP/TXT `n` has been removed (full drop, no fallback).
  */
-const val SHARE_SERVICE_TYPE = "_FC9F5ED42C8A._tcp"
+const val SHARE_SERVICE_TYPE = "_up._tcp"
 private const val TAG = "NsdDiscovery"
 
+private fun randomServiceIdHex(): String {
+    val bytes = ByteArray(16)
+    SecureRandom().nextBytes(bytes)
+    return bytes.joinToString("") { "%02x".format(it) }
+}
+
 /**
- * Manages mDNS (DNS-SD) advertisement + discovery for the Nearby Share TCP
- * endpoint — the "visible to nearby devices" surface in the Receive flow and
- * the nearby-device list in the Send flow.
+ * Manages mDNS (DNS-SD) advertisement + discovery for the Share TCP endpoint over _up._tcp.
  *
- * Responsibilities (per PROTOCOL_CONTRACT.md §8):
- *  - RECEIVE: registerService (device visible toggle) + TCP ServerSocket
- *  - SEND: discoverServices + resolveService to produce NearbyDevice endpoints
+ * Responsibilities:
+ *  - RECEIVE: registerService under _up._tcp with a random 16-byte ServiceId (instance name = hex)
+ *    and the WiFi-LAN ServerSocket(0) port. No TXT endpoint_info.
+ *  - SEND: discoverServices + resolveService to produce host/port for connect.
  *
- * One instance per activity/process; call [advertise] / [unadvertise] as the
- * visibility toggle flips, and collect [discoveredDevices] or [discover] for
- * the Send flow.
+ * Identity is resolved from the BLE Presence advert, so receivers must correlate a TCP endpoint
+ * discovered here with a BLE peer by serviceId or by UI presence.
  */
 class NsdDiscoveryManager(private val context: Context) {
 
@@ -51,37 +54,47 @@ class NsdDiscoveryManager(private val context: Context) {
 
     private var advertisedPort: Int = 0
     private var registeredServiceName: String? = null
+    private var currentServiceId: String? = null
+
+    /** The ServiceId hex for the current registration, or null if not advertising. */
+    val serviceId: String? get() = currentServiceId
 
     /**
-     * Advertise this device as a Share endpoint on [port].
+     * Advertise this device as a Share endpoint on [port] under _up._tcp.
      *
-     * Safe to call repeatedly; re-advertising first tears down the prior registration.
+     * A fresh random 16-byte ServiceId is generated per registration; the mDNS instance name
+     * is that hex string. Safe to call repeatedly — re-advertising tears down the prior registration.
+     *
+     * @param deviceName human-readable name (kept for logging only; not placed in TXT per new privacy model)
+     * @param port TCP port from ServerSocket(0) on WiFi-LAN
+     * @return the ServiceId hex that was advertised (for correlation with BLE presence if needed)
      */
-    fun advertise(deviceName: String, port: Int) {
+    fun advertise(deviceName: String, port: Int): String? {
         val mgr = nsdManager ?: run {
             Log.w(TAG, "NsdManager unavailable — cannot advertise")
-            return
+            return null
         }
-        if (advertisedPort == port && registrationListener != null) return
+        if (advertisedPort == port && registrationListener != null) return currentServiceId
         unadvertise()
         advertisedPort = port
+        val serviceId = randomServiceIdHex()
+        currentServiceId = serviceId
         val serviceInfo = NsdServiceInfo().apply {
-            serviceName = deviceName
+            serviceName = serviceId
             serviceType = SHARE_SERVICE_TYPE
             setPort(port)
-            // Attribute so nearby Send scanners can read endpoint info without extra round-trips.
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-                // API 34+ supports service attributes for extra metadata; fallback to name only on older.
-            }
+            // No plaintext TXT: no pcp 'n', no endpoint_info per spec.
         }
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(info: NsdServiceInfo) {
                 registeredServiceName = info.serviceName
-                Log.i(TAG, "advertised as ${info.serviceName} on port $port")
+                Log.i(TAG, "advertised _up._tcp as ${info.serviceName} (svcId=$serviceId) on port $port name=$deviceName")
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
                 Log.w(TAG, "registration failed: $errorCode")
+                currentServiceId = null
+                advertisedPort = 0
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) {
@@ -97,7 +110,10 @@ class NsdDiscoveryManager(private val context: Context) {
             mgr.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: Exception) {
             Log.w(TAG, "registerService threw", e)
+            currentServiceId = null
+            advertisedPort = 0
         }
+        return serviceId
     }
 
     fun unadvertise() {
@@ -109,13 +125,14 @@ class NsdDiscoveryManager(private val context: Context) {
         }
         registrationListener = null
         registeredServiceName = null
+        currentServiceId = null
         advertisedPort = 0
     }
 
     /**
-     * Start DNS-SD discovery and emit [NearbyDevice] values as services are
-     * found/lost. Call from the Send flow's scanning coroutine; cancellation
-     * tears down the discovery listener.
+     * Start DNS-SD discovery for _up._tcp and emit [NearbyDevice] values as services are
+     * found/lost. Resolve host/port asynchronously. Call from the Send flow's scanning coroutine;
+     * cancellation tears down the discovery listener.
      */
     fun discover(): Flow<NearbyDevice> = callbackFlow {
         val mgr = nsdManager ?: run {
@@ -129,7 +146,6 @@ class NsdDiscoveryManager(private val context: Context) {
 
             override fun onServiceFound(service: NsdServiceInfo) {
                 Log.d(TAG, "found: ${service.serviceName} type=${service.serviceType}")
-                // Resolve host/port asynchronously to produce a connectable NearbyDevice.
                 try {
                     mgr.resolveService(service, object : NsdManager.ResolveListener {
                         override fun onResolveFailed(info: NsdServiceInfo, errorCode: Int) {
@@ -139,16 +155,17 @@ class NsdDiscoveryManager(private val context: Context) {
                         override fun onServiceResolved(info: NsdServiceInfo) {
                             val host = info.host?.hostAddress
                             val port = info.port
+                            val svcName = info.serviceName
                             val dev = NearbyDevice(
-                                endpointId = info.serviceName,
-                                endpointName = info.serviceName,
-                                serviceName = info.serviceName,
+                                endpointId = svcName,
+                                endpointName = svcName, // will be replaced by BLE presence name when correlated
+                                serviceId = svcName,
+                                serviceName = svcName,
                                 host = host,
                                 port = if (port > 0) port else null,
                                 source = DiscoverySource.Nsd,
                             )
                             trySend(dev)
-                            // Also maintain the snapshot StateFlow for legacy consumers.
                             val current = _discoveredDevices.value.toMutableList()
                             if (current.none { it.endpointId == dev.endpointId }) {
                                 current += dev

@@ -1,12 +1,8 @@
 //! Nearby Share / Quick Share protocol core (no Play Services).
 //!
-//! Owns: UKEY2 handshake, protobuf framing, secure-message encrypt/decrypt,
-//! Introduction / Transfer payload state machine, and the JNI session facade
-//! defined in `share/PROTOCOL_CONTRACT.md`.
-//!
-//! Transport (NSD/BLE discovery, TCP socket) stays in Kotlin. Rust is a
-//! pure state machine: Kotlin feeds inbound bytes via `feedInbound`, drains
-//! outbound bytes via `drainOutbound`, and polls `queryState`.
+//! Owns: BetoCore UKEY2 D2D handshake + AES-256-GCM-SIV secure messages,
+//! Nearby Presence advertisement build/parse, and the Introduction / Transfer
+//! payload state machine. Transport (NSD/BLE discovery, TCP socket) stays in Kotlin.
 
 use jni::objects::{JByteArray, JClass, JString};
 use jni::sys::{jboolean, jbyteArray, jint, jlong};
@@ -15,9 +11,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 mod frame;
-mod handshake;
 mod payload;
-mod secure;
+mod presence;
 mod session;
 
 use session::{Session, State};
@@ -241,6 +236,64 @@ pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeClo
         None => return -1,
     };
     sess.close_file() as jint
+}
+
+// ---------------------------------------------------------------------------
+// Presence (Nearby Presence advert build/parse, public/Everyone mode, GATT 0xFCF1)
+// ---------------------------------------------------------------------------
+
+/// byte[] nativeBuildPresenceAdvert(String deviceName) -> advert bytes or null
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeBuildPresenceAdvert<'l>(
+    mut env: JNIEnv<'l>,
+    _cls: JClass<'l>,
+    jName: JString<'l>,
+) -> jbyteArray {
+    let name = str_in(&mut env, &jName).unwrap_or_else(|| "Share".to_string());
+    match crate::presence::build_presence_advert(&name) {
+        Some(b) => bytes_out(&env, &b),
+        None => std::ptr::null_mut(),
+    }
+}
+
+/// byte[] nativeParsePresenceAdvert(byte[] serviceData) -> JSON utf8 or null
+/// Returns JSON: {"deviceName":"Pixel 7","deviceType":1,"txPower":0,"isTruncated":false}
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeParsePresenceAdvert<'l>(
+    mut env: JNIEnv<'l>,
+    _cls: JClass<'l>,
+    jBytes: JByteArray<'l>,
+) -> jbyteArray {
+    let bytes = match bytes_in(&mut env, &jBytes) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    match crate::presence::parse_presence_advert_json(&bytes) {
+        Some(json) => bytes_out(&env, &json),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[allow(non_snake_case)]
+/// String nativeParsePresenceAdvertName(byte[] advertBytes) -> display name or null
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeParsePresenceAdvertName<'l>(
+    mut env: JNIEnv<'l>,
+    _cls: JClass<'l>,
+    jBytes: JByteArray<'l>,
+) -> jni::sys::jobject {
+    let bytes = match bytes_in(&mut env, &jBytes) {
+        Some(b) => b,
+        None => return std::ptr::null_mut(),
+    };
+    let name = match crate::presence::parse_presence_advert_name(&bytes) {
+        Some(n) => n,
+        None => return std::ptr::null_mut(),
+    };
+    match env.new_string(name) {
+        Ok(s) => s.into_raw(),
+        Err(_) => std::ptr::null_mut(),
+    }
 }
 
 // Allow non-snake-case for the JNI surface (mirrors e2ee-p2p's jni_bridge).

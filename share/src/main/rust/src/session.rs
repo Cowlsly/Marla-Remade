@@ -1,11 +1,15 @@
-//! Session state machine glue: handshake + SecureMessage + introduction/payload.
+//! Session state machine: BetoCore UKEY2 D2D handshake + AES-256-GCM-SIV context + payload.
 
 use std::collections::HashMap;
 
-use crate::frame::{self, NextProtocol, PayloadPacketType, Ukey2Frame, Ukey2FrameType};
-use crate::handshake::Ukey2Handshake;
+use crypto_provider_default::CryptoProviderImpl;
+use ukey2_connections::{
+    D2DConnectionContextV1, D2DHandshakeContext, HandshakeImplementation, InitiatorD2DHandshakeContext, NextProtocol,
+    ServerD2DHandshakeContext,
+};
+
+use crate::frame::{self, PayloadPacketType};
 use crate::payload::{self, FileMeta};
-use crate::secure::SecureChannel;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
@@ -25,11 +29,20 @@ struct ActiveSend {
 }
 
 struct ActiveRecv {
+    #[allow(dead_code)]
     name: String,
+    #[allow(dead_code)]
     expected_size: i64,
     received: Vec<u8>,
     next_offset: i64,
     completed: bool,
+}
+
+enum HandshakeState {
+    Initiator(InitiatorD2DHandshakeContext<CryptoProviderImpl>),
+    Server(ServerD2DHandshakeContext<CryptoProviderImpl>),
+    Done,
+    Failed,
 }
 
 pub struct Session {
@@ -37,10 +50,10 @@ pub struct Session {
     #[allow(dead_code)]
     pub local_endpoint_info: Vec<u8>,
     pub state: State,
-    outbound: Vec<Vec<u8>>, // each element is a length-prefixed frame
+    outbound: Vec<Vec<u8>>,
     inbound_buf: Vec<u8>,
-    handshake: Ukey2Handshake,
-    secure: Option<SecureChannel>,
+    handshake: HandshakeState,
+    secure: Option<D2DConnectionContextV1>,
     pending_files: Vec<FileMeta>,
     next_payload_id: i64,
     active_send: Option<ActiveSend>,
@@ -49,19 +62,35 @@ pub struct Session {
     failed_reason: Option<String>,
 }
 
+fn new_initiator_handshake() -> InitiatorD2DHandshakeContext<CryptoProviderImpl> {
+    InitiatorD2DHandshakeContext::new(
+        HandshakeImplementation::Spec,
+        vec![NextProtocol::Aes256GcmSiv],
+    )
+}
+
+fn new_server_handshake() -> ServerD2DHandshakeContext<CryptoProviderImpl> {
+    ServerD2DHandshakeContext::new(
+        HandshakeImplementation::Spec,
+        &[NextProtocol::Aes256GcmSiv],
+    )
+}
+
 impl Session {
     pub fn new(local_name: String, local_endpoint_info: Vec<u8>) -> Self {
-        let next_protocol = NextProtocol::Sharing.as_str().to_string();
-        let mut hs = Ukey2Handshake::new_initiator(&next_protocol);
-        let client_init_inner = hs.build_client_init();
-        let client_init_framed = frame::frame_with_length(&client_init_inner);
+        let mut hs = new_initiator_handshake();
+        // Queue the ClientInit the initiator must send first (wrapped Ukey2Message bytes, no extra varint here — we add it below).
+        let client_init = hs
+            .get_next_handshake_message()
+            .expect("initiator must have ClientInit");
+        let framed = frame::frame_with_length(&client_init);
         Self {
             local_name,
             local_endpoint_info,
             state: State::Handshaking,
-            outbound: vec![client_init_framed],
+            outbound: vec![framed],
             inbound_buf: Vec::new(),
-            handshake: hs,
+            handshake: HandshakeState::Initiator(hs),
             secure: None,
             pending_files: Vec::new(),
             next_payload_id: 1,
@@ -74,16 +103,14 @@ impl Session {
 
     #[cfg(test)]
     pub fn new_responder(local_name: String, local_endpoint_info: Vec<u8>) -> Self {
-        let next_protocol = NextProtocol::Sharing.as_str().to_string();
-        let hs = Ukey2Handshake::new_responder(&next_protocol);
-        // Responder does NOT queue ClientInit; it waits for peer's ClientInit then sends ServerInit.
+        let hs = new_server_handshake();
         Self {
             local_name,
             local_endpoint_info,
             state: State::Handshaking,
             outbound: Vec::new(),
             inbound_buf: Vec::new(),
-            handshake: hs,
+            handshake: HandshakeState::Server(hs),
             secure: None,
             pending_files: Vec::new(),
             next_payload_id: 1,
@@ -102,8 +129,6 @@ impl Session {
         if self.outbound.is_empty() {
             return None;
         }
-        // Concatenate all queued frames into one byte array (Kotlin will write it in one go;
-        // peer's try_consume_frame will split correctly).
         let total: usize = self.outbound.iter().map(|v| v.len()).sum();
         let mut out = Vec::with_capacity(total);
         for f in self.outbound.drain(..) {
@@ -119,6 +144,7 @@ impl Session {
     fn fail(&mut self, reason: &str) {
         self.state = State::Failed;
         self.failed_reason = Some(reason.to_string());
+        self.handshake = HandshakeState::Failed;
     }
 
     pub fn feed_inbound(&mut self, bytes: &[u8]) -> i32 {
@@ -127,8 +153,6 @@ impl Session {
         }
         self.inbound_buf.extend_from_slice(bytes);
         loop {
-            // Use peek to decide if we have a full frame
-            let available = self.inbound_buf.clone();
             let frame_opt = {
                 let mut tmp = self.inbound_buf.clone();
                 frame::try_consume_frame(&mut tmp)
@@ -136,165 +160,165 @@ impl Session {
             if frame_opt.is_none() {
                 break;
             }
-            // Actually consume
             let payload = frame::try_consume_frame(&mut self.inbound_buf).expect("just checked");
             let rc = self.handle_one_frame(&payload);
             if rc < 0 {
                 return rc;
             }
-            // Prevent infinite loop on empty consume
-            if self.inbound_buf.is_empty() {
-                // continue if more bytes were appended during handling? not needed
-            }
-            let _ = available; // keep for debug
         }
         0
     }
 
-    fn handle_one_frame(&mut self, payload: &[u8]) -> i32 {
-        if self.secure.is_none() {
-            // Still in UKEY2 phase. Try decode as Ukey2Frame.
-            // If decode fails, treat as bad frame and fail session.
-            match Ukey2Frame::decode_from_bytes(payload) {
-                Ok(f) => return self.handle_ukey2_frame(&f, payload),
-                Err(_) => {
-                    self.fail("bad ukey2 frame");
-                    return -2;
-                }
-            }
-        } else {
-            // SecureMessage phase: payload is SecureMessage prost bytes (already stripped length)
-            let mut secure = self.secure.take().expect("secure exists");
-            let inner = match secure.decrypt_one(payload) {
-                Ok(v) => v,
-                Err(e) => {
-                    self.secure = Some(secure);
-                    self.fail(&format!("secure decrypt failed: {e:?}"));
-                    return -2;
-                }
-            };
-            self.secure = Some(secure);
-            return self.handle_secure_inner(&inner);
-        }
+    fn is_handshake_done(&self) -> bool {
+        self.secure.is_some()
     }
 
-    fn handle_ukey2_frame(&mut self, frame: &Ukey2Frame, raw_payload: &[u8]) -> i32 {
-        match frame.frame_type {
-            x if x == Ukey2FrameType::ClientInit as i32 => {
-                // We are initiator expecting ServerInit, but got ClientInit -> race, switch to responder
-                if self.handshake.is_done() {
-                    self.fail("unexpected ClientInit after handshake done");
-                    return -2;
-                }
-                // If we're initiator who already sent ClientInit, handle as responder: need a responder handshake
-                // For simplicity, if we detect ClientInit while is_initiator, create a responder handshake on the fly.
-                if self.handshake.is_initiator {
-                    // Create responder to handle peer's ClientInit. Derive its keys and produce ServerInit.
-                    // Instead of mutating the initiator handshake, handle via the existing handshake's
-                    // handle_client_init if it is still in SentClientInit. The initiator handshake
-                    // can act as responder for this frame if we temporarily flip is_initiator? Simpler:
-                    // reinitialize handshake as responder and re-derive.
-                    let next_proto = self.handshake.next_protocol.clone();
-                    let mut responder = Ukey2Handshake::new_responder(&next_proto);
-                    match responder.handle_client_init(raw_payload) {
-                        Ok(server_init_inner) => {
-                            let framed = frame::frame_with_length(&server_init_inner);
-                            self.outbound.push(framed);
-                            // Replace handshake with responder so ClientFinish verification matches
-                            self.handshake = responder;
-                            // state remains Handshaking, awaiting ClientFinished
-                        }
-                        Err(e) => {
-                            self.fail(&format!("responder handle ClientInit failed: {e:?}"));
-                            return -2;
-                        }
-                    }
-                    return 0;
-                } else {
-                    // We are responder: handle ClientInit
-                    match self.handshake.handle_client_init(raw_payload) {
-                        Ok(server_init_inner) => {
-                            let framed = frame::frame_with_length(&server_init_inner);
-                            self.outbound.push(framed);
-                            return 0;
-                        }
-                        Err(e) => {
-                            self.fail(&format!("handle ClientInit failed: {e:?}"));
-                            return -2;
-                        }
-                    }
-                }
-            }
-            x if x == Ukey2FrameType::ServerInit as i32 => {
-                if self.handshake.is_initiator {
-                    match self.handshake.handle_server_init(raw_payload) {
-                        Ok(client_finish_inner) => {
-                            let framed = frame::frame_with_length(&client_finish_inner);
-                            self.outbound.push(framed);
-                            // Handshake done initiator side -> derive secure channel
-                            if let Some((enc, mac)) = self.handshake.derived_keys() {
-                                self.secure = Some(SecureChannel::new(enc, mac));
-                                // Don't transition yet: responder still needs to verify ClientFinished.
-                                // But initiator considers handshake Done; next payloads will be SecureMessages.
-                                // We remain Handshaking until introduction exchange? Keep as Handshaking for now.
-                                // The responder will ack via introduction.
-                            } else {
-                                self.fail("no derived keys after ServerInit");
-                                return -2;
-                            }
-                            return 0;
-                        }
-                        Err(e) => {
-                            self.fail(&format!("handle ServerInit failed: {e:?}"));
-                            return -2;
-                        }
-                    }
-                } else {
-                    self.fail("responder got unexpected ServerInit");
-                    return -2;
-                }
-            }
-            x if x == Ukey2FrameType::ClientFinish as i32 => {
-                if !self.handshake.is_initiator {
-                    match self.handshake.handle_client_finish(raw_payload) {
-                        Ok(()) => {
-                            if let Some((enc, mac)) = self.handshake.derived_keys() {
-                                self.secure = Some(SecureChannel::new(enc, mac));
-                            } else {
-                                self.fail("no derived keys after ClientFinish");
-                                return -2;
-                            }
-                            return 0;
-                        }
-                        Err(e) => {
-                            self.fail(&format!("handle ClientFinish failed: {e:?}"));
-                            return -2;
-                        }
-                    }
-                } else {
-                    // Initiator shouldn't receive ClientFinish
-                    self.fail("initiator got unexpected ClientFinish");
-                    return -2;
-                }
-            }
-            _ => {
-                self.fail("unknown ukey2 frame type");
+    fn handle_one_frame(&mut self, payload: &[u8]) -> i32 {
+        if !self.is_handshake_done() {
+            return self.handle_handshake_frame(payload);
+        }
+        // SecureMessage phase: payload is the SecureMessage protobuf bytes (after our varint).
+        let secure = self.secure.as_mut().expect("secure exists");
+        let inner = match secure.decode_message_from_peer::<CryptoProviderImpl>(payload, None::<&[u8]>) {
+            Ok(v) => v,
+            Err(e) => {
+                self.fail(&format!("secure decode failed: {e:?}"));
                 return -2;
+            }
+        };
+        self.handle_secure_inner(&inner)
+    }
+
+    fn handle_handshake_frame(&mut self, payload: &[u8]) -> i32 {
+        // payload is a wrapped Ukey2Message (ClientInit / ServerInit / ClientFinished / Alert).
+        // Route by handshake role.
+        match &mut self.handshake {
+            HandshakeState::Initiator(hs) => {
+                // Initiator expects ServerInit; if we get ClientInit it's a race — switch to server.
+                // Peek message type by trying to handle: if InvalidState from the library, treat as race.
+                // Simpler: try to detect ClientInit by attempting hs.handle; on InvalidState or BadMessage, try as server.
+                let res = hs.handle_handshake_message(payload);
+                match res {
+                    Ok(()) => {
+                        if hs.is_handshake_complete() {
+                            // Initiator now has ClientFinished to send. Move to Done and derive context.
+                            let ctx = match hs.to_connection_context() {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    self.fail(&format!("initiator to_connection_context: {e:?}"));
+                                    return -2;
+                                }
+                            };
+                            let cf = match hs.get_next_handshake_message() {
+                                Some(m) => m,
+                                None => {
+                                    self.fail("initiator missing ClientFinished");
+                                    return -2;
+                                }
+                            };
+                            self.outbound.push(frame::frame_with_length(&cf));
+                            self.secure = Some(ctx);
+                            self.handshake = HandshakeState::Done;
+                        } else if let Some(server_init) = hs.get_next_handshake_message() {
+                            // Not complete but server accepted? Should not happen for initiator; ignore.
+                            let _ = server_init;
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        // Race: peer also initiated. Switch this side to server role and re-handle as ServerInit's peer ClientInit.
+                        let is_race = matches!(e, ukey2_connections::HandleMessageError::InvalidState | ukey2_connections::HandleMessageError::BadMessage);
+                        if is_race {
+                            let mut server = new_server_handshake();
+                            match server.handle_handshake_message(payload) {
+                                Ok(()) => {
+                                    let server_init = match server.get_next_handshake_message() {
+                                        Some(m) => m,
+                                        None => {
+                                            self.fail("server missing ServerInit after race ClientInit");
+                                            return -2;
+                                        }
+                                    };
+                                    self.outbound.clear(); // drop our optimistic ClientInit? Keep both? Keep peer's flow; drop ours to avoid confusion.
+                                    self.outbound.push(frame::frame_with_length(&server_init));
+                                    self.handshake = HandshakeState::Server(server);
+                                    0
+                                }
+                                Err(e2) => {
+                                    self.fail(&format!("race Server handle ClientInit failed: {e2:?} (orig initiator err {e:?})"));
+                                    -2
+                                }
+                            }
+                        } else {
+                            self.fail(&format!("initiator handle ServerInit failed: {e:?}"));
+                            -2
+                        }
+                    }
+                }
+            }
+            HandshakeState::Server(hs) => {
+                let was_complete_before = hs.is_handshake_complete();
+                let res = hs.handle_handshake_message(payload);
+                match res {
+                    Ok(()) => {
+                        if !was_complete_before {
+                            if let Some(msg) = hs.get_next_handshake_message() {
+                                // After ClientInit we send ServerInit
+                                self.outbound.push(frame::frame_with_length(&msg));
+                            } else if hs.is_handshake_complete() {
+                                let ctx = match hs.to_connection_context() {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        self.fail(&format!("server to_connection_context: {e:?}"));
+                                        return -2;
+                                    }
+                                };
+                                self.secure = Some(ctx);
+                                self.handshake = HandshakeState::Done;
+                            }
+                        } else {
+                            // Was waiting for ClientFinished, now complete
+                            if hs.is_handshake_complete() {
+                                let ctx = match hs.to_connection_context() {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        self.fail(&format!("server to_connection_context after ClientFinished: {e:?}"));
+                                        return -2;
+                                    }
+                                };
+                                self.secure = Some(ctx);
+                                self.handshake = HandshakeState::Done;
+                            }
+                        }
+                        0
+                    }
+                    Err(e) => {
+                        // If server was waiting for ClientInit and got something else, surface error bytes if any
+                        if let ukey2_connections::HandleMessageError::ErrorMessage(ref alert) = e {
+                            self.outbound.push(frame::frame_with_length(alert));
+                        }
+                        self.fail(&format!("server handle handshake failed: {e:?}"));
+                        -2
+                    }
+                }
+            }
+            HandshakeState::Done => {
+                self.fail("handshake already done but got handshake frame");
+                -2
+            }
+            HandshakeState::Failed => {
+                self.fail("handshake in failed state");
+                -2
             }
         }
     }
 
     fn handle_secure_inner(&mut self, inner: &[u8]) -> i32 {
-        // Discriminate SharingFrame vs PayloadTransferFrame robustly:
-        // Prost is lenient and will "decode" arbitrary bytes as either message
-        // without error, so field presence must be validated, not just Ok().
         if let Ok(sharing) = payload::parse_sharing_frame(inner) {
             if sharing.frame_type == crate::frame::SharingFrameType::Introduction as i32
                 && sharing.introduction.is_some()
             {
                 let files = payload::parse_introduction_files(&sharing);
-                // Only treat as introduction if it actually carries files/text.
-                // Payload bytes mis-decoded as SharingFrame will have empty introduction -> fall through.
                 if !files.is_empty() || sharing.introduction.as_ref().map_or(false, |i| !i.text_metadata.is_empty()) {
                     self.pending_files = files;
                     if self.state == State::Handshaking {
@@ -306,7 +330,10 @@ impl Session {
                 && sharing.connection_response.is_some()
             {
                 if let Some(resp) = sharing.connection_response {
-                    if resp.status == 0 {
+                    // Per wire_format.proto ConnectionResponseFrame.Status: ACCEPT=1, REJECT=2, ...
+                    // Our SharingConnectionResponse uses status 0=accept legacy; treat 0 or 1 as accept for interop.
+                    let is_accept = resp.status == 0 || resp.status == 1;
+                    if is_accept {
                         if self.state == State::Handshaking || self.state == State::AwaitingAccept {
                             self.state = State::Transferring;
                         }
@@ -316,17 +343,12 @@ impl Session {
                 }
                 return 0;
             }
-            // Not a valid SharingFrame for our purposes -> try payload below.
-            // Explicit fall-through avoids misrouting Data packet_type=1 as Introduction.
         }
-        // Try PayloadTransferFrame
         if let Ok(pt) = payload::decode_payload_frame(inner) {
-            // Validate that it looks like a real payload frame (packet_type non-zero or has header/chunk)
             if pt.packet_type != 0 || pt.payload_header.is_some() || pt.payload_chunk.is_some() {
                 return self.handle_payload_frame(pt);
             }
         }
-        // Unknown inner -> ignore but don't fail (could be KeepAlive etc.)
         0
     }
 
@@ -336,7 +358,6 @@ impl Session {
                 let header = pt.payload_header.as_ref();
                 let chunk = pt.payload_chunk.as_ref();
                 if let (Some(h), Some(c)) = (header, chunk) {
-                    // First chunk for a payload includes header
                     let entry = self.recvs.entry(h.id).or_insert_with(|| ActiveRecv {
                         name: h.file_name.clone(),
                         expected_size: h.total_size,
@@ -344,38 +365,27 @@ impl Session {
                         next_offset: 0,
                         completed: false,
                     });
-                    // Validate offset ordering (allow out-of-order for now, just append if contiguous)
                     if c.offset != entry.next_offset {
-                        // Accept but log divergence; for robustness, just append if offset matches length
-                        // If mismatch, we still append to avoid data loss in tests.
+                        // tolerate gap; still append
                     }
                     entry.received.extend_from_slice(&c.body);
                     entry.next_offset += c.body.len() as i64;
                     if (c.flags & payload::FLAG_LAST) != 0 {
                         entry.completed = true;
-                        // If all recvs completed and we have pending files, transition to Completed
                         let all_done = self.recvs.values().all(|r| r.completed);
                         if all_done && !self.recvs.is_empty() {
                             self.state = State::Completed;
                         }
                     }
                 } else if let Some(c) = chunk {
-                    // Continuation chunk (no header, need id from prior header?)
-                    // Without id we can't map; try first recv entry
-                    // Fallback: append to first incomplete recv
                     if let Some((_id, entry)) = self.recvs.iter_mut().find(|(_, r)| !r.completed) {
-                        if c.offset == entry.next_offset {
-                            entry.received.extend_from_slice(&c.body);
-                            entry.next_offset += c.body.len() as i64;
-                            if (c.flags & payload::FLAG_LAST) != 0 {
-                                entry.completed = true;
-                                if self.recvs.values().all(|r| r.completed) {
-                                    self.state = State::Completed;
-                                }
+                        entry.received.extend_from_slice(&c.body);
+                        entry.next_offset += c.body.len() as i64;
+                        if (c.flags & payload::FLAG_LAST) != 0 {
+                            entry.completed = true;
+                            if self.recvs.values().all(|r| r.completed) {
+                                self.state = State::Completed;
                             }
-                        } else {
-                            entry.received.extend_from_slice(&c.body);
-                            entry.next_offset += c.body.len() as i64;
                         }
                     }
                 }
@@ -389,14 +399,12 @@ impl Session {
         if self.state != State::AwaitingAccept {
             return -2;
         }
-        if self.secure.is_none() {
+        let Some(secure) = self.secure.as_mut() else {
             return -2;
-        }
-        let mut secure = self.secure.take().unwrap();
+        };
         let resp_plain = payload::build_connection_response(accept);
-        let wire = secure.encrypt(&resp_plain);
-        self.secure = Some(secure);
-        self.outbound.push(wire);
+        let wire = secure.encode_message_to_peer::<CryptoProviderImpl>(&resp_plain, None::<&[u8]>);
+        self.outbound.push(frame::frame_with_length(&wire));
         self.accepted = Some(accept);
         if accept {
             self.state = State::Transferring;
@@ -406,19 +414,16 @@ impl Session {
         0
     }
 
-    // For testing / Kotlin file send path: queue an introduction.
     pub fn queue_introduction(&mut self) -> i32 {
-        if self.secure.is_none() {
+        let Some(secure) = self.secure.as_mut() else {
             return -2;
-        }
+        };
         if self.pending_files.is_empty() {
             return 0;
         }
-        let mut secure = self.secure.take().unwrap();
         let plain = payload::build_introduction_frame(&self.pending_files, self.next_payload_id);
-        let wire = secure.encrypt(&plain);
-        self.secure = Some(secure);
-        self.outbound.push(wire);
+        let wire = secure.encode_message_to_peer::<CryptoProviderImpl>(&plain, None::<&[u8]>);
+        self.outbound.push(frame::frame_with_length(&wire));
         0
     }
 
@@ -430,12 +435,6 @@ impl Session {
         if self.secure.is_none() {
             return -2;
         }
-        if self.state != State::Transferring && self.state != State::Handshaking {
-            // Allow if we just accepted
-            if self.state != State::AwaitingAccept {
-                // but be lenient for tests
-            }
-        }
         let id = self.next_payload_id;
         self.next_payload_id += 1;
         self.active_send = Some(ActiveSend {
@@ -444,7 +443,6 @@ impl Session {
             total_size: file_size,
             sent_offset: 0,
         });
-        // Also create a recv slot so completion tracking works if loopback
         self.recvs.entry(id).or_insert_with(|| ActiveRecv {
             name: file_name.to_string(),
             expected_size: file_size,
@@ -468,7 +466,6 @@ impl Session {
         let total_size = active.total_size;
         let offset = active.sent_offset;
         let is_last = offset + chunk.len() as i64 >= total_size || chunk.is_empty();
-        // Build a single PayloadTransferFrame for this chunk (with header only on first chunk)
         let is_first = offset == 0;
         let pt = crate::frame::PayloadTransferFrame {
             packet_type: PayloadPacketType::Data as i32,
@@ -485,43 +482,37 @@ impl Session {
                 None
             },
             payload_chunk: Some(crate::frame::PayloadChunk {
+                flags: if is_last { payload::FLAG_LAST } else { 0 },
                 offset,
                 body: chunk.to_vec(),
-                flags: if is_last { payload::FLAG_LAST } else { 0 },
             }),
             control_message: None,
         };
-        let mut secure = self.secure.take().unwrap();
         let plain = payload::encode_payload_frame(&pt);
-        let wire = secure.encrypt(&plain);
-        self.secure = Some(secure);
-        self.outbound.push(wire);
+        // take secure mut, encode, push framed SecureMessage
+        let secure = self.secure.as_mut().unwrap();
+        let wire = secure.encode_message_to_peer::<CryptoProviderImpl>(&plain, None::<&[u8]>);
+        self.outbound.push(frame::frame_with_length(&wire));
         active.sent_offset += chunk.len() as i64;
         if is_last {
             self.active_send = None;
-            // If this was the last file, we stay Transferring until peer ACKs; for loopback tests
-            // the decrypt path will mark recvs completed and transition to Completed.
         }
         0
     }
 
     pub fn close_file(&mut self) -> i32 {
-        // No-op: write_chunk with FLAG_LAST already handled. Just validate.
         if self.active_send.is_some() {
-            // Not closed yet: treat as finished
             self.active_send = None;
         }
         0
     }
 
-    /// Simulate receiving our own outbound (loopback) for integration tests: decrypts what we queued.
     #[cfg(test)]
     pub fn loopback_one(&mut self) -> i32 {
         if self.outbound.is_empty() {
             return -1;
         }
         let wire = self.outbound.remove(0);
-        // wire is length-prefixed SecureMessage or UKEY2; handle via feed_inbound
         self.feed_inbound(&wire)
     }
 }
@@ -531,16 +522,12 @@ mod tests {
     use super::*;
 
     fn two_sessions_handshake() -> (Session, Session) {
-        // a = initiator (Alice sends ClientInit), b = responder (Bob waits for ClientInit)
         let mut a = Session::new("Alice".to_string(), vec![]);
         let mut b = Session::new_responder("Bob".to_string(), vec![]);
-        // Alice's ClientInit -> Bob
         let out_a = a.outbound_drain().unwrap();
         b.feed_inbound(&out_a);
-        // Bob's ServerInit -> Alice
         let out_b = b.outbound_drain().unwrap();
         a.feed_inbound(&out_b);
-        // Alice's ClientFinish -> Bob
         let out_a2 = a.outbound_drain().unwrap();
         b.feed_inbound(&out_a2);
         assert!(a.secure.is_some());
@@ -553,6 +540,28 @@ mod tests {
         let (a, b) = two_sessions_handshake();
         assert!(a.secure.is_some());
         assert!(b.secure.is_some());
+    }
+
+    #[test]
+    fn gcm_siv_encode_decode_round_trip() {
+        let (mut a, mut b) = two_sessions_handshake();
+        let pt = b"hello gcm-siv";
+        let wire = a.secure.as_mut().unwrap().encode_message_to_peer::<CryptoProviderImpl>(pt, None::<&[u8]>);
+        let framed = frame::frame_with_length(&wire);
+        b.feed_inbound(&framed);
+        // feed via handle_secure_inner path: we already consumed via decode_message_from_peer in handle_one_frame
+        // Instead test direct decode:
+        let mut a2 = Session::new("A".to_string(), vec![]);
+        let mut b2 = Session::new_responder("B".to_string(), vec![]);
+        let oa = a2.outbound_drain().unwrap();
+        b2.feed_inbound(&oa);
+        let ob = b2.outbound_drain().unwrap();
+        a2.feed_inbound(&ob);
+        let oa2 = a2.outbound_drain().unwrap();
+        b2.feed_inbound(&oa2);
+        let w = a2.secure.as_mut().unwrap().encode_message_to_peer::<CryptoProviderImpl>(pt, None::<&[u8]>);
+        let got = b2.secure.as_mut().unwrap().decode_message_from_peer::<CryptoProviderImpl>(&w, None::<&[u8]>).unwrap();
+        assert_eq!(got, pt);
     }
 
     #[test]
@@ -570,7 +579,6 @@ mod tests {
         assert_eq!(receiver.state, State::AwaitingAccept);
         assert_eq!(receiver.pending_files.len(), 1);
         assert_eq!(receiver.pending_files[0].name, "photo.jpg");
-        // Accept
         receiver.accept(true, "/tmp");
         assert_eq!(receiver.state, State::Transferring);
         let resp_wire = receiver.outbound_drain().unwrap();
@@ -581,7 +589,6 @@ mod tests {
     #[test]
     fn chunked_payload_transfer() {
         let (mut sender, mut receiver) = two_sessions_handshake();
-        // Do introduction + accept to get to Transferring
         sender.set_pending_files_for_send(vec![FileMeta {
             name: "a.bin".to_string(),
             size_bytes: 5000,
@@ -594,18 +601,15 @@ mod tests {
         let w2 = receiver.outbound_drain().unwrap();
         sender.feed_inbound(&w2);
 
-        // Send file chunks
         let data: Vec<u8> = (0..5000u32).map(|i| (i % 251) as u8).collect();
         sender.open_file("a.bin", data.len() as i64);
         for chunk in data.chunks(1024) {
             sender.write_chunk(chunk);
         }
         sender.close_file();
-        // Drain all outbound payload wires to receiver
         while let Some(wire) = sender.outbound_drain() {
             receiver.feed_inbound(&wire);
         }
-        // Receiver should have assembled file
         let recv = receiver.recvs.get(&1).expect("payload id 1");
         assert_eq!(recv.received, data);
         assert!(recv.completed);

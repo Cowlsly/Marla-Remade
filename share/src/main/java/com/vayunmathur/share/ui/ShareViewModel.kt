@@ -12,6 +12,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.share.discovery.BleDiscoveryManager
+import com.vayunmathur.share.discovery.DiscoverySource
 import com.vayunmathur.share.discovery.NearbyDevice
 import com.vayunmathur.share.discovery.NsdDiscoveryManager
 import com.vayunmathur.share.protocol.PendingFile
@@ -36,13 +37,12 @@ private const val TAG = "ShareVM"
 /**
  * Single ViewModel for the Share app (Receive + Send).
  *
- * Mirrors the per-repo ViewModel pattern (see FindFamilyViewModel /
- * MapsSearchViewModel): exposes StateFlows for UI + Actions for mutations.
- *
- * Owns NsdDiscoveryManager + BleDiscoveryManager + TcpTransport. Each real
- * transfer runs in a dedicated [Connection] pump (one ShareSession handle per
- * TCP socket) and survives configuration change through the ViewModel; long
- * transfers are also promoted to [ShareTransferService] via explicit intents.
+ * BetoCore model (Everyone / public identity only):
+ *  - Visibility: ServerSocket(0) on WiFi-LAN -> register _up._tcp with random 16-byte ServiceId
+ *    and the ephemeral port, + BLE Nearby Presence advert under GATT 0xFCF1 whose bytes come from
+ *    the Rust np_adv JNI (presence-derived device name, no plaintext endpoint_info on mDNS).
+ *  - Discovery: browse _up._tcp (resolves host/port) + scan 0xFCF1 (presence name), then merge
+ *    by endpointId; connect requires host/port from the _up._tcp leg.
  */
 class ShareViewModel(
     application: Application,
@@ -66,6 +66,7 @@ class ShareViewModel(
 
     private val nsd by lazy { NsdDiscoveryManager(appContext) }
     private val ble by lazy { BleDiscoveryManager(appContext) }
+    // TcpTransport owns ServerSocket(0) on WiFi-LAN; NsdDiscoveryManager publishes its port under _up._tcp.
     private val transport by lazy { TcpTransport(localName = _localName.value) }
 
     // --- Receive: visibility toggle -------------------------------------
@@ -101,10 +102,10 @@ class ShareViewModel(
         _isVisible.value = visible
         if (visible) {
             val port = transport.listen()
+            // Register _up._tcp with a random 16-byte ServiceId, publishing the WiFi-LAN port.
             nsd.advertise(localName.value, port)
-            // BLE advertise "visible to nearby devices" (toggling with NSD).
+            // BLE Nearby Presence advert under 0xFCF1 (bytes from Rust np_adv JNI, public mode).
             ble.startAdvertising(localName.value)
-            // Raise foreground service so discovery + incoming pumps survive backgrounding.
             ShareTransferService.startReceiveMode(appContext, port)
         } else {
             nsd.unadvertise()
@@ -170,6 +171,7 @@ class ShareViewModel(
         nsd.clearDiscoveredDevices()
         scanNsdJob = viewModelScope.launch {
             try {
+                // Browse _up._tcp for WiFi-LAN TCP endpoints (host/port + ServiceId).
                 nsd.discover().collect { dev ->
                     val current = _discoveredDevices.value
                     val merged = mergeDevice(current, dev)
@@ -181,6 +183,7 @@ class ShareViewModel(
         }
         scanBleJob = viewModelScope.launch {
             try {
+                // Scan GATT 0xFCF1 and parse presence advert for the display name.
                 ble.scan().collect { dev ->
                     val current = _discoveredDevices.value
                     val merged = mergeDevice(current, dev)
@@ -196,11 +199,20 @@ class ShareViewModel(
         val idx = current.indexOfFirst { it.endpointId == incoming.endpointId }
         return if (idx >= 0) {
             val existing = current[idx]
+            // BLE presence name takes precedence over the raw ServiceId hex from _up._tcp.
+            val bestName = when {
+                incoming.source == DiscoverySource.Ble && incoming.endpointName.isNotBlank() -> incoming.endpointName
+                existing.source == DiscoverySource.Ble && existing.endpointName.isNotBlank() -> existing.endpointName
+                else -> incoming.endpointName.ifBlank { existing.endpointName }
+            }
             val merged = existing.copy(
+                endpointName = bestName,
+                serviceId = incoming.serviceId ?: existing.serviceId,
                 host = incoming.host ?: existing.host,
                 port = incoming.port ?: existing.port,
-                source = if (incoming.source != existing.source) com.vayunmathur.share.discovery.DiscoverySource.Both else existing.source,
+                source = if (incoming.source != existing.source) DiscoverySource.Both else existing.source,
                 serviceName = incoming.serviceName ?: existing.serviceName,
+                extra = incoming.extra ?: existing.extra,
             )
             current.toMutableList().also { it[idx] = merged }
         } else {
@@ -222,9 +234,7 @@ class ShareViewModel(
         val host = device.host
         val port = device.port
         if (host == null || port == null) {
-            Log.w(TAG, "cannot connect to ${device.endpointName}: no host/port (BLE-only peer)")
-            // BLE-only peers need the TCP endpoint carried in the service-data or a follow-up mDNS step.
-            // Surface as an error on the active connection so the UI can explain it.
+            Log.w(TAG, "cannot connect to ${device.endpointName}: no host/port (requires _up._tcp browse)")
             return
         }
         viewModelScope.launch {
@@ -232,7 +242,6 @@ class ShareViewModel(
                 val conn = transport.connect(host, port)
                 _activeConnection.value = conn
                 ShareTransferService.startSendMode(appContext, host, port)
-                // If there are staged files, begin streaming them once the handshake allows.
                 val uris = _outgoingUris.value
                 if (uris.isNotEmpty()) {
                     sendUrisOver(conn, uris)
@@ -249,7 +258,6 @@ class ShareViewModel(
             val names = uris.map { uri -> resolveDisplayName(appContext, uri) ?: uri.toString() }
             _outgoingDisplayNames.value = names
         }
-        // If already connected, stream immediately.
         val conn = _activeConnection.value
         if (conn != null && uris.isNotEmpty()) {
             viewModelScope.launch { sendUrisOver(conn, uris) }

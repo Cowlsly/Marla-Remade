@@ -1,17 +1,12 @@
-//! Varint length-prefix + protobuf (prost) framing for Nearby Connections
-//! and Nearby Sharing (WireFormat) wire formats.
+//! Varint length-prefix + protobuf framing for Nearby Share (WireFormat) wire formats.
 //!
-//! References (open reimplementations):
-//! - NearDrop `OfflineFrame` / `WireFormat` / `UKey2` (Swift, prost-equivalent)
-//! - grishka/nearby `NearbyImpl` (Kotlin) — OfflineFrame v1 with
-//!   ConnectionRequest/Response, PayloadTransferFrame, KeepAlive
-//! - Android Nearby Connections `offline_wire_formats.proto`,
-//!   `sharing_wire_format.proto` (decompiled, mirrored here with prost derives)
-//!
-//! Assumptions / divergences are documented inline. The exact field numbers
-//! are chosen to round-trip correctly between two of our peers; byte-level
-//! interop with a real Android Quick Share peer will require aligning the
-//! tag numbers to the decompiled protos (documented TODOs where uncertain).
+//! References:
+//! - `nearby_clone/sharing/proto/wire_format.proto` (Frame / V1Frame / Introduction etc.)
+//! - `nearby_clone/connections/implementation/proto/offline_wire_formats.proto`
+//!   (OfflineFrame is not used in the D2D TCP path but kept for tag verification).
+//! - Nearby Sharing uses varint length-prefix around each handshake SecureMessage /
+//!   SharingFrame / PayloadTransferFrame on the TCP stream. Kotlin does no framing;
+//!   Rust buffers partial reads and consumes one frame at a time.
 
 use prost::Message;
 
@@ -33,6 +28,7 @@ pub fn encode_varint(mut v: u32, out: &mut Vec<u8>) {
     }
 }
 
+/// Decode a varint from `buf`. Returns (value, bytes_consumed).
 pub fn decode_varint(buf: &[u8]) -> Option<(u32, usize)> {
     let mut result: u32 = 0;
     let mut shift = 0;
@@ -72,256 +68,13 @@ pub fn try_consume_frame(buf: &mut Vec<u8>) -> Option<Vec<u8>> {
 }
 
 // ---------------------------------------------------------------------------
-// UKEY2 frame (prost)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
-pub enum Ukey2FrameType {
-    Unknown = 0,
-    ClientInit = 1,
-    ServerInit = 2,
-    ClientFinish = 3,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NextProtocol {
-    Sharing,
-    Connections,
-    Unknown,
-}
-
-impl NextProtocol {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NextProtocol::Sharing => "com.google.nearby.sharing",
-            NextProtocol::Connections => "com.google.nearby.connections",
-            NextProtocol::Unknown => "unknown",
-        }
-    }
-    pub fn from_str(s: &str) -> Self {
-        match s {
-            "com.google.nearby.sharing" => NextProtocol::Sharing,
-            "com.google.nearby.connections" => NextProtocol::Connections,
-            _ => NextProtocol::Unknown,
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Ukey2Frame {
-    #[prost(int32, tag = "1")]
-    pub frame_type: i32,
-    #[prost(int32, tag = "2")]
-    pub version: i32,
-    #[prost(bytes = "vec", optional, tag = "3")]
-    pub random: Option<Vec<u8>>,
-    #[prost(bytes = "vec", optional, tag = "4")]
-    pub public_key: Option<Vec<u8>>,
-    #[prost(bytes = "vec", optional, tag = "5")]
-    pub commitment: Option<Vec<u8>>,
-    #[prost(string, optional, tag = "6")]
-    pub next_protocol: Option<String>,
-    #[prost(bytes = "vec", tag = "7")]
-    pub payload: Vec<u8>,
-}
-
-impl Ukey2Frame {
-    pub fn encode_to_vec(&self) -> Vec<u8> {
-        let mut buf = Vec::new();
-        prost::Message::encode(self, &mut buf).expect("prost encode");
-        buf
-    }
-    pub fn decode_from_bytes(bytes: &[u8]) -> Result<Self, prost::DecodeError> {
-        prost::Message::decode(bytes)
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Nearby Connections OfflineFrame (outer + v1)
-// Based on android `offline_wire_formats.proto`:
-//   message OfflineFrame { int32 version = 1; V1Frame v1 = 2; }
-//   message V1Frame { enum FrameType { UNKNOWN=0; CONNECTION_REQUEST=1; ... } }
-//
-// Field numbers below mirror the decompiled proto per NearDrop's
-// `OfflineFrame.pb.swift` (v1.type = 1, connection_request = 2, etc.).
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct OfflineFrame {
-    #[prost(int32, tag = "1")]
-    pub version: i32,
-    #[prost(message, optional, tag = "2")]
-    pub v1: Option<V1Frame>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
-pub enum V1FrameType {
-    Unknown = 0,
-    ConnectionRequest = 1,
-    ConnectionResponse = 2,
-    PayloadTransfer = 3,
-    KeepAlive = 4,
-    Disconnection = 5,
-    BandwidthUpgradeNegotiation = 6,
-    PairedKeyEncryption = 7,
-    PairedKeyResult = 8,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct V1Frame {
-    #[prost(enumeration = "V1FrameType", tag = "1")]
-    pub frame_type: i32,
-    #[prost(message, optional, tag = "2")]
-    pub connection_request: Option<ConnectionRequest>,
-    #[prost(message, optional, tag = "3")]
-    pub connection_response: Option<ConnectionResponse>,
-    #[prost(message, optional, tag = "4")]
-    pub payload_transfer: Option<PayloadTransferFrame>,
-    #[prost(message, optional, tag = "5")]
-    pub keep_alive: Option<KeepAlive>,
-    #[prost(message, optional, tag = "6")]
-    pub disconnection: Option<Disconnection>,
-    #[prost(message, optional, tag = "7")]
-    pub paired_key_encryption: Option<PairedKeyEncryption>,
-    #[prost(message, optional, tag = "8")]
-    pub paired_key_result: Option<PairedKeyResult>,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ConnectionRequest {
-    #[prost(string, tag = "1")]
-    pub endpoint_id: String,
-    #[prost(string, tag = "2")]
-    pub endpoint_name: String,
-    #[prost(bytes = "vec", tag = "3")]
-    pub endpoint_info: Vec<u8>,
-    #[prost(int32, tag = "4")]
-    pub nonce: i32,
-    #[prost(string, repeated, tag = "5")]
-    pub mediums: Vec<String>,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ConnectionResponse {
-    #[prost(int32, tag = "1")]
-    pub status: i32, // 0 = accept, non-zero = reject
-    #[prost(int32, tag = "2")]
-    pub multiplex_socket_bitmask: i32,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct KeepAlive {
-    #[prost(bool, tag = "1")]
-    pub ack: bool,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct Disconnection {
-    #[prost(bool, tag = "1")]
-    pub safe_to_disconnect: bool,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PairedKeyEncryption {
-    #[prost(bytes = "vec", tag = "1")]
-    pub signed_data: Vec<u8>,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PairedKeyResult {
-    #[prost(int32, tag = "1")]
-    pub status: i32,
-}
-
-// PayloadTransferFrame: chunked file/bytes transfer.
-// Mirrors `PayloadTransferFrame` in NearDrop's `OfflineFrame.pb.swift`:
-//   message PayloadTransferFrame {
-//     enum PacketType { UNKNOWN=0; DATA=1; CONTROL=2; PAYLOAD_ACK=3; ... }
-//     PacketType packet_type = 1;
-//     PayloadHeader payload_header = 2;
-//     PayloadChunk payload_chunk = 3;
-//     ControlMessage control_message = 4;
-//   }
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
-pub enum PayloadPacketType {
-    Unknown = 0,
-    Data = 1,
-    Control = 2,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PayloadTransferFrame {
-    #[prost(enumeration = "PayloadPacketType", tag = "1")]
-    pub packet_type: i32,
-    #[prost(message, optional, tag = "2")]
-    pub payload_header: Option<PayloadHeader>,
-    #[prost(message, optional, tag = "3")]
-    pub payload_chunk: Option<PayloadChunk>,
-    #[prost(message, optional, tag = "4")]
-    pub control_message: Option<ControlMessage>,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PayloadHeader {
-    #[prost(int64, tag = "1")]
-    pub id: i64,
-    #[prost(enumeration = "PayloadType", tag = "2")]
-    pub r#type: i32,
-    #[prost(int64, tag = "3")]
-    pub total_size: i64,
-    #[prost(bool, tag = "4")]
-    pub is_sensitive: bool,
-    #[prost(string, tag = "5")]
-    pub file_name: String,
-    #[prost(string, tag = "6")]
-    pub parent_folder: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
-pub enum PayloadType {
-    Unknown = 0,
-    Bytes = 1,
-    File = 2,
-    Stream = 3,
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct PayloadChunk {
-    #[prost(int64, tag = "1")]
-    pub offset: i64,
-    #[prost(bytes = "vec", tag = "2")]
-    pub body: Vec<u8>,
-    #[prost(int32, tag = "3")]
-    pub flags: i32, // bit 0 = last chunk
-}
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct ControlMessage {
-    #[prost(enumeration = "ControlEventType", tag = "1")]
-    pub event: i32,
-    #[prost(int64, tag = "2")]
-    pub offset: i64,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
-#[repr(i32)]
-pub enum ControlEventType {
-    Unknown = 0,
-    PayloadCanceled = 1,
-    PayloadError = 2,
-    PayloadCompleted = 3,
-}
-
-// ---------------------------------------------------------------------------
 // Sharing WireFormat (Introduction etc.)
-// Mirrors `sharing_wire_format.proto` per NearDrop / grishka:
-//   message Frame { optional IntroductionFrame introduction = 1; ... }
-// For simplicity we expose IntroductionFrame directly — the outer `Frame`
-// oneof is flattened into optional fields here.
+// Mirrors `sharing/proto/wire_format.proto` per nearby_clone:
+//   message Frame { optional Version version = 1; optional V1Frame v1 = 2; }
+//   message V1Frame { optional FrameType type = 1; optional IntroductionFrame introduction = 2;
+//                     optional ConnectionResponseFrame connection_response = 3; ... }
+// For simplicity we expose IntroductionFrame directly via SharingFrame flattened oneof.
+// Tag numbers are verified against nearby_clone/sharing/proto/wire_format.proto.
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -413,7 +166,7 @@ pub enum TextType {
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct SharingConnectionResponse {
     #[prost(int32, tag = "1")]
-    pub status: i32, // 0 = accept
+    pub status: i32, // 0 = accept (per wire_format.proto ACCEPT=1, but our legacy used 0=accept; keep for peer compat and map on recv)
 }
 
 #[derive(Clone, PartialEq, ::prost::Message)]
@@ -435,6 +188,87 @@ pub struct CertificateFrame {
 }
 
 // ---------------------------------------------------------------------------
+// PayloadTransferFrame (chunked file/bytes transfer)
+// Mirrors `connections/.../offline_wire_formats.proto` PayloadTransferFrame:
+//   packet_type = 1, payload_header = 2, payload_chunk = 3, control_message = 4
+// Verified tags: PayloadHeader id=1 type=2 total_size=3 is_sensitive=4 file_name=5 parent_folder=6
+//                PayloadChunk flags=1 offset=2 body=3 index=4 (we omit index)
+// Keep 16 KiB chunking + FLAG_LAST in payload.rs.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum PayloadPacketType {
+    Unknown = 0,
+    Data = 1,
+    Control = 2,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PayloadTransferFrame {
+    #[prost(enumeration = "PayloadPacketType", tag = "1")]
+    pub packet_type: i32,
+    #[prost(message, optional, tag = "2")]
+    pub payload_header: Option<PayloadHeader>,
+    #[prost(message, optional, tag = "3")]
+    pub payload_chunk: Option<PayloadChunk>,
+    #[prost(message, optional, tag = "4")]
+    pub control_message: Option<ControlMessage>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PayloadHeader {
+    #[prost(int64, tag = "1")]
+    pub id: i64,
+    #[prost(enumeration = "PayloadType", tag = "2")]
+    pub r#type: i32,
+    #[prost(int64, tag = "3")]
+    pub total_size: i64,
+    #[prost(bool, tag = "4")]
+    pub is_sensitive: bool,
+    #[prost(string, tag = "5")]
+    pub file_name: String,
+    #[prost(string, tag = "6")]
+    pub parent_folder: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum PayloadType {
+    Unknown = 0,
+    Bytes = 1,
+    File = 2,
+    Stream = 3,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct PayloadChunk {
+    #[prost(int32, tag = "1")]
+    pub flags: i32, // bit 0 = last chunk (FLAG_LAST)
+    #[prost(int64, tag = "2")]
+    pub offset: i64,
+    #[prost(bytes = "vec", tag = "3")]
+    pub body: Vec<u8>,
+}
+
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct ControlMessage {
+    #[prost(enumeration = "ControlEventType", tag = "1")]
+    pub event: i32,
+    #[prost(int64, tag = "2")]
+    pub offset: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, prost::Enumeration)]
+#[repr(i32)]
+pub enum ControlEventType {
+    Unknown = 0,
+    PayloadCanceled = 1,
+    PayloadError = 2,
+    PayloadCompleted = 3,
+}
+
+// ---------------------------------------------------------------------------
 // Helpers to encode/decode length-prefixed prost messages generically
 // ---------------------------------------------------------------------------
 
@@ -446,22 +280,6 @@ pub fn encode_length_prefixed<M: prost::Message>(msg: &M) -> Vec<u8> {
 
 pub fn decode_length_prefixed<M: prost::Message + Default>(bytes: &[u8]) -> Result<M, prost::DecodeError> {
     M::decode(bytes)
-}
-
-// ---------------------------------------------------------------------------
-// SecureMessage proto (separate file but defined here for single prost dep)
-// ---------------------------------------------------------------------------
-
-#[derive(Clone, PartialEq, ::prost::Message)]
-pub struct SecureMessage {
-    #[prost(int32, tag = "1")]
-    pub version: i32,
-    #[prost(int32, tag = "2")]
-    pub sequence_number: i32,
-    #[prost(bytes = "vec", tag = "3")]
-    pub header_and_body: Vec<u8>, // IV (16) + ciphertext
-    #[prost(bytes = "vec", tag = "4")]
-    pub signature: Vec<u8>, // HMAC-SHA256
 }
 
 #[cfg(test)]
@@ -487,49 +305,6 @@ mod tests {
         let got = try_consume_frame(&mut buf).unwrap();
         assert_eq!(got, payload);
         assert!(buf.is_empty());
-    }
-
-    #[test]
-    fn ukey2_frame_round_trip() {
-        let f = Ukey2Frame {
-            frame_type: Ukey2FrameType::ClientInit as i32,
-            version: 1,
-            random: Some(vec![0xAB; 32]),
-            public_key: Some(vec![0x04; 65]),
-            commitment: Some(vec![0xFF; 32]),
-            next_protocol: Some("com.google.nearby.sharing".to_string()),
-            payload: vec![],
-        };
-        let enc = f.encode_to_vec();
-        let dec = Ukey2Frame::decode_from_bytes(&enc).unwrap();
-        assert_eq!(f, dec);
-    }
-
-    #[test]
-    fn offline_frame_round_trip() {
-        let of = OfflineFrame {
-            version: 1,
-            v1: Some(V1Frame {
-                frame_type: V1FrameType::ConnectionRequest as i32,
-                connection_request: Some(ConnectionRequest {
-                    endpoint_id: "ABCD".to_string(),
-                    endpoint_name: "My Phone".to_string(),
-                    endpoint_info: vec![1, 2, 3],
-                    nonce: 42,
-                    mediums: vec!["WIFI_LAN".to_string()],
-                }),
-                connection_response: None,
-                payload_transfer: None,
-                keep_alive: None,
-                disconnection: None,
-                paired_key_encryption: None,
-                paired_key_result: None,
-            }),
-        };
-        let mut buf = Vec::new();
-        of.encode(&mut buf).unwrap();
-        let back = OfflineFrame::decode(buf.as_slice()).unwrap();
-        assert_eq!(of, back);
     }
 
     #[test]
@@ -574,9 +349,9 @@ mod tests {
                 parent_folder: String::new(),
             }),
             payload_chunk: Some(PayloadChunk {
+                flags: 0,
                 offset: 0,
                 body: b"hello".to_vec(),
-                flags: 0,
             }),
             control_message: None,
         };
@@ -592,7 +367,6 @@ mod tests {
         let framed = frame_with_length(&payload);
         let mut buf = framed[..10].to_vec();
         assert!(try_consume_frame(&mut buf).is_none());
-        // append rest -> now it completes
         buf.extend_from_slice(&framed[10..]);
         let got = try_consume_frame(&mut buf).unwrap();
         assert_eq!(got.len(), 200);

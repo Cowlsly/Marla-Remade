@@ -1,0 +1,32 @@
+Vendored BetoCore (Apache-2.0)
+
+Origin: https://github.com/google/beto-core
+Commit: 479289ef072b0880c0347d36937265e44f00f4ee
+Source clone: C:\Users\Vayun\AppData\Local\Temp\betocore_clone (nearby/ + common/ workspaces)
+License: Apache-2.0 (see LICENSE in this directory, copied from upstream root)
+Date vendored: 2026-08-15
+
+Crates vendored into third_party/betocore/ (verbatim copy, preserving per-crate LICENSE where present):
+  - array_view               <- nearby/presence/array_view
+  - array_ref                <- nearby/presence/array_ref
+  - sink                     <- nearby/presence/sink
+  - ldt_tbc                  <- nearby/presence/ldt_tbc
+  - xts_aes                  <- nearby/presence/xts_aes
+  - ldt                      <- nearby/presence/ldt
+  - np_hkdf                  <- nearby/presence/np_hkdf
+  - ldt_np_adv               <- nearby/presence/ldt_np_adv
+  - np_adv                   <- nearby/presence/np_adv
+  - rand_ext                 <- nearby/presence/rand_ext
+  - test_helper              <- nearby/presence/test_helper  (dev/test helper)
+  - test_vector_hkdf         <- nearby/presence/test_vector_hkdf
+  - crypto_provider          <- nearby/crypto/crypto_provider
+  - crypto_provider_rustcrypto <- nearby/crypto/crypto_provider_rustcrypto
+  - crypto_provider_default  <- nearby/crypto/crypto_provider_default
+  - ukey2_rs                 <- nearby/connections/ukey2/ukey2 (crate name ukey2_rs)
+  - ukey2_proto              <- nearby/connections/ukey2/ukey2_proto
+  - ukey2_connections        <- nearby/connections/ukey2/ukey2_connections
+
+Style matches third_party/om-file-format-sys (each crate remains its own directory
+with its own Cargo.toml; wired via path dependencies in the workspace root Cargo.toml).
+
+No %TEMP% clones are checked into the repo; source was the local clone above.

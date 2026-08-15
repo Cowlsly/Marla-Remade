@@ -26,48 +26,26 @@ import kotlinx.coroutines.flow.callbackFlow
 
 private const val TAG = "BleDiscovery"
 
-/**
- * Nearby Share BLE service UUID / 0xFC service-data beacon.
- *
- * Fast Pair / Nearby Connections advertises a BLE service-data entry so
- * scanners can discover peers even when the Wi-Fi/mDNS leg isn't yet
- * correlated. The task description calls this "the 0xFC service-data beacon".
- * Android's stock Quick Share attaches a short payload here (endpoint info +
- * visibility hint). The Kotlin side only needs to beacon and scan — the Rust
- * side decides trust/visibility — but the beacon must exist for interoperability.
- *
- * We use the 16-bit UUID 0xFE2C (Google Nearby) which maps to the full
- * 128-bit form required by Android's ScanFilter/AdvertiseData APIs.
- *
- * Reference values are documented in third-party reimplementations
- * (e.g. LocShar, rQuickShare) and in Android's own Nearby service-data
- * captures; adjust strictly if real-device testing indicates a different UUID
- * or manufacturer-specific fallback is required.
- */
-private const val NEARBY_SHARE_SERVICE_UUID = "0000fe2c-0000-1000-8000-00805f9b34fb"
-private val SERVICE_UUID: ParcelUuid = ParcelUuid.fromString(NEARBY_SHARE_SERVICE_UUID)
-/** Fallback 0xFC-style service UUID used by some interop captures. */
-private const val ALT_SERVICE_UUID = "0000fcfc-0000-1000-8000-00805f9b34fb"
-private val ALT_UUID: ParcelUuid = ParcelUuid.fromString(ALT_SERVICE_UUID)
-
-/** Minimal service-data payload: endpoint-id + visibility flag (1 byte is enough for beaconing). */
-private fun serviceDataPayload(endpointName: String): ByteArray {
-    // Keep under 20 bytes so it fits in the legacy 31-byte advertisement.
-    val nameBytes = endpointName.toByteArray(Charsets.UTF_8).take(10).toByteArray()
-    // Format: [version=1][nameLen][nameBytes][visible=1]
-    return byteArrayOf(0x01, nameBytes.size.toByte()) + nameBytes + byteArrayOf(0x01)
-}
+/** GATT service UUID 0xFCF1 (Nearby Presence). 128-bit expansion of 16-bit 0xFCF1. */
+const val NEARBY_PRESENCE_SERVICE_UUID_STR = "0000fcf1-0000-1000-8000-00805f9b34fb"
+val NEARBY_PRESENCE_SERVICE_UUID: ParcelUuid =
+    ParcelUuid.fromString(NEARBY_PRESENCE_SERVICE_UUID_STR)
 
 /**
- * BLE advertisement + scanning for Nearby Share discovery.
+ * BLE advertisement + scanning for Nearby Presence (BetoCore public-identity / Everyone mode).
  *
- * RECEIVE: startAdvertising so real Android Quick Share sees this device as
- * a nearby target when the user's "Device visible" toggle is on.
- * SEND: startScanning to populate a flow of [NearbyDevice] for the Send
- * nearby-device list alongside NSD results.
+ * Modern stack (BetoCore):
+ *  - Advertise: put the Nearby Presence advert BYTES built by the Rust np_adv JNI
+ *    (UnencryptedEncoder, V0, DeviceInfo DE) as GATT service-data under UUID 0xFCF1.
+ *    Until the Rust JNI is present, a Kotlin fallback builds the same minimal V0
+ *    unencrypted advert so the module stays buildable and testable.
+ *  - Scan: filter for 0xFCF1, extract service-data bytes, and pass them to the Rust
+ *    parser (JSON byte[] per rustdev's contract) or the String alias / Kotlin fallback
+ *    to derive the human-readable device name. Identity comes from the BLE presence
+ *    advert only — no plaintext endpoint_info.
  *
- * All operations are permission-guarded (BLUETOOTH_ADVERTISE / SCAN / CONNECT)
- * and no-op when Bluetooth is unavailable or permissions are missing.
+ * Legacy FC128E01 / 0xFE2C (Google Nearby service-data beacon) has been removed per
+ * the migration spec. No fallback advertises under the legacy UUID.
  */
 class BleDiscoveryManager(private val context: Context) {
 
@@ -84,6 +62,116 @@ class BleDiscoveryManager(private val context: Context) {
 
     private fun hasPermission(permission: String): Boolean =
         ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+
+    // ------------------------------------------------------------------
+    // Presence advert bytes — Rust JNI preferred, Kotlin fallback
+    // ------------------------------------------------------------------
+
+    private fun buildPresenceAdvertBytes(deviceName: String): ByteArray {
+        try {
+            val viaRust = tryBuildPresenceViaRust(deviceName)
+            if (viaRust != null && viaRust.isNotEmpty()) return viaRust
+        } catch (_: UnsatisfiedLinkError) {
+        } catch (_: NoSuchMethodError) {
+        } catch (e: Exception) {
+            Log.d(TAG, "Rust presence build failed, using Kotlin fallback: ${e.message}")
+        }
+        return buildPresenceAdvertKotlinFallback(deviceName)
+    }
+
+    private fun tryBuildPresenceViaRust(deviceName: String): ByteArray? {
+        return try {
+            @Suppress("DEPRECATION")
+            com.vayunmathur.share.protocol.ShareNative.nativeBuildPresenceAdvert(deviceName)
+        } catch (_: UnsatisfiedLinkError) { null
+        } catch (_: NoSuchMethodError) { null
+        } catch (_: ClassNotFoundException) { null }
+    }
+
+    /**
+     * Minimal V0 unencrypted Nearby Presence advert: [version=0x00][TxPower DE][DeviceInfo DE].
+     * Mirrors np_adv's AdvBuilder<UnencryptedEncoder> path so scanners (including our Rust parser)
+     * decode it. Device name is clamped to 5..9 bytes per DeviceInfo spec; shorter names are padded
+     * with spaces, longer names are truncated with the truncated bit set.
+     */
+    internal fun buildPresenceAdvertKotlinFallback(deviceName: String): ByteArray {
+        val versionHeader = 0x00.toByte()
+        val txPowerDe = byteArrayOf(0x15.toByte(), 0x00.toByte()) // header len=1 type=5 => 0x15, payload 0
+        val raw = deviceName.toByteArray(Charsets.UTF_8)
+        val nameBytes: ByteArray
+        val truncated: Boolean
+        if (raw.size <= 9) {
+            val padded = if (raw.size < 5) raw + ByteArray(5 - raw.size) { 0x20 } else raw
+            nameBytes = padded
+            truncated = false
+        } else {
+            nameBytes = raw.copyOf(9)
+            truncated = true
+        }
+        val typeByte = (1 or (if (truncated) 0x80 else 0x00)).toByte()
+        val deviceInfoContent = byteArrayOf(typeByte) + nameBytes
+        val deLen = deviceInfoContent.size
+        val header = ((deLen shl 4) or 0x03).toByte()
+        val deviceInfoDe = byteArrayOf(header) + deviceInfoContent
+        return byteArrayOf(versionHeader) + txPowerDe + deviceInfoDe
+    }
+
+    private fun parsePresenceName(advertBytes: ByteArray): String? {
+        try {
+            val viaRust = tryParsePresenceViaRust(advertBytes)
+            if (!viaRust.isNullOrBlank()) return viaRust
+        } catch (_: UnsatisfiedLinkError) {
+        } catch (_: NoSuchMethodError) {
+        } catch (e: Exception) {
+            Log.d(TAG, "Rust presence parse failed, using Kotlin fallback: ${e.message}")
+        }
+        return parsePresenceNameKotlinFallback(advertBytes)
+    }
+
+    private fun tryParsePresenceViaRust(advertBytes: ByteArray): String? {
+        return try {
+            // Primary: JSON byte[] {"deviceName":"...","deviceType":1,...} — extract deviceName.
+            val jsonBytes = try { com.vayunmathur.share.protocol.ShareNative.nativeParsePresenceAdvert(advertBytes) } catch (_: NoSuchMethodError) { null }
+            if (jsonBytes != null && jsonBytes.isNotEmpty()) {
+                val json = String(jsonBytes, Charsets.UTF_8)
+                Regex(""""deviceName"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.getOrNull(1)?.let { if (it.isNotBlank()) return it }
+                // Fallback: some builds return raw name in the bytes
+                val trimmed = json.trim().trim('"')
+                if (trimmed.isNotBlank() && !trimmed.startsWith("{")) return trimmed
+            }
+            // Alias: String return for older builds
+            @Suppress("DEPRECATION")
+            com.vayunmathur.share.protocol.ShareNative.nativeParsePresenceAdvertName(advertBytes)
+        } catch (_: UnsatisfiedLinkError) { null
+        } catch (_: NoSuchMethodError) { null }
+    }
+
+    /**
+     * Decode V0 advert bytes minimally: skip version header (1 byte), iterate DEs
+     * [header][contents], and extract DeviceInfo's name (type 0x03). Returns null if not found.
+     */
+    internal fun parsePresenceNameKotlinFallback(advertBytes: ByteArray): String? {
+        if (advertBytes.isEmpty()) return null
+        val version = advertBytes[0].toInt() and 0xFF
+        val isLdt = (version and 0x04) != 0
+        if (isLdt) return null
+        var off = 1
+        while (off < advertBytes.size) {
+            val hdr = advertBytes[off].toInt() and 0xFF
+            val encLen = (hdr ushr 4) and 0x0F
+            val typeCode = hdr and 0x0F
+            val actualLen = encLen
+            if (off + 1 + actualLen > advertBytes.size) break
+            val contents = advertBytes.copyOfRange(off + 1, off + 1 + actualLen)
+            if (typeCode == 0x03 && contents.size >= 2) {
+                val nameBytes = contents.copyOfRange(1, contents.size)
+                val raw = String(nameBytes, Charsets.UTF_8).trimEnd()
+                if (raw.isNotBlank()) return raw
+            }
+            off += 1 + actualLen
+        }
+        return null
+    }
 
     // ------------------------------------------------------------------
     // Advertising (Receive: "visible to nearby devices")
@@ -108,21 +196,21 @@ class BleDiscoveryManager(private val context: Context) {
             return false
         }
         stopAdvertising()
-        val payload = serviceDataPayload(endpointName)
+        val presenceBytes = buildPresenceAdvertBytes(endpointName)
         val settings = AdvertiseSettings.Builder()
             .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
             .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
-            .setConnectable(false)
+            .setConnectable(true)
             .build()
         val data = AdvertiseData.Builder()
-            .addServiceUuid(SERVICE_UUID)
-            .addServiceData(SERVICE_UUID, payload)
+            .addServiceUuid(NEARBY_PRESENCE_SERVICE_UUID)
+            .addServiceData(NEARBY_PRESENCE_SERVICE_UUID, presenceBytes)
             .setIncludeDeviceName(false)
             .setIncludeTxPowerLevel(false)
             .build()
         val callback = object : AdvertiseCallback() {
             override fun onStartSuccess(settingsInEffect: AdvertiseSettings) {
-                Log.i(TAG, "BLE advertising started as '$endpointName'")
+                Log.i(TAG, "BLE advertising started (0xFCF1, ${presenceBytes.size}B) as '$endpointName'")
             }
 
             override fun onStartFailure(errorCode: Int) {
@@ -179,8 +267,7 @@ class BleDiscoveryManager(private val context: Context) {
             close()
             return@callbackFlow
         }
-        val filterPrimary = ScanFilter.Builder().setServiceUuid(SERVICE_UUID).build()
-        val filterAlt = ScanFilter.Builder().setServiceUuid(ALT_UUID).build()
+        val filterFcf1 = ScanFilter.Builder().setServiceUuid(NEARBY_PRESENCE_SERVICE_UUID).build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -188,27 +275,20 @@ class BleDiscoveryManager(private val context: Context) {
             @SuppressLint("MissingPermission")
             override fun onScanResult(callbackType: Int, result: ScanResult) {
                 val record = result.scanRecord ?: return
-                val data = record.getServiceData(SERVICE_UUID)
-                    ?: record.getServiceData(ALT_UUID)
+                val data = record.getServiceData(NEARBY_PRESENCE_SERVICE_UUID) ?: return
                 val addr = result.device.address ?: return
-                // Decode payload: [version][nameLen][nameBytes][visible]
-                val nameFromPayload: String? = if (data != null && data.size >= 2) {
-                    val len = data[1].toInt() and 0xFF
-                    if (data.size >= 2 + len) {
-                        String(data, 2, len, Charsets.UTF_8)
-                    } else null
-                } else null
-                val displayName = nameFromPayload
+                val presenceName = parsePresenceName(data)
+                val displayName = presenceName
                     ?: result.device.name
                     ?: record.deviceName
                     ?: addr
                 val dev = NearbyDevice(
                     endpointId = addr,
                     endpointName = displayName,
-                    host = null, // BLE peer requires further TCP endpoint resolution via NSD or earlier payload exchange.
+                    host = null,
                     port = null,
                     source = DiscoverySource.Ble,
-                    extra = if (data != null) data.joinToString(",") { "%02x".format(it) } else null,
+                    extra = data.joinToString(",") { "%02x".format(it) },
                 )
                 _bleDevices.value = _bleDevices.value.toMutableMap().apply { put(addr, dev) }
                 trySend(dev)
@@ -221,9 +301,8 @@ class BleDiscoveryManager(private val context: Context) {
         }
         scanCallback = callback
         try {
-            // Requiring both UUIDs doubles discovery odds across stock vs third-party beacons.
             @SuppressLint("MissingPermission")
-            fun doStart() = scanner.startScan(listOf(filterPrimary, filterAlt), settings, callback)
+            fun doStart() = scanner.startScan(listOf(filterFcf1), settings, callback)
             doStart()
         } catch (e: Exception) {
             Log.w(TAG, "startScan threw", e)
@@ -231,7 +310,6 @@ class BleDiscoveryManager(private val context: Context) {
             return@callbackFlow
         }
         awaitClose {
-            // Lint's MissingPermission doesn't recognise hasPermission() wrapper; guard + suppress.
             @SuppressLint("MissingPermission")
             fun stopIfPermitted() {
                 if (hasPermission(Manifest.permission.BLUETOOTH_SCAN)) {

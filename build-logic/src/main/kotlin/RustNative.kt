@@ -94,6 +94,8 @@ fun Project.rustNativeLib(crate: String, remapLabel: String = crate) {
             inputs.file(rootProject.file("third_party/om-file-format-sys/Cargo.toml"))
             inputs.file(rootProject.file("third_party/om-file-format-sys/build.rs"))
             inputs.dir(rootProject.file("third_party/om-file-format-sys/c"))
+            // BetoCore vendored crates (Apache-2.0) — incremental builds track these like om-file-format-sys.
+            inputs.dir(rootProject.file("third_party/betocore"))
             outputs.file(destSo)
 
             val cargoHome = System.getenv("CARGO_HOME") ?: "${System.getProperty("user.home")}/.cargo"
