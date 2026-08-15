@@ -11,7 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.ListPage
-import com.vayunmathur.music.ui.component.ShufflePlayFab
+import com.vayunmathur.music.ui.components.ShufflePlayFab
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.MusicViewModel
 import com.vayunmathur.music.R

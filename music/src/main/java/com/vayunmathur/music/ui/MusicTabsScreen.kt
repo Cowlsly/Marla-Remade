@@ -7,7 +7,7 @@ import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
 import androidx.compose.runtime.Composable
-import com.vayunmathur.music.ui.component.PlayingBottomBar
+import com.vayunmathur.music.ui.components.PlayingBottomBar
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource

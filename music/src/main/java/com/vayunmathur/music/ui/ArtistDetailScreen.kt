@@ -32,9 +32,9 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconPlay
-import com.vayunmathur.music.ui.component.PlayShuffleRow
-import com.vayunmathur.music.ui.component.PlayingBottomBar
-import com.vayunmathur.music.ui.component.TrackListItem
+import com.vayunmathur.music.ui.components.PlayShuffleRow
+import com.vayunmathur.music.ui.components.PlayingBottomBar
+import com.vayunmathur.music.ui.components.TrackListItem
 import com.vayunmathur.music.util.AddToPlaylistButton
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.MusicViewModel

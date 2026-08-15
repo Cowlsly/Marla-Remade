@@ -16,8 +16,8 @@ import com.vayunmathur.music.util.MusicViewModel
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Playlist
-import com.vayunmathur.music.ui.component.NewPlaylistFab
-import com.vayunmathur.music.ui.component.ShufflePlayFab
+import com.vayunmathur.music.ui.components.NewPlaylistFab
+import com.vayunmathur.music.ui.components.ShufflePlayFab
 
 @Composable
 fun PlaylistsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel) {

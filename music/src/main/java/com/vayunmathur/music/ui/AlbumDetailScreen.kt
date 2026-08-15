@@ -9,7 +9,7 @@ import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.ui.component.PlayingBottomBar
+import com.vayunmathur.music.ui.components.PlayingBottomBar
 import com.vayunmathur.music.util.AlbumDetailUiState
 import com.vayunmathur.music.util.MusicViewModel
 import com.vayunmathur.music.util.formatDuration

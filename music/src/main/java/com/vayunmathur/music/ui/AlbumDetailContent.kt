@@ -32,8 +32,8 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.ui.component.PlayShuffleRow
-import com.vayunmathur.music.ui.component.TrackListItem
+import com.vayunmathur.music.ui.components.PlayShuffleRow
+import com.vayunmathur.music.ui.components.TrackListItem
 import com.vayunmathur.music.util.AddToPlaylistButton
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.AlbumDetailUiState

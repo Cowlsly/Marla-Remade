@@ -22,7 +22,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
-import com.vayunmathur.music.ui.component.ShufflePlayFab
+import com.vayunmathur.music.ui.components.ShufflePlayFab
 import com.vayunmathur.music.util.AddToPlaylistButton
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.MusicActions

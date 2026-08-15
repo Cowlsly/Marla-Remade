@@ -15,8 +15,8 @@ import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
-import com.vayunmathur.music.ui.component.MusicTabsBar
-import com.vayunmathur.music.ui.component.NowPlayingBar
+import com.vayunmathur.music.ui.components.MusicTabsBar
+import com.vayunmathur.music.ui.components.NowPlayingBar
 import com.vayunmathur.music.util.AlbumDetailUiState
 import com.vayunmathur.music.util.MusicActions
 import com.vayunmathur.music.util.NowPlayingUiState
