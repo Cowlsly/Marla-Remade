@@ -6,6 +6,5 @@
     <string name="left">يسار</string>
     <string name="center">وسط</string>
     <string name="right">يمين</string>
-    <string name="justify"></string>
     <string name="clear_formatting">مسح التنسيق</string>
 </resources>
