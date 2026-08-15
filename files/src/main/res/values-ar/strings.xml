@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">الملفات</string>
+    <string name="bookmarks">الإشارات المرجعية</string>
+    <string name="new_folder">مجلد جديد</string>
+    <string name="create">إنشاء</string>
 </resources>
