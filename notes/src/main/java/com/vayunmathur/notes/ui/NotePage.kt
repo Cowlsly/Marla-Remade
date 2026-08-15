@@ -7,32 +7,6 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
-import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.Icon
-import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.IconDraw
-import com.vayunmathur.library.ui.IconImage
-import com.vayunmathur.library.ui.IconKeyboardArrowDown
-import com.vayunmathur.library.ui.IconKeyboardArrowUp
-import com.vayunmathur.library.ui.LocalContentColor
-import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
-import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -42,30 +16,11 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.ClipEntry
 import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
-import androidx.ink.brush.Brush
-import androidx.ink.brush.StockBrushes
-import com.vayunmathur.library.ui.IconCopy
-import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconNavigation
-import com.vayunmathur.library.ui.EditorBottomBar
-import com.vayunmathur.library.ui.FormatIconButton
-import com.vayunmathur.library.ui.IconShare
-import com.vayunmathur.library.ink.InkCanvasView
-import com.vayunmathur.library.ui.OdfMarkdownEditorController
-import com.vayunmathur.library.ui.OdfMarkdownEditorField
-import com.vayunmathur.library.ui.OdfMarkdownEditorToolbar
-import com.vayunmathur.library.ui.rememberOdfMarkdownEditorController
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.ink.deserialize
 import com.vayunmathur.notes.R
 import com.vayunmathur.notes.Route
 import com.vayunmathur.notes.data.Note
@@ -80,11 +35,9 @@ import com.vayunmathur.notes.platform.NoteUiState
 import com.vayunmathur.notes.platform.NotesViewModel
 import com.vayunmathur.notes.platform.exportNoteMarkdown
 import com.vayunmathur.notes.platform.markdownCacheUri
-import com.vayunmathur.library.image.compose.AsyncImage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.io.File
 
 /**
  * Binds the note with [noteID] to the stateless [NoteScreen]: owns the editable row, the
@@ -257,198 +210,4 @@ fun NotePage(
             }
         },
     )
-}
-
-/**
- * The note editor, with no dependency on the ViewModel or the back stack so it can be
- * rendered from a `@Preview` — see `src/screenshotTest`, which is where the store listing
- * images come from.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun NoteScreen(state: NoteUiState, actions: NoteActions) {
-    val context = LocalContext.current
-
-    // Which text block currently has focus, so new media is inserted next to it
-    // and the formatting toolbar targets the right editor.
-    var focusedBlockId by remember { mutableStateOf<String?>(null) }
-    var activeController by remember { mutableStateOf<OdfMarkdownEditorController?>(null) }
-
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {},
-                navigationIcon = { IconNavigation { actions.back() } },
-                actions = {
-                    IconButton({ actions.copyNote() }) { IconCopy() }
-                    IconButton({ actions.shareNote() }) { IconShare() }
-                    IconButton({ actions.deleteNote() }) { IconDelete() }
-                },
-            )
-        },
-        bottomBar = {
-            // One horizontally-scrollable bar. While a text block is focused it shows
-            // the markdown formatting buttons followed by the insert buttons; otherwise
-            // it shows just the insert buttons. Everything lives in a single row.
-            val insertButtons: @Composable RowScope.() -> Unit = {
-                FormatIconButton(stringResource(R.string.add_image), onClick = {
-                    actions.addImage(focusedBlockId)
-                }) { IconImage() }
-                FormatIconButton(stringResource(R.string.add_drawing), onClick = {
-                    actions.addDrawing(focusedBlockId)
-                }) { IconDraw() }
-            }
-            val controller = activeController
-            if (controller != null && controller.focused) {
-                OdfMarkdownEditorToolbar(controller, trailing = insertButtons)
-            } else {
-                EditorBottomBar(scrollable = true, content = insertButtons)
-            }
-        },
-    ) { paddingValues ->
-        Column(
-            Modifier
-                .padding(paddingValues)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-        ) {
-            BasicTextField(
-                state.title,
-                { actions.setTitle(it) },
-                Modifier.fillMaxWidth().padding(top = 8.dp),
-                singleLine = true,
-                textStyle = MaterialTheme.typography.headlineMedium.copy(color = LocalContentColor.current),
-                cursorBrush = SolidColor(LocalContentColor.current),
-                decorationBox = { innerTextField ->
-                    Box {
-                        if (state.title.isEmpty()) Text(
-                            text = stringResource(R.string.title),
-                            style = MaterialTheme.typography.headlineMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant),
-                        )
-                        innerTextField()
-                    }
-                },
-            )
-
-            state.blocks.forEach { block ->
-                key(block.id) {
-                    when (block) {
-                        is NoteBlock.Text -> {
-                            val controller = rememberOdfMarkdownEditorController(initialMarkdown = block.markdown) { newMd ->
-                                actions.setBlockMarkdown(block.id, newMd)
-                            }
-                            LaunchedEffect(controller.focused) {
-                                if (controller.focused) {
-                                    focusedBlockId = block.id
-                                    activeController = controller
-                                }
-                            }
-                            OdfMarkdownEditorField(controller = controller, modifier = Modifier.fillMaxWidth())
-                        }
-
-                        is NoteBlock.Image -> ImageBlock(
-                            block = block,
-                            file = NoteImageStore.fileFor(context, block.fileName),
-                            onResize = { fraction -> actions.resizeImage(block.id, fraction) },
-                            onMoveUp = { actions.moveBlock(block.id, -1) },
-                            onMoveDown = { actions.moveBlock(block.id, 1) },
-                            onDelete = { actions.deleteBlock(block.id) },
-                        )
-
-                        is NoteBlock.Ink -> InkBlock(
-                            block = block,
-                            onEdit = { actions.editDrawing(block) },
-                            onMoveUp = { actions.moveBlock(block.id, -1) },
-                            onMoveDown = { actions.moveBlock(block.id, 1) },
-                            onDelete = { actions.deleteBlock(block.id) },
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ImageBlock(
-    block: NoteBlock.Image,
-    file: File,
-    onResize: (Float) -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        AsyncImage(
-            model = file,
-            contentDescription = null,
-            modifier = Modifier
-                .fillMaxWidth(block.widthFraction)
-                .clip(RoundedCornerShape(8.dp)),
-        )
-        BlockControls(onMoveUp = onMoveUp, onMoveDown = onMoveDown, onDelete = onDelete) {
-            // Step image width between quarter and full width.
-            IconButton(onClick = { onResize((block.widthFraction - 0.25f).coerceAtLeast(0.25f)) }) {
-                IconKeyboardArrowDown()
-            }
-            IconButton(onClick = { onResize((block.widthFraction + 0.25f).coerceAtMost(1f)) }) {
-                IconKeyboardArrowUp()
-            }
-        }
-    }
-}
-
-@Composable
-private fun InkBlock(
-    block: NoteBlock.Ink,
-    onEdit: () -> Unit,
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    onDelete: () -> Unit,
-) {
-    val strokes = remember(block) { block.strokes.map { it.deserialize() } }
-    Column(Modifier.fillMaxWidth().padding(vertical = 8.dp)) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(block.heightDp.dp)
-                .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
-                .clip(RoundedCornerShape(8.dp))
-                .clickable { onEdit() },
-        ) {
-            InkCanvasView(
-                currentBrush = previewBrush,
-                finishedStrokes = strokes,
-                onStrokeFinished = {},
-                enabled = false,
-                modifier = Modifier.fillMaxSize(),
-            )
-        }
-        BlockControls(onMoveUp = onMoveUp, onMoveDown = onMoveDown, onDelete = onDelete)
-    }
-}
-
-@Composable
-private fun BlockControls(
-    onMoveUp: () -> Unit,
-    onMoveDown: () -> Unit,
-    onDelete: () -> Unit,
-    extra: @Composable () -> Unit = {},
-) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        extra()
-        IconButton(onClick = onMoveUp) {
-            IconKeyboardArrowUp()
-        }
-        IconButton(onClick = onMoveDown) {
-            IconKeyboardArrowDown()
-        }
-        IconButton(onClick = onDelete) { IconDelete() }
-    }
-}
-
-// A read-only ink preview needs some brush, but strokes carry their own; this is unused for drawing.
-private val previewBrush by lazy {
-    Brush.createWithColorIntArgb(StockBrushes.pressurePen(), 0xFF000000.toInt(), 6f, 0.1f)
 }
