@@ -249,7 +249,7 @@
     <string name="row_column_size">Rea / veeru suurus…</string>
     <string name="number_format">Numbrivorming</string>
     <string name="number_2_dp">Number (2 dp)</string>
-    <string name="save_failed">Salvestamine ei õnenstunud: <xliff:g id="error" example="Õigused on puudu">%1$s</xliff:g></string>
+    <string name="save_failed">Salvestamine ei õnnestunud: <xliff:g id="error" example="Õigused on puudu">%1$s</xliff:g></string>
     <string name="saved">Salvestatud</string>
     <string name="anonymous">Anonüümne</string>
     <string name="annotation_author_date"><xliff:g id="author" example="Anonüümne">%1$s</xliff:g><xliff:g id="date_suffix" example=" · 2024-01-01">%2$s</xliff:g></string>
