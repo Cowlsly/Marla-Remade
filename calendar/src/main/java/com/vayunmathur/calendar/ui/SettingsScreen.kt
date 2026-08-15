@@ -5,7 +5,6 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,8 +17,6 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.DropdownMenu
-import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.HorizontalDivider
@@ -28,8 +25,10 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.SettingsDivider
+import com.vayunmathur.library.ui.SettingsSection
+import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +42,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
@@ -176,65 +176,27 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                 }
             }
         } else {
+            val context = LocalContext.current
             LazyColumn(modifier = Modifier.fillMaxSize(), contentPadding = paddingValues + PaddingValues(8.dp)) {
                 item {
-                    var showDefaultLayoutMenu by remember { mutableStateOf(false) }
-
-                    ListItem(
-                        content = { Text(stringResource(R.string.default_layout)) },
-                        trailingContent = {
-                            Box {
-                                TextButton(onClick = { showDefaultLayoutMenu = true }) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(stringResource(state.layout.prettyNameRes))
-                                        IconArrowDropDown()
-                                    }
-                                }
-                                DropdownMenu(expanded = showDefaultLayoutMenu, onDismissRequest = { showDefaultLayoutMenu = false }) {
-                                    CalendarViewModel.CalendarLayout.entries.forEach { layout ->
-                                        DropdownMenuItem(
-                                            text = { Text(stringResource(layout.prettyNameRes)) },
-                                            onClick = {
-                                                actions.setLayout(layout)
-                                                showDefaultLayoutMenu = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    )
-                    HorizontalDivider()
-                }
-
-                item {
-                    var showThemeMenu by remember { mutableStateOf(false) }
-
-                    ListItem(
-                        content = { Text(stringResource(R.string.theme)) },
-                        trailingContent = {
-                            Box {
-                                TextButton(onClick = { showThemeMenu = true }) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Text(stringResource(state.themeMode.prettyNameRes))
-                                        IconArrowDropDown()
-                                    }
-                                }
-                                DropdownMenu(expanded = showThemeMenu, onDismissRequest = { showThemeMenu = false }) {
-                                    CalendarViewModel.ThemeMode.entries.forEach { mode ->
-                                        DropdownMenuItem(
-                                            text = { Text(stringResource(mode.prettyNameRes)) },
-                                            onClick = {
-                                                actions.setThemeMode(mode)
-                                                showThemeMenu = false
-                                            }
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    )
-                    HorizontalDivider()
+                    SettingsSection {
+                        SettingsSelectRow<CalendarViewModel.CalendarLayout>(
+                            title = stringResource(R.string.default_layout),
+                            selected = state.layout,
+                            options = CalendarViewModel.CalendarLayout.entries,
+                            label = { context.getString(it.prettyNameRes) },
+                            onSelect = { actions.setLayout(it) },
+                        )
+                        SettingsDivider()
+                        SettingsSelectRow<CalendarViewModel.ThemeMode>(
+                            title = stringResource(R.string.theme),
+                            selected = state.themeMode,
+                            options = CalendarViewModel.ThemeMode.entries,
+                            label = { context.getString(it.prettyNameRes) },
+                            onSelect = { actions.setThemeMode(it) },
+                        )
+                        SettingsDivider()
+                    }
                 }
 
                 item {
