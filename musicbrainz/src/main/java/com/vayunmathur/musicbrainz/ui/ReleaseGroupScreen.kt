@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
+import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
 import com.vayunmathur.musicbrainz.ui.components.SecondaryText
 import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel

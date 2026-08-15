@@ -7,6 +7,7 @@ import com.vayunmathur.musicbrainz.data.MusicBrainzRepository
 import com.vayunmathur.musicbrainz.domain.library.MatchKeys
 import com.vayunmathur.musicbrainz.platform.MusicBrainzPrefs
 import com.vayunmathur.musicbrainz.platform.SafTree
+import com.vayunmathur.musicbrainz.platform.DocEntry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
