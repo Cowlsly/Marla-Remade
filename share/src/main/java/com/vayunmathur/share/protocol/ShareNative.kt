@@ -1,4 +1,5 @@
-package com.vayunmathur.share.domain.protocol
+// PACKAGE STRUCTURE EXCEPTION (JNI): FQN frozen for native RegisterNatives/symbol mangling
+package com.vayunmathur.share.protocol
 
 /**
  * JNI surface for the native Nearby Share / Quick Share protocol crate

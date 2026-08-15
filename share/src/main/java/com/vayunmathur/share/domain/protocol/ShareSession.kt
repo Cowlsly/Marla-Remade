@@ -1,5 +1,6 @@
 package com.vayunmathur.share.domain.protocol
 
+import com.vayunmathur.share.protocol.ShareNative
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 

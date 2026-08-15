@@ -82,7 +82,7 @@ class BleDiscoveryManager(private val context: Context) {
     private fun tryBuildPresenceViaRust(deviceName: String): ByteArray? {
         return try {
             @Suppress("DEPRECATION")
-            com.vayunmathur.share.domain.protocol.ShareNative.nativeBuildPresenceAdvert(deviceName)
+            com.vayunmathur.share.protocol.ShareNative.nativeBuildPresenceAdvert(deviceName)
         } catch (_: UnsatisfiedLinkError) { null
         } catch (_: NoSuchMethodError) { null
         } catch (_: ClassNotFoundException) { null }
@@ -131,7 +131,7 @@ class BleDiscoveryManager(private val context: Context) {
     private fun tryParsePresenceViaRust(advertBytes: ByteArray): String? {
         return try {
             // Primary: JSON byte[] {"deviceName":"...","deviceType":1,...} — extract deviceName.
-            val jsonBytes = try { com.vayunmathur.share.domain.protocol.ShareNative.nativeParsePresenceAdvert(advertBytes) } catch (_: NoSuchMethodError) { null }
+            val jsonBytes = try { com.vayunmathur.share.protocol.ShareNative.nativeParsePresenceAdvert(advertBytes) } catch (_: NoSuchMethodError) { null }
             if (jsonBytes != null && jsonBytes.isNotEmpty()) {
                 val json = String(jsonBytes, Charsets.UTF_8)
                 Regex(""""deviceName"\s*:\s*"([^"]+)"""").find(json)?.groupValues?.getOrNull(1)?.let { if (it.isNotBlank()) return it }
@@ -141,7 +141,7 @@ class BleDiscoveryManager(private val context: Context) {
             }
             // Alias: String return for older builds
             @Suppress("DEPRECATION")
-            com.vayunmathur.share.domain.protocol.ShareNative.nativeParsePresenceAdvertName(advertBytes)
+            com.vayunmathur.share.protocol.ShareNative.nativeParsePresenceAdvertName(advertBytes)
         } catch (_: UnsatisfiedLinkError) { null
         } catch (_: NoSuchMethodError) { null }
     }
