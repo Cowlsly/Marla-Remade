@@ -28,7 +28,7 @@
     <string name="clear_history">清除历史记录？</string>
     <string name="uses_system_location_services_private_ta">使用系统位置信息服务。私密标签页永远不会授予位置权限。</string>
     <string name="shortcuts_launch_pwaactivity_standalone">快捷方式将启动独立的 PwaActivity WebView（支持权限处理、下载和第三方 Cookie）。在此处移除将删除数据库条目；如果已固定，必须通过长按来移除固定的启动器图标。</string>
-    <string name="new_folder">新文件夹</string>
+    <string name="new_folder">新建文件夹</string>
     <string name="allow_location">允许使用位置信息？</string>
     <string name="theme">主题：%1$s</string>
     <string name="downloads">下载</string>
