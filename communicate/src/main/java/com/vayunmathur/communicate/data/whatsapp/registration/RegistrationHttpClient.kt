@@ -37,15 +37,15 @@ class RegistrationHttpClient(
 
     data class CodeResult(
         val status: String, val method: String?, val length: Int?,
-        val retryAfter: Long?, val reason: String?, val raw: String,
+        val retryAfter: Long?, val reason: String?, val param: String?, val raw: String,
     ) { val ok: Boolean get() = status == "sent" || status == "ok" }
 
     data class RegisterResult(
         val status: String, val newJid: String?, val login: String?, val serverTime: Long?,
-        val reason: String?, val auth: WhatsAppAuthData?, val raw: String,
+        val reason: String?, val param: String?, val auth: WhatsAppAuthData?, val raw: String,
     ) { val ok: Boolean get() = status == "ok" }
 
-    data class ExistResult(val status: String, val reason: String?, val raw: String)
+    data class ExistResult(val status: String, val reason: String?, val param: String?, val raw: String)
 
     /** `/v2/consent` — over-18 self-declare / DOB / parent-verification consent (§3.12). */
     data class ConsentResult(
@@ -101,12 +101,14 @@ class RegistrationHttpClient(
 
         val body = send("code", p)
         val j = parse(body)
+        Log.e(TAG, "W2 code raw=${body.take(2000)} reason=${j.optStringOrNull("reason")} param=${j.optStringOrNull("param")}")
         return CodeResult(
             status = j.optString("status", "error"),
             method = j.optStringOrNull("method"),
             length = j.optIntOrNull("length"),
             retryAfter = j.optLongOrNull("retry_after"),
             reason = j.optStringOrNull("reason"),
+            param = j.optStringOrNull("param"),
             raw = body,
         )
     }
@@ -163,7 +165,8 @@ class RegistrationHttpClient(
         if (auth != null) p.bundle(RegistrationKeys.bundleFields(auth))
         val body = send("exist", p)
         val j = parse(body)
-        return ExistResult(j.optString("status", "error"), j.optStringOrNull("reason"), body)
+        Log.e(TAG, "W2 exist raw=${body.take(2000)} reason=${j.optStringOrNull("reason")} param=${j.optStringOrNull("param")}")
+        return ExistResult(j.optString("status", "error"), j.optStringOrNull("reason"), j.optStringOrNull("param"), body)
     }
 
     /**
@@ -363,12 +366,16 @@ class RegistrationHttpClient(
         } else {
             null
         }
+        val reason = j.optStringOrNull("reason")
+        val param = j.optStringOrNull("param")
+        if (status != "ok") Log.e(TAG, "W2 register raw=${body.take(2000)} reason=$reason param=$param")
         return RegisterResult(
             status = status,
             newJid = newJid ?: login?.let { "$it@s.whatsapp.net" },
             login = login,
             serverTime = j.optLongOrNull("server_time"),
-            reason = j.optStringOrNull("reason"),
+            reason = reason,
+            param = param,
             auth = updated,
             raw = body,
         )

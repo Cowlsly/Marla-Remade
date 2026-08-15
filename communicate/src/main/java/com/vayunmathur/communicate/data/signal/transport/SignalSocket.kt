@@ -127,7 +127,7 @@ class SignalSocket(
     private suspend fun doConnectOnce() {
         val url = wsUrl()
         val headers = authHeaders()
-        webSocket(url, headers, captureResponseHeaders = listOf("x-signal-timestamp")) {
+        webSocket(url, headers, captureResponseHeaders = listOf("x-signal-timestamp"), useSystemTrust = true) {
             session = this
             isConnected = true
             val tsHeader = capturedHeader["x-signal-timestamp"] ?: responseHeaders.entries

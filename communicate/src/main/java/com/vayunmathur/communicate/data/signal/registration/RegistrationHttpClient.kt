@@ -139,6 +139,7 @@ class RegistrationHttpClient(private val context: Context) {
                     "$baseUrl/v1/accounts/whoami",
                     method = "GET",
                     headers = mapOf("Authorization" to basic),
+                    useSystemTrust = true,
                 )
                 // whoami returns {number, aci, pni} when registered
                 ExistResult(resp.status == 200, null, resp.body)
@@ -168,6 +169,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "POST",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
+            useSystemTrust = true,
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only: needs svr2Credentials/recoveryPassword)")
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
@@ -197,6 +199,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "PATCH",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
+            useSystemTrust = true,
         )
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
         return parseSession(resp.body)
@@ -215,6 +218,7 @@ class RegistrationHttpClient(private val context: Context) {
                 "Accept-Language" to (java.util.Locale.getDefault().toLanguageTag()),
             ),
             body = body,
+            useSystemTrust = true,
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only)")
         if (resp.status == 429) throw IllegalStateException("429 rate limited: ${resp.body.take(500)}")
@@ -229,6 +233,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "PUT",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
+            useSystemTrust = true,
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only)")
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
@@ -289,6 +294,7 @@ class RegistrationHttpClient(private val context: Context) {
                 "Authorization" to basic,
             ),
             body = bodyJson,
+            useSystemTrust = true,
         )
         // 423 RegistrationLock — live-only: server returns {timeRemaining, svr2Credentials:{username,password}, svr3Credentials} + recoveryPassword path
         if (resp.status == 423) {

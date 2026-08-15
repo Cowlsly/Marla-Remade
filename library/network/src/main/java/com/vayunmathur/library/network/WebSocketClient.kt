@@ -275,6 +275,7 @@ class WebSocketClient private constructor(
             headers: Map<String, String> = emptyMap(),
             captureResponseHeaders: List<String> = emptyList(),
             sslSocketFactory: SSLSocketFactory? = null,
+            useSystemTrust: Boolean = false,
         ): WebSocketClient = withContext(Dispatchers.IO) {
             val uri = try { URI(urlStr) } catch (_: Exception) { URI(URL(urlStr).toString()) }
             val scheme = uri.scheme?.lowercase() ?: if (urlStr.startsWith("wss")) "wss" else "ws"
@@ -292,7 +293,7 @@ class WebSocketClient private constructor(
             }
 
             val sock: Socket = if (scheme == "wss" || scheme == "https") {
-                val factory = sslSocketFactory ?: NetworkClient.defaultSslSocketFactory ?: SSLSocketFactory.getDefault()
+                val factory: javax.net.SocketFactory = if (useSystemTrust) SSLSocketFactory.getDefault() else sslSocketFactory ?: NetworkClient.defaultSslSocketFactory ?: SSLSocketFactory.getDefault()
                 val s = factory.createSocket(host, port) as Socket
                 if (s is SSLSocket) {
                     try { s.startHandshake() } catch (_: Exception) { }
@@ -411,9 +412,10 @@ suspend fun webSocket(
     headers: Map<String, String> = emptyMap(),
     captureResponseHeaders: List<String> = emptyList(),
     sslSocketFactory: SSLSocketFactory? = null,
+    useSystemTrust: Boolean = false,
     block: suspend WsSession.() -> Unit,
 ) {
-    val c = WebSocketClient.connect(url, headers, captureResponseHeaders, sslSocketFactory)
+    val c = WebSocketClient.connect(url, headers, captureResponseHeaders, sslSocketFactory, useSystemTrust)
     try {
         WsSession(c).block()
     } finally {

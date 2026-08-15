@@ -122,7 +122,7 @@ fun WhatsAppRegistrationScreen(
                             onClick = {
                                 run {
                                     val r = withContext(Dispatchers.IO) { client.requestCode(cc, number, "sms") }
-                                    status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
+                                    status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}${r.param?.let { " param=$it" } ?: ""} raw=${r.raw.take(800)}"
                                     if (r.ok) step = RegStep.EnterCode
                                 }
                             },
@@ -132,7 +132,7 @@ fun WhatsAppRegistrationScreen(
                             onClick = {
                                 run {
                                     val r = withContext(Dispatchers.IO) { client.requestCode(cc, number, "voice") }
-                                    status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
+                                    status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}${r.param?.let { " param=$it" } ?: ""} raw=${r.raw.take(800)}"
                                     if (r.ok) step = RegStep.EnterCode
                                 }
                             },
@@ -144,7 +144,7 @@ fun WhatsAppRegistrationScreen(
                         onClick = {
                             run {
                                 val r = withContext(Dispatchers.IO) { client.checkExist(cc, number) }
-                                status = "exist: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
+                                status = "exist: ${r.status}${r.reason?.let { " ($it)" } ?: ""}${r.param?.let { " param=$it" } ?: ""} raw=${r.raw.take(800)}"
                             }
                         },
                     ) { Text("Check number (no SMS)") }
@@ -164,7 +164,7 @@ fun WhatsAppRegistrationScreen(
                         onClick = {
                             run {
                                 val r = withContext(Dispatchers.IO) { client.register(cc, number, code) }
-                                status = "register: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
+                                status = "register: ${r.status}${r.reason?.let { " ($it)" } ?: ""}${r.param?.let { " param=$it" } ?: ""} raw=${r.raw.take(800)}"
                                 when {
                                     r.ok && r.auth != null -> {
                                         session.markRegistered(context, r.auth)

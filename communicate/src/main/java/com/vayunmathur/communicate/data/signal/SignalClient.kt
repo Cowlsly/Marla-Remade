@@ -220,7 +220,7 @@ object SignalClient {
                     try {
                         val basic = basicAuthHeader()
                         val headers = mapOf("Authorization" to "Basic $basic", "Content-Type" to "application/octet-stream")
-                        val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$pid", method = "PUT", headers = headers, body = encrypted)
+                        val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$pid", method = "PUT", headers = headers, body = encrypted, useSystemTrust = true)
                         if (!resp.isSuccess) allOk = false
                     } catch (_: Exception) { allOk = false }
                 }
@@ -244,7 +244,7 @@ object SignalClient {
         return try {
             val basic = basicAuthHeader()
             val headers = mapOf("Authorization" to "Basic $basic", "Content-Type" to "application/octet-stream")
-            val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$aci", method = "PUT", headers = headers, body = encrypted)
+            val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$aci", method = "PUT", headers = headers, body = encrypted, useSystemTrust = true)
             resp.isSuccess
         } catch (_: Exception) { false }
     }
@@ -299,10 +299,10 @@ object SignalClient {
         val cdnInfo: Pair<String?, SignalServiceProtos.AttachmentPointer?> = try {
             // Live-only: GET /v2/attachments/form/upload returns {key,credential,acl,algorithm,date,policy,signature} for CDN0 multipart.
             // This stub posts directly to cdn.signal.org; live should replace with form fetch per PushServiceSocket/AttachmentUploadForm.
-            val formResp = NetworkClient.execute("https://chat.signal.org/v2/attachments/form/upload", method = "GET", headers = mapOf("Authorization" to "Basic ${basicAuthHeader()}"))
+            val formResp = NetworkClient.execute("https://chat.signal.org/v2/attachments/form/upload", method = "GET", headers = mapOf("Authorization" to "Basic ${basicAuthHeader()}"), useSystemTrust = true)
             if (formResp.isSuccess) {
                 // Not parsing form here (live-only gap); still upload raw for wire validation.
-                val up = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes)
+                val up = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes, useSystemTrust = true)
                 if (up.isSuccess) {
                     val cdnKey = SignalProtocol.generateMessageId()
                     // Build minimal AttachmentPointer (live will encrypt key/digest/incrementalMac via AttachmentCipher)
@@ -317,7 +317,7 @@ object SignalClient {
             } else Pair(null, null)
         } catch (_: Exception) { Pair(null, null) } ?: run {
             try {
-                val resp = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes)
+                val resp = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes, useSystemTrust = true)
                 if (resp.isSuccess) Pair("cdn.signal.org/${SignalProtocol.generateMessageId()}", null) else Pair(null, null)
             } catch (_: Exception) { Pair(null, null) }
         }
@@ -491,7 +491,7 @@ object SignalClient {
                     put("titleBlob", AndroidBase64.encodeToString(titleBlob, AndroidBase64.NO_WRAP))
                     put("revision", 1)
                 }.toString().toByteArray(Charsets.UTF_8)
-                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body)
+                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, useSystemTrust = true)
                 Log.i(TAG, "setGroupName PATCH /v2/groups/ ${resp.status} (live-only GroupChange.Actions + ClientZkGroupCipher)")
             } catch (e: Exception) { Log.w(TAG, "setGroupName failed (expected offline)", e) }
         }
@@ -514,7 +514,7 @@ object SignalClient {
                     put("action", action)
                     put("revision", 1)
                 }.toString().toByteArray(Charsets.UTF_8)
-                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body)
+                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, useSystemTrust = true)
                 Log.i(TAG, "updateGroupParticipants PATCH /v2/groups/ $action ${resp.status} (live-only UidCiphertext zk proof)")
             } catch (e: Exception) { Log.w(TAG, "updateGroupParticipants failed (expected offline)", e) }
         }
@@ -540,7 +540,10 @@ object SignalClient {
 
     suspend fun downloadMedia(url: String, key: ByteArray, type: String): ByteArray? {
         return try {
-            val resp = NetworkClient.execute(url, method = "GET")
+            // Pass useSystemTrust when url points at signal.org hosts; caller URLs for attachments are already
+            // prefixed with cdn.signal.org/chat.signal.org which must not use bundled-only trust.
+            val useSystem = url.contains("signal.org")
+            val resp = NetworkClient.execute(url, method = "GET", useSystemTrust = useSystem)
             if (resp.isSuccess) resp.bytes else null
         } catch (_: Exception) { null }
     }

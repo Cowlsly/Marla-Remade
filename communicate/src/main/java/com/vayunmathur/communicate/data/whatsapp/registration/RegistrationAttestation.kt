@@ -32,11 +32,13 @@ object RegistrationAttestation {
     // ---------------------------------------------------------------------------------------------
 
     /**
-     * token = Base64UrlSafeNoWrap(
+     * token = Base64 standard NO_WRAP (flag 2, not url-safe) over
      *   HMAC-SHA1(
      *     key = PBKDF2-HMAC-SHA1(password = packageName || about_logo.png,
      *                            salt = ES3, iters = 128, dkLen = 512 bits),
-     *     msg = signingCertDer || MD5(classes.dex) || phoneDigits))
+     *     msg = signingCertDer || MD5(classes.dex) || phoneDigits)
+     * (APK: AbstractC169977f8.A0n = Base64 flag 2 = NO_WRAP; A0o/flag 11 url-safe is ONLY for
+     * expid + e2e bundle.)
      *
      * @param phoneDigits the NATIONAL number only (WhatsApp's token uses `$phoneNumber` = the `in`
      *   field, with country code kept separate), e.g. cc="1", number="5551234567" → pass

@@ -143,7 +143,7 @@ object SignalGroups {
         val basic = basicAuth(authData)
         val hdrs = mutableMapOf<String, Any>("Authorization" to "Basic $basic", "Content-Type" to "application/json")
         hdrs.putAll(headers)
-        val resp = NetworkClient.execute("$baseUrl$GROUPSV2_PATH", method = "PUT", headers = hdrs, body = requestBody)
+        val resp = NetworkClient.execute("$baseUrl$GROUPSV2_PATH", method = "PUT", headers = hdrs, body = requestBody, useSystemTrust = true)
         resp.isSuccess
     } catch (e: Exception) {
         Log.w(TAG, "putNewGroup failed", e)

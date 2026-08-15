@@ -223,7 +223,7 @@ object SignalContactSync {
         }
 
         val resp = try {
-            NetworkClient.execute(url, method = "POST", headers = headers, body = bodyJson.toString())
+            NetworkClient.execute(url, method = "POST", headers = headers, body = bodyJson.toString(), useSystemTrust = true)
         } catch (e: Exception) {
             Log.w(TAG, "CDSI POST $url failed (live-only SGX attestation): ${e.message}")
             return null
