@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui.pages
+package com.vayunmathur.measure.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -11,8 +11,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
@@ -28,18 +28,18 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.measure.Route
 import com.vayunmathur.measure.domain.Units
-import com.vayunmathur.measure.ui.CompassActions
-import com.vayunmathur.measure.ui.CompassUiState
-import com.vayunmathur.measure.ui.MeasureViewModel
+import com.vayunmathur.measure.platform.CompassActions
+import com.vayunmathur.measure.platform.CompassUiState
+import com.vayunmathur.measure.platform.MeasureViewModel
+import com.vayunmathur.measure.ui.components.MeasureBottomBar
 import kotlin.math.cos
 import kotlin.math.sin
 

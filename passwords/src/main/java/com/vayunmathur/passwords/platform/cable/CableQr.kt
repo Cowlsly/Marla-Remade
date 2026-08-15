@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 /**
  * Parser for the `FIDO:/…` caBLE v2 QR contents shown by a desktop browser during

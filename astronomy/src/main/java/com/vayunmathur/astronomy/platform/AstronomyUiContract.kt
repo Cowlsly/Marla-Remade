@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui
+package com.vayunmathur.astronomy.platform
 
 import kotlinx.datetime.TimeZone
 import kotlin.time.ExperimentalTime

@@ -1,6 +1,6 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
-import com.vayunmathur.passwords.util.Cbor
+import com.vayunmathur.passwords.domain.Cbor
 
 /**
  * CTAP2 command/status constants and the request/response models used by the caBLE authenticator.

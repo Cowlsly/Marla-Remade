@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.platform
 
 import com.vayunmathur.library.room.SqlCipherDbCodec
 import com.vayunmathur.library.util.BaseBackupAgent

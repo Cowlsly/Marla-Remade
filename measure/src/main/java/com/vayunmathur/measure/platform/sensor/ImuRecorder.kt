@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.domain.sensor
+package com.vayunmathur.measure.platform.sensor
 
 import android.content.Context
 import android.hardware.Sensor

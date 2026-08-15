@@ -23,9 +23,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
-import com.vayunmathur.measure.domain.CameraIntrinsicsResolver
 import com.vayunmathur.measure.domain.MeasureNative
-import com.vayunmathur.measure.domain.sensor.ImuRecorder
+import com.vayunmathur.measure.platform.CameraIntrinsicsResolver
+import com.vayunmathur.measure.platform.sensor.ImuRecorder
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
 import java.util.concurrent.Executors

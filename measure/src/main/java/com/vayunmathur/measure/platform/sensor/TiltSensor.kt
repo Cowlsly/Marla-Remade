@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.domain.sensor
+package com.vayunmathur.measure.platform.sensor
 
 import android.content.Context
 import android.hardware.Sensor
@@ -7,43 +7,11 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.view.Surface
 import android.view.WindowManager
+import com.vayunmathur.measure.domain.HeldOrientation
 import com.vayunmathur.measure.domain.LevelMath
+import com.vayunmathur.measure.domain.Tilt
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
-
-/** Which device edge is pointing at the ground, derived purely from gravity. */
-enum class HeldOrientation(val label: String) {
-    Portrait("Portrait"),
-    PortraitUpsideDown("Portrait, upside down"),
-    LandscapeLeft("Landscape, left edge down"),
-    LandscapeRight("Landscape, right edge down"),
-    Flat("Flat"),
-}
-
-data class Tilt(
-    /** Front-to-back tilt for the flat 2D bubble, in degrees. */
-    val pitchDeg: Double,
-    /** Side-to-side tilt for the flat 2D bubble, in degrees. */
-    val rollDeg: Double,
-    /**
-     * Deviation of the down-facing edge from level, in degrees.
-     *
-     * Measured against the nearest quarter turn, so it reads correctly whether the
-     * phone is held upright, upside down, or on either side.
-     */
-    val edgeAngleDeg: Double,
-    /** True when the device is lying close to flat, where the 2D bubble is the useful view. */
-    val isFlat: Boolean,
-    val orientation: HeldOrientation,
-    /**
-     * Rotation to apply to the edge bubble so it stays horizontal in the real world.
-     *
-     * Compensates for the gap between how the device is physically held and how the
-     * activity happens to be rotated, which is why the level does not depend on
-     * auto-rotate being enabled.
-     */
-    val uiRotationDeg: Float,
-)
 
 /**
  * Gravity-derived tilt for the bubble level.

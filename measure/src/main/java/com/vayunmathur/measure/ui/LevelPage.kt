@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui.pages
+package com.vayunmathur.measure.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Arrangement
@@ -25,11 +25,12 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.measure.Route
+import com.vayunmathur.measure.domain.HeldOrientation
 import com.vayunmathur.measure.domain.Units
-import com.vayunmathur.measure.domain.sensor.HeldOrientation
-import com.vayunmathur.measure.ui.LevelActions
-import com.vayunmathur.measure.ui.LevelUiState
-import com.vayunmathur.measure.ui.MeasureViewModel
+import com.vayunmathur.measure.platform.LevelActions
+import com.vayunmathur.measure.platform.LevelUiState
+import com.vayunmathur.measure.platform.MeasureViewModel
+import com.vayunmathur.measure.ui.components.MeasureBottomBar
 import kotlin.math.abs
 import kotlin.math.hypot
 import kotlin.math.min

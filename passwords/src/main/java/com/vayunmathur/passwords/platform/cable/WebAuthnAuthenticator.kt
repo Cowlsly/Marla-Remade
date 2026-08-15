@@ -1,8 +1,8 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.PasswordRepository
-import com.vayunmathur.passwords.util.PasskeyUtils
+import com.vayunmathur.passwords.platform.PasskeyUtils
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.PKCS8EncodedKeySpec

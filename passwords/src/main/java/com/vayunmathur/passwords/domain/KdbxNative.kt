@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.domain
 
 /**
  * JNI surface for the native Rust KDBX library (libpasswords_kdbx.so), backed

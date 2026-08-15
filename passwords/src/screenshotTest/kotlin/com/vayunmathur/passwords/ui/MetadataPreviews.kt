@@ -8,10 +8,10 @@ import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.Password
-import com.vayunmathur.passwords.util.MenuUiState
-import com.vayunmathur.passwords.util.PasswordEditUiState
-import com.vayunmathur.passwords.util.PasswordUiState
-import com.vayunmathur.passwords.util.PasswordsActions
+import com.vayunmathur.passwords.platform.MenuUiState
+import com.vayunmathur.passwords.platform.PasswordEditUiState
+import com.vayunmathur.passwords.platform.PasswordUiState
+import com.vayunmathur.passwords.platform.PasswordsActions
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"

@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 import com.vayunmathur.passwords.R
 
 import android.app.NotificationChannel

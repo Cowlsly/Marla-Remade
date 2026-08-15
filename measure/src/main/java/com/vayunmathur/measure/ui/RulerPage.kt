@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui.pages
+package com.vayunmathur.measure.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -32,8 +32,9 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.measure.Route
 import com.vayunmathur.measure.data.model.UnitSystem
 import com.vayunmathur.measure.domain.Units
-import com.vayunmathur.measure.ui.MeasureViewModel
-import com.vayunmathur.measure.ui.RulerUiState
+import com.vayunmathur.measure.platform.MeasureViewModel
+import com.vayunmathur.measure.platform.RulerUiState
+import com.vayunmathur.measure.ui.components.MeasureBottomBar
 
 @Composable
 fun RulerPage(backStack: NavBackStack<Route>, viewModel: MeasureViewModel) {

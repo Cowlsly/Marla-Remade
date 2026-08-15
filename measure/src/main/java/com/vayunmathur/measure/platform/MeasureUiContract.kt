@@ -1,10 +1,10 @@
-package com.vayunmathur.measure.ui
+package com.vayunmathur.measure.platform
 
 import com.vayunmathur.measure.data.model.Anchor
 import com.vayunmathur.measure.data.model.SavedMeasurement
 import com.vayunmathur.measure.data.model.TrackingQuality
 import com.vayunmathur.measure.data.model.UnitSystem
-import com.vayunmathur.measure.domain.sensor.HeldOrientation
+import com.vayunmathur.measure.domain.HeldOrientation
 
 /**
  * The UI contract between [MeasureViewModel] and the pages in `ui.pages`.

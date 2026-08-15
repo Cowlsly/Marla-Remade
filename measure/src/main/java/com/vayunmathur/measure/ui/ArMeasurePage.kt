@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui.pages
+package com.vayunmathur.measure.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
@@ -45,11 +45,12 @@ import com.vayunmathur.measure.Route
 import com.vayunmathur.measure.data.model.TrackingQuality
 import com.vayunmathur.measure.domain.MeasureNative
 import com.vayunmathur.measure.domain.Units
-import com.vayunmathur.measure.ui.ArMeasureActions
-import com.vayunmathur.measure.ui.ArMeasureUiState
-import com.vayunmathur.measure.ui.MeasureViewModel
+import com.vayunmathur.measure.platform.ArMeasureActions
+import com.vayunmathur.measure.platform.ArMeasureUiState
+import com.vayunmathur.measure.platform.MeasureViewModel
+import com.vayunmathur.measure.platform.trackingQualityFrom
+import com.vayunmathur.measure.ui.components.MeasureBottomBar
 import com.vayunmathur.measure.ui.components.MeasureCamera
-import com.vayunmathur.measure.ui.trackingQualityFrom
 import kotlinx.coroutines.delay
 
 @Composable

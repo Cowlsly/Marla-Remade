@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec

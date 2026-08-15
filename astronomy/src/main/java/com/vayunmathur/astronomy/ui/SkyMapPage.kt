@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui.pages
+package com.vayunmathur.astronomy.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
@@ -8,10 +8,10 @@ import androidx.compose.ui.layout.onSizeChanged
 import com.vayunmathur.astronomy.R
 import com.vayunmathur.astronomy.Route
 import com.vayunmathur.astronomy.domain.projection.ViewState
-import com.vayunmathur.astronomy.ui.AstronomyViewModel
-import com.vayunmathur.astronomy.ui.ConstellationMode
-import com.vayunmathur.astronomy.ui.SkyMapActions
-import com.vayunmathur.astronomy.ui.SkyMapUiState
+import com.vayunmathur.astronomy.platform.AstronomyViewModel
+import com.vayunmathur.astronomy.platform.ConstellationMode
+import com.vayunmathur.astronomy.platform.SkyMapActions
+import com.vayunmathur.astronomy.platform.SkyMapUiState
 import com.vayunmathur.astronomy.ui.components.CameraBackground
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.NavBackStack

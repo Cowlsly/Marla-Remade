@@ -7,23 +7,23 @@ import com.vayunmathur.measure.data.model.Anchor
 import com.vayunmathur.measure.data.model.MeasurementKind
 import com.vayunmathur.measure.data.model.SavedMeasurement
 import com.vayunmathur.measure.data.model.TrackingQuality
-import com.vayunmathur.measure.ui.ArMeasureActions
-import com.vayunmathur.measure.ui.ArMeasureUiState
-import com.vayunmathur.measure.ui.CompassActions
-import com.vayunmathur.measure.ui.CompassUiState
-import com.vayunmathur.measure.ui.LevelActions
-import com.vayunmathur.measure.ui.LevelUiState
-import com.vayunmathur.measure.ui.RulerUiState
-import com.vayunmathur.measure.ui.SavedActions
-import com.vayunmathur.measure.ui.SavedUiState
-import com.vayunmathur.measure.ui.SettingsActions
-import com.vayunmathur.measure.ui.SettingsUiState
-import com.vayunmathur.measure.ui.pages.ArMeasureContent
-import com.vayunmathur.measure.ui.pages.CompassContent
-import com.vayunmathur.measure.ui.pages.LevelContent
-import com.vayunmathur.measure.ui.pages.RulerContent
-import com.vayunmathur.measure.ui.pages.SavedMeasurementsContent
-import com.vayunmathur.measure.ui.pages.SettingsContent
+import com.vayunmathur.measure.platform.ArMeasureActions
+import com.vayunmathur.measure.platform.ArMeasureUiState
+import com.vayunmathur.measure.platform.CompassActions
+import com.vayunmathur.measure.platform.CompassUiState
+import com.vayunmathur.measure.platform.LevelActions
+import com.vayunmathur.measure.platform.LevelUiState
+import com.vayunmathur.measure.platform.RulerUiState
+import com.vayunmathur.measure.platform.SavedActions
+import com.vayunmathur.measure.platform.SavedUiState
+import com.vayunmathur.measure.platform.SettingsActions
+import com.vayunmathur.measure.platform.SettingsUiState
+import com.vayunmathur.measure.ui.ArMeasureContent
+import com.vayunmathur.measure.ui.CompassContent
+import com.vayunmathur.measure.ui.LevelContent
+import com.vayunmathur.measure.ui.RulerContent
+import com.vayunmathur.measure.ui.SavedMeasurementsContent
+import com.vayunmathur.measure.ui.SettingsContent
 
 /**
  * Store listing screenshots, rendered from Compose previews rather than an instrumented

@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.domain
 import java.nio.ByteBuffer
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec

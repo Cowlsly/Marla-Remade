@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui.pages
+package com.vayunmathur.astronomy.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -10,7 +10,7 @@ import com.vayunmathur.astronomy.R
 import com.vayunmathur.astronomy.Route
 import com.vayunmathur.astronomy.domain.engine.TimeEngine
 import com.vayunmathur.astronomy.domain.engine.toDeg
-import com.vayunmathur.astronomy.ui.AstronomyViewModel
+import com.vayunmathur.astronomy.platform.AstronomyViewModel
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.NavBackStack
@@ -87,7 +87,7 @@ private data class DetailInfo(
 )
 
 @OptIn(ExperimentalTime::class)
-private fun resolveDetail(id: String, sky: com.vayunmathur.astronomy.ui.VisibleSky, vm: AstronomyViewModel): DetailInfo? {
+private fun resolveDetail(id: String, sky: com.vayunmathur.astronomy.platform.VisibleSky, vm: AstronomyViewModel): DetailInfo? {
     return when {
         id == "SUN" -> {
             val s = sky.sun ?: return null
@@ -109,7 +109,7 @@ private fun resolveDetail(id: String, sky: com.vayunmathur.astronomy.ui.VisibleS
                 val jd = sky.jd
                 val lst = com.vayunmathur.astronomy.domain.engine.TimeEngine.lstRad(jd, obs.lonRad)
                 val aa = com.vayunmathur.astronomy.domain.engine.CoordinateTransforms.raDecToAltAz(com.vayunmathur.astronomy.domain.engine.RaDec(it.ra, it.dec), lst, obs.latRad)
-                com.vayunmathur.astronomy.ui.VisibleStar(it, aa, com.vayunmathur.astronomy.domain.engine.RaDec(it.ra, it.dec))
+                com.vayunmathur.astronomy.platform.VisibleStar(it, aa, com.vayunmathur.astronomy.domain.engine.RaDec(it.ra, it.dec))
             } ?: return null
             DetailInfo(s.star.properName ?: s.star.name ?: "Star ${s.star.id}", s.star.constellation ?: s.star.spectralClass ?: "", s.star.ra.toDeg(), s.star.dec.toDeg(), s.altAz.altDeg to s.altAz.azDeg, s.star.mag, s.star.ra to s.star.dec, "BV ${s.star.bv.format(2)}")
         }

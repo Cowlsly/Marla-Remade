@@ -1,39 +1,14 @@
 package com.vayunmathur.passwords.ui
-import com.vayunmathur.passwords.R
-
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.wrapContentHeight
-import com.vayunmathur.library.ui.CircularProgressIndicator
-import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.IconCopy
-import com.vayunmathur.library.ui.IconKey
-import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
-import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.util.DatabaseItem
-import com.vayunmathur.library.util.tryOrDefault
+import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.Password
-import com.vayunmathur.passwords.Route
-import com.vayunmathur.passwords.util.MenuUiState
-import com.vayunmathur.passwords.util.PasswordsActions
-import com.vayunmathur.passwords.util.PasswordsViewModel
-import com.vayunmathur.passwords.util.TOTP
+import com.vayunmathur.passwords.platform.MenuUiState
+import com.vayunmathur.passwords.platform.PasswordsViewModel
 
 sealed class CredentialItem(override val id: Long) : DatabaseItem {
     class PasswordItem(val password: Password) : CredentialItem(password.id)
@@ -49,71 +24,4 @@ fun MenuPage(
     val passwords by viewModel.passwords.collectAsState()
     val passkeys by viewModel.passkeys.collectAsState()
     MenuScreen(backStack, MenuUiState(passwords, passkeys, now), viewModel)
-}
-
-/**
- * The credential list, with no dependency on the ViewModel so it can be rendered from a
- * `@Preview` — see `src/screenshotTest`, which is where the store listing images come from.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-fun MenuScreen(
-    backStack: NavBackStack<Route>,
-    state: MenuUiState,
-    actions: PasswordsActions,
-) {
-    val now = state.now
-
-    val items: List<CredentialItem> = remember(state.passwords, state.passkeys) {
-        state.passwords.map { CredentialItem.PasswordItem(it) } +
-            state.passkeys.map { CredentialItem.PasskeyItem(it) }
-    }
-
-    ListPage<CredentialItem, Route, Route.PasswordEditPage>(backStack, items, "Passwords", {
-        when (it) {
-            is CredentialItem.PasswordItem -> Text(it.password.name.ifBlank { stringResource(R.string.no_name) })
-            is CredentialItem.PasskeyItem -> Row(verticalAlignment = Alignment.CenterVertically) {
-                IconKey(Modifier.size(16.dp))
-                Spacer(Modifier.width(4.dp))
-                Text(it.passkey.rpName.ifBlank { it.passkey.rpId })
-            }
-        }
-    }, {
-        when (it) {
-            is CredentialItem.PasswordItem -> Text(it.password.username.ifBlank { it.password.email })
-            is CredentialItem.PasskeyItem -> Text(it.passkey.userName)
-        }
-    }, {
-        when (val item = items.firstOrNull { i -> i.id == it }) {
-            is CredentialItem.PasswordItem -> Route.PasswordPage(item.password.id)
-            is CredentialItem.PasskeyItem -> Route.PasskeyPage(item.passkey.id)
-            null -> Route.Menu
-        }
-    }, { Route.PasswordEditPage(0) }, Route.Settings, trailingContent = {
-        if (it is CredentialItem.PasswordItem) {
-            val password = it.password
-            if (password.totpSecret.isNullOrBlank()) return@ListPage
-            val secret = password.totpSecret
-            val timeBucket = now / 1000 / 30
-            val currentCode = remember(secret, timeBucket) {
-                tryOrDefault("----") { TOTP.generate(secret, timeBucket * 30) }
-            }
-            val progress = (30000L - now % 30000L) / 30000f
-            Row(Modifier.clickable {
-                actions.copyToClipboard("totp", currentCode)
-            }.wrapContentHeight(), verticalAlignment = Alignment.CenterVertically) {
-                Text(currentCode, style = MaterialTheme.typography.bodyLarge)
-                Spacer(Modifier.width(8.dp))
-                Box(contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator({progress}, Modifier.size(40.dp))
-                    IconCopy(Modifier.size(16.dp))
-                }
-            }
-        }
-    }, searchEnabled = true, searchString = {
-        when (it) {
-            is CredentialItem.PasswordItem -> "${it.password.name} ${it.password.username} ${it.password.email} ${it.password.websites.joinToString(" ")}"
-            is CredentialItem.PasskeyItem -> "${it.passkey.rpName} ${it.passkey.rpId} ${it.passkey.userName}"
-        }
-    })
 }

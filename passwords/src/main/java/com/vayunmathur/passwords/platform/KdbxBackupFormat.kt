@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.platform
 
 import android.content.Context
 import com.vayunmathur.library.util.BackupFormat

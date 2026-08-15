@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec

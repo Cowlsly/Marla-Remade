@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui.pages
+package com.vayunmathur.measure.ui.components
 
 import androidx.compose.runtime.Composable
 import com.vayunmathur.library.ui.IconArea

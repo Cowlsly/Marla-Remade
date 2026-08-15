@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui.pages
+package com.vayunmathur.astronomy.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -9,8 +9,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.R
 import com.vayunmathur.astronomy.Route
-import com.vayunmathur.astronomy.ui.AstronomyViewModel
-import com.vayunmathur.astronomy.ui.SearchActions
+import com.vayunmathur.astronomy.platform.AstronomyViewModel
+import com.vayunmathur.astronomy.platform.SearchActions
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource

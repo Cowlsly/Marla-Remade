@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.domain
 
 object Cbor {
     private const val TYPE_UNSIGNED_INT = 0x00

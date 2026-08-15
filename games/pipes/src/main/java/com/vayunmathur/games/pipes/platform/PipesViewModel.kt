@@ -1,11 +1,11 @@
-package com.vayunmathur.games.pipes.util
+package com.vayunmathur.games.pipes.platform
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.games.pipes.data.CellPos
 import com.vayunmathur.games.pipes.data.CompletedLevelsRepository
-import com.vayunmathur.games.pipes.data.DailyLevels
+import com.vayunmathur.games.pipes.domain.DailyLevels
 import com.vayunmathur.games.pipes.data.LevelData
 import com.vayunmathur.games.pipes.data.LevelPack
 import com.vayunmathur.library.util.LevelStats

@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.platform
 
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.Password

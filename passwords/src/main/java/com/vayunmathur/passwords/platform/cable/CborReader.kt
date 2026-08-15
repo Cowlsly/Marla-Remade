@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 /**
  * Minimal CBOR (RFC 8949) decoder, companion to the canonical encoder in

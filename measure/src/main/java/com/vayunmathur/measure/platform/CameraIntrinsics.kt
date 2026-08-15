@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.domain
+package com.vayunmathur.measure.platform
 
 import android.content.Context
 import android.hardware.camera2.CameraCharacteristics

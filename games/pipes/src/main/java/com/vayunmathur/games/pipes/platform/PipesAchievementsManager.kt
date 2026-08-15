@@ -1,4 +1,4 @@
-package com.vayunmathur.games.pipes.util
+package com.vayunmathur.games.pipes.platform
 
 import android.content.Context
 import com.vayunmathur.games.pipes.data.CompletedLevelsRepository

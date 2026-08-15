@@ -1,4 +1,7 @@
-package com.vayunmathur.games.pipes.data
+package com.vayunmathur.games.pipes.domain
+
+import com.vayunmathur.games.pipes.data.LevelPack
+import com.vayunmathur.games.pipes.data.computeAdjacency
 
 /**
  * The five levels of a given day, generated from a seed derived purely from the epoch day, so

@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.platform
 
 import android.app.Application
 import android.content.ClipData

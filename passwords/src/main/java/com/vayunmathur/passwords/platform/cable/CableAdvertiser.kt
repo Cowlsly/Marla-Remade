@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothManager

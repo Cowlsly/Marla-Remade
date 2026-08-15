@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui.pages
+package com.vayunmathur.astronomy.ui
 
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
@@ -8,10 +8,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.R
 import com.vayunmathur.astronomy.Route
-import com.vayunmathur.astronomy.ui.AstronomyViewModel
-import com.vayunmathur.astronomy.ui.ConstellationMode
-import com.vayunmathur.astronomy.ui.SettingsActions
-import com.vayunmathur.astronomy.ui.SettingsUiState
+import com.vayunmathur.astronomy.platform.AstronomyViewModel
+import com.vayunmathur.astronomy.platform.ConstellationMode
+import com.vayunmathur.astronomy.platform.SettingsActions
+import com.vayunmathur.astronomy.platform.SettingsUiState
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.NavBackStack

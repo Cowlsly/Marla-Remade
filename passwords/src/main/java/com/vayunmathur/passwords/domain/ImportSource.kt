@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.util
+package com.vayunmathur.passwords.domain
 
 import androidx.annotation.StringRes
 import com.vayunmathur.passwords.R

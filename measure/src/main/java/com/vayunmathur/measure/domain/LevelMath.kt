@@ -1,6 +1,6 @@
 package com.vayunmathur.measure.domain
 
-import com.vayunmathur.measure.domain.sensor.HeldOrientation
+import com.vayunmathur.measure.domain.HeldOrientation
 import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.roundToInt

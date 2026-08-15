@@ -1,4 +1,4 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import android.util.Log
 import com.vayunmathur.library.network.WebSocketClient

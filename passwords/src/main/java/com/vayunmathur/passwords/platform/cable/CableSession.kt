@@ -1,7 +1,7 @@
-package com.vayunmathur.passwords.cable
+package com.vayunmathur.passwords.platform.cable
 
 import android.util.Log
-import com.vayunmathur.passwords.util.Cbor
+import com.vayunmathur.passwords.domain.Cbor
 
 /**
  * Drives one caBLE v2 authenticator session end-to-end, matching the Chromium `TunnelTransport`

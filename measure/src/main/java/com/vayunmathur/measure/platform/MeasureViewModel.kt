@@ -1,4 +1,4 @@
-package com.vayunmathur.measure.ui
+package com.vayunmathur.measure.platform
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -12,8 +12,8 @@ import com.vayunmathur.measure.data.model.TrackingQuality
 import com.vayunmathur.measure.data.model.UnitSystem
 import com.vayunmathur.measure.data.model.distanceTo
 import com.vayunmathur.measure.domain.MeasureNative
-import com.vayunmathur.measure.domain.sensor.ImuRecorder
-import com.vayunmathur.measure.domain.sensor.TiltSensor
+import com.vayunmathur.measure.platform.sensor.ImuRecorder
+import com.vayunmathur.measure.platform.sensor.TiltSensor
 import com.vayunmathur.measure.domain.polygonArea
 import com.vayunmathur.measure.domain.polygonPerimeter
 import kotlinx.coroutines.flow.MutableStateFlow

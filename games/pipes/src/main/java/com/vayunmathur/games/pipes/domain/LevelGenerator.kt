@@ -1,5 +1,9 @@
-package com.vayunmathur.games.pipes.data
+package com.vayunmathur.games.pipes.domain
 
+import com.vayunmathur.games.pipes.data.CellPos
+import com.vayunmathur.games.pipes.data.EndpointPair
+import com.vayunmathur.games.pipes.data.LevelData
+import com.vayunmathur.games.pipes.data.computeAdjacency
 import kotlin.math.roundToInt
 import kotlin.random.Random
 import java.util.Locale

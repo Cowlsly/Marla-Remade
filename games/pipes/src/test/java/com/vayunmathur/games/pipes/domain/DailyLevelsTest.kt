@@ -1,4 +1,4 @@
-package com.vayunmathur.games.pipes.data
+package com.vayunmathur.games.pipes.domain
 
 import kotlin.test.Test
 import kotlin.test.assertEquals

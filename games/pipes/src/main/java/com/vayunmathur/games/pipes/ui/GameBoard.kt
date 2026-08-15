@@ -12,7 +12,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.input.pointer.pointerInput
 import com.vayunmathur.games.pipes.data.CellPos
 import com.vayunmathur.games.pipes.data.LevelData
-import com.vayunmathur.games.pipes.util.PipesGameState
+import com.vayunmathur.games.pipes.platform.PipesGameState
 
 @Composable
 fun GameBoard(

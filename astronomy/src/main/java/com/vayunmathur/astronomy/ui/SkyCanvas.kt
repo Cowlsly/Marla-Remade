@@ -1,4 +1,4 @@
-package com.vayunmathur.astronomy.ui.pages
+package com.vayunmathur.astronomy.ui
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.gestures.detectDragGestures
@@ -23,9 +23,9 @@ import com.vayunmathur.astronomy.domain.engine.AltAz
 import com.vayunmathur.astronomy.domain.projection.StereographicProjection
 import com.vayunmathur.astronomy.domain.projection.ViewState
 import com.vayunmathur.astronomy.domain.projection.projectAll
-import com.vayunmathur.astronomy.ui.TrajectoryPoint
-import com.vayunmathur.astronomy.ui.VisibleArt
-import com.vayunmathur.astronomy.ui.VisibleSky
+import com.vayunmathur.astronomy.platform.TrajectoryPoint
+import com.vayunmathur.astronomy.platform.VisibleArt
+import com.vayunmathur.astronomy.platform.VisibleSky
 import kotlin.math.*
 
 @Composable

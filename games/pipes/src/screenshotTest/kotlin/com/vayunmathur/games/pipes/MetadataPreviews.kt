@@ -7,10 +7,10 @@ import com.vayunmathur.games.pipes.data.CellPos
 import com.vayunmathur.games.pipes.data.EndpointPair
 import com.vayunmathur.games.pipes.data.LevelData
 import com.vayunmathur.games.pipes.ui.PipesTheme
-import com.vayunmathur.games.pipes.util.GameBoardUiState
-import com.vayunmathur.games.pipes.util.PackProgress
-import com.vayunmathur.games.pipes.util.PipesActions
-import com.vayunmathur.games.pipes.util.PipesGameState
+import com.vayunmathur.games.pipes.platform.GameBoardUiState
+import com.vayunmathur.games.pipes.platform.PackProgress
+import com.vayunmathur.games.pipes.platform.PipesActions
+import com.vayunmathur.games.pipes.platform.PipesGameState
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
