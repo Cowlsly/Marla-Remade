@@ -7,45 +7,80 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json as KotlinJson
 
 /**
- * Persistent auth data for the Signal primary client (own phone-number registration).
+ * Persistent auth data for the Signal primary client.
  *
- * Mirrors [com.vayunmathur.communicate.data.whatsapp.WhatsAppAuthData] but for Signal's
- * registration (ACI/PNI, Kyber pre-keys). Persisted under `communicate_signal_auth` so it
- * never collides with WhatsApp or other lines.
+ * Real Signal registration (see PushServiceSocket verification-session and registration paths,
+ * RegistrationApiV2, RegistrationSessionRequestBody, AccountAttributes):
+ * - Two identity keypairs (ACI and PNI) each IdentityKeyPair, uploaded as base64 of serialized 33B.
+ * - Two registrationIds in AccountAttributes.
+ * - Account password for Basic auth on registration and WebSocket.
+ * - Unidentified-access key 32B.
+ * - Per-identity signed EC prekeys and Kyber-1024 last-resort prekeys (1569B with tag).
+ *
+ * Persisted under communicate_signal_auth. Keeps legacy single-identity fields for compat.
  */
 @Serializable
 data class SignalAuthData(
     val phoneNumber: String,
-    /** Account ACI (UUID string), assigned at registration. */
     val aci: String = "",
-    /** Phone-number identity PNI (UUID string). */
     val pni: String = "",
-    /** Device id — primary device is always 1 on Signal. */
     val deviceId: Int = 1,
-    // Signal identity key pair (Curve25519) — E2E.
-    val identityPrivateKey: String = "", // Base64
-    val identityPublicKey: String = "", // Base64
-    // Signal Protocol registration id.
+    val identityPrivateKey: String = "",
+    val identityPublicKey: String = "",
     val registrationId: Int = 0,
-    // Signed pre-key.
     val signedPreKeyId: Int = 0,
-    val signedPreKeyPublic: String = "", // Base64
-    val signedPreKeyPrivate: String = "", // Base64
-    val signedPreKeySignature: String = "", // Base64
-    // Post-quantum (Kyber1024 / ML-KEM) last-resort pre-keys.
-    // All-or-none: emitted together when the id is non-zero.
+    val signedPreKeyPublic: String = "",
+    val signedPreKeyPrivate: String = "",
+    val signedPreKeySignature: String = "",
     val pqLastResortKeyId: Int = 0,
-    val pqLastResortPublic: String = "", // Base64 (raw Kyber pub)
-    val pqLastResortSecret: String = "", // Base64 (serialized KEM secret)
-    val pqLastResortSignature: String = "", // Base64 (XEdDSA sig over 0x08||pub)
+    val pqLastResortPublic: String = "",
+    val pqLastResortSecret: String = "",
+    val pqLastResortSignature: String = "",
     val kyberPreKeyId: Int = 0,
     val kyberPreKeyPublic: String = "",
     val kyberPreKeySecret: String = "",
     val kyberPreKeySignature: String = "",
-    // Whether registration completed (Signal line is live).
+    val aciIdentityPrivateKey: String = "",
+    val aciIdentityPublicKey: String = "",
+    val pniIdentityPrivateKey: String = "",
+    val pniIdentityPublicKey: String = "",
+    val aciRegistrationId: Int = 0,
+    val pniRegistrationId: Int = 0,
+    val aciSignedPreKeyId: Int = 0,
+    val aciSignedPreKeyPublic: String = "",
+    val aciSignedPreKeyPrivate: String = "",
+    val aciSignedPreKeySignature: String = "",
+    val pniSignedPreKeyId: Int = 0,
+    val pniSignedPreKeyPublic: String = "",
+    val pniSignedPreKeyPrivate: String = "",
+    val pniSignedPreKeySignature: String = "",
+    val aciPqLastResortKeyId: Int = 0,
+    val aciPqLastResortPublic: String = "",
+    val aciPqLastResortSecret: String = "",
+    val aciPqLastResortSignature: String = "",
+    val pniPqLastResortKeyId: Int = 0,
+    val pniPqLastResortPublic: String = "",
+    val pniPqLastResortSecret: String = "",
+    val pniPqLastResortSignature: String = "",
+    val password: String = "",
+    val unidentifiedAccessKey: String = "",
+    val registrationLock: String? = null,
+    val verificationSessionId: String? = null,
     val registered: Boolean = false,
     val profileName: String = "",
 ) {
+    fun effectiveAciPrivate(): String = aciIdentityPrivateKey.ifEmpty { identityPrivateKey }
+    fun effectiveAciPublic(): String = aciIdentityPublicKey.ifEmpty { identityPublicKey }
+    fun effectiveAciRegId(): Int = if (aciRegistrationId != 0) aciRegistrationId else registrationId
+    fun effectiveAciSignedId(): Int = if (aciSignedPreKeyId != 0) aciSignedPreKeyId else signedPreKeyId
+    fun effectiveAciSignedPub(): String = aciSignedPreKeyPublic.ifEmpty { signedPreKeyPublic }
+    fun effectiveAciSignedPriv(): String = aciSignedPreKeyPrivate.ifEmpty { signedPreKeyPrivate }
+    fun effectiveAciSignedSig(): String = aciSignedPreKeySignature.ifEmpty { signedPreKeySignature }
+    fun effectiveAciPqId(): Int = if (aciPqLastResortKeyId != 0) aciPqLastResortKeyId else pqLastResortKeyId
+    fun effectiveAciPqPub(): String = aciPqLastResortPublic.ifEmpty { pqLastResortPublic }
+    fun effectiveAciPqSec(): String = aciPqLastResortSecret.ifEmpty { pqLastResortSecret }
+    fun effectiveAciPqSig(): String = aciPqLastResortSignature.ifEmpty { pqLastResortSignature }
+
     companion object {
         private const val PREFS_NAME = "communicate_signal_auth"
         private const val KEY_AUTH_DATA = "auth_data"

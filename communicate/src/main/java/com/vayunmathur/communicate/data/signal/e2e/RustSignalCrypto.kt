@@ -3,14 +3,16 @@ package com.vayunmathur.communicate.data.signal.e2e
 import android.util.Log
 
 /**
- * JNI wrapper around `libcommunicate_signal.so` (Rust crate `communicate_signal`) for the
- * **Signal** primary client.
+ * JNI bridge to the Rust Signal crate + libsignal-android Java layer.
  *
- * Reuses the same `.so` as [com.vayunmathur.communicate.data.whatsapp.e2e.RustWhatsAppCrypto];
- * no second `rustNativeLib` is added. The Rust crate exposes both WhatsApp and Signal symbols
- * from the single cdylib (see `src/main/rust/src/jni_bridge.rs` + `signal.rs`).
+ * The Signal protocol uses PQXDH (Kyber1024 + X3DH) and sealed sender.
+ * For the Kyber/Double Ratchet wire, we delegate to libsignal-android's
+ * Java API where possible (SessionBuilder, SessionCipher, GroupCipher,
+ * SealedSessionCipher). A small Rust fallback (communicate_signal crate)
+ * handles any gaps so the build stays compilable without extra Gradle deps.
  *
- * All methods are pure — Kotlin owns Room and passes opaque session/sender-key blobs.
+ * CIPHERTEXT_MESSAGE_CURRENT_VERSION = 4 (PQXDH); HKDF label
+ * "WhisperText_X25519_SHA-256_CRYSTALS-KYBER-1024" - see pqxdh.rs.
  */
 object RustSignalCrypto {
 
@@ -21,7 +23,6 @@ object RustSignalCrypto {
         Log.i(TAG, "libcommunicate_signal loaded (Signal)")
         true
     } catch (t: Throwable) {
-        // Already loaded by RustWhatsAppCrypto is OK — UnsatisfiedLinkError with "already loaded" is not fatal
         if (t.message?.contains("already loaded", ignoreCase = true) == true) {
             Log.i(TAG, "libcommunicate_signal already loaded")
             true
@@ -39,9 +40,35 @@ object RustSignalCrypto {
     @JvmStatic external fun sign(privateKey: ByteArray, message: ByteArray): ByteArray?
     @JvmStatic external fun verify(publicKey: ByteArray, message: ByteArray, signature: ByteArray): Boolean
 
-    // -- Session (same wire as WhatsApp, different JNI class) --
+    // -- Session (PQXDH wire; version 4; Kyber fields) --
 
+    /**
+     * Process a PreKeyBundle that includes Kyber prekey.
+     * Wire: PreKeySignalMessage fields 7 (kyber_pre_key_id) + 8 (kyber_ciphertext 1568B)
+     * must be present together for version >= 4.
+     * HKDF label: "WhisperText_X25519_SHA-256_CRYSTALS-KYBER-1024" (pqxdh.rs:74)
+     */
     @JvmStatic external fun processPreKeyBundle(
+        localIdentityPrivate: ByteArray,
+        localIdentityPublic: ByteArray,
+        localRegistrationId: Int,
+        registrationId: Int,
+        preKeyId: Int,
+        preKeyPublic: ByteArray?,
+        signedPreKeyId: Int,
+        signedPreKeyPublic: ByteArray,
+        signedPreKeySignature: ByteArray,
+        identityKey: ByteArray,
+        // PQXDH additions:
+        kyberPreKeyId: Int,
+        kyberPreKeyPublic: ByteArray,     // 1569B = 0x08 || 1568 (tag intact)
+        kyberPreKeySignature: ByteArray,  // XEdDSA over kyber pub serialize
+        kyberCiphertext: ByteArray,       // 1568B raw from encaps (server-provided or locally generated; 0x08 tag handled in Rust libsignal path; for stub keep as raw)
+    ): ByteArray?
+
+    /** Legacy overload without Kyber for incremental migration; delegates to above with empty Kyber. */
+    @JvmStatic @Deprecated("Use Kyber overload")
+    external fun processPreKeyBundleLegacy(
         localIdentityPrivate: ByteArray,
         localIdentityPublic: ByteArray,
         localRegistrationId: Int,
@@ -61,8 +88,19 @@ object RustSignalCrypto {
         localIdentityPublic: ByteArray,
         signedPreKeyPrivate: ByteArray,
         oneTimePrivate: ByteArray?,
+        kyberSecretKey: ByteArray?,  // 3169B or 3168B serialized KEM secret (with 0x08 tag if present)
         preKeyMessageBytes: ByteArray,
     ): Array<ByteArray>?
+
+    /**
+     * Replay guard for Kyber last-resort prekeys (storage/inmem.rs:200).
+     * One-time keys -> deleted after first use; last-resort keys -> (kyberId, signedEcId, baseKey) tuple dedup.
+     */
+    @JvmStatic external fun markKyberPreKeyUsed(
+        kyberPreKeyId: Int,
+        signedPreKeyId: Int,
+        baseKey: ByteArray,
+    ): Boolean
 
     // -- Group (Sender Keys) --
 
@@ -71,11 +109,16 @@ object RustSignalCrypto {
     @JvmStatic external fun encryptGroup(stateBytes: ByteArray, plaintext: ByteArray): Array<ByteArray>?
     @JvmStatic external fun decryptGroup(stateBytes: ByteArray, ciphertext: ByteArray): Array<ByteArray>?
 
-    // -- Sealed sender (Signal-specific, in signal.rs) --
+    // -- Sealed sender (delegated to libsignal SealedSessionCipher; see SignalE2E.sealedSender*) --
+    // Kept for Kotlin callers that still go via JNI; the primary path in SignalE2E uses
+    // org.signal.libsignal.metadata.SealedSessionCipher directly with SenderCertificate.
 
-    /** Sealed-sender encrypt: returns ciphertext bytes or null. */
+    /**
+     * Sealed-sender encrypt - real implementation requires a SenderCertificate
+     * fetched live from GET /v1/certificate/delivery and validated via CertificateValidator.
+     * This JNI stub is retained for tests; production calls SealedSessionCipher.encrypt().
+     */
     @JvmStatic external fun sealedSenderEncrypt(plaintext: ByteArray, recipientAci: String, recipientDeviceId: Int): ByteArray?
-    /** Sealed-sender decrypt: returns plaintext bytes or null. */
     @JvmStatic external fun sealedSenderDecrypt(ciphertext: ByteArray): ByteArray?
 
     // -- Convenience helpers --
@@ -107,9 +150,10 @@ object RustSignalCrypto {
         localIdentityPublic: ByteArray,
         signedPreKeyPrivate: ByteArray,
         oneTimePrivate: ByteArray?,
+        kyberSecretKey: ByteArray?,
         preKeyMessageBytes: ByteArray,
     ): DecryptResult {
-        val out = decryptPreKeyMessage(localIdentityPrivate, localIdentityPublic, signedPreKeyPrivate, oneTimePrivate, preKeyMessageBytes)
+        val out = decryptPreKeyMessage(localIdentityPrivate, localIdentityPublic, signedPreKeyPrivate, oneTimePrivate, kyberSecretKey, preKeyMessageBytes)
             ?: throw RuntimeException("Rust decryptPreKeyMessage null")
         if (out.size != 2) throw RuntimeException("decryptPreKey expected 2 parts")
         return DecryptResult(out[0], out[1])

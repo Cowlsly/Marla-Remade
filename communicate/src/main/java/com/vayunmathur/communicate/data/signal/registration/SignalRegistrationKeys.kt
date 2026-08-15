@@ -2,52 +2,122 @@ package com.vayunmathur.communicate.data.signal.registration
 
 import android.util.Base64
 import com.vayunmathur.communicate.data.signal.SignalAuthData
-import com.vayunmathur.communicate.data.signal.e2e.RustSignalCrypto
-import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
 import java.security.SecureRandom
+import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.ecc.ECKeyPair
 
 /**
  * Generates the client key material for a fresh Signal registration.
- * Mirrors `data/whatsapp/registration/RegistrationKeys.kt` for Signal.
  *
- * Produces: identity keypair, signed pre-key, registrationId, and (best-effort)
- * Kyber PQ last-resort prekey. The scaffold is persisted as [SignalAuthData] so
- * code→verify retries reuse the same keys.
+ * Real Signal (PushServiceSocket REGISTRATION_PATH, RegistrationSessionRequestBody,
+ * AccountAttributes, PreKeyUtil.java:157, libsignal state/kyber_prekey.rs):
+ * - Two IdentityKeyPairs (ACI + PNI) via IdentityKeyPair.generate()
+ * - Two registrationIds 1..16383 (KeyHelper.generateRegistrationId)
+ * - Two signed EC prekeys (ECKeyPair.generate() + identityPriv.calculateSignature(pub.serialize()))
+ * - Two Kyber-1024 last-resort prekeys (KEMKeyPair KYBER_1024, pub.serialize() 1569B = 0x08||1568, sig over full 1569B)
+ * - Account password (random for Basic e164:password) and UAK 32B
+ *
+ * Serialization contract (coordinate with crypto teammate who owns SignalPqPreKey):
+ * - aci/pniIdentityKey wire = Base64-nopad(IdentityKey.serialize()) 33B (0x05||32) via RegistrationSessionRequestBody.aciIdentityKey
+ * - SignedPreKeyEntity wire = {keyId, publicKey: Base64-nopad(ECPublicKey.serialize() 33B), signature}
+ * - KyberPreKeyEntity wire = {keyId, publicKey: Base64-nopad(KEMPublicKey.serialize() 1569B with 0x08 tag), signature}
+ *   Signature for Kyber is over the FULL 1569B serialize (including 0x08) — stripping tag breaks server verification.
+ *   Secret key (3168B raw + tag) is persisted locally only, never uploaded.
  */
 class SignalRegistrationKeys private constructor(val authScaffold: SignalAuthData) {
     companion object {
         fun generate(phoneNumber: String): SignalRegistrationKeys {
             val rng = SecureRandom()
-            val identity = RustSignalCrypto.generateKeyPairSplit()
-            val signedPreKey = RustSignalCrypto.generateKeyPairSplit()
-            val registrationId = rng.nextInt(0x3FFF) + 1
-            val signedPreKeyId = 1
-            val signature = SignalE2E.signSignedPreKey(identity.privateKey, signedPreKey.publicKey)
-            val pq = try { SignalPqPreKey.generate(identity.privateKey, 1) } catch (_: Throwable) { null }
+            fun regId() = rng.nextInt(0x3FFF) + 1
+
+            val aciIdentity = IdentityKeyPair.generate()
+            val pniIdentity = IdentityKeyPair.generate()
+            val aciRegId = regId()
+            val pniRegId = regId()
+
+            val aciSignedKp = ECKeyPair.generate()
+            val pniSignedKp = ECKeyPair.generate()
+            val aciSignedId = 1
+            val pniSignedId = 1
+            // libsignal: identityPriv.calculateSignature(pub.serialize()) — EC pub serialize is 33B (0x05||32)
+            val aciSignedSig = aciIdentity.privateKey.calculateSignature(aciSignedKp.publicKey.serialize())
+            val pniSignedSig = pniIdentity.privateKey.calculateSignature(pniSignedKp.publicKey.serialize())
+
+            // Kyber-1024 last-resort — use SignalPqPreKey which keeps 0x08 tag intact (coordinate with crypto)
+            val aciPq = SignalPqPreKey.generateWithECPrivate(aciIdentity.privateKey, 1)
+            val pniPq = SignalPqPreKey.generateWithECPrivate(pniIdentity.privateKey, 1)
+
+            // Account password for Basic e164:password (POST /v1/registration + WS Authorization)
+            val password = generatePassword(rng)
+            val uak = ByteArray(32).also { rng.nextBytes(it) }
+
+            // Identity serialization: IdentityKey.serialize() = 33B (0x05||32), private = 32B raw EC
+            val aciPubB64 = b64(aciIdentity.publicKey.serialize())
+            val pniPubB64 = b64(pniIdentity.publicKey.serialize())
+            // Private key bytes for storage — ECPrivateKey.serialize() is 32B
+            val aciPrivB64 = b64(aciIdentity.privateKey.serialize())
+            val pniPrivB64 = b64(pniIdentity.privateKey.serialize())
+
             val scaffold = SignalAuthData(
                 phoneNumber = phoneNumber,
                 aci = "",
                 pni = "",
                 deviceId = 1,
-                identityPrivateKey = b64(identity.privateKey),
-                identityPublicKey = b64(identity.publicKey),
-                registrationId = registrationId,
-                signedPreKeyId = signedPreKeyId,
-                signedPreKeyPublic = b64(signedPreKey.publicKey),
-                signedPreKeyPrivate = b64(signedPreKey.privateKey),
-                signedPreKeySignature = b64(signature),
-                pqLastResortKeyId = pq?.keyId ?: 0,
-                pqLastResortPublic = pq?.let { b64(it.publicKey) } ?: "",
-                pqLastResortSecret = pq?.let { b64(it.secretKey) } ?: "",
-                pqLastResortSignature = pq?.let { b64(it.signature) } ?: "",
-                kyberPreKeyId = pq?.keyId ?: 0,
-                kyberPreKeyPublic = pq?.let { b64(it.publicKey) } ?: "",
-                kyberPreKeySecret = pq?.let { b64(it.secretKey) } ?: "",
-                kyberPreKeySignature = pq?.let { b64(it.signature) } ?: "",
+                // Legacy single-identity mirror (ACI) for SignalE2E/RustSignalCrypto compat
+                identityPrivateKey = aciPrivB64,
+                identityPublicKey = aciPubB64,
+                registrationId = aciRegId,
+                signedPreKeyId = aciSignedId,
+                signedPreKeyPublic = b64(aciSignedKp.publicKey.serialize()),
+                signedPreKeyPrivate = b64(aciSignedKp.privateKey.serialize()),
+                signedPreKeySignature = b64(aciSignedSig),
+                pqLastResortKeyId = aciPq.keyId,
+                pqLastResortPublic = b64(aciPq.publicKey),
+                pqLastResortSecret = b64(aciPq.secretKey),
+                pqLastResortSignature = b64(aciPq.signature),
+                kyberPreKeyId = aciPq.keyId,
+                kyberPreKeyPublic = b64(aciPq.publicKey),
+                kyberPreKeySecret = b64(aciPq.secretKey),
+                kyberPreKeySignature = b64(aciPq.signature),
+                // Dual-identity (preferred)
+                aciIdentityPrivateKey = aciPrivB64,
+                aciIdentityPublicKey = aciPubB64,
+                pniIdentityPrivateKey = pniPrivB64,
+                pniIdentityPublicKey = pniPubB64,
+                aciRegistrationId = aciRegId,
+                pniRegistrationId = pniRegId,
+                aciSignedPreKeyId = aciSignedId,
+                aciSignedPreKeyPublic = b64(aciSignedKp.publicKey.serialize()),
+                aciSignedPreKeyPrivate = b64(aciSignedKp.privateKey.serialize()),
+                aciSignedPreKeySignature = b64(aciSignedSig),
+                pniSignedPreKeyId = pniSignedId,
+                pniSignedPreKeyPublic = b64(pniSignedKp.publicKey.serialize()),
+                pniSignedPreKeyPrivate = b64(pniSignedKp.privateKey.serialize()),
+                pniSignedPreKeySignature = b64(pniSignedSig),
+                aciPqLastResortKeyId = aciPq.keyId,
+                aciPqLastResortPublic = b64(aciPq.publicKey),
+                aciPqLastResortSecret = b64(aciPq.secretKey),
+                aciPqLastResortSignature = b64(aciPq.signature),
+                pniPqLastResortKeyId = pniPq.keyId,
+                pniPqLastResortPublic = b64(pniPq.publicKey),
+                pniPqLastResortSecret = b64(pniPq.secretKey),
+                pniPqLastResortSignature = b64(pniPq.signature),
+                password = password,
+                unidentifiedAccessKey = b64(uak),
+                registrationLock = null, // live-only SVR2 derivation (MasterKey.deriveRegistrationLock); keep wire-correct null for offline
+                verificationSessionId = null,
                 registered = false,
             )
             return SignalRegistrationKeys(scaffold)
         }
+
+        private fun generatePassword(rng: SecureRandom): String {
+            // Signal password is a random client secret for Basic auth; 16 bytes base64 is sufficient and server-agnostic.
+            val b = ByteArray(16).also { rng.nextBytes(it) }
+            // Use URL-safe-ish alphanumeric: base64 without padding, strip '=' — server accepts any non-empty string.
+            return Base64.encodeToString(b, Base64.NO_WRAP or Base64.NO_PADDING)
+        }
+
         private fun b64(b: ByteArray): String = Base64.encodeToString(b, Base64.NO_WRAP)
     }
 }

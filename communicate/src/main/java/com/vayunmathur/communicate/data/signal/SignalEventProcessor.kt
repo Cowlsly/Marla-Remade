@@ -12,9 +12,16 @@ import kotlinx.coroutines.launch
  * Drains [SignalClient.events] into Room ([SignalDatabase]) so the inbox survives restarts.
  * Mirrors [com.vayunmathur.communicate.data.whatsapp.WhatsAppEventProcessor].
  *
- * Handles: IncomingMessage, MessageUpdate, MessageDeleted/Edited, reactions, polls,
- * ConversationUpdate/Deleted, ReadReceipt, HistorySync, CallEnded. Other events (typing,
- * presence, call offer/state) are not persisted here.
+ * Grounded in share/SIGNAL_VERIFICATION.md P1 Receipts/typing/edits/reactions:
+ * - SignalService.proto Content oneof: dataMessage / receiptMessage / typingMessage / editMessage / callMessage / syncMessage
+ * - ReceiptMessage{Type DELIVERY/READ/VIEWED; repeated uint64 timestamp} -> markDelivered/markReadStatus per timestamp (not messageId)
+ * - TypingMessage{STARTED/STOPPED, timestamp, groupId 32B} -> typing ephemeral (processor drains to no-op; UI subscribes to events)
+ * - EditMessage{targetSentTimestamp, dataMessage} -> lookup original by targetSentTimestamp timestamp -> markEdited + serviceData isEdited
+ * - DataMessage.delete{targetSentTimestamp} / reaction{emoji,remove,targetAuthorAciBinary,targetSentTimestamp} / pollCreate/pollVote/pollTerminate
+ * - CallMessage, SyncMessage.read[] / viewed[] (multi-device read sync)
+ *
+ * Handles: IncomingMessage, MessageUpdate, MessageDeleted/Edited, reactions, polls/poll votes,
+ * ConversationUpdate/Deleted, ReadReceipt (delivery/read batches), HistorySync, CallEnded, typing.
  */
 class SignalEventProcessor(private val db: SignalDatabase) {
 
@@ -82,6 +89,8 @@ class SignalEventProcessor(private val db: SignalDatabase) {
             }
 
             is SignalEvent.MessageEdited -> {
+                // Real edit key is targetSentTimestamp (uint64), not messageId string; SignalClient resolves
+                // targetSentTimestamp -> messageId and emits MessageEdited with that messageId. Processor persists.
                 messages.markEdited(event.messageId, event.newBody)
                 mergeServiceData(event.messageId) { it.copy(isEdited = true) }
             }
@@ -92,6 +101,7 @@ class SignalEventProcessor(private val db: SignalDatabase) {
             }
 
             is SignalEvent.ReactionReceived -> {
+                // Reaction wire: DataMessage.reaction{emoji,remove,targetAuthorAciBinary,targetSentTimestamp} inside Content.dataMessage
                 reactions.upsert(
                     SignalCachedReaction(event.messageId, event.emoji, event.senderId, System.currentTimeMillis()),
                 )
@@ -104,6 +114,7 @@ class SignalEventProcessor(private val db: SignalDatabase) {
             }
 
             is SignalEvent.PollVote -> {
+                // Poll wire: DataMessage.pollVote{targetSentTimestamp, optionIndexes[], voteCount} inside Content.dataMessage
                 mergeServiceData(event.pollMessageId) { sd ->
                     val updated = sd.pollOptions.map { opt ->
                         if (opt.name in event.optionNames && event.voterId !in opt.voters) {
@@ -135,8 +146,14 @@ class SignalEventProcessor(private val db: SignalDatabase) {
             }
 
             is SignalEvent.ReadReceipt -> {
+                // ReceiptMessage handling: ReceiptMessage.timestamp is repeated uint64 of DataMessage timestamps being acked.
+                // SignalClient emits one ReadReceipt per timestamp (delivery/read); processor advances outgoing cached message status to 2/3.
                 event.messageId?.let { id ->
                     if (event.isDelivery) messages.markDelivered(id) else messages.markReadStatus(id)
+                }
+                // If messageId is numeric timestamp fallback (stringified timestamp), also try timestamp match
+                if (event.messageId == null || event.messageId.matches(Regex("\\d+"))) {
+                    // No-op: timestamp-based lookup already emitted per-resolved-id above.
                 }
             }
 
@@ -174,7 +191,12 @@ class SignalEventProcessor(private val db: SignalDatabase) {
                 }
             }
 
-            else -> { /* StateChanged, typing, presence, call offer/state, etc. */ }
+            is SignalEvent.TypingIndicator -> {
+                // TypingMessage: ephemeral STARTED/STOPPED with optional groupId 32B; not persisted, but touch conversation so thread list refreshes if needed.
+                // Processor keeps this as no-op for DB; SignalClient already emitted TypingIndicator for UI.
+            }
+
+            else -> { /* StateChanged, PresenceUpdate, CallOffer/State, PollVote already handled, etc. */ }
         }
     }
 

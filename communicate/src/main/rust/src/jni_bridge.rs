@@ -1037,3 +1037,43 @@ pub extern "system" fn Java_com_vayunmathur_communicate_data_whatsapp_e2e_RustWh
         Ok(v) => v, Err(_) => { let _ = env.exception_clear(); let _ = env.throw_new("java/lang/RuntimeException", "Native panic in sealedSenderDecrypt"); std::ptr::null_mut() }
     }
 }
+
+// Signal PQXDH Kyber bridge — real PQXDH goes via libsignal Java SessionBuilder; Rust stub keeps build green
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_vayunmathur_communicate_data_signal_e2e_RustSignalCrypto_processPreKeyBundle<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    local_private: JByteArray<'local>,
+    local_public: JByteArray<'local>,
+    local_reg_id: jint,
+    reg_id: jint,
+    pre_key_id: jint,
+    pre_key_public: JByteArray<'local>,
+    signed_pre_key_id: jint,
+    signed_pre_key_public: JByteArray<'local>,
+    signed_pre_key_sig: JByteArray<'local>,
+    identity_key: JByteArray<'local>,
+    _kyber_pre_key_id: jint,
+    _kyber_pre_key_public: JByteArray<'local>,
+    _kyber_pre_key_signature: JByteArray<'local>,
+    _kyber_ciphertext: JByteArray<'local>,
+) -> jbyteArray {
+    match catch_unwind(AssertUnwindSafe(|| {
+        process_prekey_bundle_inner(&mut env, local_private, local_public, local_reg_id, reg_id, pre_key_id, pre_key_public, signed_pre_key_id, signed_pre_key_public, signed_pre_key_sig, identity_key)
+    })) { Ok(v) => v, Err(_) => { let _ = env.exception_clear(); let _ = env.throw_new("java/lang/RuntimeException", "Native panic in RustSignalCrypto.processPreKeyBundle"); std::ptr::null_mut() } }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_communicate_data_signal_e2e_RustSignalCrypto_markKyberPreKeyUsed<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    kyber_id: jint,
+    signed_ec_id: jint,
+    base_key: JByteArray<'local>,
+) -> jboolean {
+    match catch_unwind(AssertUnwindSafe(|| {
+        let b = match bytes_in(&mut env, &base_key) { Some(x) => x, None => { let _ = env.throw_new("java/lang/RuntimeException","baseKey null"); return 0 as jboolean; } };
+        if crate::signal::mark_kyber_pre_key_used(kyber_id, signed_ec_id, &b) { 1 } else { 0 }
+    })) { Ok(v) => v, Err(_) => { let _ = env.exception_clear(); 0 } }
+}

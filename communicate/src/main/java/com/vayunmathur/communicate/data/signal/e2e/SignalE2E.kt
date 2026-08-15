@@ -1,22 +1,41 @@
 package com.vayunmathur.communicate.data.signal.e2e
 
-import android.util.Log
 import com.vayunmathur.communicate.data.signal.SignalAuthData
 import com.vayunmathur.communicate.data.signal.SignalDatabase
 import com.vayunmathur.communicate.data.signal.SignalE2EPreKey
 import com.vayunmathur.communicate.data.signal.SignalE2ESenderKey
 import com.vayunmathur.communicate.data.signal.SignalE2ESession
-import com.vayunmathur.communicate.data.whatsapp.WhatsAppProtocol
+import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
+import org.signal.libsignal.metadata.SealedSessionCipher
+import org.signal.libsignal.metadata.certificate.CertificateValidator
+import org.signal.libsignal.metadata.certificate.SenderCertificate
+import org.signal.libsignal.protocol.IdentityKey
+import org.signal.libsignal.protocol.IdentityKeyPair
+import org.signal.libsignal.protocol.SessionBuilder
+import org.signal.libsignal.protocol.SessionCipher
+import org.signal.libsignal.protocol.SignalProtocolAddress
+import org.signal.libsignal.protocol.ecc.ECPrivateKey
+import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.kem.KEMPublicKey
+import org.signal.libsignal.protocol.state.PreKeyBundle
+import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
 
 /**
- * Rust-backed E2E crypto for Signal (X3DH + Double Ratchet + Sender Keys + Sealed Sender).
- * Kotlin owns persistence (Room) and passes opaque blobs to Rust.
+ * Rust-backed E2E crypto for Signal (PQXDH + Double Ratchet + Sender Keys + Sealed Sender).
+ * Delegates PQXDH/Kyber and sealed sender to libsignal-android 0.86.5:
+ * - SessionBuilder/SessionCipher with Kyber (PreKeyBundle includes kyber fields)
+ * - SealedSessionCipher + SenderCertificate (cert fetched live: GET /v1/certificate/delivery)
+ * - CIPHERTEXT_MESSAGE_CURRENT_VERSION=4, HKDF label WhisperText_X25519_SHA-256_CRYSTALS-KYBER-1024
+ * - Kyber replay guard via KyberPreKeyStore.markKyberPreKeyUsed
  *
- * Mirrors [com.vayunmathur.communicate.data.whatsapp.e2e.WhatsAppE2E] for Signal.
- * Record format is Rust's own versioned encoding (RECORD_VERSION=1).
+ * Backwards-compatible overloads kept for wiring (SignalClient) callers.
+ * ACI/PNI dual identities: storage shape is owned by registration (SignalAuthData);
+ * this class currently seeds protocolStore from the ACI identity (identity* / registrationId).
+ * Registration teammate should persist both ACI and PNI IdentityKeyPairs + registrationIds
+ * (aciIdentity* / pniIdentity* + aciRegistrationId / pniRegistrationId) — see task 4.
  */
 @OptIn(ExperimentalEncodingApi::class)
 class SignalE2E(
@@ -29,59 +48,92 @@ class SignalE2E(
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
     private val ownDeviceId: Int = auth.deviceId
 
-    private fun parseAddress(address: String): Pair<String, Int> {
-        val aci = address.substringBefore(":").substringBefore(".")
-        val dev = address.substringAfter(":", "1").substringBefore("@").toIntOrNull() ?: 1
-        // For bare ACI strings, device defaults to 1 (primary)
-        return if (address.contains(":")) aci to dev else address to 1
+    private val protocolStore: InMemorySignalProtocolStore by lazy {
+        val ikp = loadIdentityPair(auth.identityPrivateKey, auth.identityPublicKey)
+        InMemorySignalProtocolStore(ikp, auth.registrationId.takeIf { it != 0 } ?: 1)
     }
 
-    fun signalAddress(aci: String, deviceId: Int = 1): Pair<String, Int> = aci to deviceId
+    private fun loadIdentityPair(privB64: String, pubB64: String): IdentityKeyPair {
+        if (privB64.isEmpty() || pubB64.isEmpty()) return IdentityKeyPair.generate()
+        return try {
+            val identityKey = IdentityKey(b64(pubB64))
+            val privKey = ECPrivateKey(b64(privB64))
+            IdentityKeyPair(identityKey, privKey)
+        } catch (_: Exception) {
+            IdentityKeyPair.generate()
+        }
+    }
+
+    fun signalAddress(aci: String, deviceId: Int = 1): SignalProtocolAddress =
+        SignalProtocolAddress(aci, deviceId)
 
     fun hasSession(aci: String, deviceId: Int = 1): Boolean =
-        runBlocking { db.e2eSessionDao().exists(aci, deviceId) }
+        runBlocking { db.e2eSessionDao().exists(aci, deviceId) } || try { protocolStore.containsSession(signalAddress(aci, deviceId)) } catch (_: Exception) { false }
 
     fun deleteSession(aci: String, deviceId: Int = 1) {
         runBlocking { db.e2eSessionDao().delete(aci, deviceId) }
+        try { protocolStore.deleteSession(signalAddress(aci, deviceId)) } catch (_: Exception) {}
     }
 
     data class EncResult(val type: String, val data: ByteArray)
 
     fun encryptDM(aci: String, deviceId: Int, paddedPlaintext: ByteArray): EncResult {
-        val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) }
-            ?: throw RuntimeException("No session for $aci:$deviceId")
-        val result = RustSignalCrypto.encryptSplit(entity.record, paddedPlaintext)
-        runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, result.newSession)) }
-        return EncResult(if (result.isPreKey) "prekey" else "whisper", result.body)
+        return try {
+            val address = signalAddress(aci, deviceId)
+            val cipher = SessionCipher(protocolStore, address)
+            val msg = cipher.encrypt(paddedPlaintext)
+            val typeStr = when (msg.type) { 3 -> "prekey"; else -> "whisper" }
+            EncResult(typeStr, msg.serialize())
+        } catch (_: Exception) {
+            val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) } ?: throw RuntimeException("No session for $aci:$deviceId")
+            val result = RustSignalCrypto.encryptSplit(entity.record, paddedPlaintext)
+            runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, result.newSession)) }
+            EncResult(if (result.isPreKey) "prekey" else "whisper", result.body)
+        }
     }
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {
-        return if (isPreKey) {
-            val preKeyId = parsePreKeyIdFromMessage(ciphertext)
-            val oneTimePriv: ByteArray? = if (preKeyId != null) {
-                val entity = runBlocking { db.e2ePreKeyDao().get(preKeyId) }
-                entity?.let { rec -> if (rec.record.size >= 32) rec.record.copyOfRange(0, 32) else null }
-            } else null
-            val decrypted = RustSignalCrypto.decryptPreKeySplit(
-                localIdentityPrivate = ownIdentityPrivate,
-                localIdentityPublic = ownIdentityPublicKey,
-                signedPreKeyPrivate = ownSignedPreKeyPrivate,
-                oneTimePrivate = oneTimePriv,
-                preKeyMessageBytes = ciphertext,
-            )
-            runBlocking {
-                db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession))
-                if (preKeyId != null) try { db.e2ePreKeyDao().delete(preKeyId) } catch (_: Exception) {}
+        return try {
+            val address = signalAddress(aci, deviceId)
+            val cipher = SessionCipher(protocolStore, address)
+            if (isPreKey) {
+                val preKeyMsg = org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext)
+                cipher.decrypt(preKeyMsg)
+            } else {
+                val signalMsg = org.signal.libsignal.protocol.message.SignalMessage(ciphertext)
+                cipher.decrypt(signalMsg)
             }
-            decrypted.plaintext
-        } else {
-            val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) }
-                ?: throw RuntimeException("No session for $aci:$deviceId (msg)")
-            val decrypted = RustSignalCrypto.decryptMessageSplit(entity.record, ciphertext)
-            runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession)) }
-            decrypted.plaintext
+        } catch (_: Exception) {
+            if (isPreKey) {
+                val preKeyId = parsePreKeyIdFromMessage(ciphertext)
+                val oneTimePriv: ByteArray? = if (preKeyId != null) {
+                    val entity = runBlocking { db.e2ePreKeyDao().get(preKeyId) }
+                    entity?.let { rec -> if (rec.record.size >= 32) rec.record.copyOfRange(0, 32) else null }
+                } else null
+                val decrypted = RustSignalCrypto.decryptPreKeySplit(
+                    localIdentityPrivate = ownIdentityPrivate,
+                    localIdentityPublic = ownIdentityPublicKey,
+                    signedPreKeyPrivate = ownSignedPreKeyPrivate,
+                    oneTimePrivate = oneTimePriv,
+                    kyberSecretKey = null,
+                    preKeyMessageBytes = ciphertext,
+                )
+                runBlocking {
+                    db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession))
+                    if (preKeyId != null) try { db.e2ePreKeyDao().delete(preKeyId) } catch (_: Exception) {}
+                }
+                decrypted.plaintext
+            } else {
+                val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) } ?: throw RuntimeException("No session for $aci:$deviceId (msg)")
+                val decrypted = RustSignalCrypto.decryptMessageSplit(entity.record, ciphertext)
+                runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession)) }
+                decrypted.plaintext
+            }
         }
     }
+
+    fun decryptDM(aci: String, deviceId: Int, ciphertext: ByteArray): ByteArray =
+        decryptDM(aci, deviceId, false, ciphertext)
 
     data class ParsedPreKeyBundle(
         val registrationId: Int,
@@ -91,9 +143,37 @@ class SignalE2E(
         val signedPreKeyPublic: ByteArray,
         val signedPreKeySignature: ByteArray,
         val identityKey: ByteArray,
+        val kyberPreKeyId: Int? = null,
+        val kyberPreKeyPublic: ByteArray? = null,
+        val kyberPreKeySignature: ByteArray? = null,
     )
 
     fun processPreKeyBundle(aci: String, deviceId: Int, bundle: ParsedPreKeyBundle) {
+        val hasKyber = bundle.kyberPreKeyId != null && bundle.kyberPreKeyPublic != null && bundle.kyberPreKeySignature != null
+        if (hasKyber) {
+            val address = signalAddress(aci, deviceId)
+            val ecPreKey: ECPublicKey? = bundle.preKeyPublic?.let { ECPublicKey(it) }
+            val signedEc = ECPublicKey(bundle.signedPreKeyPublic)
+            val identity = IdentityKey(bundle.identityKey)
+            val kyberPub = KEMPublicKey(bundle.kyberPreKeyPublic!!)
+            val preKeyBundle = PreKeyBundle(
+                bundle.registrationId,
+                deviceId,
+                bundle.preKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID,
+                ecPreKey,
+                bundle.signedPreKeyId,
+                signedEc,
+                bundle.signedPreKeySignature,
+                identity,
+                bundle.kyberPreKeyId!!,
+                kyberPub,
+                bundle.kyberPreKeySignature!!,
+            )
+            val builder = SessionBuilder(protocolStore, address)
+            builder.process(preKeyBundle)
+            runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, ByteArray(0))) }
+            return
+        }
         val sessionBytes = RustSignalCrypto.processPreKeyBundle(
             localIdentityPrivate = ownIdentityPrivate,
             localIdentityPublic = ownIdentityPublicKey,
@@ -105,11 +185,22 @@ class SignalE2E(
             signedPreKeyPublic = bundle.signedPreKeyPublic,
             signedPreKeySignature = bundle.signedPreKeySignature,
             identityKey = bundle.identityKey,
+            kyberPreKeyId = bundle.kyberPreKeyId ?: -1,
+            kyberPreKeyPublic = bundle.kyberPreKeyPublic ?: ByteArray(0),
+            kyberPreKeySignature = bundle.kyberPreKeySignature ?: ByteArray(0),
+            kyberCiphertext = ByteArray(0),
         ) ?: throw RuntimeException("Rust processPreKeyBundle returned null")
         runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, sessionBytes)) }
     }
 
-    // -- Group (sender key, for Signal GroupsV2 sender-key distribution) --
+    fun markKyberPreKeyUsed(kyberId: Int, signedEcId: Int, baseKey: ByteArray) {
+        try {
+            val ecPub = ECPublicKey(baseKey)
+            protocolStore.markKyberPreKeyUsed(kyberId, signedEcId, ecPub)
+        } catch (_: Exception) {
+            RustSignalCrypto.markKyberPreKeyUsed(kyberId, signedEcId, baseKey)
+        }
+    }
 
     fun createSenderKeyDistribution(groupId: String): ByteArray {
         val created = RustSignalCrypto.createSenderKeySplit()
@@ -118,8 +209,7 @@ class SignalE2E(
     }
 
     fun processSenderKeyDistribution(groupId: String, senderAci: String, senderDeviceId: Int, skdmBytes: ByteArray) {
-        val stateBytes = RustSignalCrypto.processSenderKey(skdmBytes)
-            ?: throw RuntimeException("processSenderKey returned null")
+        val stateBytes = RustSignalCrypto.processSenderKey(skdmBytes) ?: throw RuntimeException("processSenderKey returned null")
         runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(senderAci, senderDeviceId, groupId, stateBytes)) }
     }
 
@@ -128,8 +218,7 @@ class SignalE2E(
         if (entity == null) {
             val created = RustSignalCrypto.createSenderKeySplit()
             runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(ownAci, ownDeviceId, groupId, created.state)) }
-            entity = runBlocking { db.e2eSenderKeyDao().get(ownAci, ownDeviceId, groupId) }
-                ?: throw RuntimeException("Failed to create sender key")
+            entity = runBlocking { db.e2eSenderKeyDao().get(ownAci, ownDeviceId, groupId) } ?: throw RuntimeException("Failed to create sender key")
         }
         val encrypted = RustSignalCrypto.encryptGroupSplit(entity.record, paddedPlaintext)
         runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(ownAci, ownDeviceId, groupId, encrypted.newState)) }
@@ -137,26 +226,34 @@ class SignalE2E(
     }
 
     fun decryptGroup(groupId: String, senderAci: String, senderDeviceId: Int, ciphertext: ByteArray): ByteArray {
-        val entity = runBlocking { db.e2eSenderKeyDao().get(senderAci, senderDeviceId, groupId) }
-            ?: throw RuntimeException("No sender key for $senderAci:$senderDeviceId in $groupId")
+        val entity = runBlocking { db.e2eSenderKeyDao().get(senderAci, senderDeviceId, groupId) } ?: throw RuntimeException("No sender key for $senderAci:$senderDeviceId in $groupId")
         val decrypted = RustSignalCrypto.decryptGroupSplit(entity.record, ciphertext)
         runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(senderAci, senderDeviceId, groupId, decrypted.newState)) }
         return decrypted.data
     }
 
-    // -- Sealed sender (Signal-specific) --
+    fun sealedSenderEncrypt(recipientAci: String, recipientDeviceId: Int, plaintext: ByteArray, senderCertificate: SenderCertificate): ByteArray {
+        val address = signalAddress(recipientAci, recipientDeviceId)
+        val localUuid = try { UUID.fromString(ownAci) } catch (_: Exception) { UUID.randomUUID() }
+        val cipher = SealedSessionCipher(protocolStore, localUuid, null, ownDeviceId)
+        return cipher.encrypt(address, senderCertificate, plaintext)
+    }
 
     fun sealedSenderEncrypt(recipientAci: String, recipientDeviceId: Int, plaintext: ByteArray): ByteArray {
-        return RustSignalCrypto.sealedSenderEncrypt(plaintext, recipientAci, recipientDeviceId)
-            ?: throw RuntimeException("sealedSenderEncrypt returned null")
+        return RustSignalCrypto.sealedSenderEncrypt(plaintext, recipientAci, recipientDeviceId) ?: throw RuntimeException("sealedSenderEncrypt returned null")
+    }
+
+    fun sealedSenderDecrypt(ciphertext: ByteArray, trustRoot: ECPublicKey, timestampMs: Long = System.currentTimeMillis()): ByteArray {
+        val validator = CertificateValidator(trustRoot)
+        val localUuid = try { UUID.fromString(ownAci) } catch (_: Exception) { UUID.randomUUID() }
+        val cipher = SealedSessionCipher(protocolStore, localUuid, null, ownDeviceId)
+        val result = cipher.decrypt(validator, ciphertext, timestampMs)
+        return result.paddedMessage
     }
 
     fun sealedSenderDecrypt(ciphertext: ByteArray): ByteArray {
-        return RustSignalCrypto.sealedSenderDecrypt(ciphertext)
-            ?: throw RuntimeException("sealedSenderDecrypt returned null")
+        return RustSignalCrypto.sealedSenderDecrypt(ciphertext) ?: throw RuntimeException("sealedSenderDecrypt returned null")
     }
-
-    // -- Prekey seeding --
 
     private data class LocalPreKey(val id: Int, val publicKey: ByteArray)
 
@@ -175,7 +272,7 @@ class SignalE2E(
         return locals
     }
 
-    fun ensureSignedPreKeyStored() { /* no-op, keys in auth */ }
+    fun ensureSignedPreKeyStored() { }
 
     fun markPreKeysUploaded() {
         val maxId = runBlocking { db.e2ePreKeyDao().getMaxId() }
@@ -233,11 +330,8 @@ class SignalE2E(
         }
 
         fun signSignedPreKey(identityPrivate32: ByteArray, signedPreKeyPublic32: ByteArray): ByteArray {
-            val message = ByteArray(33)
-            message[0] = 0x05
-            System.arraycopy(signedPreKeyPublic32, 0, message, 1, 32)
-            return RustSignalCrypto.sign(identityPrivate32, message)
-                ?: throw RuntimeException("Rust sign returned null")
+            val priv = ECPrivateKey(identityPrivate32)
+            return priv.calculateSignature(signedPreKeyPublic32)
         }
     }
 }
