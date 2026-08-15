@@ -19,8 +19,6 @@ import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
-import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
@@ -33,83 +31,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import kotlin.math.max
 import kotlin.math.min
-
-/** Section header used above grouped sections — titleSmall + Bold. */
-@Composable
-fun SectionHeader(
-    title: String,
-    modifier: Modifier = Modifier,
-    leadingIcon: (@Composable (Modifier, Color) -> Unit)? = null,
-    accentColor: Color? = null,
-) {
-    val textColor = accentColor?.copy(alpha = 0.85f) ?: MaterialTheme.colorScheme.onSurfaceVariant
-    val iconColor = accentColor ?: MaterialTheme.colorScheme.onSurfaceVariant
-    Row(
-        modifier = modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        if (leadingIcon != null) {
-            leadingIcon(Modifier.size(16.dp), iconColor)
-            Spacer(Modifier.width(8.dp))
-        }
-        Text(
-            text = title,
-            style = MaterialTheme.typography.titleSmall,
-            fontWeight = FontWeight.Bold,
-            color = textColor,
-        )
-    }
-}
-
-/**
- * Grouped section container. Optional SectionHeader on top + Surface
- * with rounded corners (16dp) using surfaceContainerLow. Children stacked
- * in a Column inside the Surface.
- */
-@Composable
-fun GroupedSection(
-    modifier: Modifier = Modifier,
-    title: String? = null,
-    leadingIcon: (@Composable (Modifier, Color) -> Unit)? = null,
-    accentColor: Color? = null,
-    content: @Composable () -> Unit,
-) {
-    Column(modifier = modifier.fillMaxWidth()) {
-        if (title != null) {
-            SectionHeader(title = title, leadingIcon = leadingIcon, accentColor = accentColor)
-        }
-        Surface(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp),
-            shape = RoundedCornerShape(16.dp),
-            color = MaterialTheme.colorScheme.surfaceContainerLow,
-        ) {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                content()
-            }
-        }
-    }
-}
-
-/** Thin inset divider used between rows inside a GroupedSection. */
-@Composable
-fun GroupedSectionDivider(insetStart: Dp = 56.dp) {
-    HorizontalDivider(
-        modifier = Modifier.padding(start = insetStart),
-        thickness = 0.5.dp,
-        color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-    )
-}
 
 /**
  * Standard row with a small circular tinted icon background (36dp),
