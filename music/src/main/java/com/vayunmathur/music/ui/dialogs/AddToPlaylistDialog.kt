@@ -1,20 +1,10 @@
 package com.vayunmathur.music.ui.dialogs
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Column
-import com.vayunmathur.library.ui.AlertDialog
-import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.RadioButton
-import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TextButton
+
+import com.vayunmathur.library.ui.AddToListDialog
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.music.R
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.Route
@@ -23,63 +13,21 @@ import com.vayunmathur.music.util.MusicViewModel
 @Composable
 fun AddToPlaylistDialog(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel, musicId: Long) {
     val playlists by musicViewModel.playlists.collectAsState()
-    var selectedPlaylistId by remember { mutableStateOf<Long?>(null) }
-    var showCreateDialog by remember { mutableStateOf(false) }
 
-    AlertDialog(
-        onDismissRequest = { backStack.pop() },
-        title = { Text(stringResource(R.string.dialog_add_to_playlist)) },
-        text = {
-            Column {
-                ListItem(
-                    content = { Text(stringResource(R.string.new_playlist)) },
-                    leadingContent = { IconAdd() },
-                    modifier = Modifier.clickable { showCreateDialog = true }
-                )
-                playlists.forEach { playlist ->
-                    ListItem(
-                        content = { Text(playlist.name) },
-                        leadingContent = {
-                            RadioButton(
-                                selected = selectedPlaylistId == playlist.id,
-                                onClick = { selectedPlaylistId = playlist.id }
-                            )
-                        },
-                        modifier = Modifier.clickable { selectedPlaylistId = playlist.id }
-                    )
-                }
-            }
+    AddToListDialog(
+        title = stringResource(R.string.dialog_add_to_playlist),
+        options = playlists,
+        itemLabel = { it.name },
+        confirmLabel = stringResource(R.string.dialog_ok),
+        dismissLabel = stringResource(R.string.dialog_cancel),
+        itemKey = { it.id },
+        createLabel = stringResource(R.string.new_playlist),
+        canCreate = { name -> name.isNotBlank() && playlists.none { it.name == name.trim() } },
+        onCreate = { name -> musicViewModel.createPlaylist(name.trim()) {} },
+        onConfirm = { selected ->
+            selected.forEach { musicViewModel.addMusicToPlaylist(it.id, musicId) {} }
+            backStack.pop()
         },
-        confirmButton = {
-            TextButton(
-                enabled = selectedPlaylistId != null,
-                onClick = {
-                    musicViewModel.addMusicToPlaylist(selectedPlaylistId!!, musicId) {
-                        backStack.pop()
-                    }
-                }
-            ) {
-                Text(stringResource(R.string.dialog_ok))
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = { backStack.pop() }) {
-                Text(stringResource(R.string.dialog_cancel))
-            }
-        }
+        onDismiss = { backStack.pop() },
     )
-
-    if (showCreateDialog) {
-        CreatePlaylistDialog(
-            onDismiss = { showCreateDialog = false },
-            onCreate = { name ->
-                musicViewModel.createPlaylist(name) { newId ->
-                    musicViewModel.addMusicToPlaylist(newId, musicId) {
-                        backStack.pop()
-                    }
-                }
-                showCreateDialog = false
-            }
-        )
-    }
 }

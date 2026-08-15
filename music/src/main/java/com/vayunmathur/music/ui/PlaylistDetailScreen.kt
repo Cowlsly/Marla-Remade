@@ -4,7 +4,6 @@ import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.*
@@ -20,7 +19,6 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.IconClose
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.util.AlbumArt
@@ -48,12 +46,10 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
     val currentMediaItem by musicViewModel.currentMediaItem.collectAsState()
     val currentSource by musicViewModel.currentSource.collectAsState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { },
-                navigationIcon = { IconNavigation(backStack) },
-                actions = {
+    DetailLazyColumn(
+        title = {},
+        onNavigateBack = { backStack.pop() },
+        actions = {
                     var showDeleteDialog by remember { mutableStateOf(false) }
                     IconButton(onClick = { showDeleteDialog = true }) {
                         com.vayunmathur.library.ui.IconDelete()
@@ -71,17 +67,9 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
                             destructive = true,
                         )
                     }
-                }
-            )
         },
         bottomBar = { PlayingBottomBar(musicViewModel, backStack) },
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(horizontal = 16.dp)
-        ) {
+    ) {
             item {
                 Column(
                     modifier = Modifier.fillMaxWidth(),
@@ -176,6 +164,5 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
                     },
                 )
             }
-        }
     }
 }

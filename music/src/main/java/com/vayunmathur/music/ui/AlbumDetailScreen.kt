@@ -24,7 +24,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.music.util.AlbumArt
 import com.vayunmathur.music.util.AlbumDetailUiState
@@ -91,21 +90,11 @@ fun AlbumDetailContent(
 ) {
     val sourceId = "album_${state.albumId}"
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { },
-                navigationIcon = { IconNavigation(backStack) }
-            )
-        },
+    DetailLazyColumn(
+        title = {},
+        onNavigateBack = { backStack.pop() },
         bottomBar = bottomBar,
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
-                .padding(horizontal = 16.dp)
-        ) {
+    ) {
             // Header: Album Art
             item {
                 Column(
@@ -209,6 +198,5 @@ fun AlbumDetailContent(
                     },
                 )
             }
-        }
     }
 }
