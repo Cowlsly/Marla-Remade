@@ -18,4 +18,5 @@
     <string name="request_wants_to_join">%1$s soovib liitud „%2$s“ dokuemendiga</string>
     <string name="join_request_sent">Liitumispäring on edastatud ja sa saad ligipääsu, kui omanik sellega nõustub.</string>
     <string name="shared_with_you">Jagatud sinuga</string>
+    <string name="copy">Kopeeri</string>
 </resources>
