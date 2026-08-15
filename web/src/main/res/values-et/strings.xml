@@ -115,4 +115,7 @@
     <string name="bookmarks_inside_will_also_be_deleted">Järjehoidjad kustutatakse ka siit: „%1$s“.</string>
     <string name="open_a_site_and_tap_menu_install_app_add">Ava veebisait ja klõpsa valikut „Menüü“ → „Paigalda rakendus“ / „Lisa avalehele“. Sellega lisandub kinnitatud otselink, mis käivitab „PwaActivity“ eraldi (ilma brauseri kasutajaliideseta). Ikoonina kasutatakse parimat 192x192 ikooni või „apple-touch-icon“ ikooni; muul juhul kasutatakse tähtedega ikooni (PWA - progressive web app ehk pseudorakendus).</string>
     <string name="shortcuts_launch_pwaactivity_standalone">Otselingid käivitavad „PwaActivity“ iseseisva „WebView“ kestana (õiguste haldamine, allalaadimised, kolmandate osapoolte küpsised on lubatud). Nupule „Eemalda siit“ vajutamine kustutab andmebaasi kande; kinnitatud käivitusikooni saad eemaldada pika vajutusega, kui see on juba kinnitatud.</string>
+    <string name="copy_link">Kopeeri link</string>
+    <string name="open_in_new_tab">Ava uuel vahekaardil</string>
+    <string name="link_copied">Link on kopeeritud</string>
 </resources>
