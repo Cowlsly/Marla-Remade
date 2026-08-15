@@ -18,9 +18,9 @@ import com.vayunmathur.health.R
 import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.NutritionData
 import com.vayunmathur.health.data.RecordType
-import com.vayunmathur.health.ui.components.GroupedSection
-import com.vayunmathur.health.ui.components.GroupedSectionDivider
 import com.vayunmathur.health.ui.components.HealthRow
+import com.vayunmathur.library.ui.DashboardSection
+import com.vayunmathur.library.ui.DashboardSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.displayString
 import com.vayunmathur.library.ui.AppScaffold
@@ -89,9 +89,9 @@ fun NutritionDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewMo
 
                 if (allLogs.isNotEmpty()) {
                     item {
-                        GroupedSection(title = "Logged today", accentColor = HealthColors.Nutrition) {
+                        DashboardSection(title = "Logged today", accentColor = HealthColors.Nutrition) {
                             allLogs.forEachIndexed { idx, log ->
-                                if (idx > 0) GroupedSectionDivider(insetStart = 16.dp)
+                                if (idx > 0) DashboardSectionDivider(insetStart = 16.dp)
                                 val headline = log.metadata
                                     ?: if (log.type == RecordType.Hydration) "Hydration" else "Meal"
                                 val supporting = if (log.type == RecordType.Nutrition) {
@@ -119,9 +119,9 @@ fun NutritionDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewMo
                 }
 
                 item {
-                    GroupedSection(title = "Nutrient breakdown", accentColor = HealthColors.Nutrition) {
+                    DashboardSection(title = "Nutrient breakdown", accentColor = HealthColors.Nutrition) {
                         breakdownRows.forEachIndexed { idx, (nutrient, value) ->
-                            if (idx > 0) GroupedSectionDivider(insetStart = 16.dp)
+                            if (idx > 0) DashboardSectionDivider(insetStart = 16.dp)
                             NutrientProgressRow(nutrient, value)
                         }
                     }
