@@ -139,6 +139,27 @@ class InnertubeClientRequestInfo private constructor(
         }
 
         @JvmStatic
+        fun ofAndroidVrClient(): InnertubeClientRequestInfo {
+            return InnertubeClientRequestInfo(
+                ClientInfo.create(
+                    ClientsConstants.ANDROID_VR_CLIENT_NAME,
+                    ClientsConstants.ANDROID_VR_CLIENT_VERSION,
+                    ClientsConstants.ANDROID_VR_CLIENT_ID,
+                    null,
+                    null
+                ),
+                DeviceInfo.create(
+                    ClientsConstants.MOBILE_CLIENT_PLATFORM,
+                    ClientsConstants.ANDROID_VR_DEVICE_MAKE,
+                    ClientsConstants.ANDROID_VR_DEVICE_MODEL,
+                    ClientsConstants.ANDROID_VR_OS_NAME,
+                    ClientsConstants.ANDROID_VR_OS_VERSION,
+                    ClientsConstants.ANDROID_VR_SDK_VERSION
+                )
+            )
+        }
+
+        @JvmStatic
         fun ofIosClient(): InnertubeClientRequestInfo {
             return InnertubeClientRequestInfo(
                 ClientInfo.create(

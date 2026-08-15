@@ -688,8 +688,12 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.AUDIO,
             getAudioStreamBuilderHelper(), "audio"
         )
-        buildSabrStreamsIfNeeded()
-        streams.addAll(sabrAudioStreams)
+        // SABR is a last-resort fallback: only probe/append it when the ANDROID_VR direct
+        // client returned no usable streams.
+        if (streams.isEmpty()) {
+            buildSabrStreamsIfNeeded()
+            streams.addAll(sabrAudioStreams)
+        }
         return streams
     }
 
@@ -709,8 +713,12 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.VIDEO_ONLY,
             getVideoStreamBuilderHelper(true), "video-only"
         )
-        buildSabrStreamsIfNeeded()
-        streams.addAll(sabrVideoOnlyStreams)
+        // SABR is a last-resort fallback: only probe/append it when the ANDROID_VR direct
+        // client returned no usable streams.
+        if (streams.isEmpty()) {
+            buildSabrStreamsIfNeeded()
+            streams.addAll(sabrVideoOnlyStreams)
+        }
         return streams
     }
 
@@ -852,10 +860,7 @@ class YoutubeStreamExtractor(
         val poTokenProviderInstance = poTokenProvider
         val noPoTokenProviderSet = poTokenProviderInstance == null
 
-        val androidPoTokenResult = if (noPoTokenProviderSet) null
-        else poTokenProviderInstance.getAndroidClientPoToken(videoId)
-
-        fetchAndroidClient(localization, contentCountry, videoId, androidPoTokenResult)
+        fetchAndroidVrClient(localization, contentCountry, videoId)
 
         setStreamType()
 
@@ -879,38 +884,26 @@ class YoutubeStreamExtractor(
     }
 
     @Throws(IOException::class, ExtractionException::class)
-    private fun fetchAndroidClient(
+    private fun fetchAndroidVrClient(
         localization: Localization,
         contentCountry: ContentCountry,
-        videoId: String,
-        androidPoTokenResult: PoTokenResult?
+        videoId: String
     ) {
         androidCpn = generateContentPlaybackNonce()
 
-        playerResponse = if (androidPoTokenResult == null) {
-            YoutubeStreamHelper.getAndroidReelPlayerResponse(
-                contentCountry, localization, videoId, androidCpn!!
-            )
-        } else {
-            YoutubeStreamHelper.getAndroidPlayerResponse(
-                contentCountry, localization, videoId, androidCpn!!,
-                androidPoTokenResult
-            )
-        }
+        playerResponse = YoutubeStreamHelper.getAndroidVrPlayerResponse(
+            contentCountry, localization, videoId, androidCpn!!
+        )
 
         checkPlayabilityStatus(playerResponse!!.getObject(PLAYABILITY_STATUS).orEmptyObject())
         if (isPlayerResponseNotValid(playerResponse, videoId)) {
-            throw ExtractionException("ANDROID player response is not valid")
+            throw ExtractionException("ANDROID_VR player response is not valid")
         }
 
         androidStreamingData = playerResponse?.getObject(STREAMING_DATA)
 
         playerCaptionsTracklistRenderer = playerResponse?.getObject(CAPTIONS)
             ?.getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER)
-
-        if (androidPoTokenResult != null) {
-            androidStreamingUrlsPoToken = androidPoTokenResult.streamingDataPoToken
-        }
     }
 
     private fun fetchIosClient(

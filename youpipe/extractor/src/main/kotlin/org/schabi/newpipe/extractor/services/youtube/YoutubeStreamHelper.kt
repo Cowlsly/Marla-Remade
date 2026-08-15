@@ -199,6 +199,38 @@ object YoutubeStreamHelper {
 
     @JvmStatic
     @Throws(IOException::class, ExtractionException::class)
+    fun getAndroidVrPlayerResponse(
+        contentCountry: ContentCountry,
+        localization: Localization,
+        videoId: String,
+        cpn: String
+    ): JsonObject {
+        // ANDROID_VR returns direct stream URLs and does not require a PO Token or visitorData,
+        // which is why it is far more reliable than the SABR (WEB) path right now.
+        val innertubeClientRequestInfo = InnertubeClientRequestInfo.ofAndroidVrClient()
+
+        val headers = getMobileClientHeaders(ClientsConstants.ANDROID_VR_USER_AGENT)
+
+        val builder = prepareJsonBuilder(
+            localization, contentCountry, innertubeClientRequestInfo, null
+        )
+
+        addVideoIdCpnAndOkChecks(builder, videoId, cpn)
+
+        val body = builder.done().toString().toByteArray(Charsets.UTF_8)
+
+        val url = YOUTUBEI_V1_GAPIS_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER +
+            "&t=" + generateTParameter() + "&id=" + videoId
+
+        return JsonUtils.toJsonObject(
+            getValidJsonResponseBody(
+                getDownloader().postWithContentTypeJson(url, headers, body, localization)
+            )
+        )
+    }
+
+    @JvmStatic
+    @Throws(IOException::class, ExtractionException::class)
     fun getIosPlayerResponse(
         contentCountry: ContentCountry,
         localization: Localization,

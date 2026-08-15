@@ -85,6 +85,21 @@ internal object ClientsConstants {
      */
     const val ANDROID_CLIENT_VERSION = "21.03.36"
 
+    // ANDROID_VR (Meta Quest YouTube VR app) client fields.
+    // This client still returns direct stream URLs without a PO Token, so it is used as the
+    // primary playback client while SABR (WEB/visitorData) is being probabilistically rejected.
+    const val ANDROID_VR_CLIENT_ID = "28"
+    const val ANDROID_VR_CLIENT_NAME = "ANDROID_VR"
+    const val ANDROID_VR_CLIENT_VERSION = "1.65.10"
+    const val ANDROID_VR_DEVICE_MAKE = "Oculus"
+    const val ANDROID_VR_DEVICE_MODEL = "Quest 3"
+    const val ANDROID_VR_OS_NAME = "Android"
+    const val ANDROID_VR_OS_VERSION = "12L"
+    const val ANDROID_VR_SDK_VERSION = 32
+    const val ANDROID_VR_USER_AGENT =
+        "com.google.android.apps.youtube.vr.oculus/1.65.10 " +
+            "(Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip"
+
     // visionOS client fields
     const val VISIONOS_CLIENT_ID = "101"
     const val VISIONOS_CLIENT_NAME = "VISIONOS"
