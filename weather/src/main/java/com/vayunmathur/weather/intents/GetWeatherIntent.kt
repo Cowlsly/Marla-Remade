@@ -5,9 +5,9 @@ import com.vayunmathur.library.intents.weather.WeatherData
 import com.vayunmathur.library.util.AssistantIntent
 import com.vayunmathur.weather.network.ForecastResponse
 import com.vayunmathur.weather.network.WeatherApi
-import com.vayunmathur.weather.util.compassDirection
-import com.vayunmathur.weather.util.parseLocalIsoToEpochSec
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.compassDirection
+import com.vayunmathur.weather.domain.parseLocalIsoToEpochSec
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.serializer

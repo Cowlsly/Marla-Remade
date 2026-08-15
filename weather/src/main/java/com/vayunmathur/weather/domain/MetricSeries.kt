@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.domain
 
 import androidx.annotation.StringRes
 import androidx.compose.ui.graphics.Color

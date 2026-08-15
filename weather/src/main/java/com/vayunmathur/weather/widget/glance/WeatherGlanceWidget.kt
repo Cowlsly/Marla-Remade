@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.glance
+package com.vayunmathur.weather.widget.glance
 
 import com.vayunmathur.library.util.DateNameStyle
 import android.content.Context
@@ -40,8 +40,8 @@ import com.vayunmathur.weather.R
 import com.vayunmathur.weather.data.WeatherRepository
 import com.vayunmathur.weather.data.weatherJson
 import com.vayunmathur.weather.network.ForecastResponse
-import com.vayunmathur.weather.util.roundCoord
-import com.vayunmathur.weather.util.weatherConditionForCode
+import com.vayunmathur.weather.domain.roundCoord
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format

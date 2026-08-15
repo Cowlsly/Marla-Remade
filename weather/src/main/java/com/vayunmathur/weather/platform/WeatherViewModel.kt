@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
@@ -11,7 +11,9 @@ import com.vayunmathur.weather.data.SavedLocation
 import com.vayunmathur.weather.data.WeatherRepository
 import com.vayunmathur.weather.data.WeatherRefreshWorker
 import com.vayunmathur.weather.data.weatherJson
-import com.vayunmathur.weather.glance.WeatherGlanceWidget
+import com.vayunmathur.weather.domain.SelectedDateOrTime
+import com.vayunmathur.weather.domain.roundCoord
+import com.vayunmathur.weather.widget.glance.WeatherGlanceWidget
 import com.vayunmathur.weather.network.AirQualityResponse
 import com.vayunmathur.weather.network.ForecastResponse
 import com.vayunmathur.weather.network.WeatherApi

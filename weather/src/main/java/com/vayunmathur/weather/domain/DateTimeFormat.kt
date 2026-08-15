@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.domain
 
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.util.localizedAmPmMarker

@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.map
+package com.vayunmathur.weather.domain.map
 
 /**
  * JNI bridge to the native Rust `.om` decoder (`libweather_om.so`, built from

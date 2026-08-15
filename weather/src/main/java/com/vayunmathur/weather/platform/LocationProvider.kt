@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import android.Manifest
 import android.annotation.SuppressLint

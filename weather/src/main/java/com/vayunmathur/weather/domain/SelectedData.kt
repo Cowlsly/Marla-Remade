@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.domain
 
 import com.vayunmathur.weather.network.Current
 import com.vayunmathur.weather.network.ForecastResponse

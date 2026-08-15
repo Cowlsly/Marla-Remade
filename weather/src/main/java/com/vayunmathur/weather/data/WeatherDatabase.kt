@@ -9,7 +9,7 @@ import com.vayunmathur.library.util.DatabaseMigrations
 
 const val DB_NAME = "weather-db"
 
-/** Backup config shared by [com.vayunmathur.weather.util.AppBackupAgent]. */
+/** Backup config shared by [com.vayunmathur.weather.platform.AppBackupAgent]. */
 fun weatherDbConfigs(context: Context): List<Pair<String, String>> =
     listOf(DB_NAME to DatabaseHelper(context).getPassphrase())
 

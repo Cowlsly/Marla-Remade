@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import com.vayunmathur.library.room.SqlCipherDbCodec
 import com.vayunmathur.library.util.BaseBackupAgent

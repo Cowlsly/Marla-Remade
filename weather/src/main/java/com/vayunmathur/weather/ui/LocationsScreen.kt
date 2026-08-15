@@ -73,13 +73,13 @@ import com.vayunmathur.weather.network.GeocodingResult
 import com.vayunmathur.weather.network.WeatherApi
 import com.vayunmathur.weather.ui.components.LocationItem
 import com.vayunmathur.weather.ui.components.UseDeviceLocationCard
-import com.vayunmathur.weather.util.LocationProvider
-import com.vayunmathur.weather.util.LocationRow
-import com.vayunmathur.weather.util.LocationsUiState
-import com.vayunmathur.weather.util.WeatherActions
-import com.vayunmathur.weather.util.WeatherViewModel
-import com.vayunmathur.weather.util.formatTemperatureCompact
-import com.vayunmathur.weather.util.rememberTempUnit
+import com.vayunmathur.weather.domain.formatTemperatureCompact
+import com.vayunmathur.weather.platform.LocationProvider
+import com.vayunmathur.weather.platform.LocationRow
+import com.vayunmathur.weather.platform.LocationsUiState
+import com.vayunmathur.weather.platform.WeatherActions
+import com.vayunmathur.weather.platform.WeatherViewModel
+import com.vayunmathur.weather.platform.rememberTempUnit
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -388,7 +388,7 @@ fun LocationsScreen(
 /**
  * Opens the OS regional-units settings so the user can pick temperature/wind/etc. units.
  * The app itself stores no units config; it reads the system regional preferences (see
- * [com.vayunmathur.weather.util.rememberTempUnit]). Falls back to the general locale settings
+ * [com.vayunmathur.weather.platform.rememberTempUnit]).
  * on devices without a dedicated regional-preferences screen (pre-Android 14).
  */
 private fun openRegionalUnitsSettings(context: Context) {

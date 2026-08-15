@@ -1,10 +1,10 @@
-package com.vayunmathur.weather.map
+package com.vayunmathur.weather.domain.map
 
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.graphics.createBitmap
-import com.vayunmathur.weather.util.ColorStop
+import com.vayunmathur.weather.domain.ColorStop
 
 /**
  * Colorize a row-major [values] grid (`w × h`, from

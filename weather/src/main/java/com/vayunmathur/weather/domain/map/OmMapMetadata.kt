@@ -1,8 +1,8 @@
-package com.vayunmathur.weather.map
+package com.vayunmathur.weather.domain.map
 
 import com.vayunmathur.library.network.NetworkClient
-import com.vayunmathur.weather.util.WeatherMetric
-import com.vayunmathur.weather.util.openMeteoHourlyVar
+import com.vayunmathur.weather.domain.WeatherMetric
+import com.vayunmathur.weather.domain.openMeteoHourlyVar
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json

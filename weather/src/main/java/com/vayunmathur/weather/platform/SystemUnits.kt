@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember

@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.domain
 
 import java.util.Locale
 import kotlin.math.round

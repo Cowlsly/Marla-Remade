@@ -12,12 +12,12 @@ import com.vayunmathur.weather.network.Current
 import com.vayunmathur.weather.network.Daily
 import com.vayunmathur.weather.network.ForecastResponse
 import com.vayunmathur.weather.network.Hourly
-import com.vayunmathur.weather.util.DisplayUnits
-import com.vayunmathur.weather.util.LocationRow
-import com.vayunmathur.weather.util.LocationUiState
-import com.vayunmathur.weather.util.LocationsUiState
-import com.vayunmathur.weather.util.SelectedDateOrTime
-import com.vayunmathur.weather.util.WeatherActions
+import com.vayunmathur.weather.domain.DisplayUnits
+import com.vayunmathur.weather.domain.LocationRow
+import com.vayunmathur.weather.domain.LocationUiState
+import com.vayunmathur.weather.domain.LocationsUiState
+import com.vayunmathur.weather.domain.SelectedDateOrTime
+import com.vayunmathur.weather.platform.WeatherActions
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"

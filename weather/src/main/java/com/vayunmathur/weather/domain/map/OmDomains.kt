@@ -1,4 +1,4 @@
-package com.vayunmathur.weather.map
+package com.vayunmathur.weather.domain.map
 
 /**
  * Grid geometry for an Open-Meteo spatial model, mirroring the relevant fields

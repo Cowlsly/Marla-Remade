@@ -1,7 +1,10 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import android.content.Context
 import com.vayunmathur.weather.R
+import com.vayunmathur.weather.domain.TemperatureUnit
+import com.vayunmathur.weather.domain.formatTemperatureCompact
+import com.vayunmathur.weather.domain.weatherConditionForCode
 import com.vayunmathur.weather.network.ForecastResponse
 import java.util.Locale
 

@@ -1,7 +1,8 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import android.content.Context
 import com.vayunmathur.weather.R
+import com.vayunmathur.weather.domain.parseLocalIsoToEpochSec
 import com.vayunmathur.weather.network.Minutely15
 
 /**

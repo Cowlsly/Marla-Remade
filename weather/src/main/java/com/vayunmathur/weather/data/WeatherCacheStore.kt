@@ -2,7 +2,7 @@ package com.vayunmathur.weather.data
 
 import com.vayunmathur.weather.network.AirQualityResponse
 import com.vayunmathur.weather.network.ForecastResponse
-import com.vayunmathur.weather.util.roundCoord
+import com.vayunmathur.weather.domain.roundCoord
 import kotlinx.serialization.json.Json
 
 /** Shared lenient JSON used for (de)serializing cached weather payloads. */

@@ -1,7 +1,8 @@
-package com.vayunmathur.weather.util
+package com.vayunmathur.weather.platform
 
 import androidx.compose.runtime.Composable
 import com.vayunmathur.weather.data.SavedLocation
+import com.vayunmathur.weather.domain.TemperatureUnit
 import com.vayunmathur.weather.network.AirQualityCurrent
 import com.vayunmathur.weather.network.ForecastResponse
 
