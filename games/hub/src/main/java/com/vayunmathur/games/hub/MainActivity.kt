@@ -7,15 +7,20 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vayunmathur.library.ui.IconDashboard
 import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.IconPerson
 import com.vayunmathur.library.ui.IconSportsEsports
+import com.vayunmathur.library.ui.PagerTab
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.games.hub.data.DB_NAME
 import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.ui.screens.AchievementsScreen
@@ -28,15 +33,13 @@ import com.vayunmathur.games.hub.ui.screens.SettingsScreen
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.library.util.BottomBarItem
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
+import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
-import androidx.compose.ui.res.stringResource
-import com.vayunmathur.games.hub.R
 
 class MainActivity : ComponentActivity() {
 
@@ -74,12 +77,9 @@ class MainActivity : ComponentActivity() {
 
 @Serializable
 sealed interface MainRoute : NavKey {
-    @Serializable data object Dashboard : MainRoute
-    @Serializable data object GamesList : MainRoute
+    @Serializable data object Main : MainRoute
     @Serializable data class GameDetail(val gameId: String) : MainRoute
-    @Serializable data object Achievements : MainRoute
     @Serializable data class AchievementsForGame(val gameId: String) : MainRoute
-    @Serializable data object Profile : MainRoute
     @Serializable data object Activity : MainRoute
     @Serializable data object Settings : MainRoute
 }
@@ -89,45 +89,11 @@ fun HubNavigation(
     viewModel: GameHubViewModel,
     dbConfigs: List<Pair<String, String>>
 ) {
-    val backStack = rememberNavBackStack<MainRoute>(MainRoute.Dashboard)
-    val current = backStack.last()
+    val backStack = rememberNavBackStack<MainRoute>(MainRoute.Main)
 
-    val bottomBarItems: List<BottomBarItem<out MainRoute>> = listOf(
-        BottomBarItem("Home", MainRoute.Dashboard) { IconDashboard() },
-        BottomBarItem("Games", MainRoute.GamesList) { IconSportsEsports() },
-        BottomBarItem("Achievements", MainRoute.Achievements) { IconEmojiEvents() },
-        BottomBarItem("Profile", MainRoute.Profile) { IconPerson() },
-    )
-
-    val showBottomBar = current is MainRoute.Dashboard
-            || current is MainRoute.GamesList
-            || current is MainRoute.Achievements
-            || current is MainRoute.Profile
-
-    MainNavigation(
-        backStack = backStack,
-        bottomBar = {
-            if (showBottomBar) {
-                BottomNavBar(backStack, bottomBarItems, current)
-            }
-        }
-    ) {
-        entry<MainRoute.Dashboard> {
-            DashboardPage(
-                viewModel = viewModel,
-                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) },
-                onProfileClick = { backStack.add(MainRoute.Profile) },
-                onActivityClick = { backStack.add(MainRoute.Activity) },
-                onGamesClick = { backStack.add(MainRoute.GamesList) },
-                dbConfigs = dbConfigs,
-                datastoreNames = listOf("datastore_default")
-            )
-        }
-        entry<MainRoute.GamesList> {
-            GamesListPage(
-                viewModel = viewModel,
-                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) }
-            )
+    MainNavigation(backStack) {
+        entry<MainRoute.Main> {
+            HubTabs(viewModel = viewModel, backStack = backStack, dbConfigs = dbConfigs)
         }
         entry<MainRoute.GameDetail> { route ->
             GameDetailScreen(
@@ -136,14 +102,8 @@ fun HubNavigation(
                 backStack = backStack
             )
         }
-        entry<MainRoute.Achievements> {
-            AchievementsScreen(viewModel = viewModel)
-        }
         entry<MainRoute.AchievementsForGame> { route ->
             AchievementsScreen(viewModel = viewModel, initialGameFilter = route.gameId)
-        }
-        entry<MainRoute.Profile> {
-            ProfilePage(viewModel = viewModel)
         }
         entry<MainRoute.Activity> {
             ActivityFeedScreen(
@@ -161,4 +121,40 @@ fun HubNavigation(
             )
         }
     }
+}
+
+@Composable
+private fun HubTabs(
+    viewModel: GameHubViewModel,
+    backStack: NavBackStack<MainRoute>,
+    dbConfigs: List<Pair<String, String>>,
+) {
+    val pagerState = rememberPagerState(pageCount = { 4 })
+    val scope = rememberCoroutineScope()
+    val tabs = listOf(
+        PagerTab("Home", { IconDashboard() }) {
+            DashboardPage(
+                viewModel = viewModel,
+                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) },
+                onProfileClick = { scope.launch { pagerState.animateScrollToPage(3) } },
+                onActivityClick = { backStack.add(MainRoute.Activity) },
+                onGamesClick = { scope.launch { pagerState.animateScrollToPage(1) } },
+                dbConfigs = dbConfigs,
+                datastoreNames = listOf("datastore_default")
+            )
+        },
+        PagerTab("Games", { IconSportsEsports() }) {
+            GamesListPage(
+                viewModel = viewModel,
+                onGameClick = { gameId -> backStack.add(MainRoute.GameDetail(gameId)) }
+            )
+        },
+        PagerTab("Achievements", { IconEmojiEvents() }) {
+            AchievementsScreen(viewModel = viewModel)
+        },
+        PagerTab("Profile", { IconPerson() }) {
+            ProfilePage(viewModel = viewModel)
+        },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
