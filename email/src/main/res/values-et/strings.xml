@@ -61,7 +61,7 @@
     <string name="security">Turvalisus:</string>
     <string name="no_recent_emails">Hiljutisi e-kirju pole</string>
     <string name="retry">Proovi uuesti</string>
-    <string name="couldn_t_open_this_eml_file">Selle eml-faili avamine ei õnenstunud</string>
+    <string name="couldn_t_open_this_eml_file">Selle eml-faili avamine ei õnnestunud</string>
     <string name="to">Saaja: <xliff:g id="recipient" example="kadri@toredomeen.ee">%1$s</xliff:g></string>
     <string name="cc_1">Koopia: <xliff:g id="recipient" example="kadri@toredomeen.ee">%1$s</xliff:g></string>
     <string name="signature_saved">Allkiri on salvestatud</string>
