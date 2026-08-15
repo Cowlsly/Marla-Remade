@@ -1,20 +1,20 @@
 package com.vayunmathur.files.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -22,11 +22,11 @@ import androidx.core.content.ContextCompat
 import com.vayunmathur.files.R
 import com.vayunmathur.files.platform.FileBrowserItem
 import com.vayunmathur.files.platform.FileCategory
+import com.vayunmathur.files.platform.FilesActions
 import com.vayunmathur.files.platform.FilesViewModel
 import com.vayunmathur.library.ui.*
 import kotlinx.coroutines.launch
 import java.io.File
-import androidx.compose.ui.draganddrop.DragAndDropTarget
 
 
 @Composable
@@ -153,7 +153,7 @@ private fun FilesDrawer(
             selected = false,
             onClick = { go { actions.openInternalStorage() } },
         )
-        SectionHeader(stringResource(R.string.categories))
+        HomeSectionHeader(stringResource(R.string.categories))
         NavigationDrawerItem(
             label = { Text(stringResource(R.string.cat_images)) },
             icon = { IconImage(tint = COLOR_IMAGE) },
@@ -185,7 +185,7 @@ private fun FilesDrawer(
             onClick = { go { actions.openCategory(FileCategory.DOWNLOADS) } },
         )
         if (bookmarks.isNotEmpty()) {
-            SectionHeader(stringResource(R.string.bookmarks))
+            HomeSectionHeader(stringResource(R.string.bookmarks))
             bookmarks.forEach { bm ->
                 NavigationDrawerItem(
                     label = { Text(bm.name) },
@@ -202,12 +202,12 @@ private fun FilesDrawer(
  * The "install unknown apps" settings screen for this package, so the user can grant Files
  * permission to install APKs. Scoped to our package via the `package:` URI.
  */
-private fun unknownAppSourcesSettings(context: android.content.Context): Intent =
+internal fun unknownAppSourcesSettings(context: android.content.Context): Intent =
     Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
         data = Uri.fromParts("package", context.packageName, null)
     }
 
-private fun fileAncestors(from: File?, upTo: File?): List<File> = buildList {
+internal fun fileAncestors(from: File?, upTo: File?): List<File> = buildList {
     var p = from
     while (p != null) {
         add(0, p)
@@ -216,7 +216,7 @@ private fun fileAncestors(from: File?, upTo: File?): List<File> = buildList {
     }
 }
 
-private data class Crumb(
+internal data class Crumb(
     val displayName: String,
     val realFile: File?,
     val zipInternalPath: String?, // non-null = zip mode crumb

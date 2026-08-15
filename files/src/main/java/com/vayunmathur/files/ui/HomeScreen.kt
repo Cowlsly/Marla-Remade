@@ -1,30 +1,29 @@
 package com.vayunmathur.files.ui
 
 import android.text.format.Formatter
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.clickable
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.files.R
 import com.vayunmathur.files.platform.FileBrowserItem
 import com.vayunmathur.files.platform.FileCategory
 import com.vayunmathur.files.platform.FilesActions
 import com.vayunmathur.files.platform.HomeUiState
+import com.vayunmathur.files.platform.StorageInfo
 import com.vayunmathur.library.ui.*
 import java.io.File
-
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     home: HomeUiState,
@@ -54,7 +53,7 @@ fun HomeScreen(
                 )
             }
 
-            item { SectionHeader(stringResource(R.string.categories)) }
+            item { HomeSectionHeader(stringResource(R.string.categories)) }
             item {
                 Row(
                     Modifier
@@ -72,7 +71,7 @@ fun HomeScreen(
             }
 
             if (home.bookmarks.isNotEmpty()) {
-                item { SectionHeader(stringResource(R.string.bookmarks)) }
+                item { HomeSectionHeader(stringResource(R.string.bookmarks)) }
                 items(home.bookmarks, key = { "bm:" + it.key }) { bm ->
                     HomeRow(
                         leading = { IconFolder(tint = MaterialTheme.colorScheme.outline) },
@@ -87,7 +86,7 @@ fun HomeScreen(
             }
 
             if (home.recents.isNotEmpty()) {
-                item { SectionHeader(stringResource(R.string.recent_files)) }
+                item { HomeSectionHeader(stringResource(R.string.recent_files)) }
                 items(home.recents, key = { "rc:" + it.key }) { r ->
                     HomeRow(
                         leading = { FileLeading(r, false, 40.dp) },
@@ -174,7 +173,7 @@ private fun HomeRow(
 }
 
 @Composable
-private fun SectionHeader(text: String) {
+internal fun HomeSectionHeader(text: String) {
     Text(
         text,
         style = MaterialTheme.typography.titleSmall,
@@ -182,7 +181,5 @@ private fun SectionHeader(text: String) {
         modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
     )
 }
-
-// ---- Shared dialogs ----
 
 

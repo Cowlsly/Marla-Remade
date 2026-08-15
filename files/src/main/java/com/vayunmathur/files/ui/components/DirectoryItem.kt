@@ -1,5 +1,34 @@
 package com.vayunmathur.files.ui.components
 
+import android.content.ClipData
+import android.content.ClipDescription
+import android.text.format.Formatter
+import android.view.View
+import android.webkit.MimeTypeMap
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.draganddrop.dragAndDropSource
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.runtime.*
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
+import androidx.compose.ui.draganddrop.mimeTypes
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import com.vayunmathur.files.platform.FileBrowserItem
+import com.vayunmathur.files.ui.FileLeading
+import com.vayunmathur.files.ui.dropTarget
+import com.vayunmathur.library.ui.ListItem
+import com.vayunmathur.library.ui.ListItemDefaults
+import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Text
+import java.io.File
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun DirectoryItem(
@@ -97,5 +126,3 @@ fun DirectoryItem(
         )
     }
 }
-
-

@@ -6,7 +6,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
+import com.vayunmathur.files.R
 import com.vayunmathur.files.platform.FilesViewModel
+import com.vayunmathur.files.platform.HomeUiState
 import com.vayunmathur.library.ui.SnackbarHostState
 
 @Composable

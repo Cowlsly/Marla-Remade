@@ -2,7 +2,9 @@ package com.vayunmathur.files.ui
 
 import android.content.ClipData
 import android.content.ClipDescription
+import android.text.format.Formatter
 import android.webkit.MimeTypeMap
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -21,10 +23,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.DragAndDropTransferData
+import androidx.compose.ui.draganddrop.mimeTypes
+import androidx.compose.ui.draganddrop.toAndroidDragEvent
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
@@ -38,7 +44,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import android.text.format.Formatter
 import androidx.core.content.FileProvider
 import com.vayunmathur.files.R
 import com.vayunmathur.files.platform.FileBrowserItem
@@ -46,6 +51,9 @@ import com.vayunmathur.files.platform.FilesActions
 import com.vayunmathur.files.platform.FilesUiState
 import com.vayunmathur.files.platform.SortBy
 import com.vayunmathur.files.platform.ViewMode
+import com.vayunmathur.files.ui.components.DirectoryItem
+import com.vayunmathur.files.ui.components.GridItem
+import com.vayunmathur.files.ui.dialogs.PropertiesDialog
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.ui.*
 import kotlinx.coroutines.Dispatchers
@@ -54,11 +62,6 @@ import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
 import java.util.Date
-import androidx.compose.ui.draganddrop.DragAndDropEvent
-import androidx.compose.ui.draganddrop.DragAndDropTarget
-import androidx.compose.ui.draganddrop.mimeTypes
-import androidx.compose.ui.draganddrop.toAndroidDragEvent
-import androidx.compose.ui.draganddrop.DragAndDropTransferData
 import com.vayunmathur.library.ui.R as UiR
 
 // ---- File type / thumbnail helpers ----
@@ -70,17 +73,17 @@ private val DOC_EXTS = setOf("pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
 private val ARCHIVE_EXTS = setOf("zip", "rar", "7z", "tar", "gz", "bz2", "xz")
 private val CODE_EXTS = setOf("kt", "java", "c", "cpp", "h", "py", "js", "ts", "html", "css", "json", "xml", "sh", "rs", "go")
 
-private val COLOR_IMAGE = Color(0xFF4CAF50)
-private val COLOR_VIDEO = Color(0xFF9C27B0)
-private val COLOR_AUDIO = Color(0xFFFF9800)
-private val COLOR_DOC = Color(0xFF2196F3)
-private val COLOR_ARCHIVE = Color(0xFFB28500)
-private val COLOR_APK = Color(0xFF009688)
-private val COLOR_CODE = Color(0xFF607D8B)
+internal val COLOR_IMAGE = Color(0xFF4CAF50)
+internal val COLOR_VIDEO = Color(0xFF9C27B0)
+internal val COLOR_AUDIO = Color(0xFFFF9800)
+internal val COLOR_DOC = Color(0xFF2196F3)
+internal val COLOR_ARCHIVE = Color(0xFFB28500)
+internal val COLOR_APK = Color(0xFF009688)
+internal val COLOR_CODE = Color(0xFF607D8B)
 
 /** Leading visual for a browser item: an image thumbnail, or a type-colored icon. */
 @Composable
-private fun FileLeading(item: FileBrowserItem, isSelected: Boolean, sizeDp: Dp) {
+internal fun FileLeading(item: FileBrowserItem, isSelected: Boolean, sizeDp: Dp) {
     val ext = item.name.substringAfterLast('.', "").lowercase()
     if (!item.isDirectory && item.realFile != null && ext in IMAGE_EXTS) {
         AsyncImage(
@@ -591,7 +594,7 @@ fun DirectoryScreen(
                             isReadOnly = isReadOnly,
                             onLongClick = { onItemLongClick(child) },
                             onClick = { onItemClick(child) },
-                            onMove = { sources ->
+                            onMove = { sources: List<File> ->
                                 if (!isReadOnly && child.isDirectory && child.realFile != null) {
                                     actions.moveInto(sources, child.realFile)
                                 }
@@ -609,6 +612,58 @@ fun DirectoryScreen(
             }
         }
     }
+}
+
+@Composable
+internal fun sortLabel(sortBy: SortBy): String = stringResource(
+    when (sortBy) {
+        SortBy.NAME -> R.string.sort_name
+        SortBy.DATE -> R.string.sort_date
+        SortBy.SIZE -> R.string.sort_size
+        SortBy.TYPE -> R.string.sort_type
+    }
+)
+
+@Composable
+internal fun NameDialog(
+    title: String,
+    label: String,
+    initial: String,
+    confirmLabel: String,
+    onConfirm: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var name by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title) },
+        text = {
+            TextField(
+                value = name,
+                onValueChange = { name = it },
+                label = { Text(label) },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (name.isNotBlank()) onConfirm(name) }),
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = { if (name.isNotBlank()) onConfirm(name) }) { Text(confirmLabel) }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text(stringResource(UiR.string.cancel)) }
+        },
+    )
+}
+
+@Composable
+internal fun SectionHeader(text: String) {
+    Text(
+        text,
+        style = MaterialTheme.typography.titleSmall,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
+    )
 }
 
 
