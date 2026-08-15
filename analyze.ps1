@@ -1,6 +1,6 @@
 param (
     [Parameter(Position = 0, Mandatory = $true)]
-    [ValidateSet("package", "module", "ram")]
+    [ValidateSet("package", "module", "ram", "structure")]
     $Type,
 
     [Parameter(Mandatory = $false)]
@@ -91,6 +91,42 @@ if ($ModuleName) {
         Write-Warning "No Kotlin files found in module: $ModuleName"
         return
     }
+}
+
+# List every root package (the first sub-package after each app's base package) and
+# report how many modules it appears in, plus the module names.
+if ($Type -eq "structure") {
+    $entries = foreach ($f in $files) {
+        # The module name is the directory holding "src"; it is also the final segment of
+        # the app's base package (e.g. music -> com.vayunmathur.music,
+        # alchemist -> com.vayunmathur.games.alchemist).
+        $module = ($f.FullName -split '\\src\\')[0].Split('\')[-1]
+
+        # Split the package directory into segments, then take the segment right after the
+        # one matching the module name. That segment is the root package.
+        $segs = (Split-Path ($f.FullName -split '\\src\\')[1]) -split '\\'
+        $idx = [array]::IndexOf($segs, $module)
+        if ($idx -ge 0 -and ($idx + 1) -lt $segs.Count) {
+            [PSCustomObject]@{ Module = $module; Package = $segs[$idx + 1] }
+        }
+    }
+
+    if (-not $entries) {
+        Write-Warning "No root packages found."
+        return
+    }
+
+    $r = $entries | group Package | ForEach-Object {
+        $mods = $_.Group.Module | sort -Unique
+        [PSCustomObject]@{
+            Package = $_.Name
+            Modules = $mods.Count
+            ModuleNames = ($mods -join ", ")
+        }
+    } | sort @{Expression = "Modules"; Descending = $true}, @{Expression = "Package"; Descending = $false}
+
+    $r | Format-Table -AutoSize -Wrap
+    return
 }
 
 # Determine grouping logic based on the user's positional command
