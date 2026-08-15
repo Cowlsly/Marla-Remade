@@ -169,7 +169,7 @@
     <!-- MainActivity: Button accept tracked change. Verb. -->
     <string name="accept">Zaakceptuj</string>
     <!-- MainActivity: Button new doc short. Noun phrase. -->
-    <string name="new_doc">Nowy dok.</string>
+    <string name="new_doc">Nowy dokument</string>
     <!-- MainActivity: Menu export as text. Verb phrase. -->
     <string name="export_as_text">Eksportuj jako tekst</string>
     <!-- MainActivity: Menu insert. Verb. -->
@@ -179,7 +179,7 @@
     <!-- MainActivity: Button manage access. Verb. -->
     <string name="manage">Zarządzaj</string>
     <!-- MainActivity: Button new slides short. Noun phrase. -->
-    <string name="new_slides">Nowa prez.</string>
+    <string name="new_slides">Nowa prezentacja</string>
     <!-- MainActivity: Dialog title Enable online sharing question -->
     <string name="enable_online_sharing">Włączyć udostępnianie online?</string>
     <!-- MainActivity: Dialog title export to non-ODF warning -->
