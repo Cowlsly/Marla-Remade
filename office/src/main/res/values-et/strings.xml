@@ -101,7 +101,7 @@
     <string name="new_doc">Uus dokument</string>
     <string name="export_as_text">Ekspordi tekstina</string>
     <string name="insert">Sisesta</string>
-    <string name="enable">Võta kasutusele</string>
+    <string name="enable">Lülita sisse</string>
     <string name="manage">Halda</string>
     <string name="new_slides">Uued slaidid</string>
     <string name="enable_online_sharing">Kas lülitad võrgus jagamise sisse?</string>
