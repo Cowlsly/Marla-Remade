@@ -23,7 +23,7 @@ fun Navigation(viewModel: AstronomyViewModel) {
         entry<Route.Search>(metadata = ListPage()) { SearchPage(backStack, viewModel) }
         entry<Route.Settings>(metadata = DialogPage()) { SettingsPage(backStack, viewModel) }
         entry<Route.HistoryDatePicker>(metadata = DialogPage()) { route ->
-            DatePickerDialog(backStack, \ AstroHistoryDatePicker\, route.initialDate)
+            DatePickerDialog(backStack, "AstroHistoryDatePicker", route.initialDate)
         }
     }
 }
