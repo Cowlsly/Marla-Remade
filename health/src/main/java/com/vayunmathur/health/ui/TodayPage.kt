@@ -37,9 +37,9 @@ import com.vayunmathur.health.R
 import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.RecordType
 import com.vayunmathur.health.ui.components.ActivityRingsTrio
-import com.vayunmathur.health.ui.components.GroupedSection
-import com.vayunmathur.health.ui.components.GroupedSectionDivider
 import com.vayunmathur.health.ui.components.MetricRow
+import com.vayunmathur.library.ui.DashboardSection
+import com.vayunmathur.library.ui.DashboardSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.MainPageMetrics
 import com.vayunmathur.health.util.TodayActions
@@ -152,7 +152,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
 
             // Last night
             item {
-                GroupedSection(
+                DashboardSection(
                     title = stringResource(R.string.section_last_night),
                     accentColor = HealthColors.Sleep,
                 ) {
@@ -170,7 +170,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
 
             // Latest vitals
             item {
-                GroupedSection(
+                DashboardSection(
                     title = stringResource(R.string.section_latest_vitals),
                     accentColor = HealthColors.Vitals,
                 ) {
@@ -182,7 +182,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.HeartRate),
                         onClick = { actions.openMetric(HealthMetricConfig.HEART_RATE) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_blood_pressure),
                         value = state.metrics.bloodPressure?.let { "${it.first.toInt()}/${it.second.toInt()}" } ?: "--",
@@ -191,7 +191,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.BloodPressure),
                         onClick = { actions.openMetric(HealthMetricConfig.BLOOD_PRESSURE) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_oxygen_saturation),
                         value = state.metrics.spo2?.round(1)?.toString() ?: "--",
@@ -200,7 +200,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.OxygenSaturation),
                         onClick = { actions.openMetric(HealthMetricConfig.OXYGEN_SATURATION) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_resting_heart_rate),
                         value = state.metrics.rhr?.toString() ?: "--",
@@ -214,7 +214,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
 
             // Quick stats
             item {
-                GroupedSection(
+                DashboardSection(
                     title = stringResource(R.string.section_quick_stats),
                     accentColor = HealthColors.Activity,
                 ) {
@@ -226,7 +226,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.Steps),
                         onClick = { actions.openMetric(HealthMetricConfig.STEPS) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_distance),
                         value = state.distanceKm.round(2).toString(),
@@ -235,7 +235,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.Distance),
                         onClick = { actions.openMetric(HealthMetricConfig.DISTANCE) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_floors),
                         value = state.floors.round(1).toString(),
@@ -244,7 +244,7 @@ fun TodayScreen(state: TodayUiState, actions: TodayActions) {
                         leadingTint = colorFor(RecordType.Floors),
                         onClick = { actions.openMetric(HealthMetricConfig.FLOORS) },
                     )
-                    GroupedSectionDivider()
+                    DashboardSectionDivider()
                     MetricRow(
                         label = stringResource(R.string.label_hydration),
                         value = state.hydrationMl.toInt().toString(),
