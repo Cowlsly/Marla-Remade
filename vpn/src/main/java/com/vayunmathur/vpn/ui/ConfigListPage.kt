@@ -39,7 +39,6 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
@@ -82,7 +81,6 @@ fun ConfigListPage(backStack: NavBackStack<Route>, vm: VpnViewModel) {
         // and that point the row shows the spinner instead.
         activeId = connectingId?.takeIf { VpnTunnelService.isRunning },
         snackbar = snackbar,
-        onSettings = { backStack.add(Route.Settings) },
         // Open a .conf file — only import option per user request.
         onImport = { filePicker.launch(arrayOf("*/*")) },
         onToggleConnect = { cfg ->
@@ -110,7 +108,6 @@ fun ConfigListContent(
     connectingId: Long?,
     activeId: Long?,
     snackbar: SnackbarHostState = remember { SnackbarHostState() },
-    onSettings: () -> Unit = {},
     onImport: () -> Unit = {},
     onToggleConnect: (VpnConfig) -> Unit = {},
     onOpen: (VpnConfig) -> Unit = {},
@@ -120,11 +117,6 @@ fun ConfigListContent(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.vpn_wireguard_gotatun)) },
-                actions = {
-                    androidx.compose.material3.IconButton(onSettings) {
-                        IconSettings()
-                    }
-                },
             )
         },
         snackbarHost = { SnackbarHost(snackbar) },
