@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.R
@@ -12,7 +13,6 @@ import com.vayunmathur.astronomy.platform.AstronomyViewModel
 import com.vayunmathur.astronomy.platform.ConstellationMode
 import com.vayunmathur.astronomy.platform.SettingsActions
 import com.vayunmathur.astronomy.platform.SettingsUiState
-import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.*
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
@@ -61,11 +61,8 @@ fun SettingsScreen(backStack: NavBackStack<Route>, state: SettingsUiState, actio
     var latText by remember(state.latDeg) { mutableStateOf(state.latDeg?.toString() ?: "") }
     var lonText by remember(state.lonDeg) { mutableStateOf(state.lonDeg?.toString() ?: "") }
 
-    AppScaffold(
-        title = stringResource(UiR.string.settings),
-        backStack = backStack,
-    ) { padding ->
-        Column(Modifier.padding(padding).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().padding(top = 56.dp).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             Text(stringResource(R.string.display), style = MaterialTheme.typography.titleMedium)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
                 Text(stringResource(R.string.constellations))
@@ -115,6 +112,11 @@ fun SettingsScreen(backStack: NavBackStack<Route>, state: SettingsUiState, actio
             Text(stringResource(R.string.notes_true_north_correction_via_geomagne), style = MaterialTheme.typography.labelSmall)
             Text(stringResource(R.string.catalog_stars_constellations_dso, state.starCount, state.constellationCount, state.deepSkyCount), style = MaterialTheme.typography.labelSmall)
         }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            onNavigateBack = { backStack.pop() },
+        )
     }
 }
 

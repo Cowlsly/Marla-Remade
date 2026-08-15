@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.R
@@ -39,11 +40,8 @@ fun SearchScreen(
     var query by remember { mutableStateOf(initialQuery) }
     var results by remember { mutableStateOf(actions.search(initialQuery)) }
 
-    AppScaffold(
-        title = stringResource(R.string.search_1),
-        backStack = backStack,
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().padding(12.dp)) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().padding(top = 56.dp).padding(12.dp)) {
             OutlinedTextField(value = query, onValueChange = { query = it; results = actions.search(it) }, label = { Text(stringResource(R.string.search_stars_planets_messier)) }, modifier = Modifier.fillMaxWidth())
             Spacer(Modifier.height(8.dp))
             LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -66,5 +64,10 @@ fun SearchScreen(
                 }
             }
         }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            onNavigateBack = { backStack.pop() },
+        )
     }
 }

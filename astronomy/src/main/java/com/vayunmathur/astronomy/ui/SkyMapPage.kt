@@ -3,9 +3,9 @@ package com.vayunmathur.astronomy.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
-import com.vayunmathur.astronomy.R
 import com.vayunmathur.astronomy.Route
 import com.vayunmathur.astronomy.domain.projection.ViewState
 import com.vayunmathur.astronomy.platform.AstronomyViewModel
@@ -19,7 +19,6 @@ import com.vayunmathur.library.util.ResultEffect
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
 import kotlin.time.ExperimentalTime
-import androidx.compose.ui.res.stringResource
 
 // Astronomy scrubs across a wide time range, so the relative jumps are hours/days
 // rather than the minutes/seconds FindFamily uses.
@@ -102,53 +101,59 @@ fun SkyMapScreen(
         ViewState(state.centerAzRad, state.centerAltRad, state.fovDeg, screenW, screenH, state.rotationRad)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    IconButton(onClick = { backStack.add(Route.Search) }) { IconSearch() }
-                    IconButton(onClick = { cameraOn = !cameraOn }) {
-                        if (cameraOn) IconCameraOff() else IconCamera()
-                    }
-                    IconButton(onClick = { backStack.add(Route.Settings) }) { IconSettings() }
-                }
-            )
+    Box(
+        Modifier.fillMaxSize()
+            .onSizeChanged { sz -> screenW = sz.width.toFloat(); screenH = sz.height.toFloat() }
+    ) {
+        if (cameraOn) {
+            CameraBackground(Modifier.fillMaxSize()) { cameraOn = false }
         }
-    ) { padding ->
-        Box(
-            Modifier.padding(padding).fillMaxSize()
-                .onSizeChanged { sz -> screenW = sz.width.toFloat(); screenH = sz.height.toFloat() }
-        ) {
-            if (cameraOn) {
-                CameraBackground(Modifier.fillMaxSize()) { cameraOn = false }
-            }
 
-            SkyCanvas(
-                visibleSky = state.visibleSky,
-                viewState = viewState,
-                showConstellationLines = state.constellationMode != ConstellationMode.OFF,
-                showConstellationArt = state.constellationMode == ConstellationMode.LINES_AND_ART,
-                showGrid = state.showGrid,
-                showDeepSky = state.showDeepSky,
-                showPlanets = state.showPlanets,
-                transparentBackground = cameraOn,
-                trajectory = state.trajectory,
-                selectedId = state.selectedObjectId,
-                onPan = { _, _ -> /* disabled – always tracks phone */ },
-                onZoom = { actions.setFov(it) },
-                onTap = { _ -> },
-                onObjectTap = { id -> actions.selectObject(id) },
-                onObjectOpen = { id -> actions.selectObject(id); backStack.add(Route.ObjectDetail(id)) },
-                modifier = Modifier.fillMaxSize()
-            )
+        SkyCanvas(
+            visibleSky = state.visibleSky,
+            viewState = viewState,
+            showConstellationLines = state.constellationMode != ConstellationMode.OFF,
+            showConstellationArt = state.constellationMode == ConstellationMode.LINES_AND_ART,
+            showGrid = state.showGrid,
+            showDeepSky = state.showDeepSky,
+            showPlanets = state.showPlanets,
+            transparentBackground = cameraOn,
+            trajectory = state.trajectory,
+            selectedId = state.selectedObjectId,
+            onPan = { _, _ -> /* disabled – always tracks phone */ },
+            onZoom = { actions.setFov(it) },
+            onTap = { _ -> },
+            onObjectTap = { id -> actions.selectObject(id) },
+            onObjectOpen = { id -> actions.selectObject(id); backStack.add(Route.ObjectDetail(id)) },
+            modifier = Modifier.fillMaxSize()
+        )
 
-            HistoryScrubber(backStack, state, actions)
+        HistoryScrubber(backStack, state, actions)
 
-            if (state.nightMode) {
-                Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color(0x44FF0000)))
-            }
+        if (state.nightMode) {
+            Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color(0x44FF0000)))
         }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            actions = listOf(
+                OverlayAction(
+                    icon = { IconSearch() },
+                    contentDescription = "Search",
+                    onClick = { backStack.add(Route.Search) },
+                ),
+                OverlayAction(
+                    icon = { if (cameraOn) IconCameraOff() else IconCamera() },
+                    contentDescription = "Camera",
+                    onClick = { cameraOn = !cameraOn },
+                ),
+                OverlayAction(
+                    icon = { IconSettings() },
+                    contentDescription = "Settings",
+                    onClick = { backStack.add(Route.Settings) },
+                ),
+            ),
+        )
     }
 }
 

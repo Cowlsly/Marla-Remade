@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.R
@@ -26,11 +27,8 @@ fun ObjectDetailPage(backStack: NavBackStack<Route>, viewModel: AstronomyViewMod
 
     val detail = remember(objectId, visibleSky) { resolveDetail(objectId, visibleSky, viewModel) }
 
-    AppScaffold(
-        title = detail?.title ?: objectId,
-        backStack = backStack,
-    ) { padding ->
-        Column(Modifier.padding(padding).fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Box(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (detail == null) {
                 Text(stringResource(R.string.object_not_found, objectId))
                 return@Column
@@ -72,6 +70,11 @@ fun ObjectDetailPage(backStack: NavBackStack<Route>, viewModel: AstronomyViewMod
                 Text(stringResource(R.string.trajectory_24h_15m_steps_yellow_line_on), style = MaterialTheme.typography.labelSmall)
             }
         }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            onNavigateBack = { backStack.pop() },
+        )
     }
 }
 
