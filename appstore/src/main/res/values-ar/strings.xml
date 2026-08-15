@@ -1,3 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    </resources>
+    <string name="app_name">متجر التطبيقات</string>
+    <string name="open">فتح</string>
+    <string name="uninstall">إلغاء التثبيت</string>
+    <string name="view_in_play_store">عرض في متجر Play</string>
+    <string name="installed">مُثبت</string>
+    <string name="installed_2">تم تثبيت %1$s</string>
+    <string name="uninstall_3">إلغاء تثبيت %1$s؟</string>
+    <string name="this_will_uninstall_you_can_reinstall_la">ستتم إزالة %1$s. يمكنك تثبيته مرة أخرى في أي وقت.</string>
+    <string name="last_sync">آخر مزامنة: %1$s</string>
+    <string name="repositories">المصادر</string>
+</resources>
