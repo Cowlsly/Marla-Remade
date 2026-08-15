@@ -49,9 +49,9 @@ import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.passwords.sync.KdbxPasswordHelper
 import com.vayunmathur.passwords.sync.KdbxSyncScheduler
 import com.vayunmathur.passwords.sync.KdbxSyncSettings
-import com.vayunmathur.passwords.util.ImportSource
-import com.vayunmathur.passwords.util.KdbxBackupFormat
-import com.vayunmathur.passwords.util.PasswordsViewModel
+import com.vayunmathur.passwords.domain.ImportSource
+import com.vayunmathur.passwords.platform.KdbxBackupFormat
+import com.vayunmathur.passwords.platform.PasswordsViewModel
 import kotlinx.coroutines.launch
 import java.util.Date
 

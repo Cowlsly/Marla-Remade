@@ -28,7 +28,7 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.Route
-import com.vayunmathur.passwords.util.PasswordsViewModel
+import com.vayunmathur.passwords.platform.PasswordsViewModel
 import java.util.Date
 
 @OptIn(ExperimentalMaterial3Api::class)
