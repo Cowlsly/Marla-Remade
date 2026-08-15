@@ -125,7 +125,11 @@
     <string name="tile_subtitle_on">Sees</string>
     <string name="tile_subtitle_off">Väljas</string>
     <string name="tile_subtitle_no_permission">Seadistamiseks klõpsa</string>
-    <string name="fab_tracker">Jälitaja</string>
-    <string name="add_tracker_title">Lisa jälitaja</string>
-    <string name="add_tracker_name_label">Jälitaja nimi</string>
+    <string name="fab_tracker">Nutimärgis</string>
+    <string name="add_tracker_title">Lisa nutimärgis</string>
+    <string name="add_tracker_name_label">Nutimärgise nimi</string>
+    <string name="add_tracker_scan_hint">Lülita nutimärgis paardumisrežiimi ja vali ta alljärgnevast.</string>
+    <string name="add_tracker_scanning">Otsin nutimärgiseid…</string>
+    <string name="add_tracker_binding">Seon nutimärgist…</string>
+    <string name="add_tracker_failed">Nutimärgise sidumine ei õnnestunud. Proovi uuesti.</string>
 </resources>
