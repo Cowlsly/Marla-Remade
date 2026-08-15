@@ -1,4 +1,4 @@
-package com.vayunmathur.things.util
+package com.vayunmathur.things.platform
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothDevice

@@ -1,8 +1,6 @@
 package com.vayunmathur.things
 
 import kotlin.time.Clock
-import kotlin.time.Instant
-import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
@@ -19,14 +17,13 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.core.content.edit
 import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.things.ui.ThingsApp
-import com.vayunmathur.things.util.BleManager
+import com.vayunmathur.things.platform.BleManager
 import java.time.LocalDate
 
 class MainActivity : ComponentActivity() {
     private lateinit var bleManager: BleManager
-    val messages = mutableStateListOf<String>()       // sip history (newest first)
-    val totalMl = mutableIntStateOf(0)                 // today's running total
+    val messages = mutableStateListOf<String>()
+    val totalMl = mutableIntStateOf(0)
     val connectionState = mutableStateOf("Disconnected")
     val scanning = mutableStateOf(false)
     val discoveredDevices = mutableStateListOf<BleManager.BleDevice>()
@@ -47,7 +44,6 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /** Called from the BLE callback when the cup reports a drink (mL). */
     fun onDrinkReceived(ml: Int) {
         if (!isToday()) {
             totalMl.intValue = 0
@@ -75,7 +71,7 @@ class MainActivity : ComponentActivity() {
         loadTodayTotal()
         setContent {
             DynamicTheme {
-                ThingsApp(
+                Navigation(
                     totalMl = totalMl.intValue,
                     goalMl = GOAL_ML,
                     messages = messages,
