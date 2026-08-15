@@ -59,7 +59,6 @@ import androidx.core.app.NotificationCompat
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.mainPages
 import com.vayunmathur.clock.util.ClockViewModel
 import com.vayunmathur.clock.util.TimerActions
 import com.vayunmathur.clock.util.TimerReceiver
@@ -71,7 +70,6 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.IconRestartAlt
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -183,9 +181,6 @@ fun TimerScreen(
     val showKeypad = timers.isEmpty() || isAddingTimer
 
     Scaffold(
-        bottomBar = {
-            BottomNavBar(backStack, mainPages(), Route.Timer)
-        },
         floatingActionButton = {
             if (!showKeypad) {
                 FloatingActionButton({

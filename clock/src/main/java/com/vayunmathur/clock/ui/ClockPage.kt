@@ -29,12 +29,10 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.mainPages
 import com.vayunmathur.clock.util.ClockUiState
 import com.vayunmathur.clock.util.ClockViewModel
 import com.vayunmathur.clock.util.WorldClock
 import com.vayunmathur.library.ui.IconAdd
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
@@ -70,9 +68,7 @@ fun ClockPage(backStack: NavBackStack<Route>, ds: DataStoreUtils, clockViewModel
 @Composable
 fun ClockScreen(backStack: NavBackStack<Route>, state: ClockUiState) {
     val time = state.now.toLocalDateTime(state.zone)
-    Scaffold(bottomBar = {
-        BottomNavBar(backStack, mainPages(), Route.Clock)
-    }, floatingActionButton = {
+    Scaffold(floatingActionButton = {
         FloatingActionButton({
             backStack.add(Route.SelectTimeZonesDialog)
         }) { IconAdd() }

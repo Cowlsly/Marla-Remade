@@ -42,13 +42,11 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.mainPages
 import com.vayunmathur.clock.util.ClockViewModel
 import com.vayunmathur.clock.util.StopwatchActions
 import com.vayunmathur.clock.util.StopwatchUiState
 import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
-import com.vayunmathur.library.util.BottomNavBar
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.seconds
 
@@ -88,9 +86,7 @@ fun StopwatchScreen(backStack: NavBackStack<Route>, state: StopwatchUiState, act
         }
     }
 
-    Scaffold(bottomBar = {
-        BottomNavBar(backStack, mainPages(), Route.Stopwatch)
-    }, floatingActionButton = {
+    Scaffold(floatingActionButton = {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             if(isRunning) {
                 FloatingActionButton({

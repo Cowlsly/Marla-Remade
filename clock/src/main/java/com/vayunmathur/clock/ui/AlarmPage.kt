@@ -48,7 +48,6 @@ import com.vayunmathur.library.util.DateNameStyle
 import com.vayunmathur.library.util.localeWeekDayNumbers
 import com.vayunmathur.library.util.localizedDayOfWeekNames
 import com.vayunmathur.clock.util.AlarmScheduler
-import com.vayunmathur.clock.mainPages
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
@@ -59,7 +58,6 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.clock.util.AlarmActions
 import com.vayunmathur.clock.util.AlarmUiState
 import com.vayunmathur.clock.util.ClockViewModel
-import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.ResultEffect
 import kotlinx.datetime.LocalTime
 import com.vayunmathur.library.ui.DateString
@@ -159,8 +157,6 @@ fun AlarmScreen(
                 IconButton(onClick = { backStack.add(Route.AlarmSettings) }) { IconSettings() }
             },
         )
-    }, bottomBar = {
-        BottomNavBar(backStack, mainPages(), Route.Alarm)
     }, floatingActionButton = {
         if (alarms.isNotEmpty()) {
             FloatingActionButton({

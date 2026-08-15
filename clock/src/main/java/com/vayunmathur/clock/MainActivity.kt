@@ -18,12 +18,16 @@ import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.pager.rememberPagerState
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.IconAccessTime
 import com.vayunmathur.library.ui.IconAlarm
 import com.vayunmathur.library.ui.IconHourglass
 import com.vayunmathur.library.ui.IconTimer
+import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,7 +54,6 @@ import com.vayunmathur.clock.util.ClockViewModelFactory
 import com.vayunmathur.clock.util.createNotificationChannels
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.dialog.TimePickerDialogContent
-import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
@@ -147,6 +150,8 @@ fun InitialPermissionsScreen(permissions: Array<String>, setHasPermissions: (Boo
 @Serializable
 sealed interface Route : NavKey {
     @Serializable
+    data class Main(val initialTab: Int = 0) : Route
+    @Serializable
     data object Alarm: Route
     @Serializable
     data object Clock: Route
@@ -173,32 +178,26 @@ sealed interface Route : NavKey {
 }
 
 @Composable
-fun mainPages() = listOf(
-    BottomBarItem(stringResource(R.string.label_alarm), Route.Alarm) { IconAlarm() },
-    BottomBarItem(stringResource(R.string.label_clock), Route.Clock) { IconAccessTime() },
-    BottomBarItem(stringResource(R.string.label_timer), Route.Timer) { IconHourglass() },
-    BottomBarItem(stringResource(R.string.label_stopwatch), Route.Stopwatch) { IconTimer() }
-)
-
-@Composable
 fun Navigation(
     ds: DataStoreUtils,
     clockViewModel: ClockViewModel,
     initialRoute: Route?,
 ) {
-    val backStack = rememberNavBackStack<Route>(listOfNotNull(Route.Alarm, initialRoute).distinct())
+    val initialTab = when (initialRoute) {
+        is Route.Alarm -> 0
+        is Route.Clock -> 1
+        is Route.Timer -> 2
+        is Route.Stopwatch -> 3
+        else -> 0
+    }
+    val dialogRoute = when (initialRoute) {
+        is Route.Alarm, is Route.Clock, is Route.Timer, is Route.Stopwatch -> null
+        else -> initialRoute
+    }
+    val backStack = rememberNavBackStack<Route>(listOfNotNull(Route.Main(initialTab), dialogRoute).distinct())
     MainNavigation(backStack) {
-        entry<Route.Alarm> {
-            AlarmPage(backStack, clockViewModel, initialRoute as? Route.NewAlarmDialog)
-        }
-        entry<Route.Clock> {
-            ClockPage(backStack, ds, clockViewModel)
-        }
-        entry<Route.Timer> {
-            TimerPage(backStack, clockViewModel)
-        }
-        entry<Route.Stopwatch> {
-            StopwatchPage(backStack, clockViewModel)
+        entry<Route.Main> { key ->
+            ClockTabs(backStack, ds, clockViewModel, key.initialTab)
         }
         entry<Route.AlarmSettings> {
             com.vayunmathur.clock.ui.AlarmSettingsPage(backStack, ds)
@@ -223,4 +222,29 @@ fun Navigation(
             TimePickerDialogContent(backStack, "alarm_set_time_${it.id}", it.time)
         }
     }
+}
+
+@Composable
+private fun ClockTabs(
+    backStack: com.vayunmathur.library.util.NavBackStack<Route>,
+    ds: DataStoreUtils,
+    clockViewModel: ClockViewModel,
+    initialTab: Int = 0,
+) {
+    val pagerState = rememberPagerState(initialPage = initialTab, pageCount = { 4 })
+    val tabs = listOf(
+        PagerTab(stringResource(R.string.label_alarm), { IconAlarm() }) {
+            AlarmPage(backStack, clockViewModel)
+        },
+        PagerTab(stringResource(R.string.label_clock), { IconAccessTime() }) {
+            ClockPage(backStack, ds, clockViewModel)
+        },
+        PagerTab(stringResource(R.string.label_timer), { IconHourglass() }) {
+            TimerPage(backStack, clockViewModel)
+        },
+        PagerTab(stringResource(R.string.label_stopwatch), { IconTimer() }) {
+            StopwatchPage(backStack, clockViewModel)
+        },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
