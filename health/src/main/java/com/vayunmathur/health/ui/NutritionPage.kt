@@ -21,8 +21,8 @@ import com.vayunmathur.health.R
 import com.vayunmathur.health.Route
 import com.vayunmathur.health.data.NutritionData
 import com.vayunmathur.health.data.RecordType
-import com.vayunmathur.health.ui.components.GroupedSection
 import com.vayunmathur.health.ui.components.MetricRing
+import com.vayunmathur.library.ui.DashboardSection
 import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.health.util.NutritionActions
 import com.vayunmathur.health.util.NutritionUiState
@@ -239,7 +239,7 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
             }
 
             // Meals link + breakdown CTA
-            GroupedSection(accentColor = HealthColors.Nutrition) {
+            DashboardSection(accentColor = HealthColors.Nutrition) {
                 ListItem(
                     content = {
                         Text(
