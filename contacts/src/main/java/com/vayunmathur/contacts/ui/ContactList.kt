@@ -67,9 +67,6 @@ import com.vayunmathur.contacts.util.ContactSorting.sortedLocale
 import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.contacts.util.ContactsActions
 import com.vayunmathur.contacts.util.SimContactsActions
-import com.vayunmathur.contacts.util.ContactsTab
-import com.vayunmathur.library.ui.IconAdd
-import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -141,8 +138,6 @@ fun ContactList(
             override fun shareContacts(contacts: List<Contact>, filename: String) {
                 shareContactsAsVcf(scope, context, contacts, filename, resources.getString(R.string.share_contact))
             }
-
-            override fun selectTab(tab: ContactsTab) = navigateToTab(backStack, tab)
         },
         simActions = object : SimContactsActions {
             override fun importSimContact(simContact: com.vayunmathur.contacts.data.SimContact) { viewModel.importSimContact(simContact) }
@@ -288,11 +283,6 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions, simAc
                 }
             }
         },
-        bottomBar = {
-            if (!isSelectionMode) {
-                ContactsBottomNavBar(ContactsTab.Contacts, actions::selectTab)
-            }
-        }
     ) { paddingValues ->
         Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             LazyColumn(

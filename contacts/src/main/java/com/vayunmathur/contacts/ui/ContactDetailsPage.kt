@@ -99,6 +99,8 @@ import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.IconStarBorder
 import com.vayunmathur.library.ui.IconVideoCamera
+import com.vayunmathur.library.ui.OverflowMenu
+import com.vayunmathur.library.ui.rememberMessenger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -154,6 +156,7 @@ fun ContactDetailsPage(
     val hasSim by viewModel.hasSim.collectAsStateWithLifecycle()
 
     val scope = rememberCoroutineScope()
+    val messenger = rememberMessenger()
     val shareContactLabel = stringResource(R.string.share_contact)
     val simExportSuccess = stringResource(R.string.sim_export_success)
     val simExportFailed = stringResource(R.string.sim_export_failed)
@@ -180,7 +183,7 @@ fun ContactDetailsPage(
         hasSim = hasSim,
         onExportToSim = { c ->
             viewModel.exportContactToSim(c) { ok ->
-                android.widget.Toast.makeText(context, if (ok) simExportSuccess else simExportFailed, android.widget.Toast.LENGTH_SHORT).show()
+                messenger.show(if (ok) simExportSuccess else simExportFailed)
             }
         },
     )
@@ -223,19 +226,11 @@ fun ContactDetailsScreen(
                     }) {
                         IconShare()
                     }
-                    var showMore by remember { mutableStateOf(false) }
-                    Box {
-                        IconButton(onClick = { showMore = true }) { IconMoreVert() }
-                        DropdownMenu(expanded = showMore, onDismissRequest = { showMore = false }) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.export_to_sim)) },
-                                enabled = hasSim,
-                                onClick = {
-                                    showMore = false
-                                    onExportToSim?.invoke(contact)
-                                }
-                            )
-                        }
+                    OverflowMenu(icon = { IconMoreVert() }) {
+                        Item(
+                            text = stringResource(R.string.export_to_sim),
+                            enabled = hasSim,
+                        ) { onExportToSim?.invoke(contact) }
                     }
                     IconButton(onClick = { actions.confirmDeleteContact(contact) }) {
                         IconDelete()

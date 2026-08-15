@@ -25,7 +25,6 @@ import com.vayunmathur.contacts.R
 import com.vayunmathur.contacts.Route
 import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.contacts.util.ContactsActions
-import com.vayunmathur.contacts.util.ContactsTab
 import com.vayunmathur.contacts.util.GroupWithContacts
 import com.vayunmathur.contacts.util.GroupsUiState
 import com.vayunmathur.library.ui.IconAdd
@@ -53,8 +52,6 @@ fun GroupsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>, expa
             override fun openContact(contact: com.vayunmathur.contacts.data.Contact) {
                 backStack.add(Route.ContactDetail(contact.id))
             }
-
-            override fun selectTab(tab: ContactsTab) = navigateToTab(backStack, tab)
         },
         expandGroupId = expandGroupId,
     )
@@ -85,9 +82,6 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
                 IconAdd()
             }
         },
-        bottomBar = {
-            ContactsBottomNavBar(ContactsTab.Groups, actions::selectTab)
-        }
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),

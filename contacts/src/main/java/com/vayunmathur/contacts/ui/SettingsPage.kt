@@ -87,9 +87,6 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                 IconAdd()
             }
         },
-        bottomBar = {
-            ContactsBottomNavBar(backStack)
-        }
     ) { paddingValues ->
         LazyColumn(
             modifier = Modifier.fillMaxSize(),
