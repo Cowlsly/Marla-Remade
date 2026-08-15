@@ -14,14 +14,11 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.vayunmathur.games.hub.R
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.ui.components.ActivityItemCard
 import com.vayunmathur.games.hub.ui.components.GameCard
@@ -31,10 +28,7 @@ import com.vayunmathur.games.hub.ui.components.StreakCard
 import com.vayunmathur.games.hub.ui.components.XpProgressBar
 import com.vayunmathur.games.hub.util.DashboardActions
 import com.vayunmathur.games.hub.util.DashboardUiState
-import com.vayunmathur.games.hub.util.GameIconResolver
 import com.vayunmathur.games.hub.util.formatPlaytime
-import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
-import com.vayunmathur.library.ui.BackupButtons
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
@@ -42,75 +36,6 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
-import com.vayunmathur.games.hub.R
-
-/** Binds [GameHubViewModel] to the stateless [DashboardScreen]. */
-@Composable
-fun DashboardPage(
-    viewModel: GameHubViewModel,
-    onGameClick: (String) -> Unit,
-    onProfileClick: () -> Unit,
-    onActivityClick: () -> Unit,
-    onGamesClick: () -> Unit,
-    dbConfigs: List<Pair<String, String>>,
-    datastoreNames: List<String>,
-    modifier: Modifier = Modifier
-) {
-    val games by viewModel.gamesFlow.collectAsStateWithLifecycle()
-    val crossStats by viewModel.statsFlow.collectAsStateWithLifecycle()
-    val xp by viewModel.totalXpFlow.collectAsStateWithLifecycle()
-    val level by viewModel.levelFlow.collectAsStateWithLifecycle()
-    val title by viewModel.titleFlow.collectAsStateWithLifecycle()
-    val profile by viewModel.profileFlow.collectAsStateWithLifecycle()
-    val recentActivity by viewModel.recentActivityFlow.collectAsStateWithLifecycle()
-    val allAchievements by viewModel.allAchievementsFlow.collectAsStateWithLifecycle()
-    val sessions by viewModel.sessionsFlow.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-
-    val iconCache = remember { mutableMapOf<String, Drawable?>() }
-
-    val installedGameIds = remember(games) {
-        games.filter { g ->
-            try { context.packageManager.getPackageInfo(g.packageName, 0); true } catch (_: Exception) { false }
-        }.mapTo(mutableSetOf()) { it.gameId }
-    }
-
-    val recentlyPlayedGames = remember(sessions, games) {
-        val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
-        sessions.filter { it.startTime >= cutoff }
-            .distinctBy { it.gameId }
-            .mapNotNull { session -> games.find { g -> g.gameId == session.gameId } }
-            .take(10)
-    }
-
-    val achievementProgressByGame = remember(allAchievements) {
-        allAchievements.groupBy { it.gameId }.mapValues { (_, list) -> list.count { it.isUnlocked } to list.size }
-    }
-
-    DashboardScreen(
-        state = DashboardUiState(
-            playerName = profile?.displayName,
-            level = level,
-            title = title,
-            totalXp = xp,
-            stats = crossStats,
-            recentlyPlayed = recentlyPlayedGames,
-            recentActivity = recentActivity,
-            achievementProgressByGame = achievementProgressByGame,
-            installedGameIds = installedGameIds,
-        ),
-        actions = object : DashboardActions {
-            override fun openGame(gameId: String) = onGameClick(gameId)
-            override fun openProfile() = onProfileClick()
-            override fun openActivity() = onActivityClick()
-            override fun openGamesList() = onGamesClick()
-            override fun playGame(game: HubGameEntity) = launchGame(context, game)
-        },
-        iconFor = { game -> iconCache.getOrPut(game.packageName) { GameIconResolver.resolveAppIcon(context, game.packageName) } },
-        topBarActions = { BackupButtons(dbConfigs = dbConfigs, datastoreNames = datastoreNames) },
-        modifier = modifier,
-    )
-}
 
 /**
  * The dashboard, with no dependency on the ViewModel so it can be rendered from a

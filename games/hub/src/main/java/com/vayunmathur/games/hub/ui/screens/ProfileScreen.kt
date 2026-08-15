@@ -22,7 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.vayunmathur.games.hub.R
 import com.vayunmathur.games.hub.ui.components.LevelBadge
 import com.vayunmathur.games.hub.ui.components.StatCard
 import com.vayunmathur.games.hub.ui.components.XpProgressBar
@@ -30,7 +30,6 @@ import com.vayunmathur.games.hub.util.ProfileActions
 import com.vayunmathur.games.hub.util.ProfileUiState
 import com.vayunmathur.games.hub.util.XpLevelCalculator
 import com.vayunmathur.games.hub.util.formatPlaytime
-import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
@@ -41,36 +40,12 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
-import com.vayunmathur.games.hub.R
 
 private val avatarOptions = listOf(
     "person", "stadia_controller", "sports_esports", "emoji_events", "military_tech",
     "star", "bolt", "local_fire_department", "rocket", "diamond",
     "psychology", "lightbulb", "school", "workspace_premium", "king_bed"
 )
-
-/** Binds [GameHubViewModel] to the stateless [ProfileScreen]. */
-@Composable
-fun ProfilePage(viewModel: GameHubViewModel, modifier: Modifier = Modifier) {
-    val profile by viewModel.profileFlow.collectAsStateWithLifecycle()
-    val xp by viewModel.totalXpFlow.collectAsStateWithLifecycle()
-    val level by viewModel.levelFlow.collectAsStateWithLifecycle()
-    val title by viewModel.titleFlow.collectAsStateWithLifecycle()
-    val crossStats by viewModel.statsFlow.collectAsStateWithLifecycle()
-
-    ProfileScreen(
-        state = ProfileUiState(
-            playerName = profile?.displayName,
-            avatarSymbol = profile?.avatarSymbol,
-            level = level,
-            title = title,
-            totalXp = xp,
-            stats = crossStats,
-        ),
-        actions = viewModel,
-        modifier = modifier,
-    )
-}
 
 /**
  * The profile screen, with no dependency on the ViewModel so it can be rendered from a
