@@ -8,8 +8,8 @@ import com.vayunmathur.notes.data.NoteBlock
  *
  * Screens take a state value and an actions interface rather than the ViewModel itself, so
  * they can be rendered by a `@Preview` — which is what the store listing images are
- * generated from. It lives in `util` rather than `ui` so the dependency runs one way:
- * `ui` depends on `util`, and the binders in `ui` implement these interfaces.
+ * generated from. It lives in `platform` rather than `ui` so the dependency runs one way:
+ * `ui` depends on `platform`, and the binders in `ui` implement these interfaces.
  */
 
 /** Everything the notes list draws. */

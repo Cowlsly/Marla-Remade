@@ -26,7 +26,7 @@ import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.notes.R
 import com.vayunmathur.notes.Route
-import com.vayunmathur.notes.util.NotesViewModel
+import com.vayunmathur.notes.platform.NotesViewModel
 
 /**
  * Standalone markdown editor for a file opened from outside the app (VIEW/EDIT/SEND).

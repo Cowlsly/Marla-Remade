@@ -6,10 +6,10 @@ import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.notes.data.Note
 import com.vayunmathur.notes.data.NoteBlock
-import com.vayunmathur.notes.util.NoteActions
-import com.vayunmathur.notes.util.NoteUiState
-import com.vayunmathur.notes.util.NotesListActions
-import com.vayunmathur.notes.util.NotesListUiState
+import com.vayunmathur.notes.platform.NoteActions
+import com.vayunmathur.notes.platform.NoteUiState
+import com.vayunmathur.notes.platform.NotesListActions
+import com.vayunmathur.notes.platform.NotesListUiState
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"

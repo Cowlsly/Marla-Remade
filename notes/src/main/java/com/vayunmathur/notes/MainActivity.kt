@@ -28,8 +28,8 @@ import com.vayunmathur.notes.data.NotesRepository
 import com.vayunmathur.notes.ui.NotePage
 import com.vayunmathur.notes.ui.NotesListPage
 import com.vayunmathur.notes.ui.ExternalNoteScreen
-import com.vayunmathur.notes.util.NotesViewModel
-import com.vayunmathur.notes.util.NotesViewModelFactory
+import com.vayunmathur.notes.platform.NotesViewModel
+import com.vayunmathur.notes.platform.NotesViewModelFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext

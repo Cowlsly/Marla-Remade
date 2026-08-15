@@ -27,7 +27,7 @@ sealed interface NoteBlock {
         override val id: String = randomBlockId(),
     ) : NoteBlock
 
-    /** [fileName] names an image file in the note-images dir (see [com.vayunmathur.notes.util.NoteImageStore]). */
+    /** [fileName] names an image file in the note-images dir (see [com.vayunmathur.notes.platform.NoteImageStore]). */
     @Serializable
     @SerialName("image")
     data class Image(

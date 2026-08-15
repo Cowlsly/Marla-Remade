@@ -51,9 +51,9 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.notes.Route
 import com.vayunmathur.notes.data.Note
 import com.vayunmathur.notes.data.noteDbConfigs
-import com.vayunmathur.notes.util.NotesListActions
-import com.vayunmathur.notes.util.NotesListUiState
-import com.vayunmathur.notes.util.NotesViewModel
+import com.vayunmathur.notes.platform.NotesListActions
+import com.vayunmathur.notes.platform.NotesListUiState
+import com.vayunmathur.notes.platform.NotesViewModel
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
