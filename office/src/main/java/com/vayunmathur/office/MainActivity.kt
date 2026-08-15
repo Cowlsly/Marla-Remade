@@ -14,9 +14,10 @@ import androidx.core.content.IntentCompat
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
-import com.vayunmathur.library.util.BottomBarItem
-import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.util.BottomNavBar
+import androidx.compose.foundation.pager.rememberPagerState
+import com.vayunmathur.library.ui.PagerTab
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -180,8 +181,7 @@ private fun OfficeAppTheme(content: @Composable () -> Unit) {
 /** Top-level navigation routes for the Office app (shared nav framework). */
 @Serializable
 sealed interface OfficeRoute : NavKey {
-    @Serializable data object Offline : OfficeRoute
-    @Serializable data object Online : OfficeRoute
+    @Serializable data object Main : OfficeRoute
     /** Editing a local/offline document (optionally identified by its source uri). */
     @Serializable data class OfflineEditor(val uri: String? = null) : OfficeRoute
     /** Editing a cloud-synced document, identified by its document id. */
@@ -209,7 +209,7 @@ class MainActivity : ComponentActivity() {
             var documentUri by rememberSaveable { mutableStateOf(intentUri) }
             val state by viewModel.state.collectAsState()
             val backStack = rememberNavBackStack<OfficeRoute>(
-                if (intentUri != null) OfficeRoute.OfflineEditor(intentUri.toString()) else OfficeRoute.Offline
+                if (intentUri != null) OfficeRoute.OfflineEditor(intentUri.toString()) else OfficeRoute.Main
             )
 
             LaunchedEffect(Unit) { viewModel.initSync() }
@@ -244,11 +244,6 @@ class MainActivity : ComponentActivity() {
                 }
             }
 
-            val pages: List<BottomBarItem<out OfficeRoute>> = listOf(
-                BottomBarItem("Offline", OfficeRoute.Offline) { IconHome() },
-                BottomBarItem("Online", OfficeRoute.Online) { IconDownload() }
-            )
-
             fun leaveEditor() {
                 if (startedWithIntent) finish()
                 else {
@@ -277,25 +272,17 @@ class MainActivity : ComponentActivity() {
                         else -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { CircularProgressIndicator() }
                     }
                 }
-                MainNavigation(
-                    backStack,
-                    bottomBar = {
-                        val cur = backStack.last()
-                        if (cur is OfficeRoute.Offline || cur is OfficeRoute.Online) BottomNavBar(backStack, pages, cur)
-                    }
-                ) {
-                    entry<OfficeRoute.Offline> {
-                        InitialScreen(
+                MainNavigation(backStack) {
+                    entry<OfficeRoute.Main> {
+                        OfficeTabs(
                             viewModel = viewModel,
                             onOpenDocument = { filePickerLauncher.launch(odfMimeTypes) },
-                            onNavigateEditor = { backStack.add(OfficeRoute.OfflineEditor()) }
+                            onNavigateEditor = { backStack.add(OfficeRoute.OfflineEditor()) },
+                            onOpenOnlineDoc = { meta ->
+                                viewModel.openOnlineDocument(meta)
+                                backStack.add(OfficeRoute.OnlineEditor(meta.docId))
+                            }
                         )
-                    }
-                    entry<OfficeRoute.Online> {
-                        OnlineTab(viewModel = viewModel, onOpenDoc = { meta ->
-                            viewModel.openOnlineDocument(meta)
-                            backStack.add(OfficeRoute.OnlineEditor(meta.docId))
-                        })
                     }
                     entry<OfficeRoute.OfflineEditor> { editorContent() }
                     entry<OfficeRoute.OnlineEditor> { editorContent() }
@@ -376,6 +363,33 @@ private fun resolveDisplayName(context: android.content.Context, uri: Uri): Stri
         }
     }
     return uri.lastPathSegment?.substringAfterLast('/') ?: "document"
+}
+
+/**
+ * The two bottom-nav tabs, hosted in a swipeable pager (see [TabbedPagerScaffold]).
+ * OfflineEditor and OnlineEditor are pushed on top of this host as ordinary routes.
+ */
+@Composable
+private fun OfficeTabs(
+    viewModel: OfficeViewModel,
+    onOpenDocument: () -> Unit,
+    onNavigateEditor: () -> Unit,
+    onOpenOnlineDoc: (com.vayunmathur.office.util.OfficeDocMeta) -> Unit,
+) {
+    val pagerState = rememberPagerState(pageCount = { 2 })
+    val tabs = listOf(
+        PagerTab("Offline", { IconHome() }) {
+            InitialScreen(
+                viewModel = viewModel,
+                onOpenDocument = onOpenDocument,
+                onNavigateEditor = onNavigateEditor
+            )
+        },
+        PagerTab("Online", { IconDownload() }) {
+            OnlineTab(viewModel = viewModel, onOpenDoc = onOpenOnlineDoc)
+        },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
 
 @Composable
