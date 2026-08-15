@@ -64,9 +64,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.health.ui.components.GroupedSection
-import com.vayunmathur.health.ui.components.GroupedSectionDivider
 import com.vayunmathur.health.util.HealthViewModel
+import com.vayunmathur.library.ui.DashboardSection
+import com.vayunmathur.library.ui.DashboardSectionDivider
 import com.vayunmathur.health.util.MetricDetailsActions
 import com.vayunmathur.health.util.MetricDetailsUiState
 import com.vayunmathur.health.R
@@ -549,9 +549,9 @@ fun BarChartDetailsScreen(
             ) {
                 if (dataState.historyItems.isNotEmpty()) {
                     item {
-                        GroupedSection {
+                        DashboardSection {
                             dataState.historyItems.forEachIndexed { idx, item ->
-                                if (idx > 0) GroupedSectionDivider()
+                                if (idx > 0) DashboardSectionDivider()
                                 ListItem({
                                     Text(item.label, style = MaterialTheme.typography.bodyLarge)
                                 }, trailingContent = {
