@@ -60,9 +60,8 @@ fun AchievementsScreen(
         list.sortedWith(compareBy<AchievementWithProgress> { !it.isUnlocked }.thenBy { it.gameId }.thenBy { it.name })
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.achievements_1, filtered.size)) }) }) { padding ->
+    Scaffold(topBar = { TopAppBar(title = { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(0.dp)) }) }) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            item { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(horizontal = 16.dp, vertical = 8.dp)) }
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     item { FilterChip(selected = statusFilter == AchievementFilter.ALL, onClick = { statusFilter = AchievementFilter.ALL }, label = { Text(stringResource(R.string.filter_all)) }) }

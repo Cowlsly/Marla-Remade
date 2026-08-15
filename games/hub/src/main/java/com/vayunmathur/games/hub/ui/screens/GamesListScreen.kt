@@ -64,6 +64,14 @@ fun GamesListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
+                title = {
+                    CommonSearchBar(
+                        value = search,
+                        onValueChange = { search = it },
+                        placeholder = stringResource(com.vayunmathur.games.hub.R.string.search_games),
+                        padding = PaddingValues(0.dp),
+                    )
+                },
                 actions = {
                     IconButton(onClick = { showSortMenu = true }) { IconMoreVert() }
                     DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
@@ -77,7 +85,6 @@ fun GamesListScreen(
         }
     ) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            item { CommonSearchBar(value = search, onValueChange = { search = it }, placeholder = stringResource(com.vayunmathur.games.hub.R.string.search_games), padding = PaddingValues(0.dp)) }
             if (filteredSorted.isEmpty()) {
                 item { Text(text = if (search.isNotEmpty()) stringResource(R.string.no_matching_games) else stringResource(R.string.no_games_registered_yet_nplay_a_game_to), style = MaterialTheme.typography.bodyMedium, modifier = Modifier.padding(top = 32.dp)) }
             }
