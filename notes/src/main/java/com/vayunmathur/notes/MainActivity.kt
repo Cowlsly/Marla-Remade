@@ -9,31 +9,18 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.IntentHelper
-import com.vayunmathur.library.util.ListDetailPage
-import com.vayunmathur.library.util.ListPage
-import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.onFileDrop
-import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.notes.data.NotesRepository
-import com.vayunmathur.notes.ui.NotePage
-import com.vayunmathur.notes.ui.NotesListPage
-import com.vayunmathur.notes.ui.ExternalNoteScreen
 import com.vayunmathur.notes.platform.NotesViewModel
 import com.vayunmathur.notes.platform.NotesViewModelFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
     private lateinit var notesRepository: NotesRepository
@@ -84,38 +71,5 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "NotesMainActivity"
-    }
-}
-
-@Serializable
-sealed interface Route: NavKey {
-    @Serializable
-    data object NotesList: Route
-    @Serializable
-    data class Note(val id: Long): Route
-    @Serializable
-    data class ExternalNote(val uri: String): Route
-}
-
-@Composable
-fun Navigation(notesViewModel: NotesViewModel) {
-    val backStack = rememberNavBackStack<Route>(Route.NotesList)
-    val externalOpens by notesViewModel.externalOpens.collectAsStateWithLifecycle()
-    LaunchedEffect(externalOpens) {
-        externalOpens.firstOrNull()?.let { uri ->
-            notesViewModel.consumeExternal(uri)
-            backStack.add(Route.ExternalNote(uri))
-        }
-    }
-    MainNavigation(backStack) {
-        entry<Route.NotesList>(metadata = ListPage()) {
-            NotesListPage(backStack, notesViewModel)
-        }
-        entry<Route.Note>(metadata = ListDetailPage()) {
-            NotePage(backStack, notesViewModel, it.id)
-        }
-        entry<Route.ExternalNote>(metadata = ListDetailPage()) {
-            ExternalNoteScreen(backStack, notesViewModel, it.uri)
-        }
     }
 }
