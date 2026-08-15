@@ -1,3 +1,4 @@
+// PACKAGE STRUCTURE EXCEPTION (JNI): FQN frozen for native RegisterNatives/symbol mangling
 package com.vayunmathur.vpn.util
 
 /**
