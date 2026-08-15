@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="new_file">Uus fail</string>
     <string name="folder_name_label">Kausta nimi</string>
     <string name="file_name_label">Failinimi</string>
@@ -16,4 +16,13 @@
     <string name="rename">Muuda nime</string>
     <string name="app_name">Failid</string>
     <string name="enable_notifications">Kas lubad kasutada teavitusi?</string>
+    <string name="notification_permission_rationale">Teavituste sisselülitamisel näed taustal toimuvate tegevuste, nagu kokku- ja lahtipakkimine, edenemist.</string>
+    <string name="enable">Lülita sisse</string>
+    <string name="skip">Jäta vahele</string>
+    <string name="grant_all_files_access">Luba ligipääs kõikidele failidele</string>
+    <string name="archive_selection">Valik arhiivifaili jaoks</string>
+    <string name="zip_file_name_label">ZIP-faili nimi</string>
+    <string name="archiving_started">Arhiivifaili loomine algas…</string>
+    <string name="archive">Tee arhiivifail</string>
+    <string name="unzipping_started_to">Lahtipakkimine algas kausta: <xliff:g id="dest_name" example="Allalaadimised">%1$s</xliff:g></string>
 </resources>
