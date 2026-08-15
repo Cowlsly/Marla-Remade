@@ -15,7 +15,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.network.NetworkClient
@@ -24,8 +23,7 @@ import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.web.data.DB_NAME
-import com.vayunmathur.web.data.WebDatabase
+import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.shields.ShieldsEngine
 import com.vayunmathur.web.ui.BookmarksPage
 import com.vayunmathur.web.ui.BrowserPage
@@ -62,19 +60,13 @@ class MainActivity : ComponentActivity() {
         pruneClosedWindowTabs()
 
         lifecycleScope.launch(Dispatchers.IO) {
-            val db = buildDatabase<WebDatabase>(dbName = DB_NAME)
+            val repository = WebRepository.get(applicationContext)
             val factory = WebViewModelFactory(
-                historyDao = db.historyDao(),
-                bookmarkDao = db.bookmarkDao(),
-                sitePermissionDao = db.sitePermissionDao(),
-                storageInfoDao = db.storageInfoDao(),
-                downloadDao = db.downloadDao(),
-                installedSiteDao = db.installedSiteDao(),
-                shieldSettingDao = db.shieldSettingDao(),
+                repository = repository,
                 context = applicationContext,
                 windowId = windowId,
                 incognito = incognito,
-                initialShieldSettings = db.shieldSettingDao().all(),
+                initialShieldSettings = repository.allShieldSettings(),
             )
             withContext(Dispatchers.Main) {
                 factoryState = factory

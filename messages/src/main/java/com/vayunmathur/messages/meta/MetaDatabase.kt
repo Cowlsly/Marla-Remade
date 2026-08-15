@@ -3,7 +3,6 @@ package com.vayunmathur.messages.meta
 import android.content.Context
 import androidx.room.Database
 import androidx.room.RoomDatabase
-import com.vayunmathur.library.room.buildDatabase
 
 /**
  * Room database for Meta-specific data (Messenger/Instagram).
@@ -19,17 +18,7 @@ abstract class MetaDatabase : RoomDatabase() {
     abstract fun syncStateDao(): MetaSyncStateDao
 
     companion object {
-        @Volatile
-        private var INSTANCE: MetaDatabase? = null
-
-        fun getDatabase(context: Context): MetaDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = context.applicationContext.buildDatabase<MetaDatabase>(
-                    dbName = "meta_database"
-                )
-                INSTANCE = instance
-                instance
-            }
-        }
+        fun getDatabase(context: Context): MetaDatabase =
+            MetaRepository.get(context).database()
     }
 }

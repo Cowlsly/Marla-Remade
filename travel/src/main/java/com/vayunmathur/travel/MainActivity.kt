@@ -12,18 +12,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.travel.data.BookedTripDao
-import com.vayunmathur.travel.data.CustomerDao
-import com.vayunmathur.travel.data.DB_NAME
-import com.vayunmathur.travel.data.FrequentFlyerDao
-import com.vayunmathur.travel.data.RecentSearchDao
-import com.vayunmathur.travel.data.TravelDatabase
+import com.vayunmathur.travel.data.TravelRepository
 import com.vayunmathur.travel.ui.AncillariesPage
 import com.vayunmathur.travel.ui.CancellationPage
 import com.vayunmathur.travel.ui.ChangePage
@@ -54,13 +48,10 @@ import com.vayunmathur.library.network.TrustBundle
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
-    private lateinit var recentSearchDao: RecentSearchDao
-    private lateinit var bookedTripDao: BookedTripDao
-    private lateinit var frequentFlyerDao: FrequentFlyerDao
-    private lateinit var customerDao: CustomerDao
+    private lateinit var repository: TravelRepository
 
     private val viewModel: TravelViewModel by viewModels {
-        TravelViewModelFactory(application, recentSearchDao, bookedTripDao, frequentFlyerDao, customerDao)
+        TravelViewModelFactory(application, repository)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -72,11 +63,7 @@ class MainActivity : ComponentActivity() {
 
         val ready = mutableStateOf(false)
         lifecycleScope.launch(Dispatchers.IO) {
-            val db = buildDatabase<TravelDatabase>(dbName = DB_NAME)
-            recentSearchDao = db.recentSearchDao()
-            bookedTripDao = db.bookedTripDao()
-            frequentFlyerDao = db.frequentFlyerDao()
-            customerDao = db.customerDao()
+            repository = TravelRepository.get(this@MainActivity)
             withContext(Dispatchers.Main) { ready.value = true }
         }
 

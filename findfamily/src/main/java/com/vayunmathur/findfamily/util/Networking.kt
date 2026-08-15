@@ -5,7 +5,7 @@ import com.vayunmathur.findfamily.data.LocationValueCompatible
 import com.vayunmathur.findfamily.data.TemporaryLink
 import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.RequestStatus
-import com.vayunmathur.findfamily.data.UserDao
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.uwb.UwbEnvelope
 import com.vayunmathur.e2ee.E2eeKeyStore
 import com.vayunmathur.e2ee.Pqc
@@ -61,7 +61,7 @@ object Networking {
     var userid = 0L
         private set
 
-    private lateinit var userDao: UserDao
+    private lateinit var repository: FindFamilyRepository
     private lateinit var dataStoreUtils: DataStoreUtils
 
     // init() is called from both the app UI (on launch) and the location
@@ -78,12 +78,12 @@ object Networking {
             ds.setByteArray(name, value, onlyIfAbsent)
     }
 
-    suspend fun init(userDao: UserDao, dataStoreUtils: DataStoreUtils, meName: String) {
+    suspend fun init(repository: FindFamilyRepository, dataStoreUtils: DataStoreUtils, meName: String) {
         if (initialized) return
         initMutex.withLock {
             if (initialized) return
             Networking.dataStoreUtils = dataStoreUtils
-            Networking.userDao = userDao
+            Networking.repository = repository
             // FindFamily is post-quantum only — there is no classic RSA identity. The PQC identity
             // uses the same library as Office with a distinct `ff_pqc` prefix. The try/catch keeps the
             // app from crashing if libe2ee_pqc.so fails to load (pqcReady stays false and the app
@@ -106,8 +106,8 @@ object Networking {
             }
             userid = dataStoreUtils.getLongAwait("userid")!!
 
-            if (userDao.getById(userid) == null) {
-                userDao.upsert(
+            if (repository.getUser(userid) == null) {
+                repository.upsertUser(
                     User(
                         meName,
                         null,
@@ -336,7 +336,7 @@ object Networking {
                     val decoded = runCatching { decryptLocationPqcBytes(raw) }
                         .onFailure { Log.w(TAG, "live location decrypt fail", it) }.getOrNull() ?: return
                     val (loc, platform) = decoded
-                    if (platform != null) runCatching { userDao.setPlatform(loc.userid, platform) }
+                    if (platform != null) runCatching { repository.setPlatform(loc.userid, platform) }
                     runCatching { onLocations(listOf(loc)) }
                 } else {
                     val env = runCatching {
@@ -465,7 +465,7 @@ object Networking {
     // ----------------------------------------------------------------
 
     suspend fun publishUwbMessage(envelope: UwbEnvelope, recipientUserId: Long, recipient: User? = null): Boolean {
-        val resolvedUser = recipient ?: userDao.getById(recipientUserId)
+        val resolvedUser = recipient ?: repository.getUser(recipientUserId)
         val bundle = if (resolvedUser != null) {
             peerPqcBundle(resolvedUser)
         } else {
@@ -646,7 +646,7 @@ object Networking {
         user.pqcEncryptionKey?.let { return Base64.decode(it) }
         val res = wsGetKey(user.id) ?: return null
         if (res.status == WS_KEY_PQC && res.bundle != null) {
-            runCatching { userDao.setPqcEncryptionKey(user.id, Base64.encode(res.bundle)) }
+            runCatching { repository.setPqcEncryptionKey(user.id, Base64.encode(res.bundle)) }
             return res.bundle
         }
         return null

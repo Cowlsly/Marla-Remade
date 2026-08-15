@@ -7,11 +7,6 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.downloadservice.InitialDownloadChecker
 import com.vayunmathur.library.ui.DynamicTheme
@@ -21,8 +16,6 @@ import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.maps.data.AmenityDatabase
-import com.vayunmathur.maps.data.buildAmenityDatabase
 import com.vayunmathur.maps.ui.DownloadedMapsPage
 import com.vayunmathur.maps.ui.MapPage
 import com.vayunmathur.maps.ui.SearchPage
@@ -73,7 +66,6 @@ class MainActivity : ComponentActivity() {
                     Triple("https://data.vayunmathur.com/transit_voyages.bin", "transit_voyages.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/transit_attributes.bin", "transit_attributes.bin", getString(R.string.downloading_road_data))
                 )) {
-                    val db = remember { buildAmenityDatabase(this@MainActivity) }
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         // POST_NOTIFICATIONS is runtime-grantable on API 33+
                         // and required for the navigation foreground-service
@@ -89,7 +81,7 @@ class MainActivity : ComponentActivity() {
                     }
                     PermissionsChecker(perms, getString(R.string.grant_location_permission)) {
                         OfflineAware {
-                            Navigation(db)
+                            Navigation()
                         }
                     }
                 }
@@ -111,7 +103,6 @@ sealed interface Route: NavKey {
 
 @Composable
 fun Navigation(
-    db: AmenityDatabase,
     viewModel: SelectedFeatureViewModel = viewModel(),
     searchViewModel: MapsSearchViewModel = viewModel(),
     zonesViewModel: MapsZonesViewModel = viewModel(),
@@ -120,13 +111,13 @@ fun Navigation(
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, db)
+            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel)
         }
         entry<Route.DownloadedMapsPage> {
             DownloadedMapsPage(backStack, zonesViewModel)
         }
         entry<Route.SearchPage> {
-            SearchPage(backStack, viewModel, searchViewModel, db, it.idx, it.east, it.west, it.north, it.south)
+            SearchPage(backStack, viewModel, searchViewModel, it.idx, it.east, it.west, it.north, it.south)
         }
     }
 }

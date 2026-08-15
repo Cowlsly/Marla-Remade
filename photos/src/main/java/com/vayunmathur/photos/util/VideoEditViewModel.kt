@@ -32,7 +32,7 @@ import androidx.media3.transformer.ExportResult
 import androidx.media3.transformer.ProgressHolder
 import androidx.media3.transformer.Transformer
 import com.vayunmathur.photos.data.Photo
-import com.vayunmathur.photos.data.PhotoDao
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.data.VideoEditState
 import com.vayunmathur.photos.data.VideoFilterPreset
 import kotlinx.coroutines.Dispatchers
@@ -59,7 +59,7 @@ import java.io.File
 @UnstableApi
 class VideoEditViewModel(
     application: Application,
-    private val photoDao: PhotoDao,
+    private val repository: PhotosRepository,
 ) : AndroidViewModel(application) {
 
     private val _photo = MutableStateFlow<Photo?>(null)
@@ -91,7 +91,7 @@ class VideoEditViewModel(
     fun loadVideo(id: Long, initialUri: String?) {
         photoJob?.cancel()
         photoJob = viewModelScope.launch {
-            photoDao.getByIdFlow(id).collect { fromDb ->
+            repository.getByIdFlow(id).collect { fromDb ->
                 _photo.value = fromDb ?: initialUri?.let { uri ->
                     Photo(
                         id = 0, name = uri.substringAfterLast("/"), uri = uri,
@@ -415,8 +415,17 @@ class VideoEditViewModel(
 @Suppress("FunctionName")
 fun VideoEditViewModelFactory(
     application: Application,
-    photoDao: PhotoDao,
+    repository: PhotosRepository,
 ): ViewModelProvider.Factory =
     viewModelFactory {
-        initializer { VideoEditViewModel(application, photoDao) }
+        initializer { VideoEditViewModel(application, repository) }
     }
+
+@Suppress("FunctionName")
+fun VideoEditViewModelFactory(
+    application: Application,
+    photoDao: com.vayunmathur.photos.data.PhotoDao,
+): ViewModelProvider.Factory {
+    val repo = PhotosRepository.get(application)
+    return VideoEditViewModelFactory(application, repo)
+}

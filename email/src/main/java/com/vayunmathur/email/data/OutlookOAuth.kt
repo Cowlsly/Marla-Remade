@@ -183,7 +183,7 @@ object OutlookOAuth {
             refreshToken = tokens.refreshToken,
             expiresAt = tokens.expiresAtMs,
         )
-        EmailDatabase.getInstance(context).emailDao().insertAccount(account)
+        EmailRepository.get(context).getDatabase().emailDao().insertAccount(account)
         EmailSyncWorker.scheduleHourlyNonInboxSync(context)
         EmailSyncWorker.runOneOffSync(context)
         ImapIdleService.start(context)
@@ -212,7 +212,7 @@ object OutlookOAuth {
             refreshToken = tokens.refreshToken ?: account.refreshToken,
             expiresAt = tokens.expiresAtMs,
         )
-        EmailDatabase.getInstance(context).emailDao().insertAccount(updated)
+        EmailRepository.get(context).getDatabase().emailDao().insertAccount(updated)
         return updated.accessToken
     }
 

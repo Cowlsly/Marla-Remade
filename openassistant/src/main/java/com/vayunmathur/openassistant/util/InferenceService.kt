@@ -15,7 +15,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.IntentCompat
 import com.google.ai.edge.litertlm.*
 import com.vayunmathur.library.util.SecureResultReceiver
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.downloadservice.downloadModels
 import com.vayunmathur.library.downloadservice.ModelUrls
@@ -25,6 +24,7 @@ import java.io.File
 import kotlin.time.Clock
 import com.vayunmathur.openassistant.data.AppDatabase
 import com.vayunmathur.openassistant.data.Message
+import com.vayunmathur.openassistant.data.OpenAssistantRepository
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -101,10 +101,10 @@ class InferenceService : Service() {
     private var currentConversation: com.google.ai.edge.litertlm.Conversation? = null
     private var currentConversationId: Long = -1L
 
-    val db by lazy { buildDatabase<AppDatabase>() }
-    private val conversationDao by lazy { db.conversationDao() }
-    private val messageDao by lazy { db.messageDao() }
-    private val memoryDao by lazy { db.memoryDao() }
+    private val repository by lazy { OpenAssistantRepository.get(applicationContext) }
+    private val conversationDao get() = repository.conversationDaoRef
+    private val messageDao get() = repository.messageDaoRef
+    private val memoryDao get() = repository.memoryDaoRef
 
     override fun onBind(intent: Intent?): IBinder? = null
 

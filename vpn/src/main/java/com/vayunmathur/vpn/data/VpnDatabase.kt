@@ -11,7 +11,6 @@ import androidx.room.RoomDatabase
 import androidx.room.Upsert
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseItem
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
@@ -108,20 +107,11 @@ abstract class VpnDatabase : RoomDatabase() {
     companion object : DatabaseMigrations {
         override val migrations: List<Migration> = listOf(MIGRATION_1_2)
 
-        @Volatile
-        private var instance: VpnDatabase? = null
-
         /**
-         * The process-wide database. [buildDatabase] does not cache, so every call used to
-         * open a fresh SQLite connection that nobody closed — and the tunnel's log flush
-         * calls this every 1.5 seconds for as long as the VPN is up, so a long session leaked
-         * connections and file descriptors until it hit the process limit.
+         * The process-wide database. Delegates to [VpnRepository] so the single
+         * [RoomRepository]-owned instance is reused; every caller of
+         * `VpnDatabase.get(ctx)` keeps working unchanged.
          */
-        fun get(context: Context): VpnDatabase =
-            instance ?: synchronized(this) {
-                instance ?: context.applicationContext
-                    .buildDatabase<VpnDatabase>(dbName = DB_NAME)
-                    .also { instance = it }
-            }
+        fun get(context: Context): VpnDatabase = VpnRepository.get(context).database()
     }
 }

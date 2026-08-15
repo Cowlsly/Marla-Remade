@@ -8,14 +8,12 @@ import android.database.MatrixCursor
 import android.net.Uri
 import android.os.Binder
 import android.os.Process
-import com.vayunmathur.games.hub.data.DB_NAME
-import com.vayunmathur.games.hub.data.GamesHubDatabase
+import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.data.entities.AchievementDefEntity
 import com.vayunmathur.games.hub.data.entities.AchievementProgressEntity
 import com.vayunmathur.games.hub.data.entities.ActivityEventEntity
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.data.entities.PlaySessionEntity
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.sdk.games.GameHubContract
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
@@ -61,15 +59,9 @@ open class GamesHubProvider : ContentProvider() {
         }
     }
 
-    @Volatile private var db: GamesHubDatabase? = null
-
-    private fun getDb(): GamesHubDatabase {
-        db?.let { return it }
+    private fun getRepo(): GamesHubRepository {
         val ctx = context ?: error("GamesHubProvider context null")
-        synchronized(this) {
-            db?.let { return it }
-            return ctx.buildDatabase<GamesHubDatabase>(dbName = DB_NAME).also { db = it }
-        }
+        return GamesHubRepository.get(ctx)
     }
 
     override fun onCreate(): Boolean = true
@@ -88,13 +80,14 @@ open class GamesHubProvider : ContentProvider() {
         enforceGamesCaller()
         val v = values ?: return null
         return runBlocking(Dispatchers.IO) {
-            val database = getDb()
+            val repo = getRepo()
+            val database = repo.database
             try {
                 when (uriMatcher.match(uri)) {
                     CODE_GAME_ITEM, CODE_GAMES -> {
-                        val entity = valuesToGameMerged(v, uri, database)
-                        database.gameDao().upsert(entity)
-                        database.activityDao().upsert(
+                        val entity = valuesToGameMerged(v, uri, repo)
+                        repo.upsertGame(entity)
+                        repo.upsertActivity(
                             ActivityEventEntity(
                                 type = ActivityEventEntity.TYPE_GAME_REGISTERED,
                                 gameId = entity.gameId,
@@ -106,16 +99,16 @@ open class GamesHubProvider : ContentProvider() {
                     }
                     CODE_ACH_DEFS, CODE_LEGACY_ACHIEVEMENTS -> {
                         val def = valuesToAchievementDef(v, uri)
-                        database.achievementDao().upsertDef(def)
+                        repo.upsertDef(def)
                         uri
                     }
                     CODE_ACH_PROGRESS -> {
                         val prog = valuesToProgress(v, uri)
-                        val wasUnlocked = database.achievementDao().getProgress(prog.gameId, prog.achievementId)?.isUnlocked ?: false
-                        val def = database.achievementDao().getDef(prog.gameId, prog.achievementId)
-                        database.achievementDao().upsertProgress(prog)
+                        val wasUnlocked = repo.getProgress(prog.gameId, prog.achievementId)?.isUnlocked ?: false
+                        val def = repo.getAchievementDef(prog.gameId, prog.achievementId)
+                        repo.upsertProgress(prog)
                         if (prog.isUnlocked && !wasUnlocked && def != null) {
-                            database.activityDao().upsert(
+                            repo.upsertActivity(
                                 ActivityEventEntity(
                                     type = ActivityEventEntity.TYPE_ACHIEVEMENT_UNLOCKED,
                                     gameId = prog.gameId,
@@ -128,8 +121,8 @@ open class GamesHubProvider : ContentProvider() {
                     }
                     CODE_ACH_PROGRESS_ITEM, CODE_LEGACY_ACHIEVEMENT_ITEM -> {
                         val prog = valuesToProgress(v, uri)
-                        val def = database.achievementDao().getDef(prog.gameId, prog.achievementId)
-                        val existing = database.achievementDao().getProgress(prog.gameId, prog.achievementId)
+                        val def = repo.getAchievementDef(prog.gameId, prog.achievementId)
+                        val existing = repo.getProgress(prog.gameId, prog.achievementId)
                         val merged = if (existing != null) {
                             val newProgress = maxOf(existing.progress, prog.progress)
                             val newUnlocked = existing.isUnlocked || prog.isUnlocked
@@ -145,10 +138,10 @@ open class GamesHubProvider : ContentProvider() {
                                 lastUpdated = System.currentTimeMillis()
                             )
                         } else prog
-                        database.achievementDao().upsertProgress(merged)
+                        repo.upsertProgress(merged)
                         val wasUnlockedBefore = existing?.isUnlocked ?: false
                         if (merged.isUnlocked && !wasUnlockedBefore && def != null) {
-                            database.activityDao().upsert(
+                            repo.upsertActivity(
                                 ActivityEventEntity(
                                     type = ActivityEventEntity.TYPE_ACHIEVEMENT_UNLOCKED,
                                     gameId = merged.gameId,
@@ -158,8 +151,8 @@ open class GamesHubProvider : ContentProvider() {
                             )
                         }
                         if (uriMatcher.match(uri) == CODE_LEGACY_ACHIEVEMENT_ITEM) {
-                            if (database.achievementDao().getDef(prog.gameId, prog.achievementId) == null) {
-                                database.achievementDao().upsertDef(
+                            if (repo.getAchievementDef(prog.gameId, prog.achievementId) == null) {
+                                repo.upsertDef(
                                     AchievementDefEntity(
                                         gameId = prog.gameId,
                                         achievementId = prog.achievementId,
@@ -174,18 +167,18 @@ open class GamesHubProvider : ContentProvider() {
                     }
                     CODE_SESSIONS_BY_GAME -> {
                         val session = valuesToSession(v, uri)
-                        ensureGameExists(session.gameId, database)
+                        ensureGameExists(session.gameId, repo)
                         database.gameDao().markPlayed(session.gameId, session.startTime)
-                        database.sessionDao().upsert(session)
+                        repo.upsertSession(session)
                         uri
                     }
                     CODE_SESSION_ITEM -> {
                         val session = valuesToSession(v, uri)
-                        ensureGameExists(session.gameId, database)
-                        if (database.sessionDao().getBySessionId(session.sessionId) == null) {
+                        ensureGameExists(session.gameId, repo)
+                        if (repo.getSessionById(session.sessionId) == null) {
                             database.gameDao().markPlayed(session.gameId, session.startTime)
                         }
-                        database.sessionDao().upsert(session)
+                        repo.upsertSession(session)
                         uri
                     }
                     else -> null
@@ -201,7 +194,8 @@ open class GamesHubProvider : ContentProvider() {
         enforceGamesCaller()
         val v = values ?: return 0
         return runBlocking(Dispatchers.IO) {
-            val database = getDb()
+            val repo = getRepo()
+            val database = repo.database
             try {
                 when (uriMatcher.match(uri)) {
                     CODE_ACH_PROGRESS_ITEM, CODE_LEGACY_ACHIEVEMENT_ITEM -> {
@@ -218,7 +212,7 @@ open class GamesHubProvider : ContentProvider() {
                         val unlockedAt = v.getAsLong("unlocked_at") ?: v.getAsLong(GameHubContract.AchievementProgressCols.UNLOCKED_AT)
                         val progressVal = v.getAsInteger(GameHubContract.AchievementProgressCols.PROGRESS) ?: v.getAsInteger("progress") ?: 0
 
-                        val existing = database.achievementDao().getProgress(gameId, achId)
+                        val existing = repo.getProgress(gameId, achId)
                         val wasUnlockedBefore = existing?.isUnlocked ?: false
                         val merged = if (existing != null) {
                             existing.copy(
@@ -237,10 +231,10 @@ open class GamesHubProvider : ContentProvider() {
                                 lastUpdated = System.currentTimeMillis()
                             )
                         }
-                        database.achievementDao().upsertProgress(merged)
+                        repo.upsertProgress(merged)
                         if (merged.isUnlocked && !wasUnlockedBefore) {
-                            val def = database.achievementDao().getDef(gameId, achId)
-                            database.activityDao().upsert(
+                            val def = repo.getAchievementDef(gameId, achId)
+                            repo.upsertActivity(
                                 ActivityEventEntity(
                                     type = ActivityEventEntity.TYPE_ACHIEVEMENT_UNLOCKED,
                                     gameId = gameId,
@@ -253,12 +247,12 @@ open class GamesHubProvider : ContentProvider() {
                     }
                     CODE_SESSION_ITEM -> {
                         val sessionId = uri.pathSegments.lastOrNull() ?: return@runBlocking 0
-                        val existing = database.sessionDao().getBySessionId(sessionId) ?: return@runBlocking 0
+                        val existing = repo.getSessionById(sessionId) ?: return@runBlocking 0
                         val endTime = v.getAsLong(GameHubContract.Sessions.END_TIME) ?: v.getAsLong("end_time") ?: System.currentTimeMillis()
                         val duration = (endTime - existing.startTime).coerceAtLeast(0L)
-                        database.sessionDao().endSession(sessionId, endTime, duration)
+                        repo.endSession(sessionId, endTime, duration)
                         database.gameDao().addPlaytime(existing.gameId, duration)
-                        database.activityDao().upsert(
+                        repo.upsertActivity(
                             ActivityEventEntity(
                                 type = ActivityEventEntity.TYPE_SESSION_COMPLETED,
                                 gameId = existing.gameId,
@@ -280,7 +274,8 @@ open class GamesHubProvider : ContentProvider() {
     override fun query(uri: Uri, projection: Array<out String>?, selection: String?, selectionArgs: Array<out String>?, sortOrder: String?): Cursor? {
         enforceGamesCaller()
         return runBlocking(Dispatchers.IO) {
-            val database = getDb()
+            val repo = getRepo()
+            val database = repo.database
             try {
                 when (uriMatcher.match(uri)) {
                     CODE_GAMES -> cursorFromGames(database.gameDao().getAll())
@@ -291,28 +286,28 @@ open class GamesHubProvider : ContentProvider() {
                     }
                     CODE_ACH_DEFS -> {
                         val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
-                        cursorFromAchievementDefs(database.achievementDao().flowDefsByGame(gameId).first())
+                        cursorFromAchievementDefs(repo.flowDefsByGame(gameId).first())
                     }
                     CODE_LEGACY_ACHIEVEMENTS -> {
                         val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
-                        val allDefs = database.achievementDao().flowDefsByGame(gameId).first()
-                        val progressMap = database.achievementDao().flowProgressByGame(gameId).first().associateBy { it.achievementId }
+                        val allDefs = repo.flowDefsByGame(gameId).first()
+                        val progressMap = repo.flowProgressByGame(gameId).first().associateBy { it.achievementId }
                         cursorFromLegacyAchievements(allDefs, progressMap)
                     }
                     CODE_ACH_PROGRESS -> {
                         val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
-                        cursorFromProgress(database.achievementDao().flowProgressByGame(gameId).first())
+                        cursorFromProgress(repo.flowProgressByGame(gameId).first())
                     }
                     CODE_ACH_PROGRESS_ITEM -> {
                         val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
                         val achId = uri.pathSegments.getOrNull(3) ?: return@runBlocking null
-                        val prog = database.achievementDao().getProgress(gameId, achId)
+                        val prog = repo.getProgress(gameId, achId)
                         cursorFromProgress(listOfNotNull(prog))
                     }
                     CODE_LEGACY_ACHIEVEMENT_ITEM -> {
                         val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
                         val achId = uri.pathSegments.getOrNull(2) ?: return@runBlocking null
-                        cursorFromLegacyAchievementItem(database.achievementDao().getDef(gameId, achId), database.achievementDao().getProgress(gameId, achId))
+                        cursorFromLegacyAchievementItem(repo.getAchievementDef(gameId, achId), repo.getProgress(gameId, achId))
                     }
                     else -> null
                 }
@@ -341,10 +336,10 @@ open class GamesHubProvider : ContentProvider() {
         )
     }
 
-    private suspend fun valuesToGameMerged(v: ContentValues, uri: Uri, database: GamesHubDatabase): HubGameEntity {
+    private suspend fun valuesToGameMerged(v: ContentValues, uri: Uri, repo: GamesHubRepository): HubGameEntity {
         val segGameId = uri.pathSegments.getOrNull(1)
         val gameId = v.getAsString(GameHubContract.Games.GAME_ID) ?: v.getAsString("game_id") ?: segGameId ?: error("gameId missing")
-        val existing = database.gameDao().getById(gameId)
+        val existing = repo.getGame(gameId)
         if (existing == null) return valuesToGame(v, uri)
         return existing.copy(
             packageName = v.getAsString(GameHubContract.Games.PACKAGE_NAME) ?: v.getAsString("package_name") ?: existing.packageName,
@@ -356,9 +351,9 @@ open class GamesHubProvider : ContentProvider() {
         )
     }
 
-    private suspend fun ensureGameExists(gameId: String, database: GamesHubDatabase) {
-        if (database.gameDao().getById(gameId) == null) {
-            database.gameDao().upsert(
+    private suspend fun ensureGameExists(gameId: String, repo: GamesHubRepository) {
+        if (repo.getGame(gameId) == null) {
+            repo.upsertGame(
                 HubGameEntity(
                     gameId = gameId,
                     packageName = "unknown",

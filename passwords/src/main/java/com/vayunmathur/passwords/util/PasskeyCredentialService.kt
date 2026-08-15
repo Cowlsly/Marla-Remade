@@ -20,20 +20,16 @@ import androidx.credentials.provider.CreateEntry
 import androidx.credentials.provider.CredentialProviderService
 import androidx.credentials.provider.ProviderClearCredentialStateRequest
 import com.vayunmathur.library.util.DatabaseHelper
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.closeCachedDatabase
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.ui.PasskeyAuthActivity
 import kotlinx.coroutines.runBlocking
 
 class PasskeyCredentialService : CredentialProviderService() {
 
-    private val db by lazy {
-        applicationContext.buildDatabase<PasswordDatabase>()
-    }
-    private val passkeyDao by lazy { db.passkeyDao() }
-    private val passwordDao by lazy { db.passwordDao() }
+    private val repository by lazy { PasswordRepository.get(applicationContext) }
 
     private fun buildUnlockResponse(): BeginGetCredentialResponse {
         val intent = Intent(applicationContext, PasskeyAuthActivity::class.java).apply {
@@ -68,8 +64,7 @@ class PasskeyCredentialService : CredentialProviderService() {
                 val response = buildGetCredentialResponse(
                     applicationContext,
                     request.beginGetCredentialOptions,
-                    passkeyDao,
-                    passwordDao,
+                    repository,
                 )
                 callback.onResult(response)
             } catch (e: Exception) {

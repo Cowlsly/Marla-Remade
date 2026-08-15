@@ -30,7 +30,7 @@ import com.vayunmathur.photos.data.PixelLayer
 import com.vayunmathur.photos.data.DrawingLayer
 import com.vayunmathur.photos.data.TextLayer
 import com.vayunmathur.photos.data.Photo
-import com.vayunmathur.photos.data.PhotoDao
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.data.Selection
 import com.vayunmathur.photos.data.TextElement
 import kotlinx.coroutines.Dispatchers
@@ -55,7 +55,7 @@ import kotlin.math.roundToInt
  */
 class PhotoEditViewModel(
     application: Application,
-    private val photoDao: PhotoDao,
+    private val repository: PhotosRepository,
 ) : AndroidViewModel(application) {
 
     private val compositor = LayerCompositor()
@@ -70,7 +70,7 @@ class PhotoEditViewModel(
     fun loadPhoto(id: Long, initialUri: String?) {
         photoJob?.cancel()
         photoJob = viewModelScope.launch {
-            photoDao.getByIdFlow(id).collect { fromDb ->
+            repository.getByIdFlow(id).collect { fromDb ->
                 _photo.value = fromDb ?: initialUri?.let { uri ->
                     Photo(
                         id = 0, name = uri.substringAfterLast("/"), uri = uri,
@@ -675,11 +675,20 @@ class PhotoEditViewModel(
 @Suppress("FunctionName")
 fun PhotoEditViewModelFactory(
     application: Application,
-    photoDao: PhotoDao,
+    repository: PhotosRepository,
 ): ViewModelProvider.Factory =
     viewModelFactory {
-        initializer { PhotoEditViewModel(application, photoDao) }
+        initializer { PhotoEditViewModel(application, repository) }
     }
+
+@Suppress("FunctionName")
+fun PhotoEditViewModelFactory(
+    application: Application,
+    photoDao: com.vayunmathur.photos.data.PhotoDao,
+): ViewModelProvider.Factory {
+    val repo = PhotosRepository.get(application)
+    return PhotoEditViewModelFactory(application, repo)
+}
 
 /** Output formats for saving/exporting an edited photo. */
 enum class ExportFormat(

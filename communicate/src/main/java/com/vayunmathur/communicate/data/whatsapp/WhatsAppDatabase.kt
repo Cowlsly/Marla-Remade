@@ -13,7 +13,6 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseMigrations
 
 /**
@@ -74,9 +73,6 @@ abstract class WhatsAppDatabase : RoomDatabase() {
     abstract fun callLogDao(): WhatsAppCallLogDao
 
     companion object : DatabaseMigrations {
-        @Volatile
-        private var INSTANCE: WhatsAppDatabase? = null
-
         /**
          * v1 → v2: message delivery status (ticks) + group metadata on conversations. All new
          * columns are additive with defaults, so existing rows stay valid.
@@ -131,16 +127,8 @@ abstract class WhatsAppDatabase : RoomDatabase() {
 
         override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 
-        fun getDatabase(context: Context): WhatsAppDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = context.applicationContext.buildDatabase<WhatsAppDatabase>(
-                    migrations = migrations,
-                    dbName = "communicate_whatsapp.db"
-                )
-                INSTANCE = instance
-                instance
-            }
-        }
+        fun getDatabase(context: Context): WhatsAppDatabase =
+            WhatsAppRepository.get(context).database()
     }
 }
 

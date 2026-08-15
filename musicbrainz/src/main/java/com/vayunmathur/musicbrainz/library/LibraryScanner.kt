@@ -2,9 +2,8 @@ package com.vayunmathur.musicbrainz.library
 
 import android.content.Context
 import androidx.core.net.toUri
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.musicbrainz.data.LocalTrack
-import com.vayunmathur.musicbrainz.data.MusicBrainzDatabase
+import com.vayunmathur.musicbrainz.data.MusicBrainzRepository
 import com.vayunmathur.musicbrainz.util.MusicBrainzPrefs
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -22,11 +21,11 @@ object LibraryScanner {
 
     suspend fun scan(context: Context): Int = withContext(Dispatchers.IO) {
         val treeUri = MusicBrainzPrefs(context).musicFolderUri() ?: return@withContext 0
-        val dao = context.buildDatabase<MusicBrainzDatabase>(dbName = DB_NAME).localTrackDao()
+        val repo = MusicBrainzRepository.get(context)
 
         LibraryIndex.setScanning(true)
         try {
-            val known = dao.fingerprints().associateBy { it.documentUri }
+            val known = repo.fingerprints().associateBy { it.documentUri }
             val files = ArrayList<DocEntry>()
             SafTree.walkFiles(context, treeUri.toUri()) { entry ->
                 if (TagReader.isAudioFile(entry.name)) files.add(entry)
@@ -68,17 +67,17 @@ object LibraryScanner {
                 )
                 // Flushed in batches so an interrupted scan still leaves progress behind.
                 if (updates.size >= BATCH_SIZE) {
-                    dao.upsertAll(updates.toList())
+                    repo.upsertAll(updates.toList())
                     updates.clear()
                 }
             }
 
-            if (updates.isNotEmpty()) dao.upsertAll(updates)
+            if (updates.isNotEmpty()) repo.upsertAll(updates)
 
             val removed = known.keys - seen
-            if (removed.isNotEmpty()) dao.deleteByUris(removed.toList())
+            if (removed.isNotEmpty()) repo.deleteByUris(removed.toList())
 
-            val all = dao.all()
+            val all = repo.all()
             LibraryIndex.publish(all)
             all.size
         } finally {
@@ -88,8 +87,8 @@ object LibraryScanner {
 
     /** Loads the last scan result so the browse screens have data before a rescan finishes. */
     suspend fun loadCached(context: Context) = withContext(Dispatchers.IO) {
-        val dao = context.buildDatabase<MusicBrainzDatabase>(dbName = DB_NAME).localTrackDao()
-        LibraryIndex.publish(dao.all())
+        val repo = MusicBrainzRepository.get(context)
+        LibraryIndex.publish(repo.all())
     }
 
     const val DB_NAME = "musicbrainz-db"

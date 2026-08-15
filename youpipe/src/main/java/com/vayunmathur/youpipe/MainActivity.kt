@@ -31,9 +31,8 @@ import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.youpipe.data.SubscriptionDatabase
+import com.vayunmathur.youpipe.data.SubscriptionRepository
 import com.vayunmathur.youpipe.ui.ChannelPage
 import com.vayunmathur.youpipe.ui.DownloadedVideosPage
 import com.vayunmathur.youpipe.ui.HistoryPage
@@ -89,21 +88,9 @@ fun rememberIsInPipMode(): Boolean {
 
 class MainActivity : ComponentActivity() {
     private val youPipeViewModel: YouPipeViewModel by viewModels {
-        val db = buildDatabase<SubscriptionDatabase>()
         YouPipeViewModelFactory(
             application,
-            db.subscriptionDao(),
-            db.subscriptionCategoryDao(),
-            db.subscriptionVideoDao(),
-            db.historyVideoDao(),
-            db.downloadedVideoDao(),
-            db.cachedRelatedVideoDao(),
-            db.recommendationImpressionDao(),
-            db.recommendationPreferencesDao(),
-            db.channelPreferenceDao(),
-            db.keywordPreferenceDao(),
-            db.playlistDao(),
-            db.playlistItemDao(),
+            SubscriptionRepository.get(application),
         )
     }
 

@@ -35,10 +35,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.vayunmathur.clock.data.ClockDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconPause
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlin.time.Clock
@@ -61,12 +60,12 @@ class AlarmActivity : ComponentActivity() {
         val km = getSystemService(KEYGUARD_SERVICE) as KeyguardManager
         km.requestDismissKeyguard(this, null)
 
-        val db = buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
+        val repository = ClockRepository.get(applicationContext)
 
         setContent {
             val alarm by androidx.compose.runtime.produceState<com.vayunmathur.clock.data.Alarm?>(initialValue = null) {
                 value = withContext(Dispatchers.IO) {
-                    db.alarmDao().get(alarmId)
+                    repository.getAlarm(alarmId)
                 }
             }
 

@@ -45,11 +45,10 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import com.vayunmathur.health.CLASSES
-import com.vayunmathur.health.data.HealthDatabase
+import com.vayunmathur.health.data.HealthRepository
 import com.vayunmathur.health.data.Record
 import com.vayunmathur.health.data.RecordType
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.room.buildDatabase
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.TimeUnit
@@ -77,7 +76,7 @@ class HealthSyncWorker(
 
     private suspend fun sync() {
         val healthConnectClient = HealthConnectClient.getOrCreate(applicationContext)
-        val db = applicationContext.buildDatabase<HealthDatabase>()
+        val repository = HealthRepository.get(applicationContext)
         val ds = DataStoreUtils.getInstance(applicationContext)
         var token = ds.getString("hc_token")
         if (token == null) {
@@ -86,7 +85,7 @@ class HealthSyncWorker(
                 var pageToken: String? = null
                 do {
                     val records = healthConnectClient.readRecords(ReadRecordsRequest(clazz, TimeRangeFilter.after(Instant.EPOCH), pageSize = 5000, pageToken = pageToken))
-                    db.healthDao().upsert(records.records.flatMap { it.toRecord() })
+                    repository.upsert(records.records.flatMap { it.toRecord() })
                     pageToken = records.pageToken
                 } while (pageToken != null)
                 println("Completed inserting ${clazz.simpleName}")
@@ -107,12 +106,12 @@ class HealthSyncWorker(
             val newRecords = upsertedRecords.flatMap {
                 it.toRecord()
             }
-            db.healthDao().upsert(newRecords)
+            repository.upsert(newRecords)
             println("Upserted ${newRecords.size} records")
 
             // Handle deleted records
             val deletedIds = response.changes.filterIsInstance<DeletionChange>().map { it.recordId }
-            db.healthDao().deleteByIds(deletedIds)
+            repository.deleteByIds(deletedIds)
 
             // Update token for the next iteration/sync
             token = response.nextChangesToken

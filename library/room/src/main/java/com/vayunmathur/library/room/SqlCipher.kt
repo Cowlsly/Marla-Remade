@@ -22,11 +22,67 @@ fun loadSqlCipher() {
     }
 }
 
+/**
+ * Reified convenience wrapper. Prefer obtaining databases through a
+ * [RoomRepository] subclass rather than calling this directly — a follow-up
+ * change restricts direct construction so every database has a single owner.
+ */
 inline fun <reified T : RoomDatabase> Context.buildDatabase(
     migrations: List<Migration>? = null,
     encryptionPassword: String? = null,
     dbName: String = "passwords-db",
     useDeviceProtectedStorage: Boolean = false
+): T = buildDatabase(
+    T::class.java,
+    migrations,
+    encryptionPassword,
+    dbName,
+    useDeviceProtectedStorage,
+)
+
+/**
+ * Non-reified core builder (cached by database class). Takes the [dbClass]
+ * explicitly so it can be called from generic code (e.g. [RoomRepository]) that
+ * only has a `Class`/`KClass`. The reified overload above delegates here.
+ */
+fun <T : RoomDatabase> Context.buildDatabase(
+    dbClass: Class<T>,
+    migrations: List<Migration>? = null,
+    encryptionPassword: String? = null,
+    dbName: String = "passwords-db",
+    useDeviceProtectedStorage: Boolean = false
+): T {
+    synchronized(databases) {
+        @Suppress("UNCHECKED_CAST")
+        databases[dbClass.kotlin]?.let { return it as T }
+        val db = openRoomDatabase(dbClass, migrations, encryptionPassword, dbName, useDeviceProtectedStorage)
+        databases[dbClass.kotlin] = db
+        return db
+    }
+}
+
+/**
+ * Builds a database instance **without** touching the process-wide cache. Intended
+ * for one-shot/auxiliary opens where the cached instance can't be reused — e.g. a
+ * one-time legacy-migration read of an old, differently-named file of the same
+ * class. Callers own the returned instance and must `close()` it. Kept in the
+ * library so app modules never call the Room builder directly.
+ */
+fun <T : RoomDatabase> Context.buildDatabaseUncached(
+    dbClass: Class<T>,
+    migrations: List<Migration>? = null,
+    encryptionPassword: String? = null,
+    dbName: String = "passwords-db",
+    useDeviceProtectedStorage: Boolean = false
+): T = openRoomDatabase(dbClass, migrations, encryptionPassword, dbName, useDeviceProtectedStorage)
+
+/** Shared build logic for [buildDatabase] and [buildDatabaseUncached] (no caching). */
+private fun <T : RoomDatabase> Context.openRoomDatabase(
+    dbClass: Class<T>,
+    migrations: List<Migration>?,
+    encryptionPassword: String?,
+    dbName: String,
+    useDeviceProtectedStorage: Boolean,
 ): T {
     loadSqlCipher()
 
@@ -34,7 +90,7 @@ inline fun <reified T : RoomDatabase> Context.buildDatabase(
     // database's companion object if it implements [DatabaseMigrations].
     val resolvedMigrations: List<Migration> = migrations ?: run {
         val companionField = try {
-            T::class.java.getDeclaredField("Companion").apply { isAccessible = true }
+            dbClass.getDeclaredField("Companion").apply { isAccessible = true }
         } catch (_: NoSuchFieldException) {
             null
         }
@@ -58,45 +114,39 @@ inline fun <reified T : RoomDatabase> Context.buildDatabase(
         this
     }
 
-    synchronized(databases) {
-        if (databases[T::class] != null) return databases[T::class]!! as T
-
-        var password = encryptionPassword
-        if (password == null) {
-            val helper = DatabaseHelper(targetContext)
-            if (!helper.isKeyGenerated()) {
-                helper.generateKey()
-                val cipher = helper.getCipherForEncryption()
-                password = helper.createAndStorePassphrase(cipher)
-            } else {
-                val cipher = helper.getCipherForDecryption()
-                password = helper.decryptPassphrase(cipher)
-            }
+    var password = encryptionPassword
+    if (password == null) {
+        val helper = DatabaseHelper(targetContext)
+        if (!helper.isKeyGenerated()) {
+            helper.generateKey()
+            val cipher = helper.getCipherForEncryption()
+            password = helper.createAndStorePassphrase(cipher)
+        } else {
+            val cipher = helper.getCipherForDecryption()
+            password = helper.decryptPassphrase(cipher)
         }
-
-        encryptExistingDatabase(targetContext, dbName, password)
-
-        val builder = Room.databaseBuilder(
-            targetContext,
-            T::class.java,
-            dbName
-        ).addMigrations(*resolvedMigrations.toTypedArray())
-
-        builder.openHelperFactory(SupportOpenHelperFactory(password.toByteArray(Charsets.UTF_8)))
-
-        // Force TRUNCATE (rollback-journal) mode instead of the default WAL. With the
-        // net.zetetic SQLCipher SupportSQLiteOpenHelper, WAL breaks Room's
-        // InvalidationTracker: a write marks the table dirty but the change
-        // notification isn't dispatched until a *later* write forces a refresh, so
-        // Flow-backed queries only update on the next unrelated DB write (observed as
-        // list UIs lagging until the next background write). TRUNCATE restores prompt,
-        // per-write invalidation for every RoomDatabase built through this helper.
-        builder.setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
-
-        val db = builder.build()
-        databases[T::class] = db
-        return db
     }
+
+    encryptExistingDatabase(targetContext, dbName, password)
+
+    val builder = Room.databaseBuilder(
+        targetContext,
+        dbClass,
+        dbName
+    ).addMigrations(*resolvedMigrations.toTypedArray())
+
+    builder.openHelperFactory(SupportOpenHelperFactory(password.toByteArray(Charsets.UTF_8)))
+
+    // Force TRUNCATE (rollback-journal) mode instead of the default WAL. With the
+    // net.zetetic SQLCipher SupportSQLiteOpenHelper, WAL breaks Room's
+    // InvalidationTracker: a write marks the table dirty but the change
+    // notification isn't dispatched until a *later* write forces a refresh, so
+    // Flow-backed queries only update on the next unrelated DB write (observed as
+    // list UIs lagging until the next background write). TRUNCATE restores prompt,
+    // per-write invalidation for every RoomDatabase built through this helper.
+    builder.setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
+
+    return builder.build()
 }
 
 fun encryptExistingDatabase(context: Context, dbName: String, password: String) {

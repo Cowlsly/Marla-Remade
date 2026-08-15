@@ -11,6 +11,7 @@ import androidx.credentials.provider.PasswordCredentialEntry
 import androidx.credentials.provider.PublicKeyCredentialEntry
 import com.vayunmathur.passwords.data.PasskeyDao
 import com.vayunmathur.passwords.data.PasswordDao
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.ui.PasskeyAuthActivity
 import org.json.JSONObject
 
@@ -80,3 +81,42 @@ suspend fun buildGetCredentialResponse(
     }
     return responseBuilder.build()
 }
+
+/** Repository-based overload — preferred. */
+suspend fun buildGetCredentialResponse(
+    context: Context,
+    options: List<BeginGetCredentialOption>,
+    repository: PasswordRepository,
+): BeginGetCredentialResponse =
+    buildGetCredentialResponse(
+        context,
+        options,
+        passkeyDao = object : PasskeyDao() {
+            override fun getAllFlow(): kotlinx.coroutines.flow.Flow<List<com.vayunmathur.passwords.data.Passkey>> =
+                repository.passkeys
+            override suspend fun getAll(): List<com.vayunmathur.passwords.data.Passkey> =
+                repository.getAllPasskeys()
+            override suspend fun getByRpId(rpId: String): List<com.vayunmathur.passwords.data.Passkey> =
+                repository.getPasskeysByRpId(rpId)
+            override suspend fun getByCredentialId(credentialId: String): com.vayunmathur.passwords.data.Passkey? =
+                repository.getPasskeyByCredentialId(credentialId)
+            override suspend fun upsertRaw(passkey: com.vayunmathur.passwords.data.Passkey): Long =
+                repository.upsertPasskeyRaw(passkey)
+            override suspend fun delete(passkey: com.vayunmathur.passwords.data.Passkey): Int =
+                repository.deletePasskey(passkey)
+        },
+        passwordDao = object : PasswordDao() {
+            override fun getAllFlow(): kotlinx.coroutines.flow.Flow<List<com.vayunmathur.passwords.data.Password>> =
+                repository.passwords
+            override suspend fun getAll(): List<com.vayunmathur.passwords.data.Password> =
+                repository.getAllPasswords()
+            override fun getByIdFlow(id: Long): kotlinx.coroutines.flow.Flow<com.vayunmathur.passwords.data.Password?> =
+                repository.getPasswordByIdFlow(id)
+            override suspend fun getById(id: Long): com.vayunmathur.passwords.data.Password? =
+                repository.getPasswordById(id)
+            override suspend fun upsertRaw(value: com.vayunmathur.passwords.data.Password): Long =
+                repository.upsertPasswordRaw(value)
+            override suspend fun delete(value: com.vayunmathur.passwords.data.Password): Int =
+                repository.deletePassword(value)
+        },
+    )

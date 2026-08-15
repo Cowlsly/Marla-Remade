@@ -14,26 +14,22 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.photos.data.PhotoDao
-import com.vayunmathur.photos.data.PhotoDatabase
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.util.VideoEditViewModel
 import com.vayunmathur.photos.util.VideoEditViewModelFactory
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 class VideoEditActivity : ComponentActivity() {
-    private lateinit var photoDao: PhotoDao
     private val videoEditViewModel: VideoEditViewModel by viewModels {
-        VideoEditViewModelFactory(application, photoDao)
+        VideoEditViewModelFactory(application, PhotosRepository.get(application))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-
-        val db = buildDatabase<PhotoDatabase>()
-        photoDao = db.photoDao()
 
         setContent {
             DynamicTheme {
@@ -44,7 +40,7 @@ class VideoEditActivity : ComponentActivity() {
                     if (photoId == -1L && (intent.action == Intent.ACTION_EDIT || intent.action == Intent.ACTION_VIEW)) {
                         intent.data?.let { uri ->
                             val uriString = uri.toString()
-                            val existing = photoDao.getByUri(uriString)
+                            val existing = withContext(Dispatchers.IO) { PhotosRepository.get(applicationContext).getByUri(uriString) }
                             if (existing.isNotEmpty()) {
                                 photoId = existing.first().id
                             } else {

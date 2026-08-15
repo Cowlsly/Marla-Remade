@@ -37,6 +37,10 @@ typealias Feature1 = Feature<Geometry, JsonObject?>
 
 fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
 
+suspend fun parse(feature: Feature1, repository: com.vayunmathur.maps.data.AmenityRepository): SpecificFeature? {
+    return parse(feature, repository.getDatabase())
+}
+
 suspend fun parse(feature: Feature1, db: AmenityDatabase): SpecificFeature? {
     val id = feature.id?.jsonPrimitive?.content?.toULong() ?: 0uL
     val geometry = feature.geometry

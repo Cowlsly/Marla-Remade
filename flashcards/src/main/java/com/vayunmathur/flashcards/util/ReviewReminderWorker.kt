@@ -17,9 +17,7 @@ import androidx.work.WorkerParameters
 import com.vayunmathur.flashcards.MainActivity
 import com.vayunmathur.flashcards.R
 import com.vayunmathur.flashcards.data.CardState
-import com.vayunmathur.flashcards.data.DB_NAME
-import com.vayunmathur.flashcards.data.FlashcardsDatabase
-import com.vayunmathur.library.room.buildDatabase
+import com.vayunmathur.flashcards.data.FlashcardsRepository
 import com.vayunmathur.library.util.ensureNotificationChannel
 import java.util.Calendar
 import java.util.concurrent.TimeUnit
@@ -63,8 +61,8 @@ class ReviewReminderWorker(
 
     override suspend fun doWork(): Result {
         val now = System.currentTimeMillis()
-        val db = applicationContext.buildDatabase<FlashcardsDatabase>(dbName = DB_NAME)
-        val cards = db.cardDao().getAll()
+        val repository = FlashcardsRepository.get(applicationContext)
+        val cards = repository.getAllCards()
         val due = cards.count { it.state != CardState.NEW && it.dueDate <= now } +
             cards.count { it.state == CardState.NEW }
         if (due > 0) notify(due)

@@ -5,7 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.games.hub.data.GamesHubDatabase
+import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.data.dao.AchievementWithProgress
 import com.vayunmathur.games.hub.data.entities.ActivityEventEntity
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
@@ -37,35 +37,35 @@ data class CrossGameStats(
 
 class GameHubViewModel(
     application: Application,
-    private val db: GamesHubDatabase
+    private val repository: GamesHubRepository,
 ) : AndroidViewModel(application), ProfileActions {
 
     val gamesFlow: StateFlow<List<HubGameEntity>> =
-        db.gameDao().flowAll()
+        repository.gamesFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val totalPlaytimeFromGamesFlow: StateFlow<Long> =
-        db.gameDao().flowTotalPlaytimeMs()
+        repository.totalPlaytimeFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
     val totalPlaytimeSessionsFlow: StateFlow<Long> =
-        db.sessionDao().flowTotalPlaytimeMs()
+        repository.totalPlaytimeSessionsFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0L)
 
     val totalSessionsFlow: StateFlow<Int> =
-        db.gameDao().flowTotalSessions()
+        repository.totalSessionsFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val allAchievementsFlow: StateFlow<List<AchievementWithProgress>> =
-        db.achievementDao().flowAllWithProgress()
+        repository.allWithProgressFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val unlockedAchievementsFlow: StateFlow<List<AchievementWithProgress>> =
-        db.achievementDao().flowUnlockedWithProgress()
+        repository.unlockedWithProgressFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val totalXpFlow: StateFlow<Int> =
-        db.achievementDao().flowTotalXp()
+        repository.totalXpFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val levelFlow: StateFlow<Int> =
@@ -81,34 +81,34 @@ class GameHubViewModel(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), "Beginner")
 
     val profileFlow: StateFlow<PlayerProfileEntity?> =
-        db.profileDao().flowProfile()
+        repository.profileFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            val existing = db.profileDao().getProfile()
+            val existing = repository.getProfile()
             if (existing == null) {
-                db.profileDao().upsert(PlayerProfileEntity(displayName = "Player"))
+                repository.upsertProfile(PlayerProfileEntity(displayName = "Player"))
             }
         }
     }
 
     override fun updateDisplayName(name: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val current = db.profileDao().getProfile() ?: PlayerProfileEntity()
-            db.profileDao().upsert(current.copy(displayName = name))
+            val current = repository.getProfile() ?: PlayerProfileEntity()
+            repository.upsertProfile(current.copy(displayName = name))
         }
     }
 
     override fun updateAvatarSymbol(symbol: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            val current = db.profileDao().getProfile() ?: PlayerProfileEntity()
-            db.profileDao().upsert(current.copy(avatarSymbol = symbol))
+            val current = repository.getProfile() ?: PlayerProfileEntity()
+            repository.upsertProfile(current.copy(avatarSymbol = symbol))
         }
     }
 
     val sessionsFlow: StateFlow<List<PlaySessionEntity>> =
-        db.sessionDao().flowAll()
+        repository.allSessionsFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val streakFlow: StateFlow<StreakCalculator.StreakResult> =
@@ -116,11 +116,11 @@ class GameHubViewModel(
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StreakCalculator.StreakResult(0, 0))
 
     val recentActivityFlow: StateFlow<List<ActivityEventEntity>> =
-        db.activityDao().flowRecent(50)
+        repository.recentActivityFlow(50)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     val allActivityFlow: StateFlow<List<ActivityEventEntity>> =
-        db.activityDao().flowAll()
+        repository.allActivityFlow()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // Cross-game stats
@@ -162,7 +162,7 @@ class GameHubViewModel(
     val crossGameStatsFlowWithDefs: StateFlow<CrossGameStats> =
         combine(
             crossGameStatsFlow,
-            db.achievementDao().flowTotalDefsCount()
+            repository.totalDefsCountFlow()
         ) { stats, totalDefs ->
             stats.copy(totalAchievements = totalDefs)
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CrossGameStats())
@@ -170,35 +170,35 @@ class GameHubViewModel(
     val statsFlow: StateFlow<CrossGameStats> = crossGameStatsFlowWithDefs
 
     // Per-game flows
-    fun getGameFlow(gameId: String): Flow<HubGameEntity?> = db.gameDao().flowById(gameId)
+    fun getGameFlow(gameId: String): Flow<HubGameEntity?> = repository.gameByIdFlow(gameId)
 
     fun getAchievementsForGameFlow(gameId: String): Flow<List<AchievementWithProgress>> =
-        db.achievementDao().flowByGameWithProgress(gameId)
+        repository.byGameWithProgressFlow(gameId)
 
     fun getSessionsForGameFlow(gameId: String): Flow<List<PlaySessionEntity>> =
-        db.sessionDao().flowByGame(gameId)
+        repository.sessionsByGameFlow(gameId)
 
     fun getActivityForGameFlow(gameId: String): Flow<List<ActivityEventEntity>> =
-        db.activityDao().flowByGame(gameId, 30)
+        repository.activityByGameFlow(gameId, 30)
 
     fun clearAllData() {
         viewModelScope.launch(Dispatchers.IO) {
-            db.gameDao().clearAll()
-            db.achievementDao().clearDefs()
-            db.achievementDao().clearProgress()
-            db.sessionDao().clearAll()
-            db.activityDao().clearAll()
+            repository.clearGames()
+            repository.clearDefs()
+            repository.clearProgress()
+            repository.clearSessions()
+            repository.clearActivities()
         }
     }
 }
 
 class GameHubViewModelFactory(
     private val application: Application,
-    private val database: GamesHubDatabase
+    private val repository: GamesHubRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(GameHubViewModel::class.java))
-        return GameHubViewModel(application, database) as T
+        return GameHubViewModel(application, repository) as T
     }
 }

@@ -13,7 +13,6 @@ import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseMigrations
 
 /**
@@ -60,9 +59,6 @@ abstract class WhatsAppDatabase : RoomDatabase() {
     abstract fun e2eSenderKeyDao(): WhatsAppE2ESenderKeyDao
 
     companion object : DatabaseMigrations {
-        @Volatile
-        private var INSTANCE: WhatsAppDatabase? = null
-
         override val migrations: List<Migration> = listOf(
             object : Migration(6, 7) {
                 override fun migrate(db: SupportSQLiteDatabase) {
@@ -77,16 +73,8 @@ abstract class WhatsAppDatabase : RoomDatabase() {
             }
         )
 
-        fun getDatabase(context: Context): WhatsAppDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = context.applicationContext.buildDatabase<WhatsAppDatabase>(
-                    migrations = migrations,
-                    dbName = "whatsapp_database"
-                )
-                INSTANCE = instance
-                instance
-            }
-        }
+        fun getDatabase(context: Context): WhatsAppDatabase =
+            WhatsAppRepository.get(context).database()
     }
 }
 

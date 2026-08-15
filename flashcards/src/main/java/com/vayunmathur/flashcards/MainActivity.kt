@@ -10,16 +10,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.lifecycleScope
-import com.vayunmathur.flashcards.data.CardDao
-import com.vayunmathur.flashcards.data.CardTemplateDao
-import com.vayunmathur.flashcards.data.DB_NAME
-import com.vayunmathur.flashcards.data.DeckDao
-import com.vayunmathur.flashcards.data.FlashcardsDatabase
-import com.vayunmathur.flashcards.data.NoteDao
-import com.vayunmathur.flashcards.data.NoteTypeDao
-import com.vayunmathur.flashcards.data.NoteTypeFieldDao
-import com.vayunmathur.flashcards.data.ReviewLogDao
+import com.vayunmathur.flashcards.data.FlashcardsRepository
 import com.vayunmathur.flashcards.ui.DeckListPage
 import com.vayunmathur.flashcards.ui.NoteEditPage
 import com.vayunmathur.flashcards.ui.NoteListPage
@@ -31,7 +22,6 @@ import com.vayunmathur.flashcards.ui.StatsPage
 import com.vayunmathur.flashcards.util.FlashcardsViewModel
 import com.vayunmathur.flashcards.util.FlashcardsViewModelFactory
 import com.vayunmathur.flashcards.util.ThemeMode
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconDashboard
 import com.vayunmathur.library.ui.IconSettings
@@ -41,55 +31,25 @@ import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
-    private lateinit var deckDao: DeckDao
-    private lateinit var cardDao: CardDao
-    private lateinit var reviewLogDao: ReviewLogDao
-    private lateinit var noteTypeDao: NoteTypeDao
-    private lateinit var noteTypeFieldDao: NoteTypeFieldDao
-    private lateinit var cardTemplateDao: CardTemplateDao
-    private lateinit var noteDao: NoteDao
     private val viewModel: FlashcardsViewModel by viewModels {
-        FlashcardsViewModelFactory(
-            application, deckDao, cardDao, reviewLogDao,
-            noteTypeDao, noteTypeFieldDao, cardTemplateDao, noteDao,
-        )
+        FlashcardsViewModelFactory(application, FlashcardsRepository.get(application))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val ready = mutableStateOf(false)
-        lifecycleScope.launch(Dispatchers.IO) {
-            val db = buildDatabase<FlashcardsDatabase>(dbName = DB_NAME)
-            deckDao = db.deckDao()
-            cardDao = db.cardDao()
-            reviewLogDao = db.reviewLogDao()
-            noteTypeDao = db.noteTypeDao()
-            noteTypeFieldDao = db.noteTypeFieldDao()
-            cardTemplateDao = db.cardTemplateDao()
-            noteDao = db.noteDao()
-            withContext(Dispatchers.Main) { ready.value = true }
-        }
-
         setContent {
-            if (ready.value) {
-                val settings by viewModel.settings.collectAsStateWithLifecycle()
-                val darkTheme = when (settings.themeMode) {
-                    ThemeMode.LIGHT -> false
-                    ThemeMode.DARK -> true
-                    else -> null
-                }
-                DynamicTheme(darkTheme = darkTheme) { Navigation(viewModel) }
-            } else {
-                DynamicTheme {}
+            val settings by viewModel.settings.collectAsStateWithLifecycle()
+            val darkTheme = when (settings.themeMode) {
+                ThemeMode.LIGHT -> false
+                ThemeMode.DARK -> true
+                else -> null
             }
+            DynamicTheme(darkTheme = darkTheme) { Navigation(viewModel) }
         }
     }
 }

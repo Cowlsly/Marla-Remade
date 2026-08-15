@@ -2,8 +2,7 @@ package com.vayunmathur.passwords.util
 
 import android.content.Context
 import com.vayunmathur.library.util.BackupFormat
-import com.vayunmathur.passwords.data.PasskeyDao
-import com.vayunmathur.passwords.data.PasswordDao
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.data.newSyncId
 import com.vayunmathur.passwords.sync.EntryMapper
 import org.json.JSONArray
@@ -17,8 +16,7 @@ import java.io.OutputStream
  * import always inserts fresh rows.
  */
 class KdbxBackupFormat(
-    private val passwordDao: PasswordDao,
-    private val passkeyDao: PasskeyDao,
+    private val repository: PasswordRepository,
 ) : BackupFormat {
     override val mimeType = "application/octet-stream"
     override val defaultFileName = "passwords.kdbx"
@@ -28,8 +26,8 @@ class KdbxBackupFormat(
         requireNotNull(password) { "Password required for KDBX export" }
 
         val entries = JSONArray()
-        for (pw in passwordDao.getAll()) entries.put(EntryMapper.toFields(pw).withoutSyncFields())
-        for (pk in passkeyDao.getAll()) entries.put(EntryMapper.toFields(pk).withoutSyncFields())
+        for (pw in repository.getAllPasswords()) entries.put(EntryMapper.toFields(pw).withoutSyncFields())
+        for (pk in repository.getAllPasskeys()) entries.put(EntryMapper.toFields(pk).withoutSyncFields())
 
         val bytes = KdbxNative.nativeExport(password, entries.toString())
             ?: error("Failed to write KDBX file")
@@ -46,9 +44,9 @@ class KdbxBackupFormat(
         for (i in 0 until entries.length()) {
             val entry = entries.getJSONObject(i).toStringMap()
             if (EntryMapper.isPasskeyEntry(entry)) {
-                passkeyDao.upsert(EntryMapper.toPasskey(entry).copy(syncId = newSyncId()))
+                repository.upsertPasskey(EntryMapper.toPasskey(entry).copy(syncId = newSyncId()))
             } else {
-                passwordDao.upsert(EntryMapper.toPassword(entry).copy(syncId = newSyncId()))
+                repository.upsertPassword(EntryMapper.toPassword(entry).copy(syncId = newSyncId()))
             }
         }
     }

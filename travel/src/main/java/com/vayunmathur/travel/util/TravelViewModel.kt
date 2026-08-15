@@ -9,13 +9,10 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.travel.R
 import com.vayunmathur.travel.data.BookedTrip
-import com.vayunmathur.travel.data.BookedTripDao
+import com.vayunmathur.travel.data.TravelRepository
 import com.vayunmathur.travel.data.Customer
-import com.vayunmathur.travel.data.CustomerDao
 import com.vayunmathur.travel.data.FrequentFlyer
-import com.vayunmathur.travel.data.FrequentFlyerDao
 import com.vayunmathur.travel.data.RecentSearch
-import com.vayunmathur.travel.data.RecentSearchDao
 import com.vayunmathur.travel.data.Vertical
 import com.vayunmathur.travel.network.AirlineDto
 import com.vayunmathur.travel.network.AircraftDto
@@ -223,10 +220,7 @@ sealed interface StayBookingState {
  */
 class TravelViewModel(
     application: Application,
-    private val recentSearchDao: RecentSearchDao,
-    private val bookedTripDao: BookedTripDao,
-    private val frequentFlyerDao: FrequentFlyerDao,
-    private val customerDao: CustomerDao,
+    private val repository: TravelRepository,
 ) : AndroidViewModel(application) {
 
     private val _flights = MutableStateFlow(FlightResultsState())
@@ -302,14 +296,14 @@ class TravelViewModel(
     private var selectedCheckOut: String = ""
     private var stayQuote: StayQuoteDto? = null
 
-    val recentSearches: StateFlow<List<RecentSearch>> = recentSearchDao.observeRecent()
+    val recentSearches: StateFlow<List<RecentSearch>> = repository.observeRecent()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val bookedTrips: StateFlow<List<BookedTrip>> = bookedTripDao.observeAll()
+    val bookedTrips: StateFlow<List<BookedTrip>> = repository.observeBookedTrips()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Saved frequent-flyer accounts, applied as loyalty pricing at search. */
-    val frequentFlyers: StateFlow<List<FrequentFlyer>> = frequentFlyerDao.observeAll()
+    val frequentFlyers: StateFlow<List<FrequentFlyer>> = repository.observeFrequentFlyers()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun saveFrequentFlyer(airlineIata: String, accountNumber: String, airlineName: String) {
@@ -317,14 +311,14 @@ class TravelViewModel(
         val account = accountNumber.trim()
         if (iata.isBlank() || account.isBlank()) return
         viewModelScope.launch {
-            frequentFlyerDao.upsert(
+            repository.upsertFrequentFlyer(
                 FrequentFlyer(airlineIata = iata, accountNumber = account, airlineName = airlineName),
             )
         }
     }
 
     fun removeFrequentFlyer(airlineIata: String) {
-        viewModelScope.launch { frequentFlyerDao.deleteById(airlineIata) }
+        viewModelScope.launch { repository.deleteFrequentFlyer(airlineIata) }
     }
 
     // --- Customers (Duffel customer users) --------------------------------
@@ -333,7 +327,7 @@ class TravelViewModel(
     private val activeCustomerKey = "travel_active_customer_id"
 
     /** Saved customer users; orders are associated with the active one. */
-    val customers: StateFlow<List<Customer>> = customerDao.observeAll()
+    val customers: StateFlow<List<Customer>> = repository.observeCustomers()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** The id of the currently selected customer (persisted), or blank. */
@@ -354,7 +348,7 @@ class TravelViewModel(
                 )
             }.onSuccess { dto ->
                 if (dto.id.isNotBlank()) {
-                    customerDao.upsert(
+                    repository.upsertCustomer(
                         Customer(
                             id = dto.id,
                             email = dto.email,
@@ -380,7 +374,7 @@ class TravelViewModel(
 
     fun removeCustomer(id: String) {
         viewModelScope.launch {
-            customerDao.deleteById(id)
+            repository.deleteCustomerById(id)
             if (activeCustomerId.value == id) dataStore.setString(activeCustomerKey, "")
         }
     }
@@ -419,7 +413,7 @@ class TravelViewModel(
         )
         _flights.value = FlightResultsState(loading = true, hasSearched = true)
         viewModelScope.launch {
-            val loyalty = frequentFlyerDao.getAll()
+            val loyalty = repository.getAllFrequentFlyers()
                 .joinToString(",") { "${it.airlineIata}:${it.accountNumber}" }
             // Incremental search: create the request async, then poll /offers so
             // results appear progressively instead of blocking on the full set.
@@ -557,7 +551,7 @@ class TravelViewModel(
     fun startPartialSearch(query: FlightQuery) {
         _partialFlow.value = PartialFlowState(loading = true)
         viewModelScope.launch {
-            val loyalty = frequentFlyerDao.getAll()
+            val loyalty = repository.getAllFrequentFlyers()
                 .joinToString(",") { "${it.airlineIata}:${it.accountNumber}" }
             runCatching {
                 TravelApi.createPartialOffers(
@@ -620,7 +614,7 @@ class TravelViewModel(
         _passengers.value = ids.map { PassengerInputDto(id = it) }
         // Pre-fill the lead passenger with any saved frequent-flyer accounts.
         viewModelScope.launch {
-            val saved = frequentFlyerDao.getAll()
+            val saved = repository.getAllFrequentFlyers()
             if (saved.isEmpty()) return@launch
             val loyalty = saved.map {
                 LoyaltyAccountDto(airlineIataCode = it.airlineIata, accountNumber = it.accountNumber)
@@ -762,8 +756,8 @@ class TravelViewModel(
         viewModelScope.launch {
             runCatching { TravelApi.payOrder(orderId) }
                 .onSuccess { result ->
-                    bookedTripDao.byId(orderId)?.let { trip ->
-                        bookedTripDao.upsert(
+                    repository.getBookedTrip(orderId)?.let { trip ->
+                        repository.upsertBookedTrip(
                             trip.copy(
                                 awaitingPayment = result.awaitingPayment,
                                 paymentRequiredBy = result.paymentRequiredBy.orEmpty(),
@@ -842,8 +836,8 @@ class TravelViewModel(
         viewModelScope.launch {
             runCatching { TravelApi.confirmCancellation(quote.id) }
                 .onSuccess {
-                    bookedTripDao.byId(orderId)?.let {
-                        bookedTripDao.upsert(it.copy(status = "cancelled", awaitingPayment = false))
+                    repository.getBookedTrip(orderId)?.let {
+                        repository.upsertBookedTrip(it.copy(status = "cancelled", awaitingPayment = false))
                     }
                     _cancellation.value = _cancellation.value.copy(confirming = false, done = true)
                 }
@@ -891,8 +885,8 @@ class TravelViewModel(
         viewModelScope.launch {
             runCatching { TravelApi.confirmChange(offerId) }
                 .onSuccess { result ->
-                    bookedTripDao.byId(orderId)?.let {
-                        bookedTripDao.upsert(it.copy(amount = result.totalAmount, currency = result.currency))
+                    repository.getBookedTrip(orderId)?.let {
+                        repository.upsertBookedTrip(it.copy(amount = result.totalAmount, currency = result.currency))
                     }
                     _change.value = _change.value.copy(confirming = false, done = true)
                 }
@@ -922,7 +916,7 @@ class TravelViewModel(
             val base = "${first.origin} → ${first.destination}"
             if (roundTrip) "$base (round trip)" else base
         }
-        bookedTripDao.upsert(
+        repository.upsertBookedTrip(
             BookedTrip(
                 orderId = result.orderId,
                 bookingReference = result.bookingReference,
@@ -1050,7 +1044,7 @@ class TravelViewModel(
         val (quoteAmount, quoteCurrency) = stayTotal()
         val amount = result.totalAmount.takeIf { it.isNotBlank() && it != "0" } ?: quoteAmount
         val currency = result.totalCurrency.takeIf { it.isNotBlank() } ?: quoteCurrency
-        bookedTripDao.upsert(
+        repository.upsertBookedTrip(
             BookedTrip(
                 orderId = result.id,
                 bookingReference = result.reference,
@@ -1068,13 +1062,13 @@ class TravelViewModel(
     // --- Recents ----------------------------------------------------------
 
     fun clearRecents() {
-        viewModelScope.launch { recentSearchDao.clear() }
+        viewModelScope.launch { repository.clearRecent() }
     }
 
     private fun recordRecent(search: RecentSearch) {
         viewModelScope.launch {
-            recentSearchDao.insert(search)
-            recentSearchDao.trim()
+            repository.insertRecent(search)
+            repository.trimRecent()
         }
     }
 
@@ -1094,16 +1088,13 @@ class TravelViewModel(
 
 class TravelViewModelFactory(
     private val application: Application,
-    private val recentSearchDao: RecentSearchDao,
-    private val bookedTripDao: BookedTripDao,
-    private val frequentFlyerDao: FrequentFlyerDao,
-    private val customerDao: CustomerDao,
+    private val repository: TravelRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(TravelViewModel::class.java)) {
             "Unexpected ViewModel class: $modelClass"
         }
-        return TravelViewModel(application, recentSearchDao, bookedTripDao, frequentFlyerDao, customerDao) as T
+        return TravelViewModel(application, repository) as T
     }
 }

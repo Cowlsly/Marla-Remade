@@ -12,7 +12,7 @@ import android.content.pm.PackageManager
 import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
-import com.vayunmathur.findfamily.data.UserDao
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.findfamily.uwb.UwbAccessoryProtocol
 import com.vayunmathur.findfamily.uwb.UwbBytes
@@ -96,7 +96,7 @@ object UwbSessionManager {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private lateinit var appContext: Context
-    private lateinit var userDao: UserDao
+    private lateinit var repository: FindFamilyRepository
 
     private var controller: UwbController? = null
     private var streamJob: Job? = null
@@ -107,12 +107,12 @@ object UwbSessionManager {
      * Wire up the manager. No-op on devices below API 36. Safe to call
      * multiple times — only the first call has effect.
      */
-    fun init(context: Context, userDao: UserDao) {
+    fun init(context: Context, repository: FindFamilyRepository) {
         if (!isSupportedSdk) { Log.i(TAG, "init: SDK ${Build.VERSION.SDK_INT} < 36, UWB disabled"); return }
         if (!initialized.compareAndSet(false, true)) { Log.i(TAG, "init: already initialized"); return }
         Log.i(TAG, "init: hooking up UwbInbox subscriber")
         appContext = context.applicationContext
-        UwbSessionManager.userDao = userDao
+        UwbSessionManager.repository = repository
 
         // Subscribe to the global UWB envelope inbox for the whole process
         // lifetime. CANCELs from the peer tear down our local session
@@ -160,7 +160,7 @@ object UwbSessionManager {
 
         scope.launch {
             Log.i(TAG, "startAsInitiator: launched coroutine, loading peer from DB")
-            val peerUser = userDao.getById(peerUserId)
+            val peerUser = repository.getUser(peerUserId)
             Log.i(TAG, "startAsInitiator: peerUser=${peerUser?.name} platform=${peerUser?.platform}")
             if (peerUser == null) {
                 _state.value = UwbSessionState.Failed("Unknown peer")
@@ -480,7 +480,7 @@ object UwbSessionManager {
      */
     private suspend fun publish(envelope: UwbEnvelope, peerId: Long): Boolean {
         val peer = try {
-            userDao.getById(peerId)
+            repository.getUser(peerId)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to lookup peer user", e)
             null

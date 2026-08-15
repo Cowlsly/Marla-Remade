@@ -7,7 +7,7 @@ import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import com.vayunmathur.email.EmailManager
 import com.vayunmathur.email.resolveAuth
-import com.vayunmathur.email.data.EmailDatabase
+import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.imapServer
 import com.vayunmathur.email.loginUser
 import kotlinx.coroutines.CoroutineScope
@@ -30,7 +30,7 @@ class EmailNotificationActionReceiver : BroadcastReceiver() {
         val pending = goAsync()
         CoroutineScope(Dispatchers.IO).launch {
             try {
-                val dao = EmailDatabase.getInstance(context).emailDao()
+                val dao = EmailRepository.get(context).getDatabase().emailDao()
                 val account = dao.getAccountByEmail(accountEmail)
                 val manager = EmailManager()
                 when (action) {

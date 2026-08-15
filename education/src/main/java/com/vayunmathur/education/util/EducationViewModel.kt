@@ -17,11 +17,9 @@ import com.vayunmathur.education.content.ModuleType
 import com.vayunmathur.education.content.Question
 import com.vayunmathur.education.content.isCorrect
 import com.vayunmathur.education.data.Deadline
-import com.vayunmathur.education.data.DeadlineDao
+import com.vayunmathur.education.data.EducationRepository
 import com.vayunmathur.education.data.Learner
-import com.vayunmathur.education.data.LearnerDao
 import com.vayunmathur.education.data.SkillProgress
-import com.vayunmathur.education.data.SkillProgressDao
 import com.vayunmathur.library.util.Achievement
 import com.vayunmathur.library.util.AchievementStatus
 import kotlinx.coroutines.Dispatchers
@@ -41,19 +39,17 @@ import java.security.MessageDigest
 class EducationViewModel(
     application: Application,
     val content: ContentRepository,
-    private val learnerDao: LearnerDao,
-    private val skillProgressDao: SkillProgressDao,
-    private val deadlineDao: DeadlineDao,
+    private val repository: EducationRepository,
 ) : AndroidViewModel(application) {
 
-    val learner: StateFlow<Learner?> = learnerDao.getFlow()
+    val learner: StateFlow<Learner?> = repository.learnerFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
-    val progress: StateFlow<Map<String, SkillProgress>> = skillProgressDao.getAllFlow()
+    val progress: StateFlow<Map<String, SkillProgress>> = repository.skillProgressFlow()
         .map { list -> list.associateBy { it.skillId } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
-    val deadlines: StateFlow<List<Deadline>> = deadlineDao.getAllFlow()
+    val deadlines: StateFlow<List<Deadline>> = repository.deadlinesFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // --- Badges / stickers -----------------------------------------------
@@ -95,8 +91,8 @@ class EducationViewModel(
 
     private inline fun updateLearner(crossinline transform: (Learner) -> Learner) {
         viewModelScope.launch(Dispatchers.IO) {
-            val current = learnerDao.get() ?: Learner()
-            learnerDao.upsert(transform(current))
+            val current = repository.getLearner() ?: Learner()
+            repository.upsertLearner(transform(current))
         }
     }
 
@@ -107,15 +103,15 @@ class EducationViewModel(
 
     fun setDeadline(type: ModuleType, moduleId: String, dueEpochDay: Long, note: String = "") {
         viewModelScope.launch(Dispatchers.IO) {
-            val existing = deadlineDao.getFor(type.name, moduleId)
+            val existing = repository.getDeadlineFor(type.name, moduleId)
             val row = existing?.copy(dueEpochDay = dueEpochDay, note = note)
                 ?: Deadline(moduleType = type.name, moduleId = moduleId, dueEpochDay = dueEpochDay, note = note)
-            deadlineDao.upsert(row)
+            repository.upsertDeadline(row)
         }
     }
 
     fun removeDeadline(deadline: Deadline) {
-        viewModelScope.launch(Dispatchers.IO) { deadlineDao.delete(deadline) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteDeadline(deadline) }
     }
 
     // --- Quiz grading -----------------------------------------------------
@@ -147,8 +143,8 @@ class EducationViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             val today = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date.toEpochDays()
             for ((skillId, stars) in result.perSkillStars) {
-                val existing = skillProgressDao.get(skillId)
-                skillProgressDao.upsert(
+                val existing = repository.getSkillProgress(skillId)
+                repository.upsertSkillProgress(
                     SkillProgress(
                         skillId = skillId,
                         stars = maxOf(existing?.stars ?: 0, stars),
@@ -158,11 +154,11 @@ class EducationViewModel(
                 )
             }
             // Recompute total stars from the source of truth after the upserts.
-            val all = skillProgressDao.getAll()
+            val all = repository.getAllSkillProgress()
             val totalStars = all.sumOf { it.stars }
-            val current = learnerDao.get() ?: Learner()
+            val current = repository.getLearner() ?: Learner()
             val newStreak = nextStreak(current.streakCount, current.lastActivityEpochDay, today)
-            learnerDao.upsert(
+            repository.upsertLearner(
                 current.copy(
                     streakCount = newStreak,
                     lastActivityEpochDay = today,
@@ -231,15 +227,13 @@ data class QuizResult(
 class EducationViewModelFactory(
     private val application: Application,
     private val content: ContentRepository,
-    private val learnerDao: LearnerDao,
-    private val skillProgressDao: SkillProgressDao,
-    private val deadlineDao: DeadlineDao,
+    private val repository: EducationRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(EducationViewModel::class.java)) {
             "Unexpected ViewModel class: $modelClass"
         }
-        return EducationViewModel(application, content, learnerDao, skillProgressDao, deadlineDao) as T
+        return EducationViewModel(application, content, repository) as T
     }
 }

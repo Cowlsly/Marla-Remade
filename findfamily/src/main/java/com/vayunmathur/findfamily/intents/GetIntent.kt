@@ -1,10 +1,8 @@
 package com.vayunmathur.findfamily.intents
 
-import com.vayunmathur.findfamily.data.FFDatabase
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.library.intents.findfamily.FamilyMemberData
 import com.vayunmathur.library.util.AssistantIntent
-import com.vayunmathur.library.room.buildDatabase
-import kotlinx.coroutines.flow.first
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
 
@@ -12,9 +10,9 @@ import kotlinx.serialization.serializer
 class GetIntent: AssistantIntent<Unit, List<FamilyMemberData>>(serializer<Unit>(), serializer<List<FamilyMemberData>>()) {
 
     override suspend fun performCalculation(input: Unit): List<FamilyMemberData> {
-        val db = buildDatabase<FFDatabase>()
-        val latestLocations = db.locationValueDao().getLatest().first().associateBy { it.userid }
-        return db.userDao().getAll().map { user ->
+        val repository = FindFamilyRepository.get(this)
+        val latestLocations = repository.latestLocationsOnce().associateBy { it.userid }
+        return repository.getAllUsers().map { user ->
             val location = latestLocations[user.id]
             FamilyMemberData(
                 user.name,

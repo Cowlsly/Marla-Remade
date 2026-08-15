@@ -12,10 +12,9 @@ import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.widgets.updateWidgetPreviews
-import com.vayunmathur.weather.data.WeatherDatabase
+import com.vayunmathur.weather.data.WeatherRepository
 import com.vayunmathur.weather.glance.WeatherGlanceWidgetReceiver
 import com.vayunmathur.weather.ui.HomePage
 import com.vayunmathur.weather.ui.SearchLocationPage
@@ -27,9 +26,8 @@ import com.vayunmathur.weather.util.WeatherViewModelFactory
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
-    private val db by lazy { buildDatabase<WeatherDatabase>(dbName = "weather-db") }
     private val viewModel: WeatherViewModel by viewModels {
-        WeatherViewModelFactory(application, db.weatherDao())
+        WeatherViewModelFactory(application, WeatherRepository.get(application))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

@@ -10,8 +10,7 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
-import com.vayunmathur.library.room.buildDatabase
-import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,7 +21,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 /**
  * Foreground service (type `connectedDevice`) that runs a caBLE authenticator [CableSession].
  * Mirrors the FGS setup in `openassistant/util/InferenceService`. The DB must already be unlocked
- * by [CableActivity]; here it is opened via [buildDatabase] using the cached passphrase.
+ * by [CableActivity]; here it is opened via [PasswordRepository] using the cached passphrase.
  *
  * The service stops itself once the session finishes (success, cancel, or the overall timeout).
  */
@@ -45,8 +44,8 @@ class CableService : Service() {
         scope.launch {
             val ok = runCatching {
                 val qr = CableQrData.parse(uri)
-                val dao = applicationContext.buildDatabase<PasswordDatabase>().passkeyDao()
-                val processor = CtapProcessor(dao, userVerified)
+                val repository = PasswordRepository.get(applicationContext)
+                val processor = CtapProcessor(repository, userVerified)
                 val advertiser = CableAdvertiser(applicationContext)
                 val session = CableSession(qr, processor, advertiser) { updateNotification(it) }
                 withTimeoutOrNull(SESSION_TIMEOUT_MS) { session.run() } ?: false

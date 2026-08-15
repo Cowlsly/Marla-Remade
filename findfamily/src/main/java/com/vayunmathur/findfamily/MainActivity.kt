@@ -40,15 +40,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.findfamily.data.FFDatabase
-import com.vayunmathur.findfamily.data.LocationValue
-import com.vayunmathur.findfamily.data.LocationValueDao
-import com.vayunmathur.findfamily.data.TemporaryLink
-import com.vayunmathur.findfamily.data.TemporaryLinkDao
-import com.vayunmathur.findfamily.data.User
-import com.vayunmathur.findfamily.data.UserDao
-import com.vayunmathur.findfamily.data.Waypoint
-import com.vayunmathur.findfamily.data.WaypointDao
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.ui.MainPage
 import com.vayunmathur.findfamily.ui.UwbRangingScreen
 import com.vayunmathur.findfamily.ui.dialogs.AddLinkDialog
@@ -60,7 +52,6 @@ import com.vayunmathur.library.ui.dialog.DatePickerDialog
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.TimeZone
@@ -79,12 +70,8 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_UWB_PEER_ID = "com.vayunmathur.findfamily.EXTRA_UWB_PEER_ID"
     }
 
-    private lateinit var userDao: UserDao
-    private lateinit var waypointDao: WaypointDao
-    private lateinit var locationValueDao: LocationValueDao
-    private lateinit var temporaryLinkDao: TemporaryLinkDao
     private val ffViewModel: FindFamilyViewModel by viewModels {
-        FindFamilyViewModelFactory(application, userDao, waypointDao, locationValueDao, temporaryLinkDao)
+        FindFamilyViewModelFactory(application, FindFamilyRepository.get(application))
     }
 
     /**
@@ -100,11 +87,6 @@ class MainActivity : ComponentActivity() {
         // FIRST_PARTY: api.vayunmathur.com + data.vayunmathur.com + findfamily.cc (Cloudflare ISRG+GTS)
         NetworkClient.init(this, TrustBundle.FIRST_PARTY)
         enableEdgeToEdge()
-        val db = buildDatabase<FFDatabase>()
-        userDao = db.userDao()
-        waypointDao = db.waypointDao()
-        locationValueDao = db.locationValueDao()
-        temporaryLinkDao = db.temporaryLinkDao()
         val platform = Platform(this)
         setContent {
             DynamicTheme {

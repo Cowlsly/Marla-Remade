@@ -9,10 +9,12 @@ import com.vayunmathur.passwords.data.PasskeyDao
 import com.vayunmathur.passwords.data.Password
 import com.vayunmathur.passwords.data.PasswordDao
 import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.data.SyncSnapshot
 import com.vayunmathur.passwords.data.SyncSnapshotDao
 import com.vayunmathur.passwords.data.newSyncId
 import com.vayunmathur.passwords.util.KdbxNative
+import kotlinx.coroutines.flow.Flow
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -75,6 +77,34 @@ class KdbxSyncEngine(
         db.syncSnapshotDao(),
         codec,
         { db.withTransaction(it) },
+    )
+
+    constructor(repository: PasswordRepository, codec: KdbxCodec) : this(
+        passwordDao = object : PasswordDao() {
+            override fun getAllFlow(): Flow<List<Password>> = repository.passwords
+            override suspend fun getAll(): List<Password> = repository.getAllPasswords()
+            override fun getByIdFlow(id: Long): Flow<Password?> = repository.getPasswordByIdFlow(id)
+            override suspend fun getById(id: Long): Password? = repository.getPasswordById(id)
+            override suspend fun upsertRaw(value: Password): Long = repository.upsertPasswordRaw(value)
+            override suspend fun delete(value: Password): Int = repository.deletePassword(value)
+        },
+        passkeyDao = object : PasskeyDao() {
+            override fun getAllFlow(): Flow<List<Passkey>> = repository.passkeys
+            override suspend fun getAll(): List<Passkey> = repository.getAllPasskeys()
+            override suspend fun getByRpId(rpId: String): List<Passkey> = repository.getPasskeysByRpId(rpId)
+            override suspend fun getByCredentialId(credentialId: String): Passkey? =
+                repository.getPasskeyByCredentialId(credentialId)
+            override suspend fun upsertRaw(passkey: Passkey): Long = repository.upsertPasskeyRaw(passkey)
+            override suspend fun delete(passkey: Passkey): Int = repository.deletePasskey(passkey)
+        },
+        snapshotDao = object : SyncSnapshotDao {
+            override suspend fun getAll(): List<SyncSnapshot> = repository.getAllSnapshots()
+            override suspend fun upsert(snapshot: SyncSnapshot) = repository.upsertSnapshot(snapshot)
+            override suspend fun deleteBySyncId(syncId: String) = repository.deleteSnapshotBySyncId(syncId)
+            override suspend fun deleteAll() = repository.deleteAllSnapshots()
+        },
+        codec = codec,
+        inTransaction = { repository.withTransaction(it) },
     )
 
     private val passwordKind = object : EntityKind<Password>() {
@@ -384,6 +414,31 @@ suspend fun runKdbxSync(context: Context, db: PasswordDatabase): KdbxSyncResult 
 
     val result = try {
         KdbxSyncEngine(db, NativeKdbxCodec).sync(
+            document = SafKdbxDocument(context, uri.toUri()),
+            vaultPassword = passwordHelper.getPassphrase(),
+            onBackup = { previous -> File(context.filesDir, BACKUP_FILE_NAME).writeBytes(previous) },
+        )
+    } catch (e: Exception) {
+        KdbxSyncResult.Error(e.message ?: e.javaClass.simpleName)
+    }
+
+    when (result) {
+        is KdbxSyncResult.Success -> KdbxSyncSettings.recordSuccess(context)
+        KdbxSyncResult.NotConfigured -> Unit
+        else -> KdbxSyncSettings.recordFailure(context, result.errorCode())
+    }
+    return result
+}
+
+/** Repository-based overload — preferred; avoids direct PasswordDatabase access. */
+suspend fun runKdbxSync(context: Context, repository: PasswordRepository): KdbxSyncResult {
+    if (!KdbxSyncSettings.enabled(context)) return KdbxSyncResult.NotConfigured
+    val uri = KdbxSyncSettings.documentUri(context) ?: return KdbxSyncResult.NotConfigured
+    val passwordHelper = KdbxPasswordHelper(context)
+    if (!passwordHelper.isKeyGenerated()) return KdbxSyncResult.NotConfigured
+
+    val result = try {
+        KdbxSyncEngine(repository, NativeKdbxCodec).sync(
             document = SafKdbxDocument(context, uri.toUri()),
             vaultPassword = passwordHelper.getPassphrase(),
             onBackup = { previous -> File(context.filesDir, BACKUP_FILE_NAME).writeBytes(previous) },

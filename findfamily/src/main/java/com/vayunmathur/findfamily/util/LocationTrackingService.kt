@@ -34,16 +34,12 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.ExistingWorkPolicy
 import androidx.work.WorkerParameters
 import com.vayunmathur.findfamily.data.Coord
-import com.vayunmathur.findfamily.data.FFDatabase
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.data.LocationValue
-import com.vayunmathur.findfamily.data.LocationValueDao
 import com.vayunmathur.findfamily.data.RequestStatus
 import com.vayunmathur.findfamily.data.TemporaryLink
-import com.vayunmathur.findfamily.data.TemporaryLinkDao
 import com.vayunmathur.findfamily.data.User
-import com.vayunmathur.findfamily.data.UserDao
 import com.vayunmathur.findfamily.data.Waypoint
-import com.vayunmathur.findfamily.data.WaypointDao
 import com.vayunmathur.findfamily.data.havershine
 import com.vayunmathur.findfamily.uwb.UwbEnvelope
 import com.vayunmathur.findfamily.uwb.UwbEnvelopeKind
@@ -56,7 +52,6 @@ import com.vayunmathur.findfamily.tracker.TrackerStore
 import com.vayunmathur.findfamily.MainActivity
 import com.vayunmathur.findfamily.R
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.work.startRepeatedTask
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -96,10 +91,7 @@ class LocationTrackingService : Service(), SensorEventListener {
         }
     }
 
-    private lateinit var userDao: UserDao
-    private lateinit var waypointDao: WaypointDao
-    private lateinit var locationValueDao: LocationValueDao
-    private lateinit var temporaryLinkDao: TemporaryLinkDao
+    private val repository by lazy { FindFamilyRepository.get(this) }
     private lateinit var bm: BatteryManager
     
     private var isGpsRunning = false
@@ -140,8 +132,8 @@ class LocationTrackingService : Service(), SensorEventListener {
         // does not kill the foreground service loop (which previously surfaced as
         // FATAL BadPaddingException in decrypt).
         try {
-            val currentUsers = userDao.getAll()
-            val currentLinks = temporaryLinkDao.getAll()
+            val currentUsers = repository.getAllUsers()
+            val currentLinks = repository.getAllTemporaryLinks()
             val now = Clock.System.now()
 
             Log.d("FF-Heartbeat", "heartbeat userid=${Networking.userid.toULong()} self raw=${Networking.userid} users=${currentUsers.size} links=${currentLinks.size} moving=$isMoving loc=${location.latitude},${location.longitude} acc=${location.accuracy}")
@@ -156,11 +148,11 @@ class LocationTrackingService : Service(), SensorEventListener {
             )
 
             Log.d("FF-Heartbeat", "upsert local LocationValue for self")
-            locationValueDao.upsert(locationValue)
+            repository.upsertLocation(locationValue)
 
             if (currentUsers.none { it.id == Networking.userid }) {
                 Log.d("FF-Heartbeat", "self not in user DB, inserting me")
-                userDao.upsert(
+                repository.upsertUser(
                     User(
                         getString(R.string.me_label),
                         null,
@@ -180,12 +172,12 @@ class LocationTrackingService : Service(), SensorEventListener {
             // disable/enable when they didn't intend it. No stale copy() + upsert().
             var publishBaseUsers = currentUsers
             try {
-                val flipped = userDao.applyDueAutoToggles(now.epochSeconds)
+                val flipped = repository.applyDueAutoToggles(now.epochSeconds)
                 if (flipped > 0) {
                     Log.d("FF-Heartbeat", "auto-toggle flipped $flipped user(s), reloading sharing state before publish")
                     // Reload fresh sharing flags so we don't publish once after an intended disable,
                     // and we start publishing immediately after an intended enable.
-                    publishBaseUsers = userDao.getAll()
+                    publishBaseUsers = repository.getAllUsers()
                 }
             } catch (e: Exception) {
                 Log.w("FF-Heartbeat", "auto-toggle apply failed", e)
@@ -196,14 +188,14 @@ class LocationTrackingService : Service(), SensorEventListener {
             // waypoint-id-guarded update as the timer path so a stale snapshot cannot mis-flip.
             try {
                 val myCoord = Coord(location.latitude, location.longitude)
-                val insideWaypointIds = waypointDao.getAll()
+                val insideWaypointIds = repository.getAllWaypoints()
                     .filter { havershine(it.coord, myCoord) < it.range }
                     .map { it.id }
                 if (insideWaypointIds.isNotEmpty()) {
-                    val flippedArrival = userDao.applyDueArrivalToggles(insideWaypointIds)
+                    val flippedArrival = repository.applyDueArrivalToggles(insideWaypointIds)
                     if (flippedArrival > 0) {
                         Log.d("FF-Heartbeat", "arrival auto-toggle flipped $flippedArrival user(s), reloading sharing state before publish")
-                        publishBaseUsers = userDao.getAll()
+                        publishBaseUsers = repository.getAllUsers()
                     }
                 }
             } catch (e: Exception) {
@@ -220,7 +212,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                 val result = runCatching { Networking.publishLocation(locationValue, it) }
                 if (result.isFailure) Log.w("FF-Heartbeat", "publish to link ${it.id} threw", result.exceptionOrNull())
             }
-            currentLinks.filter { now >= it.deleteAt }.forEach { runCatching { temporaryLinkDao.delete(it) } }
+            currentLinks.filter { now >= it.deleteAt }.forEach { runCatching { repository.deleteTemporaryLink(it) } }
 
             // Incoming peer locations arrive via the live WebSocket push (see startTracking →
             // Networking.startLive). There is no HTTP receive; if the socket is down the loop
@@ -238,19 +230,19 @@ class LocationTrackingService : Service(), SensorEventListener {
      */
     private suspend fun processIncomingLocations(locList: List<LocationValue>) {
         if (locList.isEmpty()) return
-        val currentUsers = userDao.getAll()
-        val currentWaypoints = waypointDao.getAll()
+        val currentUsers = repository.getAllUsers()
+        val currentWaypoints = repository.getAllWaypoints()
         val userIDs = currentUsers.map { it.id }
 
         val usersRecieved = locList.map { it.userid }.distinct()
         Log.d("FF-Heartbeat", "received userids=${usersRecieved.map{ it.toULong() }} self=${Networking.userid.toULong()} known=${userIDs.map{ it.toULong() }}")
         val newUsers = usersRecieved.filter { it !in userIDs && it != Networking.userid }
         Log.d("FF-Heartbeat", "newUsers to insert=${newUsers.map{ it.toULong() }}")
-        userDao.insertAllIgnore(newUsers.map {
+        repository.insertUsersIgnore(newUsers.map {
             User(" ", null, "Unknown Location", false, RequestStatus.AWAITING_REQUEST, Clock.System.now(), null, it)
         })
 
-        val latestMap = locationValueDao.getLatest().first().associateBy { it.userid }
+        val latestMap = repository.latestLocationsOnce().associateBy { it.userid }
         currentUsers.forEach { user ->
             // Self never receives its own published location, so fall back to the latest
             // stored fix; otherwise "me" never gets its waypoint recomputed.
@@ -286,7 +278,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                 // Atomic partial update — avoids stale snapshot via copy() + upsert()
                 // clobbering sharingAutoToggleAt / sendingEnabled and accidentally
                 // disabling sharing when you didn't intend it.
-                userDao.updateLocationMeta(
+                repository.updateLocationMeta(
                     id = user.id,
                     locationName = displayName,
                     lastWaypointId = currentId,
@@ -306,7 +298,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                 }
             }
         }
-        locationValueDao.upsertAll(locList)
+        repository.upsertLocations(locList)
         Log.d("FF-Heartbeat", "upsertAll ${locList.size} locations done")
     }
 
@@ -316,7 +308,7 @@ class LocationTrackingService : Service(), SensorEventListener {
      */
     private suspend fun handleUwbEnvelopes(list: List<UwbEnvelope>) {
         if (list.isEmpty()) return
-        val users = userDao.getAll()
+        val users = repository.getAllUsers()
         for (envelope in list) {
             UwbInbox.tryEmit(envelope)
             if (envelope.kind == UwbEnvelopeKind.REQUEST) {
@@ -369,7 +361,7 @@ class LocationTrackingService : Service(), SensorEventListener {
      */
     private suspend fun pollTrackerReports() {
         val store = trackerStore ?: return
-        val trackers = runCatching { userDao.getAll().filter { it.kind == UserKind.TRACKER } }
+        val trackers = runCatching { repository.getAllUsers().filter { it.kind == UserKind.TRACKER } }
             .getOrDefault(emptyList())
         if (trackers.isEmpty()) return
         val locs = ArrayList<LocationValue>()
@@ -455,18 +447,13 @@ class LocationTrackingService : Service(), SensorEventListener {
     private fun startTracking() {
         serviceScope.launch {
             if (!trackingInitialized) {
-                val db = buildDatabase<FFDatabase>()
-                userDao = db.userDao()
-                waypointDao = db.waypointDao()
-                locationValueDao = db.locationValueDao()
-                temporaryLinkDao = db.temporaryLinkDao()
-                Networking.init(userDao, DataStoreUtils.getInstance(this@LocationTrackingService), getString(R.string.me_label))
+                Networking.init(repository, DataStoreUtils.getInstance(this@LocationTrackingService), getString(R.string.me_label))
 
                 // Hoist the UWB ranging session into this foreground service
                 // so we can auto-accept incoming Find Nearby (UWB) requests
                 // (and keep the session alive) without the user having to
                 // bring the app to foreground first. See UwbSessionManager.
-                UwbSessionManager.init(this@LocationTrackingService, userDao)
+                UwbSessionManager.init(this@LocationTrackingService, repository)
 
                 // Custom UWB tracker crowd-finding (DEV_BUILD): owner-side secret/key
                 // store. Gated so release builds never touch it.
@@ -830,8 +817,7 @@ object LocationServiceController {
     suspend fun isSharingEnabled(context: Context): Boolean {
         val ds = DataStoreUtils.getInstance(context)
         val selfId = try { ds.getLongAwait("userid") } catch (_: Exception) { ds.getLong("userid") }
-        val db = context.buildDatabase<FFDatabase>()
-        return db.userDao().getAll().any { it.sendingEnabled && it.id != selfId }
+        return FindFamilyRepository.get(context).getAllUsers().any { it.sendingEnabled && it.id != selfId }
     }
 
     /**

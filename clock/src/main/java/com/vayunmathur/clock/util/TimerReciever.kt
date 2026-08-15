@@ -4,10 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
-import com.vayunmathur.clock.data.ClockDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.data.Timer
 import com.vayunmathur.clock.R
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.coroutines.*
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -34,16 +33,16 @@ class TimerReceiver : BroadcastReceiver() {
                     .build()
                 nm.notify(id.hashCode(), notification)
 
-                val db = context.buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
+                val repository = ClockRepository.get(context)
                 // Persistence: keep timer visible after completion instead of deleting.
                 try {
-                    val existing = db.timerDao().get(id)
+                    val existing = repository.getTimer(id)
                     val completed = existing.copy(
                         isRunning = false,
                         remainingLength = Duration.ZERO,
                         remainingStartTime = Clock.System.now(),
                     )
-                    db.timerDao().upsert(completed)
+                    repository.upsertTimer(completed)
                 } catch (_: Exception) {
                     // Fallback: upsert a minimal completed timer if get fails
                     val completedFallback = Timer(
@@ -56,7 +55,7 @@ class TimerReceiver : BroadcastReceiver() {
                     )
                     // Try to preserve totalLength from name-based heuristic: keep ZERO if unknown
                     try {
-                        db.timerDao().upsert(completedFallback)
+                        repository.upsertTimer(completedFallback)
                     } catch (_: Exception) {
                         // Best-effort: if even fallback fails, keep original delete behavior skipped
                     }

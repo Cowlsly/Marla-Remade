@@ -1,10 +1,9 @@
 package com.vayunmathur.findfamily.intents
 
-import com.vayunmathur.findfamily.data.FFDatabase
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.data.TemporaryLink
 import com.vayunmathur.findfamily.util.Networking
 import com.vayunmathur.library.util.AssistantIntent
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.serializer
@@ -37,7 +36,7 @@ class CreateLinkIntent : AssistantIntent<CreateLinkData, String>(
             pqcPublicKey = pqcPair.publicBundleB64,
             pqcKey = pqcPair.privateBundleB64,
         )
-        buildDatabase<FFDatabase>().temporaryLinkDao().upsert(link)
+        FindFamilyRepository.get(this).upsertTemporaryLink(link)
         // The id is generated with the link (newTemporaryLinkId), not handed back by the
         // insert, so read it off the entity — @Upsert returns -1 on the update path.
         // Must match the URL format produced by TemporaryLinkCard in MainPage.

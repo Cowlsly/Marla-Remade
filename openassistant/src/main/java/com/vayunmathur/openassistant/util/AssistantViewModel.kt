@@ -8,14 +8,14 @@ import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.remember
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.openassistant.data.Conversation
-import com.vayunmathur.openassistant.data.ConversationDao
 import com.vayunmathur.openassistant.data.Memory
-import com.vayunmathur.openassistant.data.MemoryDao
 import com.vayunmathur.openassistant.data.Message
-import com.vayunmathur.openassistant.data.MessageDao
+import com.vayunmathur.openassistant.data.OpenAssistantRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -31,21 +31,17 @@ import kotlin.time.Clock
  * ViewModel for the OpenAssistant app.
  *
  * Owns:
- *  - filtered chat-message stream per conversation (via [MessageDao])
- *  - all-conversations and all-memories flows backed by their DAOs
+ *  - filtered chat-message stream per conversation (via [OpenAssistantRepository])
+ *  - all-conversations and all-memories flows backed by the repository
  *  - audio recorder + recording-state lifecycle (mic permission still lives in
  *    composables since it uses [androidx.activity.compose.rememberLauncherForActivityResult])
  *  - inference-service lifecycle: pre-warm on init and dispatch per-message
  *    inference requests via [requestInference]
  *  - one-time on-disk migration of the legacy gemma4 model file
- *
- * DAOs are injected directly so this VM owns the persistence layer for the app.
  */
 class AssistantViewModel(
     application: Application,
-    private val conversationDao: ConversationDao,
-    private val messageDao: MessageDao,
-    private val memoryDao: MemoryDao,
+    private val repository: OpenAssistantRepository,
 ) : AndroidViewModel(application) {
 
     private val _isRecording = MutableStateFlow(false)
@@ -59,11 +55,11 @@ class AssistantViewModel(
     private var audioRecorder: WavRecorder? = null
 
     /** All conversations, newest first. */
-    val conversations: StateFlow<List<Conversation>> = conversationDao.getAllFlow()
+    val conversations: StateFlow<List<Conversation>> = repository.conversationsFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** All memories. */
-    val memories: StateFlow<List<Memory>> = memoryDao.getAllFlow()
+    val memories: StateFlow<List<Memory>> = repository.memoriesFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     init {
@@ -79,7 +75,7 @@ class AssistantViewModel(
      * timestamp.
      */
     fun messagesFor(conversationId: Long): Flow<List<Message>> =
-        messageDao.getByConversationFlow(conversationId)
+        repository.messagesForConversationFlow(conversationId)
 
     /**
      * Composable State that tracks the [Conversation] with [id], or null if it
@@ -87,26 +83,26 @@ class AssistantViewModel(
      */
     @Composable
     fun conversationByIdState(id: Long): State<Conversation?> {
-        val flow = remember(id) { conversationDao.getByIdFlow(id) }
+        val flow = remember(id) { repository.conversationByIdFlow(id) }
         return flow.collectAsState(initial = null)
     }
 
     // ---------- Mutations ----------
 
     fun deleteConversation(conversation: Conversation) {
-        viewModelScope.launch(Dispatchers.IO) { conversationDao.delete(conversation) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteConversation(conversation) }
     }
 
     /** Suspending upsert returning the persisted row id. */
     suspend fun upsertConversation(conversation: Conversation): Long =
-        kotlinx.coroutines.withContext(Dispatchers.IO) { conversationDao.upsert(conversation) }
+        kotlinx.coroutines.withContext(Dispatchers.IO) { repository.upsertConversation(conversation) }
 
     /** Suspending upsert returning the persisted row id. */
     suspend fun upsertMessage(message: Message): Long =
-        kotlinx.coroutines.withContext(Dispatchers.IO) { messageDao.upsert(message) }
+        kotlinx.coroutines.withContext(Dispatchers.IO) { repository.upsertMessage(message) }
 
     fun deleteMemory(memory: Memory) {
-        viewModelScope.launch(Dispatchers.IO) { memoryDao.delete(memory) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteMemory(memory) }
     }
 
     /**
@@ -173,12 +169,6 @@ class AssistantViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val externalDir = context.getExternalFilesDir(null) ?: return@launch
-                // Every model file we no longer use. Add to this list when the
-                // active model changes (e.g. gemma4-4b → gemma4-2b) so users
-                // don't keep stale gigabytes on disk. Re-download of the new file
-                // happens automatically: InitialDownloadChecker gates on file
-                // presence, so an absent (renamed) active model shows the download
-                // screen on next launch.
                 val legacyModelFiles = listOf("gemma4.litertlm", "gemma4-4b.litertlm")
                 for (name in legacyModelFiles) {
                     if (File(externalDir, name).delete()) {
@@ -231,5 +221,19 @@ class AssistantViewModel(
 
     companion object {
         private const val TAG = "AssistantViewModel"
+    }
+}
+
+/** Factory for constructing [AssistantViewModel] with the repository. */
+class AssistantViewModelFactory(
+    private val application: Application,
+    private val repository: OpenAssistantRepository,
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        require(modelClass.isAssignableFrom(AssistantViewModel::class.java)) {
+            "Unexpected ViewModel class: $modelClass"
+        }
+        return AssistantViewModel(application, repository) as T
     }
 }

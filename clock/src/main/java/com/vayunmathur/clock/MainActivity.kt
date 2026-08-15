@@ -37,7 +37,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.core.content.ContextCompat
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.clock.data.ClockDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.ui.AlarmPage
 import com.vayunmathur.clock.ui.ClockPage
 import com.vayunmathur.clock.ui.StopwatchPage
@@ -54,7 +54,6 @@ import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.datetime.LocalTime
 import kotlinx.datetime.TimeZone
@@ -63,9 +62,8 @@ import kotlinx.serialization.Serializable
 import kotlin.time.Clock
 
 class MainActivity : ComponentActivity() {
-    private val db by lazy { buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true) }
     private val clockViewModel: ClockViewModel by viewModels {
-        ClockViewModelFactory(application, db.timerDao(), db.alarmDao())
+        ClockViewModelFactory(application, ClockRepository.get(application))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

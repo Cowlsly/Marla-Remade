@@ -3,9 +3,8 @@ package com.vayunmathur.passwords.sync
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseHelper
-import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 
 /** Drives the kdbx sync from WorkManager: periodically, on app open, and after local edits. */
 class KdbxSyncWorker(
@@ -19,8 +18,8 @@ class KdbxSyncWorker(
         if (!DatabaseHelper(applicationContext).isKeyGenerated()) return Result.success()
 
         return try {
-            val db = applicationContext.buildDatabase<PasswordDatabase>()
-            when (runKdbxSync(applicationContext, db)) {
+            val repository = PasswordRepository.get(applicationContext)
+            when (runKdbxSync(applicationContext, repository)) {
                 is KdbxSyncResult.Success, KdbxSyncResult.NotConfigured -> Result.success()
                 KdbxSyncResult.WrongPassword, KdbxSyncResult.VerifyFailed -> Result.failure()
                 KdbxSyncResult.FileMissing, is KdbxSyncResult.Error -> Result.retry()

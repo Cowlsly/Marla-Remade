@@ -14,20 +14,14 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.web.data.Bookmark
-import com.vayunmathur.web.data.BookmarkDao
 import com.vayunmathur.web.data.BookmarkFolder
-import com.vayunmathur.web.data.DownloadDao
 import com.vayunmathur.web.data.DownloadEntry
-import com.vayunmathur.web.data.HistoryDao
 import com.vayunmathur.web.data.HistoryEntry
 import com.vayunmathur.web.data.InstalledSite
-import com.vayunmathur.web.data.InstalledSiteDao
 import com.vayunmathur.web.data.SitePermission
-import com.vayunmathur.web.data.SitePermissionDao
+import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.data.ShieldSetting
-import com.vayunmathur.web.data.ShieldSettingDao
 import com.vayunmathur.web.data.StorageInfo
-import com.vayunmathur.web.data.StorageInfoDao
 import com.vayunmathur.web.shields.FarblingConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -60,13 +54,7 @@ data class PermissionPrompt(
 )
 
 class WebViewModel(
-    private val historyDao: HistoryDao,
-    private val bookmarkDao: BookmarkDao,
-    private val sitePermissionDao: SitePermissionDao,
-    private val storageInfoDao: StorageInfoDao,
-    private val downloadDao: DownloadDao,
-    private val installedSiteDao: InstalledSiteDao,
-    private val shieldSettingDao: ShieldSettingDao,
+    private val repository: WebRepository,
     private val context: Context,
     /** Identifies this window's independent tab set; the default window keeps the legacy pref keys. */
     private val windowId: String = DEFAULT_WINDOW_ID,
@@ -144,7 +132,7 @@ class WebViewModel(
     /**
      * Blocked-request tallies. The counting side is hit from the render thread, so the
      * authoritative totals live in a concurrent map and only the UI mirror is a snapshot
-     * state — writing Compose state off the main thread is not safe.
+     * state ΓÇö writing Compose state off the main thread is not safe.
      */
     private val blockedTotals = java.util.concurrent.ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicInteger>()
     private val blockedPublishPending = java.util.concurrent.ConcurrentHashMap<String, Boolean>()
@@ -181,7 +169,7 @@ class WebViewModel(
             withContext(Dispatchers.IO) {
                 try {
                     val sp = context.getSharedPreferences("web_prefs", Context.MODE_PRIVATE)
-                    // Incognito windows never restore persisted tabs — they start fresh and private.
+                    // Incognito windows never restore persisted tabs ΓÇö they start fresh and private.
                     val savedTabs = if (incognito) null else sp.getString(savedTabsKey, null)
                     val activeId = if (incognito) null else sp.getString(activeTabKey, null)
                     val cacheModeName = sp.getString(P_CACHE_MODE, null)
@@ -287,15 +275,15 @@ class WebViewModel(
             }
         }
 
-        viewModelScope.launch { bookmarkDao.allFlow().collect { _bookmarks.value = it } }
-        viewModelScope.launch { bookmarkDao.foldersFlow().collect { _folders.value = it } }
-        viewModelScope.launch { historyDao.allFlow().collect { _history.value = it } }
-        viewModelScope.launch { sitePermissionDao.allFlow().collect { _sitePermissions.value = it } }
-        viewModelScope.launch { storageInfoDao.allFlow().collect { _storageInfos.value = it } }
-        viewModelScope.launch { downloadDao.allFlow().collect { _downloads.value = it } }
-        viewModelScope.launch { installedSiteDao.allFlow().collect { _installedSites.value = it } }
+        viewModelScope.launch { repository.allBookmarksFlow().collect { _bookmarks.value = it } }
+        viewModelScope.launch { repository.bookmarkFoldersFlow().collect { _folders.value = it } }
+        viewModelScope.launch { repository.allHistoryFlow().collect { _history.value = it } }
+        viewModelScope.launch { repository.allSitePermissionsFlow().collect { _sitePermissions.value = it } }
+        viewModelScope.launch { repository.allStorageInfosFlow().collect { _storageInfos.value = it } }
+        viewModelScope.launch { repository.allDownloadsFlow().collect { _downloads.value = it } }
+        viewModelScope.launch { repository.allInstalledSitesFlow().collect { _installedSites.value = it } }
         viewModelScope.launch {
-            shieldSettingDao.allFlow().collect { settings ->
+            repository.allShieldSettingsFlow().collect { settings ->
                 _shieldSettings.value = settings
                 shieldOverrides.clear()
                 settings.forEach { shieldOverrides[it.host] = it.toSettings() }
@@ -335,16 +323,16 @@ class WebViewModel(
         if (settings.isEmpty) shieldOverrides.remove(host) else shieldOverrides[host] = settings
         viewModelScope.launch {
             if (settings.isEmpty) {
-                shieldSettingDao.deleteHost(host)
+                repository.deleteShieldSettingHost(host)
             } else {
-                shieldSettingDao.upsert(ShieldSetting.from(host, settings))
+                repository.upsertShieldSetting(ShieldSetting.from(host, settings))
             }
         }
     }
 
     fun clearSiteShields() {
         shieldOverrides.clear()
-        viewModelScope.launch { shieldSettingDao.clearAll() }
+        viewModelScope.launch { repository.clearAllShieldSettings() }
     }
 
     /** Called from the render thread on every blocked request; coalesces UI updates. */
@@ -379,11 +367,11 @@ class WebViewModel(
             val origin = BrowserUtils.originFromUrl(url)
             val host = BrowserUtils.hostFromUrl(url)
             viewModelScope.launch {
-                val existing = storageInfoDao.byOrigin(origin)
+                val existing = repository.storageInfoByOrigin(origin)
                 if (existing == null) {
-                    storageInfoDao.upsert(StorageInfo(origin = origin, host = host, lastSeen = System.currentTimeMillis()))
+                    repository.upsertStorageInfo(StorageInfo(origin = origin, host = host, lastSeen = System.currentTimeMillis()))
                 } else {
-                    storageInfoDao.upsert(existing.copy(lastSeen = System.currentTimeMillis(), host = host))
+                    repository.upsertStorageInfo(existing.copy(lastSeen = System.currentTimeMillis(), host = host))
                 }
             }
         }
@@ -478,34 +466,34 @@ class WebViewModel(
         if (url.isBlank() || url == "about:blank" || url.startsWith("data:")) return
         if (activeTab?.isPrivate == true) return
         viewModelScope.launch {
-            runCatching { historyDao.upsert(HistoryEntry(url = url, title = title)) }
+            runCatching { repository.upsertHistory(HistoryEntry(url = url, title = title)) }
                 .onFailure { Log.e(TAG, "recordHistory", it) }
         }
     }
 
     fun addBookmark(url: String, title: String, folderId: Long? = null) {
-        viewModelScope.launch { runCatching { bookmarkDao.upsert(Bookmark(url = url, title = title, folderId = folderId)) } }
+        viewModelScope.launch { runCatching { repository.upsertBookmark(Bookmark(url = url, title = title, folderId = folderId)) } }
     }
 
     fun removeBookmark(bookmark: Bookmark) {
-        viewModelScope.launch { bookmarkDao.delete(bookmark) }
+        viewModelScope.launch { repository.deleteBookmark(bookmark) }
     }
 
     fun createFolder(name: String) {
-        viewModelScope.launch { runCatching { bookmarkDao.upsertFolder(BookmarkFolder(name = name)) } }
+        viewModelScope.launch { runCatching { repository.upsertBookmarkFolder(BookmarkFolder(name = name)) } }
     }
 
     fun deleteFolder(folder: BookmarkFolder) {
         viewModelScope.launch {
             runCatching {
-                bookmarkDao.deleteByFolder(folder.id)
-                bookmarkDao.deleteFolder(folder)
+                repository.deleteBookmarksByFolder(folder.id)
+                repository.deleteBookmarkFolder(folder)
             }
         }
     }
 
     fun clearHistory() {
-        viewModelScope.launch { historyDao.clearAll() }
+        viewModelScope.launch { repository.clearAllHistory() }
     }
 
     fun updateCacheMode(mode: CacheMode) {
@@ -558,7 +546,7 @@ class WebViewModel(
                     startUrl = pwaInfo?.startUrl ?: url,
                     origin = origin,
                 )
-                installedSiteDao.upsert(entry)
+                repository.upsertInstalledSite(entry)
                 val accepted = PwaHelper.requestPinShortcut(
                     context = context,
                     url = url,
@@ -575,7 +563,7 @@ class WebViewModel(
     }
 
     fun removeInstalledSite(id: String) {
-        viewModelScope.launch { installedSiteDao.deleteById(id) }
+        viewModelScope.launch { repository.deleteInstalledSiteById(id) }
     }
 
     // ---- Site permissions ----
@@ -586,7 +574,7 @@ class WebViewModel(
         deny: () -> Unit
     ) {
         viewModelScope.launch {
-            val saved = sitePermissionDao.byOrigin(origin)
+            val saved = repository.sitePermissionByOrigin(origin)
             val (toAsk, preGranted) = if (saved != null) {
                 val determined = types.mapNotNull { t ->
                     when (t) {
@@ -631,7 +619,7 @@ class WebViewModel(
 
     private fun persistPermission(origin: String, granted: List<SitePermissionType>, requested: List<SitePermissionType>) {
         viewModelScope.launch {
-            val existing = sitePermissionDao.byOrigin(origin) ?: SitePermission(origin = origin)
+            val existing = repository.sitePermissionByOrigin(origin) ?: SitePermission(origin = origin)
             var updated = existing
             requested.forEach { t ->
                 val isGranted = t in granted
@@ -642,7 +630,7 @@ class WebViewModel(
                     SitePermissionType.NOTIFICATIONS -> updated.copy(notificationsAllowed = isGranted)
                 }
             }
-            sitePermissionDao.upsert(updated.copy(updatedAt = System.currentTimeMillis()))
+            repository.upsertSitePermission(updated.copy(updatedAt = System.currentTimeMillis()))
         }
     }
 
@@ -650,7 +638,7 @@ class WebViewModel(
 
     fun requestGeolocation(origin: String, onAllow: () -> Unit, onDeny: () -> Unit) {
         viewModelScope.launch {
-            val saved = sitePermissionDao.byOrigin(origin)
+            val saved = repository.sitePermissionByOrigin(origin)
             when (saved?.locationAllowed) {
                 true -> { withContext(Dispatchers.Main) { onAllow() }; return@launch }
                 false -> { withContext(Dispatchers.Main) { onDeny() }; return@launch }
@@ -704,7 +692,7 @@ class WebViewModel(
         estBytes: Long
     ) {
         viewModelScope.launch {
-            val existing = storageInfoDao.byOrigin(origin)
+            val existing = repository.storageInfoByOrigin(origin)
             val info = if (existing != null) {
                 existing.copy(
                     cookieCount = cookieCount,
@@ -726,27 +714,27 @@ class WebViewModel(
                     lastSeen = System.currentTimeMillis()
                 )
             }
-            storageInfoDao.upsert(info)
+            repository.upsertStorageInfo(info)
         }
     }
 
     fun clearSiteData(origin: String) {
         viewModelScope.launch {
-            storageInfoDao.deleteOrigin(origin)
-            sitePermissionDao.deleteOrigin(origin)
+            repository.deleteStorageInfoOrigin(origin)
+            repository.deleteSitePermissionOrigin(origin)
         }
     }
 
     fun clearAllSiteData() {
         viewModelScope.launch {
-            storageInfoDao.clearAll()
-            sitePermissionDao.clearAll()
+            repository.clearAllStorageInfos()
+            repository.clearAllSitePermissions()
         }
     }
 
     fun revokePermission(origin: String, type: SitePermissionType) {
         viewModelScope.launch {
-            val existing = sitePermissionDao.byOrigin(origin) ?: return@launch
+            val existing = repository.sitePermissionByOrigin(origin) ?: return@launch
             val updated = when (type) {
                 SitePermissionType.CAMERA -> existing.copy(cameraAllowed = null)
                 SitePermissionType.MICROPHONE -> existing.copy(microphoneAllowed = null)
@@ -754,21 +742,21 @@ class WebViewModel(
                 SitePermissionType.NOTIFICATIONS -> existing.copy(notificationsAllowed = null)
             }
             if (updated.cameraAllowed == null && updated.microphoneAllowed == null && updated.locationAllowed == null && updated.notificationsAllowed == null) {
-                sitePermissionDao.delete(updated)
+                repository.deleteSitePermission(updated)
             } else {
-                sitePermissionDao.upsert(updated.copy(updatedAt = System.currentTimeMillis()))
+                repository.upsertSitePermission(updated.copy(updatedAt = System.currentTimeMillis()))
             }
         }
     }
 
     fun addDownload(url: String, fileName: String, mime: String?, length: Long) {
         viewModelScope.launch {
-            downloadDao.upsert(DownloadEntry(url = url, fileName = fileName, mimeType = mime, contentLength = length))
+            repository.upsertDownload(DownloadEntry(url = url, fileName = fileName, mimeType = mime, contentLength = length))
         }
     }
 
     fun clearAllDownloads() {
-        viewModelScope.launch { downloadDao.clearAll() }
+        viewModelScope.launch { repository.clearAllDownloads() }
     }
 
     fun onClearedPersist() { persistTabsSync() }
@@ -822,13 +810,7 @@ class WebViewModel(
 }
 
 class WebViewModelFactory(
-    private val historyDao: HistoryDao,
-    private val bookmarkDao: BookmarkDao,
-    private val sitePermissionDao: SitePermissionDao,
-    private val storageInfoDao: StorageInfoDao,
-    private val downloadDao: DownloadDao,
-    private val installedSiteDao: InstalledSiteDao,
-    private val shieldSettingDao: ShieldSettingDao,
+    private val repository: WebRepository,
     private val context: Context,
     private val windowId: String = WebViewModel.DEFAULT_WINDOW_ID,
     private val incognito: Boolean = false,
@@ -837,7 +819,7 @@ class WebViewModelFactory(
     @Suppress("UNCHECKED_CAST")
     override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
         if (modelClass.isAssignableFrom(WebViewModel::class.java)) {
-            return WebViewModel(historyDao, bookmarkDao, sitePermissionDao, storageInfoDao, downloadDao, installedSiteDao, shieldSettingDao, context, windowId, incognito, initialShieldSettings) as T
+            return WebViewModel(repository, context, windowId, incognito, initialShieldSettings) as T
         }
         throw IllegalArgumentException("Unknown ViewModel $modelClass")
     }

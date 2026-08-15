@@ -128,6 +128,13 @@ val MIGRATION_5_6 = Migration(5, 6) {
     it.execSQL("ALTER TABLE `RecommendationPreferences` ADD COLUMN `hidePaid` INTEGER NOT NULL DEFAULT 0")
 }
 
+val MIGRATION_6_7 = Migration(6, 7) {
+    it.execSQL("ALTER TABLE `HistoryVideo` ADD COLUMN `isPaid` INTEGER NOT NULL DEFAULT 0")
+    it.execSQL("ALTER TABLE `DownloadedVideo` ADD COLUMN `isPaid` INTEGER NOT NULL DEFAULT 0")
+    it.execSQL("ALTER TABLE `CachedRelatedVideo` ADD COLUMN `isPaid` INTEGER NOT NULL DEFAULT 0")
+    it.execSQL("ALTER TABLE `PlaylistItem` ADD COLUMN `isPaid` INTEGER NOT NULL DEFAULT 0")
+}
+
 @Dao
 interface HistoryVideoDao {
     @Query("SELECT * FROM HistoryVideo")
@@ -195,7 +202,7 @@ interface SubscriptionVideoDao {
 }
 
 @TypeConverters(DefaultConverters::class)
-@Database(entities = [Subscription::class, SubscriptionVideo::class, HistoryVideo::class, SubscriptionCategory::class, DownloadedVideo::class, CachedRelatedVideo::class, RecommendationImpression::class, RecommendationPreferences::class, ChannelPreference::class, KeywordPreference::class, Playlist::class, PlaylistItem::class], version = 6, exportSchema = false)
+@Database(entities = [Subscription::class, SubscriptionVideo::class, HistoryVideo::class, SubscriptionCategory::class, DownloadedVideo::class, CachedRelatedVideo::class, RecommendationImpression::class, RecommendationPreferences::class, ChannelPreference::class, KeywordPreference::class, Playlist::class, PlaylistItem::class], version = 7, exportSchema = false)
 abstract class SubscriptionDatabase : RoomDatabase() {
     abstract fun subscriptionDao(): SubscriptionDao
     abstract fun subscriptionVideoDao(): SubscriptionVideoDao
@@ -211,6 +218,6 @@ abstract class SubscriptionDatabase : RoomDatabase() {
     abstract fun playlistItemDao(): PlaylistItemDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6)
+        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7)
     }
 }

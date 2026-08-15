@@ -14,10 +14,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vayunmathur.appstore.data.AppDatabase
-import com.vayunmathur.appstore.data.DB_NAME
+import com.vayunmathur.appstore.data.AppStoreDatabaseRepository
 import com.vayunmathur.appstore.data.UnifiedApp
 import com.vayunmathur.appstore.data.UpdateCheckWorker
 import com.vayunmathur.appstore.ui.AppDetailPage
@@ -31,7 +29,6 @@ import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.appstore.util.AppStoreViewModelFactory
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.ui.IconDownload
@@ -43,9 +40,6 @@ import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
@@ -65,14 +59,9 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         UpdateCheckWorker.schedule(this)
 
-        lifecycleScope.launch(Dispatchers.IO) {
-            val db = buildDatabase<AppDatabase>(dbName = DB_NAME, migrations = AppDatabase.migrations)
-            val factory = AppStoreViewModelFactory(applicationContext, db)
-            withContext(Dispatchers.Main) {
-                factoryState = factory
-                handleIntentUrl(intent)
-            }
-        }
+        val repository = AppStoreDatabaseRepository.get(this)
+        factoryState = AppStoreViewModelFactory(applicationContext, repository.database)
+        handleIntentUrl(intent)
 
         setContent {
             DynamicTheme {

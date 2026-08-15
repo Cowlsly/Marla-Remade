@@ -21,7 +21,7 @@ import androidx.health.connect.client.units.Length
 import androidx.health.connect.client.units.Mass
 import androidx.health.connect.client.units.Percentage
 import androidx.health.connect.client.units.Volume
-import com.vayunmathur.health.data.HealthDatabase
+import com.vayunmathur.health.data.HealthRepository
 import com.vayunmathur.health.data.Record
 import com.vayunmathur.health.data.RecordType
 import com.vayunmathur.library.util.Tuple3
@@ -35,22 +35,36 @@ import kotlinx.datetime.plus
 
 object HealthAPI {
     lateinit var healthConnectClient: HealthConnectClient
-    lateinit var db: HealthDatabase
     lateinit var preferences: SharedPreferences
 
-    fun init(healthConnectClient: HealthConnectClient, context: Context, db: HealthDatabase) {
+    private var repository: HealthRepository? = null
+
+    /** Backward-compatible accessor — callers that read `HealthAPI.db` still compile. */
+    val db get() = repository!!.database
+
+    fun init(healthConnectClient: HealthConnectClient, context: Context, repository: HealthRepository) {
         this.healthConnectClient = healthConnectClient
-        this.db = db
+        this.repository = repository
         preferences = context.getSharedPreferences("sync", Context.MODE_PRIVATE)
     }
 
+    /** Legacy overload — callers that still have a DB handle. */
+    fun init(healthConnectClient: HealthConnectClient, context: Context, db: com.vayunmathur.health.data.HealthDatabase) {
+        this.healthConnectClient = healthConnectClient
+        // Wrap via HealthRepository so callers that still pass a DB stay working until fully cut over.
+        this.repository = HealthRepository.get(context)
+        preferences = context.getSharedPreferences("sync", Context.MODE_PRIVATE)
+    }
+
+    private fun repo(): HealthRepository = repository!!
+
     suspend inline fun lastRecord(recordType: RecordType): Record? {
-        return db.healthDao().getLastRecord(recordType)
+        return repo().getLastRecord(recordType)
     }
 
     suspend fun deleteRecord(record: Record) {
         // Delete from local Room DB
-        db.healthDao().deleteByIds(listOf(record.id))
+        repo().deleteByIds(listOf(record.id))
 
         // Delete from Health Connect if it has a valid ID
         try {
@@ -198,9 +212,9 @@ object HealthAPI {
             if (newId != null) {
                 Log.i("HealthAPI", "Successfully wrote record to Health Connect with ID: $newId")
                 // Remove old local record and replace with one containing HC ID
-                db.healthDao().deleteByIds(listOf(record.primaryKey))
+                repo().deleteByIds(listOf(record.primaryKey))
                 val updatedRecord = record.copy(id = newId, primaryKey = "$newId-${record.index}")
-                db.healthDao().upsert(listOf(updatedRecord))
+                repo().upsert(listOf(updatedRecord))
             }
         } catch (e: Exception) {
             Log.e("HealthAPI", "Failed to write record to Health Connect", e)
@@ -272,8 +286,8 @@ object HealthAPI {
             period: PeriodType
     ): List<Tuple3<Long, Double, Double>> = aggregateByPeriod(
         recordType, startTime, endTime, period,
-        dailyQuery = { t, s, e -> db.healthDao().getDailyAvgs(t, s, e) },
-        hourlyQuery = { t, s, e -> db.healthDao().getHourlyAvgs(t, s, e) },
+        dailyQuery = { t, s, e -> repo().getDailyAvgs(t, s, e) },
+        hourlyQuery = { t, s, e -> repo().getHourlyAvgs(t, s, e) },
     )
 
     suspend fun getListOfSums(
@@ -283,7 +297,7 @@ object HealthAPI {
             period: PeriodType
     ): List<Tuple3<Long, Double, Double>> = aggregateByPeriod(
         recordType, startTime, endTime, period,
-        dailyQuery = { t, s, e -> db.healthDao().getDailySums(t, s, e) },
-        hourlyQuery = { t, s, e -> db.healthDao().getHourlySums(t, s, e) },
+        dailyQuery = { t, s, e -> repo().getDailySums(t, s, e) },
+        hourlyQuery = { t, s, e -> repo().getHourlySums(t, s, e) },
     )
 }

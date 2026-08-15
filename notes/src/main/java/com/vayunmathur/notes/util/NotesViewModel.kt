@@ -22,7 +22,7 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.util.IntentHelper
 import com.vayunmathur.library.util.parseMarkdown
 import com.vayunmathur.notes.data.Note
-import com.vayunmathur.notes.data.NoteDao
+import com.vayunmathur.notes.data.NotesRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -40,47 +40,28 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
-/**
- * ViewModel for the Notes app.
- *
- * Owns:
- *  - the notes [StateFlow] (collected by screens)
- *  - DB write helpers (upsert / delete / upsertAll) that dispatch on IO
- *  - per-note editable state for the editor screen
- *  - file import / drop handling (content-resolver + DB upsert)
- *  - share-URI generation (cache file write + FileProvider URI)
- *  - parsed-markdown cache (process-wide, keyed by content + search context)
- */
 class NotesViewModel(
     application: Application,
-    private val noteDao: NoteDao,
+    private val repository: NotesRepository,
 ) : AndroidViewModel(application) {
 
-    val notes: StateFlow<List<Note>> = noteDao.getAllFlow()
+    val notes: StateFlow<List<Note>> = repository.notes
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     fun delete(note: Note) {
-        viewModelScope.launch(Dispatchers.IO) { noteDao.delete(note) }
+        viewModelScope.launch(Dispatchers.IO) { repository.delete(note) }
     }
 
     fun upsertAll(notes: List<Note>) {
-        viewModelScope.launch(Dispatchers.IO) { noteDao.upsertAll(notes) }
+        viewModelScope.launch(Dispatchers.IO) { repository.upsertAll(notes) }
     }
 
-    /**
-     * Returns a [MutableState] backed by the DB row with the given id.
-     *
-     * On set, the new value is optimistically published locally and pushed to
-     * the database off-thread, debounced so a burst of keystrokes collapses to a
-     * single upsert. If [initialId] was 0L (a new row), the id is updated after
-     * the first upsert returns so subsequent edits target the same row.
-     */
     @OptIn(FlowPreview::class)
     @Composable
     fun editableNote(initialId: Long, default: () -> Note): MutableState<Note> {
         var currentId by remember { mutableLongStateOf(initialId) }
 
-        val noteFlow = remember(currentId) { noteDao.getByIdFlow(currentId) }
+        val noteFlow = remember(currentId) { repository.noteByIdFlow(currentId) }
         val dbNote by noteFlow.collectAsStateWithLifecycle(initialValue = null)
 
         val localState = remember { mutableStateOf<Note?>(null) }
@@ -89,12 +70,10 @@ class NotesViewModel(
             dbNote?.let { localState.value = it }
         }
 
-        // Debounce writes so a burst of keystrokes results in a single DB upsert
-        // once the user pauses, instead of one write per character.
         val pendingWrites = remember { MutableStateFlow<Note?>(null) }
         LaunchedEffect(Unit) {
             pendingWrites.filterNotNull().debounce(300).collectLatest { newValue ->
-                val newId = withContext(Dispatchers.IO) { noteDao.upsert(newValue) }
+                val newId = withContext(Dispatchers.IO) { repository.upsert(newValue) }
                 if (currentId == 0L) currentId = newId
             }
         }
@@ -120,19 +99,12 @@ class NotesViewModel(
         val searchIndex: Int,
     )
 
-    // Simple LRU cache for parsed markdown AnnotatedStrings. Capped to a small
-    // size to avoid retaining every note ever opened in memory. The current note
-    // is hot, and switching back and forth between a few notes stays cached.
     private val parsedCache = object : LinkedHashMap<ParsedKey, AnnotatedString>(32, 0.75f, true) {
         override fun removeEldestEntry(
             eldest: MutableMap.MutableEntry<ParsedKey, AnnotatedString>,
         ): Boolean = size > 32
     }
 
-    /**
-     * Returns the cached parsed AnnotatedString for [content] using the
-     * "display" parameters (no markers, no soft-wrap, no preprocessing).
-     */
     @Synchronized
     fun parseDisplay(
         content: String,
@@ -153,24 +125,17 @@ class NotesViewModel(
         return parsed
     }
 
-    /** Counts case-insensitive occurrences of [searchText] in the parsed text of [content]. */
     fun searchResultsCount(content: String, searchText: String): Int {
         if (searchText.isEmpty()) return 0
         val text = parseDisplay(content).text
         return Regex(Regex.escape(searchText), RegexOption.IGNORE_CASE).findAll(text).count()
     }
 
-    /** A ready-to-share note: the `.md` file [uri] plus its [markdown] (EXTRA_TEXT fallback). */
     data class NoteShare(val uri: Uri, val markdown: String)
 
     private val _shareRequests = MutableSharedFlow<NoteShare>(extraBufferCapacity = 1)
-    /** Emits a [NoteShare] each time [requestShare] completes. */
     val shareRequests: SharedFlow<NoteShare> = _shareRequests.asSharedFlow()
 
-    /**
-     * Reads each [uris] entry off the main thread and upserts it as a new [Note]
-     * via [noteDao]. Errors are logged per-file and do not abort the batch.
-     */
     fun importFiles(uris: List<Uri>) {
         if (uris.isEmpty()) return
         val ctx = getApplication<Application>()
@@ -181,7 +146,7 @@ class NotesViewModel(
                         ?.bufferedReader()?.use { it.readText() }
                     if (content != null) {
                         val name = IntentHelper.getFileName(ctx, uri) ?: "Imported Note"
-                        noteDao.upsert(Note(0, name, content))
+                        repository.upsert(Note(0, name, content))
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Error importing file: $uri", e)
@@ -190,12 +155,6 @@ class NotesViewModel(
         }
     }
 
-    /**
-     * Exports [note] to a single self-contained Markdown document (images inlined,
-     * drawings as SVG), writes it to the share cache as a `.md` file off the main
-     * thread, then emits a [NoteShare] on [shareRequests]. Composables collect this
-     * flow and dispatch the actual ACTION_SEND intent.
-     */
     fun requestShare(note: Note) {
         val ctx = getApplication<Application>()
         viewModelScope.launch {
@@ -216,27 +175,20 @@ class NotesViewModel(
         }
     }
 
-    // Externally-opened files (VIEW/EDIT/SEND intents) waiting to be shown on the
-    // ExternalNoteScreen. Unlike [importFiles], these are NOT added to the DB;
-    // navigation drains this queue one URI at a time.
     private val _externalOpens = MutableStateFlow<List<String>>(emptyList())
     val externalOpens: StateFlow<List<String>> = _externalOpens.asStateFlow()
 
-    /** Queue external [uris] to open on the ExternalNoteScreen (no DB write). */
     fun openExternal(uris: List<Uri>) {
         if (uris.isEmpty()) return
         _externalOpens.value = _externalOpens.value + uris.map { it.toString() }
     }
 
-    /** Remove [uri] from the external-open queue once navigation has handled it. */
     fun consumeExternal(uri: String) {
         _externalOpens.value = _externalOpens.value.filterNot { it == uri }
     }
 
-    /** Title (file name without extension) + raw markdown content of an external note. */
     data class ExternalNoteContent(val title: String, val content: String)
 
-    /** Reads an externally-opened markdown file. Returns null if it can't be read. */
     suspend fun readExternal(uriString: String): ExternalNoteContent? = withContext(Dispatchers.IO) {
         val ctx = getApplication<Application>()
         try {
@@ -251,10 +203,6 @@ class NotesViewModel(
         }
     }
 
-    /**
-     * Writes [content] back to the external file [uriString]. Invokes [onResult]
-     * on the main thread with whether the write succeeded (read-only URIs fail).
-     */
     fun saveExternal(uriString: String, content: String, onResult: (Boolean) -> Unit) {
         val ctx = getApplication<Application>()
         viewModelScope.launch {
@@ -273,13 +221,9 @@ class NotesViewModel(
         }
     }
 
-    /**
-     * Imports an external note into the app DB as a new [Note] and invokes
-     * [onAdded] on the main thread with the new row id.
-     */
     fun addExternalToApp(title: String, content: String, onAdded: (Long) -> Unit) {
         viewModelScope.launch {
-            val id = withContext(Dispatchers.IO) { noteDao.upsert(Note(0, title, content)) }
+            val id = withContext(Dispatchers.IO) { repository.upsert(Note(0, title, content)) }
             onAdded(id)
         }
     }
@@ -289,16 +233,14 @@ class NotesViewModel(
     }
 }
 
-/** Factory for constructing [NotesViewModel] with the [NoteDao]. */
+/** Factory for constructing [NotesViewModel] with the repository. */
 class NotesViewModelFactory(
     private val application: Application,
-    private val noteDao: NoteDao,
+    private val repository: NotesRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
-        require(modelClass.isAssignableFrom(NotesViewModel::class.java)) {
-            "Unexpected ViewModel class: $modelClass"
-        }
-        return NotesViewModel(application, noteDao) as T
+        require(modelClass.isAssignableFrom(NotesViewModel::class.java)) { "Unexpected ViewModel class: $modelClass" }
+        return NotesViewModel(application, repository) as T
     }
 }

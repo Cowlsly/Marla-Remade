@@ -1,7 +1,7 @@
 package com.vayunmathur.passwords.cable
 
 import com.vayunmathur.passwords.data.Passkey
-import com.vayunmathur.passwords.data.PasskeyDao
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.util.PasskeyUtils
 import java.security.KeyFactory
 import java.security.Signature
@@ -36,7 +36,7 @@ object WebAuthnAuthenticator {
     suspend fun signAssertion(
         passkey: Passkey,
         clientDataHash: ByteArray,
-        passkeyDao: PasskeyDao,
+        repository: PasswordRepository,
         userPresent: Boolean = true,
         userVerified: Boolean = true,
     ): AssertionResult {
@@ -50,7 +50,7 @@ object WebAuthnAuthenticator {
 
         val signature = signWithPasskey(passkey, authenticatorData + clientDataHash)
 
-        passkeyDao.upsert(
+        repository.upsertPasskey(
             passkey.copy(
                 signCount = newSignCount,
                 lastUsedTime = System.currentTimeMillis(),

@@ -63,13 +63,10 @@ import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.BottomNavBarItem
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.widgets.updateWidgetPreviews
-import com.vayunmathur.photos.data.FaceDao
 import com.vayunmathur.photos.data.Photo
-import com.vayunmathur.photos.data.PhotoDao
-import com.vayunmathur.photos.data.PhotoDatabase
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.glance.PhotoGlanceWidgetReceiver
 import com.vayunmathur.photos.ui.GalleryPage
 import com.vayunmathur.photos.ui.MapPage
@@ -96,11 +93,8 @@ val LocalColumnCount = staticCompositionLocalOf<MutableFloatState> {
 }
 
 class MainActivity : FragmentActivity() {
-    private lateinit var photoDao: PhotoDao
-    private lateinit var faceDao: FaceDao
-
     private val galleryViewModel: GalleryViewModel by viewModels {
-        GalleryViewModelFactory(application, photoDao, faceDao)
+        GalleryViewModelFactory(application, PhotosRepository.get(application))
     }
     private val photoMapViewModel: PhotoMapViewModel by viewModels {
         PhotoMapViewModelFactory(application)
@@ -113,9 +107,6 @@ class MainActivity : FragmentActivity() {
         super.onCreate(savedInstanceState)
         updateWidgetPreviews(PhotoGlanceWidgetReceiver::class)
         enableEdgeToEdge()
-        val db = buildDatabase<PhotoDatabase>()
-        photoDao = db.photoDao()
-        faceDao = db.faceDao()
         ImageLoader.init(this)
         val dataStore = DataStoreUtils.getInstance(applicationContext)
         setContent {

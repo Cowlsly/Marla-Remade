@@ -8,7 +8,7 @@ import com.android.tools.lint.detector.api.Issue
 /** Repo-specific lint checks, registered via the Lint-Registry-v2 manifest attribute. */
 class ModernAppsIssueRegistry : IssueRegistry() {
 
-    override val issues: List<Issue> = listOf(ToastDetector.ISSUE)
+    override val issues: List<Issue> = listOf(ToastDetector.ISSUE, DirectBuildDatabaseDetector.ISSUE)
 
     override val api: Int = CURRENT_API
 

@@ -10,9 +10,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
-import com.vayunmathur.clock.data.AlarmDao
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.data.TimerDao
 import com.vayunmathur.clock.ui.sendTimerNotification
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
@@ -46,8 +45,7 @@ import kotlin.time.Instant
  */
 class ClockViewModel(
     application: Application,
-    private val timerDao: TimerDao,
-    private val alarmDao: AlarmDao,
+    private val repository: ClockRepository,
 ) : AndroidViewModel(application), StopwatchActions {
 
     private val ds = DataStoreUtils.getInstance(application)
@@ -69,13 +67,13 @@ class ClockViewModel(
 
     // --- Database-backed lists -----------------------------------------------
 
-    val timers: StateFlow<List<Timer>> = timerDao.getAllFlow().stateIn(
+    val timers: StateFlow<List<Timer>> = repository.timers.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
         emptyList(),
     )
 
-    val alarms: StateFlow<List<Alarm>> = alarmDao.getAllFlow().stateIn(
+    val alarms: StateFlow<List<Alarm>> = repository.alarms.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
         emptyList(),
@@ -83,27 +81,27 @@ class ClockViewModel(
 
     fun upsert(timer: Timer, andThen: (Long) -> Unit = {}) {
         viewModelScope.launch(Dispatchers.IO) {
-            val id = timerDao.upsert(timer)
+            val id = repository.upsertTimer(timer)
             andThen(id)
         }
     }
 
     fun upsert(alarm: Alarm, andThen: (Long) -> Unit = {}) {
         viewModelScope.launch(Dispatchers.IO) {
-            val id = alarmDao.upsert(alarm)
+            val id = repository.upsertAlarm(alarm)
             andThen(id)
         }
     }
 
     fun delete(timer: Timer) {
         viewModelScope.launch(Dispatchers.IO) {
-            timerDao.delete(timer)
+            repository.deleteTimer(timer)
         }
     }
 
     fun delete(alarm: Alarm) {
         viewModelScope.launch(Dispatchers.IO) {
-            alarmDao.delete(alarm)
+            repository.deleteAlarm(alarm)
         }
     }
 
@@ -245,7 +243,7 @@ class ClockViewModel(
                     val alarm = buildDefaultAlarm(time, message ?: "", daysMask)
                     val ctx = getApplication<Application>()
                     viewModelScope.launch(Dispatchers.IO) {
-                        val id = alarmDao.upsert(alarm)
+                        val id = repository.upsertAlarm(alarm)
                         AlarmScheduler.schedule(ctx, alarm.copy(id = id))
                     }
                     null
@@ -268,7 +266,7 @@ class ClockViewModel(
                     )
                     val ctx = getApplication<Application>()
                     viewModelScope.launch(Dispatchers.IO) {
-                        val id = timerDao.upsert(timer)
+                        val id = repository.upsertTimer(timer)
                         sendTimerNotification(ctx, timer.copy(id = id), true)
                     }
                     null
@@ -346,17 +344,16 @@ class ClockViewModel(
     }
 }
 
-/** Factory for [ClockViewModel] that injects the DAOs directly. */
+/** Factory for [ClockViewModel] that injects the repository. */
 class ClockViewModelFactory(
     private val application: Application,
-    private val timerDao: TimerDao,
-    private val alarmDao: AlarmDao,
+    private val repository: ClockRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(ClockViewModel::class.java)) {
             "Unexpected ViewModel class: $modelClass"
         }
-        return ClockViewModel(application, timerDao, alarmDao) as T
+        return ClockViewModel(application, repository) as T
     }
 }

@@ -1,7 +1,7 @@
 package com.vayunmathur.passwords.cable
 
 import android.util.Log
-import com.vayunmathur.passwords.data.PasskeyDao
+import com.vayunmathur.passwords.data.PasswordRepository
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
 
@@ -11,12 +11,12 @@ import kotlin.io.encoding.ExperimentalEncodingApi
  * commands (notably `makeCredential`) return an error, as v1 is sign-in only.
  *
  * Credential lookup and signing reuse the shared [WebAuthnAuthenticator] core (Phase 0) and the
- * existing [PasskeyDao] store, so cross-device sign-in produces byte-identical assertions to the
+ * repository store, so cross-device sign-in produces byte-identical assertions to the
  * same-device Credential Manager path.
  */
 @OptIn(ExperimentalEncodingApi::class)
 class CtapProcessor(
-    private val passkeyDao: PasskeyDao,
+    private val repository: PasswordRepository,
     /** Whether the user was verified (biometric) when the session was approved. */
     private val userVerified: Boolean,
 ) {
@@ -52,7 +52,7 @@ class CtapProcessor(
             return Ctap.response(Ctap.ERR_OPERATION_DENIED)
         }
 
-        val allForRp = passkeyDao.getByRpId(req.rpId)
+        val allForRp = repository.getPasskeysByRpId(req.rpId)
         Log.d(TAG, "stored passkeys for ${req.rpId}: ${allForRp.size} " +
             allForRp.joinToString { "credId=${it.credentialId}" })
 
@@ -65,7 +65,7 @@ class CtapProcessor(
         val assertion = WebAuthnAuthenticator.signAssertion(
             passkey = passkey,
             clientDataHash = req.clientDataHash,
-            passkeyDao = passkeyDao,
+            repository = repository,
             userPresent = req.userPresenceRequired,
             userVerified = userVerified,
         )
@@ -84,11 +84,11 @@ class CtapProcessor(
     private suspend fun resolveCredential(req: CtapGetAssertionRequest) =
         if (req.allowList.isNotEmpty()) {
             req.allowList.firstNotNullOfOrNull { desc ->
-                passkeyDao.getByCredentialId(urlEncoder.encode(desc.id))
+                repository.getPasskeyByCredentialId(urlEncoder.encode(desc.id))
                     ?.takeIf { it.rpId == req.rpId }
             }
         } else {
-            passkeyDao.getByRpId(req.rpId).maxByOrNull { it.lastUsedTime }
+            repository.getPasskeysByRpId(req.rpId).maxByOrNull { it.lastUsedTime }
         }
 
     /** Stored user handles are base64url; fall back to raw UTF-8 if not decodable. */

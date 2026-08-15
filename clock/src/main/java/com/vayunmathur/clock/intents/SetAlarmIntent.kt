@@ -1,11 +1,10 @@
 package com.vayunmathur.clock.intents
 
 import com.vayunmathur.clock.data.Alarm
-import com.vayunmathur.clock.data.ClockDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.util.AlarmScheduler
 import com.vayunmathur.library.intents.clock.SetAlarmData
 import com.vayunmathur.library.util.AssistantIntent
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
@@ -27,8 +26,8 @@ class SetAlarmIntent : AssistantIntent<SetAlarmData, Unit>(
             enabled = true,
             days = 0, // no repeat: rings once at the next occurrence
         )
-        val db = buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
-        val id = db.alarmDao().upsert(alarm)
+        val repository = ClockRepository.get(this)
+        val id = repository.upsertAlarm(alarm)
         AlarmScheduler.schedule(this, alarm.copy(id = id))
     }
 }

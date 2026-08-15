@@ -8,7 +8,6 @@ import androidx.room.Query
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
 import androidx.room.Upsert
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -123,21 +122,11 @@ abstract class MessagesDatabase : androidx.room.RoomDatabase() {
     abstract fun messageDao(): MessageDao
 }
 
-private val dbLock = Any()
-@Volatile private var sharedDb: MessagesDatabase? = null
-
 /**
- * Returns the process-singleton [MessagesDatabase]. We must return the
- * same instance everywhere — Room's Flow change-notifications are
- * per-instance, so writes via one instance never notify Flows observed
- * via another, even when both point at the same SQLite file.
+ * Returns the process-singleton [MessagesDatabase].
+ *
+ * Delegates to [MessagesRepository.get] so the single `buildDatabase` call site lives in
+ * the repository. Kept as a thin top-level function so existing consumers keep compiling.
  */
-fun buildMessagesDatabase(context: android.content.Context): MessagesDatabase {
-    sharedDb?.let { return it }
-    return synchronized(dbLock) {
-        sharedDb ?: context.applicationContext.buildDatabase<MessagesDatabase>(
-            dbName = "messages.db",
-        )
-            .also { sharedDb = it }
-    }
-}
+fun buildMessagesDatabase(context: android.content.Context): MessagesDatabase =
+    MessagesRepository.get(context).database()

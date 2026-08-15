@@ -8,11 +8,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
-import com.vayunmathur.library.room.buildDatabase
-import com.vayunmathur.photos.data.FaceDao
 import com.vayunmathur.photos.data.Photo
-import com.vayunmathur.photos.data.PhotoDao
-import com.vayunmathur.photos.data.PhotoDatabase
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.sdk.openassistant.AssistantNotInstalledException
 import com.vayunmathur.sdk.openassistant.EmbeddingModelDownloadingException
 import com.vayunmathur.sdk.openassistant.EmbeddingUnsupportedException
@@ -47,11 +44,14 @@ import androidx.work.WorkManager
 @OptIn(FlowPreview::class)
 class GalleryViewModel(
     application: Application,
-    val photoDao: PhotoDao,
-    val faceDao: FaceDao,
+    private val repository: PhotosRepository,
 ) : AndroidViewModel(application), GalleryActions {
 
-    val photos: StateFlow<List<Photo>> = photoDao.getAllFlow()
+    // Kept for external callers that still reference photoDao/faceDao as PhotosRepository
+    val photoDao get() = repository
+    val faceDao get() = repository
+
+    val photos: StateFlow<List<Photo>> = repository.getAllFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _searchQuery = MutableStateFlow("")
@@ -270,9 +270,8 @@ class GalleryViewModel(
     fun resolveAndIndex(uri: Uri, onResolved: (Long?) -> Unit) {
         viewModelScope.launch {
             val id = withContext(Dispatchers.IO) {
-                val db = getApplication<Application>().buildDatabase<PhotoDatabase>()
-                runCatching { syncPhotos(getApplication(), db, listOf(uri)) }
-                photoDao.getByUri(uri.toString()).firstOrNull()?.id
+                runCatching { syncPhotos(getApplication(), repository, listOf(uri)) }
+                repository.getByUri(uri.toString()).firstOrNull()?.id
             }
             runSync()
             onResolved(id)
@@ -304,10 +303,20 @@ class GalleryViewModel(
 @Suppress("FunctionName")
 fun GalleryViewModelFactory(
     application: Application,
-    photoDao: PhotoDao,
-    faceDao: FaceDao,
+    repository: PhotosRepository,
 ): ViewModelProvider.Factory = viewModelFactory {
-    initializer { GalleryViewModel(application, photoDao, faceDao) }
+    initializer { GalleryViewModel(application, repository) }
+}
+
+/** Legacy overload kept so call sites updated incrementally compile. */
+@Suppress("FunctionName")
+fun GalleryViewModelFactory(
+    application: Application,
+    photoDao: com.vayunmathur.photos.data.PhotoDao,
+    faceDao: com.vayunmathur.photos.data.FaceDao,
+): ViewModelProvider.Factory {
+    val repo = PhotosRepository.get(application)
+    return GalleryViewModelFactory(application, repo)
 }
 
 /** An unnamed person-cluster and the library photos they appear in. */

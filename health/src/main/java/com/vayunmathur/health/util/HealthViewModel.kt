@@ -14,8 +14,11 @@ import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.health.R
+import com.vayunmathur.health.data.HealthRepository
 import com.vayunmathur.health.data.Ingredient
 import com.vayunmathur.health.data.NutritionData
 import com.vayunmathur.health.data.Recipe
@@ -67,33 +70,34 @@ import kotlin.time.Duration.Companion.hours
  *    etc. from a single `LaunchedEffect` and collect the resulting `StateFlow`.
  *  - Keep purely-UI state (dialog visibility, pager state, focus, text-field cursor) in compose.
  */
-class HealthViewModel(application: Application) : AndroidViewModel(application) {
-
-    private val db get() = HealthAPI.db
+class HealthViewModel(
+    application: Application,
+    private val repository: HealthRepository = HealthRepository.get(application),
+) : AndroidViewModel(application) {
 
     // ============================================================================================
-    //  Flow getters — direct passthrough to the DAO so callers can `collectAsState(...)`.
+    //  Flow getters — direct passthrough to the repository so callers can `collectAsState(...)`.
     //  Composables wrap them in `remember(...)` when the keys depend on changing values to avoid
     //  re-subscribing every recomposition.
     // ============================================================================================
 
     fun sumInRange(type: RecordType, start: kotlin.time.Instant, end: kotlin.time.Instant): Flow<Double> =
-        db.healthDao().sumInRange(type, start, end)
+        repository.sumInRange(type, start, end)
 
     fun sumNutritionInRange(type: RecordType, start: kotlin.time.Instant, end: kotlin.time.Instant): Flow<NutritionData> =
-        db.healthDao().sumNutritionInRange(type, start, end)
+        repository.sumNutritionInRange(type, start, end)
 
     fun maxInRange(type: RecordType, start: kotlin.time.Instant, end: kotlin.time.Instant): Flow<Double?> =
-        db.healthDao().maxInRange(type, start, end)
+        repository.maxInRange(type, start, end)
 
     fun minInRange(type: RecordType, start: kotlin.time.Instant, end: kotlin.time.Instant): Flow<Double?> =
-        db.healthDao().minInRange(type, start, end)
+        repository.minInRange(type, start, end)
 
     fun getAllRecordsInRange(type: RecordType, start: kotlin.time.Instant, end: kotlin.time.Instant): Flow<List<Record>> =
-        db.healthDao().getAllInRange(type, start, end)
+        repository.getAllInRange(type, start, end)
 
     fun getAllRecordsOfType(type: RecordType): Flow<List<Record>> =
-        db.healthDao().getRecordsFlow(type)
+        repository.getRecordsFlow(type)
 
     /**
      * Selects the sleep session to show for [day]: searches the window from 12h before the day's
@@ -104,7 +108,7 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
         val tz = TimeZone.currentSystemDefault()
         val searchStart = day.atStartOfDayIn(tz).minus(12.hours)
         val searchEnd = day.atStartOfDayIn(tz).plus(24.hours)
-        return db.healthDao().getAllInRange(RecordType.Sleep, searchStart, searchEnd).map { records ->
+        return repository.getAllInRange(RecordType.Sleep, searchStart, searchEnd).map { records ->
             records.filter {
                 val endLocal = it.endTime.atZone(ZoneId.systemDefault()).toLocalDate().toKotlinLocalDate()
                 endLocal == day
@@ -116,9 +120,9 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     //  Recipe / Ingredient flows.
     // ============================================================================================
 
-    val allRecipes: Flow<List<Recipe>> get() = db.healthDao().getAllRecipesFlow()
-    val allIngredients: Flow<List<Ingredient>> get() = db.healthDao().getAllIngredientsFlow()
-    val ingredientsAsRecipes: Flow<List<Ingredient>> get() = db.healthDao().getIngredientsAsRecipesFlow()
+    val allRecipes: Flow<List<Recipe>> get() = repository.getAllRecipesFlow()
+    val allIngredients: Flow<List<Ingredient>> get() = repository.getAllIngredientsFlow()
+    val ingredientsAsRecipes: Flow<List<Ingredient>> get() = repository.getIngredientsAsRecipesFlow()
 
     // ============================================================================================
     //  Main page point-in-time metric bundle.
@@ -345,7 +349,7 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
                 value = liters,
                 metadata = "Hydration",
             )
-            db.healthDao().upsert(listOf(record))
+            repository.upsert(listOf(record))
             HealthAPI.writeHealthRecord(record)
         }
     }
@@ -361,7 +365,7 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
                 value = value,
                 metadata = type.name,
             )
-            db.healthDao().upsert(listOf(record))
+            repository.upsert(listOf(record))
             HealthAPI.writeHealthRecord(record)
             loadMainPageMetrics()
         }
@@ -403,13 +407,13 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
                 nutritionData = nutrition,
                 metadata = displayName,
             )
-            db.healthDao().upsert(listOf(record))
+            repository.upsert(listOf(record))
             HealthAPI.writeHealthRecord(record)
         }
     }
 
     private suspend fun computeRecipeNutrition(recipeId: String, quantity: Double): NutritionData {
-        val ingredients = db.healthDao().getIngredientsForRecipe(recipeId)
+        val ingredients = repository.getIngredientsForRecipe(recipeId)
         var protein = 0.0
         var carbs = 0.0
         var fat = 0.0
@@ -419,8 +423,8 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
         var kcal = 0.0
 
         ingredients.forEach { ri ->
-            val ing = db.healthDao().getIngredient(ri.ingredientId) ?: return@forEach
-            val units = db.healthDao().getUnitsForIngredient(ing.id)
+            val ing = repository.getIngredient(ri.ingredientId) ?: return@forEach
+            val units = repository.getUnitsForIngredient(ing.id)
             val unit = units.find { it.id == ri.unitId }
             val grams = unit?.grams ?: 1.0
             val totalGrams = ri.quantity * grams * quantity
@@ -440,17 +444,17 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     // ============================================================================================
 
     fun insertIngredient(ingredient: Ingredient) {
-        viewModelScope.launch { db.healthDao().insertIngredient(ingredient) }
+        viewModelScope.launch { repository.insertIngredient(ingredient) }
     }
 
     fun updateIngredient(ingredient: Ingredient) {
-        viewModelScope.launch { db.healthDao().updateIngredient(ingredient) }
+        viewModelScope.launch { repository.updateIngredient(ingredient) }
     }
 
     fun deleteIngredient(ingredient: Ingredient) {
         viewModelScope.launch {
             try {
-                db.healthDao().deleteIngredient(ingredient)
+                repository.deleteIngredient(ingredient)
             } catch (e: Exception) {
                 // SQLiteConstraintException if used in a recipe.
                 Log.w(TAG, "Failed to delete ingredient ${ingredient.id}: ${e.message}")
@@ -459,11 +463,11 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteRecipe(recipe: Recipe) {
-        viewModelScope.launch { db.healthDao().deleteRecipe(recipe) }
+        viewModelScope.launch { repository.deleteRecipe(recipe) }
     }
 
     suspend fun getUnitsForIngredient(ingredientId: String): List<ServingUnit> =
-        withContext(Dispatchers.IO) { db.healthDao().getUnitsForIngredient(ingredientId) }
+        withContext(Dispatchers.IO) { repository.getUnitsForIngredient(ingredientId) }
 
     /** Loaded recipe + its resolved ingredient rows. */
     data class RecipeEditLoad(
@@ -479,11 +483,11 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     suspend fun loadRecipeForEdit(recipeId: String): RecipeEditLoad? = withContext(Dispatchers.IO) {
-        val recipe = db.healthDao().getRecipe(recipeId) ?: return@withContext null
-        val ingredients = db.healthDao().getIngredientsForRecipe(recipeId)
+        val recipe = repository.getRecipe(recipeId) ?: return@withContext null
+        val ingredients = repository.getIngredientsForRecipe(recipeId)
         val rows = ingredients.mapNotNull { ri ->
-            val ing = db.healthDao().getIngredient(ri.ingredientId)
-            val units = db.healthDao().getUnitsForIngredient(ri.ingredientId)
+            val ing = repository.getIngredient(ri.ingredientId)
+            val units = repository.getUnitsForIngredient(ri.ingredientId)
             val unit = units.find { it.id == ri.unitId }
             if (ing != null && unit != null) RecipeIngredientLoad(ing, unit, ri.quantity) else null
         }
@@ -498,17 +502,17 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     ) {
         viewModelScope.launch {
             val id = existingRecipeId ?: Uuid.random().toString()
-            db.healthDao().insertRecipe(Recipe(id = id, name = name))
+            repository.insertRecipe(Recipe(id = id, name = name))
 
             if (existingRecipeId != null) {
-                val oldIngredients = db.healthDao().getIngredientsForRecipe(existingRecipeId)
-                oldIngredients.forEach { db.healthDao().deleteRecipeIngredient(it) }
+                val oldIngredients = repository.getIngredientsForRecipe(existingRecipeId)
+                oldIngredients.forEach { repository.deleteRecipeIngredient(it) }
             }
 
             items.forEach { row ->
-                db.healthDao().insertIngredient(row.ingredient)
-                db.healthDao().insertServingUnit(row.unit)
-                db.healthDao().insertRecipeIngredient(
+                repository.insertIngredient(row.ingredient)
+                repository.insertServingUnit(row.unit)
+                repository.insertRecipeIngredient(
                     RecipeIngredient(
                         id = Uuid.random().toString(),
                         recipeId = id,
@@ -531,7 +535,7 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
     suspend fun searchIngredients(query: String, includeLocal: Boolean): IngredientSearchResults =
         withContext(Dispatchers.IO) {
             val remote = FoodSearchAPI.searchIngredients(query)
-            val local = if (includeLocal) db.healthDao().searchIngredients(query) else emptyList()
+            val local = if (includeLocal) repository.searchIngredients(query) else emptyList()
             IngredientSearchResults(remote, local)
         }
 
@@ -557,6 +561,17 @@ class HealthViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val TAG = "HealthViewModel"
+    }
+}
+
+class HealthViewModelFactory(
+    private val application: Application,
+    private val repository: HealthRepository,
+) : ViewModelProvider.Factory {
+    @Suppress("UNCHECKED_CAST")
+    override fun <T : ViewModel> create(modelClass: Class<T>): T {
+        require(modelClass.isAssignableFrom(HealthViewModel::class.java))
+        return HealthViewModel(application, repository) as T
     }
 }
 

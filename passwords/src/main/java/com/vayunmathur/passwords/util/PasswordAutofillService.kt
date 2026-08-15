@@ -24,9 +24,8 @@ import androidx.autofill.inline.UiVersions
 import androidx.autofill.inline.v1.InlineSuggestionUi
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.DatabaseHelper
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.passwords.R
-import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import kotlinx.coroutines.runBlocking
 import android.util.Log
 import com.vayunmathur.passwords.data.Password
@@ -38,9 +37,7 @@ class PasswordAutofillService : AutofillService() {
     private val isDatabaseAvailable by lazy {
         DatabaseHelper(applicationContext).isKeyGenerated()
     }
-    private val passwordDao by lazy {
-        applicationContext.buildDatabase<PasswordDatabase>().passwordDao()
-    }
+    private val repository by lazy { PasswordRepository.get(applicationContext) }
 
     override fun onFillRequest(request: FillRequest, cancellationSignal: CancellationSignal, callback: FillCallback) {
         if (!isDatabaseAvailable) {
@@ -64,7 +61,7 @@ class PasswordAutofillService : AutofillService() {
 
         runBlocking {
             try {
-                val allPasswords = passwordDao.getAll()
+                val allPasswords = repository.getAllPasswords()
 
                 val matches = allPasswords.filter { pass ->
                     pass.websites.any { site -> matchesContext(site, targetPackage, targetWebDomain) }
@@ -116,12 +113,12 @@ class PasswordAutofillService : AutofillService() {
 
         if (!username.isNullOrBlank() && !password.isNullOrBlank()) {
             runBlocking {
-                val existing = passwordDao.getAll().firstOrNull { it.username == username || it.email == username }
+                val existing = repository.getAllPasswords().firstOrNull { it.username == username || it.email == username }
                 if (existing != null) {
-                    passwordDao.upsert(existing.copy(password = password))
+                    repository.upsertPassword(existing.copy(password = password))
                 } else {
                     val looksLikeEmail = username.contains("@")
-                    passwordDao.upsert(
+                    repository.upsertPassword(
                         Password(
                             name = "Saved Login",
                             username = if (looksLikeEmail) "" else username,

@@ -4,7 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.maps.data.AddressResult
-import com.vayunmathur.maps.data.AmenityDatabase
+import com.vayunmathur.maps.data.AmenityRepository
 import com.vayunmathur.maps.data.AmenityEntity
 import com.vayunmathur.maps.data.OpeningHours
 import com.vayunmathur.maps.data.SpecificFeature
@@ -73,7 +73,7 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
      */
     fun setQuery(
         query: String,
-        db: AmenityDatabase,
+        repository: AmenityRepository,
         west: Double,
         east: Double,
         south: Double,
@@ -97,14 +97,14 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
                 return@launch
             }
             val merged = withContext(Dispatchers.IO) {
-                val amenities = db.amenityDao().getInBBox(
+                val amenities = repository.getInBBox(
                     query = amenityQuery,
                     latMin = south,
                     latMax = north,
                     lonMin = west,
                     lonMax = east,
                 ).map { SearchResult.Amenity(it) }
-                val addresses = db.addressDao().search(addressQuery)
+                val addresses = repository.searchAddresses(addressQuery)
                     .map { SearchResult.Address(it) }
                 amenities + addresses
             }
@@ -113,6 +113,21 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     /** Resets the search state. */
+    fun setQuery(
+        query: String,
+        db: com.vayunmathur.maps.data.AmenityDatabase,
+        west: Double,
+        east: Double,
+        south: Double,
+        north: Double,
+    ) = setQuery(query, AmenityRepository.get(getApplication()), west, east, south, north)
+
+    fun resolveAmenity(
+        amenity: AmenityEntity,
+        db: com.vayunmathur.maps.data.AmenityDatabase,
+        onFeature: (SpecificFeature\.Restaurant\) -> Unit,
+    ) = resolveAmenity(amenity, AmenityRepository.get(getApplication()), onFeature)
+
     fun reset() {
         searchJob?.cancel()
         _query.value = ""
@@ -127,12 +142,12 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
      */
     fun resolveAmenity(
         amenity: AmenityEntity,
-        db: AmenityDatabase,
+        repository: AmenityRepository,
         onFeature: (SpecificFeature.Restaurant) -> Unit,
     ) {
         viewModelScope.launch {
             val tags = withContext(Dispatchers.IO) {
-                db.tagDao().getTags(amenity.id).associate { it.key to it.value }
+                repository.getTags(amenity.id).associate { it.key to it.value }
             }
             val feature = SpecificFeature.Restaurant(
                 name = tags["name"] ?: "",

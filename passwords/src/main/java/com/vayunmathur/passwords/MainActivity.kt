@@ -16,13 +16,10 @@ import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.util.ListDetailPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.biometric.unlockDatabaseWithBiometrics
-import com.vayunmathur.passwords.data.PasswordDao
-import com.vayunmathur.passwords.data.PasskeyDao
-import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.ui.MenuPage
 import com.vayunmathur.passwords.ui.PasskeyPage
 import com.vayunmathur.passwords.ui.PasswordEditPage
@@ -37,10 +34,8 @@ import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 
 class MainActivity : FragmentActivity() {
-    private lateinit var passwordDao: PasswordDao
-    private lateinit var passkeyDao: PasskeyDao
     private val passwordsViewModel: PasswordsViewModel by viewModels {
-        PasswordsViewModelFactory(application, passwordDao, passkeyDao)
+        PasswordsViewModelFactory(application, PasswordRepository.get(application))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,12 +47,12 @@ class MainActivity : FragmentActivity() {
         unlockDatabaseWithBiometrics(
             activity = this,
             onSuccess = { passphrase ->
-                // Sync passphrase to non-auth key so services can access the database
+                // Sync passphrase to non-auth key so services can access the database.
+                // The repo's lazy db will then open via DatabaseHelper (same passphrase).
                 DatabaseHelper(this).storePassphrase(passphrase)
-
-                val db = buildDatabase<PasswordDatabase>(encryptionPassword = passphrase)
-                passwordDao = db.passwordDao()
-                passkeyDao = db.passkeyDao()
+                // Force repository (and thus DB) to be created eagerly so the
+                // cached databases[PasswordDatabase] entry matches this passphrase.
+                PasswordRepository.get(application)
                 lifecycleScope.launch {
                     if (KdbxSyncSettings.enabled(this@MainActivity)) {
                         // Re-registering keeps the periodic work alive across app updates.

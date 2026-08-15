@@ -28,8 +28,8 @@ class OutboxSendWorker(
 ) : CoroutineWorker(appContext, workerParams) {
 
     override suspend fun doWork(): Result {
-        val db = EmailDatabase.getInstance(applicationContext)
-        val dao = db.emailDao()
+        val repository = EmailRepository.get(applicationContext)
+        val dao = repository.getDatabase().emailDao()
         val pending = dao.getOutbox()
 
         if (pending.isEmpty()) {
@@ -203,7 +203,7 @@ object OutboxManager {
         scheduledAt: Long = 0,
         isHtml: Boolean = false,
     ): OutboxEntry {
-        val dao = EmailDatabase.getInstance(context).emailDao()
+        val dao = EmailRepository.get(context).getDatabase().emailDao()
         val base = OutboxEntry(
             accountEmail = accountEmail,
             to = to,
@@ -241,7 +241,7 @@ object OutboxManager {
     }
 
     suspend fun delete(context: Context, entry: OutboxEntry) {
-        val dao = EmailDatabase.getInstance(context).emailDao()
+        val dao = EmailRepository.get(context).getDatabase().emailDao()
         OutboxSendWorker.attachmentDirFor(context, entry.id).deleteRecursively()
         dao.deleteOutboxEntry(entry)
         if (dao.getOutboxCount() == 0) {

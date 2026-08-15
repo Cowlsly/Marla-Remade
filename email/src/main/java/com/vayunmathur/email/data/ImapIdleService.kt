@@ -66,7 +66,7 @@ class ImapIdleService : Service() {
     override fun onDestroy() { scope.cancel(); super.onDestroy() }
 
     private suspend fun startIdleLoops() {
-        val dao = EmailDatabase.getInstance(applicationContext).emailDao()
+        val dao = EmailRepository.get(applicationContext).getDatabase().emailDao()
         val accounts = dao.getAccounts()
         if (accounts.isEmpty()) { stopSelf(); return }
         try { EmailSyncWorker.scheduleHourlyNonInboxSync(applicationContext) } catch (_: Throwable) {}
@@ -128,7 +128,7 @@ class ImapIdleService : Service() {
                 while (scope.coroutineContext.isActive) {
                     delay(FALLBACK_NO_IDLE_POLL_MS)
                     try {
-                        val dao = EmailDatabase.getInstance(applicationContext).emailDao()
+                        val dao = EmailRepository.get(applicationContext).getDatabase().emailDao()
                         val known = dao.getKnownUids(account.email, "INBOX").toSet()
                         val deleted = dao.getDeletedUids(account.email, "INBOX").toSet()
                         val (msgs, atts) = ImapClient.fetchMessagesInConnection(rawConn, account.email, "INBOX", 50, 0, false, known + deleted, applicationContext)
@@ -139,7 +139,7 @@ class ImapIdleService : Service() {
                 return@withContext
             }
 
-            val dao = EmailDatabase.getInstance(applicationContext).emailDao()
+            val dao = EmailRepository.get(applicationContext).getDatabase().emailDao()
             while (scope.coroutineContext.isActive) {
                 val sel = rawConn.select("INBOX")
                 Log.d(TAG, "SELECT INBOX ${account.email} exists=${sel.exists}")
@@ -240,7 +240,7 @@ class ImapIdleService : Service() {
     private suspend fun syncReadStatusPullRaw(context: Context, account: EmailAccount, knownUids: Set<Long>) {
         if (knownUids.isEmpty()) return
         try {
-            val dao = EmailDatabase.getInstance(context).emailDao()
+            val dao = EmailRepository.get(context).getDatabase().emailDao()
             val uidsToCheck = knownUids.sortedDescending().take(50)
             val auth = account.resolveAuth(context)
             ImapClient.withConnection(account.imapServer(), account.loginUser(), auth) { conn ->

@@ -32,17 +32,15 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextStyle
 import com.vayunmathur.library.widgets.DynamicThemeGlance
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.photos.R
-import com.vayunmathur.photos.data.PhotoDatabase
+import com.vayunmathur.photos.data.PhotosRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 class PhotoGlanceWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
 
-        val db = context.buildDatabase<PhotoDatabase>()
-        val photos = db.photoDao().getAll()
+        val photos = PhotosRepository.get(context.applicationContext).getAll()
 
         provideContent {
             var photo by remember(photos) { mutableStateOf(photos.filter{it.videoData == null}.randomOrNull()) }

@@ -149,7 +149,7 @@ fun GalleryPage(
             onSuccess = { _, _ ->
                 secureFolderViewModel.moveToSecure(
                     photos = selectedPhotos,
-                    sourcePhotoDao = galleryViewModel.photoDao,
+                    sourceRepository = com.vayunmathur.photos.data.PhotosRepository.get(context.applicationContext),
                 ) { urisToDelete ->
                     // Use MediaStore operations to delete files
                     // MANAGE_MEDIA permission is required to run the app (checked in PermissionsWrapper)

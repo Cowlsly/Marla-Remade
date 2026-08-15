@@ -5,8 +5,7 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
-import com.vayunmathur.clock.data.ClockDatabase
-import com.vayunmathur.library.room.buildDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -44,13 +43,13 @@ class AlarmReceiver : BroadcastReceiver() {
             .setFullScreenIntent(pendingIntent, true)
             .setAutoCancel(true)
 
-        val db = context.buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
+        val repository = ClockRepository.get(context)
         val pendingResult = goAsync()
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                val alarm = db.alarmDao().get(alarmId)
+                val alarm = repository.getAlarm(alarmId)
                 if (alarm.days == 0) {
-                    db.alarmDao().upsert(alarm.copy(enabled = false))
+                    repository.upsertAlarm(alarm.copy(enabled = false))
                 } else {
                     AlarmScheduler.schedule(context, alarm)
                 }

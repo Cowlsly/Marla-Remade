@@ -5,10 +5,9 @@ import androidx.core.net.toUri
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import com.vayunmathur.library.network.NetworkClient
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.musicbrainz.api.CoverArt
 import com.vayunmathur.musicbrainz.data.LocalTrack
-import com.vayunmathur.musicbrainz.data.MusicBrainzDatabase
+import com.vayunmathur.musicbrainz.data.MusicBrainzRepository
 import com.vayunmathur.musicbrainz.library.LibraryScanner
 import com.vayunmathur.musicbrainz.library.MatchKeys
 import com.vayunmathur.musicbrainz.library.SafTree
@@ -200,10 +199,8 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
         request: DownloadRequest,
         size: Int,
     ) {
-        val dao = applicationContext
-            .buildDatabase<MusicBrainzDatabase>(dbName = LibraryScanner.DB_NAME)
-            .localTrackDao()
-        dao.upsertAll(
+        val repo = MusicBrainzRepository.get(applicationContext)
+        repo.upsertAll(
             listOf(
                 LocalTrack(
                     documentUri = uri.toString(),

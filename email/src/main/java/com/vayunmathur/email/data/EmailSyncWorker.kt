@@ -23,8 +23,8 @@ class EmailSyncWorker(appContext: Context, workerParams: WorkerParameters) :
 
     override suspend fun doWork(): Result {
         val nonInboxOnly = inputData.getBoolean(KEY_NON_INBOX_ONLY, false)
-        val db = EmailDatabase.getInstance(applicationContext)
-        val dao = db.emailDao()
+        val repository = EmailRepository.get(applicationContext)
+        val dao = repository.getDatabase().emailDao()
         val accounts = dao.getAccounts()
 
         if (accounts.isEmpty()) {
@@ -165,7 +165,7 @@ class EmailSyncWorker(appContext: Context, workerParams: WorkerParameters) :
             knownUids: Set<Long>,
         ) {
             try {
-                val db = EmailDatabase.getInstance(context)
+                val db = EmailRepository.get(context).getDatabase()
                 val dao = db.emailDao()
                 val uidsToCheck = knownUids.sortedDescending().take(50)
                 if (uidsToCheck.isEmpty()) return

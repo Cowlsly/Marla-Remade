@@ -9,9 +9,8 @@ import androidx.work.ExistingWorkPolicy
 import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.youpipe.data.DownloadedVideo
-import com.vayunmathur.youpipe.data.SubscriptionDatabase
+import com.vayunmathur.youpipe.data.SubscriptionRepository
 import com.vayunmathur.youpipe.ui.VideoInfo
 import com.vayunmathur.youpipe.util.sabr.SabrDownloadHelper
 import com.vayunmathur.library.network.NetworkClient
@@ -56,7 +55,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                 author = inputData.getString("author") ?: ""
             )
 
-        val db = applicationContext.buildDatabase<SubscriptionDatabase>()
+        val repository = SubscriptionRepository.get(applicationContext)
         val dir = File(applicationContext.getExternalFilesDir(null), "downloads")
         if (!dir.exists()) dir.mkdirs()
 
@@ -64,7 +63,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
         // "sabr://<videoId>?a=<itag>" (audio). They cannot be fetched over plain HTTP; drive a
         // SABR session instead, muxing audio+video into a single mp4.
         if (videoUrl.toUri().scheme == "sabr") {
-            return@coroutineScope runSabrDownload(videoID, videoUrl, audioUrl, videoInfo, db, dir)
+            return@coroutineScope runSabrDownload(videoID, videoUrl, audioUrl, videoInfo, repository, dir)
         }
 
         val videoFile = File(dir, "$videoID.mp4")
@@ -117,7 +116,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                     timestamp = Clock.System.now()
                 )
 
-            db.downloadedVideoDao().upsert(download)
+            repository.upsertDownloadedVideo(download)
             Result.success()
         } catch (e: Exception) {
             // Cleanup on error or cancellation
@@ -141,7 +140,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
         videoUrl: String,
         audioUrl: String?,
         videoInfo: VideoInfo,
-        db: SubscriptionDatabase,
+        repository: SubscriptionRepository,
         dir: File,
     ): Result {
         val videoUri = videoUrl.toUri()
@@ -190,7 +189,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                     audioPath = null,
                     timestamp = Clock.System.now()
                 )
-            db.downloadedVideoDao().upsert(download)
+            repository.upsertDownloadedVideo(download)
             Result.success()
         } catch (e: Exception) {
             Log.e("DownloadWorker", "SABR download failed for $videoID", e)

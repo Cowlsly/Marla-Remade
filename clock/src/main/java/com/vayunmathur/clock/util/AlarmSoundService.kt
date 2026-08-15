@@ -12,8 +12,7 @@ import android.os.VibratorManager
 import androidx.core.app.NotificationCompat
 import androidx.core.net.toUri
 import com.vayunmathur.clock.R
-import com.vayunmathur.clock.data.ClockDatabase
-import com.vayunmathur.library.room.buildDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,8 +53,7 @@ class AlarmSoundService : Service() {
             scope.launch {
                 val alarm = if (alarmId != -1L) {
                     runCatching {
-                        buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
-                            .alarmDao().get(alarmId)
+                        ClockRepository.get(applicationContext).getAlarm(alarmId)
                     }.getOrNull()
                 } else null
 

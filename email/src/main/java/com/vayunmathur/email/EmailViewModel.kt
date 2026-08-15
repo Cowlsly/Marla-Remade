@@ -8,7 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.email.data.EmailDatabase
+import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.data.EmailSyncState
 import com.vayunmathur.email.data.EmailSyncWorker
 import com.vayunmathur.email.data.OutboxManager
@@ -28,7 +28,8 @@ import kotlinx.serialization.json.jsonPrimitive
 @OptIn(ExperimentalCoroutinesApi::class)
 class EmailViewModel(application: Application) :
     AndroidViewModel(application), MessageListActions, MessageThreadActions {
-    private val dao = EmailDatabase.getInstance(application).emailDao()
+    private val repository = EmailRepository.get(application)
+    private val dao: com.vayunmathur.email.data.EmailDao get() = repository.getDatabase().emailDao()
     private val emailManager = EmailManager()
     private val appContext = application.applicationContext
     

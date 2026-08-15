@@ -25,7 +25,7 @@ import com.vayunmathur.email.EmailManager
 import com.vayunmathur.email.R
 import com.vayunmathur.email.ServerConfig
 import com.vayunmathur.email.data.CredentialCrypto
-import com.vayunmathur.email.data.EmailDatabase
+import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.data.EmailSyncWorker
 import com.vayunmathur.email.data.ImapIdleService
 import com.vayunmathur.email.data.OutlookOAuth
@@ -373,7 +373,7 @@ private suspend fun testAndPersistAccount(
         passwordEncrypted = cipher,
         passwordIv = iv,
     )
-    EmailDatabase.getInstance(context).emailDao().insertAccount(account)
+    EmailRepository.get(context).insertAccount(account)
     EmailSyncWorker.scheduleHourlyNonInboxSync(context)
     EmailSyncWorker.runOneOffSync(context)
     ImapIdleService.start(context)

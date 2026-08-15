@@ -21,9 +21,8 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.passwords.data.Passkey
-import com.vayunmathur.passwords.data.PasskeyDao
 import com.vayunmathur.passwords.data.Password
-import com.vayunmathur.passwords.data.PasswordDao
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.sync.KdbxSyncScheduler
 import com.vayunmathur.passwords.sync.KdbxSyncSettings
 import kotlinx.coroutines.Dispatchers
@@ -50,25 +49,28 @@ import kotlinx.coroutines.withContext
  *  - Edit-form draft state for [Password] (decoupled from composable lifetime).
  *  - Copy-to-clipboard actions, with a [SharedFlow] for one-shot "copied" events.
  *
- * Uses [PasswordDao] directly for all persistence. Exposes the password list
+ * Uses [PasswordRepository] for all persistence. Exposes the password list
  * as a [StateFlow] and provides Composable helpers for per-row reads and
  * editable bindings.
  */
 class PasswordsViewModel(
     application: Application,
-    val passwordDao: PasswordDao,
-    val passkeyDao: PasskeyDao,
+    private val repository: PasswordRepository,
 ) : AndroidViewModel(application), PasswordsActions {
+
+    /** Exposed so SettingsPage can build KdbxBackupFormat without exposing DAOs. */
+    fun buildBackupFormat(): com.vayunmathur.library.util.BackupFormat =
+        KdbxBackupFormat(repository)
 
     // -- Data -------------------------------------------------------------
 
-    val passwords: StateFlow<List<Password>> = passwordDao.getAllFlow().stateIn(
+    val passwords: StateFlow<List<Password>> = repository.passwords.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         emptyList(),
     )
 
-    val passkeys: StateFlow<List<Passkey>> = passkeyDao.getAllFlow().stateIn(
+    val passkeys: StateFlow<List<Passkey>> = repository.passkeys.stateIn(
         viewModelScope,
         SharingStarted.WhileSubscribed(5_000),
         emptyList(),
@@ -76,14 +78,14 @@ class PasswordsViewModel(
 
     fun deletePasskey(passkey: Passkey) {
         viewModelScope.launch(Dispatchers.IO) {
-            passkeyDao.delete(passkey)
+            repository.deletePasskey(passkey)
             requestSync()
         }
     }
 
     fun upsert(password: Password, onSaved: ((Long) -> Unit)? = null) {
         viewModelScope.launch(Dispatchers.IO) {
-            val newId = passwordDao.upsert(password)
+            val newId = repository.upsertPassword(password)
             onSaved?.invoke(newId)
             requestSync()
         }
@@ -91,7 +93,7 @@ class PasswordsViewModel(
 
     override fun delete(password: Password) {
         viewModelScope.launch(Dispatchers.IO) {
-            passwordDao.delete(password)
+            repository.deletePassword(password)
             requestSync()
         }
     }
@@ -291,7 +293,7 @@ class PasswordsViewModel(
                 val websites = rawUrl.split(*urlSeparators)
                     .mapNotNull { it.trim().takeIf(String::isNotEmpty) }
 
-                passwordDao.upsert(
+                repository.upsertPassword(
                     Password(
                         name = name,
                         username = username,
@@ -358,17 +360,16 @@ class PasswordsViewModel(
     }
 }
 
-/** Factory for constructing [PasswordsViewModel] with a [PasswordDao]. */
+/** Factory for constructing [PasswordsViewModel] with a [PasswordRepository]. */
 class PasswordsViewModelFactory(
     private val application: Application,
-    private val passwordDao: PasswordDao,
-    private val passkeyDao: PasskeyDao,
+    private val repository: PasswordRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(PasswordsViewModel::class.java)) {
             "Unexpected ViewModel class: $modelClass"
         }
-        return PasswordsViewModel(application, passwordDao, passkeyDao) as T
+        return PasswordsViewModel(application, repository) as T
     }
 }

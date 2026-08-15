@@ -15,12 +15,8 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.education.content.ContentRepository
-import com.vayunmathur.education.data.DB_NAME
-import com.vayunmathur.education.data.DeadlineDao
-import com.vayunmathur.education.data.EducationDatabase
+import com.vayunmathur.education.data.EducationRepository
 import com.vayunmathur.education.data.Learner
-import com.vayunmathur.education.data.LearnerDao
-import com.vayunmathur.education.data.SkillProgressDao
 import com.vayunmathur.education.ui.CoursePage
 import com.vayunmathur.education.ui.BadgesPage
 import com.vayunmathur.education.ui.HomePage
@@ -43,7 +39,6 @@ import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -52,12 +47,10 @@ import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
     private lateinit var content: ContentRepository
-    private lateinit var learnerDao: LearnerDao
-    private lateinit var skillProgressDao: SkillProgressDao
-    private lateinit var deadlineDao: DeadlineDao
+    private lateinit var repository: EducationRepository
 
     private val viewModel: EducationViewModel by viewModels {
-        EducationViewModelFactory(application, content, learnerDao, skillProgressDao, deadlineDao)
+        EducationViewModelFactory(application, content, repository)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -67,12 +60,9 @@ class MainActivity : ComponentActivity() {
         val ready = mutableStateOf(false)
         lifecycleScope.launch(Dispatchers.IO) {
             content = ContentRepository.load(this@MainActivity)
-            val db = buildDatabase<EducationDatabase>(dbName = DB_NAME)
-            learnerDao = db.learnerDao()
-            skillProgressDao = db.skillProgressDao()
-            deadlineDao = db.deadlineDao()
+            repository = EducationRepository.get(this@MainActivity)
             // Seed the single learner row so onboarding can observe it.
-            if (learnerDao.get() == null) learnerDao.upsert(Learner())
+            if (repository.getLearner() == null) repository.upsertLearner(Learner())
             withContext(Dispatchers.Main) { ready.value = true }
         }
 

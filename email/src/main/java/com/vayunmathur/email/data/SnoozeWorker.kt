@@ -18,7 +18,7 @@ class SnoozeWorker(
 ) : CoroutineWorker(appContext, params) {
 
     override suspend fun doWork(): Result {
-        val dao = EmailDatabase.getInstance(applicationContext).emailDao()
+        val dao = EmailRepository.get(applicationContext).getDatabase().emailDao()
         dao.wakeDueSnoozed(System.currentTimeMillis())
         return Result.success()
     }

@@ -13,9 +13,8 @@ import androidx.work.WorkerParameters
 import androidx.work.ListenableWorker.Result as WorkResult
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.ManyManyMatching
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.music.data.Music
-import com.vayunmathur.music.data.MusicDatabase
+import com.vayunmathur.music.data.MusicRepository
 import com.vayunmathur.music.data.TYPE_ALBUM_ARTIST
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,7 +22,7 @@ import java.util.concurrent.TimeUnit
 
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): WorkResult = withContext(Dispatchers.IO) {
-        val database = applicationContext.buildDatabase<MusicDatabase>()
+        val repo = MusicRepository.get(applicationContext)
 
         val dataStore = DataStoreUtils.getInstance(applicationContext)
         val lastGeneration = dataStore.getLong("last_music_generation") ?: 0L
@@ -31,9 +30,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
         val triggeredUris = triggeredContentUris
         if (triggeredUris.isNotEmpty()) {
-            syncMusic(applicationContext, database, triggeredUris.toList())
+            syncMusic(applicationContext, repo, triggeredUris.toList())
         } else {
-            syncMusic(applicationContext, database, null, lastGeneration)
+            syncMusic(applicationContext, repo, null, lastGeneration)
         }
 
         dataStore.setLong("last_music_generation", currentGeneration)
@@ -74,11 +73,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     }
 }
 
-suspend fun syncMusic(context: Context, database: MusicDatabase, uris: List<Uri>? = null, lastGeneration: Long = 0L) {
-    val musicDao = database.musicDao()
-    val albumDao = database.albumDao()
-    val artistDao = database.artistDao()
-    val matchingDao = database.matchingDao()
+suspend fun syncMusic(context: Context, repo: MusicRepository, uris: List<Uri>? = null, lastGeneration: Long = 0L) {
 
     // 1. Get all current IDs in MediaStore to handle deletions correctly
     val allMediaStoreIds = mutableSetOf<Long>()
@@ -104,13 +99,13 @@ suspend fun syncMusic(context: Context, database: MusicDatabase, uris: List<Uri>
         val triggeredIds = uris.mapNotNull { runCatching { ContentUris.parseId(it) }.getOrNull() }.toSet()
         triggeredIds - allMediaStoreIds
     } else {
-        val localIds = musicDao.getAll().map { it.id }.toSet()
+        val localIds = repo.getAllMusic().map { it.id }.toSet()
         localIds - allMediaStoreIds
     }
 
     if (toDelete.isNotEmpty()) {
         toDelete.chunked(900).forEach { chunk ->
-            musicDao.deleteByIds(chunk)
+            repo.deleteMusicByIds(chunk)
         }
     }
 
@@ -193,10 +188,10 @@ suspend fun syncMusic(context: Context, database: MusicDatabase, uris: List<Uri>
 
     if (uris == null && lastGeneration == 0L) {
         // Full refresh: wipe + reinsert.
-        musicDao.deleteAll()
-        musicDao.upsertAll(musicList)
+        repo.deleteAllMusic()
+        repo.upsertAllMusic(musicList)
     } else {
-        musicDao.upsertAll(musicList)
+        repo.upsertAllMusic(musicList)
         // Incremental trigger that changed nothing relevant: skip the (whole-
         // library) album/artist + matching rebuild below.
         if (musicList.isEmpty() && toDelete.isEmpty()) return
@@ -206,15 +201,15 @@ suspend fun syncMusic(context: Context, database: MusicDatabase, uris: List<Uri>
     val albums = getAlbums(context)
     val artists = getArtists(context)
 
-    albumDao.deleteAll()
-    albumDao.upsertAll(albums)
-    artistDao.deleteAll()
-    artistDao.upsertAll(artists)
+    repo.deleteAllAlbums()
+    repo.upsertAllAlbums(albums)
+    repo.deleteAllArtists()
+    repo.upsertAllArtists(artists)
 
     // 5. Rebuild relationship matchings
-    val allMusic = musicDao.getAll()
-    val allAlbums = albumDao.getAll()
-    val allArtists = artistDao.getAll()
+    val allMusic = repo.getAllMusic()
+    val allAlbums = repo.getAllAlbums()
+    val allArtists = repo.getAllArtists()
 
     Log.d("MusicSyncWorker", "Rebuilding matchings: Music=${allMusic.size}, Albums=${allAlbums.size}, Artists=${allArtists.size}")
 
@@ -222,8 +217,8 @@ suspend fun syncMusic(context: Context, database: MusicDatabase, uris: List<Uri>
     Log.d("MusicSyncWorker", "Rebuilding matchings: ${pairs.size} pairs found")
 
     // Album index (1) < Artist index (2) → album is left, artist is right.
-    matchingDao.deleteByType(TYPE_ALBUM_ARTIST)
-    matchingDao.upsert(pairs.map { (album, artist) ->
+    repo.deleteByType(TYPE_ALBUM_ARTIST)
+    repo.upsertMatchings(pairs.map { (album, artist) ->
         ManyManyMatching(album.id, artist.id, TYPE_ALBUM_ARTIST)
     })
 }

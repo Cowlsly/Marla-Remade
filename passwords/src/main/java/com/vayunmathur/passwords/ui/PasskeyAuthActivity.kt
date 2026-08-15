@@ -15,10 +15,9 @@ import androidx.fragment.app.FragmentActivity
 import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.biometric.unlockDatabaseWithBiometrics
 import com.vayunmathur.library.util.DatabaseHelper
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.passwords.cable.WebAuthnAuthenticator
 import com.vayunmathur.passwords.data.Passkey
-import com.vayunmathur.passwords.data.PasswordDatabase
+import com.vayunmathur.passwords.data.PasswordRepository
 import com.vayunmathur.passwords.util.Cbor
 import com.vayunmathur.passwords.util.PasskeyCredentialService
 import com.vayunmathur.passwords.util.PasskeyUtils
@@ -33,22 +32,21 @@ import java.security.spec.ECGenParameterSpec
 
 class PasskeyAuthActivity : FragmentActivity() {
 
-    private lateinit var db: PasswordDatabase
-    private val passkeyDao by lazy { db.passkeyDao() }
+    private lateinit var repository: PasswordRepository
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
         val helper = DatabaseHelper(applicationContext)
         if (helper.isKeyGenerated()) {
-            db = applicationContext.buildDatabase<PasswordDatabase>()
+            repository = PasswordRepository.get(applicationContext)
             proceedWithFlow()
         } else {
             unlockDatabaseWithBiometrics(
                 activity = this,
                 onSuccess = { passphrase ->
                     helper.storePassphrase(passphrase)
-                    db = applicationContext.buildDatabase<PasswordDatabase>(encryptionPassword = passphrase)
+                    repository = PasswordRepository.get(applicationContext)
                     proceedWithFlow()
                 },
                 onFailure = { message ->
@@ -179,7 +177,7 @@ class PasskeyAuthActivity : FragmentActivity() {
         }.toString()
 
         runBlocking {
-            passkeyDao.upsert(
+            repository.upsertPasskey(
                 Passkey(
                     rpId = rpId,
                     rpName = rpName,
@@ -214,7 +212,7 @@ class PasskeyAuthActivity : FragmentActivity() {
             return
         }
 
-        val passkey = runBlocking { passkeyDao.getByCredentialId(credentialId) } ?: run {
+        val passkey = runBlocking { repository.getPasskeyByCredentialId(credentialId) } ?: run {
             Log.e(TAG, "Passkey not found for credentialId=$credentialId")
             setResult(RESULT_CANCELED)
             return
@@ -256,7 +254,7 @@ class PasskeyAuthActivity : FragmentActivity() {
         }
 
         val assertion = runBlocking {
-            WebAuthnAuthenticator.signAssertion(passkey, clientDataHash, passkeyDao)
+            WebAuthnAuthenticator.signAssertion(passkey, clientDataHash, repository)
         }
         val authenticatorData = assertion.authenticatorData
         val sig = assertion.signature
@@ -315,7 +313,7 @@ class PasskeyAuthActivity : FragmentActivity() {
             setResult(RESULT_CANCELED)
             return
         }
-        val password = runBlocking { db.passwordDao().getById(passwordId) }
+        val password = runBlocking { repository.getPasswordById(passwordId) }
         if (password == null) {
             Log.e(TAG, "Password not found for id=$passwordId")
             setResult(RESULT_CANCELED)
@@ -343,8 +341,7 @@ class PasskeyAuthActivity : FragmentActivity() {
             buildGetCredentialResponse(
                 applicationContext,
                 request.beginGetCredentialOptions,
-                passkeyDao,
-                db.passwordDao(),
+                repository,
             )
         }
 

@@ -33,12 +33,11 @@ import androidx.glance.text.FontWeight
 import androidx.glance.text.Text
 import androidx.glance.text.TextDefaults.defaultTextStyle
 import androidx.glance.text.TextStyle
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.localizedMonthNames
 import com.vayunmathur.library.widgets.DynamicThemeGlance
 import com.vayunmathur.weather.MainActivity
 import com.vayunmathur.weather.R
-import com.vayunmathur.weather.data.WeatherDatabase
+import com.vayunmathur.weather.data.WeatherRepository
 import com.vayunmathur.weather.data.weatherJson
 import com.vayunmathur.weather.network.ForecastResponse
 import com.vayunmathur.weather.util.roundCoord
@@ -113,13 +112,12 @@ class WeatherGlanceWidget : GlanceAppWidget() {
 
     private suspend fun loadWeatherSnapshot(context: Context): WidgetWeather? {
         return try {
-            val db = context.buildDatabase<WeatherDatabase>(dbName = "weather-db")
-            val dao = db.weatherDao()
+            val repo = WeatherRepository.get(context)
             // Prefer the device-current row, fall back to the first pinned location.
-            val location = dao.getCurrentDeviceLocation()
-                ?: dao.getLocations().firstOrNull()
+            val location = repo.getCurrentDeviceLocation()
+                ?: repo.getLocations().firstOrNull()
                 ?: return null
-            val cache = dao.getCache(
+            val cache = repo.getCache(
                 roundCoord(location.latitude),
                 roundCoord(location.longitude),
             ) ?: return null

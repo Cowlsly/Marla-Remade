@@ -13,28 +13,17 @@ import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.youpipe.DEFAULT_PAGE_HOME
 import com.vayunmathur.youpipe.DEFAULT_PAGE_KEY
 import com.vayunmathur.youpipe.data.CachedRelatedVideo
-import com.vayunmathur.youpipe.data.CachedRelatedVideoDao
 import com.vayunmathur.youpipe.data.ChannelPreference
-import com.vayunmathur.youpipe.data.ChannelPreferenceDao
 import com.vayunmathur.youpipe.data.DownloadedVideo
-import com.vayunmathur.youpipe.data.DownloadedVideoDao
 import com.vayunmathur.youpipe.data.HistoryVideo
-import com.vayunmathur.youpipe.data.HistoryVideoDao
 import com.vayunmathur.youpipe.data.KeywordPreference
-import com.vayunmathur.youpipe.data.KeywordPreferenceDao
 import com.vayunmathur.youpipe.data.Playlist
-import com.vayunmathur.youpipe.data.PlaylistDao
 import com.vayunmathur.youpipe.data.PlaylistItem
-import com.vayunmathur.youpipe.data.PlaylistItemDao
-import com.vayunmathur.youpipe.data.RecommendationImpressionDao
 import com.vayunmathur.youpipe.data.RecommendationPreferences
-import com.vayunmathur.youpipe.data.RecommendationPreferencesDao
 import com.vayunmathur.youpipe.data.Subscription
 import com.vayunmathur.youpipe.data.SubscriptionCategory
-import com.vayunmathur.youpipe.data.SubscriptionCategoryDao
-import com.vayunmathur.youpipe.data.SubscriptionDao
+import com.vayunmathur.youpipe.data.SubscriptionRepository
 import com.vayunmathur.youpipe.data.SubscriptionVideo
-import com.vayunmathur.youpipe.data.SubscriptionVideoDao
 import com.vayunmathur.youpipe.ui.AudioStream
 import com.vayunmathur.youpipe.ui.ChannelInfo
 import com.vayunmathur.youpipe.ui.Comment
@@ -105,26 +94,15 @@ import kotlin.time.toKotlinInstant
  */
 class YouPipeViewModel(
     application: Application,
-    private val subscriptionDao: SubscriptionDao,
-    private val subscriptionCategoryDao: SubscriptionCategoryDao,
-    private val subscriptionVideoDao: SubscriptionVideoDao,
-    private val historyVideoDao: HistoryVideoDao,
-    private val downloadedVideoDao: DownloadedVideoDao,
-    private val cachedRelatedVideoDao: CachedRelatedVideoDao,
-    private val recommendationImpressionDao: RecommendationImpressionDao,
-    private val recommendationPreferencesDao: RecommendationPreferencesDao,
-    private val channelPreferenceDao: ChannelPreferenceDao,
-    private val keywordPreferenceDao: KeywordPreferenceDao,
-    private val playlistDao: PlaylistDao,
-    private val playlistItemDao: PlaylistItemDao,
+    private val repository: SubscriptionRepository,
 ) : AndroidViewModel(application) {
 
     // ===================== Data StateFlows =====================
 
-    val subscriptions: StateFlow<List<Subscription>> = subscriptionDao.getAllFlow()
+    val subscriptions: StateFlow<List<Subscription>> = repository.subscriptions
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val subscriptionCategories: StateFlow<List<SubscriptionCategory>> = subscriptionCategoryDao.getAllFlow()
+    val subscriptionCategories: StateFlow<List<SubscriptionCategory>> = repository.subscriptionCategories
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _hasLoadedSubscriptionVideos = MutableStateFlow(false)
@@ -132,39 +110,39 @@ class YouPipeViewModel(
     /** Flips true once the subscription-video DAO emits at least once, so the UI can distinguish "still loading" from "loaded and empty". */
     val hasLoadedSubscriptionVideos: StateFlow<Boolean> = _hasLoadedSubscriptionVideos.asStateFlow()
 
-    val subscriptionVideos: StateFlow<List<SubscriptionVideo>> = subscriptionVideoDao.getAllFlow()
+    val subscriptionVideos: StateFlow<List<SubscriptionVideo>> = repository.subscriptionVideos
         .onEach { _hasLoadedSubscriptionVideos.value = true }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val historyVideos: StateFlow<List<HistoryVideo>> = historyVideoDao.getAllFlow()
+    val historyVideos: StateFlow<List<HistoryVideo>> = repository.historyVideos
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val downloadedVideos: StateFlow<List<DownloadedVideo>> = downloadedVideoDao.getAllFlow()
+    val downloadedVideos: StateFlow<List<DownloadedVideo>> = repository.downloadedVideos
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** All playlists sorted by their persisted [Playlist.position]. */
-    val playlists: StateFlow<List<Playlist>> = playlistDao.getAllFlow()
+    val playlists: StateFlow<List<Playlist>> = repository.playlists
         .map { list -> list.sortedBy { it.position } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Every playlist membership row, for computing membership checks and per-playlist counts. */
-    val allPlaylistItems: StateFlow<List<PlaylistItem>> = playlistItemDao.getAllFlow()
+    val allPlaylistItems: StateFlow<List<PlaylistItem>> = repository.playlistItems
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // ===================== Derived, ready-to-render state =====================
 
     /** History sorted most-recent-first, as shown by the History screen. */
-    val historyVideosByRecency: StateFlow<List<HistoryVideo>> = historyVideoDao.getAllFlow()
+    val historyVideosByRecency: StateFlow<List<HistoryVideo>> = repository.historyVideos
         .map { list -> list.sortedByDescending { it.timestamp } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Downloaded videos sorted most-recent-first, as shown by the Downloads screen. */
-    val downloadedVideosByRecency: StateFlow<List<DownloadedVideo>> = downloadedVideoDao.getAllFlow()
+    val downloadedVideosByRecency: StateFlow<List<DownloadedVideo>> = repository.downloadedVideos
         .map { list -> list.sortedByDescending { it.timestamp } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Distinct subscription-category names, as listed by the Subscriptions screen. */
-    val categoryNames: StateFlow<List<String>> = subscriptionCategoryDao.getAllFlow()
+    val categoryNames: StateFlow<List<String>> = repository.subscriptionCategories
         .map { cats -> cats.map { it.category }.distinct() }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -201,67 +179,67 @@ class YouPipeViewModel(
 
     // ===================== By-id flows =====================
 
-    fun historyById(id: Long): Flow<HistoryVideo?> = historyVideoDao.getByIdFlow(id)
-    fun downloadedById(id: Long): Flow<DownloadedVideo?> = downloadedVideoDao.getByIdFlow(id)
+    fun historyById(id: Long): Flow<HistoryVideo?> = repository.historyById(id)
+    fun downloadedById(id: Long): Flow<DownloadedVideo?> = repository.downloadedById(id)
 
-    fun playlistById(id: Long): Flow<Playlist?> = playlistDao.getByIdFlow(id)
+    fun playlistById(id: Long): Flow<Playlist?> = repository.playlistById(id)
 
     /** The items of [playlistId], sorted by their persisted [PlaylistItem.position]. */
     fun playlistItemsFor(playlistId: Long): Flow<List<PlaylistItem>> =
-        playlistItemDao.getForPlaylistFlow(playlistId).map { list -> list.sortedBy { it.position } }
+        repository.playlistItemsFor(playlistId).map { list -> list.sortedBy { it.position } }
 
     // ===================== Mutations =====================
 
     fun upsertSubscription(item: Subscription) {
-        viewModelScope.launch(Dispatchers.IO) { subscriptionDao.upsert(item) }
+        viewModelScope.launch(Dispatchers.IO) { repository.upsertSubscription(item) }
     }
 
     fun deleteSubscription(item: Subscription) {
-        viewModelScope.launch(Dispatchers.IO) { subscriptionDao.delete(item) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteSubscription(item) }
     }
 
     fun upsertHistoryVideo(item: HistoryVideo) {
-        viewModelScope.launch(Dispatchers.IO) { historyVideoDao.upsert(item) }
+        viewModelScope.launch(Dispatchers.IO) { repository.upsertHistoryVideo(item) }
     }
 
     fun deleteHistoryVideos(ids: List<Long>) {
-        viewModelScope.launch(Dispatchers.IO) { historyVideoDao.deleteByIds(ids) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteHistoryVideosByIds(ids) }
     }
 
     fun clearHistory() {
-        viewModelScope.launch(Dispatchers.IO) { historyVideoDao.clearAll() }
+        viewModelScope.launch(Dispatchers.IO) { repository.clearAllHistory() }
     }
 
     fun deleteDownloadedVideo(item: DownloadedVideo) {
-        viewModelScope.launch(Dispatchers.IO) { downloadedVideoDao.delete(item) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteDownloadedVideo(item) }
     }
 
     // ===================== Playlists =====================
 
     fun createPlaylist(name: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            val maxPosition = playlistDao.getAll().maxOfOrNull { it.position } ?: 0.0
-            playlistDao.upsert(Playlist(name = name, position = maxPosition + 1))
+            val maxPosition = repository.getAllPlaylists().maxOfOrNull { it.position } ?: 0.0
+            repository.upsertPlaylist(Playlist(name = name, position = maxPosition + 1))
         }
     }
 
     /** Deletes a user playlist. Mandatory playlists (Watch later) can never be removed. */
     fun deletePlaylist(playlist: Playlist) {
         if (playlist.mandatory) return
-        viewModelScope.launch(Dispatchers.IO) { playlistDao.delete(playlist) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylist(playlist) }
     }
 
     fun reorderPlaylists(list: List<Playlist>) {
-        viewModelScope.launch(Dispatchers.IO) { playlistDao.upsertAll(list) }
+        viewModelScope.launch(Dispatchers.IO) { repository.upsertPlaylists(list) }
     }
 
     /** Adds [video] to [playlistId], deduped by videoID; a no-op if already present. */
     fun addVideoToPlaylist(playlistId: Long, video: VideoInfo) {
         viewModelScope.launch(Dispatchers.IO) {
-            val existing = playlistItemDao.getForPlaylist(playlistId)
+            val existing = repository.getPlaylistItemsForPlaylist(playlistId)
             if (existing.any { it.videoItem.videoID == video.videoID }) return@launch
             val maxPosition = existing.maxOfOrNull { it.position } ?: 0.0
-            playlistItemDao.upsert(
+            repository.upsertPlaylistItem(
                 PlaylistItem(
                     playlistId = playlistId,
                     videoItem = video,
@@ -273,15 +251,15 @@ class YouPipeViewModel(
     }
 
     fun removeFromPlaylist(item: PlaylistItem) {
-        viewModelScope.launch(Dispatchers.IO) { playlistItemDao.delete(item) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deletePlaylistItem(item) }
     }
 
     /** Creates a playlist and immediately adds [video] to it (the dialog's "New playlist" option). */
     fun createPlaylistAndAddVideo(name: String, video: VideoInfo) {
         viewModelScope.launch(Dispatchers.IO) {
-            val maxPosition = playlistDao.getAll().maxOfOrNull { it.position } ?: 0.0
-            val id = playlistDao.upsert(Playlist(name = name, position = maxPosition + 1))
-            playlistItemDao.upsert(
+            val maxPosition = repository.getAllPlaylists().maxOfOrNull { it.position } ?: 0.0
+            val id = repository.upsertPlaylist(Playlist(name = name, position = maxPosition + 1))
+            repository.upsertPlaylistItem(
                 PlaylistItem(
                     playlistId = id,
                     videoItem = video,
@@ -293,12 +271,12 @@ class YouPipeViewModel(
     }
 
     fun reorderPlaylistItems(list: List<PlaylistItem>) {
-        viewModelScope.launch(Dispatchers.IO) { playlistItemDao.upsertAll(list) }
+        viewModelScope.launch(Dispatchers.IO) { repository.upsertPlaylistItems(list) }
     }
 
     suspend fun replaceCategory(originalCategoryName: String?, categoryName: String, ids: List<Long>) {
         withContext(Dispatchers.IO) {
-            subscriptionCategoryDao.replaceCategory(originalCategoryName, categoryName, ids)
+            repository.replaceCategory(originalCategoryName, categoryName, ids)
         }
     }
 
@@ -312,19 +290,19 @@ class YouPipeViewModel(
 
     /** User-facing recommendation controls, defaulting to today's balanced behavior. */
     val recommendationPreferences: StateFlow<RecommendationPreferences> =
-        recommendationPreferencesDao.getFlow()
+        repository.recommendationPreferencesFlow
             .map { it ?: RecommendationPreferences() }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), RecommendationPreferences())
 
-    val channelPreferences: StateFlow<List<ChannelPreference>> = channelPreferenceDao.getAllFlow()
+    val channelPreferences: StateFlow<List<ChannelPreference>> = repository.channelPreferences
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val keywordPreferences: StateFlow<List<KeywordPreference>> = keywordPreferenceDao.getAllFlow()
+    val keywordPreferences: StateFlow<List<KeywordPreference>> = repository.keywordPreferences
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** The inferred interest profile, for the editable interest-management screen. */
     val interestProfile: StateFlow<InterestProfile> =
-        combine(historyVideoDao.getAllFlow(), recommendationPreferences) { history, prefs ->
+        combine(repository.historyVideos, recommendationPreferences) { history, prefs ->
             buildInterestProfile(history, Clock.System.now(), RecommendationWeights.fromPreferences(prefs))
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), InterestProfile(emptyMap(), emptyMap()))
 
@@ -337,12 +315,12 @@ class YouPipeViewModel(
             try {
                 // Read directly from the DAOs so a cold Search screen (with no active
                 // collector on the history/sub flows) still sees the persisted data.
-                val history = historyVideoDao.getAll()
-                val subs = subscriptionDao.getAll()
+                val history = repository.getAllHistoryVideos()
+                val subs = repository.getAllSubscriptions()
                 val subNames = subs.map { it.name.lowercase() }.toSet()
                 val now = Clock.System.now()
 
-                val prefs = recommendationPreferencesDao.get() ?: RecommendationPreferences()
+                val prefs = repository.getRecommendationPreferences() ?: RecommendationPreferences()
                 val weights = RecommendationWeights.fromPreferences(prefs)
                 val filters = ContentFilters(
                     hideShorts = prefs.hideShorts,
@@ -352,12 +330,12 @@ class YouPipeViewModel(
                     maxDurationSec = prefs.maxDurationSec,
                 )
 
-                val channelPrefs = channelPreferenceDao.getAll().associate {
+                val channelPrefs = repository.getAllChannelPreferences().associate {
                     it.channelKey to ChannelPref(it.multiplier, it.blocked, it.pinned)
                 }
-                val mutedKeywords = keywordPreferenceDao.getAll().filter { it.muted }.map { it.keyword }.toSet()
+                val mutedKeywords = repository.getAllKeywordPreferences().filter { it.muted }.map { it.keyword }.toSet()
 
-                val impressions = recommendationImpressionDao.getAll()
+                val impressions = repository.getAllRecommendationImpressions()
                 val watchedIds = history.map { it.id }.toSet()
                 val channelStats = impressions.groupBy { it.channelKey }.mapValues { (_, imps) ->
                     ChannelImpressionStat(
@@ -396,7 +374,7 @@ class YouPipeViewModel(
     private suspend fun recordImpressions(ranked: List<RankedVideo>, now: Instant) {
         try {
             ranked.forEach { rv ->
-                recommendationImpressionDao.recordImpression(
+                repository.recordRecommendationImpression(
                     rv.video.videoID, rv.video.author.lowercase(), rv.source.name, now,
                 )
             }
@@ -422,7 +400,7 @@ class YouPipeViewModel(
         val relatedDeferred = async(Dispatchers.IO) {
             if (!prefs.sourceRelated) return@async emptyList()
             try {
-                cachedRelatedVideoDao.getAll().map { item ->
+                repository.getAllCachedRelatedVideos().map { item ->
                     Candidate(
                         item.videoItem,
                         RecSource.RELATED,
@@ -445,7 +423,7 @@ class YouPipeViewModel(
         }
 
         val subscriptionCandidates = if (prefs.sourceSubscription) {
-            subscriptionVideoDao.getAll().map {
+            repository.getAllSubscriptionVideos().map {
                 Candidate(
                     VideoInfo(it.name, it.id, it.duration, it.views, it.uploadDate, it.thumbnailURL, it.author),
                     RecSource.SUBSCRIPTION,
@@ -540,8 +518,8 @@ class YouPipeViewModel(
 
     private fun updatePrefs(transform: (RecommendationPreferences) -> RecommendationPreferences) {
         viewModelScope.launch(Dispatchers.IO) {
-            val current = recommendationPreferencesDao.get() ?: RecommendationPreferences()
-            recommendationPreferencesDao.upsert(transform(current))
+            val current = repository.getRecommendationPreferences() ?: RecommendationPreferences()
+            repository.upsertRecommendationPreferences(transform(current))
         }
     }
 
@@ -579,8 +557,8 @@ class YouPipeViewModel(
     private fun updateChannelPref(channelKey: String, transform: (ChannelPreference) -> ChannelPreference) {
         val key = channelKey.lowercase()
         viewModelScope.launch(Dispatchers.IO) {
-            val current = channelPreferenceDao.get(key) ?: ChannelPreference(key)
-            channelPreferenceDao.upsert(transform(current))
+            val current = repository.getChannelPreference(key) ?: ChannelPreference(key)
+            repository.upsertChannelPreference(transform(current))
         }
     }
 
@@ -590,17 +568,17 @@ class YouPipeViewModel(
     fun pinChannel(channelKey: String) = updateChannelPref(channelKey) { it.copy(pinned = true) }
 
     fun clearChannelPreference(channelKey: String) {
-        viewModelScope.launch(Dispatchers.IO) { channelPreferenceDao.delete(channelKey.lowercase()) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteChannelPreference(channelKey.lowercase()) }
     }
 
     fun muteKeyword(keyword: String) {
         viewModelScope.launch(Dispatchers.IO) {
-            keywordPreferenceDao.upsert(KeywordPreference(keyword.lowercase(), muted = true))
+            repository.upsertKeywordPreference(KeywordPreference(keyword.lowercase(), muted = true))
         }
     }
 
     fun unmuteKeyword(keyword: String) {
-        viewModelScope.launch(Dispatchers.IO) { keywordPreferenceDao.delete(keyword.lowercase()) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteKeywordPreference(keyword.lowercase()) }
     }
 
     /**
@@ -615,10 +593,10 @@ class YouPipeViewModel(
     /** Clears all learned/overridden recommendation state and resets the dials. */
     fun resetAlgorithm() {
         viewModelScope.launch(Dispatchers.IO) {
-            recommendationImpressionDao.clearAll()
-            channelPreferenceDao.clearAll()
-            keywordPreferenceDao.clearAll()
-            recommendationPreferencesDao.clearAll()
+            repository.clearAllRecommendationImpressions()
+            repository.clearAllChannelPreferences()
+            repository.clearAllKeywordPreferences()
+            repository.clearAllRecommendationPreferences()
             trendingCache = null
         }
     }
@@ -708,7 +686,7 @@ class YouPipeViewModel(
             try {
                 val info = getChannelInfo(channelID)
                 _channelState.update { it.copy(info = info) }
-                val hidePaid = (recommendationPreferencesDao.get() ?: RecommendationPreferences()).hidePaid
+                val hidePaid = (repository.getRecommendationPreferences() ?: RecommendationPreferences()).hidePaid
                 val channelVideos = mutableListOf<VideoInfo>()
                 getChannelVideos(info.channelID).forEach { video ->
                     if (hidePaid && video.isPaid) return@forEach
@@ -900,7 +878,7 @@ class YouPipeViewModel(
                     fetchDeArrowForVideos(related.map { it.videoID })
 
                     if (related.isNotEmpty()) {
-                        cachedRelatedVideoDao.upsertAll(related.map {
+                        repository.upsertCachedRelatedVideos(related.map {
                             CachedRelatedVideo(
                                 sourceVideoID = videoID,
                                 videoItem = it,
@@ -1210,8 +1188,8 @@ class YouPipeViewModel(
                     entry = zipInputStream.nextEntry
                 }
 
-                if (subs.isNotEmpty()) subscriptionDao.upsertAll(subs)
-                if (history.isNotEmpty()) historyVideoDao.upsertAll(history)
+                if (subs.isNotEmpty()) repository.upsertSubscriptions(subs)
+                if (history.isNotEmpty()) repository.upsertHistoryVideos(history)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error importing YouTube Takeout", e)
@@ -1225,7 +1203,7 @@ class YouPipeViewModel(
         val ctx = getApplication<Application>()
         viewModelScope.launch(Dispatchers.IO) {
             try {
-                val subs = subscriptionDao.getAll()
+                val subs = repository.getAllSubscriptions()
                 val json = Json.encodeToString(subs)
                 ctx.contentResolver.openOutputStream(uri)?.use { it.write(json.toByteArray()) }
             } catch (e: Exception) {
@@ -1241,8 +1219,8 @@ class YouPipeViewModel(
             try {
                 val json = ctx.contentResolver.openInputStream(uri)!!.bufferedReader().readText()
                 val subs = Json.decodeFromString<List<Subscription>>(json)
-                subscriptionDao.clearAll()
-                subscriptionDao.upsertAll(subs)
+                repository.clearAllSubscriptions()
+                repository.upsertSubscriptions(subs)
             } catch (e: Exception) {
                 Log.e(TAG, "Error restoring subscriptions", e)
             }
@@ -1274,8 +1252,8 @@ class YouPipeViewModel(
                         }
                         _importProgress.value = (index + 1).toFloat() / total
                     }
-                    subscriptionDao.clearAll()
-                    subscriptionDao.upsertAll(subs)
+                    repository.clearAllSubscriptions()
+                    repository.upsertSubscriptions(subs)
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error importing NewPipe subscriptions", e)
@@ -1296,13 +1274,13 @@ class YouPipeViewModel(
         }
         viewModelScope.launch(Dispatchers.IO) {
             val cutoff = Clock.System.now() - 30.days
-            cachedRelatedVideoDao.deleteOlderThan(cutoff)
-            recommendationImpressionDao.deleteOlderThan(cutoff)
+            repository.deleteCachedRelatedOlderThan(cutoff)
+            repository.deleteRecommendationImpressionsOlderThan(cutoff)
         }
         // Seed the mandatory "Watch later" playlist once (covers fresh installs and upgrades).
         viewModelScope.launch(Dispatchers.IO) {
-            if (playlistDao.getAll().none { it.mandatory }) {
-                playlistDao.upsert(Playlist(name = "Watch later", position = 0.0, mandatory = true))
+            if (repository.getAllPlaylists().none { it.mandatory }) {
+                repository.upsertPlaylist(Playlist(name = "Watch later", position = 0.0, mandatory = true))
             }
         }
     }
@@ -1427,21 +1405,10 @@ private fun codecPriority(codec: String): Int = when (codec) {
     "av1" -> 3; "vp9" -> 2; "avc" -> 1; else -> 0
 }
 
-/** Factory for constructing [YouPipeViewModel] with the DAOs. */
+/** Factory for constructing [YouPipeViewModel] with the repository. */
 class YouPipeViewModelFactory(
     private val application: Application,
-    private val subscriptionDao: SubscriptionDao,
-    private val subscriptionCategoryDao: SubscriptionCategoryDao,
-    private val subscriptionVideoDao: SubscriptionVideoDao,
-    private val historyVideoDao: HistoryVideoDao,
-    private val downloadedVideoDao: DownloadedVideoDao,
-    private val cachedRelatedVideoDao: CachedRelatedVideoDao,
-    private val recommendationImpressionDao: RecommendationImpressionDao,
-    private val recommendationPreferencesDao: RecommendationPreferencesDao,
-    private val channelPreferenceDao: ChannelPreferenceDao,
-    private val keywordPreferenceDao: KeywordPreferenceDao,
-    private val playlistDao: PlaylistDao,
-    private val playlistItemDao: PlaylistItemDao,
+    private val repository: SubscriptionRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
@@ -1450,18 +1417,7 @@ class YouPipeViewModelFactory(
         }
         return YouPipeViewModel(
             application,
-            subscriptionDao,
-            subscriptionCategoryDao,
-            subscriptionVideoDao,
-            historyVideoDao,
-            downloadedVideoDao,
-            cachedRelatedVideoDao,
-            recommendationImpressionDao,
-            recommendationPreferencesDao,
-            channelPreferenceDao,
-            keywordPreferenceDao,
-            playlistDao,
-            playlistItemDao,
+            repository,
         ) as T
     }
 }

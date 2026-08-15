@@ -30,7 +30,6 @@ import com.vayunmathur.appstore.data.play.PlayRepository
 import com.vayunmathur.appstore.data.security.ApkCertificates
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
@@ -60,10 +59,7 @@ class UpdateCheckWorker(
         // WorkManager can cold-start the process without MainActivity initializing TLS.
         NetworkClient.init(context, TrustBundle.STANDARD)
         val scope = CoroutineScope(SupervisorJob())
-        val db = context.buildDatabase<AppDatabase>(
-            dbName = DB_NAME,
-            migrations = AppDatabase.migrations,
-        )
+        val db = AppStoreDatabaseRepository.get(context).database
         val catalog = CatalogRepository(context, db, scope)
         val installedRepo = InstalledAppsRepository(context)
         val play = PlayRepository(context)

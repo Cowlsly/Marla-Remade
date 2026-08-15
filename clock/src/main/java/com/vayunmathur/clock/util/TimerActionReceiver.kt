@@ -8,9 +8,8 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import com.vayunmathur.clock.R
-import com.vayunmathur.clock.data.ClockDatabase
+import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.library.room.buildDatabase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -26,8 +25,8 @@ class TimerActionReceiver : BroadcastReceiver() {
 
         CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
             try {
-                val db = context.buildDatabase<ClockDatabase>(useDeviceProtectedStorage = true)
-                val timer = db.timerDao().get(timerId)
+                val repository = ClockRepository.get(context)
+                val timer = repository.getTimer(timerId)
                 val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
                 val am = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
                 val notificationId = timerId.hashCode()
@@ -42,7 +41,7 @@ class TimerActionReceiver : BroadcastReceiver() {
                             timer.remainingLength
                         }
                         val pausedTimer = timer.copy(isRunning = false, remainingLength = remaining.coerceAtLeast(Duration.ZERO))
-                        db.timerDao().upsert(pausedTimer)
+                        repository.upsertTimer(pausedTimer)
                         
                         // Cancel alarm
                         val alarmIntent = Intent(context, TimerReceiver::class.java).apply {
@@ -59,12 +58,12 @@ class TimerActionReceiver : BroadcastReceiver() {
                     ACTION_RESUME -> {
                         // Resume the timer: update DB with new start time, reschedule notification
                         val resumedTimer = timer.copy(isRunning = true, remainingStartTime = Clock.System.now())
-                        db.timerDao().upsert(resumedTimer)
+                        repository.upsertTimer(resumedTimer)
                         com.vayunmathur.clock.ui.sendTimerNotification(context, resumedTimer, true)
                     }
                     ACTION_CANCEL -> {
                         // Delete timer, cancel alarm and notification
-                        db.timerDao().delete(timer)
+                        repository.deleteTimer(timer)
                         val alarmIntent = Intent(context, TimerReceiver::class.java).apply {
                             putExtra("timer_id", timerId)
                             putExtra("timer_name", timer.name)
@@ -83,7 +82,7 @@ class TimerActionReceiver : BroadcastReceiver() {
                             remainingLength = timer.totalLength,
                             remainingStartTime = Clock.System.now()
                         )
-                        db.timerDao().upsert(resetTimer)
+                        repository.upsertTimer(resetTimer)
                         
                         val alarmIntent = Intent(context, TimerReceiver::class.java).apply {
                             putExtra("timer_id", timerId)

@@ -82,7 +82,7 @@ fun SettingsPage(
             navigationIcon = { IconNavigation(backStack) },
             actions = {
                 BackupButtons(
-                    format = KdbxBackupFormat(passwordsViewModel.passwordDao, passwordsViewModel.passkeyDao),
+                    format = passwordsViewModel.buildBackupFormat(),
                 )
             },
         )

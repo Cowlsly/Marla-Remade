@@ -50,7 +50,7 @@ import androidx.health.connect.client.records.Vo2MaxRecord
 import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.records.WheelchairPushesRecord
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.health.data.HealthDatabase
+import com.vayunmathur.health.data.HealthRepository
 import com.vayunmathur.health.ui.ActivityPage
 import com.vayunmathur.health.ui.BarChartDetails
 import com.vayunmathur.health.ui.BodyPage
@@ -69,7 +69,6 @@ import com.vayunmathur.health.util.HealthViewModel
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionWall
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
 import kotlinx.serialization.Serializable
 
@@ -113,8 +112,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         val healthConnectClient = HealthConnectClient.getOrCreate(this)
-        val db = buildDatabase<HealthDatabase>()
-        HealthAPI.init(healthConnectClient, this, db)
+        val repository = HealthRepository.get(this)
+        HealthAPI.init(healthConnectClient, this, repository)
         FoodDatabase.init(this)
         setContent {
             DynamicTheme {

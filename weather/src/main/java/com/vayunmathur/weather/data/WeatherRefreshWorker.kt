@@ -8,7 +8,6 @@ import androidx.work.ExistingPeriodicWorkPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.weather.glance.WeatherBlobGlanceWidget
 import com.vayunmathur.weather.glance.WeatherGlanceWidget
 import com.vayunmathur.weather.network.WeatherApi
@@ -21,9 +20,8 @@ class WeatherRefreshWorker(
 
     override suspend fun doWork(): Result {
         return try {
-            val db = context.buildDatabase<WeatherDatabase>(dbName = "weather-db")
-            val dao = db.weatherDao()
-            val locations = dao.getLocations()
+            val repo = WeatherRepository.get(context)
+            val locations = repo.getLocations()
 
             for (location in locations) {
                 try {
@@ -31,7 +29,7 @@ class WeatherRefreshWorker(
                     val airQuality = runCatching {
                         WeatherApi.airQuality(location.latitude, location.longitude)
                     }.getOrNull()
-                    dao.writeForecastCache(location.latitude, location.longitude, forecast, airQuality)
+                    repo.writeForecastCache(location.latitude, location.longitude, forecast, airQuality)
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to refresh weather for ${location.name}: ${e.message}")
                 }

@@ -10,7 +10,6 @@ import androidx.room.OnConflictStrategy
 import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.RoomDatabase
-import com.vayunmathur.library.room.buildDatabase
 
 @Entity(tableName = "signal_sessions", primaryKeys = ["address", "deviceId"])
 data class SignalSessionEntity(
@@ -419,17 +418,7 @@ abstract class SignalDatabase : RoomDatabase() {
     abstract fun backupChatItemDao(): SignalBackupChatItemDao
 
     companion object {
-        @Volatile
-        private var instance: SignalDatabase? = null
-
-        fun getInstance(context: Context): SignalDatabase {
-            instance?.let { return it }
-            return synchronized(this) {
-                instance ?: context.applicationContext.buildDatabase<SignalDatabase>(
-                    dbName = "signal_protocol.db",
-                )
-                    .also { instance = it }
-            }
-        }
+        fun getInstance(context: Context): SignalDatabase =
+            SignalProtocolRepository.get(context).database()
     }
 }

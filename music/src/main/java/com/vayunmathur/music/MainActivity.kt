@@ -13,10 +13,9 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.music.data.MusicDatabase
 import com.vayunmathur.music.R
+import com.vayunmathur.music.data.MusicRepository
 import com.vayunmathur.music.ui.AlbumDetailScreen
 import com.vayunmathur.music.ui.ArtistDetailScreen
 import com.vayunmathur.music.ui.MusicTabsScreen
@@ -29,15 +28,13 @@ import com.vayunmathur.music.util.MusicViewModelFactory
 import com.vayunmathur.music.util.PlaybackManager
 
 class MainActivity : ComponentActivity() {
-    private lateinit var db: MusicDatabase
     private val musicViewModel: MusicViewModel by viewModels {
-        MusicViewModelFactory(application, db, PlaybackManager.getInstance(this))
+        MusicViewModelFactory(application, MusicRepository.get(application), PlaybackManager.getInstance(this))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        db = buildDatabase<MusicDatabase>()
         setContent {
             DynamicTheme {
                 val (permissions, message) = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)

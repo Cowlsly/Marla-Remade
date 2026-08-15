@@ -5,9 +5,8 @@ import android.util.Log
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.work.startRepeatedTask
-import com.vayunmathur.youpipe.data.SubscriptionDatabase
+import com.vayunmathur.youpipe.data.SubscriptionRepository
 import com.vayunmathur.youpipe.data.SubscriptionVideo
 import kotlin.time.Duration.Companion.minutes
 import kotlinx.coroutines.CancellationException
@@ -21,11 +20,9 @@ class SubscriptionFetchTask(context: Context, params: WorkerParameters) :
     override suspend fun doWork(): Result {
         Log.d("SubscriptionFetchTask", "Starting...")
         return try {
-            val db = applicationContext.buildDatabase<SubscriptionDatabase>()
-            val subscriptionDao = db.subscriptionDao()
-            val subscriptionVideoDao = db.subscriptionVideoDao()
+            val repository = SubscriptionRepository.get(applicationContext)
 
-            val subscriptions = subscriptionDao.getAll()
+            val subscriptions = repository.getAllSubscriptions()
             Log.d("SubscriptionFetchTask", "Fetched ${subscriptions.size} subscriptions")
 
             subscriptions.forEachIndexed { index, sub ->
@@ -50,7 +47,7 @@ class SubscriptionFetchTask(context: Context, params: WorkerParameters) :
                                 )
                             }
 
-                    subscriptionVideoDao.upsertAll(videosFromSub)
+                    repository.upsertSubscriptionVideos(videosFromSub)
                 } catch (e: Exception) {
                     Log.e("SubscriptionFetchTask", "Failed to fetch videos for ${sub.name}", e)
                     if (e is java.nio.channels.UnresolvedAddressException ||

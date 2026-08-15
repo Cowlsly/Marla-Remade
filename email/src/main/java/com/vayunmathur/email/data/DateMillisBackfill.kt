@@ -18,7 +18,7 @@ object DateMillisBackfill {
 
     fun runIfNeeded(scope: CoroutineScope, context: Context) {
         scope.launch(Dispatchers.IO) {
-            val dao = EmailDatabase.getInstance(context).emailDao()
+            val dao = EmailRepository.get(context).getDatabase().emailDao()
             // Java's `Date.toString()` format, e.g. "Wed Nov 27 14:30:00 PST 2024".
             val fmt = SimpleDateFormat("EEE MMM dd HH:mm:ss zzz yyyy", Locale.US)
             var batch = dao.getRowsWithZeroDateMillis()

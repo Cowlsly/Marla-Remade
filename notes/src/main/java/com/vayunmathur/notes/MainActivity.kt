@@ -22,14 +22,9 @@ import com.vayunmathur.library.util.ListDetailPage
 import com.vayunmathur.library.util.ListPage
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.library.room.buildDatabase
-import com.vayunmathur.library.util.closeCachedDatabase
 import com.vayunmathur.library.util.onFileDrop
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.notes.data.DB_NAME
-import com.vayunmathur.notes.data.Note
-import com.vayunmathur.notes.data.NoteDao
-import com.vayunmathur.notes.data.NoteDatabase
+import com.vayunmathur.notes.data.NotesRepository
 import com.vayunmathur.notes.ui.NotePage
 import com.vayunmathur.notes.ui.NotesListPage
 import com.vayunmathur.notes.ui.ExternalNoteScreen
@@ -41,9 +36,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
-    private lateinit var noteDao: NoteDao
+    private lateinit var notesRepository: NotesRepository
     private val notesViewModel: NotesViewModel by viewModels {
-        NotesViewModelFactory(application, noteDao)
+        NotesViewModelFactory(application, notesRepository)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -52,9 +47,9 @@ class MainActivity : ComponentActivity() {
 
         val ready = mutableStateOf(false)
         lifecycleScope.launch(Dispatchers.IO) {
-            val legacyNotes = readAndClearLegacyNotes()
-            noteDao = buildDatabase<NoteDatabase>(dbName = DB_NAME).noteDao()
-            if (legacyNotes.isNotEmpty()) noteDao.upsertAll(legacyNotes)
+            notesRepository = NotesRepository.get(applicationContext)
+            val legacyNotes = notesRepository.readAndClearLegacyNotes()
+            if (legacyNotes.isNotEmpty()) notesRepository.upsertAll(legacyNotes)
             withContext(Dispatchers.Main) {
                 handleIntent(intent)
                 ready.value = true
@@ -72,27 +67,9 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    /**
-     * Reads notes from the legacy "passwords-db" (the notes app's former
-     * database name) off the main thread, then removes it. Must run before the
-     * current database is built because [buildDatabase] caches by class.
-     */
-    private suspend fun readAndClearLegacyNotes(): List<Note> {
-        if (!getDatabasePath(LEGACY_DB_NAME).exists()) return emptyList()
-        return try {
-            buildDatabase<NoteDatabase>().noteDao().getAll()
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to read legacy notes database", e)
-            emptyList()
-        } finally {
-            closeCachedDatabase<NoteDatabase>()
-            deleteDatabase(LEGACY_DB_NAME)
-        }
-    }
-
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
-        if (::noteDao.isInitialized) handleIntent(intent)
+        if (::notesRepository.isInitialized) handleIntent(intent)
     }
 
     /**
@@ -107,7 +84,6 @@ class MainActivity : ComponentActivity() {
 
     companion object {
         private const val TAG = "NotesMainActivity"
-        private const val LEGACY_DB_NAME = "passwords-db"
     }
 }
 

@@ -11,7 +11,6 @@ import androidx.room.Query
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.util.DatabaseMigrations
 
 /**
@@ -55,21 +54,10 @@ abstract class SignalDatabase : RoomDatabase() {
     abstract fun callLogDao(): SignalCallLogDao
 
     companion object : DatabaseMigrations {
-        @Volatile
-        private var INSTANCE: SignalDatabase? = null
-
         override val migrations = emptyList<androidx.room.migration.Migration>()
 
-        fun getDatabase(context: Context): SignalDatabase {
-            return INSTANCE ?: synchronized(this) {
-                val instance = context.applicationContext.buildDatabase<SignalDatabase>(
-                    migrations = migrations,
-                    dbName = "communicate_signal.db"
-                )
-                INSTANCE = instance
-                instance
-            }
-        }
+        fun getDatabase(context: Context): SignalDatabase =
+            SignalRepository.get(context).database()
     }
 }
 

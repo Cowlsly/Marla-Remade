@@ -25,7 +25,6 @@ import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.ListenableWorker.Result as WorkResult
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ocr.OcrEngine
 import com.vayunmathur.sdk.openassistant.EmbeddingImageFailedException
 import com.vayunmathur.sdk.openassistant.EmbeddingModelDownloadingException
@@ -33,8 +32,7 @@ import com.vayunmathur.sdk.openassistant.OpenAssistant
 import com.vayunmathur.photos.data.Person
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.data.PhotoFace
-import com.vayunmathur.photos.data.FaceDao
-import com.vayunmathur.photos.data.PhotoDatabase
+import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.data.VideoData
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
@@ -55,7 +53,7 @@ import java.util.concurrent.TimeUnit
 class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): WorkResult = withContext(Dispatchers.IO) {
         setForeground(createForegroundInfo())
-        val database = applicationContext.buildDatabase<PhotoDatabase>()
+        val repository = PhotosRepository.get(applicationContext)
         val dataStore = DataStoreUtils.getInstance(applicationContext)
         
         val triggeredUris = triggeredContentUris
@@ -63,17 +61,17 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         val currentGeneration = MediaStore.getGeneration(applicationContext, MediaStore.VOLUME_EXTERNAL)
 
         if (triggeredUris.isNotEmpty()) {
-            syncPhotos(applicationContext, database, triggeredUris.toList())
+            syncPhotos(applicationContext, repository, triggeredUris.toList())
         } else {
             // Rows predating the mimeType column are invisible to an incremental
             // scan (their GENERATION_MODIFIED hasn't moved), so scan everything
             // until they're all backfilled.
-            val needsMimeBackfill = database.photoDao().countMissingMimeType() > 0
-            syncPhotos(applicationContext, database, null, if (needsMimeBackfill) 0L else lastGeneration)
+            val needsMimeBackfill = repository.countMissingMimeType() > 0
+            syncPhotos(applicationContext, repository, null, if (needsMimeBackfill) 0L else lastGeneration)
         }
         
-        val photos = database.photoDao().getAll()
-        setExifData(photos, database, applicationContext)
+        val photos = repository.getAll()
+        setExifData(photos, repository, applicationContext)
         
         // OCR and face grouping are both always on (no opt-in). Each worker is
         // inert if its data/model assets are missing.
@@ -135,8 +133,8 @@ class OCRWorker(context: Context, params: WorkerParameters) : CoroutineWorker(co
     override suspend fun doWork(): WorkResult = withContext(Dispatchers.IO) {
         ocrMutex.withLock {
             setForeground(createForegroundInfo())
-            val database = applicationContext.buildDatabase<PhotoDatabase>()
-            runOCR(database, applicationContext)
+            val repository = PhotosRepository.get(applicationContext)
+            runOCR(repository, applicationContext)
             WorkResult.success()
         }
     }
@@ -165,10 +163,9 @@ class OCRWorker(context: Context, params: WorkerParameters) : CoroutineWorker(co
     }
 }
 
-suspend fun syncPhotos(context: Context, database: PhotoDatabase, uris: List<Uri>? = null, lastGeneration: Long = 0L) {
-    val photoDao = database.photoDao()
+suspend fun syncPhotos(context: Context, repository: PhotosRepository, uris: List<Uri>? = null, lastGeneration: Long = 0L) {
     // Single read of the local DB reused for both deletion detection and update diffing.
-    val existing = photoDao.getAll()
+    val existing = repository.getAll()
     // 1. Get all IDs currently in MediaStore to detect deletions
     val allMediaStoreIds = mutableSetOf<Long>()
     fun collectIds(baseUri: Uri) {
@@ -204,7 +201,7 @@ suspend fun syncPhotos(context: Context, database: PhotoDatabase, uris: List<Uri
 
     if (toDelete.isNotEmpty()) {
         toDelete.chunked(900).forEach { chunk ->
-            photoDao.deleteByIds(chunk)
+            repository.deleteByIds(chunk)
         }
     }
 
@@ -290,7 +287,7 @@ suspend fun syncPhotos(context: Context, database: PhotoDatabase, uris: List<Uri
     }
 
     if (newOrUpdatedPhotos.isNotEmpty()) {
-        photoDao.upsertAll(newOrUpdatedPhotos)
+        repository.upsertAll(newOrUpdatedPhotos)
     }
 }
 
@@ -314,8 +311,7 @@ private fun Context.syncForegroundInfo(
     return ForegroundInfo(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 }
 
-suspend fun setExifData(photos: List<Photo>, database: PhotoDatabase, context: Context) = coroutineScope {
-    val photoDao = database.photoDao()
+suspend fun setExifData(photos: List<Photo>, repository: PhotosRepository, context: Context) = coroutineScope {
     val ps = photos.filter { !it.exifSet }.sortedByDescending { it.date }
     ps.chunked(50).forEach { photosChunk ->
         val newPhotos = photosChunk.map { photo ->
@@ -342,7 +338,7 @@ suspend fun setExifData(photos: List<Photo>, database: PhotoDatabase, context: C
                 }
             }
         }.awaitAll()
-        photoDao.upsertAll(newPhotos)
+        repository.upsertAll(newPhotos)
     }
 }
 
@@ -365,9 +361,8 @@ private suspend fun coolDownBetweenBatches(processed: Int, tag: String) {
 private const val BATCH_COOLDOWN_EVERY = 20
 private const val BATCH_COOLDOWN_MS = 5_000L
 
-suspend fun runOCR(database: PhotoDatabase, context: Context) = coroutineScope {
-    val photoDao = database.photoDao()
-    val photos = photoDao.getUnscannedForOCR().sortedByDescending { it.date }
+suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineScope {
+    val photos = repository.getUnscannedForOCR().sortedByDescending { it.date }
     if (photos.isEmpty()) return@coroutineScope
 
     val ocrEngine = OcrEngine(context)
@@ -385,7 +380,7 @@ suspend fun runOCR(database: PhotoDatabase, context: Context) = coroutineScope {
             // Skip tiny images (icons/thumbnails); mark scanned so we don't retry.
             val largestDim = maxOf(photo.width, photo.height)
             if (largestDim in 1 until MIN_OCR_DIM) {
-                photoDao.upsertAll(listOf(photo.copy(ocrScanned = true)))
+                repository.upsertAll(listOf(photo.copy(ocrScanned = true)))
                 continue
             }
 
@@ -406,7 +401,7 @@ suspend fun runOCR(database: PhotoDatabase, context: Context) = coroutineScope {
             }
 
             // Store result and mark scanned regardless of outcome (mirrors faces).
-            photoDao.upsertAll(listOf(photo.copy(ocrText = text, ocrScanned = true)))
+            repository.upsertAll(listOf(photo.copy(ocrText = text, ocrScanned = true)))
             Log.i("OCRWorker", "OCR for ${photo.id}: ${text?.take(50)?.replace("\n", " ")}")
 
             // Short pause between images keeps sustained CPU/battery use low.
@@ -451,8 +446,8 @@ class ClipWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     override suspend fun doWork(): WorkResult = withContext(Dispatchers.IO) {
         clipMutex.withLock {
             setForeground(createForegroundInfo())
-            val database = applicationContext.buildDatabase<PhotoDatabase>()
-            runClipIndexing(database, applicationContext)
+            val repository = PhotosRepository.get(applicationContext)
+            runClipIndexing(repository, applicationContext)
             WorkResult.success()
         }
     }
@@ -496,8 +491,7 @@ class ClipWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
  *    scanned), surfaced as [EmbeddingModelDownloadingException].
  *  - not installed / too old → skip entirely (leave `clipScanned=0`), no crash.
  */
-suspend fun runClipIndexing(database: PhotoDatabase, context: Context) = coroutineScope {
-    val photoDao = database.photoDao()
+suspend fun runClipIndexing(repository: PhotosRepository, context: Context) = coroutineScope {
     val dataStore = DataStoreUtils.getInstance(context)
 
     // Semantic search is served by OpenAssistant. If it isn't installed or is too
@@ -527,12 +521,12 @@ suspend fun runClipIndexing(database: PhotoDatabase, context: Context) = corouti
     val storedVersion = dataStore.getLong("clip_embedder_version") ?: 0L
     val storedModelId = dataStore.getString("clip_model_id")
     if (storedVersion != ClipEmbedder.EMBEDDER_VERSION.toLong() || storedModelId != modelId) {
-        photoDao.resetClipScanned()
+        repository.resetClipScanned()
         dataStore.setLong("clip_embedder_version", ClipEmbedder.EMBEDDER_VERSION.toLong())
         dataStore.setString("clip_model_id", modelId)
     }
 
-    val photos = photoDao.getUnscannedForClip().sortedByDescending { it.date }
+    val photos = repository.getUnscannedForClip().sortedByDescending { it.date }
     if (photos.isEmpty()) return@coroutineScope
 
     var processed = 0
@@ -548,7 +542,7 @@ suspend fun runClipIndexing(database: PhotoDatabase, context: Context) = corouti
             // decode failed): mark it scanned with no vector so we skip it rather
             // than blocking the queue on it forever.
             Log.w("ClipWorker", "Skipping un-embeddable photo ${photo.id}: ${e.message}")
-            photoDao.upsertAll(listOf(photo.copy(clipEmbedding = null, clipScanned = true)))
+            repository.upsertAll(listOf(photo.copy(clipEmbedding = null, clipScanned = true)))
             delay(CLIP_INTER_ITEM_DELAY_MS)
             continue
         } catch (e: TimeoutCancellationException) {
@@ -567,7 +561,7 @@ suspend fun runClipIndexing(database: PhotoDatabase, context: Context) = corouti
         }
 
         Log.d("ClipWorker", "Embedded photo ${photo.id} (${embedding.size}d) in ${System.currentTimeMillis() - t0}ms")
-        photoDao.upsertAll(listOf(photo.copy(clipEmbedding = ClipEmbedder.floatsToBytes(embedding), clipScanned = true)))
+        repository.upsertAll(listOf(photo.copy(clipEmbedding = ClipEmbedder.floatsToBytes(embedding), clipScanned = true)))
 
         // Short pause between images keeps sustained CPU/battery use low.
         delay(CLIP_INTER_ITEM_DELAY_MS)
@@ -584,8 +578,8 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     override suspend fun doWork(): WorkResult = withContext(Dispatchers.IO) {
         faceMutex.withLock {
             setForeground(createForegroundInfo())
-            val database = applicationContext.buildDatabase<PhotoDatabase>()
-            runFaceIndexing(database, applicationContext)
+            val repository = PhotosRepository.get(applicationContext)
+            runFaceIndexing(repository, applicationContext)
             WorkResult.success()
         }
     }
@@ -623,9 +617,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
  * starts a new cluster. Each cluster keeps a running-mean [Person.centroid] that
  * is updated as faces are added, so we never have to re-scan old photos.
  */
-suspend fun runFaceIndexing(database: PhotoDatabase, context: Context) {
-    val photoDao = database.photoDao()
-    val faceDao = database.faceDao()
+suspend fun runFaceIndexing(repository: PhotosRepository, context: Context) {
     val dataStore = DataStoreUtils.getInstance(context)
 
     // Feature is inert without the on-device models (see FaceRecognizer docs).
@@ -641,19 +633,19 @@ suspend fun runFaceIndexing(database: PhotoDatabase, context: Context) {
     // get re-grouped with the new model. Photo rows themselves are untouched.
     val storedVersion = dataStore.getLong("face_embedder_version") ?: 0L
     if (storedVersion != FaceRecognizer.EMBEDDER_VERSION.toLong()) {
-        faceDao.clearPersons()
-        faceDao.clearPhotoFaces()
-        photoDao.resetFaceScanned()
+        repository.clearPersons()
+        repository.clearPhotoFaces()
+        repository.resetFaceScanned()
         dataStore.setLong("face_embedder_version", FaceRecognizer.EMBEDDER_VERSION.toLong())
     }
 
     // Load existing clusters into memory once; centroids are cached as floats and
     // updated in place so we avoid re-reading them for every face.
-    val clusters = faceDao.getPersons()
+    val clusters = repository.getPersons()
         .map { Cluster(it, FaceRecognizer.bytesToFloats(it.centroid)) }
         .toMutableList()
 
-    val photos = photoDao.getUnscannedForFaces().sortedByDescending { it.date }
+    val photos = repository.getUnscannedForFaces().sortedByDescending { it.date }
     Log.i("FaceWorker", "Face indexing start: ${photos.size} photos to scan, ${clusters.size} existing clusters")
     var facesTotal = 0
     var photosWithFaces = 0
@@ -674,21 +666,21 @@ suspend fun runFaceIndexing(database: PhotoDatabase, context: Context) {
                     Log.i("FaceWorker", "photo ${photo.id}: ${faces.size} face(s) (running total: $facesTotal)")
                 }
                 val rows = faces.map { face ->
-                    val clusterId = assignToCluster(face, photo, clusters, faceDao)
+                    val clusterId = assignToCluster(face, photo, clusters, repository)
                     PhotoFace(
                         photoId = photo.id,
                         clusterId = clusterId,
                         embedding = FaceRecognizer.floatsToBytes(face.embedding),
                     )
                 }
-                if (rows.isNotEmpty()) faceDao.insertPhotoFaces(rows)
+                if (rows.isNotEmpty()) repository.insertPhotoFaces(rows)
             }
         } catch (e: Exception) {
             Log.e("FaceWorker", "Error scanning faces for photo ${photo.id}", e)
         }
 
         // Mark scanned regardless of outcome so we don't retry forever.
-        photoDao.upsertAll(listOf(photo.copy(faceScanned = true)))
+        repository.upsertAll(listOf(photo.copy(faceScanned = true)))
 
         // Face indexing runs two ONNX models per photo (detector + embedder), so
         // pace it like OCR/CLIP: a short pause after each photo we actually ran
@@ -698,11 +690,11 @@ suspend fun runFaceIndexing(database: PhotoDatabase, context: Context) {
             coolDownBetweenBatches(decoded, "FaceWorker")
         }
     }
-    Log.i("FaceWorker", "Face indexing done: decoded=$decoded/${photos.size}, $facesTotal faces in $photosWithFaces photos, ${faceDao.getPersons().size} clusters")
+    Log.i("FaceWorker", "Face indexing done: decoded=$decoded/${photos.size}, $facesTotal faces in $photosWithFaces photos, ${repository.getPersons().size} clusters")
 
     // Second pass: fold together clusters whose centroids ended up very close,
     // which trims duplicate person-groups created early in the scan.
-    mergeSimilarClusters(faceDao)
+    mergeSimilarClusters(repository)
 }
 
 /** A cluster held in memory during a scan: its [Person] row plus cached centroid. */
@@ -719,7 +711,7 @@ private suspend fun assignToCluster(
     face: FaceRecognizer.DetectedFace,
     photo: Photo,
     clusters: MutableList<Cluster>,
-    faceDao: FaceDao,
+    repository: PhotosRepository,
 ): Long {
     var best: Cluster? = null
     var bestSim = FaceRecognizer.CLUSTER_THRESHOLD
@@ -742,7 +734,7 @@ private suspend fun assignToCluster(
             centroid = FaceRecognizer.floatsToBytes(best.centroid),
             faceCount = n + 1,
         )
-        faceDao.updatePerson(best.person)
+        repository.updatePerson(best.person)
         return best.person.id
     }
 
@@ -755,7 +747,7 @@ private suspend fun assignToCluster(
         repRight = face.right,
         repBottom = face.bottom,
     )
-    val id = faceDao.insertPerson(person)
+    val id = repository.insertPerson(person)
     clusters += Cluster(person.copy(id = id), face.embedding.copyOf())
     return id
 }
@@ -766,8 +758,8 @@ private suspend fun assignToCluster(
  * centroid becomes the face-count-weighted, L2-normalised mean. O(n^2) over the
  * (small) number of person-clusters.
  */
-private suspend fun mergeSimilarClusters(faceDao: FaceDao) {
-    val persons = faceDao.getPersons().toMutableList()
+private suspend fun mergeSimilarClusters(repository: PhotosRepository) {
+    val persons = repository.getPersons().toMutableList()
     var i = 0
     while (i < persons.size) {
         var j = i + 1
@@ -788,9 +780,9 @@ private suspend fun mergeSimilarClusters(faceDao: FaceDao) {
                     centroid = FaceRecognizer.floatsToBytes(FaceRecognizer.l2Normalize(mean)),
                     faceCount = na + nb,
                 )
-                faceDao.reassignCluster(b.id, a.id)
-                faceDao.updatePerson(merged)
-                faceDao.deletePerson(b.id)
+                repository.reassignCluster(b.id, a.id)
+                repository.updatePerson(merged)
+                repository.deletePerson(b.id)
                 persons[i] = merged
                 persons.removeAt(j)
             } else {

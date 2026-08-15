@@ -27,7 +27,7 @@ import com.vayunmathur.email.EmailMessage
 import com.vayunmathur.email.accountColor
 import com.vayunmathur.email.previewText
 import com.vayunmathur.email.senderDisplayName
-import com.vayunmathur.email.data.EmailDatabase
+import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.library.widgets.DynamicThemeGlance
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -39,7 +39,7 @@ class EmailWidget : GlanceAppWidget() {
         // No read status indicators, so widget doesn't need to refresh on read changes.
         val messages = withContext(Dispatchers.IO) {
             try {
-                EmailDatabase.getInstance(context).emailDao().getRecentUnifiedMessages()
+                EmailRepository.get(context).getDatabase().emailDao().getRecentUnifiedMessages()
             } catch (e: Throwable) {
                 Log.e("EmailWidget", "DB fail", e)
                 emptyList()

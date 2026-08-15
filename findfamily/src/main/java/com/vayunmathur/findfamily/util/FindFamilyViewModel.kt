@@ -19,15 +19,12 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.findfamily.data.Coord
+import com.vayunmathur.findfamily.data.FindFamilyRepository
 import com.vayunmathur.findfamily.data.LocationValue
-import com.vayunmathur.findfamily.data.LocationValueDao
 import com.vayunmathur.findfamily.data.RequestStatus
 import com.vayunmathur.findfamily.data.TemporaryLink
-import com.vayunmathur.findfamily.data.TemporaryLinkDao
 import com.vayunmathur.findfamily.data.User
-import com.vayunmathur.findfamily.data.UserDao
 import com.vayunmathur.findfamily.data.Waypoint
-import com.vayunmathur.findfamily.data.WaypointDao
 import com.vayunmathur.findfamily.R
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.DatabaseHelper
@@ -67,10 +64,7 @@ import kotlin.time.Duration.Companion.days
  */
 class FindFamilyViewModel(
     application: Application,
-    private val userDao: UserDao,
-    private val waypointDao: WaypointDao,
-    private val locationValueDao: LocationValueDao,
-    private val temporaryLinkDao: TemporaryLinkDao,
+    private val repository: FindFamilyRepository,
 ) : AndroidViewModel(application), FamilyListActions, PersonActions {
 
     private val ctx: Context get() = getApplication()
@@ -79,21 +73,20 @@ class FindFamilyViewModel(
     // DB-backed exposed flows
     // ------------------------------------------------------------------
 
-    val users: StateFlow<List<User>> = userDao.getAllFlow()
+    val users: StateFlow<List<User>> = repository.users
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val waypoints: StateFlow<List<Waypoint>> = waypointDao.getAllFlow()
+    val waypoints: StateFlow<List<Waypoint>> = repository.waypoints
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val temporaryLinks: StateFlow<List<TemporaryLink>> = temporaryLinkDao.getAllFlow()
+    val temporaryLinks: StateFlow<List<TemporaryLink>> = repository.temporaryLinks
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
-    val latestLocationByUser: StateFlow<Map<Long, LocationValue>> = locationValueDao.getLatest()
-        .map { list -> list.associateBy { it.userid } }
+    val latestLocationByUser: StateFlow<Map<Long, LocationValue>> = repository.latestLocationByUser
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** Connected people (mutual connection or awaiting our response) — the main list. */
-    val connectedUsers: StateFlow<List<User>> = userDao.getAllFlow()
+    val connectedUsers: StateFlow<List<User>> = repository.users
         .map { list ->
             list.filter {
                 it.requestStatus == RequestStatus.MUTUAL_CONNECTION ||
@@ -103,17 +96,17 @@ class FindFamilyViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Inbound requests awaiting the user's acceptance. */
-    val awaitingRequestUsers: StateFlow<List<User>> = userDao.getAllFlow()
+    val awaitingRequestUsers: StateFlow<List<User>> = repository.users
         .map { list -> list.filter { it.requestStatus == RequestStatus.AWAITING_REQUEST } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Users keyed by id, so the UI can do id-based lookups without scanning. */
-    val usersById: StateFlow<Map<Long, User>> = userDao.getAllFlow()
+    val usersById: StateFlow<Map<Long, User>> = repository.users
         .map { list -> list.associateBy { it.id } }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** Names of the users currently located at each location/waypoint name. */
-    val usersByLocationName: StateFlow<Map<String, List<String>>> = userDao.getAllFlow()
+    val usersByLocationName: StateFlow<Map<String, List<String>>> = repository.users
         .map { list -> list.groupBy({ it.locationName }, { it.name }) }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
@@ -139,7 +132,7 @@ class FindFamilyViewModel(
 
     fun deleteUser(user: User) {
         viewModelScope.launch(Dispatchers.IO) {
-            userDao.delete(user)
+            repository.deleteUser(user)
             LocationServiceController.syncServiceState(ctx)
         }
     }
@@ -150,7 +143,7 @@ class FindFamilyViewModel(
 
     fun upsertUser(user: User, onDone: () -> Unit = {}) {
         viewModelScope.launch(Dispatchers.IO) {
-            userDao.upsert(user)
+            repository.upsertUser(user)
             LocationServiceController.syncServiceState(ctx)
             withContext(Dispatchers.Main) { onDone() }
         }
@@ -168,7 +161,7 @@ class FindFamilyViewModel(
             if (status == Networking.PeerCrypto.NEEDS_UPDATE) {
                 withContext(Dispatchers.Main) { onNeedsUpdate() }
             } else {
-                userDao.upsert(user)
+                repository.upsertUser(user)
                 LocationServiceController.syncServiceState(ctx)
                 withContext(Dispatchers.Main) { onDone() }
             }
@@ -177,16 +170,16 @@ class FindFamilyViewModel(
 
     fun updateContactNamePhoto(userId: Long, name: String, photo: String?) {
         viewModelScope.launch(Dispatchers.IO) {
-            userDao.updateContactNamePhoto(userId, name, photo)
+            repository.updateContactNamePhoto(userId, name, photo)
         }
     }
 
     fun deleteWaypoint(waypoint: Waypoint) {
-        viewModelScope.launch(Dispatchers.IO) { waypointDao.delete(waypoint) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteWaypoint(waypoint) }
     }
 
     override fun deleteTemporaryLink(link: TemporaryLink) {
-        viewModelScope.launch(Dispatchers.IO) { temporaryLinkDao.delete(link) }
+        viewModelScope.launch(Dispatchers.IO) { repository.deleteTemporaryLink(link) }
     }
 
     // ------------------------------------------------------------------
@@ -275,8 +268,8 @@ class FindFamilyViewModel(
         val id = _selectedWaypointId.value ?: return
         val coord = _waypointCoord.value
         viewModelScope.launch(Dispatchers.IO) {
-            val base = if (id == 0L) Waypoint.NEW_WAYPOINT else waypointDao.get(id)
-            waypointDao.upsert(base.copy(name = name, range = range, coord = coord))
+            val base = if (id == 0L) Waypoint.NEW_WAYPOINT else repository.getWaypoint(id)
+            repository.upsertWaypoint(base.copy(name = name, range = range, coord = coord))
             withContext(Dispatchers.Main) {
                 _selectedWaypointId.value = null
             }
@@ -291,7 +284,7 @@ class FindFamilyViewModel(
     val locationHistory: StateFlow<List<LocationValue>> = _selectedUserId
         .flatMapLatest { userId ->
             if (userId == null) flowOf(emptyList())
-            else locationValueDao.getByUseridFlow(userId)
+            else repository.locationHistory(userId)
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -360,7 +353,7 @@ class FindFamilyViewModel(
      * (e.g. accidentally disabling/enabling when you didn't intend it). */
     override fun setUserSharing(user: User, enabled: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
-            userDao.setSendingEnabledAndClearToggle(user.id, enabled)
+            repository.setSendingEnabledAndClearToggle(user.id, enabled)
             LocationServiceController.syncServiceState(ctx)
         }
     }
@@ -371,7 +364,7 @@ class FindFamilyViewModel(
     override fun setUserAutoToggle(user: User, duration: kotlin.time.Duration?) {
         viewModelScope.launch(Dispatchers.IO) {
             val epoch: Long? = if (duration == null) null else (Clock.System.now() + duration).epochSeconds
-            userDao.setSharingAutoToggleAt(user.id, epoch)
+            repository.setSharingAutoToggleAt(user.id, epoch)
         }
     }
 
@@ -379,7 +372,7 @@ class FindFamilyViewModel(
      * [waypointId]. Null means Never. Atomic and mutually exclusive with the time-based deadline. */
     override fun setUserArrivalToggle(user: User, waypointId: Long?) {
         viewModelScope.launch(Dispatchers.IO) {
-            userDao.setSharingAutoToggleWaypointId(user.id, waypointId)
+            repository.setSharingAutoToggleWaypointId(user.id, waypointId)
         }
     }
 
@@ -388,7 +381,7 @@ class FindFamilyViewModel(
      * manually cleared or rescheduled the timer but a stale service snapshot still flips. */
     suspend fun applyDueAutoToggles() {
         val nowEpoch = Clock.System.now().epochSeconds
-        userDao.applyDueAutoToggles(nowEpoch)
+        repository.applyDueAutoToggles(nowEpoch)
     }
 
     /** Clears expired auto-toggles that are past due but without flipping — used during init cleanup. */
@@ -445,7 +438,7 @@ class FindFamilyViewModel(
                 pqcPublicKey = pqcPair.publicBundleB64,
                 pqcKey = pqcPair.privateBundleB64,
             )
-            temporaryLinkDao.upsert(newLink)
+            repository.upsertTemporaryLink(newLink)
             withContext(Dispatchers.Main) { onDone(true) }
         }
     }
@@ -491,39 +484,30 @@ class FindFamilyViewModel(
         // tracking service. Networking.init() is idempotent and mutex-guarded, so
         // it's safe for the service to also call it (it may start before the UI).
         viewModelScope.launch(Dispatchers.IO) {
-            Networking.init(userDao, DataStoreUtils.getInstance(ctx), ctx.getString(R.string.me_label))
+            Networking.init(repository, DataStoreUtils.getInstance(ctx), ctx.getString(R.string.me_label))
             // Apply any due auto-toggles on cold start
             applyDueAutoToggles()
         }
         // Trim location history older than a week.
         viewModelScope.launch(Dispatchers.IO) {
             val cutoff = Clock.System.now() - 7.days
-            locationValueDao.deleteOlderThan(cutoff.epochSeconds)
+            repository.deleteLocationsOlderThan(cutoff.epochSeconds)
         }
         // Schedule the recurring sync work that drives location-tracking restarts.
         ensureSync(ctx)
     }
 }
 
-/** Factory for constructing [FindFamilyViewModel] with the four DAOs. */
+/** Factory for constructing [FindFamilyViewModel] with the shared repository. */
 class FindFamilyViewModelFactory(
     private val application: Application,
-    private val userDao: UserDao,
-    private val waypointDao: WaypointDao,
-    private val locationValueDao: LocationValueDao,
-    private val temporaryLinkDao: TemporaryLinkDao,
+    private val repository: FindFamilyRepository,
 ) : ViewModelProvider.Factory {
     @Suppress("UNCHECKED_CAST")
     override fun <T : ViewModel> create(modelClass: Class<T>): T {
         require(modelClass.isAssignableFrom(FindFamilyViewModel::class.java)) {
             "Unexpected ViewModel class: $modelClass"
         }
-        return FindFamilyViewModel(
-            application,
-            userDao,
-            waypointDao,
-            locationValueDao,
-            temporaryLinkDao,
-        ) as T
+        return FindFamilyViewModel(application, repository) as T
     }
 }

@@ -17,7 +17,7 @@ import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.IconPerson
 import com.vayunmathur.library.ui.IconSportsEsports
 import com.vayunmathur.games.hub.data.DB_NAME
-import com.vayunmathur.games.hub.data.GamesHubDatabase
+import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.ui.screens.AchievementsScreen
 import com.vayunmathur.games.hub.ui.screens.ActivityFeedScreen
 import com.vayunmathur.games.hub.ui.screens.DashboardPage
@@ -27,7 +27,6 @@ import com.vayunmathur.games.hub.ui.screens.ProfilePage
 import com.vayunmathur.games.hub.ui.screens.SettingsScreen
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModelFactory
-import com.vayunmathur.library.room.buildDatabase
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.BottomNavBar
@@ -49,17 +48,14 @@ class MainActivity : ComponentActivity() {
 
         var ready by mutableStateOf(false)
 
-        val factory = GameHubViewModelFactory(
-            application = application,
-            database = application.buildDatabase<GamesHubDatabase>(dbName = DB_NAME).also {
-                dbConfigs = try {
-                    val pass = DatabaseHelper(this).getPassphrase()
-                    listOf(DB_NAME to pass)
-                } catch (_: Exception) {
-                    emptyList()
-                }
-            }
-        )
+        val repository = GamesHubRepository.get(application)
+        dbConfigs = try {
+            val pass = DatabaseHelper(this).getPassphrase()
+            listOf(DB_NAME to pass)
+        } catch (_: Exception) {
+            emptyList()
+        }
+        val factory = GameHubViewModelFactory(application, repository)
         val vm: GameHubViewModel by viewModels { factory }
 
         ready = true

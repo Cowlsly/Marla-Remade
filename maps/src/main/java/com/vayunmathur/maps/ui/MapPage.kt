@@ -64,7 +64,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.maps.Route
-import com.vayunmathur.maps.data.AmenityDatabase
+import com.vayunmathur.maps.data.AmenityRepository
 import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.parse
@@ -106,7 +106,7 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, db: AmenityDatabase) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -349,7 +349,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 // serially in the foreground.
                                 val firstFeature = withContext(Dispatchers.IO) {
                                     features.firstNotNullOfOrNull { raw ->
-                                        runCatching { parse(raw, db) }.getOrNull()
+                                        runCatching { parse(raw, AmenityRepository.get(context).getDatabase()) }.getOrNull()
                                     }
                                 }
 

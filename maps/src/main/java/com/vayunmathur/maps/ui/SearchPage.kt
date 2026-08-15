@@ -17,6 +17,7 @@ import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.TextFieldDefaults
 import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -36,7 +37,8 @@ import com.vayunmathur.maps.util.SearchActions
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SearchUiState
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
-import com.vayunmathur.maps.data.AmenityDatabase
+import androidx.compose.ui.platform.LocalContext
+import com.vayunmathur.maps.data.AmenityRepository
 
 /**
  * A Search Page that filters amenities based on a text query and a geographic bounding box.
@@ -47,19 +49,20 @@ fun SearchPage(
     backStack: NavBackStack<Route>,
     viewModel: SelectedFeatureViewModel,
     searchViewModel: MapsSearchViewModel,
-    db: AmenityDatabase,
     idx: Int?,
     east: Double,
     west: Double,
     north: Double,
     south: Double
 ) {
+    val context = LocalContext.current
+    val repository = remember(context) { AmenityRepository.get(context) }
     val searchQuery by searchViewModel.query.collectAsState()
     val results by searchViewModel.results.collectAsState()
 
     val actions = object : SearchActions {
         override fun setQuery(query: String) {
-            searchViewModel.setQuery(query, db, west, east, south, north)
+            searchViewModel.setQuery(query, repository, west, east, south, north)
         }
 
         override fun selectResult(result: SearchResult) {
@@ -86,7 +89,7 @@ fun SearchPage(
             }
             when (result) {
                 is SearchResult.Amenity ->
-                    searchViewModel.resolveAmenity(result.entity, db) { apply(it) }
+                    searchViewModel.resolveAmenity(result.entity, repository) { apply(it) }
                 is SearchResult.Address ->
                     apply(searchViewModel.addressFeature(result.result))
             }
