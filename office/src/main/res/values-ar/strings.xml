@@ -7,4 +7,7 @@
     <string name="center">وسط</string>
     <string name="right">يمين</string>
     <string name="clear_formatting">مسح التنسيق</string>
+    <string name="bookmarks">الإشارات المرجعية</string>
+    <string name="general">عام</string>
+    <string name="share_link">مشاركة الرابط</string>
 </resources>
