@@ -1,3 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">文件</string>
+    <string name="enable_notifications">是否启用通知？</string>
+    <string name="notification_permission_rationale">启用通知后，您可以在通知查看压缩和解压缩文件的进度。</string>
+    <string name="enable">启用</string>
+    <string name="skip">跳过</string>
+    <string name="grant_all_files_access">授予所有文件访问权限</string>
+    <string name="archive_selection">选择文件</string>
+    <string name="zip_file_name_label">压缩文件名</string>
+    <string name="archiving_started">文件移动已开始…</string>
+    <string name="new_folder">新建文件夹</string>
+    <string name="create">创建</string>
 </resources>
