@@ -2,6 +2,7 @@ package com.vayunmathur.web.platform.shields
 
 import android.content.Context
 import android.util.Log
+import com.vayunmathur.web.shields.ShieldsNative
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName

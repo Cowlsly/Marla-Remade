@@ -1,4 +1,5 @@
-package com.vayunmathur.web.platform.shields
+// PACKAGE STRUCTURE EXCEPTION (JNI): FQN frozen for native RegisterNatives/symbol mangling
+package com.vayunmathur.web.shields
 
 /**
  * JNI bridge to Brave's adblock engine (`libweb_shields.so`, built from
