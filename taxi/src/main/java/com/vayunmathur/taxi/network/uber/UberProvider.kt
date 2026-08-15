@@ -1,10 +1,10 @@
-package com.vayunmathur.taxi.uber
+package com.vayunmathur.taxi.network.uber
 
 import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.Provider
 import com.vayunmathur.taxi.data.QuoteResult
 import com.vayunmathur.taxi.data.RideQuote
-import com.vayunmathur.taxi.deeplink.RideDeepLinks
+import com.vayunmathur.taxi.platform.deeplink.RideDeepLinks
 import com.vayunmathur.taxi.provider.RideProvider
 
 /**

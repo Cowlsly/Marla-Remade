@@ -15,7 +15,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.taxi.R
-import com.vayunmathur.taxi.uber.UberWebView
+import com.vayunmathur.taxi.network.uber.UberWebView
 
 /**
  * Uber sign-in. The user logs in to m.uber.com themselves in a real WebView — Uber's hosted

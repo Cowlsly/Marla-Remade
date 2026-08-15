@@ -65,7 +65,7 @@ import com.vayunmathur.taxi.data.DriverLocation
 import com.vayunmathur.taxi.data.RideStatus
 import com.vayunmathur.taxi.data.RideStatusResult
 import com.vayunmathur.taxi.data.RideStopInfo
-import com.vayunmathur.taxi.lyft.LyftProvider
+import com.vayunmathur.taxi.network.lyft.LyftProvider
 import com.vayunmathur.taxi.notifications.RideTrackingService
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

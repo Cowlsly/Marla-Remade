@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.location
+package com.vayunmathur.taxi.platform.location
 
 import android.Manifest
 import android.annotation.SuppressLint

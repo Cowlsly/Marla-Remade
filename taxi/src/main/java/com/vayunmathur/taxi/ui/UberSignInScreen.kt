@@ -23,8 +23,8 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.taxi.R
-import com.vayunmathur.taxi.uber.UberAuth
-import com.vayunmathur.taxi.uber.UberAuthResult
+import com.vayunmathur.taxi.network.uber.UberAuth
+import com.vayunmathur.taxi.network.uber.UberAuthResult
 import kotlinx.coroutines.launch
 
 /**

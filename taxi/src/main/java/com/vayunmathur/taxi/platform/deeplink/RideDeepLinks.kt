@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.deeplink
+package com.vayunmathur.taxi.platform.deeplink
 
 import android.content.Context
 import android.content.Intent

@@ -12,7 +12,7 @@ import androidx.core.app.NotificationManagerCompat
 import com.vayunmathur.taxi.data.ActiveRide
 import com.vayunmathur.taxi.data.RideStatus
 import com.vayunmathur.taxi.data.RideStatusResult
-import com.vayunmathur.taxi.lyft.LyftProvider
+import com.vayunmathur.taxi.network.lyft.LyftProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job

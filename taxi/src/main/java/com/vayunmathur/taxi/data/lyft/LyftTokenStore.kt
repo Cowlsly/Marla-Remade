@@ -1,6 +1,7 @@
-package com.vayunmathur.taxi.lyft
+package com.vayunmathur.taxi.data.lyft
 
 import android.content.Context
+import com.vayunmathur.taxi.network.lyft.LyftToken
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.longPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey

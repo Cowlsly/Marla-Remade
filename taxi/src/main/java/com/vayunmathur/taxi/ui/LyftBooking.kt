@@ -37,7 +37,7 @@ import com.vayunmathur.taxi.data.ChargeAccount
 import com.vayunmathur.taxi.data.PaymentMethodsResult
 import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.RideQuote
-import com.vayunmathur.taxi.lyft.LyftProvider
+import com.vayunmathur.taxi.network.lyft.LyftProvider
 import com.vayunmathur.taxi.notifications.RideTrackingService
 import kotlinx.coroutines.launch
 

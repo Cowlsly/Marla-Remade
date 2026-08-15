@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.lyft
+package com.vayunmathur.taxi.network.lyft
 
 import android.content.Context
 import android.net.Uri
@@ -25,7 +25,7 @@ import com.vayunmathur.taxi.data.RideStatus
 import com.vayunmathur.taxi.data.RideStatusResult
 import com.vayunmathur.taxi.data.RideStopInfo
 import com.vayunmathur.taxi.data.VehicleInfo
-import com.vayunmathur.taxi.deeplink.RideDeepLinks
+import com.vayunmathur.taxi.platform.deeplink.RideDeepLinks
 import com.vayunmathur.taxi.provider.RideProvider
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject

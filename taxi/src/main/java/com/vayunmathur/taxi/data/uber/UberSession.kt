@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.uber
+package com.vayunmathur.taxi.data.uber
 
 import android.content.Context
 import androidx.datastore.preferences.core.booleanPreferencesKey

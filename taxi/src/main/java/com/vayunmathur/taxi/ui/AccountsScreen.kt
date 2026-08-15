@@ -43,8 +43,8 @@ import com.vayunmathur.taxi.data.ChargeAccount
 import com.vayunmathur.taxi.data.NewCard
 import com.vayunmathur.taxi.data.PaymentActionResult
 import com.vayunmathur.taxi.data.PaymentMethodsResult
-import com.vayunmathur.taxi.lyft.LyftProvider
-import com.vayunmathur.taxi.lyft.LyftTokenStore
+import com.vayunmathur.taxi.network.lyft.LyftProvider
+import com.vayunmathur.taxi.data.lyft.LyftTokenStore
 import java.util.Calendar
 import kotlinx.coroutines.launch
 

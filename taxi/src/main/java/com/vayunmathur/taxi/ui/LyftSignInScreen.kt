@@ -23,9 +23,9 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.taxi.R
-import com.vayunmathur.taxi.lyft.LyftAuth
-import com.vayunmathur.taxi.lyft.LyftAuthResult
-import com.vayunmathur.taxi.lyft.LyftTokenStore
+import com.vayunmathur.taxi.network.lyft.LyftAuth
+import com.vayunmathur.taxi.network.lyft.LyftAuthResult
+import com.vayunmathur.taxi.data.lyft.LyftTokenStore
 import kotlinx.coroutines.launch
 
 /**

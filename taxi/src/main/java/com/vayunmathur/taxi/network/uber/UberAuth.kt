@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.uber
+package com.vayunmathur.taxi.network.uber
 
 import android.os.Build
 import android.util.Log

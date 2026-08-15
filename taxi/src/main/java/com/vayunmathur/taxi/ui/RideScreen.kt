@@ -66,8 +66,8 @@ import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.Provider
 import com.vayunmathur.taxi.data.QuoteResult
 import com.vayunmathur.taxi.data.RideQuote
-import com.vayunmathur.taxi.deeplink.RideDeepLinks
-import com.vayunmathur.taxi.location.LocationProvider
+import com.vayunmathur.taxi.platform.deeplink.RideDeepLinks
+import com.vayunmathur.taxi.platform.location.LocationProvider
 import com.vayunmathur.taxi.provider.QuoteRepository
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

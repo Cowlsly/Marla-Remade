@@ -4,7 +4,7 @@ import android.content.Context
 import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.Provider
 import com.vayunmathur.taxi.data.QuoteResult
-import com.vayunmathur.taxi.lyft.LyftProvider
+import com.vayunmathur.taxi.network.lyft.LyftProvider
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 

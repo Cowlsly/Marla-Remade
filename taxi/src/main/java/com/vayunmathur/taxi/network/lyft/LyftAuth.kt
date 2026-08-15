@@ -1,4 +1,4 @@
-package com.vayunmathur.taxi.lyft
+package com.vayunmathur.taxi.network.lyft
 
 import android.os.Build
 import android.util.Base64
