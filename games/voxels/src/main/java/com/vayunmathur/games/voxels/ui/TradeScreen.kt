@@ -2,6 +2,7 @@ package com.vayunmathur.games.voxels.ui
 
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.voxels.R
+import com.vayunmathur.games.voxels.platform.SoundFx
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -110,7 +111,7 @@ fun TradeOverlay(tradesJson: String, onClose: () -> Unit) {
                                 .clickable {
                                     try {
                                         if (VoxelsNative.trade(i)) {
-                                            com.vayunmathur.games.voxels.util.SoundFx.playPlace()
+                                            SoundFx.playPlace()
                                             json = VoxelsNative.getTradesJson()
                                         }
                                     } catch (_: Exception) {}
