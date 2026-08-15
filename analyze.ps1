@@ -5,7 +5,11 @@ param (
 
     [Parameter(Mandatory = $false)]
     [Alias("m")]
-    [string]$ModuleName
+    [string]$ModuleName,
+
+    [Parameter(Mandatory = $false)]
+    [Alias("nolib")]
+    [switch]$ExcludeLibrary
 )
 
 # Handle RAM analysis on a connected Android device
@@ -83,6 +87,11 @@ if ($Type -eq "ram") {
 
 # Core logic to fetch and filter files for codebase analysis
 $files = gci -r -fi *.kt | ? {$_.FullName -match '\\src\\'}
+
+# Optionally exclude shared library modules (anything under a top-level "library" dir)
+if ($ExcludeLibrary) {
+    $files = $files | ? { $_.FullName -notmatch '\\library\\' }
+}
 
 # If a specific module is requested, filter the files down early
 if ($ModuleName) {
