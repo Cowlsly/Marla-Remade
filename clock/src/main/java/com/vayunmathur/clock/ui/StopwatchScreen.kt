@@ -27,7 +27,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.clock.R
-import com.vayunmathur.clock.ui.component.LapRow
+import com.vayunmathur.clock.ui.components.LapRow
 import com.vayunmathur.clock.util.StopwatchActions
 import com.vayunmathur.clock.util.StopwatchUiState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api

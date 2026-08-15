@@ -7,7 +7,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.ui.component.sendTimerNotification
+import com.vayunmathur.clock.ui.components.sendTimerNotification
 import com.vayunmathur.clock.util.ClockViewModel
 import com.vayunmathur.clock.util.TimerActions
 import com.vayunmathur.clock.util.TimerUiState

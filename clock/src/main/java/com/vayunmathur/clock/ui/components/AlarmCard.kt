@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.ui.component
+package com.vayunmathur.clock.ui.components
 
 import android.content.Context
 import android.text.format.DateFormat

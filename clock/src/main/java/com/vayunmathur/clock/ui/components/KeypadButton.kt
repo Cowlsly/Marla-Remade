@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.ui.component
+package com.vayunmathur.clock.ui.components
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable

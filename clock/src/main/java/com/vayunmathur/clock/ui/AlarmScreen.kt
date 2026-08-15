@@ -16,7 +16,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.ui.component.AlarmCard
+import com.vayunmathur.clock.ui.components.AlarmCard
 import com.vayunmathur.clock.util.AlarmActions
 import com.vayunmathur.clock.util.AlarmUiState
 import com.vayunmathur.library.ui.Button

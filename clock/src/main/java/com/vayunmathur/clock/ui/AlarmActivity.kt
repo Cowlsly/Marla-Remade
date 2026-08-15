@@ -9,8 +9,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.data.ClockRepository
-import com.vayunmathur.clock.ui.component.AlarmRingingScreen
-import com.vayunmathur.clock.ui.component.formatAlarmTime
+import com.vayunmathur.clock.ui.components.AlarmRingingScreen
+import com.vayunmathur.clock.ui.components.formatAlarmTime
 import com.vayunmathur.clock.util.AlarmReceiver
 import com.vayunmathur.clock.util.AlarmSoundService
 import com.vayunmathur.library.ui.DynamicTheme

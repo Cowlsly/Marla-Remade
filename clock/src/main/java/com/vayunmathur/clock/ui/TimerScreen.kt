@@ -13,8 +13,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.ui.component.TimerCard
-import com.vayunmathur.clock.ui.component.TimerKeypadContent
+import com.vayunmathur.clock.ui.components.TimerCard
+import com.vayunmathur.clock.ui.components.TimerKeypadContent
 import com.vayunmathur.clock.util.TimerActions
 import com.vayunmathur.clock.util.TimerUiState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api

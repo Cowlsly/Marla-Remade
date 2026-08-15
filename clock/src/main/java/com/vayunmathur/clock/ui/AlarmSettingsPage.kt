@@ -16,9 +16,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
-import com.vayunmathur.clock.ui.component.AlarmOptionControls
-import com.vayunmathur.clock.ui.component.ringtonePickerIntent
-import com.vayunmathur.clock.ui.component.ringtonePickerResult
+import com.vayunmathur.clock.ui.components.AlarmOptionControls
+import com.vayunmathur.clock.ui.components.ringtonePickerIntent
+import com.vayunmathur.clock.ui.components.ringtonePickerResult
 import com.vayunmathur.clock.util.ClockViewModel
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconBack

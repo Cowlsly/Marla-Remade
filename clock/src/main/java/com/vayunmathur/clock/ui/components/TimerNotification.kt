@@ -1,4 +1,4 @@
-package com.vayunmathur.clock.ui.component
+package com.vayunmathur.clock.ui.components
 
 import android.app.AlarmManager
 import android.app.NotificationManager

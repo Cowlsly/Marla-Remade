@@ -29,7 +29,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.ui.component.sendTimerNotification
+import com.vayunmathur.clock.ui.components.sendTimerNotification
 import com.vayunmathur.clock.util.ClockViewModel
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.hours
