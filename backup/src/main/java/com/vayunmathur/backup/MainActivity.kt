@@ -6,7 +6,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import com.vayunmathur.backup.ui.BackupApp
-import com.vayunmathur.backup.ui.BackupViewModel
+import com.vayunmathur.backup.platform.BackupViewModel
 import com.vayunmathur.library.ui.DynamicTheme
 
 class MainActivity : ComponentActivity() {

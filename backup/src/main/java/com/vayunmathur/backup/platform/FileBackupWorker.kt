@@ -1,12 +1,12 @@
-package com.vayunmathur.backup.files
+package com.vayunmathur.backup.platform
 
 import android.content.Context
 import androidx.work.CoroutineWorker
 import androidx.work.WorkerParameters
-import com.vayunmathur.backup.backend.BackendFactory
-import com.vayunmathur.backup.backend.BackupRepository
-import com.vayunmathur.backup.crypto.Crypto
-import com.vayunmathur.backup.crypto.KeyManager
+import com.vayunmathur.backup.data.backend.BackendFactory
+import com.vayunmathur.backup.data.backend.BackupRepository
+import com.vayunmathur.backup.domain.crypto.Crypto
+import com.vayunmathur.backup.platform.crypto.KeyManager
 import com.vayunmathur.backup.data.BackupConfig
 import com.vayunmathur.library.work.startRepeatedTask
 import kotlinx.coroutines.flow.first

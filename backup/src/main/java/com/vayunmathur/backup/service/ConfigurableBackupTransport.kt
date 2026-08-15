@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.transport
+package com.vayunmathur.backup.service
 
 import android.app.backup.BackupDataInput
 import android.app.backup.BackupDataOutput
@@ -10,10 +10,10 @@ import android.content.pm.PackageInfo
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Base64
-import com.vayunmathur.backup.backend.BackendFactory
-import com.vayunmathur.backup.backend.BackupRepository
-import com.vayunmathur.backup.crypto.Crypto
-import com.vayunmathur.backup.crypto.KeyManager
+import com.vayunmathur.backup.data.backend.BackendFactory
+import com.vayunmathur.backup.data.backend.BackupRepository
+import com.vayunmathur.backup.domain.crypto.Crypto
+import com.vayunmathur.backup.platform.crypto.KeyManager
 import com.vayunmathur.backup.data.BackupConfig
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
@@ -337,7 +337,7 @@ class ConfigurableBackupTransport(private val context: Context) : BackupTranspor
         String(Base64.decode(keyId, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING), Charsets.UTF_8)
 
     companion object {
-        private const val COMPONENT = "com.vayunmathur.backup/.transport.ConfigurableBackupTransportService"
+        private const val COMPONENT = "com.vayunmathur.backup/.service.ConfigurableBackupTransportService"
         private const val CHUNK = 32 * 1024
         // A single current backup set; token is stable so restore can find it.
         private const val CURRENT_TOKEN = 1L

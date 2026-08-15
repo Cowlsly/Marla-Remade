@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.crypto
+package com.vayunmathur.backup.domain.crypto
 
 import com.vayunmathur.e2ee.E2ee
 import java.io.ByteArrayInputStream

@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.crypto
+package com.vayunmathur.backup.domain.crypto
 
 import javax.crypto.AEADBadTagException
 import kotlin.test.Test

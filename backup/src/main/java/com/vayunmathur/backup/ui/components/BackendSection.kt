@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.ui
+package com.vayunmathur.backup.ui.components
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column

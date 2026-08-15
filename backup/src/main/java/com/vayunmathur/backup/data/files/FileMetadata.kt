@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.files
+package com.vayunmathur.backup.data.files
 
 import kotlinx.serialization.Serializable
 

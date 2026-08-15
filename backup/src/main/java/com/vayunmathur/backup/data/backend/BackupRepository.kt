@@ -1,6 +1,6 @@
-package com.vayunmathur.backup.backend
+package com.vayunmathur.backup.data.backend
 
-import com.vayunmathur.backup.crypto.Crypto
+import com.vayunmathur.backup.domain.crypto.Crypto
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.InputStream

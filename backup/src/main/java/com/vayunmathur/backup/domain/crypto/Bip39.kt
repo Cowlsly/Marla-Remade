@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.crypto
+package com.vayunmathur.backup.domain.crypto
 
 import java.security.MessageDigest
 import java.security.SecureRandom

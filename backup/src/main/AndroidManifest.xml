@@ -45,7 +45,7 @@
              priv-app holding BACKUP; access is gated by the system-only
              BIND_BACKUP_TRANSPORT permission. -->
         <service
-            android:name=".transport.ConfigurableBackupTransportService"
+            android:name=".service.ConfigurableBackupTransportService"
             android:exported="true"
             android:permission="android.permission.BIND_BACKUP_TRANSPORT">
             <intent-filter>

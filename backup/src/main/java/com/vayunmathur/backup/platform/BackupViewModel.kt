@@ -1,4 +1,4 @@
-package com.vayunmathur.backup.ui
+package com.vayunmathur.backup.platform
 
 import android.app.Application
 import androidx.compose.runtime.getValue
@@ -6,15 +6,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.backup.backend.BackendFactory
-import com.vayunmathur.backup.backend.BackupRepository
-import com.vayunmathur.backup.crypto.Bip39
-import com.vayunmathur.backup.crypto.Crypto
-import com.vayunmathur.backup.crypto.KeyManager
+import com.vayunmathur.backup.data.backend.BackendFactory
+import com.vayunmathur.backup.data.backend.BackupRepository
+import com.vayunmathur.backup.domain.crypto.Bip39
+import com.vayunmathur.backup.domain.crypto.Crypto
+import com.vayunmathur.backup.platform.crypto.KeyManager
 import com.vayunmathur.backup.data.BackupConfig
 import com.vayunmathur.backup.data.BackupSettings
-import com.vayunmathur.backup.files.FileBackupManager
-import com.vayunmathur.backup.files.FileBackupWorker
+import com.vayunmathur.backup.data.files.FileBackupManager
+import com.vayunmathur.backup.platform.FileBackupWorker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
