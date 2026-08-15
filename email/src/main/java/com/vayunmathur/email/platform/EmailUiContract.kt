@@ -1,9 +1,9 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import android.content.Context
 import android.net.Uri
-import com.vayunmathur.email.Attachment
-import com.vayunmathur.email.EmailMessage
+import com.vayunmathur.email.data.Attachment
+import com.vayunmathur.email.data.EmailMessage
 import java.io.File
 
 /**

@@ -1,4 +1,4 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import android.content.BroadcastReceiver
 import android.content.Context

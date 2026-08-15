@@ -9,7 +9,7 @@ import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
 /**
- * AES-256-GCM encryption helper for [com.vayunmathur.email.EmailAccount.passwordEncrypted].
+ * AES-256-GCM encryption helper for [com.vayunmathur.email.data.EmailAccount.passwordEncrypted].
  *
  * The key lives in the Android Keystore (alias [KEY_ALIAS]) so it never leaves
  * the device and can't be exported even with root. Each encryption produces a

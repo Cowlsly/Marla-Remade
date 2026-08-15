@@ -1,4 +1,4 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,9 +8,9 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
-import com.vayunmathur.email.EmailMessage
 import com.vayunmathur.email.MainActivity
 import com.vayunmathur.email.R
+import com.vayunmathur.email.data.EmailMessage
 
 object EmailNotifications {
 

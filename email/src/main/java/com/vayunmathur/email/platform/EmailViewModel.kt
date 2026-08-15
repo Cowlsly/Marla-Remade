@@ -41,10 +41,10 @@ class EmailViewModel(application: Application) :
     val syncProgress: StateFlow<Float> = EmailSyncState.progress
 
     val outbox: Flow<List<OutboxEntry>> = dao.getOutboxFlow()
-    val drafts: Flow<List<com.vayunmathur.email.DraftEntry>> = dao.getDraftsFlow()
+    val drafts: Flow<List<com.vayunmathur.email.data.DraftEntry>> = dao.getDraftsFlow()
 
     /** Load a draft for resuming in the composer. */
-    suspend fun loadDraft(id: Long): com.vayunmathur.email.DraftEntry? = dao.getDraft(id)
+    suspend fun loadDraft(id: Long): com.vayunmathur.email.data.DraftEntry? = dao.getDraft(id)
 
     /** Insert or update a draft; returns its id (new id when [id] is null). */
     fun saveDraft(
@@ -59,7 +59,7 @@ class EmailViewModel(application: Application) :
     ) {
         viewModelScope.launch {
             val rowId = dao.insertDraft(
-                com.vayunmathur.email.DraftEntry(
+                com.vayunmathur.email.data.DraftEntry(
                     id = id ?: 0,
                     accountEmail = accountEmail,
                     to = to, cc = cc, bcc = bcc, subject = subject, body = body,
@@ -78,7 +78,7 @@ class EmailViewModel(application: Application) :
     override fun blockSender(from: String) {
         val address = extractEmailAddress(from)
         if (address.isBlank()) return
-        viewModelScope.launch { dao.insertBlockedSender(com.vayunmathur.email.BlockedSender(address.lowercase())) }
+        viewModelScope.launch { dao.insertBlockedSender(com.vayunmathur.email.data.BlockedSender(address.lowercase())) }
     }
 
     fun unblockSender(address: String) {
@@ -165,7 +165,7 @@ class EmailViewModel(application: Application) :
         }
     }
 
-    val blockedSenders: Flow<List<com.vayunmathur.email.BlockedSender>> = dao.getBlockedSendersFlow()
+    val blockedSenders: Flow<List<com.vayunmathur.email.data.BlockedSender>> = dao.getBlockedSendersFlow()
 
     // Hide messages from blocked senders (matched by email address substring).
     val messages: Flow<List<EmailMessage>> = combine(messagesRaw, blockedSenders) { msgs, blocked ->

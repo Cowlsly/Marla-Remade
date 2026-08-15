@@ -1,9 +1,9 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import android.content.Context
 import android.net.Uri
-import com.vayunmathur.email.network.imap.MimeParser
 import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.network.imap.MimeParser
 import java.io.File
 
 data class EmlAttachment(

@@ -1,15 +1,15 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.util.Log
 import androidx.core.app.NotificationManagerCompat
-import com.vayunmathur.email.EmailManager
-import com.vayunmathur.email.resolveAuth
+import com.vayunmathur.email.data.EmailManager
+import com.vayunmathur.email.data.resolveAuth
 import com.vayunmathur.email.data.EmailRepository
-import com.vayunmathur.email.imapServer
-import com.vayunmathur.email.loginUser
+import com.vayunmathur.email.data.imapServer
+import com.vayunmathur.email.data.loginUser
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch

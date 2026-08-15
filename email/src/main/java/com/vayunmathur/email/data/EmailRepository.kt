@@ -1,14 +1,14 @@
 package com.vayunmathur.email.data
 
 import android.content.Context
-import com.vayunmathur.email.Attachment
-import com.vayunmathur.email.BlockedSender
-import com.vayunmathur.email.DeletedUid
-import com.vayunmathur.email.DraftEntry
-import com.vayunmathur.email.EmailAccount
-import com.vayunmathur.email.EmailFolder
-import com.vayunmathur.email.EmailMessage
-import com.vayunmathur.email.OutboxEntry
+import com.vayunmathur.email.data.Attachment
+import com.vayunmathur.email.data.BlockedSender
+import com.vayunmathur.email.data.DeletedUid
+import com.vayunmathur.email.data.DraftEntry
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.OutboxEntry
 import com.vayunmathur.library.room.RoomRepository
 import kotlinx.coroutines.flow.Flow
 

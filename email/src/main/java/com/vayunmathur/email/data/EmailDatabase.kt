@@ -4,14 +4,14 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
-import com.vayunmathur.email.EmailFolder
-import com.vayunmathur.email.EmailMessage
-import com.vayunmathur.email.EmailAccount
-import com.vayunmathur.email.OutboxEntry
-import com.vayunmathur.email.DraftEntry
-import com.vayunmathur.email.BlockedSender
-import com.vayunmathur.email.DeletedUid
-import com.vayunmathur.email.Attachment
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.OutboxEntry
+import com.vayunmathur.email.data.DraftEntry
+import com.vayunmathur.email.data.BlockedSender
+import com.vayunmathur.email.data.DeletedUid
+import com.vayunmathur.email.data.Attachment
 
 @Database(
     entities = [

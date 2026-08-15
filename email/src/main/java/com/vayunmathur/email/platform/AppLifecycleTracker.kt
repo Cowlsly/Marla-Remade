@@ -1,4 +1,4 @@
-package com.vayunmathur.email.util
+package com.vayunmathur.email.platform
 
 import androidx.core.content.edit
 
@@ -23,13 +23,13 @@ object AppLifecycleTracker {
      */
     fun tryStartIdleIfForeground(context: android.content.Context): Boolean {
         if (!isAppInForeground) return false
-        val prefs = context.getSharedPreferences(com.vayunmathur.email.util.BootReceiver.PREFS, android.content.Context.MODE_PRIVATE)
-        if (!prefs.getBoolean(com.vayunmathur.email.util.BootReceiver.KEY_PENDING, false)) return false
+        val prefs = context.getSharedPreferences(BootReceiver.PREFS, android.content.Context.MODE_PRIVATE)
+        if (!prefs.getBoolean(BootReceiver.KEY_PENDING, false)) return false
 
         // Clear pending first to avoid loops, attempt start
         val started = com.vayunmathur.email.data.ImapIdleService.start(context)
         if (started) {
-            prefs.edit { remove(com.vayunmathur.email.util.BootReceiver.KEY_PENDING) }
+            prefs.edit { remove(BootReceiver.KEY_PENDING) }
         } else {
             // Schedule retry worker if direct start failed
             try {

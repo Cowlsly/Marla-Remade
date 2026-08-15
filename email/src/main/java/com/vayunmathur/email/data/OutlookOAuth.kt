@@ -8,7 +8,7 @@ import androidx.browser.customtabs.CustomTabsIntent
 import androidx.core.content.edit
 import androidx.core.net.toUri
 import com.vayunmathur.email.BuildConfig
-import com.vayunmathur.email.EmailAccount
+import com.vayunmathur.email.data.EmailAccount
 import java.net.HttpURLConnection
 import java.net.URL
 import java.security.MessageDigest

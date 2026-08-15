@@ -1,6 +1,6 @@
 package com.vayunmathur.email.intents
 
-import com.vayunmathur.email.EmailMessage
+import com.vayunmathur.email.data.EmailMessage
 import com.vayunmathur.email.plainTextBody
 import com.vayunmathur.library.intents.email.EmailData
 

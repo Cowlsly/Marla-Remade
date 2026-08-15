@@ -23,7 +23,7 @@ import androidx.glance.layout.*
 import androidx.glance.text.*
 import androidx.glance.unit.ColorProvider
 import com.vayunmathur.email.MainActivity
-import com.vayunmathur.email.EmailMessage
+import com.vayunmathur.email.data.EmailMessage
 import com.vayunmathur.email.accountColor
 import com.vayunmathur.email.previewText
 import com.vayunmathur.email.senderDisplayName

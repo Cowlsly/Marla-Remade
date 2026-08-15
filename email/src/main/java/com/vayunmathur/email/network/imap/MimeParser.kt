@@ -4,8 +4,8 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.vayunmathur.email.data.Attachment
-import com.vayunmathur.email.util.EmlAttachment
-import com.vayunmathur.email.util.ParsedEml
+import com.vayunmathur.email.platform.EmlAttachment
+import com.vayunmathur.email.platform.ParsedEml
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.nio.charset.Charset

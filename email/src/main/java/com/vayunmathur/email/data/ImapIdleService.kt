@@ -15,17 +15,17 @@ import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.edit
-import com.vayunmathur.email.EmailAccount
-import com.vayunmathur.email.EmailFolder
-import com.vayunmathur.email.EmailManager
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.platform.EmailManager
 import com.vayunmathur.email.R
 import com.vayunmathur.email.network.imap.ImapAuthException
 import com.vayunmathur.email.network.imap.ImapClient
 import com.vayunmathur.email.network.imap.RawImapConnection
 import com.vayunmathur.email.network.imap.TrustAll
-import com.vayunmathur.email.resolveAuth
-import com.vayunmathur.email.imapServer
-import com.vayunmathur.email.loginUser
+import com.vayunmathur.email.data.resolveAuth
+import com.vayunmathur.email.data.imapServer
+import com.vayunmathur.email.data.loginUser
 import com.vayunmathur.email.platform.AppLifecycleTracker
 import com.vayunmathur.email.platform.EmailNotifications
 import com.vayunmathur.email.widget.EmailWidget
@@ -223,7 +223,7 @@ class ImapIdleService : Service() {
         } catch (e: Exception) { try { rawConn.close() } catch (_: Throwable) {}; throw e }
     }
 
-    private suspend fun postNewMailNotification(accountEmail: String, messages: List<com.vayunmathur.email.EmailMessage>) {
+    private suspend fun postNewMailNotification(accountEmail: String, messages: List<com.vayunmathur.email.data.EmailMessage>) {
         if (messages.isEmpty()) return
         val ctx = applicationContext ?: return
         val prefs = ctx.getSharedPreferences("email_notif_last_seen", Context.MODE_PRIVATE)

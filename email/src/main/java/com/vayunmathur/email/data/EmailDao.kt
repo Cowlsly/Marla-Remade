@@ -1,13 +1,13 @@
 package com.vayunmathur.email.data
 
 import androidx.room.*
-import com.vayunmathur.email.Attachment
-import com.vayunmathur.email.EmailAccount
-import com.vayunmathur.email.EmailFolder
-import com.vayunmathur.email.EmailMessage
-import com.vayunmathur.email.OutboxEntry
-import com.vayunmathur.email.DraftEntry
-import com.vayunmathur.email.BlockedSender
+import com.vayunmathur.email.data.Attachment
+import com.vayunmathur.email.data.EmailAccount
+import com.vayunmathur.email.data.EmailFolder
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.OutboxEntry
+import com.vayunmathur.email.data.DraftEntry
+import com.vayunmathur.email.data.BlockedSender
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -65,7 +65,7 @@ interface EmailDao {
     // ---- Deleted-UID tombstones ----
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
-    suspend fun insertDeletedUid(tombstone: com.vayunmathur.email.DeletedUid)
+    suspend fun insertDeletedUid(tombstone: com.vayunmathur.email.data.DeletedUid)
 
     /** UIDs the user deleted locally — consulted by sync to avoid re-inserting them. */
     @Query("SELECT uid FROM DeletedUid WHERE accountEmail = :accountEmail AND folderName = :folderName")
@@ -75,7 +75,7 @@ interface EmailDao {
     @Transaction
     suspend fun deleteMessageRow(accountEmail: String, folderName: String, uid: Long, tombstone: Boolean) {
         if (tombstone) {
-            insertDeletedUid(com.vayunmathur.email.DeletedUid(accountEmail, folderName, uid))
+            insertDeletedUid(com.vayunmathur.email.data.DeletedUid(accountEmail, folderName, uid))
         }
         deleteMessageRow(accountEmail, folderName, uid)
     }
