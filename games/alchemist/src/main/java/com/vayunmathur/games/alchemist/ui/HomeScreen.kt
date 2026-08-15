@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -28,14 +29,13 @@ import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.OverlayAction
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.TopAppBarOverlay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -132,48 +132,9 @@ fun HomeScreen(
 
     val lazyList = rememberLazyListState()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.app_name)) }, actions = {
-                if (activeItems.isNotEmpty()) {
-                    IconButton(onClick = { actions.clearElements() }) {
-                        Icon(
-                            painterResource(id = android.R.drawable.ic_menu_close_clear_cancel), "Clear"
-                        )
-                    }
-                }
-                IconButton(onClick = onOpenCollection) {
-                    Icon(
-                        painterResource(id = android.R.drawable.ic_menu_sort_by_size), "Collection"
-                    )
-                }
-                IconButton(onClick = onOpenGameCenter) {
-                    Icon(
-                        painterResource(id = android.R.drawable.btn_star_big_on), "Achievements"
-                    )
-                }
-                IconButton(onClick = { overflowExpanded = true }) {
-                    IconMoreVert()
-                }
-                DropdownMenu(
-                    expanded = overflowExpanded,
-                    onDismissRequest = { overflowExpanded = false }
-                ) {
-                    DropdownMenuItem(
-                        text = { Text(stringResource(R.string.hide_maxed_elements)) },
-                        trailingIcon = { if (state.hideExhausted) IconCheck() },
-                        onClick = {
-                            actions.setHideExhausted(!state.hideExhausted)
-                            overflowExpanded = false
-                        }
-                    )
-                }
-            })
-        }) { paddingValues ->
+    Box(Modifier.fillMaxSize()) {
         Box(
-            Modifier
-                .fillMaxSize()
-                .padding(paddingValues)
+            Modifier.fillMaxSize()
         ) {
             // 1. PLAY AREA (Full Screen)
             Box(
@@ -381,6 +342,62 @@ fun HomeScreen(
                     }
                     .size(72.dp)
                 ) { DynamicAlchemyIcon(id) }
+            }
+        }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            actions = buildList {
+                if (activeItems.isNotEmpty()) {
+                    add(
+                        OverlayAction(
+                            icon = { Icon(painterResource(id = android.R.drawable.ic_menu_close_clear_cancel), "Clear") },
+                            contentDescription = "Clear",
+                            onClick = { actions.clearElements() },
+                        )
+                    )
+                }
+                add(
+                    OverlayAction(
+                        icon = { Icon(painterResource(id = android.R.drawable.ic_menu_sort_by_size), "Collection") },
+                        contentDescription = "Collection",
+                        onClick = onOpenCollection,
+                    )
+                )
+                add(
+                    OverlayAction(
+                        icon = { Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements") },
+                        contentDescription = "Achievements",
+                        onClick = onOpenGameCenter,
+                    )
+                )
+                add(
+                    OverlayAction(
+                        icon = { IconMoreVert() },
+                        contentDescription = "More",
+                        onClick = { overflowExpanded = true },
+                    )
+                )
+            }
+        )
+
+        Box(
+            Modifier
+                .align(Alignment.TopEnd)
+                .statusBarsPadding()
+        ) {
+            DropdownMenu(
+                expanded = overflowExpanded,
+                onDismissRequest = { overflowExpanded = false }
+            ) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(R.string.hide_maxed_elements)) },
+                    trailingIcon = { if (state.hideExhausted) IconCheck() },
+                    onClick = {
+                        actions.setHideExhausted(!state.hideExhausted)
+                        overflowExpanded = false
+                    }
+                )
             }
         }
 

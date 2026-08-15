@@ -2,20 +2,21 @@ package com.vayunmathur.games.alchemist.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.TopAppBarOverlay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -31,7 +32,6 @@ import com.vayunmathur.games.alchemist.Route
 import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
 import com.vayunmathur.games.alchemist.platform.CollectionUiState
 import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [AlchemistViewModel] to the stateless [CollectionScreen]. */
@@ -64,16 +64,11 @@ fun CollectionScreen(
     onBack: () -> Unit,
     onOpenItemDetails: (Long) -> Unit
 ) {
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(stringResource(R.string.collection)) },
-            navigationIcon = { IconNavigation(onBack) }
-        )
-    }) { paddingValues ->
+    Box(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .fillMaxSize()
-                .padding(paddingValues)
+                .statusBarsPadding()
         ) {
             Text(
                 text = stringResource(R.string.discovered_counter, state.discoveredItems.size, state.totalCount),
@@ -111,5 +106,10 @@ fun CollectionScreen(
                 }
             }
         }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            onNavigateBack = onBack,
+        )
     }
 }

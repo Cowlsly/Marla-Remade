@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -19,9 +20,8 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.TopAppBarOverlay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -37,7 +37,6 @@ import com.vayunmathur.games.alchemist.data.AlchemyRecipe
 import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
 import com.vayunmathur.games.alchemist.platform.ItemDetailsUiState
 import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 
 /** Binds [AlchemistViewModel] to the stateless [ItemDetailsScreen]. */
@@ -73,24 +72,13 @@ fun ItemDetailsScreen(
     val recipes = state.recipes
     val itemsIds = state.discoveredIds
 
-    Scaffold(topBar = {
-        TopAppBar(
-            { Text(stringResource(R.string.item_details)) },
-            navigationIcon = { IconNavigation(onBack) }
-        )
-    }) { paddingValues ->
-        if (item == null) {
-            // Catalog not yet loaded or item id unknown — render an empty surface
-            // rather than crashing.
-            Column(Modifier.padding(paddingValues)) {}
-            return@Scaffold
-        }
-
-        Column(
-            Modifier
-                .padding(paddingValues)
-                .padding(8.dp)
-        ) {
+    Box(Modifier.fillMaxSize()) {
+        if (item != null) {
+            Column(
+                Modifier
+                    .statusBarsPadding()
+                    .padding(8.dp)
+            ) {
             Card(
                 modifier = Modifier.fillMaxSize(),
                 shape = RoundedCornerShape(16.dp),
@@ -170,6 +158,12 @@ fun ItemDetailsScreen(
                 }
             }
         }
+        }
+
+        TopAppBarOverlay(
+            modifier = Modifier.align(Alignment.TopCenter),
+            onNavigateBack = onBack,
+        )
     }
 }
 
