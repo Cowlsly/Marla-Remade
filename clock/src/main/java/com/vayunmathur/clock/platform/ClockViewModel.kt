@@ -12,7 +12,7 @@ import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
 import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.ui.sendTimerNotification
+import com.vayunmathur.clock.ui.components.sendTimerNotification
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay

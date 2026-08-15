@@ -59,7 +59,7 @@ class TimerActionReceiver : BroadcastReceiver() {
                         // Resume the timer: update DB with new start time, reschedule notification
                         val resumedTimer = timer.copy(isRunning = true, remainingStartTime = Clock.System.now())
                         repository.upsertTimer(resumedTimer)
-                        com.vayunmathur.clock.ui.sendTimerNotification(context, resumedTimer, true)
+                        com.vayunmathur.clock.ui.components.sendTimerNotification(context, resumedTimer, true)
                     }
                     ACTION_CANCEL -> {
                         // Delete timer, cancel alarm and notification

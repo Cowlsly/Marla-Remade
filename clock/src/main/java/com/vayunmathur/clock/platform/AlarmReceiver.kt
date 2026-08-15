@@ -10,7 +10,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
-import com.vayunmathur.clock.ui.AlarmActivity
+import com.vayunmathur.clock.service.AlarmSoundService
 import com.vayunmathur.clock.R
 
 class AlarmReceiver : BroadcastReceiver() {

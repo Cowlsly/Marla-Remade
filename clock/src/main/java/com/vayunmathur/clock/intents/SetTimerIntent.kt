@@ -2,7 +2,7 @@ package com.vayunmathur.clock.intents
 
 import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.data.Timer
-import com.vayunmathur.clock.ui.sendTimerNotification
+import com.vayunmathur.clock.ui.components.sendTimerNotification
 import com.vayunmathur.library.intents.clock.SetTimerData
 import com.vayunmathur.library.util.AssistantIntent
 import kotlinx.serialization.InternalSerializationApi

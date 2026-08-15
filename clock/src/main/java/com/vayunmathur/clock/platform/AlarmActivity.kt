@@ -7,6 +7,7 @@ import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.getValue
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.data.ClockRepository
 import com.vayunmathur.clock.ui.components.AlarmRingingScreen
