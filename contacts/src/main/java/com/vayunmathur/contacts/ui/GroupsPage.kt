@@ -84,8 +84,8 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
         },
     ) { padding ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = padding + PaddingValues(horizontal = 8.dp),
             verticalArrangement = Arrangement.spacedBy(4.dp)
         ) {
             state.groups.forEach { (group, contactsInGroup) ->

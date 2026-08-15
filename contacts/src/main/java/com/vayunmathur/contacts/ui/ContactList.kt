@@ -262,55 +262,53 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
             }
         },
     ) { paddingValues ->
-        Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
-            LazyColumn(
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                if (favorites.isNotEmpty()) {
-                    item(key = "favorites-header") { FavoritesHeader() }
-                    item(key = "favorites-card") {
-                        GroupedContactSection(count = favorites.size) { idx ->
-                            val contact = favorites[idx]
-                            ContactItem(
-                                contact = contact,
-                                isSelected = if (isSelectionMode) contact.id in selectedIds else selectedID == contact.id,
-                                showAccountLabels = state.showAccountLabels,
-                                allGroups = state.groups,
-                                decodePhoto = actions::decodePhoto,
-                                embeddedInCard = true,
-                                onClick = {
-                                    if (isSelectionMode) toggleSelection(contact.id) else actions.openContact(contact)
-                                },
-                                onLongClick = {
-                                    if (!isSelectionMode) selectedIds.add(contact.id)
-                                }
-                            )
-                        }
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = paddingValues + PaddingValues(horizontal = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            if (favorites.isNotEmpty()) {
+                item(key = "favorites-header") { FavoritesHeader() }
+                item(key = "favorites-card") {
+                    GroupedContactSection(count = favorites.size) { idx ->
+                        val contact = favorites[idx]
+                        ContactItem(
+                            contact = contact,
+                            isSelected = if (isSelectionMode) contact.id in selectedIds else selectedID == contact.id,
+                            showAccountLabels = state.showAccountLabels,
+                            allGroups = state.groups,
+                            decodePhoto = actions::decodePhoto,
+                            embeddedInCard = true,
+                            onClick = {
+                                if (isSelectionMode) toggleSelection(contact.id) else actions.openContact(contact)
+                            },
+                            onLongClick = {
+                                if (!isSelectionMode) selectedIds.add(contact.id)
+                            }
+                        )
                     }
                 }
+            }
 
-                groupedContacts.forEach { (letter, contactsInGroup) ->
-                    item(key = "letter-header-$letter") { LetterHeader(letter) }
-                    item(key = "letter-card-$letter") {
-                        GroupedContactSection(count = contactsInGroup.size) { idx ->
-                            val contact = contactsInGroup[idx]
-                            ContactItem(
-                                contact = contact,
-                                isSelected = if (isSelectionMode) contact.id in selectedIds else selectedID == contact.id,
-                                showAccountLabels = state.showAccountLabels,
-                                allGroups = state.groups,
-                                decodePhoto = actions::decodePhoto,
-                                embeddedInCard = true,
-                                onClick = {
-                                    if (isSelectionMode) toggleSelection(contact.id) else actions.openContact(contact)
-                                },
-                                onLongClick = {
-                                    if (!isSelectionMode) selectedIds.add(contact.id)
-                                }
-                            )
-                        }
+            groupedContacts.forEach { (letter, contactsInGroup) ->
+                item(key = "letter-header-$letter") { LetterHeader(letter) }
+                item(key = "letter-card-$letter") {
+                    GroupedContactSection(count = contactsInGroup.size) { idx ->
+                        val contact = contactsInGroup[idx]
+                        ContactItem(
+                            contact = contact,
+                            isSelected = if (isSelectionMode) contact.id in selectedIds else selectedID == contact.id,
+                            showAccountLabels = state.showAccountLabels,
+                            allGroups = state.groups,
+                            decodePhoto = actions::decodePhoto,
+                            embeddedInCard = true,
+                            onClick = {
+                                if (isSelectionMode) toggleSelection(contact.id) else actions.openContact(contact)
+                            },
+                            onLongClick = {
+                                if (!isSelectionMode) selectedIds.add(contact.id)
+                            }
+                        )
                     }
                 }
             }
@@ -352,8 +350,8 @@ fun ContactListPick(
         },
     ) { paddingValues ->
         LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(paddingValues),
-            contentPadding = PaddingValues(horizontal = 16.dp),
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = paddingValues + PaddingValues(horizontal = 16.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
             if (favorites.isNotEmpty()) {
