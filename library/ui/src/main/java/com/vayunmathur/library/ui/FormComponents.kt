@@ -3,10 +3,18 @@ package com.vayunmathur.library.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.VisualTransformation
@@ -94,4 +102,98 @@ fun LabeledTextField(
         keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
         singleLine = singleLine,
     )
+}
+
+/**
+ * A repeatable list of typed detail rows, each with a value field, a type
+ * dropdown and a remove button, plus an "add" affordance.
+ *
+ * This is the generic version of `contacts:DetailsSection` — promoted here so
+ * contact-like editors can share the shape without copying the function.
+ * Callers supply how to read/write the row ([value]/[typeLabel]/[isCustom])
+ * and how to create or mutate it ([onValueChange]/[onTypeChange]/[onLabelChange]
+ * /[onAdd]/[onRemove]); [Spacing] and the library primitives
+ * ([OutlinedTextField]/[DropdownMenu]/[IconRemoveCircle]/[IconAdd]) are reused
+ * so the look stays consistent with [FormSection]/[LabeledTextField].
+ *
+ * [optionLabel] formats each dropdown option; when null the row's [typeLabel]
+ * is not used for options (callers that need localized type names should pass
+ * it explicitly, e.g. via `ContactDetail.default<T>().withType(option)`).
+ */
+@Composable
+fun <T> FormDetailGroup(
+    items: List<T>,
+    label: String,
+    addLabel: String,
+    typeOptions: List<Int>,
+    value: (T) -> String,
+    onValueChange: (Int, String) -> Unit,
+    typeLabel: (T) -> String,
+    onTypeChange: (Int, Int) -> Unit,
+    onRemove: (Int) -> Unit,
+    onAdd: () -> Unit,
+    modifier: Modifier = Modifier,
+    keyboardType: KeyboardType = KeyboardType.Text,
+    visualTransformation: VisualTransformation = VisualTransformation.None,
+    isCustom: (T) -> Boolean = { false },
+    customLabel: (T) -> String = { "" },
+    onLabelChange: ((Int, String) -> Unit)? = null,
+    customLabelText: String? = null,
+    customPlaceholder: String? = null,
+    optionLabel: ((Int) -> String)? = null,
+    leadingIcon: (@Composable (T) -> Unit)? = null,
+    addIcon: (@Composable () -> Unit)? = null,
+) {
+    Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(Spacing.sm)) {
+        items.forEachIndexed { index, item ->
+            OutlinedTextField(
+                value = value(item),
+                onValueChange = { v -> onValueChange(index, v) },
+                label = { Text(label) },
+                visualTransformation = visualTransformation,
+                leadingIcon = leadingIcon?.let { { it(item) } },
+                trailingIcon = {
+                    Row {
+                        var expanded by remember { mutableStateOf(false) }
+                        TextButton({ expanded = true }) {
+                            Text(typeLabel(item))
+                            IconArrowDropDown()
+                        }
+                        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+                            typeOptions.forEach { option ->
+                                DropdownMenuItem(
+                                    text = { Text(optionLabel?.invoke(option) ?: option.toString()) },
+                                    onClick = {
+                                        onTypeChange(index, option)
+                                        expanded = false
+                                    },
+                                )
+                            }
+                        }
+                        IconButton(onClick = { onRemove(index) }) {
+                            IconRemoveCircle()
+                        }
+                    }
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                modifier = Modifier.fillMaxWidth(),
+            )
+            if (isCustom(item) && onLabelChange != null) {
+                Spacer(Modifier.height(Spacing.xs))
+                OutlinedTextField(
+                    value = customLabel(item),
+                    onValueChange = { v -> onLabelChange(index, v) },
+                    label = { Text(customLabelText ?: label) },
+                    placeholder = customPlaceholder?.let { { Text(it) } },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            Spacer(Modifier.height(Spacing.xs))
+        }
+        FilledTonalButton(onClick = onAdd, modifier = Modifier.fillMaxWidth()) {
+            addIcon?.invoke() ?: IconAdd()
+            Spacer(Modifier.width(Spacing.sm))
+            Text(addLabel)
+        }
+    }
 }
