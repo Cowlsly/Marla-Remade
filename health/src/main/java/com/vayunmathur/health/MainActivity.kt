@@ -66,6 +66,7 @@ import com.vayunmathur.health.util.FoodDatabase
 import com.vayunmathur.health.util.HealthAPI
 import com.vayunmathur.health.util.HealthSyncWorker
 import com.vayunmathur.health.util.HealthViewModel
+import com.vayunmathur.health.util.HealthViewModelFactory
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.PermissionWall
 import com.vayunmathur.library.util.MainNavigation
@@ -106,7 +107,9 @@ val PERMISSIONS = CLASSES.map { HealthPermission.getReadPermission(it) }.toSet()
 
 
 class MainActivity : ComponentActivity() {
-    private val healthViewModel: HealthViewModel by viewModels()
+    private val healthViewModel: HealthViewModel by viewModels {
+        HealthViewModelFactory(application, HealthRepository.get(this))
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
