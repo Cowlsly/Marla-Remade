@@ -37,8 +37,11 @@ import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.FormDetailGroup
+import com.vayunmathur.library.ui.FormSection
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.InputChip
+import com.vayunmathur.library.ui.LabeledTextField
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Scaffold
@@ -72,8 +75,10 @@ import com.vayunmathur.contacts.data.CDKEmail
 import com.vayunmathur.contacts.data.CDKEvent
 import com.vayunmathur.contacts.data.CDKPhone
 import com.vayunmathur.contacts.data.CDKStructuredPostal
+import com.vayunmathur.contacts.data.Address
 import com.vayunmathur.contacts.data.ContactDetail
 import com.vayunmathur.contacts.data.ContactGroup
+import com.vayunmathur.contacts.data.Email
 import com.vayunmathur.contacts.data.Event
 import com.vayunmathur.contacts.data.GroupMembership
 import com.vayunmathur.contacts.data.PhoneNumber
@@ -211,30 +216,25 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.fillMaxWidth()
                 )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = currentDraft.simName,
-                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(simName = v) } },
-                    label = { Text(stringResource(R.string.sim_name)) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = currentDraft.simPhone,
-                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(simPhone = v) } },
-                    label = { Text(stringResource(R.string.sim_phone)) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Phone),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = currentDraft.simEmail,
-                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(simEmail = v) } },
-                    label = { Text(stringResource(R.string.sim_email)) },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(Modifier.height(16.dp))
+                FormSection {
+                    LabeledTextField(
+                        value = currentDraft.simName,
+                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simName = v) } },
+                        label = stringResource(R.string.sim_name),
+                    )
+                    LabeledTextField(
+                        value = currentDraft.simPhone,
+                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simPhone = v) } },
+                        label = stringResource(R.string.sim_phone),
+                        keyboardType = KeyboardType.Phone,
+                    )
+                    LabeledTextField(
+                        value = currentDraft.simEmail,
+                        onValueChange = { v -> viewModel.updateEditDraft { it.copy(simEmail = v) } },
+                        label = stringResource(R.string.sim_email),
+                        keyboardType = KeyboardType.Email,
+                    )
+                }
                 return@Column
             }
 
@@ -252,55 +252,43 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             Spacer(Modifier.height(24.dp))
 
 
-            OutlinedTextField(
-                value = currentDraft.firstName,
-                onValueChange = { v -> viewModel.updateEditDraft { it.copy(firstName = v) } },
-                label = { Text(stringResource(R.string.first_name)) },
-                leadingIcon = {
-                    NamePrefixChooser(currentDraft.namePrefix) { v ->
-                        viewModel.updateEditDraft { it.copy(namePrefix = v) }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = currentDraft.middleName,
-                onValueChange = { v -> viewModel.updateEditDraft { it.copy(middleName = v) } },
-                label = { Text(stringResource(R.string.middle_name)) },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = currentDraft.lastName,
-                onValueChange = { v -> viewModel.updateEditDraft { it.copy(lastName = v) } },
-                label = { Text(stringResource(R.string.last_name)) },
-                trailingIcon = {
-                    NameSuffixChooser(currentDraft.nameSuffix) { v ->
-                        viewModel.updateEditDraft { it.copy(nameSuffix = v) }
-                    }
-                },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = currentDraft.nickname,
-                onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
-                label = { Text(stringResource(R.string.nickname)) },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = currentDraft.company,
-                onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
-                label = { Text(stringResource(R.string.company)) },
-                modifier = Modifier.fillMaxWidth()
-            )
-            Spacer(Modifier.height(16.dp))
+            FormSection {
+                LabeledTextField(
+                    value = currentDraft.firstName,
+                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(firstName = v) } },
+                    label = stringResource(R.string.first_name),
+                    leadingIcon = {
+                        NamePrefixChooser(currentDraft.namePrefix) { v ->
+                            viewModel.updateEditDraft { it.copy(namePrefix = v) }
+                        }
+                    },
+                )
+                LabeledTextField(
+                    value = currentDraft.middleName,
+                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(middleName = v) } },
+                    label = stringResource(R.string.middle_name),
+                )
+                LabeledTextField(
+                    value = currentDraft.lastName,
+                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(lastName = v) } },
+                    label = stringResource(R.string.last_name),
+                    trailingIcon = {
+                        NameSuffixChooser(currentDraft.nameSuffix) { v ->
+                            viewModel.updateEditDraft { it.copy(nameSuffix = v) }
+                        }
+                    },
+                )
+                LabeledTextField(
+                    value = currentDraft.nickname,
+                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(nickname = v) } },
+                    label = stringResource(R.string.nickname),
+                )
+                LabeledTextField(
+                    value = currentDraft.company,
+                    onValueChange = { v -> viewModel.updateEditDraft { it.copy(company = v) } },
+                    label = stringResource(R.string.company),
+                )
+            }
 
             // Group memberships (placed near identity fields)
             val allGroups by viewModel.groups.collectAsStateWithLifecycle()
@@ -324,29 +312,50 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             )
             Spacer(Modifier.height(16.dp))
 
-            DetailsSection(
-                detailType = stringResource(R.string.phone),
-                addLabelRes = R.string.add_phone,
-                removeLabelRes = R.string.remove_phone,
-                details = currentDraft.phoneNumbers,
-                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(phoneNumbers = list) } },
-                icon = { IconCall() },
+            val phoneCtx = LocalContext.current
+            FormDetailGroup(
+                items = currentDraft.phoneNumbers,
+                label = stringResource(R.string.phone),
+                addLabel = stringResource(R.string.add_phone),
+                typeOptions = listOf(CDKPhone.TYPE_MOBILE, CDKPhone.TYPE_HOME, CDKPhone.TYPE_WORK, CDKPhone.TYPE_OTHER, CDKPhone.TYPE_CUSTOM),
+                value = { it.value },
+                onValueChange = { idx, v -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l[idx] = l[idx].withValue(v) }) } },
+                typeLabel = { it.typeString(phoneCtx) },
+                optionLabel = { opt -> ContactDetail.default<PhoneNumber>().withType(opt).typeString(phoneCtx) },
+                onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
+                onRemove = { idx -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l.removeAt(idx) }) } },
+                onAdd = { viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers + ContactDetail.default<PhoneNumber>()) } },
                 keyboardType = KeyboardType.Phone,
-                visualTransformation = VisualTransformation.None,
-                options = listOf(CDKPhone.TYPE_MOBILE, CDKPhone.TYPE_HOME, CDKPhone.TYPE_WORK, CDKPhone.TYPE_OTHER, CDKPhone.TYPE_CUSTOM)
+                isCustom = { it.type == CDKPhone.TYPE_CUSTOM },
+                customLabel = { it.label },
+                onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(phoneNumbers = it.phoneNumbers.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
+                customLabelText = stringResource(R.string.custom_label),
+                customPlaceholder = stringResource(R.string.enter_custom_label),
+                leadingIcon = { item -> Text(getCountryFlagEmoji(item.value)) },
+                addIcon = { IconCall() },
             )
             Spacer(Modifier.height(8.dp))
 
-            DetailsSection(
-                detailType = stringResource(R.string.email),
-                addLabelRes = R.string.add_email,
-                removeLabelRes = R.string.remove_email,
-                details = currentDraft.emails,
-                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(emails = list) } },
-                icon = { IconMail() },
+            val emailCtx = LocalContext.current
+            FormDetailGroup(
+                items = currentDraft.emails,
+                label = stringResource(R.string.email),
+                addLabel = stringResource(R.string.add_email),
+                typeOptions = listOf(CDKEmail.TYPE_HOME, CDKEmail.TYPE_WORK, CDKEmail.TYPE_OTHER, CDKEmail.TYPE_MOBILE, CDKEmail.TYPE_CUSTOM),
+                value = { it.value },
+                onValueChange = { idx, v -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l[idx] = l[idx].withValue(v) }) } },
+                typeLabel = { it.typeString(emailCtx) },
+                optionLabel = { opt -> ContactDetail.default<Email>().withType(opt).typeString(emailCtx) },
+                onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
+                onRemove = { idx -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l.removeAt(idx) }) } },
+                onAdd = { viewModel.updateEditDraft { it.copy(emails = it.emails + ContactDetail.default<Email>()) } },
                 keyboardType = KeyboardType.Email,
-                visualTransformation = VisualTransformation.None,
-                options = listOf(CDKEmail.TYPE_HOME, CDKEmail.TYPE_WORK, CDKEmail.TYPE_OTHER, CDKEmail.TYPE_MOBILE, CDKEmail.TYPE_CUSTOM)
+                isCustom = { it.type == CDKEmail.TYPE_CUSTOM },
+                customLabel = { it.label },
+                onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(emails = it.emails.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
+                customLabelText = stringResource(R.string.custom_label),
+                customPlaceholder = stringResource(R.string.enter_custom_label),
+                addIcon = { IconMail() },
             )
 
             Spacer(Modifier.height(16.dp))
@@ -365,16 +374,25 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
 
             Spacer(Modifier.height(12.dp))
 
-            DetailsSection(
-                detailType = stringResource(R.string.addresses),
-                addLabelRes = R.string.add_address,
-                removeLabelRes = R.string.remove_address,
-                details = currentDraft.addresses,
-                onDetailsChange = { list -> viewModel.updateEditDraft { it.copy(addresses = list) } },
-                icon = { IconEvent() },
-                keyboardType = KeyboardType.Text,
-                visualTransformation = VisualTransformation.None,
-                options = listOf(CDKStructuredPostal.TYPE_HOME, CDKStructuredPostal.TYPE_WORK, CDKStructuredPostal.TYPE_OTHER, CDKStructuredPostal.TYPE_CUSTOM)
+            val addressCtx = LocalContext.current
+            FormDetailGroup(
+                items = currentDraft.addresses,
+                label = stringResource(R.string.addresses),
+                addLabel = stringResource(R.string.add_address),
+                typeOptions = listOf(CDKStructuredPostal.TYPE_HOME, CDKStructuredPostal.TYPE_WORK, CDKStructuredPostal.TYPE_OTHER, CDKStructuredPostal.TYPE_CUSTOM),
+                value = { it.value },
+                onValueChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withValue(v) }) } },
+                typeLabel = { it.typeString(addressCtx) },
+                optionLabel = { opt -> ContactDetail.default<Address>().withType(opt).typeString(addressCtx) },
+                onTypeChange = { idx, opt -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withType(opt) }) } },
+                onRemove = { idx -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l.removeAt(idx) }) } },
+                onAdd = { viewModel.updateEditDraft { it.copy(addresses = it.addresses + ContactDetail.default<Address>()) } },
+                isCustom = { it.type == CDKStructuredPostal.TYPE_CUSTOM },
+                customLabel = { it.label },
+                onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
+                customLabelText = stringResource(R.string.custom_label),
+                customPlaceholder = stringResource(R.string.enter_custom_label),
+                addIcon = { IconEvent() },
             )
 
             Spacer(Modifier.height(16.dp))
@@ -611,94 +629,6 @@ private fun ColumnScope.DateDetailsSection(
         icon()
         Spacer(Modifier.width(8.dp))
         Text(stringResource(R.string.add_date))
-    }
-}
-
-@Composable
-private inline fun <reified T : ContactDetail<T>> ColumnScope.DetailsSection(
-    detailType: String,
-    addLabelRes: Int,
-    removeLabelRes: Int,
-    details: List<T>,
-    noinline onDetailsChange: (List<T>) -> Unit,
-    crossinline icon: @Composable () -> Unit,
-    keyboardType: KeyboardType,
-    visualTransformation: VisualTransformation,
-    options: List<Int>
-) {
-    val context = LocalContext.current
-    details.forEachIndexed { index, detail ->
-        // Heuristic: TYPE_CUSTOM is 0 across all CommonDataKinds
-        val isCustom = detail.type == 0
-        OutlinedTextField(
-            value = detail.value,
-            onValueChange = { newNumber ->
-                onDetailsChange(details.toMutableList().also { it[index] = detail.withValue(newNumber) })
-            },
-            visualTransformation = visualTransformation,
-            label = { Text(detailType) },
-            leadingIcon = {
-                if (detail is PhoneNumber) {
-                    Text(getCountryFlagEmoji(detail.value))
-                }
-            },
-            trailingIcon = {
-                Row {
-                    var dropdownExpanded by remember { mutableStateOf(false) }
-                    TextButton({ dropdownExpanded = true }) {
-                        Text(detail.typeString(context))
-                        IconArrowDropDown()
-                    }
-                    DropdownMenu(
-                        expanded = dropdownExpanded,
-                        onDismissRequest = { dropdownExpanded = false }) {
-                        options.forEach { option ->
-                            DropdownMenuItem(
-                                onClick = {
-                                    onDetailsChange(details.toMutableList().also { it[index] = detail.withType(option) })
-                                    dropdownExpanded = false
-                                },
-                                text = { Text(ContactDetail.default<T>().withType(option).typeString(context)) }
-                            )
-                        }
-                    }
-                    IconButton(onClick = {
-                        onDetailsChange(details.toMutableList().also { it.removeAt(index) })
-                    }) {
-                        IconRemoveCircle()
-                    }
-                }
-            },
-            keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
-            modifier = Modifier.fillMaxWidth()
-        )
-        if (isCustom) {
-            Spacer(Modifier.height(4.dp))
-            OutlinedTextField(
-                value = when (detail) {
-                    is PhoneNumber -> detail.label
-                    is com.vayunmathur.contacts.data.Email -> detail.label
-                    is com.vayunmathur.contacts.data.Address -> detail.label
-                    is Event -> detail.label
-                    else -> ""
-                },
-                onValueChange = { newLabel ->
-                    onDetailsChange(details.toMutableList().also { it[index] = detail.withLabel(newLabel) })
-                },
-                label = { Text(stringResource(R.string.custom_label)) },
-                placeholder = { Text(stringResource(R.string.enter_custom_label)) },
-                modifier = Modifier.fillMaxWidth()
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-    }
-    FilledTonalButton(
-        onClick = { onDetailsChange(details + ContactDetail.default<T>()) },
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        icon()
-        Spacer(Modifier.width(8.dp))
-        Text(stringResource(addLabelRes))
     }
 }
 
