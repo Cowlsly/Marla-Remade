@@ -1,4 +1,8 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.platform
+
+import com.vayunmathur.translate.data.TranslateSettings
+import com.vayunmathur.translate.domain.Languages
+import com.vayunmathur.translate.domain.TranslationEngine
 
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel

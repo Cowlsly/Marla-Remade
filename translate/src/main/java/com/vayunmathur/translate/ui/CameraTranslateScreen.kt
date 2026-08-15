@@ -78,8 +78,9 @@ import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.translate.util.Languages
-import com.vayunmathur.translate.util.TranslateViewModel
+import com.vayunmathur.translate.domain.Languages
+import com.vayunmathur.translate.platform.TranslateViewModel
+import com.vayunmathur.translate.ui.components.LanguagePicker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive

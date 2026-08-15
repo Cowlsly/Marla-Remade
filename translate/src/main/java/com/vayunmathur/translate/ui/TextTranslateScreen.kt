@@ -53,13 +53,14 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberMessenger
-import com.vayunmathur.translate.util.AndroidSpeechRecognizer
-import com.vayunmathur.translate.util.Languages
-import com.vayunmathur.translate.util.MicState
-import com.vayunmathur.translate.util.SpeechRecognizerEngine
-import com.vayunmathur.translate.util.TextTranslateActions
-import com.vayunmathur.translate.util.TextTranslateUiState
-import com.vayunmathur.translate.util.TranslateViewModel
+import com.vayunmathur.translate.domain.Languages
+import com.vayunmathur.translate.platform.AndroidSpeechRecognizer
+import com.vayunmathur.translate.platform.MicState
+import com.vayunmathur.translate.platform.SpeechRecognizerEngine
+import com.vayunmathur.translate.platform.TextTranslateActions
+import com.vayunmathur.translate.platform.TextTranslateUiState
+import com.vayunmathur.translate.platform.TranslateViewModel
+import com.vayunmathur.translate.ui.components.LanguagePicker
 import kotlinx.coroutines.delay
 
 /** Debounce window for live translation as the user types (ms). */

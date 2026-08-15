@@ -1,4 +1,4 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.platform
 
 import android.content.Context
 import com.vayunmathur.library.downloadservice.ModelDownloadItem

@@ -1,0 +1,28 @@
+package com.vayunmathur.translate
+
+import androidx.compose.runtime.Composable
+import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.rememberNavBackStack
+import com.vayunmathur.translate.platform.TranslateViewModel
+import com.vayunmathur.translate.ui.CameraTranslateScreen
+import com.vayunmathur.translate.ui.TextTranslatePage
+
+@Composable
+fun Navigation(viewModel: TranslateViewModel, initialText: String) {
+    val backStack = rememberNavBackStack<Route>(Route.Text)
+    MainNavigation(backStack) {
+        entry<Route.Text> {
+            TextTranslatePage(
+                viewModel = viewModel,
+                initialText = initialText,
+                onOpenCamera = { backStack.add(Route.Camera) },
+            )
+        }
+        entry<Route.Camera> {
+            CameraTranslateScreen(
+                viewModel = viewModel,
+                onBack = { backStack.pop() },
+            )
+        }
+    }
+}

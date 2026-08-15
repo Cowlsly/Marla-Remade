@@ -1,4 +1,4 @@
-package com.vayunmathur.translate.ui
+package com.vayunmathur.translate.ui.components
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
@@ -16,8 +16,8 @@ import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.translate.util.Language
-import com.vayunmathur.translate.util.Languages
+import com.vayunmathur.translate.domain.Language
+import com.vayunmathur.translate.domain.Languages
 
 /**
  * A compact language selector: a text button showing the current language's

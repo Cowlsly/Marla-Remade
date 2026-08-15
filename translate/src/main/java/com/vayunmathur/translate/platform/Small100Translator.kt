@@ -1,4 +1,6 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.platform
+
+import com.vayunmathur.translate.domain.TranslationEngine
 
 import android.content.Context
 import android.util.Log

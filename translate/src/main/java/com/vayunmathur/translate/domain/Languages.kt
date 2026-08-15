@@ -1,4 +1,4 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.domain
 
 /**
  * One selectable language. [code] is the BCP-47 / ISO-639-1 code used both as the

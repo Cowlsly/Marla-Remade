@@ -1,4 +1,6 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.data
+
+import com.vayunmathur.translate.domain.Languages
 
 import android.content.Context
 import androidx.datastore.preferences.core.edit

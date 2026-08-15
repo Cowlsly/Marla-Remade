@@ -1,4 +1,6 @@
-package com.vayunmathur.translate.util
+package com.vayunmathur.translate.platform
+
+import com.vayunmathur.translate.domain.Languages
 
 /**
  * The UI contract between [TranslateViewModel] (plus the speech plumbing that wraps it) and

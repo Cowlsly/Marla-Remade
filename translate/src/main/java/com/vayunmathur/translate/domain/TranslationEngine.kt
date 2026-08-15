@@ -1,12 +1,4 @@
-package com.vayunmathur.translate.util
-
-import android.content.Context
-import android.util.Log
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
-import java.io.File
+package com.vayunmathur.translate.domain
 
 /**
  * On-device translation, behind a clean interface so a real neural backend can
