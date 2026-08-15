@@ -8,7 +8,7 @@ import androidx.compose.runtime.setValue
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.music.ui.dialogs.CreatePlaylistDialog
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.MusicViewModel
 
 @Composable
 fun NewPlaylistFab(musicViewModel: MusicViewModel) {

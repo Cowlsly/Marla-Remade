@@ -40,7 +40,7 @@ import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.music.util.formatDuration
+import com.vayunmathur.music.platform.formatDuration
 import kotlinx.coroutines.delay
 
 /**

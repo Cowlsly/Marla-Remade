@@ -54,11 +54,11 @@ import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.MusicActions
-import com.vayunmathur.music.util.NowPlayingUiState
-import com.vayunmathur.music.util.PlaybackSource
-import com.vayunmathur.music.util.formatDuration
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.MusicActions
+import com.vayunmathur.music.platform.NowPlayingUiState
+import com.vayunmathur.music.platform.PlaybackSource
+import com.vayunmathur.music.platform.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

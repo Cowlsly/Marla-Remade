@@ -14,8 +14,8 @@ import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.util.MusicViewModel
-import com.vayunmathur.music.util.SyncWorker
+import com.vayunmathur.music.platform.MusicViewModel
+import com.vayunmathur.music.platform.SyncWorker
 
 /**
  * Hosts the four main tabs (Songs / Albums / Artists / Playlists) in a swipeable

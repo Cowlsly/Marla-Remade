@@ -23,10 +23,10 @@ import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
 import com.vayunmathur.music.ui.components.ShufflePlayFab
-import com.vayunmathur.music.util.AddToPlaylistButton
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.MusicActions
-import com.vayunmathur.music.util.SongsUiState
+import com.vayunmathur.music.platform.AddToPlaylistButton
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.MusicActions
+import com.vayunmathur.music.platform.SongsUiState
 
 /** Queue id the songs tab plays under; [SOURCE_ALL_SONGS_NAME] is its display label. */
 internal const val SOURCE_ALL_SONGS = "all_songs"

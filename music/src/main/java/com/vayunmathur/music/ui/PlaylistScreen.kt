@@ -11,8 +11,8 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Playlist

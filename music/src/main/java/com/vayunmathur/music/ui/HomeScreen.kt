@@ -5,8 +5,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.util.MusicViewModel
-import com.vayunmathur.music.util.SongsUiState
+import com.vayunmathur.music.platform.MusicViewModel
+import com.vayunmathur.music.platform.SongsUiState
 
 /** Binds [SongsScreen] to the ViewModel. */
 @Composable

@@ -24,9 +24,9 @@ import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.invisibleClickable
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.MusicActions
-import com.vayunmathur.music.util.NowPlayingUiState
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.MusicActions
+import com.vayunmathur.music.platform.NowPlayingUiState
 
 /** The mini player docked above the tab bar. Tapping anywhere opens the full player. */
 @Composable

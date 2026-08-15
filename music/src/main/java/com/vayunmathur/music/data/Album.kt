@@ -6,7 +6,7 @@ import androidx.compose.runtime.remember
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import com.vayunmathur.library.util.DatabaseItem
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.MusicViewModel
 import kotlinx.serialization.Serializable
 
 @Serializable

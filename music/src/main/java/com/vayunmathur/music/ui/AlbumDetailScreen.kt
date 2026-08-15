@@ -10,9 +10,9 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.ui.components.PlayingBottomBar
-import com.vayunmathur.music.util.AlbumDetailUiState
-import com.vayunmathur.music.util.MusicViewModel
-import com.vayunmathur.music.util.formatDuration
+import com.vayunmathur.music.platform.AlbumDetailUiState
+import com.vayunmathur.music.platform.MusicViewModel
+import com.vayunmathur.music.platform.formatDuration
 
 /** Binds [AlbumDetailContent] to the ViewModel. */
 @Composable

@@ -8,7 +8,7 @@ import androidx.compose.ui.res.stringResource
 import com.vayunmathur.music.R
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.Route
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.MusicViewModel
 
 @Composable
 fun AddToPlaylistDialog(backStack: NavBackStack<Route>, musicViewModel: MusicViewModel, musicId: Long) {

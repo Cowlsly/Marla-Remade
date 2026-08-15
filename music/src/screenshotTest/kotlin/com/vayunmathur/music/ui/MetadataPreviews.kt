@@ -17,10 +17,10 @@ import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Music
 import com.vayunmathur.music.ui.components.MusicTabsBar
 import com.vayunmathur.music.ui.components.NowPlayingBar
-import com.vayunmathur.music.util.AlbumDetailUiState
-import com.vayunmathur.music.util.MusicActions
-import com.vayunmathur.music.util.NowPlayingUiState
-import com.vayunmathur.music.util.SongsUiState
+import com.vayunmathur.music.platform.AlbumDetailUiState
+import com.vayunmathur.music.platform.MusicActions
+import com.vayunmathur.music.platform.NowPlayingUiState
+import com.vayunmathur.music.platform.SongsUiState
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
@@ -33,7 +33,7 @@ private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
  * functions. Order comes from the function names (Preview1…, Preview2…).
  *
  * Nothing here touches MediaStore. The sample tracks carry plausible `content://` URIs
- * because the screens build MediaItems from them, but [com.vayunmathur.music.util.AlbumArt]
+ * because the screens build MediaItems from them, but [com.vayunmathur.music.platform.AlbumArt]
  * short-circuits to its placeholder under `LocalInspectionMode`, so no thumbnail is ever
  * read off the device — which is also why the artwork tiles render as glyphs rather than
  * covers.

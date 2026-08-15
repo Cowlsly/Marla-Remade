@@ -35,15 +35,15 @@ import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.music.ui.components.PlayShuffleRow
 import com.vayunmathur.music.ui.components.PlayingBottomBar
 import com.vayunmathur.music.ui.components.TrackListItem
-import com.vayunmathur.music.util.AddToPlaylistButton
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.AddToPlaylistButton
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.data.Album
 import com.vayunmathur.music.data.Artist
 import com.vayunmathur.music.data.Music
 import com.vayunmathur.music.R
-import com.vayunmathur.music.util.formatDuration
+import com.vayunmathur.music.platform.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

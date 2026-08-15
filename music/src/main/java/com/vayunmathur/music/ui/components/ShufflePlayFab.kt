@@ -8,7 +8,7 @@ import com.vayunmathur.library.ui.IconShuffle
 import com.vayunmathur.music.data.Music
 import com.vayunmathur.music.ui.SOURCE_ALL_SONGS
 import com.vayunmathur.music.ui.SOURCE_ALL_SONGS_NAME
-import com.vayunmathur.music.util.MusicViewModel
+import com.vayunmathur.music.platform.MusicViewModel
 
 @Composable
 fun ShufflePlayFab(musicViewModel: MusicViewModel) {

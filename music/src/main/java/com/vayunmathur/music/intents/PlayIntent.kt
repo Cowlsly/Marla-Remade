@@ -4,7 +4,7 @@ import com.vayunmathur.library.intents.music.PlayMusicData
 import com.vayunmathur.library.util.AssistantIntent
 import com.vayunmathur.music.data.MusicRepository
 import com.vayunmathur.music.data.TYPE_MUSIC_PLAYLIST
-import com.vayunmathur.music.util.PlaybackManager
+import com.vayunmathur.music.platform.PlaybackManager
 import kotlinx.serialization.InternalSerializationApi
 import kotlinx.serialization.serializer
 

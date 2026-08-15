@@ -34,11 +34,11 @@ import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.ui.components.PlayShuffleRow
 import com.vayunmathur.music.ui.components.TrackListItem
-import com.vayunmathur.music.util.AddToPlaylistButton
-import com.vayunmathur.music.util.AlbumArt
-import com.vayunmathur.music.util.AlbumDetailUiState
-import com.vayunmathur.music.util.MusicActions
-import com.vayunmathur.music.util.formatDuration
+import com.vayunmathur.music.platform.AddToPlaylistButton
+import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.AlbumDetailUiState
+import com.vayunmathur.music.platform.MusicActions
+import com.vayunmathur.music.platform.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

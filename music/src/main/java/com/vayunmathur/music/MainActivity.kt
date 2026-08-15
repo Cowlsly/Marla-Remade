@@ -23,9 +23,9 @@ import com.vayunmathur.music.ui.PlaylistDetailScreen
 import com.vayunmathur.music.ui.SongScreen
 import com.vayunmathur.music.ui.dialogs.AddToPlaylistDialog
 import kotlinx.serialization.Serializable
-import com.vayunmathur.music.util.MusicViewModel
-import com.vayunmathur.music.util.MusicViewModelFactory
-import com.vayunmathur.music.util.PlaybackManager
+import com.vayunmathur.music.platform.MusicViewModel
+import com.vayunmathur.music.platform.MusicViewModelFactory
+import com.vayunmathur.music.platform.PlaybackManager
 
 class MainActivity : ComponentActivity() {
     private val musicViewModel: MusicViewModel by viewModels {

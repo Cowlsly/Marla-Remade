@@ -18,7 +18,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.vayunmathur.music.util.AlbumArt
+import com.vayunmathur.music.platform.AlbumArt
 
 /**
  * A track row that highlights the currently-playing song (title color/weight + container tint) and
