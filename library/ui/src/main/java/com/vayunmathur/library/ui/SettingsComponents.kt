@@ -1,7 +1,9 @@
 package com.vayunmathur.library.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.ListItemDefaults
@@ -9,6 +11,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
@@ -130,4 +136,116 @@ fun SettingsDivider(modifier: Modifier = Modifier, inset: Boolean = true) {
         modifier = if (inset) modifier.padding(horizontal = 16.dp) else modifier,
         color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
     )
+}
+
+/**
+ * A settings row that picks one of [options].
+ *
+ * Reads as a [SettingsRow] whose supporting text is the current selection and
+ * whose trailing affordance is a dropdown arrow; tapping the row opens a
+ * [DropdownMenu] of the options, the selected one ticked. This is the one row
+ * type the settings family was missing, so "pick a value" settings were each
+ * hand-rolling a menu. Its shape matches [SettingsRow]/[SettingsSwitchRow] so a
+ * screen stays a uniform list of rows.
+ */
+@Composable
+fun <T> SettingsSelectRow(
+    title: String,
+    selected: T,
+    options: List<T>,
+    label: (T) -> String,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+    supportingText: String? = null,
+    enabled: Boolean = true,
+    leadingContent: @Composable (() -> Unit)? = null,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box {
+        SettingsRow(
+            title = title,
+            modifier = modifier,
+            supportingText = supportingText ?: label(selected),
+            enabled = enabled,
+            onClick = { expanded = true },
+            leadingContent = leadingContent,
+            trailingContent = { IconArrowDropDown() },
+        )
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = { Text(label(option)) },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    },
+                    trailingIcon = if (option == selected) ({ IconCheck() }) else null,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * The dense, form-style select: a read-only [OutlinedTextField] with an
+ * [ExposedDropdownMenuBox], for settings that read like a form field rather than
+ * a list row (the camera codec/audio pickers). Prefer [SettingsSelectRow] for
+ * ordinary settings lists.
+ *
+ * [itemSupporting] adds a second line under each option (e.g. a codec's
+ * description).
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun <T> SettingsExposedSelectRow(
+    label: String,
+    selected: T,
+    options: List<T>,
+    itemLabel: (T) -> String,
+    onSelect: (T) -> Unit,
+    modifier: Modifier = Modifier,
+    itemSupporting: ((T) -> String?)? = null,
+    enabled: Boolean = true,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    ExposedDropdownMenuBox(
+        expanded = expanded,
+        onExpandedChange = { if (enabled) expanded = it },
+        modifier = modifier,
+    ) {
+        OutlinedTextField(
+            value = itemLabel(selected),
+            onValueChange = {},
+            readOnly = true,
+            enabled = enabled,
+            label = { Text(label) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable),
+        )
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            options.forEach { option ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(itemLabel(option))
+                            val supporting = itemSupporting?.invoke(option)
+                            if (supporting != null) {
+                                Text(
+                                    supporting,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSelect(option)
+                    },
+                )
+            }
+        }
+    }
 }
