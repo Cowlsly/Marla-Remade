@@ -25,9 +25,12 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.share.protocol.PendingFile
-import com.vayunmathur.share.protocol.ShareState
-import com.vayunmathur.share.transport.Connection
+import com.vayunmathur.share.domain.protocol.PendingFile
+import com.vayunmathur.share.domain.protocol.ShareState
+import com.vayunmathur.share.platform.ShareViewModel
+import com.vayunmathur.share.platform.ShareActions
+import com.vayunmathur.share.platform.ReceiveUiState
+import com.vayunmathur.share.network.transport.Connection
 
 @Composable
 fun ShareReceiveScreen(

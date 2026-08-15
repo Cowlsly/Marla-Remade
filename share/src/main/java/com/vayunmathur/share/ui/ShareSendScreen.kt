@@ -25,9 +25,12 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.share.discovery.DiscoverySource
-import com.vayunmathur.share.discovery.NearbyDevice
-import com.vayunmathur.share.protocol.ShareState
+import com.vayunmathur.share.platform.discovery.DiscoverySource
+import com.vayunmathur.share.platform.discovery.NearbyDevice
+import com.vayunmathur.share.domain.protocol.ShareState
+import com.vayunmathur.share.platform.ShareViewModel
+import com.vayunmathur.share.platform.ShareActions
+import com.vayunmathur.share.platform.SendUiState
 
 @Composable
 fun ShareSendScreen(

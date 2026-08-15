@@ -62,10 +62,11 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.vayunmathur.games.alchemist.R
 import com.vayunmathur.games.alchemist.Route
-import com.vayunmathur.games.alchemist.util.AlchemistViewModel
-import com.vayunmathur.games.alchemist.util.HomeActions
-import com.vayunmathur.games.alchemist.util.HomeUiState
-import com.vayunmathur.games.alchemist.util.PlacedItem
+import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
+import com.vayunmathur.games.alchemist.platform.HomeActions
+import com.vayunmathur.games.alchemist.platform.HomeUiState
+import com.vayunmathur.games.alchemist.platform.PlacedItem
+import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch

@@ -7,36 +7,22 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.lifecycleScope
-import androidx.lifecycle.viewmodel.compose.viewModel
-import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
-import com.vayunmathur.library.util.openSettingsIfRequested
-import com.vayunmathur.library.util.NavKey
-import com.vayunmathur.library.util.MainNavigation
-import com.vayunmathur.library.util.rememberNavBackStack
+import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.web.data.WebRepository
-import com.vayunmathur.web.shields.ShieldsEngine
-import com.vayunmathur.web.ui.BookmarksPage
-import com.vayunmathur.web.ui.BrowserPage
-import com.vayunmathur.web.ui.HistoryPage
-import com.vayunmathur.web.ui.SettingsPage
-import com.vayunmathur.web.ui.DownloadsPage
-import com.vayunmathur.web.ui.SiteDataPage
-import com.vayunmathur.web.util.WebViewModel
-import com.vayunmathur.web.util.WebViewModelFactory
+import com.vayunmathur.web.domain.shields.ShieldsEngine
+import com.vayunmathur.web.platform.WebViewModel
+import com.vayunmathur.web.platform.WebViewModelFactory
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.Serializable
 
 class MainActivity : ComponentActivity() {
 
@@ -182,51 +168,4 @@ fun launchNewWebWindow(context: android.content.Context, incognito: Boolean) {
         )
     }
     context.startActivity(intent)
-}
-
-@Serializable
-sealed interface Route : NavKey {
-    @Serializable data object Browser : Route
-    @Serializable data object History : Route
-    @Serializable data object Bookmarks : Route
-    @Serializable data object Settings : Route
-    @Serializable data object Downloads : Route
-    @Serializable data object SiteData : Route
-    @Serializable data object InstalledSites : Route
-    @Serializable data object Shields : Route
-}
-
-@Composable
-private fun AppRoot(
-    factory: WebViewModelFactory,
-    pendingExternalUrl: String?,
-    onExternalUrlConsumed: () -> Unit,
-) {
-    val viewModel: WebViewModel = viewModel(factory = factory)
-
-    LaunchedEffect(pendingExternalUrl) {
-        if (pendingExternalUrl != null) {
-            viewModel.externalIntentUrl(pendingExternalUrl)
-            onExternalUrlConsumed()
-        }
-    }
-
-    Navigation(viewModel)
-}
-
-@Composable
-fun Navigation(viewModel: WebViewModel) {
-    val backStack = rememberNavBackStack<Route>(Route.Browser)
-    // Land on settings when opened from the system App Info page.
-    backStack.openSettingsIfRequested(Route.Settings)
-    MainNavigation(backStack) {
-        entry<Route.Browser> { BrowserPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.History> { HistoryPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.Bookmarks> { BookmarksPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.Settings> { SettingsPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.Downloads> { DownloadsPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.SiteData> { SiteDataPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.InstalledSites> { com.vayunmathur.web.ui.InstalledSitesPage(viewModel = viewModel, backStack = backStack) }
-        entry<Route.Shields> { com.vayunmathur.web.ui.ShieldsPage(viewModel = viewModel, backStack = backStack) }
-    }
 }

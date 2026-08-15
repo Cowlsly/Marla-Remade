@@ -68,7 +68,7 @@
 
         <!-- Keep receiving / transferring while backgrounded. -->
         <service
-            android:name=".transfer.ShareTransferService"
+            android:name=".platform.transfer.ShareTransferService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
     </application>

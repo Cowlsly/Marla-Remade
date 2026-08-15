@@ -28,8 +28,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.alchemist.R
 import com.vayunmathur.games.alchemist.Route
-import com.vayunmathur.games.alchemist.util.AlchemistViewModel
-import com.vayunmathur.games.alchemist.util.CollectionUiState
+import com.vayunmathur.games.alchemist.platform.AlchemistViewModel
+import com.vayunmathur.games.alchemist.platform.CollectionUiState
+import com.vayunmathur.games.alchemist.ui.components.DynamicAlchemyIcon
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 

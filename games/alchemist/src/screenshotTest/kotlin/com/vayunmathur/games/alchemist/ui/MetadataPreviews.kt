@@ -6,11 +6,11 @@ import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.games.alchemist.data.AlchemyItem
 import com.vayunmathur.games.alchemist.data.AlchemyRecipe
-import com.vayunmathur.games.alchemist.util.CollectionUiState
-import com.vayunmathur.games.alchemist.util.HomeActions
-import com.vayunmathur.games.alchemist.util.HomeUiState
-import com.vayunmathur.games.alchemist.util.ItemDetailsUiState
-import com.vayunmathur.games.alchemist.util.PlacedItem
+import com.vayunmathur.games.alchemist.platform.CollectionUiState
+import com.vayunmathur.games.alchemist.platform.HomeActions
+import com.vayunmathur.games.alchemist.platform.HomeUiState
+import com.vayunmathur.games.alchemist.platform.ItemDetailsUiState
+import com.vayunmathur.games.alchemist.platform.PlacedItem
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
