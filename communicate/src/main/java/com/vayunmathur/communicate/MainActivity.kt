@@ -7,6 +7,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -17,9 +18,11 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconCall
 import com.vayunmathur.library.ui.IconHistory
 import com.vayunmathur.library.ui.IconSms
-import com.vayunmathur.library.util.BottomBarItem
-import com.vayunmathur.library.util.BottomNavBar
+import com.vayunmathur.library.ui.PagerTab
+import com.vayunmathur.library.ui.TabStyle
+import com.vayunmathur.library.ui.TabbedPagerScaffold
 import com.vayunmathur.library.util.MainNavigation
+import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.communicate.data.CommunicateLine
@@ -46,9 +49,7 @@ import androidx.compose.ui.platform.LocalContext
 import kotlinx.serialization.Serializable
 
 sealed interface Route : NavKey {
-    @Serializable data object Messages : Route
-    @Serializable data object Dialer : Route
-    @Serializable data object CallLogs : Route
+    @Serializable data object Main : Route
     @Serializable data object Accounts : Route
     @Serializable data object GoogleVoiceSignIn : Route
     @Serializable data object WhatsAppRegistration : Route
@@ -128,55 +129,12 @@ private fun CommunicateApp() {
         }
     }
 
-    val backStack = rememberNavBackStack<Route>(Route.Messages)
-    val currentPage = backStack.last()
-    val currentRoot = when (currentPage) {
-        is Route.Conversation -> Route.Messages
-        is Route.Accounts, is Route.GoogleVoiceSignIn -> Route.Messages
-        is Route.WhatsAppRegistration -> Route.Messages
-        is Route.WhatsAppBackupImport -> Route.Messages
-        is Route.SignalRegistration -> Route.Messages
-        else -> currentPage
-    }
-    val pages = listOf(
-        BottomBarItem(stringResource(R.string.nav_messages), Route.Messages) { IconSms() },
-        BottomBarItem(stringResource(R.string.nav_dialer), Route.Dialer) { IconCall() },
-        BottomBarItem(stringResource(R.string.nav_call_logs), Route.CallLogs) { IconHistory() },
-    )
+    val backStack = rememberNavBackStack<Route>(Route.Main)
 
-    val showBottomBar = currentPage is Route.Messages ||
-        currentPage is Route.Dialer ||
-        currentPage is Route.CallLogs
-
-    MainNavigation(
-        backStack = backStack,
-        bottomBar = {
-            if (showBottomBar) {
-                BottomNavBar(backStack, pages, currentRoot)
-            }
-        },
-    ) {
-        entry<Route.Messages> {
-            MessagesScreen(
-                onOpenThread = { thread ->
-                    backStack.add(
-                        Route.Conversation(
-                            threadId = thread.threadId,
-                            address = thread.address,
-                            line = thread.line,
-                            remoteId = thread.remoteId,
-                            subscriptionId = thread.subscriptionId,
-                            isGroup = thread.isGroup,
-                            participants = thread.participants,
-                            groupTitle = thread.groupTitle,
-                        ),
-                    )
-                },
-                onOpenAccounts = { backStack.add(Route.Accounts) },
-            )
+    MainNavigation(backStack) {
+        entry<Route.Main> {
+            CommunicateTabs(backStack)
         }
-        entry<Route.Dialer> { DialerScreen() }
-        entry<Route.CallLogs> { CallLogsScreen() }
         entry<Route.Accounts> {
             AccountsScreen(
                 onBack = { backStack.pop() },
@@ -240,4 +198,33 @@ private fun CommunicateApp() {
     if (callState.phase != CallPhase.Idle) {
         CallScreen(onClose = { GoogleVoiceCallManager.clearEnded() })
     }
+}
+
+@Composable
+private fun CommunicateTabs(backStack: NavBackStack<Route>) {
+    val pagerState = rememberPagerState(pageCount = { 3 })
+    val tabs = listOf(
+        PagerTab(stringResource(R.string.nav_messages), { IconSms() }) {
+            MessagesScreen(
+                onOpenThread = { thread ->
+                    backStack.add(
+                        Route.Conversation(
+                            threadId = thread.threadId,
+                            address = thread.address,
+                            line = thread.line,
+                            remoteId = thread.remoteId,
+                            subscriptionId = thread.subscriptionId,
+                            isGroup = thread.isGroup,
+                            participants = thread.participants,
+                            groupTitle = thread.groupTitle,
+                        ),
+                    )
+                },
+                onOpenAccounts = { backStack.add(Route.Accounts) },
+            )
+        },
+        PagerTab(stringResource(R.string.nav_dialer), { IconCall() }) { DialerScreen() },
+        PagerTab(stringResource(R.string.nav_call_logs), { IconHistory() }) { CallLogsScreen() },
+    )
+    TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
