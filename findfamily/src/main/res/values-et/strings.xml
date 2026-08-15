@@ -125,4 +125,7 @@
     <string name="tile_subtitle_on">Sees</string>
     <string name="tile_subtitle_off">Väljas</string>
     <string name="tile_subtitle_no_permission">Seadistamiseks klõpsa</string>
+    <string name="fab_tracker">Jälitaja</string>
+    <string name="add_tracker_title">Lisa jälitaja</string>
+    <string name="add_tracker_name_label">Jälitaja nimi</string>
 </resources>
