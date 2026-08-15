@@ -11,7 +11,7 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.web.data.Bookmark
 import com.vayunmathur.web.data.BookmarkFolder
 import com.vayunmathur.web.data.HistoryEntry
-import com.vayunmathur.web.util.BrowserTab
+import com.vayunmathur.web.platform.BrowserTab
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"

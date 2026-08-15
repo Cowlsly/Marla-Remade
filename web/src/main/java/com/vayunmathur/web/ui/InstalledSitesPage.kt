@@ -40,9 +40,9 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.PwaHelper
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.PwaHelper
+import com.vayunmathur.web.platform.WebViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

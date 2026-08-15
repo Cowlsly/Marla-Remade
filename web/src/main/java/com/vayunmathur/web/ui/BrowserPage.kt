@@ -78,12 +78,12 @@ import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconShield
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.web.shields.ShieldsWebViewClient
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.PwaHelper
-import com.vayunmathur.web.util.PwaInfo
-import com.vayunmathur.web.util.WebViewModel
-import com.vayunmathur.web.util.isNewTab
+import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.PwaHelper
+import com.vayunmathur.web.platform.PwaInfo
+import com.vayunmathur.web.platform.WebViewModel
+import com.vayunmathur.web.platform.isNewTab
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -596,7 +596,7 @@ fun BrowserPage(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun BrowserChrome(
+private fun BrowserChrome(
     omniboxText: String,
     tabCount: Int,
     canGoBack: Boolean = false,
@@ -716,7 +716,7 @@ private fun DisplayOnlyAddressPill(
 }
 
 @Composable
-fun QuickAccess(
+private fun QuickAccess(
     bookmarks: List<com.vayunmathur.web.data.Bookmark>,
     history: List<com.vayunmathur.web.data.HistoryEntry>,
     onOpenUrl: (String) -> Unit,
@@ -779,7 +779,7 @@ fun QuickAccess(
 
 /** Already stateless — public only so the store-listing previews can render it. */
 @Composable
-fun TabSwitcher(
+private fun TabSwitcher(
     tabs: List<com.vayunmathur.web.util.BrowserTab>,
     activeTabId: String?,
     onSwitch: (String) -> Unit,

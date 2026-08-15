@@ -55,8 +55,8 @@ import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.data.HistoryEntry
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.WebViewModel
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.toLocalDateTime
 

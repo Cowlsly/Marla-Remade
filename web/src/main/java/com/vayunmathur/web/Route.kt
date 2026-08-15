@@ -1,1 +1,16 @@
-fatal: path 'web/src/main/java/com/vayunmathur/web/Route.kt' exists on disk, but not in 'stash@{0}'
+package com.vayunmathur.web
+
+import com.vayunmathur.library.util.NavKey
+import kotlinx.serialization.Serializable
+
+@Serializable
+sealed interface Route : NavKey {
+    @Serializable data object Browser : Route
+    @Serializable data object History : Route
+    @Serializable data object Bookmarks : Route
+    @Serializable data object Settings : Route
+    @Serializable data object Downloads : Route
+    @Serializable data object SiteData : Route
+    @Serializable data object InstalledSites : Route
+    @Serializable data object Shields : Route
+}

@@ -2,8 +2,8 @@ package com.vayunmathur.web.data
 
 import androidx.room.Entity
 import androidx.room.PrimaryKey
-import com.vayunmathur.web.util.ShieldLevel
-import com.vayunmathur.web.util.ShieldsSettings
+import com.vayunmathur.web.domain.ShieldLevel
+import com.vayunmathur.web.domain.ShieldsSettings
 
 /**
  * Per-site shields override, keyed by host. Null fields inherit the global setting, so a

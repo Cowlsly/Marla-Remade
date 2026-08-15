@@ -49,8 +49,8 @@ import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.data.Bookmark
 import com.vayunmathur.web.data.BookmarkFolder
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.WebViewModel
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -82,7 +82,7 @@ fun BookmarksPage(
  */
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
-fun BookmarksScreen(
+private fun BookmarksScreen(
     bookmarks: List<Bookmark>,
     folders: List<BookmarkFolder>,
     navigationIcon: @Composable () -> Unit = {},

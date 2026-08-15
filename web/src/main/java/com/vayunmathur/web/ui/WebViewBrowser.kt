@@ -32,12 +32,12 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
-import com.vayunmathur.web.shields.FarblingConfig
-import com.vayunmathur.web.shields.ShieldsWebViewClient
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.PwaHelper
-import com.vayunmathur.web.util.SitePermissionType
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.shields.FarblingConfig
+import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.PwaHelper
+import com.vayunmathur.web.platform.SitePermissionType
+import com.vayunmathur.web.platform.WebViewModel
 
 private const val TAG = "WebViewBrowser"
 

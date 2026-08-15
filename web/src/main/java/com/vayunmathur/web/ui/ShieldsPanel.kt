@@ -34,10 +34,10 @@ import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.R
 import com.vayunmathur.web.Route
-import com.vayunmathur.web.util.EffectiveShields
-import com.vayunmathur.web.util.ShieldLevel
-import com.vayunmathur.web.util.ShieldsSettings
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.domain.EffectiveShields
+import com.vayunmathur.web.domain.ShieldLevel
+import com.vayunmathur.web.domain.ShieldsSettings
+import com.vayunmathur.web.platform.WebViewModel
 
 /**
  * Brave's shields panel: the shield in the toolbar opens this for the current site.
@@ -179,7 +179,7 @@ private val ShieldLevel.descriptionRes: Int
 /** Global shield defaults plus the list of sites that deviate from them. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ShieldsPage(
+private fun ShieldsPage(
     viewModel: WebViewModel,
     backStack: NavBackStack<Route>,
 ) {

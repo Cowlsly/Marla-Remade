@@ -47,9 +47,9 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.Route
 import com.vayunmathur.web.data.SitePermission
 import com.vayunmathur.web.data.StorageInfo
-import com.vayunmathur.web.util.BrowserUtils
-import com.vayunmathur.web.util.SitePermissionType
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.BrowserUtils
+import com.vayunmathur.web.platform.SitePermissionType
+import com.vayunmathur.web.platform.WebViewModel
 
 @Composable
 fun PermissionPromptSheet(
@@ -90,7 +90,7 @@ fun PermissionPromptSheet(
 }
 
 @Composable
-fun GeolocationPromptSheet(
+private fun GeolocationPromptSheet(
     origin: String,
     onAllow: () -> Unit,
     onDeny: () -> Unit,
@@ -111,7 +111,7 @@ fun GeolocationPromptSheet(
 }
 
 @Composable
-fun FileChooserSheet(
+private fun FileChooserSheet(
     mimeTypes: List<String>,
     onFiles: (Array<Uri>?) -> Unit,
     onCancel: () -> Unit,
@@ -135,7 +135,7 @@ fun FileChooserSheet(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SiteDataPage(
+private fun SiteDataPage(
     viewModel: WebViewModel,
     backStack: NavBackStack<Route>,
 ) {

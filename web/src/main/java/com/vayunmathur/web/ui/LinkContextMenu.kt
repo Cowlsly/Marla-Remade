@@ -22,7 +22,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.web.R
-import com.vayunmathur.web.util.BrowserUtils
+import com.vayunmathur.web.platform.BrowserUtils
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

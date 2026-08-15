@@ -44,9 +44,9 @@ import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.web.util.CacheMode
-import com.vayunmathur.web.util.SearchEngine
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.CacheMode
+import com.vayunmathur.web.platform.SearchEngine
+import com.vayunmathur.web.platform.WebViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable

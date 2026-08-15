@@ -37,7 +37,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.web.util.WebViewModel
+import com.vayunmathur.web.platform.WebViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
