@@ -134,4 +134,7 @@
     <string name="video_stat_paid_format">Tasuline | <xliff:g id="time" example="3 päeva tagasi">%1$s</xliff:g></string>
     <string name="video_info_paid_format"><xliff:g id="channel" example="Linus Tech Tips">%1$s</xliff:g> | Tasuline | <xliff:g id="time" example="2 päeva tagasi">%2$s</xliff:g></string>
     <string name="label_hide_paid">Peida tasulised videod</string>
+    <string name="label_player">Pleier</string>
+    <string name="label_keep_controls_visible">Hoia pleieri juhtnupud nähtaval</string>
+    <string name="label_keep_controls_visible_description">Selle asemel, et 2 sekundi möödumisel peita, jäävad juhtnupud nähtavaks. Sobib kasutuseks näiteks hõlbustuse mõttes.</string>
 </resources>
