@@ -106,8 +106,13 @@ if ($Type -eq "structure") {
         # one matching the module name. That segment is the root package.
         $segs = (Split-Path ($f.FullName -split '\\src\\')[1]) -split '\\'
         $idx = [array]::IndexOf($segs, $module)
-        if ($idx -ge 0 -and ($idx + 1) -lt $segs.Count) {
-            [PSCustomObject]@{ Module = $module; Package = $segs[$idx + 1] }
+        if ($idx -ge 0) {
+            if (($idx + 1) -lt $segs.Count) {
+                [PSCustomObject]@{ Module = $module; Package = $segs[$idx + 1] }
+            } else {
+                # File sits directly in the base package (e.g. MainActivity.kt); list it by name.
+                [PSCustomObject]@{ Module = $module; Package = $f.Name }
+            }
         }
     }
 
