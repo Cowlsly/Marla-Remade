@@ -6,6 +6,7 @@ import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.euicc.data.EuiccInfo
 import com.vayunmathur.euicc.data.Notification
 import com.vayunmathur.euicc.data.Profile
+import com.vayunmathur.euicc.platform.EuiccScreenState
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */
