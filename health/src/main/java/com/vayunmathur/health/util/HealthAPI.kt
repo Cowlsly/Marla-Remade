@@ -58,7 +58,7 @@ object HealthAPI {
 
     private fun repo(): HealthRepository = repository!!
 
-    suspend inline fun lastRecord(recordType: RecordType): Record? {
+    suspend fun lastRecord(recordType: RecordType): Record? {
         return repo().getLastRecord(recordType)
     }
 
