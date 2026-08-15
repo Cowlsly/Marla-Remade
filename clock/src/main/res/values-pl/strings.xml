@@ -56,4 +56,5 @@
     <string name="sound">Dzwięk</string>
     <string name="vibrate">Wibracja</string>
     <string name="timer_name_optional">Nazwa minutnika (opcjonalnie)</string>
+    <string name="alarm_label_hint">Nazwa alarmu (opcjonalnie)</string>
 </resources>
