@@ -36,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.FloatingActionButton
@@ -48,10 +49,8 @@ import com.vayunmathur.library.ui.IconStop
 import com.vayunmathur.library.ui.IconSwapLanguages
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.translate.domain.Languages
 import com.vayunmathur.translate.platform.AndroidSpeechRecognizer
@@ -206,16 +205,12 @@ fun TextTranslatePage(
  */
 @Composable
 fun TextTranslateScreen(state: TextTranslateUiState, actions: TextTranslateActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    IconButton(onClick = actions::openCamera) {
-                        IconCamera()
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            IconButton(onClick = actions::openCamera) {
+                IconCamera()
+            }
         },
         floatingActionButton = {
             // Idle → Mic (starts). Listening → Stop (ends capture). Transcribing → a spinner
