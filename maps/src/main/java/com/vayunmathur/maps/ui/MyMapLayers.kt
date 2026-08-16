@@ -55,6 +55,10 @@ fun MyMapLayers(
     navProgress: com.vayunmathur.maps.util.NavigationProgress? = null,
     googlePins: List<GooglePoiPin> = emptyList(),
     searchResults: List<SearchResult> = emptyList(),
+    savedPlaces: List<com.vayunmathur.maps.data.SavedPlace> = emptyList(),
+    trafficEnabled: Boolean = true,
+    satelliteEnabled: Boolean = false,
+    safetyEnabled: Boolean = false,
 ) {
     val trafficVersion by OfflineRouter.trafficVersion.collectAsState()
     val context = LocalContext.current
@@ -123,26 +127,40 @@ fun MyMapLayers(
         }
 
 
-        LineLayer(
-            "traffic-layer",
-            trafficSource,
-            sourceLayer = "traffic",
-            color = feature["color"].cast<StringValue>().convertToColor(),
-            width = interpolate(
-                linear(),
-                zoom(),
-                11 to const(0.8.dp),
-                12 to const(1.2.dp),
-                14 to const(2.dp),
-                18 to const(4.dp)
-            ),
-            opacity = const(0.6f),
-            cap = const(LineCap.Butt)
-        )
+        // Satellite / aerial imagery (P6, Decision D11). Gated: renders nothing
+        // until a raster tile source is hosted. Drawn first so it sits beneath
+        // the overlays.
+        SatelliteLayer(satelliteEnabled)
+
+        if (trafficEnabled) {
+            LineLayer(
+                "traffic-layer",
+                trafficSource,
+                sourceLayer = "traffic",
+                color = feature["color"].cast<StringValue>().convertToColor(),
+                width = interpolate(
+                    linear(),
+                    zoom(),
+                    11 to const(0.8.dp),
+                    12 to const(1.2.dp),
+                    14 to const(2.dp),
+                    18 to const(4.dp)
+                ),
+                opacity = const(0.6f),
+                cap = const(LineCap.Butt)
+            )
+        }
+
+        // Safety / road-furniture layer (P6). Gated on the P13 PMTiles v5.
+        SafetyLayer(safetyEnabled)
 
         // Custom Google POI overlay (replaces suppressed native basemap POIs).
         // Rendered above traffic but below the user puck.
         GooglePoiLayer(googlePins)
+
+        // Saved-place pins (Home / Work / starred list). Tap re-selects the
+        // place → PlaceSheet (Vela's SavedPin).
+        SavedPlacesLayer(savedPlaces)
 
         // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
         // under the puck during navigation. No-op until the tileset is hosted.

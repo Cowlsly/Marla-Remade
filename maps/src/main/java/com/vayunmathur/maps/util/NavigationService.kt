@@ -113,7 +113,7 @@ class NavigationService : Service() {
         when (state) {
             is NavigationSessionManager.NavState.Navigating -> {
                 val route = NavigationSessionManager.currentRoute
-                if (route != null) {
+                if (route != null && voiceGuidanceEnabled()) {
                     NavigationTts.onProgressUpdate(state.progress, route.step)
                 }
                 maybeUpdateNotification(state)
@@ -145,6 +145,18 @@ class NavigationService : Service() {
             }
         }
     }
+
+    /**
+     * Whether spoken turn-by-turn cues are enabled (P6 settings). Read live from
+     * DataStore so toggling voice guidance in settings takes effect immediately;
+     * defaults to on when unset.
+     */
+    private fun voiceGuidanceEnabled(): Boolean =
+        com.vayunmathur.library.util.DataStoreUtils.getInstance(this)
+            .getBoolean(
+                com.vayunmathur.maps.data.MapPreferences.KEY_VOICE_GUIDANCE,
+                com.vayunmathur.maps.data.MapPreferences.DEFAULT_VOICE_GUIDANCE,
+            )
 
     private fun maybeUpdateNotification(state: NavigationSessionManager.NavState) {
         val now = System.currentTimeMillis()

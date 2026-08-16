@@ -77,6 +77,7 @@ import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
+import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.ZoneDownloadManager
@@ -111,13 +112,25 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     val savedHome by savedPlacesViewModel.home.collectAsState()
     val savedWork by savedPlacesViewModel.work.collectAsState()
+    val savedList by savedPlacesViewModel.saved.collectAsState()
+
+    // All saved places drawn as pins: Home, Work and the starred list, deduped.
+    val savedPins = remember(savedHome, savedWork, savedList) {
+        (listOfNotNull(savedHome, savedWork) + savedList).distinct()
+    }
+
+    // Map-layer visibility toggles (P6 layers sheet, persisted via DataStore).
+    val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
+    val satelliteEnabled by settingsViewModel.satelliteLayer.collectAsState()
+    val safetyEnabled by settingsViewModel.safetyLayer.collectAsState()
+    var showLayersSheet by remember { mutableStateOf(false) }
 
     // Google POI overlay pins (viewport scrape → custom layer, replacing the
     // suppressed native basemap POIs).
@@ -363,7 +376,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             modifier = Modifier.padding(top = paddingValues.calculateTopPadding()),
             actions = {
                 IconButton({
-                    backStack.add(Route.DownloadedMapsPage)
+                    backStack.add(Route.SettingsPage)
                 }) {
                     IconSettings()
                 }
@@ -392,6 +405,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     offset,
                                     setOf(SEARCH_RESULT_LAYER_ID)
                                 )?.firstNotNullOfOrNull { it.toSelectedSearchResult() }
+                                    ?: projection?.queryRenderedFeatures(
+                                        offset,
+                                        setOf(SAVED_PLACE_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedSavedPlace() }
                                     ?: projection?.queryRenderedFeatures(
                                         offset,
                                         setOf(GOOGLE_POI_LAYER_ID)
@@ -450,7 +467,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, trafficEnabled, satelliteEnabled, safetyEnabled)
                     }
                 }
 
@@ -616,7 +633,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
                             },
                         )
-                        LayersButton(onClick = { /* P6: open the layers sheet */ })
+                        LayersButton(onClick = { showLayersSheet = true })
                         FloatingActionButton(
                             onClick = {
                                 coroutineScope.launch {
@@ -656,6 +673,19 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                     onToggleNorthUp = { navNorthUp = !navNorthUp },
                     destinationName = com.vayunmathur.maps.util.NavigationSessionManager.destinationName,
                 )
+
+                // Map-layers toggle sheet (P6), opened from the LayersButton.
+                if (showLayersSheet) {
+                    LayersSheet(
+                        onDismiss = { showLayersSheet = false },
+                        trafficEnabled = trafficEnabled,
+                        onTrafficChange = { settingsViewModel.setTrafficLayer(it) },
+                        satelliteEnabled = satelliteEnabled,
+                        onSatelliteChange = { settingsViewModel.setSatelliteLayer(it) },
+                        safetyEnabled = safetyEnabled,
+                        onSafetyChange = { settingsViewModel.setSafetyLayer(it) },
+                    )
+                }
             }
         }
     }

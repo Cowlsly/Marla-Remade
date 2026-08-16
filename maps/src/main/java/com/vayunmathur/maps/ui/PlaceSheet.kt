@@ -238,8 +238,8 @@ private fun PlaceActionRow(
     requestDirections: () -> Unit,
 ) {
     val context = LocalContext.current
-    val home by savedPlacesViewModel.home.collectAsState()
-    val isSaved = home?.matches(feature) == true
+    val saved by savedPlacesViewModel.saved.collectAsState()
+    val isSaved = saved.any { it.matches(feature) }
 
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         PlaceAction(
@@ -266,7 +266,11 @@ private fun PlaceActionRow(
             { IconSave(tint = if (isSaved) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface) },
             stringResource(if (isSaved) R.string.place_action_saved else R.string.place_action_save),
         ) {
-            if (isSaved) savedPlacesViewModel.clearHome() else savedPlacesViewModel.setHome(feature)
+            if (isSaved) {
+                saved.firstOrNull { it.matches(feature) }?.let { savedPlacesViewModel.removeSaved(it) }
+            } else {
+                savedPlacesViewModel.addSaved(feature)
+            }
         }
     }
 }

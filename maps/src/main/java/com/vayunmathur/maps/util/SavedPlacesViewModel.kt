@@ -5,48 +5,101 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.maps.data.SavedPlace
+import com.vayunmathur.maps.data.SavedPlaceStore
 import com.vayunmathur.maps.data.SpecificFeature
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
-import kotlinx.serialization.json.Json
 
 /**
- * Stores the user's Home and Work quick-access places in DataStore. Each slot is
- * persisted as a small JSON string; clearing a slot writes an empty string, which
- * decodes back to null.
+ * Exposes the user's saved places to the UI. P4 introduced the Home/Work
+ * quick-access slots; P6 grows this into a full saved-places model backed by
+ * [SavedPlaceStore]:
+ *
+ *  - [home] / [work] — single slots (unchanged public API so P4 wiring keeps
+ *    working).
+ *  - [saved] — a flat starred list built from the place sheet's Save action.
+ *  - [lists] — named collections managed from the saved-places screen.
+ *
+ * All persistence lives in [SavedPlaceStore]; this class only adds the
+ * `viewModelScope`, turns the store's flows into `StateFlow`s, and applies the
+ * small list edits (add / remove / rename / list membership) against the latest
+ * snapshot before writing it back.
  */
 class SavedPlacesViewModel(application: Application) : AndroidViewModel(application) {
-    private val ds = DataStoreUtils.getInstance(application)
+    private val store = SavedPlaceStore(DataStoreUtils.getInstance(application))
 
-    val home: StateFlow<SavedPlace?> = slotFlow(KEY_HOME)
-    val work: StateFlow<SavedPlace?> = slotFlow(KEY_WORK)
+    val home: StateFlow<SavedPlace?> =
+        store.homeFlow().stateIn(viewModelScope, SharingStarted.Eagerly, store.homeInitial())
+    val work: StateFlow<SavedPlace?> =
+        store.workFlow().stateIn(viewModelScope, SharingStarted.Eagerly, store.workInitial())
+    val saved: StateFlow<List<SavedPlace>> =
+        store.savedFlow().stateIn(viewModelScope, SharingStarted.Eagerly, store.savedInitial())
+    val lists: StateFlow<Map<String, List<SavedPlace>>> =
+        store.listsFlow().stateIn(viewModelScope, SharingStarted.Eagerly, store.listsInitial())
 
-    fun setHome(feature: SpecificFeature.RoutableFeature) = save(KEY_HOME, SavedPlace.from(feature))
-    fun setWork(feature: SpecificFeature.RoutableFeature) = save(KEY_WORK, SavedPlace.from(feature))
-    fun clearHome() = clear(KEY_HOME)
-    fun clearWork() = clear(KEY_WORK)
+    // --- Home / Work slots -------------------------------------------------
 
-    private fun slotFlow(key: String): StateFlow<SavedPlace?> =
-        ds.stringFlow(key)
-            .map { decode(it) }
-            .stateIn(viewModelScope, SharingStarted.Eagerly, decode(ds.getString(key)))
+    fun setHome(feature: SpecificFeature.RoutableFeature) =
+        launch { store.setHome(SavedPlace.from(feature)) }
 
-    private fun save(key: String, place: SavedPlace) {
-        viewModelScope.launch { ds.setString(key, Json.encodeToString(place)) }
+    fun setWork(feature: SpecificFeature.RoutableFeature) =
+        launch { store.setWork(SavedPlace.from(feature)) }
+
+    fun clearHome() = launch { store.setHome(null) }
+    fun clearWork() = launch { store.setWork(null) }
+
+    // --- Flat saved (starred) list ----------------------------------------
+
+    /** True if [feature] is already in the flat saved list. */
+    fun isSaved(feature: SpecificFeature.RoutableFeature): Boolean =
+        saved.value.any { it.matches(feature) }
+
+    fun addSaved(feature: SpecificFeature.RoutableFeature) = launch {
+        val place = SavedPlace.from(feature)
+        if (saved.value.none { it.matches(feature) }) {
+            store.setSaved(saved.value + place)
+        }
     }
 
-    private fun clear(key: String) {
-        viewModelScope.launch { ds.setString(key, "") }
+    fun removeSaved(place: SavedPlace) = launch { store.setSaved(saved.value - place) }
+
+    fun renameSaved(place: SavedPlace, newName: String) = launch {
+        val name = newName.trim()
+        if (name.isEmpty()) return@launch
+        store.setSaved(saved.value.map { if (it == place) it.copy(name = name) else it })
     }
 
-    private fun decode(raw: String?): SavedPlace? =
-        raw?.takeIf { it.isNotBlank() }?.let { runCatching { Json.decodeFromString<SavedPlace>(it) }.getOrNull() }
+    // --- Named lists -------------------------------------------------------
 
-    companion object {
-        private const val KEY_HOME = "saved_place_home"
-        private const val KEY_WORK = "saved_place_work"
+    fun createList(name: String) = launch {
+        val listName = name.trim()
+        if (listName.isEmpty() || lists.value.containsKey(listName)) return@launch
+        store.setLists(lists.value + (listName to emptyList()))
+    }
+
+    fun deleteList(name: String) = launch { store.setLists(lists.value - name) }
+
+    fun addToList(name: String, feature: SpecificFeature.RoutableFeature) = launch {
+        val place = SavedPlace.from(feature)
+        val current = lists.value[name].orEmpty()
+        if (current.any { it.matches(feature) }) return@launch
+        store.setLists(lists.value + (name to (current + place)))
+    }
+
+    fun addToList(name: String, place: SavedPlace) = launch {
+        val current = lists.value[name].orEmpty()
+        if (place in current) return@launch
+        store.setLists(lists.value + (name to (current + place)))
+    }
+
+    fun removeFromList(name: String, place: SavedPlace) = launch {
+        val current = lists.value[name] ?: return@launch
+        store.setLists(lists.value + (name to (current - place)))
+    }
+
+    private fun launch(block: suspend () -> Unit) {
+        viewModelScope.launch { block() }
     }
 }

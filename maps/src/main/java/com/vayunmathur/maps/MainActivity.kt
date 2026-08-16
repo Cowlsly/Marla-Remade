@@ -7,6 +7,8 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.downloadservice.InitialDownloadChecker
 import com.vayunmathur.library.ui.DynamicTheme
@@ -18,13 +20,18 @@ import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.maps.ui.DownloadedMapsPage
 import com.vayunmathur.maps.ui.MapPage
+import com.vayunmathur.maps.ui.SavedPlacesPage
 import com.vayunmathur.maps.ui.SearchPage
+import com.vayunmathur.maps.ui.settings.MapSettingsPage
+import com.vayunmathur.maps.data.MapPreferences
+import com.vayunmathur.maps.data.ThemeMode
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.MapsZonesViewModel
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
+import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import kotlinx.serialization.Serializable
@@ -56,7 +63,9 @@ class MainActivity : ComponentActivity() {
 //        }
 
         setContent {
-            DynamicTheme {
+            val themeMode by ds.stringFlow(MapPreferences.KEY_THEME_MODE)
+                .collectAsState(initial = ds.getString(MapPreferences.KEY_THEME_MODE))
+            DynamicTheme(darkTheme = ThemeMode.from(themeMode).darkOverride) {
                 InitialDownloadChecker(ds, listOf(
                     Triple("https://data.vayunmathur.com/metadata.bin", "metadata.bin", getString(R.string.downloading_navigation_metadata)),
                     Triple("https://data.vayunmathur.com/road_names.bin", "road_names.bin", getString(R.string.downloading_road_data)),
@@ -96,6 +105,10 @@ sealed interface Route: NavKey {
     data object MapPage: Route
     @Serializable
     data object DownloadedMapsPage: Route
+    @Serializable
+    data object SettingsPage: Route
+    @Serializable
+    data object SavedPlacesPage: Route
 
     @Serializable
     data class SearchPage(val idx: Int?, val east: Double, val west: Double, val north: Double, val south: Double, val query: String? = null): Route
@@ -108,14 +121,21 @@ fun Navigation(
     zonesViewModel: MapsZonesViewModel = viewModel(),
     savedPlacesViewModel: SavedPlacesViewModel = viewModel(),
     poiViewModel: GooglePoiMapViewModel = viewModel(),
+    settingsViewModel: MapSettingsViewModel = viewModel(),
 ) {
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel)
+            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel)
         }
         entry<Route.DownloadedMapsPage> {
             DownloadedMapsPage(backStack, zonesViewModel)
+        }
+        entry<Route.SettingsPage> {
+            MapSettingsPage(backStack, settingsViewModel)
+        }
+        entry<Route.SavedPlacesPage> {
+            SavedPlacesPage(backStack, savedPlacesViewModel)
         }
         entry<Route.SearchPage> {
             SearchPage(backStack, viewModel, searchViewModel, it.idx, it.east, it.west, it.north, it.south, it.query)

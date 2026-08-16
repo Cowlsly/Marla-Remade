@@ -277,4 +277,82 @@
     <string name="min"><xliff:g id="minutes" example="12">%1$s</xliff:g> min · <xliff:g id="distance" example="1.2 km">%2$s</xliff:g></string>
     <string name="map_zone_download_title">Map Zone <xliff:g id="zone" example="7">%1$d</xliff:g> (Map)</string>
     <string name="map_zone_download_desc">Downloading high-detail offline map data</string>
+
+    <!-- LayersSheet: title of the map-layers toggle sheet. Noun. -->
+    <string name="layers_title">Map layers</string>
+    <!-- LayersSheet: traffic layer toggle. Noun. -->
+    <string name="layer_traffic">Traffic</string>
+    <!-- LayersSheet: traffic layer description. -->
+    <string name="layer_traffic_desc">Show live traffic conditions</string>
+    <!-- LayersSheet: satellite imagery toggle. Noun. -->
+    <string name="layer_satellite">Satellite</string>
+    <!-- LayersSheet: satellite imagery description. -->
+    <string name="layer_satellite_desc">Show aerial imagery</string>
+    <!-- LayersSheet: safety layers toggle (speed cameras, stop signs, signals). Noun. -->
+    <string name="layer_safety">Safety layers</string>
+    <!-- LayersSheet: safety layers description when available. -->
+    <string name="layer_safety_desc">Show speed cameras, stop signs and signals</string>
+    <!-- LayersSheet: safety layers description while the data isn't available yet. -->
+    <string name="layer_safety_unavailable">Coming soon</string>
+
+    <!-- Settings: screen title. Noun. -->
+    <string name="settings_title">Settings</string>
+    <!-- Settings: section header for display options. Noun. -->
+    <string name="settings_section_display">Display</string>
+    <!-- Settings: section header for navigation options. Noun. -->
+    <string name="settings_section_navigation">Navigation</string>
+    <!-- Settings: section header for places and maps entries. Noun. -->
+    <string name="settings_section_places">Places &amp; maps</string>
+    <!-- Settings: distance-units setting title. Noun. -->
+    <string name="settings_units">Distance units</string>
+    <!-- Settings: kilometres unit option. -->
+    <string name="settings_units_km">Kilometers</string>
+    <!-- Settings: miles unit option. -->
+    <string name="settings_units_mi">Miles</string>
+    <!-- Settings: map-theme setting title. Noun. -->
+    <string name="settings_theme">Map theme</string>
+    <!-- Settings: theme option following the system day/night setting. -->
+    <string name="settings_theme_system">System default</string>
+    <!-- Settings: light (day) theme option. -->
+    <string name="settings_theme_light">Light</string>
+    <!-- Settings: dark (night) theme option. -->
+    <string name="settings_theme_dark">Dark</string>
+    <!-- Settings: voice-guidance toggle title. Noun. -->
+    <string name="settings_voice_guidance">Voice guidance</string>
+    <!-- Settings: voice-guidance toggle description. -->
+    <string name="settings_voice_guidance_desc">Speak turn-by-turn directions</string>
+
+    <!-- SavedPlacesPage: screen title. Noun. -->
+    <string name="saved_places_title">Saved places</string>
+    <!-- SavedPlacesPage: section header for Home/Work quick-access slots. Noun. -->
+    <string name="saved_quick_access">Quick access</string>
+    <!-- SavedPlacesPage: shown when neither Home nor Work is set. -->
+    <string name="saved_quick_access_empty">No Home or Work set yet</string>
+    <!-- SavedPlacesPage: section header for the starred list. Noun. -->
+    <string name="saved_list_header">Saved</string>
+    <!-- SavedPlacesPage: shown when the starred list is empty. -->
+    <string name="saved_list_empty">Places you save appear here</string>
+    <!-- SavedPlacesPage: section header for named lists. Noun. -->
+    <string name="saved_lists_header">Lists</string>
+    <!-- SavedPlacesPage: row/action to create a new list. Verb phrase. -->
+    <string name="saved_lists_new">New list</string>
+    <!-- SavedPlacesPage: confirm button to create a list. Verb. -->
+    <string name="saved_lists_create">Create</string>
+    <!-- SavedPlacesPage: number of places in a list. -->
+    <plurals name="saved_list_count">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> place</item>
+        <item quantity="other"><xliff:g id="count" example="3">%1$d</xliff:g> places</item>
+    </plurals>
+    <!-- SavedPlacesPage: rename dialog title. Verb. -->
+    <string name="saved_rename_title">Rename place</string>
+    <!-- SavedPlacesPage: rename dialog confirm button. Verb. -->
+    <string name="saved_rename_confirm">Rename</string>
+    <!-- SavedPlacesPage: overflow action to rename a saved place. Verb. -->
+    <string name="saved_action_rename">Rename</string>
+    <!-- SavedPlacesPage: overflow action to add a saved place to a list. Verb phrase. -->
+    <string name="saved_action_add_to_list">Add to list…</string>
+    <!-- SavedPlacesPage: overflow action to remove a saved place. Verb. -->
+    <string name="saved_action_remove">Remove</string>
+    <!-- SavedPlacesPage: generic cancel button. Verb. -->
+    <string name="saved_cancel">Cancel</string>
 </resources>
