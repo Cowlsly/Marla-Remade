@@ -1,0 +1,9 @@
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4194,37.7749]},"properties":{"highway":"speed_camera","direction":"forward","id":"node/1001"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4180,37.7760]},"properties":{"enforcement":"maxspeed","id":"node/1002"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4170,37.7770]},"properties":{"man_made":"surveillance","surveillance:type":"ALPR","operator":"Flock Safety","id":"node/1003"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4160,37.7780]},"properties":{"man_made":"surveillance","camera:type":"alpr","id":"node/1004"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4150,37.7790]},"properties":{"man_made":"surveillance","surveillance:type":"camera","id":"node/1005"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4140,37.7800]},"properties":{"highway":"stop","id":"node/1006"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4130,37.7810]},"properties":{"highway":"traffic_signals","id":"node/1007"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4120,37.7820]},"properties":{"amenity":"cafe","name":"Not Safety","id":"node/1008"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.41,37.78],[-122.40,37.79]]},"properties":{"highway":"stop","id":"way/2001"}}

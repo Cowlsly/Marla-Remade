@@ -1,0 +1,15 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {"NAME": "United States of America", "NAME_EN": "United States of America", "ISO_A2": "US", "ISO_A3": "USA"},
+      "geometry": {"type": "Polygon", "coordinates": [[[-124.7,32.5],[-114.1,32.5],[-114.1,42.0],[-124.7,42.0],[-124.7,32.5]]]}
+    },
+    {
+      "type": "Feature",
+      "properties": {"NAME": "Antarctica sliver", "ISO_A2": "-99"},
+      "geometry": {"type": "Point", "coordinates": [0, -89]}
+    }
+  ]
+}
