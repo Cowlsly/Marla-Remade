@@ -447,6 +447,24 @@ class WhatsAppRegistrationBadParamRegressionTest {
     }
 
     @Test
+    fun addDevice_includesOfficialNoPlayFingerprint() {
+        // The official no-Play /v2 request (RE of LX/F4L; A0I/A0M/A0P/A0G) carries these honest
+        // device signals; we must send them (none are Play/attestation signals).
+        val src = tryReadSource("communicate/src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/RegistrationHttpClient.kt")
+            ?: tryReadSource("src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/RegistrationHttpClient.kt")
+        if (src != null) {
+            val idx = src.indexOf("fun addDevice")
+            assertTrue(idx >= 0, "addDevice must exist")
+            val snip = src.substring(idx, minOf(src.length, idx + 1800))
+            for (p in listOf("mcc", "mnc", "sim_mcc", "sim_mnc", "network_radio_type", "simnum",
+                    "hasinrc", "pid", "rc", "network_operator_name", "sim_operator_name",
+                    "airplane_mode_on", "device_ram")) {
+                assertTrue(snip.contains("\"$p\""), "addDevice must send device param $p")
+            }
+        }
+    }
+
+    @Test
     fun eKeytype_constants_matchSpec() {
         assertEquals(0x05.toByte(), WhatsAppRegistrationConstants.KEY_TYPE_CURVE25519)
         assertEquals(0x08.toByte(), WhatsAppRegistrationConstants.KEY_TYPE_KYBER)

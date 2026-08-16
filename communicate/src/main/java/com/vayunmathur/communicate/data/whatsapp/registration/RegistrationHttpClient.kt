@@ -2,6 +2,7 @@ package com.vayunmathur.communicate.data.whatsapp.registration
 
 import android.content.Context
 import android.os.Build
+import android.provider.Settings
 import android.telephony.TelephonyManager
 import android.util.Log
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppAuthData
@@ -408,9 +409,12 @@ class RegistrationHttpClient(
 
         /**
          * Common/device params added by the APK's `F4L` layer (merged via `A06(map)`). Confirmed
-         * against the native param-key table in libwhatsappmerged.so: WhatsApp does NOT send a
-         * `platform` form param — the server derives platform from the User-Agent — so we must not
-         * send one. These device fields are the real F4L set; values are URL-safe.
+         * against the native param-key table in libwhatsappmerged.so AND by decompiling `LX/F4L;`
+         * (A0I/A0M/A0P/A0G) from the installed com.whatsapp 2.26.29.73: WhatsApp does NOT send a
+         * `platform` form param — the server derives platform from the User-Agent — and it does NOT
+         * send any `gpia`/`aid`/`_gi`/`_gp`/`_ge`/`_ga`/`_gs`/`t`/`db` params in the no-Play path
+         * (`gpia` is added only when Play Integrity is available; see [SEND_INTEGRITY_SIGNALS]). The
+         * fields below are the real F4L device fingerprint the official no-Play request carries.
          */
         fun addDevice() {
             val tm = runCatching { context.getSystemService(TelephonyManager::class.java) }.getOrNull()
@@ -425,7 +429,24 @@ class RegistrationHttpClient(
             a01("hasinrc", "0")
             a01("pid", android.os.Process.myPid().toString())
             a01("rc", "0")
+            // Honest device fingerprint the official no-Play /v2 request includes (RE of LX/F4L;
+            // A0G/A0M/A0P). All standard, non-Play, non-attestation signals.
+            a01("network_operator_name", tm?.networkOperatorName.orEmpty())
+            a01("sim_operator_name", tm?.simOperatorName.orEmpty())
+            a01("airplane_mode_on", airplaneModeOn())
+            a01("device_ram", deviceRamBytes())
         }
+
+        private fun airplaneModeOn(): String = runCatching {
+            if (Settings.Global.getInt(context.contentResolver, Settings.Global.AIRPLANE_MODE_ON, 0) != 0) "1" else "0"
+        }.getOrDefault("0")
+
+        private fun deviceRamBytes(): String = runCatching {
+            val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
+            val mi = android.app.ActivityManager.MemoryInfo()
+            am.getMemoryInfo(mi)
+            mi.totalMem.toString()
+        }.getOrDefault("0")
 
         fun query(): String = map.entries.joinToString("&") { (k, v) ->
             val encoded = if (k in raw) v else URLEncoder.encode(v, "UTF-8")
