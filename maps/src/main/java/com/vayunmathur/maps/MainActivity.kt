@@ -98,7 +98,7 @@ sealed interface Route: NavKey {
     data object DownloadedMapsPage: Route
 
     @Serializable
-    data class SearchPage(val idx: Int?, val east: Double, val west: Double, val north: Double, val south: Double): Route
+    data class SearchPage(val idx: Int?, val east: Double, val west: Double, val north: Double, val south: Double, val query: String? = null): Route
 }
 
 @Composable
@@ -118,7 +118,7 @@ fun Navigation(
             DownloadedMapsPage(backStack, zonesViewModel)
         }
         entry<Route.SearchPage> {
-            SearchPage(backStack, viewModel, searchViewModel, it.idx, it.east, it.west, it.north, it.south)
+            SearchPage(backStack, viewModel, searchViewModel, it.idx, it.east, it.west, it.north, it.south, it.query)
         }
     }
 }

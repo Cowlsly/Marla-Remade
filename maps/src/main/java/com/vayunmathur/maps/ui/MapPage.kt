@@ -10,11 +10,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBars
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -29,8 +32,10 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.CompassCalibrationBanner
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconMyLocation
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.SheetValue
@@ -246,6 +251,21 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 bbox?.west ?: -180.0,
                 bbox?.north ?: 85.0,
                 bbox?.south ?: -85.0,
+            )
+        )
+    }
+
+    // Browse category chip → open search pre-filled with the category query.
+    fun openCategorySearch(query: String) {
+        val bbox = camera.projection?.queryVisibleBoundingBox()
+        backStack.add(
+            Route.SearchPage(
+                null,
+                bbox?.east ?: 180.0,
+                bbox?.west ?: -180.0,
+                bbox?.north ?: 85.0,
+                bbox?.south ?: -85.0,
+                query,
             )
         )
     }
@@ -504,6 +524,13 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             )
                         }
                         Spacer(Modifier.height(8.dp))
+                        // Quick category chips (Vela's browse CategoryChips),
+                        // wired to the P3 Google search categories.
+                        CategoryChips(
+                            onCategory = { openCategorySearch(it) },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                        Spacer(Modifier.height(8.dp))
                         // Compass calibration hint for the heading puck; self-hides at HIGH accuracy.
                         CompassCalibrationBanner(userHeadingAccuracy)
                     }
@@ -535,6 +562,59 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             }
                         }
                     )
+                }
+
+                // Browse map controls (Decision D6): a scale bar plus the FAB
+                // stack (my-location, layers, compass). Surfaced only while
+                // browsing — hidden during navigation (the nav overlay owns its
+                // own controls) and while a place/route is selected (the bottom
+                // sheet takes over the lower half of the screen).
+                if (selectedFeature == null && inactiveNavigation == null && !isNavigating) {
+                    MapScaleBar(
+                        zoom = camera.position.zoom,
+                        latitude = camera.position.target.latitude,
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                            .padding(16.dp),
+                    )
+                    Column(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .windowInsetsPadding(WindowInsets.systemBars)
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.End,
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        // Compass sits on top and only shows when the map is
+                        // rotated; layers in the middle; my-location is the
+                        // primary action, closest to the thumb.
+                        CompassButton(
+                            bearing = camera.position.bearing,
+                            onResetNorth = {
+                                coroutineScope.launch {
+                                    camera.animateTo(
+                                        camera.position.copy(bearing = 0.0, tilt = 0.0)
+                                    )
+                                }
+                            },
+                        )
+                        LayersButton(onClick = { /* P6: open the layers sheet */ })
+                        FloatingActionButton(
+                            onClick = {
+                                coroutineScope.launch {
+                                    camera.animateTo(
+                                        camera.position.copy(
+                                            target = userPosition,
+                                            zoom = maxOf(camera.position.zoom, 15.0),
+                                        )
+                                    )
+                                }
+                            }
+                        ) {
+                            IconMyLocation()
+                        }
+                    }
                 }
 
                 // Live navigation overlay (top maneuver card, bottom ETA strip,

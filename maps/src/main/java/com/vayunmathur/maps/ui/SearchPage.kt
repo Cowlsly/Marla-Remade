@@ -1,7 +1,6 @@
 package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,8 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
-import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
@@ -22,6 +19,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.TextFieldDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -58,7 +56,8 @@ fun SearchPage(
     east: Double,
     west: Double,
     north: Double,
-    south: Double
+    south: Double,
+    query: String? = null,
 ) {
     val searchQuery by searchViewModel.query.collectAsState()
     val results by searchViewModel.results.collectAsState()
@@ -67,6 +66,13 @@ fun SearchPage(
     // Bias the Google search toward the centre of the visible viewport.
     val nearLat = (north + south) / 2.0
     val nearLon = (east + west) / 2.0
+
+    // Pre-fill from a browse-screen category chip tap (Route carries the query).
+    LaunchedEffect(query) {
+        if (!query.isNullOrBlank()) {
+            searchViewModel.setQuery(query, nearLat, nearLon)
+        }
+    }
 
     val actions = remember(nearLat, nearLon, idx) {
         object : SearchActions {
@@ -111,18 +117,6 @@ fun SearchPage(
     SearchScreen(SearchUiState(searchQuery, results, recents), actions)
 }
 
-/** One quick-search category chip: a display label and the query it runs. */
-private data class SearchCategory(val labelRes: Int, val query: String)
-
-private val SEARCH_CATEGORIES = listOf(
-    SearchCategory(R.string.search_category_restaurants, "restaurants"),
-    SearchCategory(R.string.search_category_coffee, "coffee"),
-    SearchCategory(R.string.search_category_gas, "gas station"),
-    SearchCategory(R.string.search_category_groceries, "groceries"),
-    SearchCategory(R.string.search_category_hotels, "hotels"),
-    SearchCategory(R.string.search_category_atms, "atm"),
-)
-
 /** The rendered half of [SearchPage]: query text in, results out, no ViewModel. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -146,7 +140,12 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
         onNavigateBack = { actions.back() },
     ) { paddingValues ->
         Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-            CategoryChips(actions)
+            CategoryChips(
+                onCategory = { actions.setQuery(it) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+            )
             Box(modifier = Modifier.fillMaxSize()) {
                 when {
                     state.query.length >= 2 && state.results.isEmpty() -> {
@@ -172,24 +171,6 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun CategoryChips(actions: SearchActions) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        SEARCH_CATEGORIES.forEach { category ->
-            AssistChip(
-                onClick = { actions.setQuery(category.query) },
-                label = { Text(stringResource(category.labelRes)) },
-            )
         }
     }
 }
