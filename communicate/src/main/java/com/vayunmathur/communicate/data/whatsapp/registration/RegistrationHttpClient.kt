@@ -533,10 +533,20 @@ class RegistrationHttpClient(
         }
     }
 
-    /** WhatsApp/<ver> Android/<osrel> Device/<manufacturer>-<model> (server parses platform here). */
+    /**
+     * `WhatsApp/<ver> Android/<osrel> Device/<manufacturer>-<model>` — byte-for-byte the official
+     * app's registration UA (decompiled `X/C09990d9.A01`, com.whatsapp 2.26.29.73): app name
+     * "WhatsApp", version, "Android"/osRelease, "Device/"manufacturer-model, with a trailing
+     * empty token (`Voip.REJECT_REASON_DECLINED == ""`). Each device token (osRelease, manufacturer,
+     * model) is sanitized with WhatsApp's exact regex `[^,.\w\-()]` → "_" (NOT just spaces). The
+     * server derives `platform` from this UA.
+     */
     private fun userAgent(): String {
-        val device = "${Build.MANUFACTURER}-${Build.MODEL}".replace(' ', '_')
-        return "WhatsApp/${WhatsAppProtocol.WA_VERSION_NAME} Android/${Build.VERSION.RELEASE} Device/$device"
+        val san = Regex("[^,.\\w()\\-]")
+        val os = san.replace(Build.VERSION.RELEASE.orEmpty(), "_")
+        val mfr = san.replace(Build.MANUFACTURER.orEmpty(), "_")
+        val model = san.replace(Build.MODEL.orEmpty(), "_")
+        return "WhatsApp/${WhatsAppProtocol.WA_VERSION_NAME} Android/$os Device/$mfr-$model"
     }
 
     private fun parse(body: String): JSONObject = try {

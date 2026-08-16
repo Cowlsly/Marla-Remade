@@ -46,9 +46,13 @@ class WhatsAppRegistrationBadParamRegressionTest {
     }
 
     private fun userAgent(manufacturer: String, model: String, osRelease: String): String {
-        // Exact mirror of RegistrationHttpClient.userAgent(): only device token underscored.
-        val device = "$manufacturer-$model".replace(' ', '_')
-        return "WhatsApp/${WhatsAppProtocol.WA_VERSION_NAME} Android/$osRelease Device/$device"
+        // Exact mirror of RegistrationHttpClient.userAgent(): per-token sanitize with WhatsApp's
+        // regex [^,.\w()-] -> "_" (decompiled X/C09990d9.A01).
+        val san = Regex("[^,.\\w()\\-]")
+        val os = san.replace(osRelease, "_")
+        val mfr = san.replace(manufacturer, "_")
+        val mdl = san.replace(model, "_")
+        return "WhatsApp/${WhatsAppProtocol.WA_VERSION_NAME} Android/$os Device/$mfr-$mdl"
     }
 
     private fun tryReadSource(relative: String): String? {
