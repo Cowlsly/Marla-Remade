@@ -9,8 +9,6 @@ import android.content.Context
 import android.content.Intent
 import android.speech.tts.TextToSpeech
 import android.util.Log
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -52,6 +50,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.rememberMessenger
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.translate.domain.Languages
 import com.vayunmathur.translate.platform.AndroidSpeechRecognizer
 import com.vayunmathur.translate.platform.MicState
@@ -123,8 +122,8 @@ fun TextTranslatePage(
         )
     }
 
-    val micPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val micPermission = rememberPermissionRequest(
+        Manifest.permission.RECORD_AUDIO
     ) { granted ->
         if (granted) startListening() else speechError = "Microphone permission is required"
     }
@@ -175,7 +174,7 @@ fun TextTranslatePage(
                 when (micState) {
                     MicState.LISTENING -> speech.stop()
                     MicState.TRANSCRIBING -> Unit
-                    MicState.IDLE -> micPermission.launch(Manifest.permission.RECORD_AUDIO)
+                    MicState.IDLE -> micPermission()
                 }
             }
 
