@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Word Maker</string>
     <string name="error_parse_level">无法解析关卡数据。</string>
     <string name="level_number">关卡 <xliff:g id="level" example="12">%1$d</xliff:g></string>
     <string name="next_level">下一关</string>

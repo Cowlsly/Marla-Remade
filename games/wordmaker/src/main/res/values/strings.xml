@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- Manifest / launcher: App name. Noun, proper, word puzzle game -->
-    <string name="app_name">Word Maker</string>
+    <string name="app_name" translatable="false">Word Maker</string>
     <!-- WordMakerViewModel: Error when parsing level data fails (CrosswordData.fromAsset null). Sentence -->
     <string name="error_parse_level">Failed to parse level data.</string>
     <!-- WordMakerTopBar: Title in casual mode when level number present. %1$d = level number integer, e.g. 12. Noun phrase -->
