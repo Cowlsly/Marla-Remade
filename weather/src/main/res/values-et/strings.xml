@@ -73,7 +73,7 @@
     <string name="aqi_very_unhealthy">Väga ebatervislik</string>
     <string name="aqi_hazardous">Ohtlik</string>
     <string name="precip_raining_now">Hetkel sajab</string>
-    <string name="precip_no_rain_next_2h">Järgmise 2 tunni jooksul vihma ei saja</string>
+    <string name="precip_no_rain_next_2h">2 tunni jooksul vihma ei saja</string>
     <string name="precip_rain_starting_now">Kohe hakkab sadama</string>
     <string name="precip_rain_in_min">Saju algus ~<xliff:g id="minutes" example="15">%1$d</xliff:g> min</string>
     <string name="last_updated">Viimati uuendatud <xliff:g id="time_ago" example="2h ago">%1$s</xliff:g></string>
@@ -105,4 +105,5 @@
     <string name="moon_phase_waning_crescent">Vanakuu</string>
     <string name="weather_blob_widget_description">Ilmateade loomulikus vormis - suur ikooniga temperatuurinäit tumedal sinakasrohelisel taustal</string>
     <string name="set_units">Ühikud</string>
+    <string name="gusts">Puhangud <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
 </resources>
