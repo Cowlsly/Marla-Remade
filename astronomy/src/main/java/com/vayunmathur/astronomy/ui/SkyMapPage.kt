@@ -1,11 +1,13 @@
 package com.vayunmathur.astronomy.ui
 
+import android.hardware.SensorManager
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.dp
 import com.vayunmathur.astronomy.Route
 import com.vayunmathur.astronomy.domain.projection.ViewState
 import com.vayunmathur.astronomy.platform.AstronomyViewModel
@@ -71,6 +73,7 @@ fun SkyMapPage(backStack: NavBackStack<Route>, viewModel: AstronomyViewModel) {
             nightMode = nightMode,
             trajectory = trajectory,
             selectedObjectId = selectedId,
+            accuracy = deviceOrient?.accuracy ?: SensorManager.SENSOR_STATUS_ACCURACY_HIGH,
         ),
         actions = viewModel,
     )
@@ -133,6 +136,13 @@ fun SkyMapScreen(
         if (state.nightMode) {
             Box(Modifier.fillMaxSize().background(androidx.compose.ui.graphics.Color(0x44FF0000)))
         }
+
+        CompassCalibrationBanner(
+            accuracy = state.accuracy,
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(top = 72.dp, start = 16.dp, end = 16.dp),
+        )
 
         TopAppBarOverlay(
             modifier = Modifier.align(Alignment.TopCenter),

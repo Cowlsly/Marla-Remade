@@ -1,5 +1,6 @@
 package com.vayunmathur.astronomy.platform
 
+import android.hardware.SensorManager
 import kotlinx.datetime.TimeZone
 import kotlin.time.ExperimentalTime
 import kotlin.time.Instant
@@ -41,6 +42,8 @@ data class SkyMapUiState(
     val nightMode: Boolean = false,
     val trajectory: List<TrajectoryPoint> = emptyList(),
     val selectedObjectId: String? = null,
+    /** Magnetometer accuracy from the device sensors; drives the calibration banner. */
+    val accuracy: Int = SensorManager.SENSOR_STATUS_ACCURACY_HIGH,
 )
 
 /** Sky map callbacks. */
