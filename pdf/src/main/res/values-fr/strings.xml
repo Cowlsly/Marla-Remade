@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">PDF</string>
     <string name="open_pdf">Ouvrir un fichier PDF</string>
     <string name="share_pdf">Partager le PDF</string>
     <string name="pdf_save">Sauvegarder</string>

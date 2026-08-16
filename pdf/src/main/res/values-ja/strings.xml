@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="color">色</string>
-    <string name="app_name">PDF</string>
     <string name="search_label">検索</string>
     <string name="open_pdf">PDFを開く</string>
     <string name="safe_pdf_error">このPDFは安全なビューアーで開くことができませんでした。損傷を受けているかサポートされていない機能を使用している可能性があります。</string>

@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PDF</string>
     <string name="search_label">Znajdź</string>
     <string name="open_pdf">Otwórz plik PDF</string>
     <string name="capture_pdf">Zapisz jako PDF</string>

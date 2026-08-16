@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- App name displayed in launcher -->
-    <string name="app_name">PDF</string>
+    <string name="app_name" translatable="false">PDF</string>
 
     <!-- MainActivity: Verb. Button to search text inside current PDF -->
     <string name="search_label">Find</string>
