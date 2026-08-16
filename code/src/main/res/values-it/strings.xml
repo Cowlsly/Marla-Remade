@@ -2,4 +2,8 @@
 <resources>
     <string name="font_size">Dimensione carattere</string>
     <string name="language">Lingua</string>
+    <string name="reload">Ricarica</string>
+    <string name="all">Tutti</string>
+    <string name="new_folder">Nuova cartella</string>
+    <string name="create">Crea</string>
 </resources>
