@@ -26,6 +26,7 @@ import androidx.compose.ui.text.drawText
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.CompassCalibrationBanner
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
@@ -82,13 +83,7 @@ fun CompassContent(
                     .padding(8.dp),
             )
 
-            if (state.accuracy < ACCURACY_HIGH) {
-                Text(
-                    "Compass needs calibration — move the phone in a figure-8",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
+            CompassCalibrationBanner(state.accuracy)
             if (state.tiltWarning) {
                 Text(
                     "Hold the phone flat for an accurate bearing",
@@ -236,5 +231,3 @@ private fun DrawScope.drawHeldBearing(
         strokeWidth = 4f,
     )
 }
-
-private const val ACCURACY_HIGH = 3
