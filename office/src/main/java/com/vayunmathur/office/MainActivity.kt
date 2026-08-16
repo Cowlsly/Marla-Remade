@@ -49,6 +49,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
@@ -95,7 +96,6 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.TextFieldDefaults
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -411,7 +411,7 @@ fun HomeScreen(
     onNewSpreadsheet: () -> Unit = {},
     onNewPresentation: () -> Unit = {},
 ) {
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { pad ->
+    AppScaffold(title = stringResource(R.string.app_name)) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(24.dp))
             Text(stringResource(R.string.open_document_format_viewer_editor), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -443,6 +443,9 @@ private fun OnlineInit(viewModel: OfficeViewModel) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun OnlineDisabledScreen(onEnable: () -> Unit) {
+    // RAW SCAFFOLD EXCEPTION: bar-less full-screen opt-in prompt; the shared scaffolds all
+    // impose a top app bar (AppScaffold/DetailScaffold) or lazy-list content semantics
+    // (LazyListScaffold), none of which fit a centered, bar-less message screen.
     Scaffold { pad ->
         Column(
             Modifier.fillMaxSize().padding(pad).padding(24.dp),
@@ -641,16 +644,12 @@ fun OnlineTab(viewModel: OfficeViewModel, onOpenDoc: (com.vayunmathur.office.uti
     val scope = rememberCoroutineScope()
     val online by rememberIsOnline()
     val context = LocalContext.current
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.online)) },
-                actions = {
-                    IconButton(onClick = { viewModel.refreshOnline() }) {
-                        IconRefresh()
-                    }
-                }
-            )
+    AppScaffold(
+        title = stringResource(R.string.online),
+        actions = {
+            IconButton(onClick = { viewModel.refreshOnline() }) {
+                IconRefresh()
+            }
         }
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
@@ -935,28 +934,68 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
             }
         }
     ) {
-        Scaffold(
-            topBar = {
-                Column {
-                    TopAppBar(
-                        expandedHeight = 56.dp,
-                        title = { Text(document.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium) },
-                        navigationIcon = {
-                            IconButton(onClick = { if (!isOnline && hasUnsavedChanges) showUnsavedDialog = true else onBack() }) {
-                                IconBack()
+        AppScaffold(
+            title = { Text(document.title, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.titleMedium) },
+            navigationIcon = {
+                IconButton(onClick = { if (!isOnline && hasUnsavedChanges) showUnsavedDialog = true else onBack() }) {
+                    IconBack()
+                }
+            },
+            actions = {
+                if (canEdit) IconButton(onClick = { showSearch = !showSearch }) { IconSearch() }
+                IconButton(onClick = { viewModel.undo() }, enabled = canUndo) { IconUndo() }
+                IconButton(onClick = { viewModel.redo() }, enabled = canRedo) { IconRedo() }
+                if (!isOnline) {
+                    IconButton(onClick = { if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() }, enabled = hasUnsavedChanges && !isSaving) {
+                        if (isSaving) CircularProgressIndicator(Modifier.size(20.dp)) else IconSave()
+                    }
+                }
+            },
+            bottomBar = {
+                if (canEdit) {
+                    val formatTarget: FormatTarget = when {
+                        isTextDoc && activeRunStart >= 0 -> FormatTarget.TextRun(activeRunStart, activeRunEnd, selStart, selEnd)
+                        isSpreadsheet && (activeCell?.second ?: -1) >= 0 -> FormatTarget.Cell(activeCell!!.first, activeCell!!.second, activeCell!!.third)
+                        isPresentation && activeSlideEl >= 0 -> FormatTarget.Element(activeSlide, activeSlideEl)
+                        else -> FormatTarget.None
+                    }
+                    val caps = when {
+                        isTextDoc -> DocCaps(insertImage = true, insertChart = true, insertTable = true)
+                        isPresentation -> DocCaps(insertImage = true, insertShape = true, insertChart = true)
+                        isSpreadsheet -> DocCaps(insertImage = true, insertShape = true, insertChart = true)
+                        else -> DocCaps()
+                    }
+                    val activeSheet = activeCell?.first ?: 0
+                    val actions = BottomBarActions(
+                        onTextColor = { showColorPicker = true },
+                        onCellTextColor = { showCellTextColor = true },
+                        onCellBgColor = { showCellBgColor = true },
+                        onSlideTextColor = { showSlideTextColor = true },
+                        onSlideFill = { showSlideFillColor = true },
+                        onSlideStroke = { showSlideStrokeColor = true },
+                        onFontSize = { showFontSizePicker = true },
+                        onInsertImage = { imagePickerLauncher.launch("image/*") },
+                        onInsertShape = { kind ->
+                            when {
+                                isPresentation -> viewModel.addShapeToSlide(activeSlide, kind.name.lowercase())
+                                isSpreadsheet -> viewModel.addShapeToSheet(activeSheet, kind.name.lowercase())
                             }
                         },
-                        actions = {
-                            if (canEdit) IconButton(onClick = { showSearch = !showSearch }) { IconSearch() }
-                            IconButton(onClick = { viewModel.undo() }, enabled = canUndo) { IconUndo() }
-                            IconButton(onClick = { viewModel.redo() }, enabled = canRedo) { IconRedo() }
-                            if (!isOnline) {
-                                IconButton(onClick = { if (viewModel.needsSaveAs()) saveAsLauncher.launch(saveAsName) else viewModel.save() }, enabled = hasUnsavedChanges && !isSaving) {
-                                    if (isSaving) CircularProgressIndicator(Modifier.size(20.dp)) else IconSave()
-                                }
-                            }
-                        }
+                        onInsertChart = { editingChartBlock = -1; chartForSlide = isPresentation; chartForSheet = isSpreadsheet; showChartEditor = true },
+                        onInsertTable = { showInsertTable = true },
+                        onDeleteElement = { if (activeSlideEl >= 0) { viewModel.deleteSlideElement(activeSlide, activeSlideEl); activeSlideEl = -1 } },
+                        onCellBorder = { showCellBorderColor = true },
+                        onCellComment = { showCellComment = true },
+                        onCellResize = { showCellResize = true },
+                        onSlideNotes = { showSlideNotes = true },
+                        onSlideBackground = { showSlideBackground = true },
+                        onSlideTransition = { showSlideTransition = true }
                     )
+                    OfficeBottomBar(document, formatTarget, caps, viewModel, actions, activeTableBlock, activeTableRow, activeTableCol)
+                }
+            },
+        ) { paddingValues ->
+            Column(Modifier.fillMaxSize().padding(paddingValues)) {
                     // Office-style menu bar
                     Surface(tonalElevation = 2.dp) {
                         Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 4.dp)) {
@@ -1115,53 +1154,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                                 modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp))
                         }
                     }
-                }
-            },
-            bottomBar = {
-                if (canEdit) {
-                    val formatTarget: FormatTarget = when {
-                        isTextDoc && activeRunStart >= 0 -> FormatTarget.TextRun(activeRunStart, activeRunEnd, selStart, selEnd)
-                        isSpreadsheet && (activeCell?.second ?: -1) >= 0 -> FormatTarget.Cell(activeCell!!.first, activeCell!!.second, activeCell!!.third)
-                        isPresentation && activeSlideEl >= 0 -> FormatTarget.Element(activeSlide, activeSlideEl)
-                        else -> FormatTarget.None
-                    }
-                    val caps = when {
-                        isTextDoc -> DocCaps(insertImage = true, insertChart = true, insertTable = true)
-                        isPresentation -> DocCaps(insertImage = true, insertShape = true, insertChart = true)
-                        isSpreadsheet -> DocCaps(insertImage = true, insertShape = true, insertChart = true)
-                        else -> DocCaps()
-                    }
-                    val activeSheet = activeCell?.first ?: 0
-                    val actions = BottomBarActions(
-                        onTextColor = { showColorPicker = true },
-                        onCellTextColor = { showCellTextColor = true },
-                        onCellBgColor = { showCellBgColor = true },
-                        onSlideTextColor = { showSlideTextColor = true },
-                        onSlideFill = { showSlideFillColor = true },
-                        onSlideStroke = { showSlideStrokeColor = true },
-                        onFontSize = { showFontSizePicker = true },
-                        onInsertImage = { imagePickerLauncher.launch("image/*") },
-                        onInsertShape = { kind ->
-                            when {
-                                isPresentation -> viewModel.addShapeToSlide(activeSlide, kind.name.lowercase())
-                                isSpreadsheet -> viewModel.addShapeToSheet(activeSheet, kind.name.lowercase())
-                            }
-                        },
-                        onInsertChart = { editingChartBlock = -1; chartForSlide = isPresentation; chartForSheet = isSpreadsheet; showChartEditor = true },
-                        onInsertTable = { showInsertTable = true },
-                        onDeleteElement = { if (activeSlideEl >= 0) { viewModel.deleteSlideElement(activeSlide, activeSlideEl); activeSlideEl = -1 } },
-                        onCellBorder = { showCellBorderColor = true },
-                        onCellComment = { showCellComment = true },
-                        onCellResize = { showCellResize = true },
-                        onSlideNotes = { showSlideNotes = true },
-                        onSlideBackground = { showSlideBackground = true },
-                        onSlideTransition = { showSlideTransition = true }
-                    )
-                    OfficeBottomBar(document, formatTarget, caps, viewModel, actions, activeTableBlock, activeTableRow, activeTableCol)
-                }
-            }
-        ) { paddingValues ->
-            Box(Modifier.padding(paddingValues)) {
+            Box(Modifier.weight(1f)) {
                 val presence by viewModel.remotePresence.collectAsState()
                 val remoteCarets = presence.mapNotNull { p ->
                     p.caret?.let { com.vayunmathur.library.ui.odf.RemoteCaret(it, 0xFF000000L or (p.id.hashCode().toLong() and 0xFFFFFFL), p.name) }
@@ -1234,6 +1227,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                 }
                 // Night reading mode: a view-only dimming scrim (does not modify or save the document). (C4)
                 if (nightMode) Box(Modifier.matchParentSize().background(Color(0x660E1116)))
+            }
             }
         }
     }
