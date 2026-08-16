@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- MainActivity / Manifest: App name displayed in launcher. Noun, proper -->
-    <string name="app_name">Pipes</string>
+    <string name="app_name" translatable="false">Pipes</string>
     <!-- PackScreen: TopAppBar title for pack selection screen. Noun phrase, entry point showing level packs grid -->
     <string name="pack_selector">Pack Select</string>
     <!-- LevelScreen: TopAppBar title for level grid inside a pack. Noun phrase -->
