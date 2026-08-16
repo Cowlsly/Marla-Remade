@@ -1,5 +1,14 @@
 package com.vayunmathur.library.util
 
+import androidx.compose.animation.ContentTransform
+import androidx.compose.animation.core.FastOutLinearInEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
+import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.ime
@@ -112,6 +121,37 @@ class EntryProviderScope<T: NavKey>(val obj: T) {
     }
 }
 
+// App-wide nav transitions. nav3's default is a slow crossfade, which makes
+// every screen change feel sluggish. These keep the motion short: a fade that
+// is a touch slower in than out for a clean handoff, plus a very light slide so
+// the direction of travel reads without the jank of a full-width slide. Defined
+// once here because MainNavigation owns the only NavDisplay, so this is app-wide.
+private const val NavEnterMillis = 180
+private const val NavExitMillis = 130
+
+// Forward (push): new screen fades/slides in from the right, old drifts left.
+private val NavPush: ContentTransform =
+    (fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) +
+        slideInHorizontally(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) { it / 12 })
+        .togetherWith(
+            fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)) +
+                slideOutHorizontally(tween(NavExitMillis, easing = FastOutLinearInEasing)) { -it / 12 }
+        )
+
+// Back (pop): symmetric reverse - previous screen comes in from the left.
+private val NavPop: ContentTransform =
+    (fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) +
+        slideInHorizontally(tween(NavEnterMillis, easing = LinearOutSlowInEasing)) { -it / 12 })
+        .togetherWith(
+            fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)) +
+                slideOutHorizontally(tween(NavExitMillis, easing = FastOutLinearInEasing)) { it / 12 }
+        )
+
+// Predictive back gesture: a plain quick fade so it tracks the finger immediately.
+private val NavPredictivePop: ContentTransform =
+    fadeIn(tween(NavEnterMillis, easing = LinearOutSlowInEasing))
+        .togetherWith(fadeOut(tween(NavExitMillis, easing = FastOutLinearInEasing)))
+
 /**
  * Single owner of the IME (keyboard) inset for every screen it hosts: it applies
  * [imePadding] once to all hosted content. Screens and reusable components rendered
@@ -160,6 +200,9 @@ fun <T: NavKey> MainNavigation(backStack: NavBackStack<T>, bottomBar: @Composabl
                     .consumeWindowInsets(paddingValues)
                     .imePadding(),
                 sceneStrategies = listOf(DialogSceneStrategy(), sceneStrategy),
+                transitionSpec = { NavPush },
+                popTransitionSpec = { NavPop },
+                predictivePopTransitionSpec = { NavPredictivePop },
                 backStack = backStack.backStack, entryProvider = {
                     EntryProviderScope(it).apply {
                         entryProvider()
