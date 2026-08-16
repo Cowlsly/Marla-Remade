@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">EUICC</string>
+    <string name="app_name" translatable="false">EUICC</string>
     <string name="eid_title">EID</string>
     <string name="euicc_info_title">eUICC info</string>
     <string name="no_euicc">No eUICC available on this device.</string>

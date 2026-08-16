@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">VPN</string>
+    <string name="app_name" translatable="false">VPN</string>
     <string name="vpn_wireguard_gotatun">VPN — WireGuard (gotatun)</string>
     <string name="no_tunnels_yet">No tunnels yet</string>
     <string name="add_a_connection_by_opening_a_conf_file">Add a connection by opening a .conf file</string>

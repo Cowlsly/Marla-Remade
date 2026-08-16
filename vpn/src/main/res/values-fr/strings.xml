@@ -29,6 +29,5 @@
     <string name="vpn_wireguard_gotatun">VPN — WireGuard (gotatun)</string>
     <string name="no_tunnels_yet">Aucun tunnel pour le moment</string>
     <string name="always_on_vpn">VPN permanent</string>
-    <string name="app_name">VPN</string>
     <string name="mtu_keepalive_s">MTU : %1$s • Maintien de connexion : %2$s s</string>
 </resources>
