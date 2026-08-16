@@ -325,8 +325,8 @@ abstract class AppDatabase : RoomDatabase() {
     abstract fun pinnedStampDao(): PinnedStampDao
     abstract fun accrescentTrustDao(): AccrescentTrustDao
 
-    companion object {
-        val migrations = listOf(
+    companion object : com.vayunmathur.library.util.DatabaseMigrations {
+        override val migrations = listOf(
             object : Migration(1, 2) {
                 override fun migrate(db: SupportSQLiteDatabase) {
                     db.execSQL("DROP TABLE IF EXISTS FavoriteEntity")
