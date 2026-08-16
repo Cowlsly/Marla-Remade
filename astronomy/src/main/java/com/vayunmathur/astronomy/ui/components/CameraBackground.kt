@@ -2,8 +2,6 @@ package com.vayunmathur.astronomy.ui.components
 
 import android.Manifest
 import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.compose.CameraXViewfinder
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
@@ -26,6 +24,7 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.MutableStateFlow
 
@@ -44,14 +43,12 @@ fun CameraBackground(modifier: Modifier = Modifier, onUnavailable: () -> Unit) {
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { ok ->
+    val requestCamera = rememberPermissionRequest(Manifest.permission.CAMERA) { ok ->
         granted = ok
         if (!ok) onUnavailable()
     }
     LaunchedEffect(Unit) {
-        if (!granted) launcher.launch(Manifest.permission.CAMERA)
+        if (!granted) requestCamera()
     }
 
     if (!granted) return
