@@ -97,14 +97,18 @@ def test_maxspeed() -> None:
     print("maxspeed layer:")
     raw = _load(FIX / "maxspeed_sample.geojsonseq")
     feats = list(normalize_maxspeed.normalize(normalize_maxspeed.iter_features(raw)))
-    # 4 line features with maxspeed; service (no maxspeed) + Point node dropped.
-    check("emits 4 line features", len(feats) == 4, f"got {len(feats)}")
+    # 7 line features with maxspeed; service (no maxspeed) + Point node dropped.
+    check("emits 7 line features", len(feats) == 7, f"got {len(feats)}")
     check("all line geometry", all(f["geometry"]["type"] in ("LineString", "MultiLineString") for f in feats))
     values = [f["properties"]["maxspeed"] for f in feats]
     check("keeps raw mph value", "25 mph" in values)
     check("keeps bare number value", "50" in values)
     check("keeps km/h value", "100 km/h" in values)
     check("falls back to maxspeed:forward", "30 mph" in values)
+    # Non-numeric OSM values are passed through raw; the app parser handles them.
+    check("passes through 'none' raw", "none" in values)
+    check("passes through 'walk' raw", "walk" in values)
+    check("passes through 'signals' raw", "signals" in values)
     check("every feature has maxspeed property", all(f["properties"].get("maxspeed") for f in feats))
     check("no point node leaked", all(f["geometry"]["type"] != "Point" for f in feats))
 

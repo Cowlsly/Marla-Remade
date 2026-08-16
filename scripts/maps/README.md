@@ -91,7 +91,9 @@ base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
   * `highway=traffic_signals` → `traffic_signals`
 * **Maxspeed** — OpenStreetMap. Ways carrying a `maxspeed` (or
   `maxspeed:forward`/`maxspeed:backward`) tag; the raw value is kept verbatim so
-  the app parses `mph`/`km/h`/bare numbers itself.
+  the app parses `mph`/`km/h`/bare numbers itself. Non-numeric OSM values
+  (`none`, `signals`, `walk`, etc.) are also passed through raw — the app-side
+  parser (`MaxspeedSource`) decides how to render them.
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
     `ne_10m_admin_1_states_provinces`). Chosen because the current `.fgb` are
@@ -239,12 +241,13 @@ passes:
 ```
 $ python3 scripts/maps/test/test_normalize.py
 ...
-34 passed, 0 failed
+37 passed, 0 failed
 ```
 
 This validates: all five safety `kind` classifications (incl. DeFlock ALPR
 detection), maxspeed value passthrough (mph/km/h/bare + `maxspeed:forward`
-fallback, lines only), non-safety/non-point features dropped, `admin_level`
+fallback + non-numeric `none`/`walk`/`signals` raw passthrough, lines only),
+non-safety/non-point features dropped, `admin_level`
 mapping (2/4/8), `ISO_A2` / `iso_3166_2` preservation, county-vs-city
 `admin_level` filtering, and that every emitted line is valid GeoJSON
 (tippecanoe input). Run the metro dry run above on a box with the toolchain
