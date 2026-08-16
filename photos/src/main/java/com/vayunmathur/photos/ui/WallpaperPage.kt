@@ -150,6 +150,9 @@ fun WallpaperPage(
         viewModel.load(uriToLoad)
     }
 
+    // RAW SCAFFOLD EXCEPTION: immersive black wallpaper preview with a transparent,
+    // white-tinted TopAppBar (title + back). AppScaffold exposes no top-bar color slot, so
+    // the transparent/white immersive bar cannot be preserved.
     Scaffold(
         containerColor = Color.Black,
         topBar = {

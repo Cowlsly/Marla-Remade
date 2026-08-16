@@ -238,6 +238,10 @@ fun GalleryScreen(
         groupPhotosByMonth(state.searchResults, resources)
     }
 
+    // RAW SCAFFOLD EXCEPTION: top bar is an expandable SearchBar (with in-bar search
+    // results) swapped for a selection TopAppBar, and the body is a pinch-to-zoom photo
+    // grid wrapped in PullToRefreshBox. Neither AppScaffold (title/actions only) nor
+    // LazyListScaffold (LazyColumn body) can represent this without changing the UI.
     Scaffold(
         topBar = {
             Column {

@@ -18,12 +18,11 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -39,7 +38,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconCheck
-import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconUnarchive
 import com.vayunmathur.library.ui.BackupButtons
 import com.vayunmathur.library.room.SqlCipherDbCodec
@@ -66,40 +64,30 @@ fun SecureFolderPage(
     val selectedIds by secureFolderViewModel.selectedIds.collectAsState()
     val isSelectionMode = selectedIds.isNotEmpty()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    if (isSelectionMode) {
-                        Text(stringResource(R.string.items_selected, selectedIds.size))
-                    } else {
-                        Text(stringResource(R.string.label_secure_folder))
-                    }
-                },
-                navigationIcon = {
-                    if (isSelectionMode) {
-                        IconButton(onClick = { secureFolderViewModel.clearSelection() }) {
-                            IconClose()
-                        }
-                    }
-                },
-                actions = {
-                    if (isSelectionMode) {
-                        IconButton(onClick = {
-                            val selectedPhotos = photos.filter { it.id in selectedIds }
-                            secureFolderViewModel.restorePhotos(selectedPhotos)
-                        }) {
-                            IconUnarchive()
-                        }
-                    } else {
-                        BackupButtons(
-                            dbConfigs = listOf("vault-db" to password),
-                            dbCodec = SqlCipherDbCodec,
-                            extraFiles = listOf(File(context.filesDir, "secure_vault"))
-                        )
-                    }
+    val closeSelection: (() -> Unit)? =
+        if (isSelectionMode) ({ secureFolderViewModel.clearSelection() }) else null
+    AppScaffold(
+        title = if (isSelectionMode) {
+            stringResource(R.string.items_selected, selectedIds.size)
+        } else {
+            stringResource(R.string.label_secure_folder)
+        },
+        onClose = closeSelection,
+        actions = {
+            if (isSelectionMode) {
+                IconButton(onClick = {
+                    val selectedPhotos = photos.filter { it.id in selectedIds }
+                    secureFolderViewModel.restorePhotos(selectedPhotos)
+                }) {
+                    IconUnarchive()
                 }
-            )
+            } else {
+                BackupButtons(
+                    dbConfigs = listOf("vault-db" to password),
+                    dbCodec = SqlCipherDbCodec,
+                    extraFiles = listOf(File(context.filesDir, "secure_vault"))
+                )
+            }
         },
         bottomBar = { if (!isSelectionMode) NavigationBar(Route.SecureFolder, backStack) }
     ) { paddingValues ->

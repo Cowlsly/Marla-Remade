@@ -53,10 +53,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.FilledTonalButton
-import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconContentCut
 import com.vayunmathur.library.ui.IconCrop
@@ -72,11 +72,9 @@ import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.RangeSlider
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.photos.R
 import com.vayunmathur.photos.data.VideoEditState
 import com.vayunmathur.photos.data.VideoFilterPreset
@@ -122,22 +120,15 @@ fun VideoEditPage(vm: VideoEditViewModel, id: Long, uri: String?) {
         return
     }
 
-    Scaffold(
-        containerColor = Color.Black,
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.title_edit_video), maxLines = 1) },
-                navigationIcon = {
-                    IconButton(onClick = { activity?.finish() }) { IconBack() }
-                },
-                actions = {
-                    IconButton(onClick = { showSaveDialog = true }, enabled = !exporting) { IconSave() }
-                },
-            )
+    AppScaffold(
+        title = { Text(stringResource(R.string.title_edit_video), maxLines = 1) },
+        onNavigateBack = { activity?.finish() },
+        actions = {
+            IconButton(onClick = { showSaveDialog = true }, enabled = !exporting) { IconSave() }
         },
     ) { padding ->
         Column(
-            modifier = Modifier.fillMaxSize().padding(padding),
+            modifier = Modifier.fillMaxSize().background(Color.Black).padding(padding),
         ) {
             Box(
                 modifier = Modifier.fillMaxWidth().weight(1f),

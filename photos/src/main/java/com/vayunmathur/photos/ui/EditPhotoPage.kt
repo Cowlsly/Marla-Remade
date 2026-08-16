@@ -36,6 +36,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
@@ -43,11 +44,9 @@ import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconHighlightAlt
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextField
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -672,57 +671,49 @@ fun EditPhotoPage(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.title_edit_photo), maxLines = 1) },
-                navigationIcon = {
-                    IconButton(onClick = { context.finish() }) {
-                        IconBack()
-                    }
+    AppScaffold(
+        title = { Text(stringResource(R.string.title_edit_photo), maxLines = 1) },
+        onNavigateBack = { context.finish() },
+        actions = {
+            val strokeUndo = isDrawing && inkStrokes.isNotEmpty()
+            val strokeRedo = isDrawing && redoStrokes.isNotEmpty()
+            IconButton(
+                onClick = {
+                    if (strokeUndo) redoStrokes.add(inkStrokes.removeAt(inkStrokes.size - 1))
+                    else vm.undo()
                 },
-                actions = {
-                    val strokeUndo = isDrawing && inkStrokes.isNotEmpty()
-                    val strokeRedo = isDrawing && redoStrokes.isNotEmpty()
-                    IconButton(
-                        onClick = {
-                            if (strokeUndo) redoStrokes.add(inkStrokes.removeAt(inkStrokes.size - 1))
-                            else vm.undo()
-                        },
-                        enabled = strokeUndo || canUndo,
-                    ) { IconUndo() }
-                    IconButton(
-                        onClick = {
-                            if (strokeRedo) inkStrokes.add(redoStrokes.removeAt(redoStrokes.size - 1))
-                            else vm.redo()
-                        },
-                        enabled = strokeRedo || canRedo,
-                    ) {
-                        Text("↻", fontSize = 20.sp)
-                    }
-                    Box {
-                        IconButton(onClick = { showSaveMenu = true }) { IconSave() }
-                        DropdownMenu(expanded = showSaveMenu, onDismissRequest = { showSaveMenu = false }) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_save)) },
-                                onClick = { showSaveMenu = false; doSave(false) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.action_save_as_copy)) },
-                                onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Jpeg) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.export_as_png)) },
-                                onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Png) },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.export_as_webp)) },
-                                onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Webp) },
-                            )
-                        }
-                    }
+                enabled = strokeUndo || canUndo,
+            ) { IconUndo() }
+            IconButton(
+                onClick = {
+                    if (strokeRedo) inkStrokes.add(redoStrokes.removeAt(redoStrokes.size - 1))
+                    else vm.redo()
                 },
-            )
+                enabled = strokeRedo || canRedo,
+            ) {
+                Text("↻", fontSize = 20.sp)
+            }
+            Box {
+                IconButton(onClick = { showSaveMenu = true }) { IconSave() }
+                DropdownMenu(expanded = showSaveMenu, onDismissRequest = { showSaveMenu = false }) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_save)) },
+                        onClick = { showSaveMenu = false; doSave(false) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.action_save_as_copy)) },
+                        onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Jpeg) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.export_as_png)) },
+                        onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Png) },
+                    )
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.export_as_webp)) },
+                        onClick = { showSaveMenu = false; doSave(true, com.vayunmathur.photos.util.ExportFormat.Webp) },
+                    )
+                }
+            }
         },
     ) { paddingValues ->
         val layoutDirection = LocalLayoutDirection.current

@@ -209,6 +209,9 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
         val pagerState =
                 rememberPagerState(initialPage = initialIndex.coerceAtLeast(0), pageCount = { photosSorted.size })
 
+        // RAW SCAFFOLD EXCEPTION: bar-less full-screen black media viewer (no top/bottom
+        // bar); controls are a bottom overlay inside the pager. AppScaffold always renders a
+        // top app bar, which would break the immersive viewer.
         Scaffold(containerColor = Color.Black) { paddingValues ->
             HorizontalPager(
                     state = pagerState,
@@ -266,6 +269,8 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
  */
 @Composable
 private fun PendingPhotoView(uri: String, context: Context) {
+    // RAW SCAFFOLD EXCEPTION: bar-less full-screen black viewer for a not-yet-indexed image;
+    // AppScaffold always renders a top app bar, which would break the immersive viewer.
     Scaffold(containerColor = Color.Black) { paddingValues ->
         AsyncImage(
                 model = ImageRequest.Builder(context).data(uri.toUri()).build(),

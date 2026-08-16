@@ -102,6 +102,9 @@ fun MapPage(
         }
     }
 
+    // RAW SCAFFOLD EXCEPTION: full-bleed map main-nav page with only a bottom
+    // NavigationBar and no top app bar. AppScaffold always renders a top app bar (which
+    // would break the immersive map) and the body is not a LazyColumn.
     Scaffold(bottomBar = { NavigationBar(Route.Map, backStack) }) { paddingValues ->
         Box(Modifier.padding(paddingValues).fillMaxSize()) {
             RasterMap(

@@ -90,6 +90,9 @@ fun PeopleScreen(
     val showProgress = state.faceTargetCount > 0 &&
         (state.indexing || state.faceScannedCount < state.faceTargetCount)
 
+    // RAW SCAFFOLD EXCEPTION: main-nav page with only a bottom NavigationBar and no top
+    // app bar. AppScaffold always renders a top app bar (which would break the layout) and
+    // the body is a Column (progress + grid), not a LazyColumn.
     Scaffold(
         bottomBar = { NavigationBar(Route.People, backStack) },
     ) { padding ->

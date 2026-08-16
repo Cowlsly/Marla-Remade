@@ -16,11 +16,10 @@ import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -38,7 +37,6 @@ import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
-import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconUnarchive
 import com.vayunmathur.library.util.NavBackStack
@@ -80,48 +78,40 @@ fun TrashPage(backStack: NavBackStack<Route>, galleryViewModel: GalleryViewModel
         derivedStateOf { groupPhotosByMonth(trashedPhotos, resources) }
     }
 
-    Scaffold(
-        topBar = {
+    val closeSelection: (() -> Unit)? = if (isSelectionMode) ({ selectedIds.clear() }) else null
+    AppScaffold(
+        title = if (isSelectionMode) {
+            stringResource(com.vayunmathur.photos.R.string.items_selected, selectedIds.size)
+        } else {
+            stringResource(com.vayunmathur.photos.R.string.label_trash)
+        },
+        onClose = closeSelection,
+        actions = {
             if (isSelectionMode) {
-                TopAppBar(
-                    title = { Text(stringResource(com.vayunmathur.photos.R.string.items_selected, selectedIds.size)) },
-                    navigationIcon = {
-                        IconButton(onClick = { selectedIds.clear() }) {
-                            IconClose()
-                        }
-                    },
-                    actions = {
-                        IconButton(onClick = {
-                            val uris = trashedPhotos.filter { it.id in selectedIds }.map { it.uri.toUri() }
-                            val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, false)
-                            trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
-                        }) {
-                            IconUnarchive() // Restore icon
-                        }
-                        IconButton(onClick = {
-                            val uris = trashedPhotos.filter { it.id in selectedIds }.map { it.uri.toUri() }
-                            val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, uris)
-                            trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
-                        }) {
-                            IconDelete() // Permanent delete icon
-                        }
-                    }
-                )
+                IconButton(onClick = {
+                    val uris = trashedPhotos.filter { it.id in selectedIds }.map { it.uri.toUri() }
+                    val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, false)
+                    trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                }) {
+                    IconUnarchive() // Restore icon
+                }
+                IconButton(onClick = {
+                    val uris = trashedPhotos.filter { it.id in selectedIds }.map { it.uri.toUri() }
+                    val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, uris)
+                    trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                }) {
+                    IconDelete() // Permanent delete icon
+                }
             } else {
-                TopAppBar(
-                    title = { Text(stringResource(com.vayunmathur.photos.R.string.label_trash)) },
-                    actions = {
-                        if (trashedPhotos.isNotEmpty()) {
-                            IconButton(onClick = {
-                                val uris = trashedPhotos.map { it.uri.toUri() }
-                                val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, uris)
-                                trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
-                            }) {
-                                IconDelete()
-                            }
-                        }
+                if (trashedPhotos.isNotEmpty()) {
+                    IconButton(onClick = {
+                        val uris = trashedPhotos.map { it.uri.toUri() }
+                        val pendingIntent = MediaStore.createDeleteRequest(context.contentResolver, uris)
+                        trashLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+                    }) {
+                        IconDelete()
                     }
-                )
+                }
             }
         },
         bottomBar = { if (!isSelectionMode) NavigationBar(Route.Trash, backStack) }
