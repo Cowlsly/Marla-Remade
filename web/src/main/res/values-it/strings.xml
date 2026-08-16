@@ -1,4 +1,73 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="history">Cronologia</string>
+    <string name="app_name">Web</string>
+    <string name="search_or_enter_address">Cerca o inserisci un indirizzo</string>
+    <string name="reload">Ricarica</string>
+    <string name="bookmarks">Segnalibri</string>
+    <string name="site_data">Dati del sito</string>
+    <string name="app_name_2">Nome app</string>
+    <string name="recent">Recenti</string>
+    <string name="private_prefix">Privata •</string>
+    <string name="private_tab">Scheda privata</string>
+    <string name="no_downloads">Nessun download</string>
+    <string name="general">Generali</string>
+    <string name="search_engine">Motore di ricerca</string>
+    <string name="duckduckgo_locked">DuckDuckGo (bloccato)</string>
+    <string name="cache_mode">Modalità cache</string>
+    <string name="javascript">JavaScript</string>
+    <string name="clear_browsing_data_2">Cancellare i dati di navigazione?</string>
+    <string name="clears_cookies_cache_storage_history_dow">Cancella cookie, cache, archiviazione, cronologia, download, autorizzazioni. Le schede rimangono aperte.</string>
+    <string name="your_choice_is_saved_per_site_change_it">La tua scelta viene salvata per sito. Modificala in Impostazioni → Dati dei siti.</string>
+    <string name="allow">Consenti</string>
+    <string name="block">Blocca</string>
+    <string name="allow_location">Consentire la posizione?</string>
+    <string name="uses_system_location_services_private_ta">Utilizza i servizi di localizzazione del sistema. Le schede private non concedono mai la posizione.</string>
+    <string name="choose_files">Scegli file</string>
+    <string name="select_files_to_upload">Seleziona i file da caricare.</string>
+    <string name="pick_files">Scegli i file</string>
+    <string name="storage">Archiviazione</string>
+    <string name="permissions">Autorizzazioni</string>
+    <string name="no_permissions_set">Nessuna autorizzazione impostata</string>
+    <string name="no_installed_apps">Nessuna app installata</string>
+    <string name="all">Tutti</string>
+    <string name="delete_folder">Elimina cartella</string>
+    <string name="no_bookmarks_yet">Ancora nessun segnalibro</string>
+    <string name="no_bookmarks_in_this_folder">Nessun segnalibro in questa cartella</string>
+    <string name="new_folder">Nuova cartella</string>
+    <string name="folder_name">Nome cartella</string>
+    <string name="create">Crea</string>
+    <string name="delete_bookmark">Eliminare il segnalibro?</string>
+    <string name="delete_folder_2">Eliminare la cartella?</string>
+    <string name="no_history_yet">Ancora nessuna cronologia</string>
+    <string name="clear_history">Cancellare la cronologia?</string>
+    <string name="this_will_permanently_delete_your_browsi">Questa operazione eliminerà definitivamente la tua cronologia di navigazione.</string>
+    <string name="icon">icona: %1$s</string>
+    <string name="theme">tema: %1$s</string>
+    <string name="blank_new_tab_tap_the_address_pill_to_se">Nuova scheda vuota - tocca la pillo degli indirizzi per cercare. URL intero visibile nella pillola. Ricarica/cancella all\'interno della scheda della barra di ricerca espansa.</string>
+    <plurals name="tabs">
+        <item quantity="one">%1$s scheda</item>
+        <item quantity="many">%1$s schede</item>
+        <item quantity="other">%1$s schede</item>
+    </plurals>
+    <string name="sites_permission_grants">%1$s siti • %2$s autorizzazioni concesse</string>
+    <plurals name="entries">
+        <item quantity="one">%1$s voce</item>
+        <item quantity="many">%1$s voci</item>
+        <item quantity="other">%1$s voci</item>
+    </plurals>
+    <plurals name="files">
+        <item quantity="one">%1$s file</item>
+        <item quantity="many">%1$s file</item>
+        <item quantity="other">%1$s file</item>
+    </plurals>
+    <plurals name="pwas">
+        <item quantity="one">%1$s PWA</item>
+        <item quantity="many">%1$s PWA</item>
+        <item quantity="other">%1$s PWA</item>
+    </plurals>
+    <string name="engine">Motore: %1$s</string>
+    <string name="allow_to_access">Concedere a %1$s di accedere?</string>
+    <string name="wants_to_know_your_location">%1$s desidera conoscere la tua posizione.</string>
+    <string name="accepted">Accettato: %1$s</string>
 </resources>
