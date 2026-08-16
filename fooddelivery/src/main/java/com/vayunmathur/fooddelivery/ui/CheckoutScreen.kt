@@ -32,23 +32,20 @@ import com.stripe.android.Stripe
 import com.stripe.android.paymentsheet.PaymentSheet
 import com.stripe.android.paymentsheet.PaymentSheetResult
 import com.stripe.android.paymentsheet.rememberPaymentSheet
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.IconBack
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SegmentedButtonDefaults
 import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.AddressStore
 import com.vayunmathur.fooddelivery.data.CartItem
@@ -225,8 +222,8 @@ fun CheckoutScreen(
     }
 
     if (orderSuccess) {
-        Scaffold(
-            topBar = { TopAppBar(title = { Text(stringResource(R.string.order_confirmed)) }) }
+        AppScaffold(
+            title = stringResource(R.string.order_confirmed),
         ) { padding ->
             Column(
                 Modifier.fillMaxSize().padding(padding),
@@ -244,15 +241,9 @@ fun CheckoutScreen(
         return
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.checkout)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) { IconBack() }
-                }
-            )
-        }
+    AppScaffold(
+        title = stringResource(R.string.checkout),
+        onNavigateBack = onBack,
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             LazyColumn(

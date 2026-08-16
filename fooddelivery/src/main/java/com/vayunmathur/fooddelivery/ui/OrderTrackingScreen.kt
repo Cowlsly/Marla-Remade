@@ -40,23 +40,20 @@ import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.RasterMap
 import com.vayunmathur.library.map.TileSource
 import com.vayunmathur.library.map.rememberCameraState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.EmptyState
-import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconDeliveryDining
 import com.vayunmathur.library.ui.IconRestaurant
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconPerson
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import android.util.Log
 import com.vayunmathur.fooddelivery.R
 import com.vayunmathur.fooddelivery.api.BitesApi
@@ -102,13 +99,9 @@ fun OrderTrackingScreen(orderId: Int, onBack: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(order?.merchant?.name ?: stringResource(R.string.tracking)) },
-                navigationIcon = { IconButton(onClick = onBack) { IconBack() } },
-            )
-        },
+    AppScaffold(
+        title = order?.merchant?.name ?: stringResource(R.string.tracking),
+        onNavigateBack = onBack,
     ) { padding ->
         val o = order
         when {
