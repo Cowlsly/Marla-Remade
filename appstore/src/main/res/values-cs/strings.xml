@@ -15,7 +15,6 @@
     <string name="nav_search">Hledat</string>
     <string name="nav_updates">Aktualizace</string>
     <string name="nav_library">Knihovna</string>
-    <string name="source_chip_modern_apps">Modern Apps</string>
     <string name="source_chip_fdroid">F-Droid</string>
     <string name="source_chip_play">Obchod Play</string>
     <string name="filter_all">Vše</string>

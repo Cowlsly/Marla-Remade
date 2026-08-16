@@ -16,7 +16,6 @@
     <string name="nav_search">Suchen</string>
     <string name="nav_updates">Aktualisierungen</string>
     <string name="nav_library">Bibliothek</string>
-    <string name="source_chip_modern_apps">Modern Apps</string>
     <string name="source_chip_fdroid">F-Droid</string>
     <string name="source_chip_play">Play Store</string>
     <string name="filter_all">Alle</string>

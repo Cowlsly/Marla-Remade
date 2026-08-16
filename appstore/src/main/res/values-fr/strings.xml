@@ -67,10 +67,8 @@
     <string name="section_recently_updated_subtitle">Les compilations les plus récentes sur F-Droid</string>
     <string name="share_app_text">%1$s — %2$s</string>
     <string name="source_chip_fdroid">F-Droid</string>
-    <string name="source_chip_modern_apps">Modern Apps</string>
     <string name="source_fdroid">F-Droid</string>
     <string name="source_fdroid_pin">Épinglé à la clé de signature de la liste d’applications de F-Droid</string>
-    <string name="source_modern_apps">Modern Apps</string>
     <string name="source_modern_apps_pin">Épinglé à la propre clé de signature de cette application</string>
     <string name="source_play">Play Store (anonyme)</string>
     <string name="source_play_pin">Rien à épingler : Google détient la clé de signature</string>
@@ -129,7 +127,6 @@
     <string name="trust_modern_apps_practice_one_key">Chaque application provient d’une version balisée et est signée avec une seule clé</string>
     <string name="trust_modern_apps_practice_open">L’ensemble du projet est libre et publié dans un dépôt public unique</string>
     <string name="trust_modern_apps_summary">Compilées dans le même dépôt que ce magasin et signées avec la même clé, que votre téléphone peut comparer à celle de la copie du magasin installée sur l’appareil.</string>
-    <string name="trust_modern_apps_title">Modern Apps</string>
     <string name="trust_own_key_detail">Les téléchargements de Modern Apps doivent être signés avec cette clé. Celle-ci est lue sur votre téléphone au moment de l’installation : il s’agit donc toujours de la clé ayant réellement servi à signer cette copie du magasin.</string>
     <string name="trust_own_key_title">Clé de signature de ce magasin</string>
     <string name="trust_own_key_unreadable">Impossible de lire la clé de signature de cette application.</string>

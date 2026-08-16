@@ -19,7 +19,7 @@
     <string name="nav_library">Library</string>
 
     <!-- Source chips. Factual labels; the sources are not ranked. -->
-    <string name="source_chip_modern_apps">Modern Apps</string>
+    <string name="source_chip_modern_apps" translatable="false">Modern Apps</string>
     <string name="source_chip_fdroid">F-Droid</string>
     <string name="source_chip_grapheneos">GrapheneOS</string>
     <string name="source_chip_play">Play Store</string>
@@ -163,7 +163,7 @@
     <string name="trust_own_key_detail">Modern Apps downloads have to be signed by this key. It is read off your phone at install time, so it is always the key this copy of the store was really signed with.</string>
     <string name="trust_own_key_unreadable">Couldn\'t read this app\'s signing key.</string>
 
-    <string name="trust_modern_apps_title">Modern Apps</string>
+    <string name="trust_modern_apps_title" translatable="false">Modern Apps</string>
     <string name="trust_modern_apps_summary">Built in the same repo as this store and signed with the same key, which your phone can check against the copy of the store you are holding.</string>
     <string name="trust_modern_apps_practice_open">All of it is open source, in one public repository</string>
     <string name="trust_modern_apps_practice_one_key">Every app ships from one tagged release, signed with one key</string>
@@ -207,7 +207,7 @@
     <!-- Sources page. -->
     <string name="repos_syncing">Syncing…</string>
     <string name="repos_sync_sources">Sync sources</string>
-    <string name="source_modern_apps">Modern Apps</string>
+    <string name="source_modern_apps" translatable="false">Modern Apps</string>
     <string name="source_modern_apps_pin">Pinned to this app\'s own signing key</string>
     <string name="source_fdroid">F-Droid</string>
     <string name="source_fdroid_pin">Pinned to F-Droid\'s app list signing key</string>

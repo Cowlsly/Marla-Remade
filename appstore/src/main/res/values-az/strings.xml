@@ -15,7 +15,6 @@
     <string name="nav_search">Axtarış</string>
     <string name="nav_updates">Yeniləmələr</string>
     <string name="nav_library">Kitabxana</string>
-    <string name="source_chip_modern_apps">Müasir tətbiqlər</string>
     <string name="source_chip_fdroid">F-Droid</string>
     <string name="source_chip_grapheneos">GrapheneOS</string>
     <string name="source_chip_play">Play Mağaza</string>
@@ -143,7 +142,6 @@
     <string name="trust_own_key_title">Bu mağazanın imzalama açarı</string>
     <string name="trust_own_key_detail">Müasir tətbiq yükləmələri bu açarla imzalanmalıdır. Quraşdırma zamanı həmin açar telefonunuzdan oxunur; beləliklə, bu, həmişə mağazanın həmin nüsxəsinin əslində imzalandığı açar olur.</string>
     <string name="trust_own_key_unreadable">Bu tətbiqin imzalama açarını oxumaq mümkün olmadı.</string>
-    <string name="trust_modern_apps_title">Müasir tətbiqlər</string>
     <string name="trust_modern_apps_summary">Bu mağaza ilə eyni repozitoriyada yaradılıb və telefonunuzun, sizdəki mağaza nüsxəsi ilə müqayisə edərək yoxlaya biləcəyi eyni açarla imzalanıb.</string>
     <string name="trust_modern_apps_practice_open">Hamısı açıq mənbəlidir və vahid açıq repozitoriyada yerləşir.</string>
     <string name="trust_modern_apps_practice_one_key">Hər bir tətbiq bir açarla imzalanmış, etiketlənmiş bir buraxılışdan təqdim olunur.</string>
@@ -182,7 +180,6 @@
     <string name="trust_accrescent_limits">Accrescent hər fayl üçün hash yayımlamır və reproduksiya edilə bilən yığmalar təqdim etmir. Buna görə zəmanət mənbə kodu ilə uyğunluğa deyil, imzaya və minimum versiyaya əsaslanır. Siyahılar və yükləmə keçidləri gRPC vasitəsilə adi serverdən əldə olunur; zərərli cavab yalnız bu imza və versiya yoxlamalarından keçməyən fayl yarada bilər. Heç kim tətbiqləri skan etmir və zərərli buraxılışı artıq telefonlara quraşdırıldıqdan sonra geri götürmək mümkün deyil.</string>
     <string name="repos_syncing">Sinxronlaşdırılır…</string>
     <string name="repos_sync_sources">Sinxronizasiya mənbələri</string>
-    <string name="source_modern_apps">Müasir tətbiqlər</string>
     <string name="source_modern_apps_pin">Bu tətbiqin öz imzalama açarına bağlanıb.</string>
     <string name="source_fdroid">F-Droid</string>
     <string name="source_fdroid_pin">F-Droid tətbiq siyahısı imzalama açarına bərkidilib</string>

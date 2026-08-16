@@ -32,7 +32,6 @@
     <string name="section_modern_apps_subtitle">Zbudowano w tym repozytorium i podpisano tym samym kluczem co ten sklep</string>
     <string name="section_recently_updated">Nowe i zaktualizowane</string>
     <string name="filter_with_count">%1$s (%2$d)</string>
-    <string name="source_chip_modern_apps">Modern Apps</string>
     <string name="section_category_subtitle">Aplikacje z katalogu offline w tej kategorii</string>
     <string name="home_empty_title">Jeszcze nic tu nie ma</string>
     <string name="home_empty_message">Zsynchronizuj źródła, aby je uzupełnić, lub wyszukaj aplikację według nazwy.</string>
@@ -126,7 +125,6 @@
     <string name="trust_own_key_title">Klucz do podpisu tego sklepu</string>
     <string name="trust_own_key_detail">Pobrane aplikacje Modern muszą być podpisane tym kluczem. Jest on odczytywany z telefonu podczas instalacji, więc zawsze jest to klucz, którym faktycznie podpisano tę kopię sklepu.</string>
     <string name="trust_own_key_unreadable">Nie udało się odczytać klucza podpisu tej aplikacji.</string>
-    <string name="trust_modern_apps_title">Modern Apps</string>
     <string name="trust_modern_apps_summary">Zbudowany w tym samym repozytorium co ten sklep i podpisany tym samym kluczem, który Twój telefon może sprawdzić w kopii sklepu, którą przechowujesz.</string>
     <string name="trust_modern_apps_practice_open">Wszystko jest dostępne jako oprogramowanie open source w jednym publicznym repozytorium</string>
     <string name="trust_modern_apps_practice_one_key">Każda aplikacja pochodzi z jednej oznaczonej wersji, podpisanej jednym kluczem</string>
@@ -156,7 +154,6 @@
     <string name="trust_play_limits">Brak kodu źródłowego i brak niezależnej kompilacji, więc nic nie potwierdza zgodności aplikacji z jakimkolwiek opublikowanym kodem. Google dostarcza zarówno plik, jak i wzorzec do jego weryfikacji, więc te testy wykryją zmodyfikowane pobieranie, ale nie złośliwą aktualizację podpisaną przez samo Google. Ten sklep łączy się z Play przez konto anonimowe, a nie oficjalnego klienta, przez co widzi mniej niż aplikacja Play.</string>
     <string name="repos_syncing">Synchronizacja…</string>
     <string name="repos_sync_sources">Synchronizuj źródła</string>
-    <string name="source_modern_apps">Modern Apps</string>
     <string name="source_modern_apps_pin">Przypięte do klucza podpisu tej aplikacji</string>
     <string name="source_fdroid">F-Droid</string>
     <string name="source_fdroid_pin">Przypięto do klucza podpisu listy aplikacji F-Droid</string>

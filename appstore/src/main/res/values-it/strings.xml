@@ -22,7 +22,6 @@
     <string name="nav_search">Cerca</string>
     <string name="nav_updates">Aggiornamenti</string>
     <string name="nav_library">Libreria</string>
-    <string name="source_chip_modern_apps">Modern Apps</string>
     <string name="source_chip_fdroid">F-Droid</string>
     <string name="source_chip_play">Play Store</string>
     <string name="filter_all">Tutti</string>
