@@ -17,19 +17,21 @@ package com.vayunmathur.maps.util
 data class SearchUiState(
     val query: String = "",
     val results: List<SearchResult> = emptyList(),
+    val recents: List<String> = emptyList(),
 )
 
 /**
  * Search callbacks. Every method has a no-op default so a preview can render the screen
  * without supplying behaviour — [Noop] is the whole implementation a preview needs.
  *
- * These are not implemented by [MapsSearchViewModel]: a query needs the amenity database
- * and the visible bounding box, and picking a result touches the nav back stack, so the
- * search page builds the adapter itself.
+ * These are not implemented by [MapsSearchViewModel]: a query needs the visible bounding
+ * box (to bias the Google search toward the map centre) and picking a result touches the
+ * nav back stack, so the search page builds the adapter itself.
  */
 interface SearchActions {
     fun setQuery(query: String) {}
     fun selectResult(result: SearchResult) {}
+    fun clearRecents() {}
     fun back() {}
 
     companion object {

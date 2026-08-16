@@ -218,34 +218,6 @@ fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigatio
     }
 }
 
-@Composable
-fun TransitStopBottomSheet(inactiveNavigation: SpecificFeature.Route?, feature: SpecificFeature.TransitStop, requestDirections: () -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            ListItem({
-                Text(
-                    feature.name,
-                    style = MaterialTheme.typography.titleLarge,
-                )
-            }, supportingContent = {
-                if (feature.stopCode != null || feature.gtfsFeed != null) {
-                    val info = listOfNotNull(feature.gtfsFeed, feature.stopCode).joinToString(" / ")
-                    Text(info)
-                }
-            }, trailingContent = {
-                Button({requestDirections()}) {
-                    if(inactiveNavigation == null) {
-                        Text(stringResource(R.string.directions))
-                    } else {
-                        Text(stringResource(R.string.add_stop_to_route))
-                    }
-                }
-            }, colors = ListItemDefaults.colors(containerColor = Color.Transparent))
-        }
-        RestaurantItem({ IconGlobe() }, stringResource(R.string.travel_mode_transit)) {}
-    }
-}
-
 fun verticalShape(index: Int, count: Int): RoundedCornerShape {
     val top = if (index == 0) 12.dp else 0.dp
     val bottom = if (index == count - 1) 12.dp else 0.dp

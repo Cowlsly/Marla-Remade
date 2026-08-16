@@ -72,6 +72,7 @@ import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
+import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.ZoneDownloadManager
 import kotlinx.coroutines.Dispatchers
@@ -105,7 +106,7 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -116,6 +117,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // Google POI overlay pins (viewport scrape → custom layer, replacing the
     // suppressed native basemap POIs).
     val googlePins by poiViewModel.pins.collectAsState()
+
+    // Search-result pins (from the Google search page) drawn on the map.
+    val searchResults by searchViewModel.results.collectAsState()
 
     // --- ZONE DOWNLOAD STATE ---
     val camera = rememberCameraState(CameraPosition(target = Position(-118.243683,34.052235), zoom = 5.0))
@@ -339,22 +343,27 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             GestureOptions.Standard,
                             OrnamentOptions.AllDisabled
                         ),
-                        onMapClick = { _, offset ->
+                        onMapClick = { latLng, offset ->
                             coroutineScope.launch {
                                 val projection = camera.projection
-                                // Hit-test the Google POI overlay first — a pin
-                                // tap re-selects the place as a GenericPlace so
+                                // Hit-test the search-result pins first, then the
+                                // ambient Google POI overlay — a pin tap re-selects
+                                // the place as a GenericPlace so
                                 // SelectedFeatureViewModel.currentPoiInfo fetches
                                 // the enrichment and GooglePoiEnrichment renders.
-                                val poiHit = projection?.queryRenderedFeatures(
+                                val pinHit = projection?.queryRenderedFeatures(
                                     offset,
-                                    setOf(GOOGLE_POI_LAYER_ID)
-                                )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
-                                if (poiHit != null) {
+                                    setOf(SEARCH_RESULT_LAYER_ID)
+                                )?.firstNotNullOfOrNull { it.toSelectedSearchResult() }
+                                    ?: projection?.queryRenderedFeatures(
+                                        offset,
+                                        setOf(GOOGLE_POI_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
+                                if (pinHit != null) {
                                     if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
                                         selectedFeature as SpecificFeature.Route
                                     )
-                                    viewModel.set(poiHit)
+                                    viewModel.set(pinHit)
                                     scaffoldState.bottomSheetState.expand()
                                     return@launch
                                 }
@@ -379,18 +388,32 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     }
                                 }
 
-                                firstFeature?.let {
+                                if (firstFeature != null) {
                                     if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
                                         selectedFeature as SpecificFeature.Route
                                     )
-                                    viewModel.set(it)
+                                    viewModel.set(firstFeature)
                                     scaffoldState.bottomSheetState.expand()
+                                    return@launch
+                                }
+
+                                // Nothing hit: reverse-geocode the tapped point
+                                // ("what's here?"). Replaces the removed address
+                                // FTS geocoder — online-only (Decision D2).
+                                searchViewModel.reverseGeocode(latLng.latitude, latLng.longitude) { place ->
+                                    if (place != null) {
+                                        if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
+                                            selectedFeature as SpecificFeature.Route
+                                        )
+                                        viewModel.set(place)
+                                        coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                    }
                                 }
                             }
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults)
                     }
                 }
 

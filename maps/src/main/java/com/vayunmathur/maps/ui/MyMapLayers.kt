@@ -17,6 +17,7 @@ import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiPin
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
+import com.vayunmathur.maps.util.SearchResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.maplibre.compose.expressions.dsl.const
@@ -53,6 +54,7 @@ fun MyMapLayers(
     userBearing: Float,
     navProgress: com.vayunmathur.maps.util.NavigationProgress? = null,
     googlePins: List<GooglePoiPin> = emptyList(),
+    searchResults: List<SearchResult> = emptyList(),
 ) {
     val trafficVersion by OfflineRouter.trafficVersion.collectAsState()
     val context = LocalContext.current
@@ -141,6 +143,10 @@ fun MyMapLayers(
         // Custom Google POI overlay (replaces suppressed native basemap POIs).
         // Rendered above traffic but below the user puck.
         GooglePoiLayer(googlePins)
+
+        // Search-result pins (Vela MARKERS_LAYER analog) — drawn above the
+        // ambient POI overlay so a query's hits stand out; tap re-selects.
+        SearchResultLayer(searchResults)
 
         userSource?.let { src ->
             LaunchedEffect(userPosition, userBearing) {

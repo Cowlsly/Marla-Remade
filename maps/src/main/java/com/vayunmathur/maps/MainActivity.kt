@@ -58,7 +58,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             DynamicTheme {
                 InitialDownloadChecker(ds, listOf(
-                    Triple("https://data.vayunmathur.com/amenities.db", "amenities.db", getString(R.string.downloading_amenity_database)),
                     Triple("https://data.vayunmathur.com/metadata.bin", "metadata.bin", getString(R.string.downloading_navigation_metadata)),
                     Triple("https://data.vayunmathur.com/road_names.bin", "road_names.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/intermediate.bin", "intermediate.bin", getString(R.string.downloading_road_data)),
@@ -113,7 +112,7 @@ fun Navigation(
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel)
+            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel)
         }
         entry<Route.DownloadedMapsPage> {
             DownloadedMapsPage(backStack, zonesViewModel)

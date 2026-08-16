@@ -11,8 +11,6 @@ import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
-import com.vayunmathur.maps.data.AddressResult
-import com.vayunmathur.maps.data.AmenityEntity
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.util.NavigationProgress
 import com.vayunmathur.maps.util.NavigationSessionManager
@@ -83,24 +81,10 @@ class MetadataPreviews {
                 SearchUiState(
                     query = "ferry",
                     results = listOf(
-                        SearchResult.Amenity(
-                            AmenityEntity(1, "Ferry Building Marketplace", 37.7955, -122.3933)
-                        ),
-                        SearchResult.Amenity(
-                            AmenityEntity(2, "Ferry Plaza Farmers Market", 37.7959, -122.3937)
-                        ),
-                        SearchResult.Amenity(
-                            AmenityEntity(3, "Golden Gate Ferry Terminal", 37.7936, -122.3927)
-                        ),
-                        SearchResult.Amenity(
-                            AmenityEntity(4, "Oakland Ferry Dock", 37.7947, -122.2783)
-                        ),
-                        SearchResult.Address(
-                            AddressResult(5, "1 Ferry Building, San Francisco", 37.7955, -122.3937)
-                        ),
-                        SearchResult.Address(
-                            AddressResult(6, "480 Ferry Point, Richmond", 37.9099, -122.3608)
-                        ),
+                        SearchResult("1", "Ferry Building Marketplace", "1 Ferry Building, San Francisco", 37.7955, -122.3933, "Marketplace"),
+                        SearchResult("2", "Ferry Plaza Farmers Market", "1 Ferry Building, San Francisco", 37.7959, -122.3937, "Farmers market"),
+                        SearchResult("3", "Golden Gate Ferry Terminal", "Pier 1, San Francisco", 37.7936, -122.3927, "Ferry terminal"),
+                        SearchResult("4", "Oakland Ferry Dock", "Clay St, Oakland", 37.7947, -122.2783, "Ferry terminal"),
                     ),
                 ),
                 SearchActions.Noop,

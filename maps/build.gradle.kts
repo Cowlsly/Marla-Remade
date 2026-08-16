@@ -3,7 +3,6 @@ plugins {
     // Listing screenshots come from Compose previews (src/screenshotTest), not from an
     // instrumented test on a device. Same `:<module>:metadata` task name either way.
     id("common-conventions-preview-metadata")
-    alias(libs.plugins.ksp)
 }
 
 launcherIcon {
@@ -38,8 +37,5 @@ dependencies {
 
     implementation(libs.flatgeobuf)
 
-
-    // room
-    implementRoom(libs)
     implementation(project(":library:downloadservice"))
 }

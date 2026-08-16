@@ -1,12 +1,18 @@
 package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
+import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
@@ -26,6 +32,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.R
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.ui.IconHistory
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.Route
@@ -35,12 +42,12 @@ import com.vayunmathur.maps.util.SearchActions
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SearchUiState
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
-import androidx.compose.ui.platform.LocalContext
-import com.vayunmathur.maps.data.AmenityRepository
 
 /**
- * A Search Page that filters amenities based on a text query and a geographic bounding box.
- * Results are dispatched back to the navigation registry upon selection.
+ * Google-only search page (amenities.db removed, Decision D2): a text query
+ * biased toward the map centre returns Google places, shown Vela-style with
+ * quick category chips and a recent-searches list before any text is typed.
+ * Results are dispatched back to the navigation registry on selection.
  */
 @Composable
 fun SearchPage(
@@ -53,24 +60,33 @@ fun SearchPage(
     north: Double,
     south: Double
 ) {
-    val context = LocalContext.current
-    val repository = remember(context) { AmenityRepository.get(context) }
     val searchQuery by searchViewModel.query.collectAsState()
     val results by searchViewModel.results.collectAsState()
+    val recents by searchViewModel.recents.collectAsState()
 
-    val actions = object : SearchActions {
-        override fun setQuery(query: String) {
-            searchViewModel.setQuery(query, repository, west, east, south, north)
-        }
+    // Bias the Google search toward the centre of the visible viewport.
+    val nearLat = (north + south) / 2.0
+    val nearLon = (east + west) / 2.0
 
-        override fun selectResult(result: SearchResult) {
-            // Shared selection path: replace a route waypoint when picking a stop
-            // (idx != null), otherwise set the selected feature. Then leave the
-            // search page.
-            val apply: (SpecificFeature.RoutableFeature) -> Unit = { feature ->
+    val actions = remember(nearLat, nearLon, idx) {
+        object : SearchActions {
+            override fun setQuery(query: String) {
+                searchViewModel.setQuery(query, nearLat, nearLon)
+            }
+
+            override fun clearRecents() {
+                searchViewModel.clearRecents()
+            }
+
+            override fun selectResult(result: SearchResult) {
+                searchViewModel.recordRecent(result.title)
+                // Shared selection path: replace a route waypoint when picking a
+                // stop (idx != null), otherwise set the selected feature. Then
+                // leave the search page.
+                val feature = searchViewModel.toFeature(result)
                 if (idx != null) {
-                    // The selection could have changed (e.g. user navigated away and
-                    // back) between launching the resolve and the callback firing.
+                    // The selection could have changed (e.g. user navigated away
+                    // and back) between opening search and picking a result.
                     // Tolerate a non-Route current selection rather than crashing.
                     val current = viewModel.selectedFeature.value
                     if (current is SpecificFeature.Route) {
@@ -85,21 +101,27 @@ fun SearchPage(
                 }
                 backStack.pop()
             }
-            when (result) {
-                is SearchResult.Amenity ->
-                    searchViewModel.resolveAmenity(result.entity, repository) { apply(it) }
-                is SearchResult.Address ->
-                    apply(searchViewModel.addressFeature(result.result))
-            }
-        }
 
-        override fun back() {
-            backStack.pop()
+            override fun back() {
+                backStack.pop()
+            }
         }
     }
 
-    SearchScreen(SearchUiState(searchQuery, results), actions)
+    SearchScreen(SearchUiState(searchQuery, results, recents), actions)
 }
+
+/** One quick-search category chip: a display label and the query it runs. */
+private data class SearchCategory(val labelRes: Int, val query: String)
+
+private val SEARCH_CATEGORIES = listOf(
+    SearchCategory(R.string.search_category_restaurants, "restaurants"),
+    SearchCategory(R.string.search_category_coffee, "coffee"),
+    SearchCategory(R.string.search_category_gas, "gas station"),
+    SearchCategory(R.string.search_category_groceries, "groceries"),
+    SearchCategory(R.string.search_category_hotels, "hotels"),
+    SearchCategory(R.string.search_category_atms, "atm"),
+)
 
 /** The rendered half of [SearchPage]: query text in, results out, no ViewModel. */
 @OptIn(ExperimentalMaterial3Api::class)
@@ -123,34 +145,105 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
         },
         onNavigateBack = { actions.back() },
     ) { paddingValues ->
-        Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-            if (state.results.isEmpty() && state.query.length >= 2) {
-                Text(
-                    text = stringResource(R.string.no_results_found),
-                    modifier = Modifier.align(Alignment.Center),
-                    style = MaterialTheme.typography.bodyLarge
-                )
-            } else if (state.query.length < 2) {
-                Text(
-                    text = stringResource(R.string.type_to_search),
-                    modifier = Modifier.align(Alignment.Center),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            } else {
-                LazyColumn(modifier = Modifier.fillMaxSize()) {
-                    items(state.results, key = { it.key }) { result ->
-                        ListItem(
-                            content = { Text(result.title.ifBlank { stringResource(R.string.unnamed_amenity) }) },
-                            supportingContent = {
-                                Text(stringResource(R.string.coordinates, result.lat.round(4), result.lon.round(4)))
-                            },
-                            modifier = Modifier.clickable { actions.selectResult(result) }
+        Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
+            CategoryChips(actions)
+            Box(modifier = Modifier.fillMaxSize()) {
+                when {
+                    state.query.length >= 2 && state.results.isEmpty() -> {
+                        Text(
+                            text = stringResource(R.string.no_results_found),
+                            modifier = Modifier.align(Alignment.Center),
+                            style = MaterialTheme.typography.bodyLarge
                         )
-                        HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+                    }
+                    state.query.length >= 2 -> {
+                        ResultsList(state.results, actions)
+                    }
+                    state.recents.isNotEmpty() -> {
+                        RecentsList(state.recents, actions)
+                    }
+                    else -> {
+                        Text(
+                            text = stringResource(R.string.type_to_search),
+                            modifier = Modifier.align(Alignment.Center),
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun CategoryChips(actions: SearchActions) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        SEARCH_CATEGORIES.forEach { category ->
+            AssistChip(
+                onClick = { actions.setQuery(category.query) },
+                label = { Text(stringResource(category.labelRes)) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun ResultsList(results: List<SearchResult>, actions: SearchActions) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        items(results, key = { it.id }) { result ->
+            ListItem(
+                content = { Text(result.title) },
+                supportingContent = {
+                    Text(
+                        result.subtitle
+                            ?: stringResource(R.string.coordinates, result.lat.round(4), result.lon.round(4))
+                    )
+                },
+                modifier = Modifier.clickable { actions.selectResult(result) }
+            )
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
+        }
+    }
+}
+
+@Composable
+private fun RecentsList(recents: List<String>, actions: SearchActions) {
+    LazyColumn(modifier = Modifier.fillMaxSize()) {
+        item {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    stringResource(R.string.recent_searches),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    stringResource(R.string.clear_recents),
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.clickable { actions.clearRecents() },
+                )
+            }
+        }
+        items(recents, key = { it }) { recent ->
+            ListItem(
+                content = { Text(recent) },
+                leadingContent = { IconHistory() },
+                modifier = Modifier.clickable { actions.setQuery(recent) }
+            )
+            HorizontalDivider(modifier = Modifier.padding(horizontal = 16.dp))
         }
     }
 }

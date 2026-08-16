@@ -93,24 +93,6 @@ fun BottomSheetContent(
                 SavedPlaceActions(selectedFeature, savedPlacesViewModel)
             }
         }
-        is SpecificFeature.TransitStop -> {
-            Column {
-                TransitStopBottomSheet(inactiveNavigation, selectedFeature) {
-                    if (inactiveNavigation == null) {
-                        setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
-                    } else {
-                        setSelectedFeature(
-                            SpecificFeature.Route(
-                                inactiveNavigation.waypoints + listOf(
-                                    selectedFeature
-                                )
-                            )
-                        )
-                    }
-                }
-                SavedPlaceActions(selectedFeature, savedPlacesViewModel)
-            }
-        }
         is SpecificFeature.Route -> {
             if(route != null) {
                 RouteSheet(selectedFeature, route, selectedRouteType, setSelectedRouteType, navState)
