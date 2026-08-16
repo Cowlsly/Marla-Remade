@@ -30,13 +30,12 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SegmentedButtonDefaults
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -100,7 +99,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import kotlinx.serialization.Serializable
 import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -387,16 +385,12 @@ fun ChessGameScreen(
         PawnPromotionDialog(state.turn, onPromote = actions::onPromote)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    IconButton(onClick = onOpenGameCenter) {
-                        Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
-                    }
-                }
-            )
+    AppScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            IconButton(onClick = onOpenGameCenter) {
+                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
+            }
         }
     ) { innerPadding ->
         BoxWithConstraints(
@@ -684,11 +678,11 @@ fun LearnHomeScreen(onOpenStage: (String, String) -> Unit) {
             com.vayunmathur.games.chess.data.LearnRepository.categories
         }
     }
-    Scaffold { pad ->
+    AppScaffold(title = stringResource(R.string.tab_learn)) { pad ->
         val cats = categories
         if (cats == null) {
             Box(Modifier.fillMaxSize().padding(pad), Alignment.Center) { CircularProgressIndicator() }
-            return@Scaffold
+            return@AppScaffold
         }
         LazyColumn(
             Modifier.fillMaxSize(),
@@ -752,21 +746,13 @@ fun LearnStageScreen(
     // Lichess shows a "Stage N: title … Let's go!" card once when the stage opens.
     var showIntro by remember(stage?.key) { mutableStateOf(true) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stage?.title ?: stringResource(R.string.tab_learn)) },
-                navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        IconBack()
-                    }
-                }
-            )
-        }
+    AppScaffold(
+        title = stage?.title ?: stringResource(R.string.tab_learn),
+        onNavigateBack = onBack,
     ) { pad ->
         if (stage == null || level == null) {
             Box(Modifier.fillMaxSize().padding(pad), Alignment.Center) { CircularProgressIndicator() }
-            return@Scaffold
+            return@AppScaffold
         }
         val isLast = ui.levelIndex + 1 >= stage.levels.size
         Column(
@@ -1101,7 +1087,7 @@ fun PuzzleBoardScreen(state: PuzzleUiState, actions: PuzzleActions) {
         PawnPromotionDialog(state.playerColor, onPromote = actions::onPromote)
     }
 
-    Scaffold { innerPadding ->
+    AppScaffold(title = stringResource(R.string.tab_puzzles)) { innerPadding ->
         Column(
             Modifier
                 .fillMaxSize()
