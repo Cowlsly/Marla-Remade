@@ -4,6 +4,7 @@ package com.vayunmathur.library.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.calculateEndPadding
 import androidx.compose.foundation.layout.calculateStartPadding
 import androidx.compose.foundation.layout.fillMaxSize
@@ -31,14 +32,18 @@ import androidx.compose.ui.unit.dp
  *
  * The caller supplies the chrome the list needs: an add-style [floatingActionButton]
  * and a swappable [topBar] - e.g. the normal-vs-selection top bar a multi-select
- * screen toggles between (see `SelectionMode.kt` for that pattern). Everything else
- * matches the shared [Scaffold] wrapper (same param names/types) so it stays a
+ * screen toggles between (see `SelectionMode.kt` for that pattern). For the common
+ * case a plain bar is enough, pass [title] and/or [actions] and the scaffold builds
+ * the [TopAppBar] for you; with neither, and no [topBar], no bar is drawn. Everything
+ * else matches the shared [Scaffold] wrapper (same param names/types) so it stays a
  * drop-in replacement.
  */
 @Composable
 fun LazyListScaffold(
     modifier: Modifier = Modifier,
     topBar: @Composable () -> Unit = {},
+    title: String = "",
+    actions: (@Composable RowScope.() -> Unit)? = null,
     bottomBar: @Composable () -> Unit = {},
     snackbarHost: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
@@ -50,7 +55,12 @@ fun LazyListScaffold(
     content: LazyListScope.() -> Unit,
 ) = Scaffold(
     modifier,
-    topBar,
+    // A caller can either pass a fully custom [topBar], or - the common case -
+    // let the scaffold build a plain top bar from [title]/[actions]. When neither
+    // a title nor actions are given, no bar is drawn (the historical default).
+    if (actions != null || title.isNotEmpty()) {
+        { TopAppBar(title = { Text(title) }, actions = actions ?: {}) }
+    } else topBar,
     bottomBar,
     snackbarHost,
     floatingActionButton,

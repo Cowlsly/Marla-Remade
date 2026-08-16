@@ -37,8 +37,8 @@ import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.IconRestartAlt
 import com.vayunmathur.library.ui.IconTimer
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import kotlin.time.Duration.Companion.seconds
@@ -61,7 +61,7 @@ fun StopwatchScreen(backStack: com.vayunmathur.library.util.NavBackStack<com.vay
         }
     }
 
-    Scaffold(floatingActionButton = {
+    LazyListScaffold(floatingActionButton = {
         Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
             if(isRunning) {
                 FloatingActionButton({ actions.addLap() }) { IconTimer() }
@@ -73,45 +73,46 @@ fun StopwatchScreen(backStack: com.vayunmathur.library.util.NavBackStack<com.vay
                 if(isRunning) IconPause() else IconPlay()
             }
         }
-    }) { paddingValues ->
-        Column(
-            modifier = Modifier.fillMaxSize().padding(paddingValues).padding(horizontal = 16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+    }, horizontalPadding = 16.dp) {
+        item {
             val trackColor = MaterialTheme.colorScheme.surfaceVariant
             val progressColor = MaterialTheme.colorScheme.primary
-            Box(
-                modifier = Modifier.padding(top = 40.dp, bottom = 40.dp).size(320.dp),
-                contentAlignment = Alignment.Center
-            ) {
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawCircle(color = trackColor, style = Stroke(width = 8f))
-                }
-                val sweepAngle = ((countingTime.inWholeMilliseconds % 60000) / 60000f) * 360f
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    drawArc(
-                        color = progressColor,
-                        startAngle = -90f,
-                        sweepAngle = sweepAngle,
-                        useCenter = false,
-                        style = Stroke(width = 12f, cap = StrokeCap.Round)
-                    )
-                }
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    countingTime.toComponents { minutes, seconds, nanoseconds ->
-                        val centiseconds = nanoseconds / 10_000_000
-                        Text(
-                            text = stringResource(R.string.stopwatch_time_format, minutes, seconds),
-                            style = MaterialTheme.typography.displayLarge.copy(fontSize = 84.sp, fontWeight = FontWeight.Normal)
+            Box(Modifier.fillParentMaxWidth(), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = Modifier.padding(top = 40.dp, bottom = 40.dp).size(320.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawCircle(color = trackColor, style = Stroke(width = 8f))
+                    }
+                    val sweepAngle = ((countingTime.inWholeMilliseconds % 60000) / 60000f) * 360f
+                    Canvas(modifier = Modifier.fillMaxSize()) {
+                        drawArc(
+                            color = progressColor,
+                            startAngle = -90f,
+                            sweepAngle = sweepAngle,
+                            useCenter = false,
+                            style = Stroke(width = 12f, cap = StrokeCap.Round)
                         )
-                        Text(
-                            text = stringResource(R.string.duration_ms_format, 0, centiseconds),
-                            style = MaterialTheme.typography.headlineMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Light)
-                        )
+                    }
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        countingTime.toComponents { minutes, seconds, nanoseconds ->
+                            val centiseconds = nanoseconds / 10_000_000
+                            Text(
+                                text = stringResource(R.string.stopwatch_time_format, minutes, seconds),
+                                style = MaterialTheme.typography.displayLarge.copy(fontSize = 84.sp, fontWeight = FontWeight.Normal)
+                            )
+                            Text(
+                                text = stringResource(R.string.duration_ms_format, 0, centiseconds),
+                                style = MaterialTheme.typography.headlineMedium.copy(color = MaterialTheme.colorScheme.onSurfaceVariant, fontWeight = FontWeight.Light)
+                            )
+                        }
                     }
                 }
             }
+        }
 
+        item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(12.dp),

@@ -1,10 +1,8 @@
 package com.vayunmathur.clock.ui
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.plus
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,7 +19,7 @@ import com.vayunmathur.clock.platform.TimerUiState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.IconAdd
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.util.NavBackStack
 
 /**
@@ -41,29 +39,29 @@ fun TimerScreen(
     val timers = state.timers
     var isAddingTimer by remember { mutableStateOf(initialAddingTimer) }
     val showKeypad = timers.isEmpty() || isAddingTimer
-    Scaffold(
+    LazyListScaffold(
         floatingActionButton = {
             if (!showKeypad) {
                 FloatingActionButton({ isAddingTimer = true }) { IconAdd() }
             }
-        }
-    ) { paddingValues ->
+        },
+        horizontalPadding = if (showKeypad) 0.dp else 16.dp,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
         if (showKeypad) {
-            TimerKeypadContent(
-                paddingValues = paddingValues,
-                onStart = { duration, name -> actions.start(duration, name); isAddingTimer = false },
-                onCancel = { if (timers.isNotEmpty()) isAddingTimer = false },
-                showCancel = timers.isNotEmpty(),
-                initialInput = initialKeypadInput
-            )
-        } else {
-            LazyColumn(
-                contentPadding = paddingValues + PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-                verticalArrangement = Arrangement.spacedBy(16.dp),
-                modifier = Modifier.fillMaxSize()
-            ) {
-                items(timers, key = { it.id }) { timer -> TimerCard(timer, state.now, actions) }
+            item {
+                Box(Modifier.fillParentMaxSize()) {
+                    TimerKeypadContent(
+                        paddingValues = PaddingValues(0.dp),
+                        onStart = { duration, name -> actions.start(duration, name); isAddingTimer = false },
+                        onCancel = { if (timers.isNotEmpty()) isAddingTimer = false },
+                        showCancel = timers.isNotEmpty(),
+                        initialInput = initialKeypadInput
+                    )
+                }
             }
+        } else {
+            items(timers, key = { it.id }) { timer -> TimerCard(timer, state.now, actions) }
         }
     }
 }

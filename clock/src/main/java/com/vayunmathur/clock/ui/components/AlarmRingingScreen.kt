@@ -37,6 +37,9 @@ fun AlarmRingingScreen(
     onDismiss: () -> Unit,
     onSnooze: () -> Unit
 ) {
+    // RAW SCAFFOLD EXCEPTION: full-screen alarm-ringing takeover — no top bar, nav,
+    // actions or FAB, just centered content with SpaceBetween. None of the shared
+    // scaffolds (which all add chrome) fit; a minimal Scaffold is intentional here.
     Scaffold(modifier = Modifier.fillMaxSize()) { paddingValues ->
         Column(
             modifier = Modifier.fillMaxSize().padding(paddingValues).padding(horizontal = 24.dp, vertical = 48.dp),

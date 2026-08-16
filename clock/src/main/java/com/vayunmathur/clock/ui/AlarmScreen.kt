@@ -2,12 +2,9 @@ package com.vayunmathur.clock.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -25,9 +22,8 @@ import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 
 /**
@@ -43,49 +39,43 @@ fun AlarmScreen(
     initialExpandedAlarmId: Long? = null,
 ) {
     val alarms = state.alarms
-    Scaffold(topBar = {
-        TopAppBar(
-            actions = {
-                IconButton(onClick = { backStack.add(Route.AlarmSettings) }) { IconSettings() }
-            },
-        )
-    }, floatingActionButton = {
-        if (alarms.isNotEmpty()) {
-            FloatingActionButton({
-                backStack.add(Route.NewAlarmDialog())
-            }) {
-                IconAdd()
-            }
-        }
-    }) { paddingValues ->
-        if (alarms.isEmpty()) {
-            Box(Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {
-                Button(onClick = { backStack.add(Route.NewAlarmDialog()) }) {
+    LazyListScaffold(
+        actions = {
+            IconButton(onClick = { backStack.add(Route.AlarmSettings) }) { IconSettings() }
+        },
+        floatingActionButton = {
+            if (alarms.isNotEmpty()) {
+                FloatingActionButton({
+                    backStack.add(Route.NewAlarmDialog())
+                }) {
                     IconAdd()
-                    Spacer(Modifier.width(8.dp))
-                    Text(stringResource(R.string.set_an_alarm))
+                }
+            }
+        },
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (alarms.isEmpty()) {
+            item {
+                Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
+                    Button(onClick = { backStack.add(Route.NewAlarmDialog()) }) {
+                        IconAdd()
+                        Spacer(Modifier.width(8.dp))
+                        Text(stringResource(R.string.set_an_alarm))
+                    }
                 }
             }
         } else {
-            LazyColumn(
-                contentPadding = PaddingValues(
-                    start = 16.dp,
-                    end = 16.dp,
-                    top = paddingValues.calculateTopPadding() + 8.dp,
-                    bottom = paddingValues.calculateBottomPadding() + 80.dp
-                ),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(alarms, key = { it.id }) { alarm ->
-                    AlarmCard(
-                        backStack = backStack,
-                        alarm = alarm,
-                        is24Hour = state.is24Hour,
-                        actions = actions,
-                        initialExpanded = alarm.id == initialExpandedAlarmId,
-                    )
-                }
+            items(alarms, key = { it.id }) { alarm ->
+                AlarmCard(
+                    backStack = backStack,
+                    alarm = alarm,
+                    is24Hour = state.is24Hour,
+                    actions = actions,
+                    initialExpanded = alarm.id == initialExpandedAlarmId,
+                )
             }
+            item { Spacer(Modifier.height(80.dp)) }
         }
     }
 }
