@@ -3,7 +3,6 @@
     <string name="add_account_title">Ajouter un compte</string>
     <string name="apple_id_email">Adresse e-mail de l’identifiant Apple</string>
     <string name="accounts_title">Synchronisation</string>
-    <string name="app_name">Synchronisation</string>
     <string name="app_specific_password">Mot de passe pour application</string>
     <string name="conflict_local">Privilégier l’appareil</string>
     <string name="conflict_lww">La dernière modification l’emporte</string>

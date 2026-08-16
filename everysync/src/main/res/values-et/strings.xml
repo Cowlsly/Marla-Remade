@@ -11,7 +11,6 @@
     <string name="login">Logi sisse</string>
     <string name="remove_account">Eemalda kasutajakonto</string>
     <string name="settings_title">Seadistused</string>
-    <string name="app_name">Sünkroonimine</string>
     <string name="accounts_title">Sünkroonimine</string>
     <string name="no_accounts">Kasutajakontosid veel pole. Mõne lisamiseks klõps + ikooni.</string>
     <string name="last_synced">Viimati sünkroonitud: <xliff:g id="date" example="Täna 10:30">%1$s</xliff:g></string>

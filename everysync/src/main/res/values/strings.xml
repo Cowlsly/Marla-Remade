@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- App name displayed in launcher and system Accounts settings -->
-    <string name="app_name">EverySync</string>
+    <string name="app_name" translatable="false">EverySync</string>
 
     <!-- AccountsScreen: TopAppBar title for accounts list home screen -->
     <string name="accounts_title">EverySync</string>
