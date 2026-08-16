@@ -14,10 +14,8 @@ import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -59,6 +57,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.speech.service.WhisperRecognitionService
 import com.vayunmathur.speech.util.PiperModel
@@ -152,8 +151,8 @@ private fun SetupScreen() {
         Settings.Secure.getString(context.contentResolver, "tts_default_synth") == context.packageName
     }
 
-    val micPermission = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val launchMicRequest = rememberPermissionRequest(
+        Manifest.permission.RECORD_AUDIO
     ) { refresh++ }
 
     SpeechSetupScreen(
@@ -168,8 +167,7 @@ private fun SetupScreen() {
             currentTestLang = if (installedCodes.isNotEmpty()) installedCodes.first() else "en",
         ),
         actions = object : SpeechSetupActions {
-            override fun requestMicPermission() =
-                micPermission.launch(Manifest.permission.RECORD_AUDIO)
+            override fun requestMicPermission() = launchMicRequest()
 
             override fun openVoiceInputSettings() {
                 val localeIntent = Intent(Settings.ACTION_LOCALE_SETTINGS).apply {
