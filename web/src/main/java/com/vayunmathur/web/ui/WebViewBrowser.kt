@@ -32,6 +32,8 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
 import com.vayunmathur.web.platform.BrowserUtils
@@ -70,8 +72,8 @@ fun WebViewBrowser(
 
     var pendingSysPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val cameraPermissionRequest = rememberPermissionRequest(
+        Manifest.permission.CAMERA
     ) { granted ->
         if (granted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
@@ -81,8 +83,8 @@ fun WebViewBrowser(
         pendingSysPermissionRequest = null
     }
 
-    val micPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val micPermissionRequest = rememberPermissionRequest(
+        Manifest.permission.RECORD_AUDIO
     ) { granted ->
         if (granted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
@@ -92,10 +94,9 @@ fun WebViewBrowser(
         pendingSysPermissionRequest = null
     }
 
-    val multiPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        val allGranted = result.values.all { it }
+    val cameraMicPermissionRequest = rememberMultiplePermissionRequest(
+        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+    ) { allGranted ->
         if (allGranted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
@@ -104,6 +105,8 @@ fun WebViewBrowser(
         pendingSysPermissionRequest = null
     }
 
+    // Geolocation grants on EITHER fine OR coarse, so this keeps the raw multi-permission
+    // launcher (the shared helper reports all-granted, which would wrongly require both).
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -343,9 +346,9 @@ fun WebViewBrowser(
                                 if (!hasCamera || !hasMic) {
                                     pendingSysPermissionRequest = request
                                     when {
-                                        needsCamera && needsMic -> multiPermissionLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
-                                        needsCamera -> cameraPermissionLauncher.launch(Manifest.permission.CAMERA)
-                                        needsMic -> micPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                        needsCamera && needsMic -> cameraMicPermissionRequest()
+                                        needsCamera -> cameraPermissionRequest()
+                                        needsMic -> micPermissionRequest()
                                     }
                                     return@requestWebPermission
                                 }
