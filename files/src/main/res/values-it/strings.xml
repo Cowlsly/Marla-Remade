@@ -1,3 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="bookmarks">Segnalibri</string>
+    <string name="new_folder">Nuova cartella</string>
+    <string name="create">Crea</string>
 </resources>
