@@ -24,9 +24,8 @@ import com.vayunmathur.library.ui.IconHistory
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.CommunicateCallLogEntry
 import com.vayunmathur.communicate.data.CommunicateCallType
@@ -37,8 +36,8 @@ import kotlinx.coroutines.withContext
 @Composable
 fun CallLogsScreen() {
     val context = LocalContext.current
-    Scaffold(
-        topBar = { TopAppBar(title = { Text(stringResource(R.string.call_logs_title)) }) },
+    AppScaffold(
+        title = stringResource(R.string.call_logs_title),
     ) { padding ->
         DefaultDialerGate(modifier = Modifier.padding(padding)) { roleRevision ->
             PermissionGate(

@@ -2,19 +2,12 @@ package com.vayunmathur.communicate.ui.whatsapp
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -23,9 +16,8 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
-import androidx.core.net.toUri
 import com.vayunmathur.communicate.data.whatsapp.backup.BackupImporter
+import com.vayunmathur.library.ui.DetailScaffold
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -34,7 +26,6 @@ import kotlinx.coroutines.withContext
  * Imports a local `msgstore.db.crypt15` using a 64-hex-char backup key. SAF file picker + key field
  * → [BackupImporter] → summary. Available whether or not the primary line is registered.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun WhatsAppBackupImportScreen(onBack: () -> Unit) {
     val context = LocalContext.current
@@ -58,57 +49,52 @@ fun WhatsAppBackupImportScreen(onBack: () -> Unit) {
         }
     }
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Import WhatsApp backup") }) }) { padding ->
-        Column(
-            modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Text("Select a msgstore.db.crypt15 file and enter its 64-character hex backup key.")
+    DetailScaffold(title = "Import WhatsApp backup") {
+        Text("Select a msgstore.db.crypt15 file and enter its 64-character hex backup key.")
 
-            OutlinedButton(
-                onClick = { picker.launch(arrayOf("*/*")) },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text(pickedName ?: "Choose .crypt15 file") }
+        OutlinedButton(
+            onClick = { picker.launch(arrayOf("*/*")) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(pickedName ?: "Choose .crypt15 file") }
 
-            OutlinedTextField(
-                value = keyHex,
-                onValueChange = { keyHex = it.trim().filter { c -> c.isLetterOrDigit() } },
-                label = { Text("64-hex backup key") },
-                singleLine = true,
-                modifier = Modifier.fillMaxWidth(),
-            )
+        OutlinedTextField(
+            value = keyHex,
+            onValueChange = { keyHex = it.trim().filter { c -> c.isLetterOrDigit() } },
+            label = { Text("64-hex backup key") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
 
-            Button(
-                enabled = !busy && pickedBytes != null && keyHex.length == 64,
-                onClick = {
-                    busy = true
-                    status = "Importing…"
-                    scope.launch {
-                        val key = runCatching { hexToBytes(keyHex) }.getOrNull()
-                        if (key == null || key.size != 32) {
-                            status = "Invalid key (need 64 hex chars = 32 bytes)"
-                            busy = false
-                            return@launch
-                        }
-                        val result = withContext(Dispatchers.IO) {
-                            BackupImporter.import(context, pickedBytes!!, key)
-                        }
-                        status = if (result.errors.isEmpty()) {
-                            "Imported ${result.messageCount} messages in ${result.conversationCount} chats"
-                        } else {
-                            "Errors: ${result.errors.joinToString("; ")}"
-                        }
+        Button(
+            enabled = !busy && pickedBytes != null && keyHex.length == 64,
+            onClick = {
+                busy = true
+                status = "Importing…"
+                scope.launch {
+                    val key = runCatching { hexToBytes(keyHex) }.getOrNull()
+                    if (key == null || key.size != 32) {
+                        status = "Invalid key (need 64 hex chars = 32 bytes)"
                         busy = false
+                        return@launch
                     }
-                },
-                modifier = Modifier.fillMaxWidth(),
-            ) { Text("Import") }
+                    val result = withContext(Dispatchers.IO) {
+                        BackupImporter.import(context, pickedBytes!!, key)
+                    }
+                    status = if (result.errors.isEmpty()) {
+                        "Imported ${result.messageCount} messages in ${result.conversationCount} chats"
+                    } else {
+                        "Errors: ${result.errors.joinToString("; ")}"
+                    }
+                    busy = false
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text("Import") }
 
-            if (busy) CircularProgressIndicator()
-            status?.let { Text(it, style = androidx.compose.material3.MaterialTheme.typography.bodySmall) }
+        if (busy) CircularProgressIndicator()
+        status?.let { Text(it, style = androidx.compose.material3.MaterialTheme.typography.bodySmall) }
 
-            OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back") }
-        }
+        OutlinedButton(onClick = onBack, modifier = Modifier.fillMaxWidth()) { Text("Back") }
     }
 }
 

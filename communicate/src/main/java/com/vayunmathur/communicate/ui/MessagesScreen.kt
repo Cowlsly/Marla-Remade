@@ -42,10 +42,9 @@ import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.CommunicateRepository
@@ -196,14 +195,10 @@ fun MessagesScreen(onOpenThread: (SmsThread) -> Unit, onOpenAccounts: () -> Unit
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.messages_title)) },
-                actions = {
-                    IconButton(onClick = onOpenAccounts) { IconPerson() }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.messages_title),
+        actions = {
+            IconButton(onClick = onOpenAccounts) { IconPerson() }
         },
         floatingActionButton = {
             FloatingActionButton(onClick = {

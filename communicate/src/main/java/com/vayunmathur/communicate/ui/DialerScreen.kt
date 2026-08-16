@@ -54,12 +54,11 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -94,25 +93,21 @@ fun DialerScreen() {
         CommunicateRepository.placeCall(context, choice, target)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.dialer_title)) },
-                actions = {
-                    val sel = selectedLine
-                    if (lineChoices.size > 1 && sel != null) {
-                        LineSelector(
-                            choices = lineChoices,
-                            selected = sel,
-                            onSelect = {
-                                selectedLine = it
-                                userSelectedLine = true
-                            },
-                            modifier = Modifier.padding(end = 8.dp),
-                        )
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.dialer_title),
+        actions = {
+            val sel = selectedLine
+            if (lineChoices.size > 1 && sel != null) {
+                LineSelector(
+                    choices = lineChoices,
+                    selected = sel,
+                    onSelect = {
+                        selectedLine = it
+                        userSelectedLine = true
+                    },
+                    modifier = Modifier.padding(end = 8.dp),
+                )
+            }
         },
     ) { padding ->
         DefaultDialerGate(modifier = Modifier.padding(padding)) { roleRevision ->

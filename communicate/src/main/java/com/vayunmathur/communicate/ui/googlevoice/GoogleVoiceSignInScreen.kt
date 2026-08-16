@@ -18,10 +18,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.viewinterop.AndroidView
 import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceSession
-import com.vayunmathur.library.ui.IconNavigation
-import com.vayunmathur.library.ui.Scaffold
-import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.launch
 import java.util.concurrent.atomic.AtomicBoolean
@@ -59,13 +56,9 @@ fun GoogleVoiceSignInScreen(onBack: () -> Unit, onSignedIn: () -> Unit) {
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.gv_sign_in_title)) },
-                navigationIcon = { IconNavigation(onBack) },
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.gv_sign_in_title),
+        onNavigateBack = onBack,
     ) { padding ->
         AndroidView(
             modifier = Modifier

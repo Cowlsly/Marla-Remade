@@ -45,16 +45,14 @@ import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.ui.IconArchive
 import com.vayunmathur.library.ui.IconAttachment
 import com.vayunmathur.library.ui.IconClose
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSend
 import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.compose.AsyncImageState
 import com.vayunmathur.communicate.R
@@ -205,57 +203,53 @@ fun ConversationScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    val displayTitle = if (isGroup) (groupTitle ?: title.value) else title.value
-                    Column {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                displayTitle,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                fontWeight = FontWeight.SemiBold,
-                            )
-                            LineBadge(line, modifier = Modifier.padding(start = 8.dp))
-                        }
-                        if (isGroup) {
-                            groupSubtitle.value?.let { subtitle ->
-                                Text(
-                                    subtitle,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                        } else if (address.isNotBlank() && title.value != address) {
-                            Text(
-                                address,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            )
-                        }
+    AppScaffold(
+        title = {
+            val displayTitle = if (isGroup) (groupTitle ?: title.value) else title.value
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        displayTitle,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    LineBadge(line, modifier = Modifier.padding(start = 8.dp))
+                }
+                if (isGroup) {
+                    groupSubtitle.value?.let { subtitle ->
+                        Text(
+                            subtitle,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
                     }
-                },
-                navigationIcon = { IconNavigation(onBack) },
-                actions = {
-                    if (line == CommunicateLine.GoogleVoice && remoteId != null) {
-                        IconButton(onClick = {
-                            scope.launch {
-                                val ok = CommunicateRepository.updateGoogleVoiceThread(
-                                    context, remoteId,
-                                    com.vayunmathur.communicate.data.googlevoice.GoogleVoiceParser.ThreadAction.Archive,
-                                )
-                                if (ok) onBack() else AppMessages.show(context.getString(R.string.gv_action_failed))
-                            }
-                        }) { IconArchive() }
+                } else if (address.isNotBlank() && title.value != address) {
+                    Text(
+                        address,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        },
+        onNavigateBack = onBack,
+        actions = {
+            if (line == CommunicateLine.GoogleVoice && remoteId != null) {
+                IconButton(onClick = {
+                    scope.launch {
+                        val ok = CommunicateRepository.updateGoogleVoiceThread(
+                            context, remoteId,
+                            com.vayunmathur.communicate.data.googlevoice.GoogleVoiceParser.ThreadAction.Archive,
+                        )
+                        if (ok) onBack() else AppMessages.show(context.getString(R.string.gv_action_failed))
                     }
-                },
-            )
+                }) { IconArchive() }
+            }
         },
         bottomBar = {
             ComposeSmsRow(
@@ -293,7 +287,7 @@ fun ConversationScreen(
             MessagesList(padding, refresh) {
                 CommunicateRepository.loadSmsMessagesMerged(context, thread)
             }
-            return@Scaffold
+            return@AppScaffold
         }
         DefaultSmsGate(modifier = Modifier.padding(padding)) { roleRevision ->
             PermissionGate(
