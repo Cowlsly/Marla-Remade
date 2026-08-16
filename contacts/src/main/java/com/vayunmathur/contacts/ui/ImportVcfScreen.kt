@@ -64,13 +64,9 @@ fun ImportVcfScreen(
         ImportMode.New -> newAccountName.isNotBlank() && contacts?.isNotEmpty() == true && !isImporting
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.import_contacts)) },
-                navigationIcon = { IconNavigation(backStack) }
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.import_contacts),
+        onNavigateBack = { backStack.pop() },
         floatingActionButton = {
             if (canImport) {
                 FloatingActionButton(onClick = {

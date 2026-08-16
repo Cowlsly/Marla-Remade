@@ -34,14 +34,11 @@ import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.CommonSearchBar
-import com.vayunmathur.library.ui.IconClose
 
 /**
  * Shown for ACTION_INSERT_OR_EDIT / SHOW_OR_CREATE_CONTACT (Fossify dialer "Add number to contact").
@@ -70,22 +67,16 @@ fun InsertOrEditContactScreen(
         viewModel.loadContacts()
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Column {
-                        Text(stringResource(R.string.add_number_to_contact))
-                        if (!phone.isNullOrBlank()) {
-                            Text(phone, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = onExit) { IconClose() }
+    AppScaffold(
+        title = {
+            Column {
+                Text(stringResource(R.string.add_number_to_contact))
+                if (!phone.isNullOrBlank()) {
+                    Text(phone, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            )
+            }
         },
+        onClose = onExit,
         bottomBar = {
             Row(
                 Modifier.fillMaxWidth().padding(16.dp),

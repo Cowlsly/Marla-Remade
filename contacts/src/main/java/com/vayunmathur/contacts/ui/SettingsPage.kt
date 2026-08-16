@@ -6,15 +6,11 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.plus
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.*
@@ -85,17 +81,14 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
         }
     }
 
-    Scaffold(
+    LazyListScaffold(
+        horizontalPadding = 16.dp,
         floatingActionButton = {
             FloatingActionButton(onClick = { backStack.add(Route.AddAccountDialog) }) {
                 IconAdd()
             }
         },
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = paddingValues + PaddingValues(16.dp)
-        ) {
+    ) {
             item {
                 Text(
                     text = stringResource(R.string.calendar_sync),
@@ -235,7 +228,7 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
             item {
                 Spacer(modifier = Modifier.height(80.dp))
             }
-        }
+    }
 
         renameTarget?.let { target ->
             var newName by remember(target) { mutableStateOf(target.name) }
@@ -290,5 +283,4 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                 onDismiss = { deleteTarget = null }
             )
         }
-    }
 }

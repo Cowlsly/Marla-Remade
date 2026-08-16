@@ -14,10 +14,9 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
@@ -55,8 +54,8 @@ class ImportActivity : ComponentActivity() {
 @OptIn(ExperimentalMaterial3Api::class)
 @androidx.compose.runtime.Composable
 fun ImportScreen(contacts: List<Contact>, onImport: () -> Unit) {
-    Scaffold(
-        topBar = { TopAppBar({Text(stringResource(R.string.import_contacts))}) },
+    AppScaffold(
+        title = stringResource(R.string.import_contacts),
         floatingActionButton = {
             FloatingActionButton(onClick = onImport) {
                 IconSave()

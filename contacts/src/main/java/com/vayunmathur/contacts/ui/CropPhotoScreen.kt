@@ -12,10 +12,9 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -132,37 +131,33 @@ fun CropPhotoScreen(
         onDispose { bitmap?.recycle() }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.crop_photo)) },
-                navigationIcon = {
-                    TextButton(onClick = onCancel) { Text(stringResource(UiR.string.cancel)) }
-                },
-                actions = {
-                    TextButton(onClick = {
-                        val bmp = bitmap ?: return@TextButton
-                        if (imgDisplayW <= 0f || imgDisplayH <= 0f) return@TextButton
+    AppScaffold(
+        title = stringResource(R.string.crop_photo),
+        navigationIcon = {
+            TextButton(onClick = onCancel) { Text(stringResource(UiR.string.cancel)) }
+        },
+        actions = {
+            TextButton(onClick = {
+                val bmp = bitmap ?: return@TextButton
+                if (imgDisplayW <= 0f || imgDisplayH <= 0f) return@TextButton
 
-                        val scaleX = bmp.width.toFloat() / imgDisplayW
-                        val scaleY = bmp.height.toFloat() / imgDisplayH
-                        val cx = ((cropOffset.x - imgDisplayOffset.x) * scaleX).roundToInt()
-                            .coerceIn(0, bmp.width - 1)
-                        val cy = ((cropOffset.y - imgDisplayOffset.y) * scaleY).roundToInt()
-                            .coerceIn(0, bmp.height - 1)
-                        val cs = (cropSize * scaleX).roundToInt()
-                            .coerceIn(1, min(bmp.width - cx, bmp.height - cy))
+                val scaleX = bmp.width.toFloat() / imgDisplayW
+                val scaleY = bmp.height.toFloat() / imgDisplayH
+                val cx = ((cropOffset.x - imgDisplayOffset.x) * scaleX).roundToInt()
+                    .coerceIn(0, bmp.width - 1)
+                val cy = ((cropOffset.y - imgDisplayOffset.y) * scaleY).roundToInt()
+                    .coerceIn(0, bmp.height - 1)
+                val cs = (cropSize * scaleX).roundToInt()
+                    .coerceIn(1, min(bmp.width - cx, bmp.height - cy))
 
-                        val cropped = Bitmap.createBitmap(bmp, cx, cy, cs, cs)
-                        val scaled = cropped.scale(1024, 1024)
-                        if (cropped !== scaled) cropped.recycle()
-                        onCropComplete(scaled)
-                    }) { Text(stringResource(UiR.string.done)) }
-                }
-            )
+                val cropped = Bitmap.createBitmap(bmp, cx, cy, cs, cs)
+                val scaled = cropped.scale(1024, 1024)
+                if (cropped !== scaled) cropped.recycle()
+                onCropComplete(scaled)
+            }) { Text(stringResource(UiR.string.done)) }
         }
     ) { padding ->
-        val currentBitmap = bitmap ?: return@Scaffold
+        val currentBitmap = bitmap ?: return@AppScaffold
 
         BoxWithConstraints(
             modifier = Modifier

@@ -25,11 +25,9 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.foundation.verticalScroll
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DropdownMenu
@@ -43,10 +41,9 @@ import com.vayunmathur.library.ui.InputChip
 import com.vayunmathur.library.ui.LabeledTextField
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -89,7 +86,6 @@ import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.library.ui.IconAddPhoto
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconCall
-import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconEvent
 import com.vayunmathur.library.ui.IconGroup
@@ -135,44 +131,29 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             viewModel.updateEditDraft { it.copy(noteContent = content) }
         }
     }
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    val pageTitle = if (isNewContact) stringResource(R.string.add_contact) else stringResource(R.string.edit_contact)
-                    Text(pageTitle)
-                },
-                navigationIcon = {
-                    IconButton(onClick = { onExit() }) {
-                        IconClose()
-                    }
-                },
-                actions = {
-                    Button(onClick = {
-                        if (isSaving) return@Button
-                        isSaving = true
-                        viewModel.saveEditDraft { ok, err ->
-                            isSaving = false
-                            if (ok) onExit() else saveError = err ?: context.getString(R.string.save_failed)
-                        }
-                    }) {
-                        Text(stringResource(UiR.string.save))
-                    }
+    DetailScaffold(
+        title = if (isNewContact) stringResource(R.string.add_contact) else stringResource(R.string.edit_contact),
+        onClose = { onExit() },
+        actions = {
+            Button(onClick = {
+                if (isSaving) return@Button
+                isSaving = true
+                viewModel.saveEditDraft { ok, err ->
+                    isSaving = false
+                    if (ok) onExit() else saveError = err ?: context.getString(R.string.save_failed)
                 }
-            )
+            }) {
+                Text(stringResource(UiR.string.save))
+            }
         },
         bottomBar = {
             if (noteController.focused) {
                 com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(noteController)
             }
         }
-    ) { paddingValues ->
+    ) {
         Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(paddingValues)
-                .padding(horizontal = 16.dp, vertical = 8.dp),
+            modifier = Modifier.fillMaxWidth(),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             if (saveError != null) {

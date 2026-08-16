@@ -21,15 +21,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.plus
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,13 +38,11 @@ import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
-import com.vayunmathur.library.ui.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -93,7 +88,6 @@ import com.vayunmathur.library.ui.IconGroup
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.IconMail
 import com.vayunmathur.library.ui.IconMoreVert
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconShare
 import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.IconStar
@@ -193,40 +187,29 @@ fun ContactDetailsScreen(
 
     val scope = rememberCoroutineScope()
 
-    Scaffold(Modifier, {
-            TopAppBar({}, Modifier, {if (showBackButton) IconNavigation(actions::closeContact) },
-                actions = {
-                    IconButton({
-                        actions.saveContact(contact.copy(isFavorite = !contact.isFavorite))
-                    }) {
-                        if (!contact.isFavorite) IconStarBorder(tint = MaterialTheme.colorScheme.onSurface)
-                        else IconStar(tint = MaterialTheme.colorScheme.primary)
-                    }
-                    IconButton(onClick = { actions.editContact(contact.id) }) {
-                        IconEdit()
-                    }
-                    IconButton(onClick = {
-                        actions.shareContacts(listOf(contact), "${contact.name.value.replace(' ', '_')}.vcf")
-                    }) {
-                        IconShare()
-                    }
-                    IconButton(onClick = { actions.confirmDeleteContact(contact) }) {
-                        IconDelete()
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = Color.Transparent
-                )
-            )
-        }, containerColor = MaterialTheme.colorScheme.background
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize(),
-            contentPadding = paddingValues + PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-            horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally
-        ) {
+    DetailLazyColumn(
+        title = "",
+        onNavigateBack = if (showBackButton) actions::closeContact else null,
+        actions = {
+            IconButton({
+                actions.saveContact(contact.copy(isFavorite = !contact.isFavorite))
+            }) {
+                if (!contact.isFavorite) IconStarBorder(tint = MaterialTheme.colorScheme.onSurface)
+                else IconStar(tint = MaterialTheme.colorScheme.primary)
+            }
+            IconButton(onClick = { actions.editContact(contact.id) }) {
+                IconEdit()
+            }
+            IconButton(onClick = {
+                actions.shareContacts(listOf(contact), "${contact.name.value.replace(' ', '_')}.vcf")
+            }) {
+                IconShare()
+            }
+            IconButton(onClick = { actions.confirmDeleteContact(contact) }) {
+                IconDelete()
+            }
+        },
+    ) {
 
             item {
                 ProfileHeader(contact, actions::decodePhoto)
@@ -411,14 +394,13 @@ fun ContactDetailsScreen(
                 }
             }
         }
-    }
 }
 
 @Composable
 fun ProfileHeader(contact: Contact, decodePhoto: ((String) -> Bitmap?)? = null) {
     Column(
         horizontalAlignment = androidx.compose.ui.Alignment.CenterHorizontally,
-        modifier = Modifier.padding(vertical = 16.dp)
+        modifier = Modifier.fillMaxWidth().padding(vertical = 16.dp)
     ) {
         ContactAvatar(
             contact = contact,
