@@ -3,7 +3,6 @@
     <string name="app_name">Calculatrice</string>
     <string name="history">Historique</string>
     <string name="no_calculations_yet">Aucun calcul pour le moment.</string>
-    <string name="graph">Graphique</string>
     <string name="add_function">Ajouter une fonction</string>
     <string name="toggle_curve_visibility">Afficher ou masquer cette courbe</string>
     <string name="feature_root">racine</string>
