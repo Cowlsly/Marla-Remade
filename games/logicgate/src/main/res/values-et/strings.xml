@@ -13,4 +13,6 @@
     <string name="done">LÄBITUD</string>
     <string name="play">MÄNGI</string>
     <string name="cd_achievements">Saavutused</string>
+    <string name="inputs">Sisendid</string>
+    <string name="outputs">Väljundid</string>
 </resources>
