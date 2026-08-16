@@ -50,6 +50,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.CommonSearchBar
@@ -157,43 +158,39 @@ fun BrowserPage(
 
     Box(Modifier.fillMaxSize()) {
         if (viewModel.omniboxFocused) {
-            Scaffold(
-                topBar = {
-                    TopAppBar(
-                        navigationIcon = {
-                            IconButton(onClick = {
+            AppScaffold(
+                title = {
+                    OutlinedTextField(
+                        value = viewModel.searchDraft,
+                        onValueChange = { viewModel.searchDraft = it },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(searchFocusRequester),
+                        placeholder = { Text(stringResource(R.string.search_or_enter_address)) },
+                        leadingIcon = { IconSearch() },
+                        trailingIcon = if (viewModel.searchDraft.isNotEmpty()) {
+                            {
+                                IconButton(onClick = { viewModel.searchDraft = "" }) { IconClose() }
+                            }
+                        } else null,
+                        shape = RoundedCornerShape(28.dp),
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                        keyboardActions = KeyboardActions(onSearch = {
+                            if (viewModel.searchDraft.isNotBlank()) {
+                                viewModel.navigateActiveTab(viewModel.searchDraft)
                                 focusManager.clearFocus()
                                 viewModel.omniboxFocused = false
-                            }) { IconBack() }
-                        },
-                        title = {
-                            OutlinedTextField(
-                                value = viewModel.searchDraft,
-                                onValueChange = { viewModel.searchDraft = it },
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .focusRequester(searchFocusRequester),
-                                placeholder = { Text(stringResource(R.string.search_or_enter_address)) },
-                                leadingIcon = { IconSearch() },
-                                trailingIcon = if (viewModel.searchDraft.isNotEmpty()) {
-                                    {
-                                        IconButton(onClick = { viewModel.searchDraft = "" }) { IconClose() }
-                                    }
-                                } else null,
-                                shape = RoundedCornerShape(28.dp),
-                                singleLine = true,
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                                keyboardActions = KeyboardActions(onSearch = {
-                                    if (viewModel.searchDraft.isNotBlank()) {
-                                        viewModel.navigateActiveTab(viewModel.searchDraft)
-                                        focusManager.clearFocus()
-                                        viewModel.omniboxFocused = false
-                                    }
-                                })
-                            )
-                        }
+                            }
+                        })
                     )
-                }
+                },
+                navigationIcon = {
+                    IconButton(onClick = {
+                        focusManager.clearFocus()
+                        viewModel.omniboxFocused = false
+                    }) { IconBack() }
+                },
             ) { paddingValues ->
                 LazyColumn(
                     modifier = Modifier
@@ -613,6 +610,12 @@ private fun BrowserChrome(
     menu: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
+    // RAW SCAFFOLD EXCEPTION: bespoke browser toolbar chrome. The top bar is a
+    // Column of a custom TopAppBar (back/forward nav row, a tappable read-only
+    // address pill as the title, and shield + tab-count + overflow-menu actions
+    // on a surface-colored bar) with a page LinearProgressIndicator drawn
+    // underneath it. That composite bar has no equivalent in the shared
+    // scaffolds, and the content is the full-bleed WebView.
     Scaffold(
         topBar = {
             Column {

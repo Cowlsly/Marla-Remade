@@ -40,18 +40,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.data.HistoryEntry
@@ -74,20 +72,16 @@ fun HistoryPage(
         groupByDate(context, history)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.history)) },
-                navigationIcon = { IconNavigation(backStack) },
-                actions = {
-                    if (history.isNotEmpty()) {
-                        IconButton(onClick = { showClearConfirm = true }) {
-                            IconDelete()
-                        }
-                    }
+    AppScaffold(
+        title = stringResource(R.string.history),
+        backStack = backStack,
+        actions = {
+            if (history.isNotEmpty()) {
+                IconButton(onClick = { showClearConfirm = true }) {
+                    IconDelete()
                 }
-            )
-        }
+            }
+        },
     ) { paddingValues ->
         if (history.isEmpty()) {
             EmptyState(

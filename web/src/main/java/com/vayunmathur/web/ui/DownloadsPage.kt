@@ -25,16 +25,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDownload
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.platform.WebViewModel
@@ -47,18 +45,14 @@ fun DownloadsPage(
 ) {
     val downloads by viewModel.downloads.collectAsStateWithLifecycle()
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.downloads)) },
-                navigationIcon = { IconNavigation(backStack) },
-                actions = {
-                    if (downloads.isNotEmpty()) {
-                        IconButton(onClick = { viewModel.clearAllDownloads() }) { IconDelete() }
-                    }
-                }
-            )
-        }
+    AppScaffold(
+        title = stringResource(R.string.downloads),
+        backStack = backStack,
+        actions = {
+            if (downloads.isNotEmpty()) {
+                IconButton(onClick = { viewModel.clearAllDownloads() }) { IconDelete() }
+            }
+        },
     ) { paddingValues ->
         if (downloads.isEmpty()) {
             EmptyState(

@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -37,8 +36,8 @@ import com.vayunmathur.library.ui.IconGlobe
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.IconMic
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
@@ -142,7 +141,9 @@ internal fun SiteDataPage(
     val storages by viewModel.storageInfos.collectAsStateWithLifecycle()
     val permissions by viewModel.sitePermissions.collectAsStateWithLifecycle()
 
-    Scaffold(
+    LazyListScaffold(
+        horizontalPadding = 12.dp,
+        verticalArrangement = Arrangement.spacedBy(10.dp),
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.site_data)) },
@@ -151,39 +152,34 @@ internal fun SiteDataPage(
                     if (storages.isNotEmpty() || permissions.isNotEmpty()) {
                         IconButton(onClick = { viewModel.clearAllSiteData() }) { IconDelete() }
                     }
-                }
+                },
             )
+        },
+    ) {
+        if (storages.isEmpty() && permissions.isEmpty()) {
+            item {
+                Text(
+                    stringResource(R.string.no_site_data_yet_cookies_localstorage_in),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier.fillMaxWidth().padding(paddingValues).padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            if (storages.isEmpty() && permissions.isEmpty()) {
-                item {
-                    Text(
-                        stringResource(R.string.no_site_data_yet_cookies_localstorage_in),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
 
-            if (storages.isNotEmpty()) {
-                item { Text(stringResource(R.string.storage), style = MaterialTheme.typography.titleMedium) }
-                items(storages, key = { it.id }) { info ->
-                    StorageInfoCard(info, viewModel)
-                }
+        if (storages.isNotEmpty()) {
+            item { Text(stringResource(R.string.storage), style = MaterialTheme.typography.titleMedium) }
+            items(storages, key = { it.id }) { info ->
+                StorageInfoCard(info, viewModel)
             }
+        }
 
-            if (permissions.isNotEmpty()) {
-                item {
-                    Spacer(Modifier.height(8.dp))
-                    Text(stringResource(R.string.permissions), style = MaterialTheme.typography.titleMedium)
-                }
-                items(permissions, key = { it.id }) { perm ->
-                    PermissionInfoCard(perm, viewModel)
-                }
+        if (permissions.isNotEmpty()) {
+            item {
+                Spacer(Modifier.height(8.dp))
+                Text(stringResource(R.string.permissions), style = MaterialTheme.typography.titleMedium)
+            }
+            items(permissions, key = { it.id }) { perm ->
+                PermissionInfoCard(perm, viewModel)
             }
         }
     }

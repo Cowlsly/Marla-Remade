@@ -28,6 +28,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.AlertDialog
@@ -40,11 +41,9 @@ import com.vayunmathur.library.ui.IconFolder
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.data.Bookmark
@@ -102,18 +101,14 @@ private fun BookmarksScreen(
         else bookmarks.filter { it.folderId == selectedFolder }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.bookmarks)) },
-                navigationIcon = navigationIcon,
-                actions = {
-                    IconButton(onClick = { showNewFolderDialog = true }) {
-                        IconFolder()
-                    }
-                }
-            )
-        }
+    AppScaffold(
+        title = stringResource(R.string.bookmarks),
+        navigationIcon = navigationIcon,
+        actions = {
+            IconButton(onClick = { showNewFolderDialog = true }) {
+                IconFolder()
+            }
+        },
     ) { paddingValues ->
         Column(Modifier.fillMaxSize().padding(paddingValues)) {
             if (folders.isNotEmpty()) {
