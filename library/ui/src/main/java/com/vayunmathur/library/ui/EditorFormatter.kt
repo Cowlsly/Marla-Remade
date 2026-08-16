@@ -5,7 +5,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -183,9 +182,13 @@ fun EditorBaseButtons(formatter: EditorFormatter) {
 }
 
 /**
- * Shared bottom-bar container for editor toolbars: a tonal [Surface] with an
- * [imePadding]-ed [Row]. Place [EditorBaseButtons] plus any editor-specific
- * extras inside [content]. Set [scrollable] for wide toolbars (e.g. office).
+ * Shared bottom-bar container for editor toolbars: a tonal [Surface] wrapping a
+ * [Row]. Place [EditorBaseButtons] plus any editor-specific extras inside
+ * [content]. Set [scrollable] for wide toolbars (e.g. office).
+ *
+ * Does NOT apply window insets: as a reusable component it does not know its
+ * host's inset ownership. The host (MainNavigation, or a standalone root
+ * Scaffold) owns imePadding and keeps this bar above the keyboard.
  */
 @Composable
 fun EditorBottomBar(
@@ -198,7 +201,6 @@ fun EditorBottomBar(
             modifier = Modifier
                 .fillMaxWidth()
                 .then(if (scrollable) Modifier.horizontalScroll(rememberScrollState()) else Modifier)
-                .imePadding()
                 .padding(horizontal = 4.dp, vertical = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = if (scrollable) Arrangement.Start else Arrangement.SpaceEvenly,

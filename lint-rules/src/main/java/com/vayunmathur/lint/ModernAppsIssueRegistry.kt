@@ -13,6 +13,7 @@ class ModernAppsIssueRegistry : IssueRegistry() {
         DirectBuildDatabaseDetector.ISSUE,
         OneComposablePerFileDetector.ISSUE,
         PackageStructureDetector.ISSUE,
+        WindowInsetsInReusableComponentDetector.ISSUE,
     )
 
     override val api: Int = CURRENT_API

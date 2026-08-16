@@ -112,6 +112,11 @@ class EntryProviderScope<T: NavKey>(val obj: T) {
     }
 }
 
+/**
+ * Single owner of the IME (keyboard) inset for every screen it hosts: it applies
+ * [imePadding] once to all hosted content. Screens and reusable components rendered
+ * inside must NOT call [imePadding] themselves, or the inset is applied twice.
+ */
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
 fun <T: NavKey> MainNavigation(backStack: NavBackStack<T>, bottomBar: @Composable () -> Unit = {}, entryProvider: EntryProviderScope<T>.() -> Unit) {
