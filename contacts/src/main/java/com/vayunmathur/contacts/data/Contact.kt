@@ -465,10 +465,31 @@ data class Contact(
             getContacts(context, null)
 
         fun delete(context: Context, contact: Contact) {
-            context.contentResolver.delete(
-                ContentUris.withAppendedId(ContactsContract.RawContacts.CONTENT_URI, contact.id),
-                null, null
-            )
+            val resolver = context.contentResolver
+            val rawUri = ContentUris.withAppendedId(ContactsContract.RawContacts.CONTENT_URI, contact.id)
+            // A plain delete only tombstones (DELETED=1) raw contacts that belong to an account
+            // whose sync adapter is expected to finish the deletion. Custom/local accounts have no
+            // sync adapter, so the row would linger (contact still shows, and edits to a deleted
+            // row don't persist). Force a real delete via the sync-adapter URI for those.
+            var accountName: String? = null
+            var accountType: String? = null
+            resolver.query(
+                rawUri,
+                arrayOf(ContactsContract.RawContacts.ACCOUNT_NAME, ContactsContract.RawContacts.ACCOUNT_TYPE),
+                null, null, null,
+            )?.use { c -> if (c.moveToFirst()) { accountName = c.getString(0); accountType = c.getString(1) } }
+
+            if (accountType.isNullOrEmpty() && accountName.isNullOrEmpty()) {
+                // Null/device-local account: a plain delete already hard-deletes.
+                resolver.delete(rawUri, null, null)
+            } else {
+                val syncUri = rawUri.buildUpon()
+                    .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
+                    .appendQueryParameter(ContactsContract.RawContacts.ACCOUNT_NAME, accountName ?: "")
+                    .appendQueryParameter(ContactsContract.RawContacts.ACCOUNT_TYPE, accountType ?: "")
+                    .build()
+                resolver.delete(syncUri, null, null)
+            }
         }
     }
 }

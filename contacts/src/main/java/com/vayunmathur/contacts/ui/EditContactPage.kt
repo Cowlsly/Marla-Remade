@@ -411,7 +411,11 @@ fun AccountChooser(
                 val key = "${account.type}|${account.name}"
                 val label = simLabels[key] ?: account.name.ifEmpty { onDevice }
                 DropdownMenuItem(
-                    text = { Text(if (simLabels.containsKey(key)) label else stringResource(R.string.account_display_format, label, account.type)) },
+                    text = { Text(when {
+                        simLabels.containsKey(key) -> label
+                        account.type.isBlank() -> label
+                        else -> stringResource(R.string.account_display_format, label, account.type)
+                    }) },
                     onClick = {
                         onAccountChange(account.name, account.type)
                         expanded = false
