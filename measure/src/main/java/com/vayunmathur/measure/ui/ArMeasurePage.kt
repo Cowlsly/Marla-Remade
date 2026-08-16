@@ -2,8 +2,6 @@ package com.vayunmathur.measure.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -20,6 +18,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.ContextCompat
 import androidx.compose.foundation.layout.fillMaxSize
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.measure.Route
 import com.vayunmathur.measure.domain.MeasureNative
 import com.vayunmathur.measure.platform.MeasureViewModel
@@ -122,15 +121,13 @@ private fun rememberCameraPermission(onResult: (Boolean) -> Unit): Boolean {
                 PackageManager.PERMISSION_GRANTED
         )
     }
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { result ->
+    val launcher = rememberPermissionRequest(Manifest.permission.CAMERA) { result ->
         granted = result
         onResult(result)
     }
     LaunchedEffect(Unit) {
         onResult(granted)
-        if (!granted) launcher.launch(Manifest.permission.CAMERA)
+        if (!granted) launcher()
     }
     return granted
 }
