@@ -183,7 +183,9 @@
     <!-- Precipitation nowcast: raining now -->
     <string name="precip_raining_now">Raining now</string>
     <!-- Precipitation nowcast: no rain in next 2 hours -->
-    <string name="precip_no_rain_next_2h">No rain in the next 2 hours</string>
+    <string name="precip_no_rain_next_2h">No rain for 2 hours</string>
+    <!-- WindBlock: gusts-only detail line. %1$s = gusts speed e.g. 18 km/h -->
+    <string name="gusts">Gusts <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
     <!-- Precipitation nowcast: rain starting now -->
     <string name="precip_rain_starting_now">Rain starting now</string>
     <!-- Precipitation nowcast: rain expected in ~N minutes. %1$d = rounded minutes -->

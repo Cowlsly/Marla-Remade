@@ -23,7 +23,6 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.weather.R
 import com.vayunmathur.weather.network.Current
 import com.vayunmathur.weather.domain.WindUnit
-import com.vayunmathur.weather.domain.compassDirection
 import com.vayunmathur.weather.domain.formatWind
 import androidx.compose.ui.res.stringResource
 
@@ -70,15 +69,14 @@ fun WindBlock(current: Current, unit: WindUnit) {
                 )
             }
             Text(
-                text = stringResource(R.string.from_gusts, compassDirection(current.windDirection), formatWind(current.windGusts, unit)),
+                text = stringResource(R.string.gusts, formatWind(current.windGusts, unit)),
                 style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 20.dp)
                     .padding(horizontal = 16.dp),
                 textAlign = TextAlign.Center,
-                maxLines = 2,
-                softWrap = true,
+                maxLines = 1,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
