@@ -38,6 +38,8 @@ fun AppScaffold(
     title: String,
     modifier: Modifier = Modifier,
     onNavigateBack: (() -> Unit)? = null,
+    onClose: (() -> Unit)? = null,
+    navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
@@ -46,9 +48,7 @@ fun AppScaffold(
     snackbarHost: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val navigationIcon: @Composable () -> Unit = {
-        if (onNavigateBack != null) IconNavigation(onNavigateBack)
-    }
+    val resolvedNavigationIcon = resolveNavigationIcon(navigationIcon, onClose, onNavigateBack)
 
     Scaffold(
         modifier = modifier,
@@ -56,13 +56,13 @@ fun AppScaffold(
             when (alignment) {
                 AppBarAlignment.Start -> TopAppBar(
                     title = { Text(title) },
-                    navigationIcon = navigationIcon,
+                    navigationIcon = resolvedNavigationIcon,
                     actions = actions,
                     scrollBehavior = scrollBehavior,
                 )
                 AppBarAlignment.Center -> CenterAlignedTopAppBar(
                     title = { Text(title) },
-                    navigationIcon = navigationIcon,
+                    navigationIcon = resolvedNavigationIcon,
                     actions = actions,
                     scrollBehavior = scrollBehavior,
                 )
@@ -87,6 +87,8 @@ fun AppScaffold(
     title: @Composable () -> Unit,
     modifier: Modifier = Modifier,
     onNavigateBack: (() -> Unit)? = null,
+    onClose: (() -> Unit)? = null,
+    navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
@@ -95,19 +97,17 @@ fun AppScaffold(
     snackbarHost: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    val navigationIcon: @Composable () -> Unit = {
-        if (onNavigateBack != null) IconNavigation(onNavigateBack)
-    }
+    val resolvedNavigationIcon = resolveNavigationIcon(navigationIcon, onClose, onNavigateBack)
     Scaffold(
         modifier = modifier,
         topBar = {
             when (alignment) {
                 AppBarAlignment.Start -> TopAppBar(
-                    title = title, navigationIcon = navigationIcon,
+                    title = title, navigationIcon = resolvedNavigationIcon,
                     actions = actions, scrollBehavior = scrollBehavior,
                 )
                 AppBarAlignment.Center -> CenterAlignedTopAppBar(
-                    title = title, navigationIcon = navigationIcon,
+                    title = title, navigationIcon = resolvedNavigationIcon,
                     actions = actions, scrollBehavior = scrollBehavior,
                 )
             }
@@ -126,6 +126,8 @@ fun <T : NavKey> AppScaffold(
     title: String,
     backStack: NavBackStack<T>,
     modifier: Modifier = Modifier,
+    onClose: (() -> Unit)? = null,
+    navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
@@ -137,6 +139,8 @@ fun <T : NavKey> AppScaffold(
     title = title,
     modifier = modifier,
     onNavigateBack = { backStack.pop() },
+    onClose = onClose,
+    navigationIcon = navigationIcon,
     alignment = alignment,
     actions = actions,
     scrollBehavior = scrollBehavior,
@@ -145,3 +149,21 @@ fun <T : NavKey> AppScaffold(
     snackbarHost = snackbarHost,
     content = content,
 )
+
+/**
+ * Resolves the top-bar navigation icon from the available options, in priority
+ * order: an explicit [navigationIcon] slot wins; otherwise [onClose] renders a
+ * Close (X) button; otherwise [onNavigateBack] renders the default back arrow;
+ * otherwise nothing is shown. Kept as a single source of truth so every
+ * [AppScaffold] overload behaves identically.
+ */
+private fun resolveNavigationIcon(
+    navigationIcon: (@Composable () -> Unit)?,
+    onClose: (() -> Unit)?,
+    onNavigateBack: (() -> Unit)?,
+): @Composable () -> Unit = navigationIcon ?: {
+    when {
+        onClose != null -> IconButton(onClick = onClose) { IconClose() }
+        onNavigateBack != null -> IconNavigation(onNavigateBack)
+    }
+}
