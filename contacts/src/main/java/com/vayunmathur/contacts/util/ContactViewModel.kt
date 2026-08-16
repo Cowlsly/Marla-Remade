@@ -389,6 +389,28 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
      * DataStore references (saved-accounts set, hidden-accounts key, last-selected account).
      * [onResult] is invoked on the main thread with success and an optional error message key.
      */
+    /**
+     * WHERE clause (+ selection args) matching a RawContacts account. An empty
+     * type/name is treated as NULL-or-empty in the provider, so device-local
+     * accounts (whose ACCOUNT_TYPE/ACCOUNT_NAME may be stored as NULL) are matched.
+     */
+    private fun accountSelection(type: String, name: String): Pair<String, Array<String>> {
+        val args = ArrayList<String>()
+        val typeClause = if (type.isEmpty()) {
+            "(${ContactsContract.RawContacts.ACCOUNT_TYPE} IS NULL OR ${ContactsContract.RawContacts.ACCOUNT_TYPE} = '')"
+        } else {
+            args.add(type)
+            "${ContactsContract.RawContacts.ACCOUNT_TYPE} = ?"
+        }
+        val nameClause = if (name.isEmpty()) {
+            "(${ContactsContract.RawContacts.ACCOUNT_NAME} IS NULL OR ${ContactsContract.RawContacts.ACCOUNT_NAME} = '')"
+        } else {
+            args.add(name)
+            "${ContactsContract.RawContacts.ACCOUNT_NAME} = ?"
+        }
+        return "$typeClause AND $nameClause" to args.toTypedArray()
+    }
+
     fun renameLocalAccount(
         account: ContactAccount,
         newName: String,
@@ -417,12 +439,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                 try {
                     val resolver = getApplication<Application>().contentResolver
                     val ops = ArrayList<ContentProviderOperation>()
+                    val (sel, args) = accountSelection(account.type, account.name)
                     ops.add(
                         ContentProviderOperation.newUpdate(ContactsContract.RawContacts.CONTENT_URI)
-                            .withSelection(
-                                "${ContactsContract.RawContacts.ACCOUNT_TYPE} = ? AND ${ContactsContract.RawContacts.ACCOUNT_NAME} = ?",
-                                arrayOf(account.type, account.name)
-                            )
+                            .withSelection(sel, args)
                             .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, trimmed)
                             .build()
                     )
@@ -475,11 +495,8 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                     val uri = ContactsContract.RawContacts.CONTENT_URI.buildUpon()
                         .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
                         .build()
-                    resolver.delete(
-                        uri,
-                        "${ContactsContract.RawContacts.ACCOUNT_TYPE} = ? AND ${ContactsContract.RawContacts.ACCOUNT_NAME} = ?",
-                        arrayOf(account.type, account.name)
-                    )
+                    val (sel, args) = accountSelection(account.type, account.name)
+                    resolver.delete(uri, sel, args)
                 } catch (e: Exception) {
                     Log.e("ContactViewModel", "Error deleting local account", e)
                 }

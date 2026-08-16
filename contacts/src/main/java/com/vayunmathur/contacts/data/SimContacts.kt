@@ -32,7 +32,13 @@ const val LOCAL_ACCOUNT_TYPE = "com.vayunmathur.contacts.local"
 
 fun isSimAccountType(type: String?): Boolean = type == SIM_ACCOUNT_TYPE
 
-fun isLocalAccountType(type: String?): Boolean = type == LOCAL_ACCOUNT_TYPE
+/**
+ * True for accounts the app may rename/delete: its own local type, plus the
+ * device-local account whose type is null/empty (e.g. contacts created by
+ * another local contacts app that has no sync adapter). Synced accounts
+ * (Google etc.) and SIM accounts have a real non-empty type and are excluded.
+ */
+fun isLocalAccountType(type: String?): Boolean = type.isNullOrBlank() || type == LOCAL_ACCOUNT_TYPE
 
 object SimContactsDataSource {
 
