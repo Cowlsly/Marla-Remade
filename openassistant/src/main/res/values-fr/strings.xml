@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Assistant</string>
     <string name="recording">Enregistrement en cours…</string>
     <string name="error_ai_engine_failed">Défaillance du moteur d\'IA</string>
     <string name="perm_desc_inference">Permet à d\'autres applications d\'accéder au service d\'inférence IA intégré à l\'appareil afin d\'extraire des données structurées.</string>

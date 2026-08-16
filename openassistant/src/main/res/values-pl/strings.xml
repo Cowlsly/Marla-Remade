@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="recording">Nagrywanie…</string>
-    <string name="app_name">OpenAssistant</string>
     <string name="message_placeholder">Wiadomość…</string>
     <string name="voice_message">Wiadomość głosowa</string>
     <string name="mic_error_format">Błąd mikrofonu: %1$s</string>

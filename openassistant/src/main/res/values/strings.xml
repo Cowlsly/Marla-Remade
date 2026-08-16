@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- App name: launcher label and foreground service title fallback -->
-    <string name="app_name">OpenAssistant</string>
+    <string name="app_name" translatable="false">OpenAssistant</string>
 
     <!-- Chat input placeholder hint. Noun, ellipsis intentional -->
     <string name="recording">Recording&#8230;</string>

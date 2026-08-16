@@ -6,7 +6,6 @@
     <string name="mic_error_format">Chyba mikrofonu: <xliff:g id="error" example="Přístup zakázán">%1$s</xliff:g></string>
     <string name="new_conversation">Nová konverzace</string>
     <string name="error_prefix">Chyba: <xliff:g id="error" example="Timeout">%1$s</xliff:g></string>
-    <string name="app_name">OpenAsistent</string>
     <string name="perm_desc_inference">Umožňuje ostatním aplikacím přístup k inferenční službě AI na zařízení pro extrakci strukturovaných dat.</string>
     <string name="inference_service">Inferenční služba</string>
     <string name="processing_ai_inference">Zpracování AI inference…</string>

@@ -7,5 +7,4 @@
     <string name="recording">Nimmt auf…</string>
     <string name="voice_message">Sprachnachricht</string>
     <string name="error_prefix">Error: %1$s</string>
-    <string name="app_name">OpenAssistant</string>
 </resources>
