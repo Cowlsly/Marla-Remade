@@ -41,6 +41,7 @@ import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.platform.EmailViewModel
 import com.vayunmathur.email.platform.MessageListActions
 import com.vayunmathur.email.platform.MessageListUiState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -61,12 +62,10 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 
 @Composable
 fun MessageListPage(
@@ -141,42 +140,44 @@ fun MessageListScreen(
         }
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            if (state.selectedUids.isNotEmpty()) {
-                TopAppBar(
-                    title = { Text(stringResource(R.string.selected_count, state.selectedUids.size)) },
-                    navigationIcon = { IconButton(onClick = { actions.clearSelection() }) { IconClose() } },
-                    actions = {
-                        IconButton(onClick = {
-                            val account = state.selectedAccountEmail ?: state.messages.firstOrNull { it.id in state.selectedUids }?.accountEmail ?: return@IconButton
-                            actions.bulkMarkAsRead(account, state.selectedUids.toList(), true)
-                        }) { IconMarkRead() }
-                        IconButton(onClick = {
-                            val account = state.selectedAccountEmail ?: state.messages.firstOrNull { it.id in state.selectedUids }?.accountEmail ?: return@IconButton
-                            actions.bulkMarkAsRead(account, state.selectedUids.toList(), false)
-                        }) { IconMarkUnread() }
-                    }
-                )
-            } else if (isSearching) {
-                TopAppBar(
-                    title = { CommonSearchBar(value = state.searchQuery, onValueChange = { actions.setSearchQuery(it) }, padding = PaddingValues(0.dp)) },
-                    navigationIcon = { IconNavigation { isSearching = false; actions.setSearchQuery("") } }
-                )
-            } else {
-                TopAppBar(
-                    title = { Text(if (state.selectedAccountEmail == null) stringResource(R.string.unified_inbox) else state.selectedFolderName) },
-                    navigationIcon = { IconButton(onClick = onOpenDrawer) { IconMenu() } },
-                    actions = { IconButton(onClick = { isSearching = true }) { IconSearch() } }
-                )
+    val selectionActive = state.selectedUids.isNotEmpty()
+    AppScaffold(
+        title = {
+            when {
+                selectionActive -> Text(stringResource(R.string.selected_count, state.selectedUids.size))
+                isSearching -> CommonSearchBar(value = state.searchQuery, onValueChange = { actions.setSearchQuery(it) }, padding = PaddingValues(0.dp))
+                else -> Text(if (state.selectedAccountEmail == null) stringResource(R.string.unified_inbox) else state.selectedFolderName)
+            }
+        },
+        navigationIcon = {
+            when {
+                selectionActive -> IconButton(onClick = { actions.clearSelection() }) { IconClose() }
+                isSearching -> IconNavigation { isSearching = false; actions.setSearchQuery("") }
+                else -> IconButton(onClick = onOpenDrawer) { IconMenu() }
+            }
+        },
+        actions = {
+            when {
+                selectionActive -> {
+                    IconButton(onClick = {
+                        val account = state.selectedAccountEmail ?: state.messages.firstOrNull { it.id in state.selectedUids }?.accountEmail ?: return@IconButton
+                        actions.bulkMarkAsRead(account, state.selectedUids.toList(), true)
+                    }) { IconMarkRead() }
+                    IconButton(onClick = {
+                        val account = state.selectedAccountEmail ?: state.messages.firstOrNull { it.id in state.selectedUids }?.accountEmail ?: return@IconButton
+                        actions.bulkMarkAsRead(account, state.selectedUids.toList(), false)
+                    }) { IconMarkUnread() }
+                }
+                isSearching -> {}
+                else -> IconButton(onClick = { isSearching = true }) { IconSearch() }
             }
         },
         floatingActionButton = {
-            if (state.selectedUids.isEmpty()) {
+            if (!selectionActive) {
                 FloatingActionButton(onClick = onComposeClick) { IconAdd() }
             }
-        }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             Box(modifier = Modifier.fillMaxWidth().height(2.dp)) {

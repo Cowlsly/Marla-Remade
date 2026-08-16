@@ -25,75 +25,62 @@ fun SettingsScreen(viewModel: EmailViewModel, onBack: () -> Unit) {
     val accounts by viewModel.accounts.collectAsStateWithLifecycle(emptyList())
     val context = LocalContext.current
     val resources = LocalResources.current
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(UiR.string.settings)) },
-                navigationIcon = { IconNavigation(onBack) },
-            )
+    DetailScaffold(
+        title = stringResource(UiR.string.settings),
+        onNavigateBack = onBack,
+    ) {
+        val settings = remember(context) { com.vayunmathur.email.data.EmailSettings.get(context) }
+        val loadRemoteImages by settings.loadRemoteImages.collectAsStateWithLifecycle()
+        Text(stringResource(R.string.reading), style = MaterialTheme.typography.titleMedium)
+        com.vayunmathur.library.ui.SettingsSwitchRow(
+            title = stringResource(R.string.load_remote_images),
+            supportingText = stringResource(R.string.load_remote_images_summary),
+            checked = loadRemoteImages,
+            onCheckedChange = { settings.setLoadRemoteImages(it) },
+        )
+        HorizontalDivider()
+
+        Text(stringResource(R.string.signatures), style = MaterialTheme.typography.titleMedium)
+        if (accounts.isEmpty()) {
+            Text(stringResource(R.string.select_account))
         }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .padding(padding)
-                .padding(16.dp)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            val settings = remember(context) { com.vayunmathur.email.data.EmailSettings.get(context) }
-            val loadRemoteImages by settings.loadRemoteImages.collectAsStateWithLifecycle()
-            Text(stringResource(R.string.reading), style = MaterialTheme.typography.titleMedium)
-            com.vayunmathur.library.ui.SettingsSwitchRow(
-                title = stringResource(R.string.load_remote_images),
-                supportingText = stringResource(R.string.load_remote_images_summary),
-                checked = loadRemoteImages,
-                onCheckedChange = { settings.setLoadRemoteImages(it) },
+        accounts.forEach { acc ->
+            var sig by remember(acc.email) { mutableStateOf(acc.signature) }
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(acc.email, style = MaterialTheme.typography.labelLarge)
+                OutlinedTextField(
+                    value = sig,
+                    onValueChange = { sig = it },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    placeholder = { Text(stringResource(R.string.your_signature)) },
+                )
+                Button(
+                    onClick = {
+                        viewModel.setSignature(acc.email, sig)
+                        AppMessages.show(resources.getString(R.string.signature_saved))
+                    },
+                    modifier = Modifier.align(Alignment.End),
+                ) {
+                    Text(stringResource(UiR.string.save))
+                }
+            }
+            HorizontalDivider()
+        }
+
+        val blocked by viewModel.blockedSenders.collectAsStateWithLifecycle(emptyList())
+        Text(stringResource(R.string.blocked_senders), style = MaterialTheme.typography.titleMedium)
+        if (blocked.isEmpty()) {
+            Text(stringResource(R.string.none), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+        blocked.forEach { b ->
+            ListItem(
+                content = { Text(b.address) },
+                trailingContent = {
+                    TextButton(onClick = { viewModel.unblockSender(b.address) }) { Text(stringResource(R.string.unblock)) }
+                },
             )
             HorizontalDivider()
-
-            Text(stringResource(R.string.signatures), style = MaterialTheme.typography.titleMedium)
-            if (accounts.isEmpty()) {
-                Text(stringResource(R.string.select_account))
-            }
-            accounts.forEach { acc ->
-                var sig by remember(acc.email) { mutableStateOf(acc.signature) }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text(acc.email, style = MaterialTheme.typography.labelLarge)
-                    OutlinedTextField(
-                        value = sig,
-                        onValueChange = { sig = it },
-                        modifier = Modifier.fillMaxWidth(),
-                        minLines = 3,
-                        placeholder = { Text(stringResource(R.string.your_signature)) },
-                    )
-                    Button(
-                        onClick = {
-                            viewModel.setSignature(acc.email, sig)
-                            AppMessages.show(resources.getString(R.string.signature_saved))
-                        },
-                        modifier = Modifier.align(Alignment.End),
-                    ) {
-                        Text(stringResource(UiR.string.save))
-                    }
-                }
-                HorizontalDivider()
-            }
-
-            val blocked by viewModel.blockedSenders.collectAsStateWithLifecycle(emptyList())
-            Text(stringResource(R.string.blocked_senders), style = MaterialTheme.typography.titleMedium)
-            if (blocked.isEmpty()) {
-                Text(stringResource(R.string.none), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            }
-            blocked.forEach { b ->
-                ListItem(
-                    content = { Text(b.address) },
-                    trailingContent = {
-                        TextButton(onClick = { viewModel.unblockSender(b.address) }) { Text(stringResource(R.string.unblock)) }
-                    },
-                )
-                HorizontalDivider()
-            }
         }
     }
 }

@@ -46,6 +46,7 @@ import com.vayunmathur.email.platform.EmlUtils
 import com.vayunmathur.email.platform.MessageThreadActions
 import com.vayunmathur.email.data.UnsubscribeMethod
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
@@ -68,11 +69,9 @@ import com.vayunmathur.library.ui.IconUndo
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.contentColorOn
 import com.vayunmathur.library.ui.rememberModalBottomSheetState
 import com.vayunmathur.library.util.AppMessages
@@ -120,7 +119,10 @@ fun MessageThreadScreen(
             hasMarkedAsRead = true
         }
     }
-    Scaffold(topBar = { TopAppBar(title = { Text(messages.firstOrNull()?.subject ?: stringResource(R.string.conversation)) }, navigationIcon = { IconNavigation(onBack) }) }) { padding ->
+    AppScaffold(
+        title = messages.firstOrNull()?.subject ?: stringResource(R.string.conversation),
+        onNavigateBack = onBack,
+    ) { padding ->
         LazyColumn(modifier = Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(messages, key = { "${it.accountEmail}|${it.folderName}|${it.id}" }) { msg ->
                 MessageItem(msg = msg, actions = actions, onBack = onBack, onReply = onReply, onForward = onForward, onCompose = onCompose, onExportEml = { toExport ->

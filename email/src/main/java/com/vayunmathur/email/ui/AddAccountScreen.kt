@@ -53,18 +53,14 @@ fun AddAccountScreen(
 
     androidx.activity.compose.BackHandler(enabled = selectedProvider != null) { selectedProviderId = null }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (selectedProvider == null) stringResource(R.string.add_account) else selectedProvider.displayName) },
-                navigationIcon = {
-                    val backTarget: (() -> Unit)? = when {
-                        selectedProvider != null -> ({ selectedProviderId = null })
-                        else -> onBack
-                    }
-                    if (backTarget != null) { IconNavigation(backTarget) }
-                },
-            )
+    AppScaffold(
+        title = if (selectedProvider == null) stringResource(R.string.add_account) else selectedProvider.displayName,
+        navigationIcon = {
+            val backTarget: (() -> Unit)? = when {
+                selectedProvider != null -> ({ selectedProviderId = null })
+                else -> onBack
+            }
+            if (backTarget != null) { IconNavigation(backTarget) }
         },
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {

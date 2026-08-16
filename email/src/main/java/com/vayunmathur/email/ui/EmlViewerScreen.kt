@@ -10,17 +10,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.*
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -72,24 +71,20 @@ fun EmlViewerScreen(
         loading = false
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    val t = parsed?.message?.subject ?: uriString.substringAfterLast('/').substringAfterLast("%2F")
-                    Text(t.ifBlank { stringResource(R.string.e_mail_file) }, maxLines = 1)
-                },
-                navigationIcon = { IconNavigation(onBack) },
-                actions = {
-                    val msg = parsed?.message
-                    if (msg != null) {
-                        IconButton(onClick = { onComposeForward("Fwd: ${msg.subject}", msg.body ?: "") }) {
-                            IconForward()
-                        }
-                    }
+    AppScaffold(
+        title = {
+            val t = parsed?.message?.subject ?: uriString.substringAfterLast('/').substringAfterLast("%2F")
+            Text(t.ifBlank { stringResource(R.string.e_mail_file) }, maxLines = 1)
+        },
+        onNavigateBack = onBack,
+        actions = {
+            val msg = parsed?.message
+            if (msg != null) {
+                IconButton(onClick = { onComposeForward("Fwd: ${msg.subject}", msg.body ?: "") }) {
+                    IconForward()
                 }
-            )
-        }
+            }
+        },
     ) { padding ->
         when {
             loading -> {

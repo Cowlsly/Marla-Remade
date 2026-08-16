@@ -20,13 +20,9 @@ fun DraftsScreen(
     onOpenDraft: (Long) -> Unit,
 ) {
     val drafts by viewModel.drafts.collectAsStateWithLifecycle(emptyList())
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.drafts)) },
-                navigationIcon = { IconNavigation(onBack) },
-            )
-        }
+    AppScaffold(
+        title = stringResource(R.string.drafts),
+        onNavigateBack = onBack,
     ) { padding ->
         if (drafts.isEmpty()) {
             EmptyState(

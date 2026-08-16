@@ -183,85 +183,81 @@ fun ComposerScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.compose)) },
-                navigationIcon = { IconNavigation(onBack) },
-                actions = {
-                    IconButton(onClick = { attachmentLauncher.launch("*/*") }) {
-                        IconAttachment()
-                    }
-                    IconButton(onClick = {
-                        // Prefer new photo picker
-                        try {
-                            pickVisualLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                        } catch (_: Exception) {
-                            inlineFallbackLauncher.launch("image/*")
-                        }
-                    }) {
-                        com.vayunmathur.library.ui.IconImage()
-                    }
-                    Box {
-                        TextButton(onClick = { showSchedule = true }, enabled = fromAccount != null) {
-                            Text(stringResource(R.string.later))
-                        }
-                        DropdownMenu(expanded = showSchedule, onDismissRequest = { showSchedule = false }) {
-                            val schedule = { at: Long ->
-                                showSchedule = false
-                                fromAccount?.let { acc ->
-                                    viewModel.scheduleSend(
-                                        account = acc, to = to, subject = subject,
-                                        body = bodyController.html,
-                                        asHtml = true,
-                                        cc = cc.ifBlank { null }, bcc = bcc.ifBlank { null },
-                                        attachments = attachments,
-                                        inlineImages = bodyController.toInlineAttachments(),
-                                        inReplyTo = inReplyTo,
-                                        references = references, scheduledAt = at,
-                                    ) { currentDraftId?.let { viewModel.deleteDraft(it) } }
-                                    AppMessages.show(resources.getString(R.string.scheduled))
-                                    onBack()
-                                }
-                            }
-                            DropdownMenuItem(text = { Text(stringResource(R.string.in_1_hour)) }, onClick = { schedule(System.currentTimeMillis() + 3_600_000L) })
-                            DropdownMenuItem(text = { Text(stringResource(R.string.this_evening_6_pm)) }, onClick = { schedule(scheduleTime(18, sameDay = true)) })
-                            DropdownMenuItem(text = { Text(stringResource(R.string.tomorrow_8_am)) }, onClick = { schedule(scheduleTime(8, sameDay = false)) })
-                        }
-                    }
-                    IconButton(onClick = {
-                        val acc = fromAccount ?: return@IconButton
-                        sending = true
-                        viewModel.sendEmailFrom(
-                            account = acc,
-                            to = to,
-                            subject = subject,
-                            body = bodyController.html,
-                            asHtml = true,
-                            cc = cc.ifBlank { null },
-                            bcc = bcc.ifBlank { null },
-                            attachments = attachments,
-                            inlineImages = bodyController.toInlineAttachments(),
-                            inReplyTo = inReplyTo,
-                            references = references,
-                            onSuccess = {
-                                sending = false
-                                currentDraftId?.let { viewModel.deleteDraft(it) }
-                                AppMessages.show(resources.getString(R.string.message_sent))
-                                onBack()
-                            },
-                            onError = { err ->
-                                sending = false
-                                AppMessages.show(resources.getString(R.string.saved_to_outbox, err))
-                                onBack()
-                            }
-                        )
-                    }, enabled = !sending && fromAccount != null) {
-                        if (sending) CircularProgressIndicator(modifier = Modifier.size(24.dp))
-                        else IconSend()
-                    }
+    AppScaffold(
+        title = stringResource(R.string.compose),
+        onNavigateBack = onBack,
+        actions = {
+            IconButton(onClick = { attachmentLauncher.launch("*/*") }) {
+                IconAttachment()
+            }
+            IconButton(onClick = {
+                // Prefer new photo picker
+                try {
+                    pickVisualLauncher.launch(androidx.activity.result.PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                } catch (_: Exception) {
+                    inlineFallbackLauncher.launch("image/*")
                 }
-            )
+            }) {
+                com.vayunmathur.library.ui.IconImage()
+            }
+            Box {
+                TextButton(onClick = { showSchedule = true }, enabled = fromAccount != null) {
+                    Text(stringResource(R.string.later))
+                }
+                DropdownMenu(expanded = showSchedule, onDismissRequest = { showSchedule = false }) {
+                    val schedule = { at: Long ->
+                        showSchedule = false
+                        fromAccount?.let { acc ->
+                            viewModel.scheduleSend(
+                                account = acc, to = to, subject = subject,
+                                body = bodyController.html,
+                                asHtml = true,
+                                cc = cc.ifBlank { null }, bcc = bcc.ifBlank { null },
+                                attachments = attachments,
+                                inlineImages = bodyController.toInlineAttachments(),
+                                inReplyTo = inReplyTo,
+                                references = references, scheduledAt = at,
+                            ) { currentDraftId?.let { viewModel.deleteDraft(it) } }
+                            AppMessages.show(resources.getString(R.string.scheduled))
+                            onBack()
+                        }
+                    }
+                    DropdownMenuItem(text = { Text(stringResource(R.string.in_1_hour)) }, onClick = { schedule(System.currentTimeMillis() + 3_600_000L) })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.this_evening_6_pm)) }, onClick = { schedule(scheduleTime(18, sameDay = true)) })
+                    DropdownMenuItem(text = { Text(stringResource(R.string.tomorrow_8_am)) }, onClick = { schedule(scheduleTime(8, sameDay = false)) })
+                }
+            }
+            IconButton(onClick = {
+                val acc = fromAccount ?: return@IconButton
+                sending = true
+                viewModel.sendEmailFrom(
+                    account = acc,
+                    to = to,
+                    subject = subject,
+                    body = bodyController.html,
+                    asHtml = true,
+                    cc = cc.ifBlank { null },
+                    bcc = bcc.ifBlank { null },
+                    attachments = attachments,
+                    inlineImages = bodyController.toInlineAttachments(),
+                    inReplyTo = inReplyTo,
+                    references = references,
+                    onSuccess = {
+                        sending = false
+                        currentDraftId?.let { viewModel.deleteDraft(it) }
+                        AppMessages.show(resources.getString(R.string.message_sent))
+                        onBack()
+                    },
+                    onError = { err ->
+                        sending = false
+                        AppMessages.show(resources.getString(R.string.saved_to_outbox, err))
+                        onBack()
+                    }
+                )
+            }, enabled = !sending && fromAccount != null) {
+                if (sending) CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                else IconSend()
+            }
         },
         bottomBar = {
             // Always show formatting toolbar? Per plan, only when focused, but now scrollable and more buttons
@@ -275,7 +271,7 @@ fun ComposerScreen(
                         }
                     })
             }
-        }
+        },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).padding(horizontal = 16.dp, vertical = 8.dp).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Surface(

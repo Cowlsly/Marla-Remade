@@ -32,20 +32,16 @@ fun OutboxScreen(
     val context = LocalContext.current
     val resources = LocalResources.current
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.outbox)) },
-                navigationIcon = { IconNavigation(onBack) },
-                actions = {
-                    if (outbox.isNotEmpty()) {
-                        TextButton(onClick = {
-                            viewModel.sendOutboxNow(context)
-                            AppMessages.show(resources.getQuantityString(R.plurals.retrying_pending_messages, outbox.size, outbox.size))
-                        }) { Text(stringResource(R.string.send_now)) }
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.outbox),
+        onNavigateBack = onBack,
+        actions = {
+            if (outbox.isNotEmpty()) {
+                TextButton(onClick = {
+                    viewModel.sendOutboxNow(context)
+                    AppMessages.show(resources.getQuantityString(R.plurals.retrying_pending_messages, outbox.size, outbox.size))
+                }) { Text(stringResource(R.string.send_now)) }
+            }
         },
     ) { padding ->
         if (outbox.isEmpty()) {
