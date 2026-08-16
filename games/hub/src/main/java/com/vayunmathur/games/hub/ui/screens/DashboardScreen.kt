@@ -29,12 +29,11 @@ import com.vayunmathur.games.hub.ui.components.XpProgressBar
 import com.vayunmathur.games.hub.util.DashboardActions
 import com.vayunmathur.games.hub.util.DashboardUiState
 import com.vayunmathur.games.hub.util.formatPlaytime
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
 
 /**
@@ -53,13 +52,9 @@ fun DashboardScreen(
     iconFor: (HubGameEntity) -> Drawable? = { null },
     topBarActions: @Composable RowScope.() -> Unit = {},
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
-                actions = topBarActions
-            )
-        }
+    AppScaffold(
+        title = { Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
+        actions = topBarActions
     ) { padding ->
         LazyColumn(
             modifier = modifier.fillMaxSize().padding(padding),

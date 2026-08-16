@@ -16,11 +16,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.games.hub.MainRoute
 import com.vayunmathur.games.hub.ui.components.ActivityItemCard
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.hub.R
@@ -34,12 +33,10 @@ fun ActivityFeedScreen(
 ) {
     val activity by viewModel.allActivityFlow.collectAsStateWithLifecycle()
 
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(stringResource(R.string.tab_activity)) },
-            navigationIcon = { backStack?.let { IconNavigation(it) } }
-        )
-    }) { padding ->
+    AppScaffold(
+        title = stringResource(R.string.tab_activity),
+        navigationIcon = { backStack?.let { IconNavigation(it) } }
+    ) { padding ->
         if (activity.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp), contentAlignment = Alignment.TopStart) {
                 Text(stringResource(R.string.no_activity_yet_start_playing_games_to_s), style = MaterialTheme.typography.bodyMedium)

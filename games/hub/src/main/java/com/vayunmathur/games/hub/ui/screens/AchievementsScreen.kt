@@ -18,12 +18,11 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.games.hub.data.dao.AchievementWithProgress
 import com.vayunmathur.games.hub.ui.components.AchievementRow
 import com.vayunmathur.games.hub.viewmodel.GameHubViewModel
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CommonSearchBar
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.hub.R
 
@@ -60,7 +59,7 @@ fun AchievementsScreen(
         list.sortedWith(compareBy<AchievementWithProgress> { !it.isUnlocked }.thenBy { it.gameId }.thenBy { it.name })
     }
 
-    Scaffold(topBar = { TopAppBar(title = { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(0.dp)) }) }) { padding ->
+    AppScaffold(title = { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(0.dp)) }) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

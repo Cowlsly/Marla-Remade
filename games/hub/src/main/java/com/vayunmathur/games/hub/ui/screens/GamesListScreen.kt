@@ -21,13 +21,12 @@ import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.ui.components.GameCard
 import com.vayunmathur.games.hub.util.GamesListActions
 import com.vayunmathur.games.hub.util.GamesListUiState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CommonSearchBar
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
 
 enum class GameSort { LAST_PLAYED, MOST_PLAYED, NAME, COMPLETION }
@@ -61,27 +60,23 @@ fun GamesListScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    CommonSearchBar(
-                        value = search,
-                        onValueChange = { search = it },
-                        placeholder = stringResource(com.vayunmathur.games.hub.R.string.search_games),
-                        padding = PaddingValues(0.dp),
-                    )
-                },
-                actions = {
-                    IconButton(onClick = { showSortMenu = true }) { IconMoreVert() }
-                    DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
-                        DropdownMenuItem(text = { Text(stringResource(R.string.sort_last_played)) }, onClick = { sort = GameSort.LAST_PLAYED; showSortMenu = false })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.sort_most_played)) }, onClick = { sort = GameSort.MOST_PLAYED; showSortMenu = false })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.sort_name)) }, onClick = { sort = GameSort.NAME; showSortMenu = false })
-                        DropdownMenuItem(text = { Text(stringResource(R.string.sort_completion)) }, onClick = { sort = GameSort.COMPLETION; showSortMenu = false })
-                    }
-                }
+    AppScaffold(
+        title = {
+            CommonSearchBar(
+                value = search,
+                onValueChange = { search = it },
+                placeholder = stringResource(com.vayunmathur.games.hub.R.string.search_games),
+                padding = PaddingValues(0.dp),
             )
+        },
+        actions = {
+            IconButton(onClick = { showSortMenu = true }) { IconMoreVert() }
+            DropdownMenu(expanded = showSortMenu, onDismissRequest = { showSortMenu = false }) {
+                DropdownMenuItem(text = { Text(stringResource(R.string.sort_last_played)) }, onClick = { sort = GameSort.LAST_PLAYED; showSortMenu = false })
+                DropdownMenuItem(text = { Text(stringResource(R.string.sort_most_played)) }, onClick = { sort = GameSort.MOST_PLAYED; showSortMenu = false })
+                DropdownMenuItem(text = { Text(stringResource(R.string.sort_name)) }, onClick = { sort = GameSort.NAME; showSortMenu = false })
+                DropdownMenuItem(text = { Text(stringResource(R.string.sort_completion)) }, onClick = { sort = GameSort.COMPLETION; showSortMenu = false })
+            }
         }
     ) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {

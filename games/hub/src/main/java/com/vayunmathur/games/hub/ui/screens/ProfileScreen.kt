@@ -31,14 +31,13 @@ import com.vayunmathur.games.hub.util.ProfileUiState
 import com.vayunmathur.games.hub.util.XpLevelCalculator
 import com.vayunmathur.games.hub.util.formatPlaytime
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.res.stringResource
 
 private val avatarOptions = listOf(
@@ -66,17 +65,16 @@ fun ProfileScreen(
         selectedAvatar = state.avatarSymbol
     }
 
-    Scaffold(topBar = {
-        TopAppBar(
-            actions = {
-                androidx.compose.material3.IconButton(onClick = {
-                    editName = state.playerName ?: ""
-                    selectedAvatar = state.avatarSymbol
-                    showEditDialog = true
-                }) { IconPerson() }
-            }
-        )
-    }) { padding ->
+    AppScaffold(
+        title = {},
+        actions = {
+            androidx.compose.material3.IconButton(onClick = {
+                editName = state.playerName ?: ""
+                selectedAvatar = state.avatarSymbol
+                showEditDialog = true
+            }) { IconPerson() }
+        }
+    ) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
