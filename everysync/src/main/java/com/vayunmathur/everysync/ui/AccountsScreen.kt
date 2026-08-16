@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.EmptyState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
@@ -20,9 +21,7 @@ import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -93,16 +92,12 @@ fun AccountsScreen(backStack: NavBackStack<Route>, viewModel: EverySyncViewModel
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AccountsScreen(state: AccountsUiState, actions: AccountsActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.accounts_title)) },
-                actions = {
-                    IconButton(onClick = { actions.openSettings() }) {
-                        IconSettings()
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.accounts_title),
+        actions = {
+            IconButton(onClick = { actions.openSettings() }) {
+                IconSettings()
+            }
         },
         floatingActionButton = {
             FloatingActionButton(onClick = { actions.openAddAccount() }) {

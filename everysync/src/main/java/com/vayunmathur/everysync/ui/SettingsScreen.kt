@@ -1,21 +1,16 @@
 package com.vayunmathur.everysync.ui
 
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.selection.selectable
 import com.vayunmathur.library.ui.SettingsSwitchRow
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.IconBack
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.RadioButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -24,7 +19,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
@@ -74,42 +68,31 @@ fun SettingsScreen(backStack: NavBackStack<Route>, viewModel: EverySyncViewModel
 fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
     var intervalText by remember(state.intervalMinutes) { mutableStateOf(state.intervalMinutes.toString()) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.settings_title)) },
-                navigationIcon = {
-                    IconButton(onClick = { actions.back() }) {
-                        IconBack()
-                    }
-                },
-            )
-        },
-    ) { padding ->
-        Column(Modifier.padding(padding)) {
-            OutlinedTextField(
-                value = intervalText,
-                onValueChange = {
-                    intervalText = it.filter { c -> c.isDigit() }
-                    intervalText.toLongOrNull()?.let { m -> actions.setInterval(m) }
-                },
-                label = { Text(stringResource(R.string.global_interval)) },
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-            )
-            SettingsSwitchRow(
-                title = stringResource(R.string.wifi_only),
-                checked = state.wifiOnly,
-                onCheckedChange = { actions.setWifiOnly(it) },
-            )
-            HorizontalDivider()
-            Text(
-                stringResource(R.string.conflict_policy),
-                Modifier.padding(16.dp),
-            )
-            ConflictOption(R.string.conflict_lww, Settings.CONFLICT_LWW, state.conflictPolicy) { actions.setConflictPolicy(it) }
-            ConflictOption(R.string.conflict_remote, Settings.CONFLICT_REMOTE, state.conflictPolicy) { actions.setConflictPolicy(it) }
-            ConflictOption(R.string.conflict_local, Settings.CONFLICT_LOCAL, state.conflictPolicy) { actions.setConflictPolicy(it) }
-        }
+    DetailScaffold(
+        title = stringResource(R.string.settings_title),
+        onNavigateBack = { actions.back() },
+    ) {
+        OutlinedTextField(
+            value = intervalText,
+            onValueChange = {
+                intervalText = it.filter { c -> c.isDigit() }
+                intervalText.toLongOrNull()?.let { m -> actions.setInterval(m) }
+            },
+            label = { Text(stringResource(R.string.global_interval)) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        SettingsSwitchRow(
+            title = stringResource(R.string.wifi_only),
+            checked = state.wifiOnly,
+            onCheckedChange = { actions.setWifiOnly(it) },
+        )
+        HorizontalDivider()
+        Text(
+            stringResource(R.string.conflict_policy),
+        )
+        ConflictOption(R.string.conflict_lww, Settings.CONFLICT_LWW, state.conflictPolicy) { actions.setConflictPolicy(it) }
+        ConflictOption(R.string.conflict_remote, Settings.CONFLICT_REMOTE, state.conflictPolicy) { actions.setConflictPolicy(it) }
+        ConflictOption(R.string.conflict_local, Settings.CONFLICT_LOCAL, state.conflictPolicy) { actions.setConflictPolicy(it) }
     }
 }
 

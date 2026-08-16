@@ -5,12 +5,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.IconBack
-import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -56,17 +53,9 @@ fun AddAccountScreen(backStack: NavBackStack<Route>, viewModel: EverySyncViewMod
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AddAccountScreen(actions: AddAccountActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.add_account_title)) },
-                navigationIcon = {
-                    IconButton(onClick = { actions.back() }) {
-                        IconBack()
-                    }
-                },
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.add_account_title),
+        onNavigateBack = { actions.back() },
     ) { padding ->
         LazyColumn(Modifier.padding(padding)) {
             items(ProviderRegistry.all, key = { it.id }) { provider ->

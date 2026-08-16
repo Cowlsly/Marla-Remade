@@ -1,25 +1,19 @@
 package com.vayunmathur.everysync.ui
 
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.IconBack
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.everysync.R
 import com.vayunmathur.everysync.Route
@@ -71,49 +65,39 @@ fun AccountDetailScreen(backStack: NavBackStack<Route>, viewModel: EverySyncView
 fun AccountDetailScreen(state: AccountDetailUiState, actions: AccountDetailActions) {
     val provider = state.providerId?.let { ProviderRegistry.get(it) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(state.accountName) },
-                navigationIcon = {
-                    IconButton(onClick = { actions.back() }) {
-                        IconBack()
-                    }
-                },
-            )
-        },
-    ) { padding ->
+    DetailScaffold(
+        title = state.accountName,
+        onNavigateBack = { actions.back() },
+    ) {
         if (provider == null) {
-            Text(stringResource(R.string.no_accounts), Modifier.padding(padding).padding(16.dp))
-            return@Scaffold
+            Text(stringResource(R.string.no_accounts))
+            return@DetailScaffold
         }
-        Column(Modifier.padding(padding)) {
-            if (DataType.CONTACTS in provider.capabilities) {
-                TypeToggle(R.string.sync_contacts, DataType.CONTACTS in state.enabledTypes) {
-                    actions.toggleType(state.accountName, DataType.CONTACTS, it)
-                }
+        if (DataType.CONTACTS in provider.capabilities) {
+            TypeToggle(R.string.sync_contacts, DataType.CONTACTS in state.enabledTypes) {
+                actions.toggleType(state.accountName, DataType.CONTACTS, it)
             }
-            if (DataType.CALENDAR in provider.capabilities) {
-                TypeToggle(R.string.sync_calendar, DataType.CALENDAR in state.enabledTypes) {
-                    actions.toggleType(state.accountName, DataType.CALENDAR, it)
-                }
-            }
-            if (DataType.HEALTH in provider.capabilities) {
-                TypeToggle(R.string.sync_health, DataType.HEALTH in state.enabledTypes) {
-                    actions.toggleType(state.accountName, DataType.HEALTH, it)
-                }
-            }
-
-            Button(
-                onClick = { actions.syncNow(state.accountName) },
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-            ) { Text(stringResource(R.string.sync_now)) }
-
-            OutlinedButton(
-                onClick = { actions.removeAccount(state.accountName) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-            ) { Text(stringResource(R.string.remove_account)) }
         }
+        if (DataType.CALENDAR in provider.capabilities) {
+            TypeToggle(R.string.sync_calendar, DataType.CALENDAR in state.enabledTypes) {
+                actions.toggleType(state.accountName, DataType.CALENDAR, it)
+            }
+        }
+        if (DataType.HEALTH in provider.capabilities) {
+            TypeToggle(R.string.sync_health, DataType.HEALTH in state.enabledTypes) {
+                actions.toggleType(state.accountName, DataType.HEALTH, it)
+            }
+        }
+
+        Button(
+            onClick = { actions.syncNow(state.accountName) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(stringResource(R.string.sync_now)) }
+
+        OutlinedButton(
+            onClick = { actions.removeAccount(state.accountName) },
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(stringResource(R.string.remove_account)) }
     }
 }
 
