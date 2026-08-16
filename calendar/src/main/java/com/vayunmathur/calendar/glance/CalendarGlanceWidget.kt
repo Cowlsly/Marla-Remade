@@ -125,7 +125,7 @@ private fun CalendarPreviewContent() {
         horizontalPadding = 0.dp
     ) {
         Column(GlanceModifier.fillMaxSize().background(GlanceTheme.colors.surface)) {
-            DayHeader(DateString.dateWeekday(today))
+            DayHeader(dayHeaderLabel(today, today, context))
             CalendarEventRow(
                 0xFF4285F4.toInt(),
                 context.getString(R.string.widget_preview_event_1_title),
@@ -165,7 +165,7 @@ fun Content(context: Context, positionedEvents: Map<LocalDate, List<Instance>>) 
             for(day in days) {
                 if(positionedEvents[day]!!.isNotEmpty()) {
                     item {
-                        DayHeader(DateString.dateWeekday(day))
+                        DayHeader(dayHeaderLabel(day, today, context))
                     }
                 }
                 items(positionedEvents[day]!!) { instance ->
@@ -190,13 +190,28 @@ fun Content(context: Context, positionedEvents: Map<LocalDate, List<Instance>>) 
     }
 }
 
-/** A day-group heading in the calendar widget list. */
+/** "Today"/"Tomorrow" for those days, otherwise the weekday + date. */
+private fun dayHeaderLabel(day: LocalDate, today: LocalDate, context: Context): String = when (day) {
+    today -> context.getString(R.string.today)
+    today + DatePeriod(days = 1) -> context.getString(R.string.tomorrow)
+    else -> DateString.dateWeekday(day)
+}
+
+/**
+ * A day-group heading in the calendar widget list: a full-width band with a
+ * subtle [GlanceTheme.colors.surfaceVariant] background (not a primary/accent
+ * colour) so it reads as a quiet section divider over the surface list.
+ */
 @SuppressLint("RestrictedApi")
 @Composable
 private fun DayHeader(text: String) {
     Text(
         text,
-        modifier = GlanceModifier.padding(start = 12.dp, top = 12.dp, bottom = 4.dp),
+        modifier = GlanceModifier
+            .fillMaxWidth()
+            .padding(top = 8.dp, bottom = 2.dp)
+            .background(GlanceTheme.colors.surfaceVariant)
+            .padding(horizontal = 12.dp, vertical = 6.dp),
         style = TextStyle(
             fontSize = 12.sp,
             fontWeight = FontWeight.Medium,

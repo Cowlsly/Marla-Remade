@@ -318,4 +318,7 @@
     <string name="reminder_notification_default_title">Event reminder</string>
     <!-- ReminderReceiver: Notification body. %1$s = formatted event start time, e.g. 3:00 PM -->
     <string name="reminder_notification_text">Starts at <xliff:g id="start_time" example="3:00 PM">%1$s</xliff:g></string>
+    <!-- Calendar widget day-group headers for the current/next day -->
+    <string name="today">Today</string>
+    <string name="tomorrow">Tomorrow</string>
 </resources>
