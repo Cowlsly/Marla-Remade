@@ -114,4 +114,6 @@
     <string name="food_database_retry">Proovi uuesti</string>
     <string name="route_recorded">Teekond on salvestatud</string>
     <string name="reps"><xliff:g id="reps_count" example="12">%1$s</xliff:g> kordust</string>
+    <string name="metric_lean_body_mass">Rasvavaba kehamass</string>
+    <string name="label_lean_body_mass">Rasvavaba kehamass</string>
 </resources>
