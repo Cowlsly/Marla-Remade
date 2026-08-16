@@ -38,6 +38,8 @@ import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.openAppSettings
+import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import com.vayunmathur.web.platform.shields.ShieldsEngine
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
@@ -120,16 +122,9 @@ private fun PwaBrowser(
     var pendingSysPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
     var pendingGeoCallback by remember { mutableStateOf<Pair<String, GeolocationPermissions.Callback>?>(null) }
 
-    // When a runtime permission is permanently denied (denied with no rationale), the
-    // system dialog no longer appears, so re-triggering from the web page does nothing.
-    // Route the user to app settings so they can still grant it.
-    fun openSettingsIfPermanentlyDenied(permission: String) {
-        if (activity == null ||
-            !ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
-        ) {
-            openAppSettings(context)
-        }
-    }
+    // Geolocation grants on EITHER fine OR coarse, so this keeps the raw multi-permission
+    // launcher (the shared helper reports all-granted, which would wrongly require both).
+    // When both are permanently denied it still routes the user to app settings.
     fun openSettingsIfAnyPermanentlyDenied(result: Map<String, Boolean>) {
         val anyPermanentlyDenied = result.any { (perm, granted) ->
             !granted && (activity == null ||
@@ -138,31 +133,31 @@ private fun PwaBrowser(
         if (anyPermanentlyDenied) openAppSettings(context)
     }
 
-    val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    // camera/mic/both use the shared helper, which opens app settings on permanent denial;
+    // onResult(granted) drives the pending WebView request's grant()/deny().
+    val cameraPermissionRequest = rememberPermissionRequest(Manifest.permission.CAMERA) { granted ->
         if (granted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
-            openSettingsIfPermanentlyDenied(Manifest.permission.CAMERA)
         }
         pendingSysPermissionRequest = null
     }
-    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+    val micPermissionRequest = rememberPermissionRequest(Manifest.permission.RECORD_AUDIO) { granted ->
         if (granted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
-            openSettingsIfPermanentlyDenied(Manifest.permission.RECORD_AUDIO)
         }
         pendingSysPermissionRequest = null
     }
-    val multiLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
-        val allGranted = result.values.all { it }
+    val cameraMicPermissionRequest = rememberMultiplePermissionRequest(
+        arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
+    ) { allGranted ->
         if (allGranted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
-            openSettingsIfAnyPermanentlyDenied(result)
         }
         pendingSysPermissionRequest = null
     }
@@ -347,9 +342,9 @@ private fun PwaBrowser(
                             if (!hasCamera || !hasMic) {
                                 pendingSysPermissionRequest = request
                                 when {
-                                    needsCamera && needsMic -> multiLauncher.launch(arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO))
-                                    needsCamera -> cameraLauncher.launch(Manifest.permission.CAMERA)
-                                    needsMic -> micLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                                    needsCamera && needsMic -> cameraMicPermissionRequest()
+                                    needsCamera -> cameraPermissionRequest()
+                                    needsMic -> micPermissionRequest()
                                 }
                                 return
                             }
