@@ -29,6 +29,7 @@ import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import androidx.compose.ui.res.painterResource
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -81,8 +82,8 @@ fun CapturePdfScreen(
         )
     }
 
-    val cameraPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val cameraPermissionRequest = rememberPermissionRequest(
+        Manifest.permission.CAMERA
     ) { isGranted ->
         hasCameraPermission = isGranted
     }
@@ -285,7 +286,7 @@ fun CapturePdfScreen(
                             verticalArrangement = Arrangement.Center,
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            Button(onClick = { cameraPermissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                            Button(onClick = cameraPermissionRequest) {
                                 Text(stringResource(R.string.request_camera_permission))
                             }
                             Button(onClick = { galleryLauncher.launch("image/*") }, Modifier.padding(top = 8.dp)) {
