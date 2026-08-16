@@ -11,9 +11,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import com.vayunmathur.library.ui.AppScaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -41,12 +40,13 @@ fun GameBoardScreen(state: SolitaireUiState, mode: GameMode, actions: SolitaireA
     val elapsed = activeGame?.third ?: 0
     val modeName = mode.displayName()
     val timeText = "%02d:%02d".format(elapsed / 60, elapsed % 60)
-    Scaffold(topBar = {
-        TopAppBar(title = { Text(modeName) }, actions = {
+    AppScaffold(
+        title = modeName,
+        actions = {
             Text(timeText, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
             Text("{stringResource(R.string.moves)}: moveCount", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
-        })
-    }) { innerPadding ->
+        }
+    ) { innerPadding ->
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 8.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 GameActionBar(onUndo = { actions.undo() }, onGiveUp = { actions.giveUp(); onExit() }, undoEnabled = state.history.isNotEmpty() && !isWon)
