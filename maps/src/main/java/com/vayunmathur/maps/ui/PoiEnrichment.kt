@@ -58,14 +58,17 @@ import kotlin.time.Clock
  * which handles its own vertical scroll — no nested vertical LazyColumn).
  */
 @Composable
-fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean) {
+fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle: Boolean = true) {
     if (info.isEmpty) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Price · category subtitle (rating itself is shown by the caller's header).
-        val subtitle = listOfNotNull(info.priceText?.ifBlank { null }, info.category?.ifBlank { null })
-            .joinToString(" \u00B7 ")
-        if (subtitle.isNotBlank()) {
-            Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        // The reworked place sheet renders these in its own header, so it opts out.
+        if (showSubtitle) {
+            val subtitle = listOfNotNull(info.priceText?.ifBlank { null }, info.category?.ifBlank { null })
+                .joinToString(" \u00B7 ")
+            if (subtitle.isNotBlank()) {
+                Text(subtitle, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
         }
 
         info.editorialSummary?.let {

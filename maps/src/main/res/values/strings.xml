@@ -87,6 +87,18 @@
     <string name="directions">Directions</string>
     <!-- Button: Add selected place as stop on route -->
     <string name="add_stop_to_route">Add Stop to Route</string>
+    <!-- Place sheet action row: call the place's phone number -->
+    <string name="place_action_call">Call</string>
+    <!-- Place sheet action row: open the place's website -->
+    <string name="place_action_website">Website</string>
+    <!-- Place sheet action row: share the place -->
+    <string name="place_action_share">Share</string>
+    <!-- Place sheet action row: save the place (bookmark) -->
+    <string name="place_action_save">Save</string>
+    <!-- Place sheet action row: place is already saved -->
+    <string name="place_action_saved">Saved</string>
+    <!-- Share sheet body. %1$s=place name, %2$s=maps URL -->
+    <string name="place_share_text"><xliff:g id="name" example="Blue Bottle Coffee">%1$s</xliff:g>\n<xliff:g id="url" example="https://maps.google.com/?q=37.0,-122.0">%2$s</xliff:g></string>
     <!-- Label: Place is currently open. Adjective. -->
     <string name="open_status">Open</string>
     <!-- Label: Place is closed. Adjective. -->

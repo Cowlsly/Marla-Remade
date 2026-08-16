@@ -65,7 +65,7 @@ fun BottomSheetContent(
         }
         is SpecificFeature.Restaurant -> {
             Column {
-                RestaurantBottomSheet(viewModel, inactiveNavigation, selectedFeature) {
+                PlaceSheet(viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature) {
                     if(inactiveNavigation == null) {
                         setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
                     } else {
@@ -77,7 +77,7 @@ fun BottomSheetContent(
         }
         is SpecificFeature.GenericPlace -> {
             Column {
-                RestaurantBottomSheet(viewModel, inactiveNavigation, selectedFeature) {
+                PlaceSheet(viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature) {
                     if (inactiveNavigation == null) {
                         setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
                     } else {
