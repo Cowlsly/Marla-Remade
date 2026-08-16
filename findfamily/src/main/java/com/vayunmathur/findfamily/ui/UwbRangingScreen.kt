@@ -1,8 +1,6 @@
 package com.vayunmathur.findfamily.ui
 
 import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +14,7 @@ import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -74,13 +73,13 @@ fun UwbRangingScreen(
             ) == PackageManager.PERMISSION_GRANTED
         )
     }
-    val permLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val requestRangingPermission = rememberPermissionRequest(
+        "android.permission.RANGING"
     ) { granted -> hasRangingPermission = granted }
 
     LaunchedEffect(hasRangingPermission) {
         if (!hasRangingPermission) {
-            permLauncher.launch("android.permission.RANGING")
+            requestRangingPermission()
             return@LaunchedEffect
         }
         // Three cases when the screen opens:

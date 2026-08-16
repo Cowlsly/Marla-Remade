@@ -4,10 +4,8 @@ import android.Manifest
 import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -48,6 +46,8 @@ import com.vayunmathur.findfamily.ui.dialogs.AddPersonDialog
 import com.vayunmathur.findfamily.ui.dialogs.AddTrackerDialog
 import com.vayunmathur.findfamily.ui.dialogs.decodeBase26
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.dialog.DatePickerDialog
 import com.vayunmathur.library.util.DialogPage
 import com.vayunmathur.library.util.MainNavigation
@@ -168,21 +168,18 @@ fun NoPermissionsScreen(
 
     // Request fine AND coarse together. On Android 12+ this is what surfaces the
     // Precise/Approximate choice; requesting fine alone is ignored by the system.
-    val locationLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { result ->
-        onPermissionsChanged()
-        val fineGranted = result[Manifest.permission.ACCESS_FINE_LOCATION] == true
-        val coarseGranted = result[Manifest.permission.ACCESS_COARSE_LOCATION] == true
-        // Approximate-only: prompt the user to upgrade to precise.
-        if (!fineGranted && coarseGranted) {
-            showUpgradeDialog = true
-        }
-    }
+    // Approximate-only handling stays in LaunchedEffect(coarseOnly) below; the shared
+    // helper opens app settings when fine+coarse are permanently denied.
+    val requestLocation = rememberMultiplePermissionRequest(
+        arrayOf(
+            Manifest.permission.ACCESS_FINE_LOCATION,
+            Manifest.permission.ACCESS_COARSE_LOCATION,
+        )
+    ) { onPermissionsChanged() }
 
-    // Launcher for Background Location (Redirects to Settings)
-    val backgroundLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    // Background location: the shared helper opens app settings on permanent denial.
+    val requestBackground = rememberPermissionRequest(
+        Manifest.permission.ACCESS_BACKGROUND_LOCATION
     ) { onPermissionsChanged() }
 
     // Auto-surface the upgrade prompt when we first detect approximate-only.
@@ -200,14 +197,7 @@ fun NoPermissionsScreen(
         ) {
             // STEP 1: Precise (Fine) Location
             Button(
-                onClick = {
-                    locationLauncher.launch(
-                        arrayOf(
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                            Manifest.permission.ACCESS_COARSE_LOCATION
-                        )
-                    )
-                },
+                onClick = { requestLocation() },
                 enabled = !hasFine
             ) {
                 Text(if (hasFine) stringResource(R.string.permission_fine_location_granted) else stringResource(R.string.permission_grant_fine_location))
@@ -231,7 +221,7 @@ fun NoPermissionsScreen(
 
             // STEP 2: Background Location
             Button(
-                onClick = { backgroundLauncher.launch(Manifest.permission.ACCESS_BACKGROUND_LOCATION) },
+                onClick = { requestBackground() },
                 enabled = hasFine && !hasBackground
             ) {
                 val label = if (hasBackground) stringResource(R.string.permission_background_granted) else stringResource(R.string.permission_enable_all_the_time)
@@ -255,12 +245,7 @@ fun NoPermissionsScreen(
             message = stringResource(R.string.permission_upgrade_dialog_message),
             confirmLabel = stringResource(R.string.permission_upgrade_dialog_confirm),
             dismissLabel = stringResource(R.string.permission_upgrade_dialog_dismiss),
-            onConfirm = { locationLauncher.launch(
-                        arrayOf(
-                            Manifest.permission.ACCESS_FINE_LOCATION,
-                            Manifest.permission.ACCESS_COARSE_LOCATION
-                        )
-                    ) },
+            onConfirm = { requestLocation() },
             onDismiss = { showUpgradeDialog = false },
         )
     }

@@ -15,10 +15,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.result.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.core.content.PermissionChecker
 import androidx.core.database.getBlobOrNull
 import androidx.core.database.getStringOrNull
 import com.vayunmathur.findfamily.R
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import kotlinx.coroutines.launch
 import kotlin.io.encoding.Base64
 
@@ -132,23 +132,11 @@ class Platform(private val context: Context) {
                         Log.e("Platform", "Error querying contact from picker URI: $uri", e)
                     }
                 }
-            val permissionLauncher =
-                rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
-                    if (it) {
-                        launcher.launch()
-                    }
+            val requestContactsPermission =
+                rememberPermissionRequest(Manifest.permission.READ_CONTACTS) { granted ->
+                    if (granted) launcher.launch()
                 }
-            return {
-                if (PermissionChecker.checkSelfPermission(
-                        context,
-                        Manifest.permission.READ_CONTACTS
-                    ) == PermissionChecker.PERMISSION_GRANTED
-                ) {
-                    launcher.launch()
-                } else {
-                    permissionLauncher.launch(Manifest.permission.READ_CONTACTS)
-                }
-            }
+            return { requestContactsPermission() }
         }
     }
 
