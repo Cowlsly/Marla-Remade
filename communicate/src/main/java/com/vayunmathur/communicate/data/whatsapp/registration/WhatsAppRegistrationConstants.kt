@@ -35,6 +35,21 @@ object WhatsAppRegistrationConstants {
     /** MD5(classes.dex) of the pinned base.apk, lower-case hex (16 bytes). */
     const val CLASSES_DEX_MD5_HEX = "eda19e0c342f17d7aae9ae5e4d50e439"
 
+    /**
+     * Official-identity values for the `_gi` device-integrity blob, so it describes the REAL
+     * WhatsApp app rather than this client. Extracted from the SAME pinned APK as everything else
+     * (com.whatsapp base.apk, versionName 2.26.29.73 / versionCode 262907320, pulled from the device
+     * via `adb pull` — NOT committed). Keep in sync with [CLASSES_DEX_MD5_HEX], the bundled
+     * signing cert + about_logo.png, and [WhatsAppProtocol.WA_VERSION] (all one APK).
+     */
+    const val OFFICIAL_APK_SHA256_B64 = "38wasuL4WBcWVxf5K0p6dc6ELF+OvBqshecYAn1awkM="
+
+    /** Official com.whatsapp base.apk size in bytes (same pinned APK), for the `_gi` blob. */
+    const val OFFICIAL_APK_SIZE = 120328807L
+
+    /** Canonical official install path for the `_gi` blob (the real path is per-install random). */
+    const val OFFICIAL_SOURCE_DIR = "/data/app/com.whatsapp/base.apk"
+
     /** Registration server static X25519 public key, hex (p000X/ES4.java). Used by the ENC wrapper. */
     const val REG_SERVER_X25519_PUBKEY_HEX =
         "8e8c0f74c3ebc5d7a6865c6c3c843856b06121cce8ea774d22fb6f122512302d"

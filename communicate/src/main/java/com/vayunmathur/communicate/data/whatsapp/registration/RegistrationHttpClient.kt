@@ -435,16 +435,15 @@ class RegistrationHttpClient(
         /**
          * Add the per-endpoint device-integrity signals (w2.md §2.3/§3.1-3.3, Phase B 2e) from
          * [RegistrationIntegrity]. `gpia`/`_gg` (Play Integrity) and `recaptcha` are intentionally
-         * NOT sent — they are bound to the official signed WhatsApp app identity and an unofficial
-         * client cannot mint server-valid tokens (documented, not faked).
+         * NOT sent — they are signed by Google / bound to the official Play-installed WhatsApp and
+         * cannot be forged by this client (see the gpia report).
          *
-         * DEFAULT OFF (see [SEND_INTEGRITY_SIGNALS]): the honest signals we *can* compute
-         * (`_gi` = ENC of THIS app's apk/cert/package, `aid`, `_gp`) positively identify the client
-         * as non-WhatsApp, which is strictly worse than omitting them. The last live-verified
-         * registration (whatsapp-documentation.md §2, pre-`e7e120`) sent NONE of these, so by default
-         * we restore that verified param set and this method is a no-op.
+         * ON by default (see [SEND_INTEGRITY_SIGNALS]): the signals we *do* send now carry the
+         * OFFICIAL WhatsApp identity — `_gi` reports `package=com.whatsapp` + the official base.apk
+         * SHA-256/size, and `_gp` hashes WhatsApp's manifest permissions — so they look like the real
+         * app rather than this client. `aid` is the real device Android ID (already authentic).
          *
-         * Inclusion per endpoint (only when the switch is flipped on for experimentation):
+         * Inclusion per endpoint:
          *  - EXIST:    aid,_gi,_gp,_ge,_ga,_gs,db  (+profile_name; no t)
          *  - CODE:     aid,_gi,_gp,_ge,_ga,_gs,t,hasav
          *  - REGISTER: aid,_gi,_gp,_ge,_ga,_gs,t
@@ -530,18 +529,17 @@ class RegistrationHttpClient(
 
         /**
          * Master switch for the Phase-B device-integrity signals
-         * (`aid`,`_gi`,`_gp`,`_ge`,`_ga`,`_gs`,`t`,`hasav`,`db`,`profile_name`) added in `e7e120`.
+         * (`aid`,`_gi`,`_gp`,`_ge`,`_ga`,`_gs`,`t`,`hasav`,`db`,`profile_name`).
          *
-         * DEFAULT **false** — restores the last live-verified registration param set
-         * (whatsapp-documentation.md §2 / base commit `33dd602`, which returned `status:ok`). These
-         * signals were added AFTER that success and never validated live; critically `_gi` is an ENC
-         * blob the server decrypts to `package=com.vayunmathur.communicate` + this app's apk/cert
-         * hash, and `aid`/`_gp` further fingerprint the non-official app. Since we also cannot mint
-         * the server-required Play-Integrity / reCAPTCHA-Enterprise proofs, sending honest-but-wrong
-         * -app integrity can only hurt. Flip to `true` only to experiment (the wire shapes are still
-         * validated by WhatsAppRegistrationBadParamRegressionTest.addIntegrity_perEndpointCorrectFields).
+         * ON — the blob now carries the OFFICIAL WhatsApp identity (see [RegistrationIntegrity]):
+         * `_gi` reports `package=com.whatsapp` + the official base.apk SHA-256/size, and `_gp` hashes
+         * WhatsApp's manifest permissions, so the signals look like the real app instead of this
+         * client. (`aid` is the real device Android ID, already authentic.) The Play-Integrity /
+         * reCAPTCHA-Enterprise proofs are still NOT sent — they are signed by Google / bound to the
+         * official Play app and cannot be forged (see the integrity report). Set false to fall back
+         * to the verified-live param set with no integrity signals at all.
          */
-        private const val SEND_INTEGRITY_SIGNALS = false
+        private const val SEND_INTEGRITY_SIGNALS = true
     }
 
     /** WAMSYS endpoint kinds that carry per-endpoint integrity params (w2.md §3.1-3.3). */

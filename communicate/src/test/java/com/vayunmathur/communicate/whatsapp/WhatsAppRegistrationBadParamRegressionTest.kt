@@ -366,12 +366,11 @@ class WhatsAppRegistrationBadParamRegressionTest {
             val snippet = src.substring(existIdx, minOf(src.length, existIdx + 2000))
             assertTrue(snippet.contains("token"), "checkExist must include token param (bad_param fix w2.md §3.1)")
             assertTrue(snippet.contains("computeToken"), "checkExist token must be via computeToken")
-            // Phase-B device-integrity signals are gated OFF by default (restored verified-live
-            // param set from base commit 33dd602): _gi/aid/_gp must NOT be sent, so the master
-            // switch has to be disabled. (The addIntegrity() body itself early-returns on it.)
+            assertTrue(snippet.contains("EndpointKind.EXIST"), "checkExist must addIntegrity(EXIST)")
+            // Integrity signals are ON but carry the OFFICIAL WhatsApp identity (not this client).
             assertTrue(
-                src.contains("SEND_INTEGRITY_SIGNALS = false"),
-                "integrity signals must be gated OFF by default (restored verified-live param set)",
+                src.contains("SEND_INTEGRITY_SIGNALS = true"),
+                "integrity signals must be enabled (official-identity mode)",
             )
         }
     }
@@ -408,6 +407,42 @@ class WhatsAppRegistrationBadParamRegressionTest {
         // Also verify the pure encoders for t and aid match spec
         assertEquals(8, Base64.getDecoder().decode(RegistrationIntegrity.tField(0L)).size)
         assertEquals(44, RegistrationIntegrity.aidOf("test").length)
+    }
+
+    @Test
+    fun integrity_giAndGpUseOfficialWhatsAppIdentity() {
+        // _gi must carry the OFFICIAL WhatsApp package + official base.apk hash/size (same pinned APK
+        // as the token), NOT this client's identity.
+        val constSrc = tryReadSource("communicate/src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/WhatsAppRegistrationConstants.kt")
+            ?: tryReadSource("src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/WhatsAppRegistrationConstants.kt")
+        if (constSrc != null) {
+            assertTrue(constSrc.contains("OFFICIAL_APK_SHA256_B64"), "must pin official base.apk sha256")
+            assertTrue(
+                constSrc.contains("38wasuL4WBcWVxf5K0p6dc6ELF+OvBqshecYAn1awkM="),
+                "official base.apk sha256 (b64) must be the pinned 2.26.29.73 value",
+            )
+            assertTrue(constSrc.contains("OFFICIAL_APK_SIZE = 120328807"), "must pin official base.apk size")
+        }
+        val integSrc = tryReadSource("communicate/src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/RegistrationIntegrity.kt")
+            ?: tryReadSource("src/main/java/com/vayunmathur/communicate/data/whatsapp/registration/RegistrationIntegrity.kt")
+        if (integSrc != null) {
+            val giIdx = integSrc.indexOf("fun buildGi")
+            assertTrue(giIdx >= 0, "buildGi must exist")
+            val gi = integSrc.substring(giIdx, minOf(integSrc.length, giIdx + 1200))
+            assertTrue(gi.contains("OFFICIAL_APK_SHA256_B64"), "_gi must use the official apk sha256")
+            assertTrue(gi.contains("PACKAGE_NAME"), "_gi package must be the official com.whatsapp const")
+            assertFalse(gi.contains("context.packageName"), "_gi must NOT use this client's package")
+            assertFalse(gi.contains("readBytes"), "_gi must NOT hash this client's own apk")
+            // _gp must hash the OFFICIAL WhatsApp permission set, not this client's manifest.
+            assertTrue(
+                integSrc.contains("permissionsHashOf(OFFICIAL_WHATSAPP_PERMISSIONS)"),
+                "_gp must hash the official WhatsApp permission set",
+            )
+            assertFalse(integSrc.contains("manifestPermissions("), "must not hash this client's manifest permissions")
+            // The official permission set must include WhatsApp-specific permissions.
+            assertTrue(integSrc.contains("com.whatsapp.permission.REGISTRATION"), "official perms must be WhatsApp's")
+        }
+        assertEquals("com.whatsapp", WhatsAppRegistrationConstants.PACKAGE_NAME)
     }
 
     @Test
