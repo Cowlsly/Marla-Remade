@@ -110,7 +110,6 @@
     <string name="az">азимут:</string>
     <string name="el">высота:</string>
     <string name="point_the_back_of_your_phone_toward_your">Направьте заднюю часть телефона на контакт</string>
-    <string name="app_name">Найти семью</string>
     <string name="notification_channel_location_tracking_name">Отслеживание местоположения</string>
     <string name="notification_channel_location_tracking_desc">FindFamily использует для обновления данных о местоположении в фоновом режиме</string>
     <string name="notification_channel_battery_name">Оповещения про батарею</string>

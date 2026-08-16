@@ -15,7 +15,6 @@
     <string name="since_just_now">Právě teď</string>
     <string name="today">dnes</string>
     <string name="yesterday">včera</string>
-    <string name="app_name">Najít rodinu</string>
     <string name="notification_channel_location_tracking_name">Sledování polohy</string>
     <string name="notification_tracking_text">Sdílení polohy s vybranými kontakty</string>
     <string name="notification_low_battery"><xliff:g id="person_name" example="Jan">%1$s</xliff:g> má nízkou baterii</string>

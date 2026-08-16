@@ -60,7 +60,6 @@
     <string name="time_very_soon">très bientôt</string>
     <string name="notification_tracking_text">Partage de la position avec les contacts sélectionnés</string>
     <string name="waypoint_range_suffix">mètres</string>
-    <string name="app_name">Trouver sa famille</string>
     <string name="section_temporary_links">Liens temporaires</string>
     <string name="notification_channel_location_tracking_desc">Utilisé pour les mises à jour de localisation en arrière-plan de Trouver sa famille</string>
     <string name="time_in_hours">en %1$d heures</string>

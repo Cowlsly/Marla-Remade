@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- MainActivity / launcher: App name. Noun, proper name -->
-    <string name="app_name">Find Family</string>
+    <string name="app_name" translatable="false">Find Family</string>
 
     <!-- LocationTrackingService: Notification channel name for foreground location tracking. Noun -->
     <string name="notification_channel_location_tracking_name">Location Tracking</string>

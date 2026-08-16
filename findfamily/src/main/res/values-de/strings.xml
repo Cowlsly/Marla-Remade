@@ -2,7 +2,6 @@
 <resources>
     <string name="notification_channel_battery_name">Akku Alarm</string>
     <string name="notification_channel_location_tracking_name">Standortverfolgung</string>
-    <string name="app_name">Find Family</string>
     <string name="notification_channel_location_tracking_desc">Wird genutzt um FindFamily Ortung auch im Hintergrund durchzuführen</string>
     <string name="notification_channel_battery_desc">Benachrichtigen wenn Familienmitglied niedrigen Akkustand hat</string>
     <string name="notification_channel_entry_exit_name">Ankünfte und Abfahrten</string>
