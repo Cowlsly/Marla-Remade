@@ -1,5 +1,6 @@
 package com.vayunmathur.maps.util
 import android.app.Application
+import android.hardware.SensorManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.maps.data.SpecificFeature
@@ -21,6 +22,11 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     private val _userBearing = MutableStateFlow(0f)
     val userBearing = _userBearing.asStateFlow()
 
+    // Magnetometer accuracy backing the compass calibration banner. Defaults to
+    // HIGH so the banner stays hidden until the sensor reports a lower value.
+    private val _userHeadingAccuracy = MutableStateFlow(SensorManager.SENSOR_STATUS_ACCURACY_HIGH)
+    val userHeadingAccuracy = _userHeadingAccuracy.asStateFlow()
+
     val locationManager = FrameworkLocationManager(application)
 
     // Small cache of reviews keyed by (name, lat, lon) to avoid refetching the
@@ -33,10 +39,15 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     }
 
     init {
-        locationManager.startUpdates { position, bearing ->
-            _userPosition.value = position
-            _userBearing.value = bearing
-        }
+        locationManager.startUpdates(
+            onUpdateReceived = { position, bearing ->
+                _userPosition.value = position
+                _userBearing.value = bearing
+            },
+            onAccuracyReceived = { accuracy ->
+                _userHeadingAccuracy.value = accuracy
+            },
+        )
     }
 
     override fun onCleared() {

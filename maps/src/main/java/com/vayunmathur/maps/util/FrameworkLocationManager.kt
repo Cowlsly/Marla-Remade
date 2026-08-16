@@ -23,14 +23,20 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
 
     // Callback to pass both Position and Heading (Compass)
     private var onUpdate: ((Position, Float) -> Unit)? = null
+    // Callback for magnetometer accuracy so the UI can prompt for calibration.
+    private var onAccuracy: ((Int) -> Unit)? = null
     private var lastLocation: Location? = null
     private var currentHeading: Float = 0f
     /** Listener we registered with the OS so [stop] can unregister it. */
     private var registeredLocationListener: LocationListener? = null
 
     @SuppressLint("MissingPermission")
-    fun startUpdates(onUpdateReceived: (Position, Float) -> Unit): LocationListener {
+    fun startUpdates(
+        onUpdateReceived: (Position, Float) -> Unit,
+        onAccuracyReceived: (Int) -> Unit = {},
+    ): LocationListener {
         this.onUpdate = onUpdateReceived
+        this.onAccuracy = onAccuracyReceived
 
         // 1. Setup GPS Updates
         val locationListener = object : LocationListener {
@@ -73,6 +79,7 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
         registeredLocationListener = null
         runCatching { sensorManager.unregisterListener(this) }
         onUpdate = null
+        onAccuracy = null
     }
 
     override fun onSensorChanged(event: SensorEvent) {
@@ -102,5 +109,10 @@ class FrameworkLocationManager(context: Context) : SensorEventListener {
         }
     }
 
-    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {
+        // Only the magnetometer's accuracy reflects compass calibration state.
+        if (sensor?.type == Sensor.TYPE_MAGNETIC_FIELD) {
+            onAccuracy?.invoke(accuracy)
+        }
+    }
 }

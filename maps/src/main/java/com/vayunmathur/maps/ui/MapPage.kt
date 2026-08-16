@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.BottomSheetScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.CompassCalibrationBanner
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
@@ -185,6 +186,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // --- LOCATION & OSM INITIALIZATION ---
     val userPosition by viewModel.userPosition.collectAsState()
     val userBearing by viewModel.userBearing.collectAsState()
+    val userHeadingAccuracy by viewModel.userHeadingAccuracy.collectAsState()
 
     val inactiveNavigation by viewModel.inactiveNavigation.collectAsState()
 
@@ -453,6 +455,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 leadingIcon = { IconWork(Modifier.size(18.dp)) },
                             )
                         }
+                        Spacer(Modifier.height(8.dp))
+                        // Compass calibration hint for the heading puck; self-hides at HIGH accuracy.
+                        CompassCalibrationBanner(userHeadingAccuracy)
                     }
                 }
 
