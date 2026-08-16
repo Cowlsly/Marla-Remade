@@ -57,6 +57,8 @@ fun PollenBlock(air: AirQualityCurrent?) {
             text = label,
             modifier = Modifier.align(Alignment.BottomCenter).offset(y = (-20).dp),
             style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

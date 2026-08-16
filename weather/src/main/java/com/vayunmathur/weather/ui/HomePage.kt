@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DrawerState
@@ -28,7 +29,6 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.PullToRefreshBox
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -83,6 +83,8 @@ fun HomePage(backStack: NavBackStack<Route>, viewModel: WeatherViewModel) {
         // Room hasn't answered yet. Hold a plain surface rather than falling
         // through to EmptyHome, which would flash the location chooser on
         // every cold start before the saved rows arrive.
+        // RAW SCAFFOLD EXCEPTION: cold-start placeholder — a bare, bar-less,
+        // content-less surface. No shared scaffold applies (they all draw chrome).
         Scaffold(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh) {}
         return
     }
@@ -207,6 +209,10 @@ fun HomeScreen(
         },
     ) {
         Scaffold(
+            // RAW SCAFFOLD EXCEPTION: bespoke full-bleed home. The forecast
+            // scrolls under a floating in-content MainSearchBar (there is no top
+            // app bar), inside a ModalNavigationDrawer + PullToRefreshBox, and the
+            // body consumes the scaffold insets itself. No shared scaffold fits.
             containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
         ) { paddingValues ->
             ForecastColumn(
@@ -390,7 +396,7 @@ private fun ForecastColumn(
 private fun EmptyHome(viewModel: WeatherViewModel, onAddLocation: () -> Unit) {
     val (onUseCurrent, requesting) = rememberRequestDeviceLocation(viewModel)
 
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.weather_title)) }) }) { padding ->
+    AppScaffold(title = stringResource(R.string.weather_title)) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(stringResource(R.string.no_locations_yet), style = MaterialTheme.typography.titleMedium)

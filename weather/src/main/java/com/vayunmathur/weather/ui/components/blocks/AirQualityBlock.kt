@@ -58,8 +58,10 @@ fun AirQualityBlock(air: AirQualityCurrent?) {
                 text = levelRes?.let { stringResource(it) } ?: "—",
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.End,
+                maxLines = 2,
+                softWrap = true,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
             )
         }
     }

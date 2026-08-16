@@ -43,6 +43,8 @@ fun BlockHeader(
             text = title,
             style = MaterialTheme.typography.titleMedium,
             fontWeight = FontWeight.Bold,
+            maxLines = 2,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.9f),
         )
     }
@@ -68,6 +70,7 @@ fun RiseSetTimeRow(
             color = MaterialTheme.colorScheme.onSurface,
             style = style,
             maxLines = 1,
+            softWrap = true,
         )
     }
 }

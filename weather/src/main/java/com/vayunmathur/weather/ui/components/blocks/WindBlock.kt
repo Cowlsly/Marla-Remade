@@ -71,12 +71,14 @@ fun WindBlock(current: Current, unit: WindUnit) {
             }
             Text(
                 text = stringResource(R.string.from_gusts, compassDirection(current.windDirection), formatWind(current.windGusts, unit)),
-                style = MaterialTheme.typography.bodyLarge,
+                style = MaterialTheme.typography.bodyMedium,
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 20.dp)
                     .padding(horizontal = 16.dp),
                 textAlign = TextAlign.Center,
+                maxLines = 2,
+                softWrap = true,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }

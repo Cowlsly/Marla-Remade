@@ -58,6 +58,8 @@ fun PrecipitationBlock(
                 Text(
                     text = unit,
                     style = MaterialTheme.typography.bodyMedium,
+                    maxLines = 1,
+                    softWrap = true,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
@@ -68,6 +70,8 @@ fun PrecipitationBlock(
                         modifier = Modifier.align(Alignment.Center),
                         style = MaterialTheme.typography.labelLarge,
                         textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        softWrap = true,
                         color = MaterialTheme.colorScheme.primary,
                     )
                 }

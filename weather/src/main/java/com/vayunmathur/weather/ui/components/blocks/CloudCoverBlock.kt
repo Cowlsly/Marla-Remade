@@ -1,13 +1,16 @@
 package com.vayunmathur.weather.ui.components.blocks
 
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.IconCloudy
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
@@ -44,8 +47,15 @@ fun CloudCoverBlock(current: Current) {
         )
         Text(
             text = stringResource(labelRes),
-            modifier = Modifier.align(Alignment.BottomCenter).offset(y = (-26).dp),
-            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .offset(y = (-26).dp)
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

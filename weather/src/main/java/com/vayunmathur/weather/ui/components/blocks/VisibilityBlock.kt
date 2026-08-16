@@ -55,6 +55,8 @@ fun VisibilityBlock(current: Current, useMiles: Boolean = false) {
             text = unit,
             modifier = Modifier.align(Alignment.BottomCenter).offset(y = (-30).dp),
             style = MaterialTheme.typography.bodyMedium,
+            maxLines = 1,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

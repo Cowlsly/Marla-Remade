@@ -8,8 +8,11 @@ import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 
 /**
@@ -17,6 +20,11 @@ import androidx.compose.ui.unit.dp
  * with a 2.dp shadow and the given [shape], wrapping a square
  * (`aspectRatio(1f)`) [Box] that fills it. Blocks lay out their content with
  * the usual [BoxScope] alignment modifiers.
+ *
+ * Block content runs with the font scale capped at 1.3×: the tile is a fixed
+ * square/circle, so at large system font sizes the big value would otherwise
+ * overflow the shape. Capping lets text still grow with accessibility settings
+ * but bounds it so it always fits.
  */
 @Composable
 fun StatBlock(
@@ -28,7 +36,16 @@ fun StatBlock(
         shape = shape,
         shadowElevation = 2.dp,
     ) {
-        Box(modifier = Modifier.fillMaxSize().aspectRatio(1f), content = content)
+        Box(modifier = Modifier.fillMaxSize().aspectRatio(1f)) {
+            CompositionLocalProvider(
+                LocalDensity provides Density(
+                    density = LocalDensity.current.density,
+                    fontScale = LocalDensity.current.fontScale.coerceAtMost(1.3f),
+                ),
+            ) {
+                this@Box.content()
+            }
+        }
     }
 }
 

@@ -2,7 +2,9 @@ package com.vayunmathur.weather.ui.components.blocks
 
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.ExperimentalMaterial3ExpressiveApi
 import com.vayunmathur.library.ui.IconSunny
 import com.vayunmathur.library.ui.MaterialShapes
@@ -14,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.weather.R
@@ -95,8 +98,15 @@ fun UvIndexBlock(uvIndex: Double?) {
         )
         Text(
             text = labelRes?.let { stringResource(it) } ?: "—",
-            modifier = Modifier.align(Alignment.BottomCenter).offset(y = (-35).dp),
-            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .offset(y = (-35).dp)
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp),
+            style = MaterialTheme.typography.bodySmall,
+            textAlign = TextAlign.Center,
+            maxLines = 2,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
     }

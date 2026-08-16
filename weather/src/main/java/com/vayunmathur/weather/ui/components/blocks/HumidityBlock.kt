@@ -78,6 +78,8 @@ private fun DewPointRow(dewPointCelsius: Double, tempUnit: TemperatureUnit) {
                 Text(
                     formatTemperatureCompact(dewPointCelsius, tempUnit),
                     style = MaterialTheme.typography.titleMedium,
+                    maxLines = 1,
+                    softWrap = true,
                     color = MaterialTheme.colorScheme.onPrimary,
                 )
             }
@@ -86,6 +88,8 @@ private fun DewPointRow(dewPointCelsius: Double, tempUnit: TemperatureUnit) {
         Text(
             stringResource(R.string.dew_point),
             style = MaterialTheme.typography.labelLarge,
+            maxLines = 2,
+            softWrap = true,
             color = MaterialTheme.colorScheme.onSurface,
         )
     }

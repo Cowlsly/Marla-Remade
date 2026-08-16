@@ -13,7 +13,6 @@ import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -39,9 +38,9 @@ import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.TopAppBarDefaults
@@ -241,8 +240,11 @@ fun LocationsScreen(
         }
     }
 
-    Scaffold(
+    LazyListScaffold(
         containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        state = listState,
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(8.dp),
         topBar = {
             TopAppBar(
                 colors = TopAppBarDefaults.topAppBarColors(
@@ -286,66 +288,53 @@ fun LocationsScreen(
                 }
             }
         },
-    ) { paddingValues ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = paddingValues.calculateTopPadding(), bottom = paddingValues.calculateBottomPadding()),
-        ) {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp),
-            ) {
-                val showDeviceLocationCard = localData.none { it.location.isCurrent }
-                if (showDeviceLocationCard) {
-                    item {
-                        UseDeviceLocationCard(
-                            onClick = { if (!state.deviceLocationLoading) onUseDeviceLocation() },
-                            isLoading = state.deviceLocationLoading,
-                        )
-                        Spacer(Modifier.height(8.dp))
-                    }
-                }
-                itemsIndexed(localData, key = { _, item -> item.location.id }) { idx, row ->
-                    val loc = row.location
-                    ReorderableItem(reorderState, key = loc.id) { isDragging ->
-                        val elevation by animateDpAsState(if (isDragging) 6.dp else 0.dp)
-                        LocationItem(
-                            location = loc,
-                            description = row.description,
-                            currentWeatherCode = row.weatherCode,
-                            isDay = row.isDay,
-                            isSelected = loc.id == state.activeLocationId,
-                            onClick = { onLocationSelect(loc) },
-                            onLongClick = { longPressedLocation = loc },
-                            modifier = Modifier.shadow(elevation, MaterialTheme.shapes.extraLarge),
-                            dragHandle = if (localData.size > 1) {
-                                {
-                                    IconButton(
-                                        onClick = {},
-                                        modifier = Modifier.draggableHandle(
-                                            reorderState,
-                                            key = loc.id,
-                                            index = idx,
-                                            onDragStarted = {
-                                                haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
-                                            },
-                                            onDragStopped = {
-                                                haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
-                                            },
-                                        ),
-                                    ) {
-                                        IconDragHandle(tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                                    }
-                                }
-                            } else {
-                                null
-                            },
-                        )
-                    }
-                }
+    ) {
+        val showDeviceLocationCard = localData.none { it.location.isCurrent }
+        if (showDeviceLocationCard) {
+            item {
+                UseDeviceLocationCard(
+                    onClick = { if (!state.deviceLocationLoading) onUseDeviceLocation() },
+                    isLoading = state.deviceLocationLoading,
+                )
+                Spacer(Modifier.height(8.dp))
+            }
+        }
+        itemsIndexed(localData, key = { _, item -> item.location.id }) { idx, row ->
+            val loc = row.location
+            ReorderableItem(reorderState, key = loc.id) { isDragging ->
+                val elevation by animateDpAsState(if (isDragging) 6.dp else 0.dp)
+                LocationItem(
+                    location = loc,
+                    description = row.description,
+                    currentWeatherCode = row.weatherCode,
+                    isDay = row.isDay,
+                    isSelected = loc.id == state.activeLocationId,
+                    onClick = { onLocationSelect(loc) },
+                    onLongClick = { longPressedLocation = loc },
+                    modifier = Modifier.shadow(elevation, MaterialTheme.shapes.extraLarge),
+                    dragHandle = if (localData.size > 1) {
+                        {
+                            IconButton(
+                                onClick = {},
+                                modifier = Modifier.draggableHandle(
+                                    reorderState,
+                                    key = loc.id,
+                                    index = idx,
+                                    onDragStarted = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.GestureThresholdActivate)
+                                    },
+                                    onDragStopped = {
+                                        haptics.performHapticFeedback(HapticFeedbackType.GestureEnd)
+                                    },
+                                ),
+                            ) {
+                                IconDragHandle(tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    } else {
+                        null
+                    },
+                )
             }
         }
     }
