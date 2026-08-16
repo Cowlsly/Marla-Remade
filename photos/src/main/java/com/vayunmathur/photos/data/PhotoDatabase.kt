@@ -15,7 +15,13 @@ interface PhotoDao {
     // UI never reads, so the first emission on cold start is fast (loading those
     // for a large library is what left the grid blank). Semantic search reads
     // embeddings via getClipEmbeddings(); OCR text is read via getAll().
-    @Query("SELECT id, name, uri, date, width, height, dateModified, exifSet, lat, `long`, duration, fullWidth, fullHeight, croppedWidth, croppedHeight, croppedLeft, croppedTop, projectionType, isTrashed, faceScanned, ocrScanned, clipScanned, mimeType FROM Photo")
+    //
+    // ORDER BY date DESC is served by index_Photo_date, so SQLite returns rows
+    // newest-first on its own background executor. Every consumer (gallery grid,
+    // trash, people) groups/sorts by date descending anyway, so the composition
+    // pass now groups pre-ordered rows instead of sorting the whole library on
+    // the main thread — cutting first-load jank without changing what's shown.
+    @Query("SELECT id, name, uri, date, width, height, dateModified, exifSet, lat, `long`, duration, fullWidth, fullHeight, croppedWidth, croppedHeight, croppedLeft, croppedTop, projectionType, isTrashed, faceScanned, ocrScanned, clipScanned, mimeType FROM Photo ORDER BY date DESC")
     fun getAllFlow(): Flow<List<Photo>>
 
     @Query("SELECT * FROM Photo WHERE id = :id")
