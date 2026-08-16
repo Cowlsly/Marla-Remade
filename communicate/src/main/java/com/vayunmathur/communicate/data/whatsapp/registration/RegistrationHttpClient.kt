@@ -434,16 +434,19 @@ class RegistrationHttpClient(
 
         /**
          * Add the per-endpoint device-integrity signals (w2.md §2.3/§3.1-3.3, Phase B 2e) from
-         * [RegistrationIntegrity]. `gpia`/`_gg` (Play Integrity) and `recaptcha` are intentionally
-         * NOT sent — they are signed by Google / bound to the official Play-installed WhatsApp and
-         * cannot be forged by this client (see the gpia report).
+         * [RegistrationIntegrity]. `gpia`/`_gg` (Play Integrity) and `recaptcha` are never sent —
+         * they are signed by Google / bound to the official Play-installed WhatsApp and cannot be
+         * forged by this client.
          *
-         * ON by default (see [SEND_INTEGRITY_SIGNALS]): the signals we *do* send now carry the
-         * OFFICIAL WhatsApp identity — `_gi` reports `package=com.whatsapp` + the official base.apk
-         * SHA-256/size, and `_gp` hashes WhatsApp's manifest permissions — so they look like the real
-         * app rather than this client. `aid` is the real device Android ID (already authentic).
+         * OFF by default (see [SEND_INTEGRITY_SIGNALS]): DEVICE-CONFIRMED that sending ANY integrity
+         * blob — even with official static values (`_gi` package=com.whatsapp + official base.apk
+         * hash, official `_gp`) — trips WhatsApp's attestation gate and returns
+         * `status:fail reason:blocked` ("couldn't verify you're using the official WhatsApp app").
+         * The last verified-live `status:ok` sent NO integrity signals, so we match that. The
+         * official-valued builder is retained (dormant) for recoverability; when the switch is off
+         * this method is a no-op.
          *
-         * Inclusion per endpoint:
+         * Inclusion per endpoint (only if the switch is turned on):
          *  - EXIST:    aid,_gi,_gp,_ge,_ga,_gs,db  (+profile_name; no t)
          *  - CODE:     aid,_gi,_gp,_ge,_ga,_gs,t,hasav
          *  - REGISTER: aid,_gi,_gp,_ge,_ga,_gs,t
@@ -531,15 +534,15 @@ class RegistrationHttpClient(
          * Master switch for the Phase-B device-integrity signals
          * (`aid`,`_gi`,`_gp`,`_ge`,`_ga`,`_gs`,`t`,`hasav`,`db`,`profile_name`).
          *
-         * ON — the blob now carries the OFFICIAL WhatsApp identity (see [RegistrationIntegrity]):
-         * `_gi` reports `package=com.whatsapp` + the official base.apk SHA-256/size, and `_gp` hashes
-         * WhatsApp's manifest permissions, so the signals look like the real app instead of this
-         * client. (`aid` is the real device Android ID, already authentic.) The Play-Integrity /
-         * reCAPTCHA-Enterprise proofs are still NOT sent — they are signed by Google / bound to the
-         * official Play app and cannot be forged (see the integrity report). Set false to fall back
-         * to the verified-live param set with no integrity signals at all.
+         * OFF — DEVICE-CONFIRMED: sending the integrity blob, even with the OFFICIAL WhatsApp static
+         * values, trips WhatsApp's attestation gate and returns `status:fail reason:blocked` (the
+         * "couldn't verify you're using the official WhatsApp app" screen), because that gate is
+         * backed by a Play-Integrity / reCAPTCHA-Enterprise proof that is Google-signed / bound to
+         * the official Play app and cannot be forged. So the default request sends NO integrity
+         * signals at all, matching the last verified-live `status:ok` param set (baseline 33dd602).
+         * The official-valued builder in [RegistrationIntegrity] is kept dormant for recoverability.
          */
-        private const val SEND_INTEGRITY_SIGNALS = true
+        private const val SEND_INTEGRITY_SIGNALS = false
     }
 
     /** WAMSYS endpoint kinds that carry per-endpoint integrity params (w2.md §3.1-3.3). */

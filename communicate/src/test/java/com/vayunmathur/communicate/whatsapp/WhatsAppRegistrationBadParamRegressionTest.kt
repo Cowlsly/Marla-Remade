@@ -366,11 +366,12 @@ class WhatsAppRegistrationBadParamRegressionTest {
             val snippet = src.substring(existIdx, minOf(src.length, existIdx + 2000))
             assertTrue(snippet.contains("token"), "checkExist must include token param (bad_param fix w2.md §3.1)")
             assertTrue(snippet.contains("computeToken"), "checkExist token must be via computeToken")
-            assertTrue(snippet.contains("EndpointKind.EXIST"), "checkExist must addIntegrity(EXIST)")
-            // Integrity signals are ON but carry the OFFICIAL WhatsApp identity (not this client).
+            // Integrity signals are gated OFF by default: device-confirmed that sending them (even
+            // with official values) → status:fail reason:blocked. The default request matches the
+            // verified-live param set (baseline 33dd602): no _gi/aid/_gp. (addIntegrity() early-returns.)
             assertTrue(
-                src.contains("SEND_INTEGRITY_SIGNALS = true"),
-                "integrity signals must be enabled (official-identity mode)",
+                src.contains("SEND_INTEGRITY_SIGNALS = false"),
+                "integrity signals must be gated OFF by default (device-confirmed blocked when on)",
             )
         }
     }
