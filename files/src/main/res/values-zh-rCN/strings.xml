@@ -11,4 +11,8 @@
     <string name="archiving_started">文件移动已开始…</string>
     <string name="new_folder">新建文件夹</string>
     <string name="create">创建</string>
+    <string name="no_app_found_to_open_file">没有可打开该文件的app</string>
+    <string name="install_permission_needed">允许文件应用安装未知应用，然后再次点击安装包</string>
+    <string name="file_fallback">文件</string>
+    <string name="unzipping">解压缩…</string>
 </resources>
