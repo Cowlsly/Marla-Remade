@@ -51,6 +51,7 @@ import com.vayunmathur.calculator.util.GraphFunction
 import com.vayunmathur.calculator.util.GraphUiState
 import com.vayunmathur.calculator.util.GraphPoint
 import com.vayunmathur.calculator.util.formatResult
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.HorizontalDivider
@@ -61,9 +62,7 @@ import com.vayunmathur.library.ui.IconKeyboardArrowDown
 import com.vayunmathur.library.ui.IconKeyboardArrowUp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -82,16 +81,13 @@ fun GraphPage(viewModel: CalculatorViewModel) {
  */
 @Composable
 fun GraphScreen(state: GraphUiState, actions: GraphActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                actions = {
-                    AssistChip(
-                        onClick = { actions.toggleAngleMode() },
-                        label = { Text(if (state.angleMode == AngleMode.DEGREES) "DEG" else "RAD") },
-                        modifier = Modifier.padding(end = 12.dp),
-                    )
-                },
+    AppScaffold(
+        title = {},
+        actions = {
+            AssistChip(
+                onClick = { actions.toggleAngleMode() },
+                label = { Text(if (state.angleMode == AngleMode.DEGREES) "DEG" else "RAD") },
+                modifier = Modifier.padding(end = 12.dp),
             )
         },
     ) { padding ->

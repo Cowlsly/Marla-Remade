@@ -25,8 +25,9 @@ import com.vayunmathur.calculator.util.CalculatorViewModel
 import com.vayunmathur.calculator.util.UnitConverterActions
 import com.vayunmathur.calculator.util.UnitConverterUiState
 import com.vayunmathur.calculator.util.UnitDef
+import com.vayunmathur.library.ui.AppBarAlignment
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.CenterAlignedTopAppBar
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
@@ -38,7 +39,6 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.PrimaryScrollableTabRow
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
@@ -55,8 +55,9 @@ fun UnitConverterPage(viewModel: CalculatorViewModel) {
  */
 @Composable
 fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActions) {
-    Scaffold(
-        topBar = { CenterAlignedTopAppBar(title = { Text(stringResource(R.string.units)) }) },
+    AppScaffold(
+        title = stringResource(R.string.units),
+        alignment = AppBarAlignment.Center,
     ) { padding ->
         val category = state.categories.getOrNull(state.selectedCategoryIndex)
         Column(Modifier.fillMaxSize().padding(padding)) {

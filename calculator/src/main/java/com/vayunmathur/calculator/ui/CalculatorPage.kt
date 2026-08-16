@@ -47,11 +47,12 @@ import java.time.ZoneId
 import java.time.ZoneOffset
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppBarAlignment
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.CenterAlignedTopAppBar
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
@@ -60,7 +61,6 @@ import com.vayunmathur.library.ui.IconRuler
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalBottomSheet
 import com.vayunmathur.library.ui.PrimaryScrollableTabRow
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
@@ -210,14 +210,12 @@ fun CalculatorScreen(
         ),
     )
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                actions = {
-                    IconButton({ showUnitPicker = true }) { IconRuler() }
-                    IconButton({ showHistory = true }) { IconHistory() }
-                },
-            )
+    AppScaffold(
+        title = {},
+        alignment = AppBarAlignment.Center,
+        actions = {
+            IconButton({ showUnitPicker = true }) { IconRuler() }
+            IconButton({ showHistory = true }) { IconHistory() }
         },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
