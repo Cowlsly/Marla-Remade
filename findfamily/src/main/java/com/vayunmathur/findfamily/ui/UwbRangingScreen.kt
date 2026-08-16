@@ -11,12 +11,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -41,7 +40,6 @@ import com.vayunmathur.findfamily.Route
 import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.findfamily.util.UwbSessionManager
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconNavigationArrow
 import com.vayunmathur.library.util.NavBackStack
 
@@ -129,13 +127,9 @@ fun UwbRangingContent(
     session: UwbSessionManager.UwbSessionState,
     onBack: () -> Unit
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(peerName) },
-                navigationIcon = { IconNavigation(onBack) }
-            )
-        }
+    AppScaffold(
+        title = peerName,
+        onNavigateBack = onBack,
     ) { padding ->
         Column(
             modifier = Modifier
