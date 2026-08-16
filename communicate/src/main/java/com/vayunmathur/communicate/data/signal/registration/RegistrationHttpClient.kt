@@ -44,6 +44,9 @@ class RegistrationHttpClient(private val context: Context) {
 
     data class CodeResult(val status: String, val reason: String?, val raw: String) {
         val ok: Boolean get() = status == "sent" || status == "ok" || status == "200"
+
+        /** Server asked for an hCaptcha token (requestedInformation contains "captcha"). */
+        val needsCaptcha: Boolean get() = status == "captcha"
     }
     data class RegisterResult(
         val status: String, val aci: String?, val pni: String?, val reason: String?, val auth: SignalAuthData?, val raw: String,
@@ -74,33 +77,75 @@ class RegistrationHttpClient(private val context: Context) {
             Log.e(TAG, "createVerificationSession failed", t)
             return CodeResult("error", t.message, t.message ?: "")
         }
-        // Persist session id so verifyCode can use it across process restarts.
+        // Persist session id so submitCaptcha/verifyCode can use it across process restarts.
         SignalAuthData.save(context, auth.copy(verificationSessionId = create.id, phoneNumber = number))
 
-        // 2) PATCH if server asks for pushChallenge/captcha.
-        // live-only: pushChallenge requires FCM token from Play Services + 5s EventBus latch (RegistrationRepository.requestAndVerifyPushToken); captcha requires hCaptcha token
-        if (create.requestedInformation.contains("pushChallenge") || create.requestedInformation.contains("captcha")) {
-            // Wire-correct PATCH construction; offline we have no FCM/captcha token so we send empty PATCH and surface reason.
+        // 2) Server-requested challenges gate code delivery.
+        // captcha: needs an hCaptcha token minted via the signalcaptchas.org WebView (see submitCaptcha + SignalCaptchaScreen).
+        if (create.requestedInformation.contains("captcha") && !create.allowedToRequestCode) {
+            return CodeResult("captcha", "captcha required", create.raw)
+        }
+        // pushChallenge is live-only: requires an FCM token from Play Services + EventBus latch (RegistrationRepository.requestAndVerifyPushToken).
+        if (create.requestedInformation.contains("pushChallenge") && !create.allowedToRequestCode) {
             try {
                 patchVerificationSession(create.id, pushToken = null, pushChallenge = null, captcha = null, mcc = null, mnc = null)
             } catch (t: Throwable) {
                 Log.w(TAG, "patchVerificationSession (live-only) failed", t)
             }
-            if (create.requestedInformation.contains("pushChallenge") && !create.allowedToRequestCode) {
-                return CodeResult("error", "pushChallenge required (live-only: needs FCM pushToken)", create.raw)
-            }
-            if (create.requestedInformation.contains("captcha") && !create.allowedToRequestCode) {
-                return CodeResult("error", "captcha required (live-only: needs hCaptcha token)", create.raw)
-            }
+            return CodeResult("error", "pushChallenge required (live-only: needs FCM pushToken)", create.raw)
         }
 
         // 3) POST /v1/verification/session/{id}/code {transport, client}
+        return sendCode(create.id, transport)
+    }
+
+    /**
+     * Submit a solved hCaptcha token to the current verification session, then continue to request the code.
+     *
+     * Signal-Android flow (RegistrationApi.submitCaptchaToken):
+     *  - WebView loads [CAPTCHA_URL]; on success it redirects to
+     *    `signalcaptcha://signal-hcaptcha.{sitekey}.registration.{token}`.
+     *  - The client strips the `signalcaptcha://` scheme and sends the remainder as the `captcha` field via
+     *    PATCH /v1/verification/session/{id} (UpdateVerificationSessionRequestBody).
+     *  - Once the session is no longer captcha-gated, request the SMS/voice code.
+     *
+     * [captchaToken] may be the raw `signalcaptcha://…` redirect URL or the already-stripped value; the scheme is
+     * removed here so callers can pass either.
+     */
+    suspend fun submitCaptcha(e164: String, captchaToken: String, transport: String = "sms"): CodeResult {
+        val number = e164.filter { it.isDigit() || it == '+' }
+        val stored = SignalAuthData.load(context)
+            ?: return CodeResult("error", "no_session", "missing verification session — request a code first")
+        val sessionId = stored.verificationSessionId
+            ?: return CodeResult("error", "no_session", "missing verification session — request a code first")
+        val token = captchaToken.removePrefix(SIGNAL_CAPTCHA_SCHEME).ifBlank {
+            return CodeResult("error", "empty_captcha", "empty captcha token")
+        }
+        // PATCH /v1/verification/session/{id} {captcha}
+        val patched = try {
+            patchVerificationSession(sessionId, pushToken = null, pushChallenge = null, captcha = token, mcc = null, mnc = null)
+        } catch (t: Throwable) {
+            Log.e(TAG, "submitCaptcha patch failed", t)
+            return CodeResult("error", t.message, t.message ?: "")
+        }
+        // Keep the (possibly rotated) session id and number persisted for verifyCode.
+        SignalAuthData.save(context, stored.copy(verificationSessionId = patched.id.ifEmpty { sessionId }, phoneNumber = number.ifEmpty { stored.phoneNumber }))
+        if (patched.requestedInformation.contains("captcha") && !patched.allowedToRequestCode) {
+            return CodeResult("captcha", "captcha rejected", patched.raw)
+        }
+        return sendCode(patched.id.ifEmpty { sessionId }, transport)
+    }
+
+    /** POST /v1/verification/session/{id}/code — shared by initial request and post-captcha retry. */
+    private suspend fun sendCode(sessionId: String, transport: String): CodeResult {
         return try {
-            val codeResp = requestVerificationCode(create.id, transport)
-            if (!codeResp.allowedToRequestCode && codeResp.raw.contains("captcha", true)) {
-                CodeResult("error", "captcha required", codeResp.raw)
-            } else {
-                CodeResult("sent", null, codeResp.raw)
+            val codeResp = requestVerificationCode(sessionId, transport)
+            when {
+                !codeResp.allowedToRequestCode && codeResp.requestedInformation.contains("captcha") ->
+                    CodeResult("captcha", "captcha required", codeResp.raw)
+                !codeResp.allowedToRequestCode && codeResp.raw.contains("captcha", true) ->
+                    CodeResult("captcha", "captcha required", codeResp.raw)
+                else -> CodeResult("sent", null, codeResp.raw)
             }
         } catch (t: Throwable) {
             Log.e(TAG, "requestVerificationCode failed", t)
@@ -373,6 +418,16 @@ class RegistrationHttpClient(private val context: Context) {
         private const val VERIFICATION_SESSION_PATH = "/v1/verification/session"
         private const val VERIFICATION_CODE_PATH = "/v1/verification/session/%s/code"
         private const val REGISTRATION_PATH = "/v1/registration"
+
+        /** hCaptcha challenge page (Signal-Android BuildConfig.SIGNAL_CAPTCHA_URL). */
+        const val CAPTCHA_URL = "https://signalcaptchas.org/registration/generate.html"
+
+        /**
+         * Redirect scheme the captcha page hands back on success:
+         * `signalcaptcha://signal-hcaptcha.{sitekey}.registration.{token}` (RegistrationConstants.SIGNAL_CAPTCHA_SCHEME).
+         * The value after this prefix is submitted verbatim as the `captcha` field.
+         */
+        const val SIGNAL_CAPTCHA_SCHEME = "signalcaptcha://"
     }
 }
 

@@ -39,7 +39,7 @@ import kotlinx.coroutines.withContext
  *
  *  ⚠️ Registering as primary links Signal to this app — use a test number.
  */
-private enum class RegStep { EnterNumber, EnterCode, Done }
+private enum class RegStep { EnterNumber, Captcha, EnterCode, Done }
 
 @Composable
 fun SignalRegistrationScreen(
@@ -57,6 +57,8 @@ fun SignalRegistrationScreen(
     var code by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
+    // Transport ("sms"/"voice") to resume after a captcha challenge is solved.
+    var pendingTransport by remember { mutableStateOf("sms") }
 
     fun e164(): String = "+${cc.filter { it.isDigit() }}${number.filter { it.isDigit() }}"
 
@@ -108,7 +110,10 @@ fun SignalRegistrationScreen(
                             run {
                                 val r = withContext(Dispatchers.IO) { client.requestSmsCode(e164()) }
                                 status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
-                                if (r.ok) step = RegStep.EnterCode
+                                when {
+                                    r.needsCaptcha -> { pendingTransport = "sms"; step = RegStep.Captcha }
+                                    r.ok -> step = RegStep.EnterCode
+                                }
                             }
                         },
                     ) { Text("Request SMS code") }
@@ -118,7 +123,10 @@ fun SignalRegistrationScreen(
                             run {
                                 val r = withContext(Dispatchers.IO) { client.requestVoiceCode(e164()) }
                                 status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
-                                if (r.ok) step = RegStep.EnterCode
+                                when {
+                                    r.needsCaptcha -> { pendingTransport = "voice"; step = RegStep.Captcha }
+                                    r.ok -> step = RegStep.EnterCode
+                                }
                             }
                         },
                     ) { Text("Voice") }
@@ -132,6 +140,30 @@ fun SignalRegistrationScreen(
                         }
                     },
                 ) { Text("Check number (no SMS)") }
+            }
+
+            RegStep.Captcha -> {
+                Text(
+                    "Signal requires a captcha to continue. Complete the challenge below.",
+                    style = androidx.compose.material3.MaterialTheme.typography.bodySmall,
+                )
+                SignalCaptchaWebView(
+                    onToken = { token ->
+                        run {
+                            val r = withContext(Dispatchers.IO) { client.submitCaptcha(e164(), token, pendingTransport) }
+                            status = "code: ${r.status}${r.reason?.let { " ($it)" } ?: ""}"
+                            when {
+                                r.ok -> step = RegStep.EnterCode
+                                !r.needsCaptcha -> step = RegStep.EnterNumber
+                            }
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth().height(420.dp),
+                )
+                OutlinedButton(
+                    enabled = !busy,
+                    onClick = { step = RegStep.EnterNumber; status = null },
+                ) { Text("Cancel") }
             }
 
             RegStep.EnterCode -> {
