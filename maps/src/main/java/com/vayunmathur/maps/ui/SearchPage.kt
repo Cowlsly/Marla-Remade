@@ -7,15 +7,14 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.TextFieldDefaults
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
@@ -27,7 +26,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.R
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.Route
@@ -107,29 +105,23 @@ fun SearchPage(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SearchScreen(state: SearchUiState, actions: SearchActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    TextField(
-                        value = state.query,
-                        onValueChange = { query -> actions.setQuery(query) },
-                        placeholder = { Text(stringResource(R.string.search_nearby)) },
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = TextFieldDefaults.colors(
-                            focusedContainerColor = Color.Transparent,
-                            unfocusedContainerColor = Color.Transparent,
-                            disabledContainerColor = Color.Transparent,
-                        ),
-                        leadingIcon = { IconSearch() },
-                        singleLine = true
-                    )
-                },
-                navigationIcon = {
-                    IconNavigation { actions.back() }
-                }
+    AppScaffold(
+        title = {
+            TextField(
+                value = state.query,
+                onValueChange = { query -> actions.setQuery(query) },
+                placeholder = { Text(stringResource(R.string.search_nearby)) },
+                modifier = Modifier.fillMaxWidth(),
+                colors = TextFieldDefaults.colors(
+                    focusedContainerColor = Color.Transparent,
+                    unfocusedContainerColor = Color.Transparent,
+                    disabledContainerColor = Color.Transparent,
+                ),
+                leadingIcon = { IconSearch() },
+                singleLine = true
             )
-        }
+        },
+        onNavigateBack = { actions.back() },
     ) { paddingValues ->
         Box(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
             if (state.results.isEmpty() && state.query.length >= 2) {

@@ -20,6 +20,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconDragHandle
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.BottomSheetScaffold
@@ -31,12 +32,9 @@ import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
-import com.vayunmathur.library.ui.TopAppBarDefaults
 import com.vayunmathur.library.ui.rememberBottomSheetScaffoldState
 import com.vayunmathur.library.ui.rememberBottomSheetState
 import androidx.compose.runtime.Composable
@@ -310,16 +308,17 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             BottomSheetContent(viewModel, selectedFeature, { viewModel.set(it) }, route, selectedRouteType, { selectedRouteType = it }, inactiveNavigation, savedPlacesViewModel, navState)
         }
     }, Modifier, scaffoldState, 170.dp) { paddingValues ->
-        Scaffold(Modifier.padding(top = paddingValues.calculateTopPadding()), topBar = {
-            TopAppBar({}, actions = {
-                Row {
-                    IconButton({
-                        backStack.add(Route.DownloadedMapsPage)
-                    }) {
-                        IconSettings()
-                    }
-                } }, colors = TopAppBarDefaults.topAppBarColors(Color.Transparent))
-        }) { innerPadding ->
+        AppScaffold(
+            title = "",
+            modifier = Modifier.padding(top = paddingValues.calculateTopPadding()),
+            actions = {
+                IconButton({
+                    backStack.add(Route.DownloadedMapsPage)
+                }) {
+                    IconSettings()
+                }
+            },
+        ) { innerPadding ->
             Box(Modifier.padding(innerPadding).fillMaxSize()) {
                 json?.let { json ->
                     MaplibreMap(
