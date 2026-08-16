@@ -116,4 +116,8 @@
     <string name="reps"><xliff:g id="reps_count" example="12">%1$s</xliff:g> kordust</string>
     <string name="metric_lean_body_mass">Rasvavaba kehamass</string>
     <string name="label_lean_body_mass">Rasvavaba kehamass</string>
+    <string name="food_database_attribution">Toitumisandmed pärinevad Open Food Factsist, litsentseeritud ODbL v1.0 alusel</string>
+    <string name="segments">Segmente</string>
+    <string name="laps">Ringe</string>
+    <string name="lap">Ring <xliff:g id="lap_index" example="1">%1$s</xliff:g></string>
 </resources>
