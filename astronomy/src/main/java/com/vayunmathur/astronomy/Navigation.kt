@@ -21,7 +21,7 @@ fun Navigation(viewModel: AstronomyViewModel) {
         entry<Route.SkyMap>(metadata = ListPage()) { SkyMapPage(backStack, viewModel) }
         entry<Route.ObjectDetail>(metadata = DialogPage()) { route -> ObjectDetailPage(backStack, viewModel, route.id) }
         entry<Route.Search>(metadata = ListPage()) { SearchPage(backStack, viewModel) }
-        entry<Route.Settings>(metadata = DialogPage()) { SettingsPage(backStack, viewModel) }
+        entry<Route.Settings>(metadata = ListPage()) { SettingsPage(backStack, viewModel) }
         entry<Route.HistoryDatePicker>(metadata = DialogPage()) { route ->
             DatePickerDialog(backStack, "AstroHistoryDatePicker", route.initialDate)
         }

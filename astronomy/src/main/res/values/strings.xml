@@ -47,6 +47,8 @@
     <string name="search_stars_planets_messier">Search stars, planets, Messier</string>
 
     <!-- SettingsPage -->
+    <!-- SettingsPage: TopAppBar title -->
+    <string name="settings">Settings</string>
     <!-- SettingsPage: slider label showing current magnitude limit. %1$s = numeric limit e.g. 4.5 -->
     <string name="magnitude_limit">Magnitude limit: <xliff:g id="limit" example="4.5">%1$s</xliff:g></string>
     <!-- SettingsPage: text field label for manual longitude input in degrees -->
