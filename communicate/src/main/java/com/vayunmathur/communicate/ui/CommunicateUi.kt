@@ -43,6 +43,7 @@ import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import java.util.Date
 
 @Composable
@@ -54,9 +55,7 @@ fun PermissionGate(
 ) {
     val context = LocalContext.current
     var grantRevision by remember { mutableStateOf(0) }
-    val launcher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) { grantRevision++ }
+    val requestPermission = rememberPermissionRequest(permission) { grantRevision++ }
     val granted = ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
 
     if (granted) {
@@ -67,7 +66,7 @@ fun PermissionGate(
             message = message,
             icon = { IconCall() },
             action = {
-                Button(onClick = { launcher.launch(permission) }) {
+                Button(onClick = requestPermission) {
                     Text(stringResource(R.string.grant_permission))
                 }
             },
