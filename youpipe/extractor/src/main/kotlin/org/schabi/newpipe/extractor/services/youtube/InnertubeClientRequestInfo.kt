@@ -27,7 +27,13 @@ class InnertubeClientRequestInfo private constructor(
         var clientScreen: String?,
         @JvmField
         @field:Nullable
-        var visitorData: String?
+        var visitorData: String?,
+        @JvmField
+        @field:Nullable
+        var userAgent: String?,
+        @JvmField
+        @field:Nullable
+        var timeZone: String?
     ) {
         companion object {
             internal fun create(
@@ -35,8 +41,12 @@ class InnertubeClientRequestInfo private constructor(
                 clientVersion: String,
                 clientId: String,
                 clientScreen: String?,
-                visitorData: String?
-            ): ClientInfo = ClientInfo(clientName, clientVersion, clientId, clientScreen, visitorData)
+                visitorData: String?,
+                userAgent: String? = null,
+                timeZone: String? = null
+            ): ClientInfo = ClientInfo(
+                clientName, clientVersion, clientId, clientScreen, visitorData, userAgent, timeZone
+            )
         }
     }
 
@@ -140,16 +150,20 @@ class InnertubeClientRequestInfo private constructor(
 
         @JvmStatic
         fun ofAndroidVrClient(): InnertubeClientRequestInfo {
+            // Mirrors PipePipe's android_vr player request context.client: it carries the client
+            // userAgent and timeZone=UTC, and does NOT send a platform field.
             return InnertubeClientRequestInfo(
                 ClientInfo.create(
                     ClientsConstants.ANDROID_VR_CLIENT_NAME,
                     ClientsConstants.ANDROID_VR_CLIENT_VERSION,
                     ClientsConstants.ANDROID_VR_CLIENT_ID,
                     null,
-                    null
+                    null,
+                    ClientsConstants.ANDROID_VR_USER_AGENT,
+                    "UTC"
                 ),
                 DeviceInfo.create(
-                    ClientsConstants.MOBILE_CLIENT_PLATFORM,
+                    null,
                     ClientsConstants.ANDROID_VR_DEVICE_MAKE,
                     ClientsConstants.ANDROID_VR_DEVICE_MODEL,
                     ClientsConstants.ANDROID_VR_OS_NAME,

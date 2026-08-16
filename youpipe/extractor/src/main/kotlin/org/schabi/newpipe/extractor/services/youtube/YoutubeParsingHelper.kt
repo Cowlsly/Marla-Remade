@@ -1315,6 +1315,10 @@ object YoutubeParsingHelper {
                     if (osVersion != null) put("osVersion", osVersion)
                     val sdk = innertubeClientRequestInfo.deviceInfo.androidSdkVersion
                     if (sdk > 0) put("androidSdkVersion", sdk)
+                    val userAgent = innertubeClientRequestInfo.clientInfo.userAgent
+                    if (userAgent != null) put("userAgent", userAgent)
+                    val timeZone = innertubeClientRequestInfo.clientInfo.timeZone
+                    if (timeZone != null) put("timeZone", timeZone)
                     put("hl", localization.getLocalizationCode())
                     put("gl", contentCountry.countryCode)
                     put("utcOffsetMinutes", 0)
