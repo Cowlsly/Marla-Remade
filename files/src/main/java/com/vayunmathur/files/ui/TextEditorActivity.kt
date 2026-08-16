@@ -14,12 +14,11 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.foundation.text.input.TextFieldState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -64,15 +63,9 @@ private fun TextEditorScreen(uri: Uri, viewModel: TextEditorViewModel) {
     val content = initialContent
     if (content == null) {
         // Loading: render the bar only so the screen isn't blank during async read.
-        Scaffold(
-            Modifier.imePadding(),
-            topBar = {
-                TopAppBar(
-                    title = {
-                        Text(uri.lastPathSegment ?: stringResource(R.string.file_fallback))
-                    },
-                )
-            },
+        AppScaffold(
+            title = uri.lastPathSegment ?: stringResource(R.string.file_fallback),
+            modifier = Modifier.imePadding(),
         ) { }
     } else {
         TextEditorLoaded(uri, content, viewModel)
@@ -85,23 +78,19 @@ private fun TextEditorLoaded(uri: Uri, initialContent: String, viewModel: TextEd
     val state = remember { TextFieldState(initialText = initialContent) }
     var isEditing by remember { mutableStateOf(false) }
 
-    Scaffold(
-        Modifier.imePadding(),
-        topBar = {
-            TopAppBar(
-                title = { Text(uri.lastPathSegment ?: stringResource(R.string.file_fallback)) },
-                actions = {
-                    IconButton(onClick = {
-                        if (isEditing && state.text.toString() != initialContent) {
-                            viewModel.save(uri, state.text.toString())
-                        }
-                        isEditing = !isEditing
-                    }) {
-                        if (isEditing) if (initialContent == state.text.toString()) IconVisible() else IconSave() else IconEdit()
-                    }
+    AppScaffold(
+        title = uri.lastPathSegment ?: stringResource(R.string.file_fallback),
+        modifier = Modifier.imePadding(),
+        actions = {
+            IconButton(onClick = {
+                if (isEditing && state.text.toString() != initialContent) {
+                    viewModel.save(uri, state.text.toString())
                 }
-            )
-        }
+                isEditing = !isEditing
+            }) {
+                if (isEditing) if (initialContent == state.text.toString()) IconVisible() else IconSave() else IconEdit()
+            }
+        },
     ) { paddingValues ->
         Column(
             modifier = Modifier

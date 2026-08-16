@@ -4,7 +4,6 @@ import android.text.format.Formatter
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -32,7 +31,7 @@ fun HomeScreen(
     onOpenDrawer: () -> Unit = {},
 ) {
     val context = LocalContext.current
-    Scaffold(
+    LazyListScaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             TopAppBar(
@@ -40,67 +39,65 @@ fun HomeScreen(
                 title = { Text(stringResource(R.string.app_name)) },
             )
         },
-    ) { padding ->
-        LazyColumn(Modifier.fillMaxSize().padding(padding)) {
-            home.storage?.let { s -> item { StorageCard(s) } }
+    ) {
+        home.storage?.let { s -> item { StorageCard(s) } }
 
-            item {
+        item {
+            HomeRow(
+                leading = { IconFolder(tint = MaterialTheme.colorScheme.primary) },
+                title = stringResource(R.string.internal_storage),
+                subtitle = home.storage?.let { Formatter.formatShortFileSize(context, it.totalBytes) },
+                onClick = { actions.openInternalStorage() },
+            )
+        }
+
+        item { HomeSectionHeader(stringResource(R.string.categories)) }
+        item {
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                CategoryTile(stringResource(R.string.cat_images), { IconImage(tint = COLOR_IMAGE) }) { actions.openCategory(FileCategory.IMAGES) }
+                CategoryTile(stringResource(R.string.cat_videos), { IconVideoCamera(tint = COLOR_VIDEO) }) { actions.openCategory(FileCategory.VIDEOS) }
+                CategoryTile(stringResource(R.string.cat_audio), { IconLibraryMusic(tint = COLOR_AUDIO) }) { actions.openCategory(FileCategory.AUDIO) }
+                CategoryTile(stringResource(R.string.cat_documents), { IconDescription(tint = COLOR_DOC) }) { actions.openCategory(FileCategory.DOCUMENTS) }
+                CategoryTile(stringResource(R.string.cat_downloads), { IconDownload(tint = COLOR_APK) }) { actions.openCategory(FileCategory.DOWNLOADS) }
+            }
+        }
+
+        if (home.bookmarks.isNotEmpty()) {
+            item { HomeSectionHeader(stringResource(R.string.bookmarks)) }
+            items(home.bookmarks, key = { "bm:" + it.key }) { bm ->
                 HomeRow(
-                    leading = { IconFolder(tint = MaterialTheme.colorScheme.primary) },
-                    title = stringResource(R.string.internal_storage),
-                    subtitle = home.storage?.let { Formatter.formatShortFileSize(context, it.totalBytes) },
-                    onClick = { actions.openInternalStorage() },
+                    leading = { IconFolder(tint = MaterialTheme.colorScheme.outline) },
+                    title = bm.name,
+                    subtitle = null,
+                    onClick = { bm.realFile?.let { actions.openBookmark(it) } },
+                    trailing = {
+                        IconButton(onClick = { bm.realFile?.let { actions.removeBookmark(it) } }) { IconClose() }
+                    },
                 )
             }
+        }
 
-            item { HomeSectionHeader(stringResource(R.string.categories)) }
-            item {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .horizontalScroll(rememberScrollState())
-                        .padding(horizontal = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                ) {
-                    CategoryTile(stringResource(R.string.cat_images), { IconImage(tint = COLOR_IMAGE) }) { actions.openCategory(FileCategory.IMAGES) }
-                    CategoryTile(stringResource(R.string.cat_videos), { IconVideoCamera(tint = COLOR_VIDEO) }) { actions.openCategory(FileCategory.VIDEOS) }
-                    CategoryTile(stringResource(R.string.cat_audio), { IconLibraryMusic(tint = COLOR_AUDIO) }) { actions.openCategory(FileCategory.AUDIO) }
-                    CategoryTile(stringResource(R.string.cat_documents), { IconDescription(tint = COLOR_DOC) }) { actions.openCategory(FileCategory.DOCUMENTS) }
-                    CategoryTile(stringResource(R.string.cat_downloads), { IconDownload(tint = COLOR_APK) }) { actions.openCategory(FileCategory.DOWNLOADS) }
-                }
-            }
-
-            if (home.bookmarks.isNotEmpty()) {
-                item { HomeSectionHeader(stringResource(R.string.bookmarks)) }
-                items(home.bookmarks, key = { "bm:" + it.key }) { bm ->
-                    HomeRow(
-                        leading = { IconFolder(tint = MaterialTheme.colorScheme.outline) },
-                        title = bm.name,
-                        subtitle = null,
-                        onClick = { bm.realFile?.let { actions.openBookmark(it) } },
-                        trailing = {
-                            IconButton(onClick = { bm.realFile?.let { actions.removeBookmark(it) } }) { IconClose() }
-                        },
-                    )
-                }
-            }
-
-            if (home.recents.isNotEmpty()) {
-                item { HomeSectionHeader(stringResource(R.string.recent_files)) }
-                items(home.recents, key = { "rc:" + it.key }) { r ->
-                    HomeRow(
-                        leading = { FileLeading(r, false, 40.dp) },
-                        title = r.name,
-                        subtitle = r.size?.let { Formatter.formatShortFileSize(context, it) },
-                        onClick = {
-                            if (r.name.endsWith(".apk", ignoreCase = true) && r.realFile != null) {
-                                actions.installApk(r)
-                            } else {
-                                actions.openFile(r)
-                            }
-                        },
-                    )
-                }
+        if (home.recents.isNotEmpty()) {
+            item { HomeSectionHeader(stringResource(R.string.recent_files)) }
+            items(home.recents, key = { "rc:" + it.key }) { r ->
+                HomeRow(
+                    leading = { FileLeading(r, false, 40.dp) },
+                    title = r.name,
+                    subtitle = r.size?.let { Formatter.formatShortFileSize(context, it) },
+                    onClick = {
+                        if (r.name.endsWith(".apk", ignoreCase = true) && r.realFile != null) {
+                            actions.installApk(r)
+                        } else {
+                            actions.openFile(r)
+                        }
+                    },
+                )
             }
         }
     }

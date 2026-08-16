@@ -269,17 +269,17 @@ fun DirectoryScreen(
         }
     }
 
-    Scaffold(
+    AppScaffold(
         modifier = Modifier
-            .imePadding()
             .clickable(
                 interactionSource = remember { MutableInteractionSource() }, indication = null
             ) {
                 focusManager.clearFocus()
                 itemBeingRenamed = null
                 actions.clearSelection()
-            }, snackbarHost = { SnackbarHost(snackbarHostState) }, topBar = {
-            TopAppBar(navigationIcon = {
+            },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        navigationIcon = {
                 if (!state.isSearchActive && state.selectedPaths.isEmpty()) {
                     IconButton(onClick = onOpenDrawer) { IconMenu() }
                 }
@@ -512,8 +512,8 @@ fun DirectoryScreen(
                         }
                     }
                 }
-            })
-        }) { padding ->
+            },
+        ) { padding ->
         val query = state.searchQuery.trim()
         fun matches(item: FileBrowserItem) =
             query.isEmpty() || item.name.contains(query, ignoreCase = true)

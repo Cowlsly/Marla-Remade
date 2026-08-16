@@ -39,23 +39,21 @@ import androidx.lifecycle.lifecycleScope
 import com.vayunmathur.files.R
 import com.vayunmathur.files.platform.FileBrowserItem
 import com.vayunmathur.files.platform.FilesViewModel
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconFile
 import com.vayunmathur.library.ui.IconFolder
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TextField
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -148,14 +146,10 @@ class DocumentPickerActivity : ComponentActivity() {
         }
         BackHandler { navUp() }
 
-        Scaffold(
+        AppScaffold(
+            title = titleFor(mode),
             modifier = Modifier.imePadding(),
-            topBar = {
-                TopAppBar(
-                    navigationIcon = { com.vayunmathur.library.ui.IconButton(onClick = { navUp() }) { IconBack() } },
-                    title = { Text(titleFor(mode)) },
-                )
-            },
+            onNavigateBack = { navUp() },
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 Text(
