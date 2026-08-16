@@ -1,5 +1,6 @@
 package com.vayunmathur.openassistant
 
+import android.content.Intent
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -42,6 +43,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         intentLauncher = IntentLauncher(this)
 
+        readAssistScreenContext(intent)
+
         val ds = DataStoreUtils.getInstance(this)
 
         setContent {
@@ -52,6 +55,24 @@ class MainActivity : ComponentActivity() {
                     }
                 }
             }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        readAssistScreenContext(intent)
+    }
+
+    /**
+     * Picks up the flattened screen text captured by the Assist API session
+     * ([com.vayunmathur.openassistant.assist.OpenAssistantSession]) and hands it to
+     * the ViewModel so it seeds the next inference turn as context.
+     */
+    private fun readAssistScreenContext(intent: Intent?) {
+        val screenText = intent?.getStringExtra("assist_screen_text")
+        if (!screenText.isNullOrBlank()) {
+            assistantViewModel.setScreenContext(screenText)
         }
     }
 }

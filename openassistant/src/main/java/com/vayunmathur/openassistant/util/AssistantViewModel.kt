@@ -54,6 +54,20 @@ class AssistantViewModel(
 
     private var audioRecorder: WavRecorder? = null
 
+    /**
+     * Screen contents captured by the Assist API (see
+     * [com.vayunmathur.openassistant.assist.OpenAssistantSession]) when the app was
+     * invoked as the default digital assistant. Prepended to the next inference
+     * request as context so the model can answer about what is on screen, then
+     * cleared so it only seeds a single turn.
+     */
+    private var pendingScreenContext: String? = null
+
+    /** Stores screen text captured by the Assist API for the next inference turn. */
+    fun setScreenContext(text: String?) {
+        pendingScreenContext = text?.takeIf { it.isNotBlank() }
+    }
+
     /** All conversations, newest first. */
     val conversations: StateFlow<List<Conversation>> = repository.conversationsFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -155,10 +169,17 @@ class AssistantViewModel(
         imagePaths: List<String>,
         audioPath: String?,
     ) {
+        val screenContext = pendingScreenContext
+        pendingScreenContext = null
+        val effectiveText = if (screenContext != null) {
+            "Current screen contents:\n$screenContext\n\nUser request: $userText"
+        } else {
+            userText
+        }
         val context = getApplication<Application>()
         context.startService(Intent(context, InferenceService::class.java).apply {
             putExtra("conversation_id", conversationId)
-            putExtra("user_text", userText)
+            putExtra("user_text", effectiveText)
             putExtra("image_paths", imagePaths.toTypedArray())
             putExtra("audio_path", audioPath)
         })
