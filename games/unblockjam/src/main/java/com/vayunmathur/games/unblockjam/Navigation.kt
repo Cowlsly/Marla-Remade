@@ -61,13 +61,11 @@ import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCheck
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.MainNavigation
@@ -154,16 +152,14 @@ fun PackScreen(
     daily: DailyProgress? = null,
     onOpenDaily: () -> Unit = {},
 ) {
-    Scaffold(topBar = {
-        TopAppBar(
-            title = { Text(stringResource(R.string.pack_selector)) },
-            actions = {
-                IconButton(onClick = onOpenGameCenter) {
-                    Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
-                }
+    AppScaffold(
+        title = stringResource(R.string.pack_selector),
+        actions = {
+            IconButton(onClick = onOpenGameCenter) {
+                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
             }
-        )
-    }) { paddingValues ->
+        }
+    ) { paddingValues ->
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = paddingValues + PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp),
@@ -262,9 +258,7 @@ fun LevelScreen(
     onOpenLevel: (Int) -> Unit,
     title: String = stringResource(R.string.level_selector)
 ) {
-    Scaffold(topBar = {
-        TopAppBar({Text(title)})
-    }) { paddingValues ->
+    AppScaffold(title = title) { paddingValues ->
         LazyVerticalGrid(
             GridCells.Adaptive(88.dp),
             Modifier.fillMaxSize(),
@@ -366,8 +360,9 @@ fun GameScreen(state: GameUiState, actions: GameActions, onBack: () -> Unit) {
     val currentLevelData = state.levelData
     val isLevelWon = state.isLevelWon
 
-    Scaffold(
-        topBar = { TopAppBar({}, navigationIcon = { IconNavigation(onBack) }) },
+    AppScaffold(
+        title = {},
+        onNavigateBack = onBack,
     ) { innerPadding ->
         Surface(
             modifier = Modifier.fillMaxSize(),
