@@ -1,14 +1,22 @@
 package com.vayunmathur.findfamily.ui
 
-import androidx.compose.foundation.Canvas
+import android.graphics.BitmapFactory
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.tooling.preview.Preview
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.findfamily.data.Coord
 import com.vayunmathur.findfamily.data.LocationValue
@@ -25,7 +33,6 @@ import com.vayunmathur.findfamily.util.PersonUiState
 import com.vayunmathur.findfamily.util.UwbSessionManager
 import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.library.ui.DynamicTheme
-import com.vayunmathur.library.ui.MaterialTheme
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 
@@ -128,27 +135,44 @@ class MetadataPreviews {
     )
 
     /**
-     * Stand-in for the live [MapView] in the `map` slot: a muted, map-ish neutral fill with a
-     * faint grid so the full page reads as "map behind chrome" without any tile rendering.
+     * Stands in for the live [MapView] in the `map` slot. Layoutlib cannot fetch the network
+     * raster tiles the real [MapView] draws, so instead of a synthetic grid we bundle a real
+     * CARTO Voyager basemap mosaic (`preview_map_sf.png`, a screenshotTest-only classpath
+     * resource centered on [mayaLocation]) and overlay the sample person marker exactly like
+     * the app does. The mosaic is a JVM resource rather than an Android drawable so it never
+     * ships in the app APK. The "© CARTO © OpenStreetMap" attribution is required by the
+     * basemap terms and must stay visible. Image + static overlays only — no network or
+     * effects — so it renders under Layoutlib.
      */
     @Composable
     private fun StaticMapBackdrop() {
-        val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
-        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)) {
-            Canvas(Modifier.fillMaxSize()) {
-                val step = 48.dp.toPx()
-                val stroke = 1.dp.toPx()
-                var x = step
-                while (x < size.width) {
-                    drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), stroke)
-                    x += step
-                }
-                var y = step
-                while (y < size.height) {
-                    drawLine(gridColor, Offset(0f, y), Offset(size.width, y), stroke)
-                    y += step
-                }
+        val mapImage = remember {
+            val stream = MetadataPreviews::class.java.getResourceAsStream("/preview_map_sf.png")
+                ?: error("preview_map_sf.png missing from screenshotTest resources")
+            stream.use { BitmapFactory.decodeStream(it).asImageBitmap() }
+        }
+        Box(Modifier.fillMaxSize()) {
+            Image(
+                bitmap = mapImage,
+                contentDescription = null,
+                modifier = Modifier.fillMaxSize(),
+                contentScale = ContentScale.Crop,
+            )
+            // Sample person marker over the map point the mosaic is centered on.
+            Box(Modifier.align(Alignment.Center)) {
+                UserPicture(maya, 64.dp)
             }
+            Text(
+                text = "© CARTO © OpenStreetMap",
+                color = Color.Black.copy(alpha = 0.7f),
+                fontSize = 9.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    // Clear the 200.dp collapsed sheet peek so the required attribution stays visible.
+                    .padding(start = 8.dp, bottom = 208.dp)
+                    .background(Color.White.copy(alpha = 0.6f))
+                    .padding(horizontal = 4.dp, vertical = 2.dp),
+            )
         }
     }
 

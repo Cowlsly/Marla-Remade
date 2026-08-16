@@ -39,3 +39,24 @@ dependencies {
     // on GrapheneOS (sandboxed Play Services can't talk to the platform UWB
     // service). All UWB code paths are gated on Build.VERSION.SDK_INT >= 35.
 }
+
+// The Compose screenshot renderer draws previews from the compiled `screenshotTest` classes
+// directory (the renderer's screenshotProjectClassPath). JVM resources placed under
+// src/screenshotTest/resources are NOT otherwise put on that classpath, so the metadata
+// previews can't load the bundled CARTO map via getResourceAsStream. Stage those resources
+// into the classes output so the previews can read them at render time. Because this asset
+// lives only in the screenshotTest source set it ships in neither the dev nor the release APK.
+val screenshotTestClasses = layout.buildDirectory.dir(
+    "intermediates/built_in_kotlinc/devScreenshotTest/compileDevScreenshotTestKotlin/classes"
+)
+val stageDevScreenshotTestResources = tasks.register<Copy>("stageDevScreenshotTestResources") {
+    from(layout.projectDirectory.dir("src/screenshotTest/resources"))
+    into(screenshotTestClasses)
+    mustRunAfter("compileDevScreenshotTestKotlin")
+    outputs.upToDateWhen { false }
+}
+tasks.matching {
+    it.name == "updateDevScreenshotTest" || it.name == "validateDevScreenshotTest"
+}.configureEach {
+    dependsOn(stageDevScreenshotTestResources)
+}
