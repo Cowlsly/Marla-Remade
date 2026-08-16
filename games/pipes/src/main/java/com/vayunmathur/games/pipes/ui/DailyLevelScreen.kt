@@ -1,6 +1,7 @@
 package com.vayunmathur.games.pipes.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -44,7 +45,7 @@ fun DailyLevelScreen(backStack: NavBackStack<Route>, viewModel: PipesViewModel) 
         val levels = dailyPack?.levels
         if (levels == null) { Box(Modifier.fillMaxSize().padding(paddingValues), Alignment.Center) { CircularProgressIndicator() }; return@Scaffold }
         LazyVerticalGrid(GridCells.Adaptive(88.dp), Modifier.fillMaxSize(), contentPadding = paddingValues + PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            itemsIndexed(levels) { index, levelData -> Card(Modifier.fillMaxWidth().clickable { backStack.add(Route.DailyGame(index)) }, colors = CardDefaults.cardColors(com.vayunmathur.library.ui.MaterialTheme.colorScheme.surface)) { Box(Modifier.fillMaxSize().padding(8.dp)) { Text("${index + 1}", Modifier.align(Alignment.Center)); val levelStat = dailyStats[levelData.id]; Box(Modifier.size(20.dp).align(Alignment.CenterEnd), Alignment.Center) { when { levelStat == null -> return@Box; levelStat.bestScore <= levelData.optimalMoves -> IconStar(); else -> IconCheck() } } } }
+            itemsIndexed(levels) { index, levelData -> Card(Modifier.fillMaxWidth().clickable { backStack.add(Route.DailyGame(index)) }, colors = CardDefaults.cardColors(com.vayunmathur.library.ui.MaterialTheme.colorScheme.surface)) { Box(Modifier.fillMaxSize().padding(8.dp)) { Text("${index + 1}", Modifier.align(Alignment.Center)); val levelStat = dailyStats[levelData.id]; Box(Modifier.size(20.dp).align(Alignment.CenterEnd), Alignment.Center) { when { levelStat == null -> return@Box; levelStat.bestScore <= levelData.optimalMoves -> IconStar(); else -> IconCheck() } } } } }
         }
     }
 }

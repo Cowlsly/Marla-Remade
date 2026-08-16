@@ -1,6 +1,7 @@
 package com.vayunmathur.games.pipes.ui
 
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -41,7 +42,7 @@ fun LevelScreen(backStack: NavBackStack<Route>, viewModel: PipesViewModel, packI
     val levelStats by viewModel.levelStats.collectAsState()
     Scaffold(topBar = { TopAppBar({ Text(stringResource(R.string.level_selector)) }, navigationIcon = { IconNavigation(backStack) }) }) { paddingValues ->
         LazyVerticalGrid(GridCells.Adaptive(88.dp), Modifier.fillMaxSize(), contentPadding = paddingValues + PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp), verticalArrangement = Arrangement.spacedBy(12.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            itemsIndexed(pack.levels) { index, levelData -> Card(Modifier.fillMaxWidth().clickable { backStack.add(Route.Game(packIndex, index)) }, colors = CardDefaults.cardColors(com.vayunmathur.library.ui.MaterialTheme.colorScheme.surface)) { Box(Modifier.fillMaxSize().padding(8.dp)) { if (levelData.cells.size < levelData.rows * levelData.cols) { LevelThumbnail(levelData, Modifier.size(24.dp).align(Alignment.CenterStart)) }; Text("${index + 1}", Modifier.align(Alignment.Center)); val levelStat = levelStats[levelData.id]; Box(Modifier.size(20.dp).align(Alignment.CenterEnd), Alignment.Center) { when { levelStat == null -> return@Box; levelStat.bestScore <= levelData.optimalMoves -> IconStar(); else -> IconCheck() } } } }
+            itemsIndexed(pack.levels) { index, levelData -> Card(Modifier.fillMaxWidth().clickable { backStack.add(Route.Game(packIndex, index)) }, colors = CardDefaults.cardColors(com.vayunmathur.library.ui.MaterialTheme.colorScheme.surface)) { Box(Modifier.fillMaxSize().padding(8.dp)) { if (levelData.cells.size < levelData.rows * levelData.cols) { LevelThumbnail(levelData, Modifier.size(24.dp).align(Alignment.CenterStart)) }; Text("${index + 1}", Modifier.align(Alignment.Center)); val levelStat = levelStats[levelData.id]; Box(Modifier.size(20.dp).align(Alignment.CenterEnd), Alignment.Center) { when { levelStat == null -> return@Box; levelStat.bestScore <= levelData.optimalMoves -> IconStar(); else -> IconCheck() } } } } }
         }
     }
 }
