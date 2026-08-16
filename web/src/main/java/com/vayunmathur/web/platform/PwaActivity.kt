@@ -33,9 +33,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.openAppSettings
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import com.vayunmathur.web.platform.shields.ShieldsEngine
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
@@ -118,11 +120,30 @@ private fun PwaBrowser(
     var pendingSysPermissionRequest by remember { mutableStateOf<PermissionRequest?>(null) }
     var pendingGeoCallback by remember { mutableStateOf<Pair<String, GeolocationPermissions.Callback>?>(null) }
 
+    // When a runtime permission is permanently denied (denied with no rationale), the
+    // system dialog no longer appears, so re-triggering from the web page does nothing.
+    // Route the user to app settings so they can still grant it.
+    fun openSettingsIfPermanentlyDenied(permission: String) {
+        if (activity == null ||
+            !ActivityCompat.shouldShowRequestPermissionRationale(activity, permission)
+        ) {
+            openAppSettings(context)
+        }
+    }
+    fun openSettingsIfAnyPermanentlyDenied(result: Map<String, Boolean>) {
+        val anyPermanentlyDenied = result.any { (perm, granted) ->
+            !granted && (activity == null ||
+                !ActivityCompat.shouldShowRequestPermissionRationale(activity, perm))
+        }
+        if (anyPermanentlyDenied) openAppSettings(context)
+    }
+
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) {
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
+            openSettingsIfPermanentlyDenied(Manifest.permission.CAMERA)
         }
         pendingSysPermissionRequest = null
     }
@@ -131,6 +152,7 @@ private fun PwaBrowser(
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
+            openSettingsIfPermanentlyDenied(Manifest.permission.RECORD_AUDIO)
         }
         pendingSysPermissionRequest = null
     }
@@ -140,6 +162,7 @@ private fun PwaBrowser(
             pendingSysPermissionRequest?.grant(pendingSysPermissionRequest?.resources ?: emptyArray())
         } else {
             pendingSysPermissionRequest?.deny()
+            openSettingsIfAnyPermanentlyDenied(result)
         }
         pendingSysPermissionRequest = null
     }
@@ -151,6 +174,7 @@ private fun PwaBrowser(
             pair?.second?.invoke(pair.first, true, false)
         } else {
             pair?.second?.invoke(pair.first, false, false)
+            openSettingsIfAnyPermanentlyDenied(result)
         }
         pendingGeoCallback = null
     }
