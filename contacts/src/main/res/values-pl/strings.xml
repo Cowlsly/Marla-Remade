@@ -107,4 +107,8 @@
     <string name="sim_limited_fields_hint">Kontakty na karcie SIM przechowują tylko imię, numer telefonu i adres e-mail.</string>
     <string name="save_failed">Nie udało się zapisać</string>
     <string name="importing">Importowanie…</string>
+    <string name="rename_account">Zmień nazwę konta</string>
+    <string name="delete_account">Usuń konto</string>
+    <string name="delete_local_account_confirm">Usunąć to konto i wszystkie kontakty? Tego nie da się cofnąć.</string>
+    <string name="account_name_exists">Konto o takiej nazwie już istnieje</string>
 </resources>
