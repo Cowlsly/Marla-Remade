@@ -67,10 +67,24 @@ class RegistrationHttpClient(private val context: Context) {
 
     private suspend fun requestCode(e164: String, transport: String): CodeResult {
         val number = e164.filter { it.isDigit() || it == '+' }
-        // Reuse existing scaffold if same number, else generate fresh ACI+PNI keys + password + UAK.
+        // Reuse the stored scaffold only if it belongs to this number AND is either an already-registered
+        // account (never clobber committed keys) or a still-valid pre-registration scaffold. A stale
+        // pre-registration scaffold — e.g. an old 32-byte unidentifiedAccessKey that the server rejects
+        // with HTTP 422 — is self-healed by regenerating fresh ephemeral registration keys for the SAME
+        // number, so the user does not need a new number or an app-data wipe.
         val existing = SignalAuthData.load(context)
-        val auth = if (existing != null && existing.phoneNumber == number && existing.password.isNotEmpty()) existing
-        else SignalRegistrationKeys.generate(number).authScaffold.also { SignalAuthData.save(context, it) }
+        val reuseExisting = existing != null &&
+            existing.phoneNumber == number &&
+            existing.password.isNotEmpty() &&
+            (existing.registered || isValidPreRegScaffold(existing))
+        val auth = if (reuseExisting) {
+            existing
+        } else {
+            if (existing != null && existing.phoneNumber == number && !existing.registered) {
+                Log.i(TAG, "Regenerating stale pre-registration scaffold for existing number (UAK/key refresh)")
+            }
+            SignalRegistrationKeys.generate(number).authScaffold.also { SignalAuthData.save(context, it) }
+        }
 
         // 1) POST /v1/verification/session
         val create = try { createVerificationSession(number, pushToken = null, mcc = null, mnc = null) } catch (t: Throwable) {
@@ -425,6 +439,18 @@ class RegistrationHttpClient(private val context: Context) {
     }
 
     private fun parse(body: String): JSONObject = try { JSONObject(body) } catch (_: Exception) { JSONObject() }
+
+    /**
+     * A reusable pre-registration scaffold must carry a valid unidentifiedAccessKey: the Signal server
+     * requires it to be EXACTLY 16 bytes (UnidentifiedAccess.deriveAccessKeyFrom trims to 16). An older
+     * scaffold with a 32-byte UAK is treated as stale so requestCode regenerates it for the same number.
+     */
+    private fun isValidPreRegScaffold(auth: SignalAuthData): Boolean {
+        val uak = auth.unidentifiedAccessKey
+        if (uak.isEmpty()) return false
+        val bytes = runCatching { Base64.decode(uak, Base64.NO_WRAP) }.getOrNull() ?: return false
+        return bytes.size == 16
+    }
 
     companion object {
         private const val TAG = "SignalRegHttp"
