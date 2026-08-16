@@ -4,16 +4,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.OdfMarkdownEditor
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -63,25 +61,21 @@ fun ExternalNoteScreen(
         loaded = true
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(title.ifBlank { stringResource(R.string.title) }) },
-                navigationIcon = { IconNavigation { backStack.pop() } },
-                actions = {
-                    IconButton(onClick = {
-                        notesViewModel.saveExternal(uri, content) { ok ->
-                            AppMessages.show(if (ok) savedMsg else saveFailedMsg)
-                        }
-                    }) { IconSave() }
-                    IconButton(onClick = {
-                        notesViewModel.addExternalToApp(title, content) { id ->
-                            backStack.pop()
-                            backStack.add(Route.Note(id))
-                        }
-                    }) { IconAdd() }
-                },
-            )
+    AppScaffold(
+        title = title.ifBlank { stringResource(R.string.title) },
+        onNavigateBack = { backStack.pop() },
+        actions = {
+            IconButton(onClick = {
+                notesViewModel.saveExternal(uri, content) { ok ->
+                    AppMessages.show(if (ok) savedMsg else saveFailedMsg)
+                }
+            }) { IconSave() }
+            IconButton(onClick = {
+                notesViewModel.addExternalToApp(title, content) { id ->
+                    backStack.pop()
+                    backStack.add(Route.Note(id))
+                }
+            }) { IconAdd() }
         },
     ) { paddingValues ->
         if (loaded) {

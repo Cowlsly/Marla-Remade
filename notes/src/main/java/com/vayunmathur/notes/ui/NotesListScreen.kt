@@ -38,7 +38,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
@@ -157,7 +157,7 @@ fun NotesListScreen(
         }
     }
 
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             if (isSelectionMode) {
                 TopAppBar(
@@ -197,13 +197,9 @@ fun NotesListScreen(
                     IconAdd()
                 }
             }
-        }
-    ) { paddingValues ->
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = paddingValues
-        ) {
+        },
+        state = listState,
+    ) {
             items(localData, key = { it.id }) { note ->
                 val dragging = reorderState.draggingKey == note.id
                 // Item root: follow the finger 1:1 while dragging; otherwise glide into place.
@@ -267,6 +263,5 @@ fun NotesListScreen(
                     }
                 }
             }
-        }
     }
 }

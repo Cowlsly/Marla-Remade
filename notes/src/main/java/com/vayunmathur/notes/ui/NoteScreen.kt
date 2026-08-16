@@ -1,14 +1,10 @@
 package com.vayunmathur.notes.ui
 
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.RowScope
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -25,22 +21,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.EditorBottomBar
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.FormatIconButton
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCopy
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDraw
 import com.vayunmathur.library.ui.IconImage
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconShare
 import com.vayunmathur.library.ui.LocalContentColor
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OdfMarkdownEditorController
 import com.vayunmathur.library.ui.OdfMarkdownEditorField
 import com.vayunmathur.library.ui.OdfMarkdownEditorToolbar
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberOdfMarkdownEditorController
 import com.vayunmathur.library.ink.deserialize
 import com.vayunmathur.notes.R
@@ -67,17 +61,13 @@ fun NoteScreen(state: NoteUiState, actions: NoteActions) {
     var focusedBlockId by remember { mutableStateOf<String?>(null) }
     var activeController by remember { mutableStateOf<OdfMarkdownEditorController?>(null) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {},
-                navigationIcon = { IconNavigation { actions.back() } },
-                actions = {
-                    IconButton({ actions.copyNote() }) { IconCopy() }
-                    IconButton({ actions.shareNote() }) { IconShare() }
-                    IconButton({ actions.deleteNote() }) { IconDelete() }
-                },
-            )
+    DetailScaffold(
+        title = {},
+        onNavigateBack = { actions.back() },
+        actions = {
+            IconButton({ actions.copyNote() }) { IconCopy() }
+            IconButton({ actions.shareNote() }) { IconShare() }
+            IconButton({ actions.deleteNote() }) { IconDelete() }
         },
         bottomBar = {
             // One horizontally-scrollable bar. While a text block is focused it shows
@@ -98,15 +88,8 @@ fun NoteScreen(state: NoteUiState, actions: NoteActions) {
                 EditorBottomBar(scrollable = true, content = insertButtons)
             }
         },
-    ) { paddingValues ->
-        Column(
-            Modifier
-                .padding(paddingValues)
-                .fillMaxSize()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-        ) {
-            BasicTextField(
+    ) {
+        BasicTextField(
                 state.title,
                 { actions.setTitle(it) },
                 Modifier.fillMaxWidth().padding(top = 8.dp),
@@ -159,6 +142,5 @@ fun NoteScreen(state: NoteUiState, actions: NoteActions) {
                     }
                 }
             }
-        }
     }
 }

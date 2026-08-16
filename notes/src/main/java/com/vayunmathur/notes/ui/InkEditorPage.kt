@@ -14,15 +14,14 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
@@ -40,7 +39,6 @@ import androidx.ink.brush.StockBrushes
 import androidx.ink.strokes.Stroke
 import com.vayunmathur.library.ui.IconBrush
 import com.vayunmathur.library.ui.IconCheck
-import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconDraw
 import com.vayunmathur.library.ui.IconEraser
 import com.vayunmathur.library.ui.IconForward
@@ -94,15 +92,11 @@ fun InkEditor(
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.drawing)) },
-                navigationIcon = { IconButton(onClick = onCancel) { IconClose() } },
-                actions = {
-                    IconButton(onClick = { onDone(strokes.map { it.serialize() }) }) { IconCheck() }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.drawing),
+        onClose = onCancel,
+        actions = {
+            IconButton(onClick = { onDone(strokes.map { it.serialize() }) }) { IconCheck() }
         },
         bottomBar = {
             InkToolbar(
