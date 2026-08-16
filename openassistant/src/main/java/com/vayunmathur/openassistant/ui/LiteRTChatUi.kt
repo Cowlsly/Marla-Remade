@@ -1,7 +1,6 @@
 package com.vayunmathur.openassistant.ui
 import android.Manifest
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -42,7 +41,6 @@ import com.vayunmathur.openassistant.util.ChatUiState
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
 import com.vayunmathur.library.util.NavBackStack
 import androidx.window.core.layout.WindowSizeClass.Companion.WIDTH_DP_EXPANDED_LOWER_BOUND
 import com.vayunmathur.library.image.compose.AsyncImage
@@ -86,7 +84,7 @@ fun LiteRTChatUi(
     val selectedImageUris = remember { mutableStateListOf<Uri>() }
     val selectedImageFiles = remember { mutableStateListOf<File>() }
 
-    val recordAudioPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
+    val recordAudioPermission = rememberPermissionRequest(Manifest.permission.RECORD_AUDIO) { isGranted ->
         if (isGranted) {
             assistantViewModel.startRecording()
             if (!assistantViewModel.isRecording.value && assistantViewModel.recordedAudioPath.value == null) {
@@ -143,9 +141,7 @@ fun LiteRTChatUi(
         }
 
         override fun record() {
-            if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) {
-                assistantViewModel.startRecording()
-            } else recordAudioPermission.launch(Manifest.permission.RECORD_AUDIO)
+            recordAudioPermission()
         }
 
         override fun cancelMedia() {
