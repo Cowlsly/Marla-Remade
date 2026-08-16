@@ -2,6 +2,7 @@ package com.vayunmathur.library.ui
 
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Typography
 import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
@@ -14,7 +15,7 @@ fun DynamicTheme(darkTheme: Boolean? = null, content: @Composable () -> Unit) {
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = AppTypography,
+        typography = Typography(),
         content = content
     )
 }
