@@ -2,32 +2,155 @@ package org.schabi.newpipe.extractor.services.youtube.sabrng
 
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import org.schabi.newpipe.extractor.NewPipe
 import org.schabi.newpipe.extractor.exceptions.ExtractionException
 import org.schabi.newpipe.extractor.exceptions.ParsingException
+import org.schabi.newpipe.extractor.localization.ContentCountry
+import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.services.youtube.ItagItem
 import org.schabi.newpipe.extractor.services.youtube.YoutubeApiDecoder
 import org.schabi.newpipe.extractor.services.youtube.YoutubeJavaScriptPlayerManager
+import org.schabi.newpipe.extractor.services.youtube.YoutubeJsonBuilder
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper
 import org.schabi.newpipe.extractor.services.youtube.sabrng.exception.SabrProtocolException
+import org.schabi.newpipe.extractor.utils.JsonUtils
 import org.schabi.newpipe.extractor.utils.Parser
 import org.schabi.newpipe.extractor.utils.getArray
 import org.schabi.newpipe.extractor.utils.getBoolean
 import org.schabi.newpipe.extractor.utils.getInt
 import org.schabi.newpipe.extractor.utils.getObject
 import org.schabi.newpipe.extractor.utils.getString
+import java.io.IOException
 import java.io.UnsupportedEncodingException
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
 
 /**
- * Builds a session-based [YoutubeSabrInfo] from a MWEB player response, resolving signature and
+ * Builds a session-based [YoutubeSabrInfo] from a MWEB/WEB player response, resolving signature and
  * n-parameter obfuscation via youpipe's shared deobfuscation path. This is the session-stack
  * equivalent of the old `YoutubeSabrProbe.fromPlayerResponse`, but it produces the [YoutubeSabrInfo]
  * consumed by [YoutubeSabrSession] and does not depend on the legacy `sabr` package.
  */
 object YoutubeSabrNgInfoBuilder {
     private const val FALLBACK_CLIENT_VERSION = "2.20250122.04.00"
+    private const val WEB_CLIENT_NAME = "WEB"
+    private const val WEB_CLIENT_ID = "1"
+
+    /**
+     * Fetches a WEB player response for [videoId] and builds a [YoutubeSabrInfo]. Independent of the
+     * legacy `sabr` package (uses only youpipe's shared innertube/deobfuscation infrastructure).
+     */
+    @JvmStatic
+    @Throws(IOException::class, ExtractionException::class)
+    fun fetchSabrInfo(
+        videoId: String,
+        localization: Localization,
+        contentCountry: ContentCountry
+    ): YoutubeSabrInfo {
+        val sessionToken =
+            YoutubeParsingHelper.getSessionPoToken(WEB_CLIENT_NAME, localization, contentCountry)
+        val playerPoToken = sessionToken?.getPoToken()
+        val visitorData = sessionToken?.visitorData
+        val cpn = YoutubeParsingHelper.generateContentPlaybackNonce()
+        val response =
+            fetchPlayerResponse(videoId, localization, contentCountry, cpn, playerPoToken, visitorData)
+        return buildFromPlayerResponse(videoId, cpn, response, visitorData, null)
+    }
+
+    @Throws(IOException::class, ExtractionException::class)
+    private fun fetchPlayerResponse(
+        videoId: String,
+        localization: Localization,
+        contentCountry: ContentCountry,
+        cpn: String,
+        playerPoToken: String?,
+        visitorData: String?
+    ): JsonObject {
+        val body = createPlayerBody(
+            videoId, localization, contentCountry, cpn, playerPoToken, visitorData
+        )
+        val url = YoutubeParsingHelper.YOUTUBEI_V1_URL + "player?" +
+            YoutubeParsingHelper.DISABLE_PRETTY_PRINT_PARAMETER
+        val response = NewPipe.getDownloader().post(
+            url, buildPlayerHeaders(visitorData), body, localization
+        )
+        return JsonUtils.toJsonObject(YoutubeParsingHelper.getValidJsonResponseBody(response))
+    }
+
+    @Throws(ParsingException::class)
+    private fun createPlayerBody(
+        videoId: String,
+        localization: Localization,
+        contentCountry: ContentCountry,
+        cpn: String,
+        playerPoToken: String?,
+        visitorData: String?
+    ): ByteArray {
+        val builder = YoutubeJsonBuilder()
+            .`object`("context")
+            .`object`("client")
+            .value("clientName", WEB_CLIENT_NAME)
+            .value("clientVersion", resolveClientVersion())
+            .value("hl", localization.getLocalizationCode())
+            .value("gl", contentCountry.countryCode)
+            .value("utcOffsetMinutes", 0)
+            .value("platform", "DESKTOP")
+        if (!visitorData.isNullOrEmpty()) {
+            builder.value("visitorData", visitorData)
+        }
+        builder.end()
+            .`object`("request")
+            .array("internalExperimentFlags")
+            .end()
+            .value("useSsl", true)
+            .end()
+            .`object`("user")
+            .value("lockedSafetyMode", false)
+            .end()
+            .end()
+            .`object`("playbackContext")
+            .`object`("contentPlaybackContext")
+            .value("referer", "https://www.youtube.com/watch?v=$videoId")
+            .value("vis", 0)
+            .value("splay", false)
+            .value("lactMilliseconds", "-1")
+            .value(
+                "signatureTimestamp",
+                YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId)
+            )
+            .value("html5Preference", "HTML5_PREF_WANTS")
+            .end()
+            .end()
+            .value(YoutubeParsingHelper.CPN, cpn)
+            .value(YoutubeParsingHelper.VIDEO_ID, videoId)
+            .value(YoutubeParsingHelper.CONTENT_CHECK_OK, true)
+            .value(YoutubeParsingHelper.RACY_CHECK_OK, true)
+        if (!playerPoToken.isNullOrEmpty()) {
+            builder.`object`("serviceIntegrityDimensions")
+                .value("poToken", playerPoToken)
+                .end()
+        }
+        return builder.done().toString().toByteArray(StandardCharsets.UTF_8)
+    }
+
+    @Throws(IOException::class, ExtractionException::class)
+    private fun buildPlayerHeaders(visitorData: String?): Map<String, List<String>> {
+        val headers = HashMap<String, List<String>>()
+        headers["Content-Type"] = listOf("application/json")
+        if (!visitorData.isNullOrEmpty()) {
+            headers["X-Goog-Visitor-Id"] = listOf(visitorData)
+        }
+        headers["Origin"] = listOf("https://www.youtube.com")
+        headers["Referer"] = listOf("https://www.youtube.com")
+        headers["X-YouTube-Client-Name"] = listOf(WEB_CLIENT_ID)
+        headers["X-YouTube-Client-Version"] = listOf(resolveClientVersion())
+        YoutubeParsingHelper.addLoggedInHeaders(headers)
+        if (!headers.containsKey("Cookie")) {
+            YoutubeParsingHelper.addCookieHeader(headers)
+        }
+        return headers
+    }
 
     @JvmStatic
     @JvmOverloads
