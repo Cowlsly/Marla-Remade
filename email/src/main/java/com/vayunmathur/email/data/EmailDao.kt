@@ -114,7 +114,7 @@ interface EmailDao {
     @Query("UPDATE EmailMessage SET snoozedUntil = 0, isRead = 0 WHERE snoozedUntil != 0 AND snoozedUntil <= :now")
     suspend fun wakeDueSnoozed(now: Long): Int
 
-    @Query("SELECT * FROM EmailMessage WHERE folderName = 'INBOX' ORDER BY dateMillis DESC, id DESC LIMIT 30")
+    @Query("SELECT * FROM EmailMessage WHERE folderName = 'INBOX' ORDER BY dateMillis DESC, id DESC LIMIT 100")
     suspend fun getRecentUnifiedMessages(): List<EmailMessage>
 
     @Query("SELECT * FROM EmailMessage WHERE folderName = 'INBOX' ORDER BY dateMillis DESC, id DESC LIMIT 30")
