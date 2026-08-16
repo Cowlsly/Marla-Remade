@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.CountryMap
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.google.GooglePoiPin
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import kotlinx.serialization.json.JsonObject
@@ -51,6 +52,7 @@ fun MyMapLayers(
     userPosition: Position,
     userBearing: Float,
     navProgress: com.vayunmathur.maps.util.NavigationProgress? = null,
+    googlePins: List<GooglePoiPin> = emptyList(),
 ) {
     val trafficVersion by OfflineRouter.trafficVersion.collectAsState()
     val context = LocalContext.current
@@ -135,6 +137,10 @@ fun MyMapLayers(
             opacity = const(0.6f),
             cap = const(LineCap.Butt)
         )
+
+        // Custom Google POI overlay (replaces suppressed native basemap POIs).
+        // Rendered above traffic but below the user puck.
+        GooglePoiLayer(googlePins)
 
         userSource?.let { src ->
             LaunchedEffect(userPosition, userBearing) {

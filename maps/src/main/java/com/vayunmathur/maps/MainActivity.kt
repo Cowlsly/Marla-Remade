@@ -24,6 +24,7 @@ import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.MapsZonesViewModel
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
 import kotlinx.serialization.Serializable
@@ -107,11 +108,12 @@ fun Navigation(
     searchViewModel: MapsSearchViewModel = viewModel(),
     zonesViewModel: MapsZonesViewModel = viewModel(),
     savedPlacesViewModel: SavedPlacesViewModel = viewModel(),
+    poiViewModel: GooglePoiMapViewModel = viewModel(),
 ) {
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel)
+            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel)
         }
         entry<Route.DownloadedMapsPage> {
             DownloadedMapsPage(backStack, zonesViewModel)

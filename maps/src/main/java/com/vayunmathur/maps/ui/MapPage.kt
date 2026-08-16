@@ -63,7 +63,6 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.maps.Route
-import com.vayunmathur.maps.data.AmenityRepository
 import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.parse
@@ -72,6 +71,7 @@ import com.vayunmathur.maps.util.MapsZonesViewModel
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
+import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.ZoneDownloadManager
 import kotlinx.coroutines.Dispatchers
@@ -105,13 +105,17 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
 
     val savedHome by savedPlacesViewModel.home.collectAsState()
     val savedWork by savedPlacesViewModel.work.collectAsState()
+
+    // Google POI overlay pins (viewport scrape → custom layer, replacing the
+    // suppressed native basemap POIs).
+    val googlePins by poiViewModel.pins.collectAsState()
 
     // --- ZONE DOWNLOAD STATE ---
     val camera = rememberCameraState(CameraPosition(target = Position(-118.243683,34.052235), zoom = 5.0))
@@ -135,6 +139,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.west, true)
                 OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.east, true)
                 OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.west, true)
+                // Refresh the Google POI overlay for the idle viewport (VM
+                // debounces + LRU-caches the keyless scrape).
+                poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
             }
         }
     }
@@ -335,22 +342,40 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         onMapClick = { _, offset ->
                             coroutineScope.launch {
                                 val projection = camera.projection
+                                // Hit-test the Google POI overlay first — a pin
+                                // tap re-selects the place as a GenericPlace so
+                                // SelectedFeatureViewModel.currentPoiInfo fetches
+                                // the enrichment and GooglePoiEnrichment renders.
+                                val poiHit = projection?.queryRenderedFeatures(
+                                    offset,
+                                    setOf(GOOGLE_POI_LAYER_ID)
+                                )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
+                                if (poiHit != null) {
+                                    if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
+                                        selectedFeature as SpecificFeature.Route
+                                    )
+                                    viewModel.set(poiHit)
+                                    scaffoldState.bottomSheetState.expand()
+                                    return@launch
+                                }
+
+                                // Otherwise fall back to basemap admin labels
+                                // (country/region). Native POIs are suppressed
+                                // and the amenity-DB enrichment path is gone.
                                 val features = projection?.queryRenderedFeatures(
                                     offset,
-                                    setOf("places_country", "places_region", "pois").flatMap {
+                                    setOf("places_country", "places_region").flatMap {
                                         listOf("${it}_base", "${it}_hybrid")
                                     }.toSet()
                                 ) ?: emptyList()
-                                // parse() may do network (Wikidata) + Room
-                                // per feature. queryRenderedFeatures returns
-                                // one Feature PER LAYER at the tap point —
-                                // often 2-3 — and we only use the first
-                                // parseable result. Stop at the first hit
-                                // instead of doing every Wikidata round-trip
-                                // serially in the foreground.
+                                // parse() may do a Wikidata round-trip per
+                                // feature; queryRenderedFeatures returns one
+                                // Feature PER LAYER at the tap point, so stop at
+                                // the first parseable hit instead of doing every
+                                // round-trip serially in the foreground.
                                 val firstFeature = withContext(Dispatchers.IO) {
                                     features.firstNotNullOfOrNull { raw ->
-                                        runCatching { parse(raw, AmenityRepository.get(context).getDatabase()) }.getOrNull()
+                                        runCatching { parse(raw) }.getOrNull()
                                     }
                                 }
 
@@ -365,7 +390,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins)
                     }
                 }
 
@@ -542,6 +567,11 @@ fun calculateZoneId(lat: Double, lon: Double, zoom: Float): Int? {
     return ((spatialId ushr 58) and 0x3F).toInt()
 }
 
+// Native basemap layers suppressed at runtime — amenities are Google-only now
+// (custom overlay layer). Keeping this in code (vs editing style.json) makes it
+// OTA-swappable per Decision D1.
+private val SUPPRESSED_LAYERS = setOf("pois")
+
 fun patchStyleForHybrid(
     jsonString: String,
     baseLocalUrl: String,
@@ -567,6 +597,12 @@ fun patchStyleForHybrid(
             val layer = layerElement.jsonObject
             val id = layer["id"]?.jsonPrimitive?.content ?: ""
             val type = layer["type"]?.jsonPrimitive?.content ?: ""
+
+            // Suppress native basemap POIs at runtime (Decision D1) — amenities
+            // are Google-only now, rendered on the custom overlay layer. Dropping
+            // the source layer here (rather than editing style.json) keeps it
+            // OTA-swappable. Also drops the would-be _base/_hybrid variants.
+            if (id in SUPPRESSED_LAYERS) return@forEach
 
             if (type == "background") {
                 add(layer)
