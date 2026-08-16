@@ -157,6 +157,13 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
             initWith(getByName("release"))
             isMinifyEnabled = false
             isShrinkResources = false
+            // The Compose screenshot-test plugin (com.android.compose.screenshot) only
+            // registers its per-variant render tasks (preview/update/validateDevScreenshotTest)
+            // for a variant whose component is debuggable. `dev` is our testBuildType and is
+            // built from `release` (initWith), which is not debuggable, so without this the
+            // render tasks are never created and `metadata` fails with "No rendered previews
+            // found". `dev` is a developer build and never ships, so debuggable is correct here.
+            isDebuggable = true
             matchingFallbacks += listOf("release")
             ndk {
                 abiFilters.clear()
