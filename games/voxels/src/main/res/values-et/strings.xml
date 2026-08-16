@@ -17,4 +17,22 @@
     <string name="join_request_sent">Liitumispäring on edastatud ja sa saad ligipääsu, kui omanik sellega nõustub.</string>
     <string name="shared_with_you">Jagatud sinuga</string>
     <string name="copy">Kopeeri</string>
+    <string name="no_worlds_yet_create_one_to_start">Uusi maailmu veel pole - alustamiseks loo mõni.</string>
+    <string name="world_name">Maailma nimi</string>
+    <string name="your_device_id">Sinu seadme tunnus (kutse saamiseks jaga seda teistega):</string>
+    <string name="refresh">Uuenda andmeid</string>
+    <string name="requires_internet">Eeldab toimivat internetiühendust</string>
+    <string name="no_online_worlds">Võrgupõhiseid maailmu veel pole. Jaga mõnda enda oma teistega või küsi sõbralt kutset tema omasse.</string>
+    <string name="hosted_by_you">Sina jagad teistega</string>
+    <string name="share_world">Jaga maailma</string>
+    <string name="recipient_device_id">Vastuvõtva seadme tunnus</string>
+    <string name="send_invite">Saada kutse</string>
+    <string name="invite_sent">Kutse on saadetud.</string>
+    <string name="invite_failed">Kutse saatmine ei õnnestunud - kontrolli, kas seadme tunnus on õige ja internetiühendus toimib.</string>
+    <string name="share_link_chooser">Jaga Voxelsi kutset</string>
+    <string name="requesting_access">Küsin õigust ligipääsuks…</string>
+    <string name="online_worlds">Maailmad võrgus</string>
+    <string name="host_online_world">Jaga oma maailma võrku</string>
+    <string name="connection_lost">Ühendus on katkenud - ootan selle taastumist…</string>
+    <string name="players_online">Võrgus on %1$d mängijat</string>
 </resources>
