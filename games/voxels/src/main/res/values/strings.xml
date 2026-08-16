@@ -1,5 +1,5 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">Voxels</string>
+    <string name="app_name" translatable="false">Voxels</string>
     <string name="rust_lib_missing_vulkan_unavailable">Rust lib missing — Vulkan unavailable</string>
     <string name="paused">Paused</string>
     <string name="resume">Resume</string>

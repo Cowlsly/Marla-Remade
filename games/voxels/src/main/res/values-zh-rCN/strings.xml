@@ -20,7 +20,6 @@
     <string name="a_number_or_any_text_hashed_to_a_seed">数字或任意文本（哈希为种子）。</string>
     <string name="select_a_world">选择世界</string>
     <string name="estus">原素 ×%1$s</string>
-    <string name="app_name">Voxels</string>
     <string name="seed">种子</string>
     <string name="no_worlds_yet_create_one_to_start">尚无世界 — 创建一个开始。</string>
     <string name="save_quit_to_menu">保存并退出到菜单</string>

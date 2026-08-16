@@ -81,6 +81,5 @@
     <string name="share_link_chooser">Поделиться приглашением Voxels</string>
     <string name="or_add_by_device_id">Или добавьте по идентификатору устройства</string>
     <string name="requesting_access">Запрос доступа…</string>
-    <string name="app_name">Вокселы</string>
     <string name="seed">Начальное число</string>
 </resources>
