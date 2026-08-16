@@ -11,4 +11,7 @@
     <string name="hide">Nascondi</string>
     <string name="clear_formatting">Cancella formattazione</string>
     <string name="copy">Copia</string>
+    <string name="bookmarks">Segnalibri</string>
+    <string name="general">Generali</string>
+    <string name="all">Tutti</string>
 </resources>
