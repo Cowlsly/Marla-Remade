@@ -1,0 +1,6 @@
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.42,37.77],[-122.41,37.78]]},"properties":{"highway":"residential","maxspeed":"25 mph","name":"Main St","id":"way/3001"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.41,37.78],[-122.40,37.79]]},"properties":{"highway":"primary","maxspeed":"50","id":"way/3002"}}
+{"type":"Feature","geometry":{"type":"MultiLineString","coordinates":[[[-122.40,37.79],[-122.39,37.80]]]},"properties":{"highway":"motorway","maxspeed":"100 km/h","id":"way/3003"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.39,37.80],[-122.38,37.81]]},"properties":{"highway":"tertiary","maxspeed:forward":"30 mph","id":"way/3004"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.38,37.81],[-122.37,37.82]]},"properties":{"highway":"service","id":"way/3005"}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.37,37.82]},"properties":{"highway":"speed_camera","maxspeed":"40","id":"node/3006"}}

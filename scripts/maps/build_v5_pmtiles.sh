@@ -5,6 +5,7 @@ set -euo pipefail
 #
 # v5.pmtiles = Protomaps base schema (unchanged, style.json-compatible)
 #            + safety     (baked road-furniture: cameras/ALPR/stops/signals)
+#            + maxspeed   (posted speed limits for the P5b MaxspeedSource)
 #            + admin_country / admin_region / admin_city  (borders; replaces .fgb)
 #
 # This single file REPLACES both:
@@ -14,8 +15,9 @@ set -euo pipefail
 # Pipeline (each step is a standalone script in this dir):
 #   1. build_base_layers.sh   -> base.pmtiles           (planetiler OR reuse v4)
 #   2. build_safety_layer.sh  -> safety.pmtiles         (osmium + tippecanoe)
-#   3. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
-#   4. tile-join              -> v5.pmtiles             (merge all layers)
+#   3. build_maxspeed_layer.sh-> maxspeed.pmtiles       (osmium + tippecanoe)
+#   4. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
+#   5. tile-join              -> v5.pmtiles             (merge all layers)
 #
 # Full planet build is the user's infra step (large + long). Prove correctness
 # first with a metro dry run:
@@ -36,6 +38,7 @@ set -euo pipefail
 #   --base-area A     planetiler area name/path (base-mode build; default planet)
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
+#   --skip-maxspeed   omit maxspeed layer
 #   --skip-admin      omit admin layers
 #   --keep-work       keep intermediates
 #
@@ -52,6 +55,7 @@ BASE_JAR=""
 BASE_AREA="planet"
 SKIP_BASE=0
 SKIP_SAFETY=0
+SKIP_MAXSPEED=0
 SKIP_ADMIN=0
 KEEP_WORK=0
 
@@ -66,9 +70,10 @@ while [[ $# -gt 0 ]]; do
         --base-area) BASE_AREA="$2"; shift 2 ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
+        --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
         --skip-admin) SKIP_ADMIN=1; shift ;;
         --keep-work) KEEP_WORK=1; shift ;;
-        -h|--help) sed -n '4,55p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,60p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -100,7 +105,16 @@ if [[ "$SKIP_SAFETY" == "0" ]]; then
     INPUTS+=("$WORK/safety.pmtiles")
 fi
 
-# --- 3. admin ---
+# --- 3. maxspeed ---
+if [[ "$SKIP_MAXSPEED" == "0" ]]; then
+    [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for maxspeed layer (or --skip-maxspeed)" >&2; exit 1; }
+    MS_ARGS=(--pbf "$PBF" --out "$WORK/maxspeed.pmtiles")
+    [[ -n "$BBOX" ]] && MS_ARGS+=(--bbox "$BBOX")
+    "$HERE/build_maxspeed_layer.sh" "${MS_ARGS[@]}"
+    INPUTS+=("$WORK/maxspeed.pmtiles")
+fi
+
+# --- 4. admin ---
 if [[ "$SKIP_ADMIN" == "0" ]]; then
     ADMIN_ARGS=(--outdir "$WORK/admin")
     [[ -n "$PBF" ]] && ADMIN_ARGS+=(--pbf "$PBF")
@@ -112,7 +126,7 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     done
 fi
 
-# --- 4. merge ---
+# --- 5. merge ---
 echo "[v5] merging ${#INPUTS[@]} source(s) -> $OUT"
 printf '  + %s\n' "${INPUTS[@]}"
 # --no-tile-size-limit: don't drop features when combining dense base + overlays.
@@ -123,7 +137,7 @@ echo "[v5] done: $OUT (${SIZE} bytes)"
 echo ""
 echo "Layers now in $OUT:"
 echo "  base : earth landcover landuse water roads buildings boundaries pois places"
-echo "  new  : safety admin_country admin_region admin_city"
+echo "  new  : safety maxspeed admin_country admin_region admin_city"
 echo ""
 echo "Publish (bump key to v5.pmtiles):"
 echo "  R2_KEY=v5.pmtiles ./scripts/maps/vendor_pmtiles.sh --local $OUT --source $OUT"

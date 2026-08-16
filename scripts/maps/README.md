@@ -8,9 +8,10 @@ Builds the custom **`v5.pmtiles`** consumed by the `maps` app. This single file
 | `https://data.vayunmathur.com/v4.pmtiles` (base tiles) | `v5.pmtiles` base layers (identical schema) |
 | `maps/src/main/assets/admin0.fgb` + `admin1.fgb` (border masks) | `v5.pmtiles` `admin_country` / `admin_region` / `admin_city` layers |
 
-On top of the base it also **bakes safety / road-furniture** data (speed
+On top of the base it also **bakes** (a) safety / road-furniture data (speed
 cameras, ALPR/surveillance, stop signs, traffic signals) so the app never needs
-a runtime Overpass query.
+a runtime Overpass query, and (b) posted **speed limits** (`maxspeed`) for the
+P5b speed-limit feature — all from the same file.
 
 > This directory is the **generator**. Running the full planet build is an infra
 > step (large + long-running); the scripts are designed to be correct, modular
@@ -58,6 +59,7 @@ earth  landcover  landuse  water  roads  buildings  boundaries  pois  places
 | source-layer | geometry | key attributes |
 |---|---|---|
 | `safety` | Point | `kind` ∈ {`speed_camera`,`alpr`,`surveillance`,`stop_sign`,`traffic_signals`}, `name?`, `direction?`, `operator?`, `ref?`, `osm_id` |
+| `maxspeed` | LineString/MultiLineString | **`maxspeed`** (raw OSM value, e.g. `"35 mph"`, `"50"`, `"50 km/h"`), `highway?`, `name?`, `osm_id` |
 | `admin_country` | Polygon/MultiPolygon | `admin_level=2`, `name`, `name_en`, **`ISO_A2`**, `iso_a3` |
 | `admin_region` | Polygon/MultiPolygon | `admin_level=4`, `name`, `name_en`, **`iso_3166_2`**, `country_iso` |
 | `admin_city` | Polygon/MultiPolygon | `admin_level=8`, `name`, `name_en` |
@@ -65,6 +67,12 @@ earth  landcover  landuse  water  roads  buildings  boundaries  pois  places
 The admin layers deliberately preserve `ISO_A2` (countries) and `iso_3166_2`
 (regions) — the same keys `CountryMap.kt` matches on — so P13 can repoint the
 mask lookup at the PMTiles source with **no attribute changes**.
+
+The `maxspeed` layer feeds P5b's `MaxspeedSource`, which reads the posted speed
+limit via `queryRenderedFeatures` on **source-layer `maxspeed`**, property
+**`maxspeed`**. It is a dedicated layer (not an attribute on the base `roads`
+layer) so it works whether the base is freshly built or the upstream Protomaps
+base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
 
 ---
 
@@ -81,6 +89,9 @@ mask lookup at the PMTiles source with **no attribute changes**.
   * `man_made=surveillance` (any other) → `surveillance`
   * `highway=stop` → `stop_sign`
   * `highway=traffic_signals` → `traffic_signals`
+* **Maxspeed** — OpenStreetMap. Ways carrying a `maxspeed` (or
+  `maxspeed:forward`/`maxspeed:backward`) tag; the raw value is kept verbatim so
+  the app parses `mph`/`km/h`/bare numbers itself.
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
     `ne_10m_admin_1_states_provinces`). Chosen because the current `.fgb` are
@@ -99,8 +110,10 @@ mask lookup at the PMTiles source with **no attribute changes**.
 | `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + admin → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
+| `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
+| `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
 | `test/fixtures/*` | Tiny sample inputs for the test |
@@ -173,8 +186,9 @@ Individual layers can also be built standalone — see each script's `--help`.
 | Artifact | Extent | Approx size |
 |---|---|---|
 | `safety.pmtiles` | planet | ~0.3–1 GB (point features only) |
+| `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
-| **`v5.pmtiles`** | planet | ≈ **137 GB** (dominated by the base; overlays add < 1%) |
+| **`v5.pmtiles`** | planet | ≈ **137 GB** (dominated by the base; overlays add < 3%) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
 
 The base dominates; the safety + admin overlays are a rounding error on top.
@@ -225,11 +239,13 @@ passes:
 ```
 $ python3 scripts/maps/test/test_normalize.py
 ...
-26 passed, 0 failed
+34 passed, 0 failed
 ```
 
-This validates: all five `kind` classifications (incl. DeFlock ALPR detection),
-non-safety/non-point features dropped, `admin_level` mapping (2/4/8),
-`ISO_A2` / `iso_3166_2` preservation, county-vs-city `admin_level` filtering, and
-that every emitted line is valid GeoJSON (tippecanoe input). Run the metro dry
-run above on a box with the toolchain installed for a full end-to-end check.
+This validates: all five safety `kind` classifications (incl. DeFlock ALPR
+detection), maxspeed value passthrough (mph/km/h/bare + `maxspeed:forward`
+fallback, lines only), non-safety/non-point features dropped, `admin_level`
+mapping (2/4/8), `ISO_A2` / `iso_3166_2` preservation, county-vs-city
+`admin_level` filtering, and that every emitted line is valid GeoJSON
+(tippecanoe input). Run the metro dry run above on a box with the toolchain
+installed for a full end-to-end check.

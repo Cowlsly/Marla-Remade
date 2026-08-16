@@ -22,6 +22,7 @@ FIX = HERE / "fixtures"
 sys.path.insert(0, str(ROOT))
 
 import normalize_admin  # noqa: E402
+import normalize_maxspeed  # noqa: E402
 import normalize_safety  # noqa: E402
 
 
@@ -92,6 +93,22 @@ def test_admin_region() -> None:
     check("MultiPolygon kept", feats[1]["geometry"]["type"] == "MultiPolygon")
 
 
+def test_maxspeed() -> None:
+    print("maxspeed layer:")
+    raw = _load(FIX / "maxspeed_sample.geojsonseq")
+    feats = list(normalize_maxspeed.normalize(normalize_maxspeed.iter_features(raw)))
+    # 4 line features with maxspeed; service (no maxspeed) + Point node dropped.
+    check("emits 4 line features", len(feats) == 4, f"got {len(feats)}")
+    check("all line geometry", all(f["geometry"]["type"] in ("LineString", "MultiLineString") for f in feats))
+    values = [f["properties"]["maxspeed"] for f in feats]
+    check("keeps raw mph value", "25 mph" in values)
+    check("keeps bare number value", "50" in values)
+    check("keeps km/h value", "100 km/h" in values)
+    check("falls back to maxspeed:forward", "30 mph" in values)
+    check("every feature has maxspeed property", all(f["properties"].get("maxspeed") for f in feats))
+    check("no point node leaked", all(f["geometry"]["type"] != "Point" for f in feats))
+
+
 def test_admin_city() -> None:
     print("admin_city layer:")
     raw = _load(FIX / "admin_city_sample.geojsonseq")
@@ -114,6 +131,7 @@ def test_valid_geojson_output() -> None:
 
 def main() -> int:
     test_safety()
+    test_maxspeed()
     test_admin_country()
     test_admin_region()
     test_admin_city()
