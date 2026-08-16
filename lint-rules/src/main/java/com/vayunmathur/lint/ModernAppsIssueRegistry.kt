@@ -13,6 +13,7 @@ class ModernAppsIssueRegistry : IssueRegistry() {
         DirectBuildDatabaseDetector.ISSUE,
         OneComposablePerFileDetector.ISSUE,
         PackageStructureDetector.ISSUE,
+        RawScaffoldInAppDetector.ISSUE,
         WindowInsetsInReusableComponentDetector.ISSUE,
     )
 
