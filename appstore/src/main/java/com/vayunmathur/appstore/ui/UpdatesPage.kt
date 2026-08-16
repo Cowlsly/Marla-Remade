@@ -28,6 +28,7 @@ import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.appstore.util.UpdatesActions
 import com.vayunmathur.appstore.util.UpdatesUiState
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.EmptyState
@@ -35,9 +36,7 @@ import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 
 /** Binds [AppStoreViewModel] to the stateless [UpdatesScreen]. */
 @Composable
@@ -59,16 +58,13 @@ fun UpdatesScreen(
 ) {
     val anyInstalling = state.stages.values.any { it !is InstallStage.Failed }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                actions = {
-                    if (state.isChecking) {
-                        CircularProgressIndicator(Modifier.size(18.dp).padding(end = 4.dp))
-                    }
-                },
-            )
-        }
+    AppScaffold(
+        title = {},
+        actions = {
+            if (state.isChecking) {
+                CircularProgressIndicator(Modifier.size(18.dp).padding(end = 4.dp))
+            }
+        },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Row(

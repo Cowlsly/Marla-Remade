@@ -2,11 +2,8 @@ package com.vayunmathur.appstore.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
@@ -23,8 +20,8 @@ import com.vayunmathur.library.ui.CenterAlignedTopAppBar
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconBack
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 
 /**
@@ -49,20 +46,17 @@ fun TrustPage(
      */
     initialFirstVisibleItem: Int = 0,
 ) {
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(stringResource(R.string.trust_page_title)) },
                 navigationIcon = { IconButton(onClick = onBack) { IconBack() } },
             )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            state = rememberLazyListState(initialFirstVisibleItemIndex = initialFirstVisibleItem),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+        },
+        state = rememberLazyListState(initialFirstVisibleItemIndex = initialFirstVisibleItem),
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
             item {
                 Text(
                     stringResource(R.string.trust_intro),
@@ -134,7 +128,6 @@ fun TrustPage(
             }
         }
     }
-}
 
 @Composable
 private fun ProfileCard(profile: TrustProfile) {

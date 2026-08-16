@@ -21,12 +21,11 @@ import com.vayunmathur.appstore.util.AppStoreViewModel
 import com.vayunmathur.appstore.util.LibraryActions
 import com.vayunmathur.appstore.util.LibraryUiState
 import com.vayunmathur.appstore.util.SourceFilter
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconPackage
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 
 /** Binds [AppStoreViewModel] to the stateless [LibraryScreen]. */
 @Composable
@@ -47,19 +46,11 @@ fun LibraryScreen(
     actions: LibraryActions,
     onAppClick: (UnifiedApp) -> Unit = {},
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        stringResource(
-                            R.string.library_title,
-                            state.counts[SourceFilter.ALL] ?: state.apps.size,
-                        )
-                    )
-                },
-            )
-        }
+    AppScaffold(
+        title = stringResource(
+            R.string.library_title,
+            state.counts[SourceFilter.ALL] ?: state.apps.size,
+        ),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             LazyRow(
