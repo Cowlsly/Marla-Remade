@@ -8,6 +8,7 @@ import android.telephony.TelephonyManager
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.google.i18n.phonenumbers.PhoneNumberUtil
+import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import com.vayunmathur.library.network.NetworkClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -223,7 +224,7 @@ object SignalContactSync {
         }
 
         val resp = try {
-            NetworkClient.execute(url, method = "POST", headers = headers, body = bodyJson.toString(), useSystemTrust = true)
+            NetworkClient.execute(url, method = "POST", headers = headers, body = bodyJson.toString(), sslSocketFactory = SignalTrust.sslSocketFactory(context))
         } catch (e: Exception) {
             Log.w(TAG, "CDSI POST $url failed (live-only SGX attestation): ${e.message}")
             return null

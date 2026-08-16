@@ -1,5 +1,6 @@
 package com.vayunmathur.communicate.data.signal.transport
 
+import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.SignalAuthData
@@ -36,6 +37,7 @@ import java.security.SecureRandom
  * Uses :library:network WebSocketClient (binary frames).
  */
 class SignalSocket(
+    private val context: Context,
     private val authData: SignalAuthData,
     private val host: String = DEFAULT_HOST,
     private val port: Int = DEFAULT_PORT,
@@ -127,7 +129,10 @@ class SignalSocket(
     private suspend fun doConnectOnce() {
         val url = wsUrl()
         val headers = authHeaders()
-        webSocket(url, headers, captureResponseHeaders = listOf("x-signal-timestamp"), useSystemTrust = true) {
+        // Signal's chat host chains to Signal's private service CA — trust it explicitly
+        // (system trust alone throws "trust anchor for certification path not found").
+        val sslFactory = SignalTrust.sslSocketFactory(context)
+        webSocket(url, headers, captureResponseHeaders = listOf("x-signal-timestamp"), sslSocketFactory = sslFactory) {
             session = this
             isConnected = true
             val tsHeader = capturedHeader["x-signal-timestamp"] ?: responseHeaders.entries

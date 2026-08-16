@@ -7,6 +7,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.library.network.NetworkClient
 import org.whispersystems.signalservice.internal.push.SignalServiceProtos
 import java.security.SecureRandom
+import javax.net.ssl.SSLSocketFactory
 
 /**
  * GroupsV2 helper for the Signal primary client.
@@ -139,11 +140,12 @@ object SignalGroups {
         authData: SignalAuthData,
         requestBody: ByteArray,
         headers: Map<String, String> = emptyMap(),
+        sslSocketFactory: SSLSocketFactory? = null,
     ): Boolean = try {
         val basic = basicAuth(authData)
         val hdrs = mutableMapOf<String, Any>("Authorization" to "Basic $basic", "Content-Type" to "application/json")
         hdrs.putAll(headers)
-        val resp = NetworkClient.execute("$baseUrl$GROUPSV2_PATH", method = "PUT", headers = hdrs, body = requestBody, useSystemTrust = true)
+        val resp = NetworkClient.execute("$baseUrl$GROUPSV2_PATH", method = "PUT", headers = hdrs, body = requestBody, sslSocketFactory = sslSocketFactory)
         resp.isSuccess
     } catch (e: Exception) {
         Log.w(TAG, "putNewGroup failed", e)

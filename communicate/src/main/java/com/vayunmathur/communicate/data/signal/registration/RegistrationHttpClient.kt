@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.SignalAuthData
+import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import com.vayunmathur.library.network.NetworkClient
 import org.json.JSONArray
 import org.json.JSONObject
@@ -139,7 +140,7 @@ class RegistrationHttpClient(private val context: Context) {
                     "$baseUrl/v1/accounts/whoami",
                     method = "GET",
                     headers = mapOf("Authorization" to basic),
-                    useSystemTrust = true,
+                    sslSocketFactory = SignalTrust.sslSocketFactory(context),
                 )
                 // whoami returns {number, aci, pni} when registered
                 ExistResult(resp.status == 200, null, resp.body)
@@ -169,7 +170,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "POST",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
-            useSystemTrust = true,
+            sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only: needs svr2Credentials/recoveryPassword)")
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
@@ -199,7 +200,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "PATCH",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
-            useSystemTrust = true,
+            sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
         return parseSession(resp.body)
@@ -218,7 +219,7 @@ class RegistrationHttpClient(private val context: Context) {
                 "Accept-Language" to (java.util.Locale.getDefault().toLanguageTag()),
             ),
             body = body,
-            useSystemTrust = true,
+            sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only)")
         if (resp.status == 429) throw IllegalStateException("429 rate limited: ${resp.body.take(500)}")
@@ -233,7 +234,7 @@ class RegistrationHttpClient(private val context: Context) {
             method = "PUT",
             headers = mapOf("Content-Type" to "application/json"),
             body = body,
-            useSystemTrust = true,
+            sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only)")
         if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
@@ -294,7 +295,7 @@ class RegistrationHttpClient(private val context: Context) {
                 "Authorization" to basic,
             ),
             body = bodyJson,
-            useSystemTrust = true,
+            sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         // 423 RegistrationLock — live-only: server returns {timeRemaining, svr2Credentials:{username,password}, svr3Credentials} + recoveryPassword path
         if (resp.status == 423) {
