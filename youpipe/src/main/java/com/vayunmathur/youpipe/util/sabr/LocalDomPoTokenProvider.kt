@@ -195,11 +195,22 @@ class LocalDomPoTokenProvider(context: Context) :
         info: YoutubeSabrInfo,
         streamState: YoutubeSabrStreamState,
         forceRefresh: Boolean,
+    ): ByteArray? = getPoTokenBytes(info.videoId, info.visitorData, forceRefresh)
+
+    /**
+     * Raw PO token bytes for the session-based SABR stack ([SabrNgSession]); mirrors
+     * [getPoToken] but takes the videoId/visitorData directly so it does not depend on the legacy
+     * `YoutubeSabrInfo`/`YoutubeSabrStreamState` types.
+     */
+    @JvmOverloads
+    fun getPoTokenBytes(
+        videoId: String,
+        visitorDataHint: String?,
+        forceRefresh: Boolean = false,
     ): ByteArray? {
         val credentialIdentity = currentCredentialIdentity(currentlyLoggedIn())
         credentialIdentityTracker.observe(credentialIdentity)
-        val videoId = info.videoId
-        val visitorData = info.visitorData ?: synchronized(visitorDataLock) {
+        val visitorData = visitorDataHint ?: synchronized(visitorDataLock) {
             fetchedVisitorData
         } ?: throw SabrProtocolException("Missing visitorData for Local DOM PO token")
         if (forceRefresh) {
