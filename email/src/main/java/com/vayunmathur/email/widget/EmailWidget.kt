@@ -127,7 +127,7 @@ class EmailWidget : GlanceAppWidget() {
                 }
             } else {
                 LazyColumn(modifier = GlanceModifier.fillMaxSize().background(GlanceTheme.colors.surface)) {
-                    items(messages.take(10)) { msg ->
+                    items(messages.take(30)) { msg ->
                         EmailItem(msg)
                     }
                 }
