@@ -124,13 +124,14 @@ private fun PwaBrowser(
 
     // Geolocation grants on EITHER fine OR coarse, so this keeps the raw multi-permission
     // launcher (the shared helper reports all-granted, which would wrongly require both).
-    // When both are permanently denied it still routes the user to app settings.
-    fun openSettingsIfAnyPermanentlyDenied(result: Map<String, Boolean>) {
-        val anyPermanentlyDenied = result.any { (perm, granted) ->
+    // Open app settings ONLY when BOTH are permanently denied — if either is still
+    // grantable the user isn't blocked.
+    fun openSettingsIfBothPermanentlyDenied(result: Map<String, Boolean>) {
+        val bothPermanentlyDenied = result.all { (perm, granted) ->
             !granted && (activity == null ||
                 !ActivityCompat.shouldShowRequestPermissionRationale(activity, perm))
         }
-        if (anyPermanentlyDenied) openAppSettings(context)
+        if (bothPermanentlyDenied) openAppSettings(context)
     }
 
     // camera/mic/both use the shared helper, which opens app settings on permanent denial;
@@ -169,7 +170,7 @@ private fun PwaBrowser(
             pair?.second?.invoke(pair.first, true, false)
         } else {
             pair?.second?.invoke(pair.first, false, false)
-            openSettingsIfAnyPermanentlyDenied(result)
+            openSettingsIfBothPermanentlyDenied(result)
         }
         pendingGeoCallback = null
     }

@@ -29,9 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.app.ActivityCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.webkit.WebSettingsCompat
 import androidx.webkit.WebViewFeature
+import com.vayunmathur.library.ui.findActivity
+import com.vayunmathur.library.ui.openAppSettings
 import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.web.platform.shields.FarblingConfig
@@ -107,6 +110,8 @@ fun WebViewBrowser(
 
     // Geolocation grants on EITHER fine OR coarse, so this keeps the raw multi-permission
     // launcher (the shared helper reports all-granted, which would wrongly require both).
+    // Open app settings ONLY when BOTH are permanently denied — if either is still
+    // grantable the user isn't blocked.
     val locationPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { result ->
@@ -119,6 +124,12 @@ fun WebViewBrowser(
             }
         } else {
             viewModel.denyGeolocation()
+            val activity = context.findActivity()
+            val bothPermanentlyDenied = result.all { (perm, isGranted) ->
+                !isGranted && (activity == null ||
+                    !ActivityCompat.shouldShowRequestPermissionRationale(activity, perm))
+            }
+            if (bothPermanentlyDenied) openAppSettings(context)
         }
     }
 
