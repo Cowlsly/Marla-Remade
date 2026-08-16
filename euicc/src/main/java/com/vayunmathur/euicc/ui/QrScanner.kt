@@ -2,8 +2,6 @@ package com.vayunmathur.euicc.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.OptIn as AndroidOptIn
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
@@ -39,6 +37,7 @@ import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import java.util.concurrent.Executors
 
 /**
@@ -55,11 +54,11 @@ fun QrScannerScreen(onResult: (String) -> Unit, onCancel: () -> Unit) {
                 PackageManager.PERMISSION_GRANTED,
         )
     }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) {
+    val requestCamera = rememberPermissionRequest(Manifest.permission.CAMERA) {
         hasPermission = it
     }
     LaunchedEffect(Unit) {
-        if (!hasPermission) launcher.launch(Manifest.permission.CAMERA)
+        if (!hasPermission) requestCamera()
     }
 
     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
