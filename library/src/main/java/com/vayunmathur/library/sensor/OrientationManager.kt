@@ -112,7 +112,7 @@ class OrientationManager(private val context: Context) : SensorEventListener {
             else -> SensorManager.remapCoordinateSystem(RdeviceToWorld, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped)
         }
         val o = FloatArray(3); SensorManager.getOrientation(remapped, o)
-        val azMag = (Math.toDegrees(o[0].toDouble()) + 360) % 360
+        val azMag = deviceTopHeadingDeg(RdeviceToWorld)
         val pitch = Math.toDegrees(o[1].toDouble()); val roll = Math.toDegrees(o[2].toDouble())
 
         val (pointAzMag, pointAlt) = pointingFromDeviceToWorld(RdeviceToWorld)
@@ -152,6 +152,18 @@ class OrientationManager(private val context: Context) : SensorEventListener {
     // camera's optical axis) in world ENU. -Z is the negated third column of the
     // device->world matrix. Back facing the zenith => alt +90, horizon => 0, ground
     // => -90. Uses the whole axis (not Y) so it's stable to charging-port up/down.
+    // Flat-compass heading: azimuth of the device +Y (top edge) projected onto the
+    // horizontal plane, taken straight from the device->world matrix. Matches the
+    // "true-north yaw of device top" contract and, like the pointing* values, is robust to
+    // tilt — unlike getOrientation()[0], which gimbal-locks near vertical and was additionally
+    // being read off the AR "window" remap (correct only for a phone held up, not a flat
+    // compass). This is why the sky view pointed accurately while the compass drifted.
+    private fun deviceTopHeadingDeg(R: FloatArray): Double {
+        val east = R[1].toDouble()
+        val north = R[4].toDouble()
+        return (Math.toDegrees(atan2(east, north)) + 360) % 360
+    }
+
     private fun pointingFromDeviceToWorld(R: FloatArray): Pair<Double, Double> {
         val east = -R[2].toDouble()
         val north = -R[5].toDouble()
@@ -202,7 +214,7 @@ class OrientationManager(private val context: Context) : SensorEventListener {
             else -> SensorManager.remapCoordinateSystem(R, SensorManager.AXIS_X, SensorManager.AXIS_Z, remapped)
         }
         val o = FloatArray(3); SensorManager.getOrientation(remapped, o)
-        val azMag = (Math.toDegrees(o[0].toDouble()) + 360) % 360
+        val azMag = deviceTopHeadingDeg(R)
         val pitch = Math.toDegrees(o[1].toDouble()); val roll = Math.toDegrees(o[2].toDouble())
         val (pAz, pAlt) = pointingFromDeviceToWorld(R)
         val vrot = viewRotationFromDeviceToWorld(R)
