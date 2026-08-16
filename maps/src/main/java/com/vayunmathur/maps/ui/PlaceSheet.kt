@@ -21,6 +21,7 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.IconCall
 import com.vayunmathur.library.ui.IconDirections
+import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconGlobe
 import com.vayunmathur.library.ui.IconMenuBook
 import com.vayunmathur.library.ui.IconSave
@@ -34,6 +35,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -50,12 +52,17 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.firstLetterUppercase
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.OpeningHours
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiInfo
+import com.vayunmathur.maps.data.google.StreetViewDataSource
+import com.vayunmathur.maps.data.google.StreetViewPano
+import com.vayunmathur.maps.ui.streetview.StreetViewScreen
 import com.vayunmathur.maps.data.timeFormat
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
@@ -137,10 +144,39 @@ private fun PlaceSheetContent(
             RestaurantItem({ IconMenuBook() }, stringResource(R.string.menu_label)) { goto(context, it) }
         }
         openingHours?.let { OsmHours(it) }
+        StreetViewEntry(feature)
         // Reuse the existing enrichment sections (editorial / photos / popular
         // times / reviews). The header already shows category · price, so the
         // enrichment's own subtitle is suppressed to avoid duplication.
         poi?.let { GooglePoiEnrichment(it, hasOsmHours = openingHours != null, showSubtitle = false) }
+    }
+}
+
+/**
+ * "Street View" place-sheet entry (v1 entry point per the port plan). On selection
+ * we do a keyless nearest-pano lookup for the place's position; the row only
+ * appears when imagery exists nearby. Tapping it opens the full-screen
+ * [StreetViewScreen] in a dialog (the photos-style pan/zoom pano viewer).
+ */
+@Composable
+private fun StreetViewEntry(feature: SpecificFeature.RoutableFeature) {
+    var pano by remember(feature.position) { mutableStateOf<StreetViewPano?>(null) }
+    var show by remember(feature.position) { mutableStateOf(false) }
+
+    LaunchedEffect(feature.position) {
+        pano = StreetViewDataSource.nearest(feature.position.latitude, feature.position.longitude)
+    }
+
+    pano?.let { p ->
+        RestaurantItem({ IconDirectionsWalk() }, stringResource(R.string.street_view)) { show = true }
+        if (show) {
+            Dialog(
+                onDismissRequest = { show = false },
+                properties = DialogProperties(usePlatformDefaultWidth = false),
+            ) {
+                StreetViewScreen(initialPano = p, onClose = { show = false })
+            }
+        }
     }
 }
 

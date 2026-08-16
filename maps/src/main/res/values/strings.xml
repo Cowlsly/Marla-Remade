@@ -109,6 +109,15 @@
     <string name="opens_at">Opens <xliff:g id="time" example="9 AM">%1$s</xliff:g></string>
     <!-- Label: Section header for menu -->
     <string name="menu_label">Menu</string>
+    <!-- Place detail: opens the Google Street View panorama viewer. "Street View" is a
+         Google product name, so it stays non-translatable. -->
+    <string name="street_view" translatable="false">Street View</string>
+    <!-- Street View viewer: close button content description. -->
+    <string name="street_view_close">Close</string>
+    <!-- Street View viewer: shown while the panorama tiles are downloading. -->
+    <string name="street_view_loading">Loading Street View…</string>
+    <!-- Street View viewer: shown when no panorama could be loaded for this place. -->
+    <string name="street_view_unavailable">Street View is not available here</string>
 
     <!-- MapPage: Placeholder for map search bar -->
     <string name="search_placeholder">Search…</string>
