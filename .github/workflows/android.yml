@@ -48,6 +48,23 @@ jobs:
       - name: Change Gradle Wrapper Permissions
         run: chmod +x ./gradlew
 
+      - name: Configure Gradle for CI runner
+        run: |
+          # GitHub-hosted Linux runners are ~16GB RAM / ~4 vCPU. The project's
+          # local gradle.properties sizes the daemon at -Xmx46g for a full local
+          # build of every module at once, which cannot start on a runner.
+          # GRADLE_USER_HOME (~/.gradle)/gradle.properties overrides the project
+          # gradle.properties, so cap heap + workers to runner-appropriate values
+          # here rather than changing the local dev defaults.
+          mkdir -p ~/.gradle
+          {
+            echo 'org.gradle.jvmargs=-Xmx6144m -XX:MaxMetaspaceSize=1024m -XX:+UseG1GC -Dfile.encoding=UTF-8'
+            echo 'org.gradle.workers.max=2'
+            echo 'kotlin.daemon.jvm.options=-Xmx2048m'
+            echo 'android.compose.screenshot.maxHeapSize=2g'
+          } >> ~/.gradle/gradle.properties
+          echo "CI gradle overrides:" && cat ~/.gradle/gradle.properties
+
       - name: Read and Inject Version
         id: version_info
         run: |
@@ -221,6 +238,7 @@ jobs:
           # Always build release APKs for every app module.
           ./gradlew assembleRelease \
             --no-daemon \
+            --max-workers=2 \
             -x lint \
             -x test \
             -Pandroid.enableResourceOptimizations=true \
