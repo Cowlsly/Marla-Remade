@@ -1,9 +1,6 @@
 package com.vayunmathur.camera.ui
 
 import android.Manifest
-import android.content.pm.PackageManager
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -24,10 +21,8 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import com.vayunmathur.camera.R
 import com.vayunmathur.camera.util.CameraViewModel
 import com.vayunmathur.camera.util.AudioInputSource
@@ -38,6 +33,7 @@ import com.vayunmathur.library.ui.ExposedDropdownMenuAnchorType
 import com.vayunmathur.library.ui.ExposedDropdownMenuBox
 import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
 import com.vayunmathur.library.ui.OutlinedTextField
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 
@@ -47,10 +43,9 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
     val locationEnabled by viewModel.locationEnabled.collectAsState()
     val videoCodec by viewModel.videoCodec.collectAsState()
     val audioInputSource by viewModel.audioInputSource.collectAsState()
-    val context = LocalContext.current
 
-    val locationPermissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission()
+    val requestLocation = rememberPermissionRequest(
+        Manifest.permission.ACCESS_FINE_LOCATION
     ) { granted ->
         viewModel.setLocationEnabled(granted)
         if (granted) viewModel.updateLocation()
@@ -167,15 +162,7 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
                     checked = locationEnabled,
                     onCheckedChange = { enabled ->
                         if (enabled) {
-                            val hasPermission = ContextCompat.checkSelfPermission(
-                                context, Manifest.permission.ACCESS_FINE_LOCATION
-                            ) == PackageManager.PERMISSION_GRANTED
-                            if (hasPermission) {
-                                viewModel.setLocationEnabled(true)
-                                viewModel.updateLocation()
-                            } else {
-                                locationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-                            }
+                            requestLocation()
                         } else {
                             viewModel.setLocationEnabled(false)
                         }
