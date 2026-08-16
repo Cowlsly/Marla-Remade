@@ -16,6 +16,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
@@ -24,12 +25,11 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SettingsDivider
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
+
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -55,7 +55,6 @@ import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconEdit
-import com.vayunmathur.library.ui.IconNavigation
 
 /** Binds [CalendarViewModel] to the stateless [SettingsScreen]. */
 @Composable
@@ -135,26 +134,24 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
 
     val grouped = calendars.groupBy { it.accountName }
 
-    Scaffold(
-        topBar = {
-            TopAppBar({Text(stringResource(UiR.string.settings))}, navigationIcon = {
-                IconNavigation(actions::closeSettings)
-            }, actions = {
-                if(selectedCalendarId != null) {
-                    val selectedCalendar = calendars.find { it.id == selectedCalendarId }
-                    if (selectedCalendar?.canModify == true) {
-                        IconButton(onClick = {
-                            // open rename dialog via navigation
-                            actions.openRenameCalendar(selectedCalendarId!!)
-                        }) {
-                            IconEdit()
-                        }
-                        IconButton(onClick = { actions.openDeleteCalendar(selectedCalendarId!!) }) {
-                            IconDelete()
-                        }
+    AppScaffold(
+        title = stringResource(UiR.string.settings),
+        onNavigateBack = actions::closeSettings,
+        actions = {
+            if(selectedCalendarId != null) {
+                val selectedCalendar = calendars.find { it.id == selectedCalendarId }
+                if (selectedCalendar?.canModify == true) {
+                    IconButton(onClick = {
+                        // open rename dialog via navigation
+                        actions.openRenameCalendar(selectedCalendarId!!)
+                    }) {
+                        IconEdit()
+                    }
+                    IconButton(onClick = { actions.openDeleteCalendar(selectedCalendarId!!) }) {
+                        IconDelete()
                     }
                 }
-            })
+            }
         },
         floatingActionButton = {
             if (calendars.isNotEmpty()) {

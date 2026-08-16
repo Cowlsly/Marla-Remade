@@ -6,7 +6,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -15,21 +14,18 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
-import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.HorizontalDivider
+import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.ProvideTextStyle
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -54,7 +50,6 @@ import com.vayunmathur.calendar.util.RRule
 import com.vayunmathur.calendar.util.RecurrenceParams
 import com.vayunmathur.calendar.Route
 import com.vayunmathur.library.ui.IconGlobe
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconSchedule
 import com.vayunmathur.library.util.ResultEffect
@@ -197,45 +192,45 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
     // Timezone selector (navigation dialog) - open via Nav route and handle result
     ResultEffect<String>(KEY_TIMEZONE) { z -> timezone = z }
 
-    Scaffold(topBar = {
-        TopAppBar({}, navigationIcon = {
-            IconNavigation(backStack)
-        })
-    }, bottomBar = {
-        if (descriptionController.focused) {
-            com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(descriptionController)
+    DetailScaffold(
+        title = "",
+        onNavigateBack = { backStack.pop() },
+        actions = {
+            IconButton(onClick = {
+                val buildTz = if (allDay) TimeZone.UTC else TimeZone.of(timezone)
+                // All-day events are stored at midnight UTC with an exclusive end (the midnight
+                // after the last selected day), matching RFC 5545 / the Android calendar provider.
+                val startInstant = if (allDay) startDate.atStartOfDayIn(buildTz)
+                    else startDate.atTime(startTime).toInstant(buildTz)
+                val endInstant = if (allDay) endDate.plus(DatePeriod(days = 1)).atStartOfDayIn(buildTz)
+                    else endDate.atTime(endTime).toInstant(buildTz)
+                val newEvent = Event(
+                    id = eventId,
+                    calendarID = selectedCalendar,
+                    title = title,
+                    description = descriptionText,
+                    location = location,
+                    color = event?.color,
+                    start = startInstant.toEpochMilliseconds(),
+                    end = endInstant.toEpochMilliseconds(),
+                    timezone = if (allDay) "UTC" else timezone,
+                    allDay = allDay,
+                    rrule = rruleObj,
+                    exdate = event?.exdate ?: emptyList(),
+                    reminders = reminders,
+                )
+                viewModel.upsertEvent(eventId, newEvent.toContentValues(selectedCalendar), reminders)
+                backStack.pop()
+            }) {
+                IconSave()
+            }
+        },
+        bottomBar = {
+            if (descriptionController.focused) {
+                com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(descriptionController)
+            }
         }
-    }, floatingActionButton = {
-        FloatingActionButton(onClick = {
-            val buildTz = if (allDay) TimeZone.UTC else TimeZone.of(timezone)
-            // All-day events are stored at midnight UTC with an exclusive end (the midnight
-            // after the last selected day), matching RFC 5545 / the Android calendar provider.
-            val startInstant = if (allDay) startDate.atStartOfDayIn(buildTz)
-                else startDate.atTime(startTime).toInstant(buildTz)
-            val endInstant = if (allDay) endDate.plus(DatePeriod(days = 1)).atStartOfDayIn(buildTz)
-                else endDate.atTime(endTime).toInstant(buildTz)
-            val newEvent = Event(
-                id = eventId,
-                calendarID = selectedCalendar,
-                title = title,
-                description = descriptionText,
-                location = location,
-                color = event?.color,
-                start = startInstant.toEpochMilliseconds(),
-                end = endInstant.toEpochMilliseconds(),
-                timezone = if (allDay) "UTC" else timezone,
-                allDay = allDay,
-                rrule = rruleObj,
-                exdate = event?.exdate ?: emptyList(),
-                reminders = reminders,
-            )
-            viewModel.upsertEvent(eventId, newEvent.toContentValues(selectedCalendar), reminders)
-            backStack.pop()
-        }) {
-            IconSave()
-        }
-    }) { paddingValues ->
-        Column(Modifier.padding(paddingValues).verticalScroll(rememberScrollState())) {
+    ) {
             OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth().padding(8.dp), label = { Text(stringResource(R.string.label_title)) })
 
             // Calendar selector: moved above the datetime section — only when creating a new event
@@ -350,7 +345,6 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
 
             HorizontalDivider(Modifier.padding(vertical = 16.dp))
             OutlinedTextField(location, { location = it }, Modifier.fillMaxWidth().padding(8.dp), label = { Text(stringResource(R.string.label_location)) })
-        }
     }
 }
 

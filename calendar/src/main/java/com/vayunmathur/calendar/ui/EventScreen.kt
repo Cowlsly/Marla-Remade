@@ -10,18 +10,16 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
@@ -43,7 +41,6 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDescription
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconGlobe
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalTime
@@ -96,10 +93,10 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
     val isEditable = calendar.canModify
     var showDeleteMenu by remember { mutableStateOf(false) }
 
-    Scaffold(topBar = {
-        TopAppBar({}, navigationIcon = {
-            IconNavigation(actions::closeEvent)
-        }, actions = {
+    DetailScaffold(
+        title = "",
+        onNavigateBack = actions::closeEvent,
+        actions = {
             if(isEditable) {
                 IconButton({
                     actions.editEvent(event.id!!)
@@ -142,9 +139,8 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
                     }
                 }
             }
-        })
-    }) { paddingValues ->
-        Column(Modifier.padding(paddingValues)) {
+        }
+    ) {
             ListItem({
                 Text(event.title, style = MaterialTheme.typography.titleLarge)
             }, supportingContent = {
@@ -185,7 +181,6 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
                 },
                 leadingContent = { IconGlobe() },
             )
-        }
     }
 }
 

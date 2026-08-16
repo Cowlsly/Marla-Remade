@@ -72,13 +72,9 @@ fun ImportIcsScreen(
         ImportMode.New -> newCalendarName.isNotBlank() && events?.isNotEmpty() == true && !isImporting
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.import_events)) },
-                navigationIcon = { IconNavigation(backStack) }
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.import_events),
+        onNavigateBack = { backStack.pop() },
         floatingActionButton = {
             if (canImport) {
                 FloatingActionButton(onClick = {

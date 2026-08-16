@@ -37,11 +37,10 @@ import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.contentColorOn
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -168,47 +167,43 @@ fun CalendarScreen(state: CalendarUiState, actions: CalendarActions) {
     // shared vertical scroll so hour labels and grid scroll together
     val verticalState = rememberScrollState()
 
-    Scaffold(
-        Modifier,
-        {
-            TopAppBar(
-                {
-                    // show month/year of the currently visible date
-                    val mon = localizedMonthNames(DateNameStyle.SHORT)[state.dateViewing.month.number - 1]
-                    Row(
-                        Modifier.clickable { actions.openDatePicker(state.dateViewing) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Text(stringResource(R.string.month_year_format, mon, state.dateViewing.year), fontWeight = FontWeight.Bold)
-                        IconArrowDropDown()
-                    }
-                }, actions = {
-                    var showLayoutMenu by remember { mutableStateOf(false) }
-                    Box {
-                        TextButton(onClick = { showLayoutMenu = true }) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(stringResource(state.layout.shortNameRes), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
-                                IconArrowDropDown(tint = MaterialTheme.colorScheme.primary)
-                            }
-                        }
-                        DropdownMenu(expanded = showLayoutMenu, onDismissRequest = { showLayoutMenu = false }) {
-                            CalendarViewModel.CalendarLayout.entries.forEach { layout ->
-                                DropdownMenuItem(
-                                    text = { Text(stringResource(layout.prettyNameRes)) },
-                                    onClick = {
-                                        actions.setLayout(layout)
-                                        showLayoutMenu = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-
-                    IconButton({ actions.openSettings() }) {
-                        IconSettings()
+    AppScaffold(
+        title = {
+            // show month/year of the currently visible date
+            val mon = localizedMonthNames(DateNameStyle.SHORT)[state.dateViewing.month.number - 1]
+            Row(
+                Modifier.clickable { actions.openDatePicker(state.dateViewing) },
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(stringResource(R.string.month_year_format, mon, state.dateViewing.year), fontWeight = FontWeight.Bold)
+                IconArrowDropDown()
+            }
+        },
+        actions = {
+            var showLayoutMenu by remember { mutableStateOf(false) }
+            Box {
+                TextButton(onClick = { showLayoutMenu = true }) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(stringResource(state.layout.shortNameRes), fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                        IconArrowDropDown(tint = MaterialTheme.colorScheme.primary)
                     }
                 }
-            )
+                DropdownMenu(expanded = showLayoutMenu, onDismissRequest = { showLayoutMenu = false }) {
+                    CalendarViewModel.CalendarLayout.entries.forEach { layout ->
+                        DropdownMenuItem(
+                            text = { Text(stringResource(layout.prettyNameRes)) },
+                            onClick = {
+                                actions.setLayout(layout)
+                                showLayoutMenu = false
+                            }
+                        )
+                    }
+                }
+            }
+
+            IconButton({ actions.openSettings() }) {
+                IconSettings()
+            }
         },
         floatingActionButton = {
             FloatingActionButton({ actions.createEvent() }) {
