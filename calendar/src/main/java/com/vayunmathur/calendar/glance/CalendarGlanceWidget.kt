@@ -30,7 +30,6 @@ import androidx.glance.layout.Row
 import androidx.glance.layout.fillMaxHeight
 import androidx.glance.layout.fillMaxSize
 import androidx.glance.layout.fillMaxWidth
-import androidx.glance.layout.height
 import androidx.glance.layout.padding
 import androidx.glance.layout.width
 import androidx.glance.text.FontWeight
@@ -198,31 +197,19 @@ private fun dayHeaderLabel(day: LocalDate, today: LocalDate, context: Context): 
     else -> DateString.dateWeekday(day)
 }
 
-/**
- * A day-group heading in the calendar widget list: a full-width horizontal
- * divider above a bold date label. The divider gives the section separation
- * (spanning the whole width) without a filled background band.
- */
+/** A day-group heading in the calendar widget list. */
 @SuppressLint("RestrictedApi")
 @Composable
 private fun DayHeader(text: String) {
-    Column(GlanceModifier.fillMaxWidth()) {
-        Box(
-            GlanceModifier
-                .fillMaxWidth()
-                .height(1.dp)
-                .background(GlanceTheme.colors.outline)
-        ) {}
-        Text(
-            text,
-            modifier = GlanceModifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp),
-            style = TextStyle(
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Medium,
-                color = GlanceTheme.colors.onSurface
-            )
+    Text(
+        text,
+        modifier = GlanceModifier.padding(start = 12.dp, top = 10.dp, bottom = 4.dp),
+        style = TextStyle(
+            fontSize = 14.sp,
+            fontWeight = FontWeight.Medium,
+            color = GlanceTheme.colors.onSurface
         )
-    }
+    )
 }
 
 /**
