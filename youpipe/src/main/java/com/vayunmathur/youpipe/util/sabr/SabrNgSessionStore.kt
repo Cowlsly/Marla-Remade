@@ -1,7 +1,6 @@
 package com.vayunmathur.youpipe.util.sabr
 
 import android.util.Log
-import org.schabi.newpipe.extractor.exceptions.ExtractionException
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
 import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrRequest
@@ -24,8 +23,6 @@ import java.util.concurrent.ConcurrentHashMap
  */
 object SabrNgSessionStore {
     private const val TAG = "SabrNgSessionStore"
-    private const val MAX_INIT_ATTEMPTS = 8
-    private const val INIT_BACKOFF_SLEEP_MS = 400L
 
     private val extractorInfo = ConcurrentHashMap<String, YoutubeSabrInfo>()
 
@@ -40,6 +37,7 @@ object SabrNgSessionStore {
     }
 
     @Throws(IOException::class)
+    @JvmOverloads
     fun createSourceSpec(
         videoId: String,
         preferredVideoItag: Int,
@@ -47,7 +45,8 @@ object SabrNgSessionStore {
         preferredAudioTrackId: String?,
         info: YoutubeSabrInfo,
         poToken: ByteArray?,
-        localization: Localization
+        localization: Localization,
+        tokenMinter: ((Boolean) -> ByteArray?)? = null
     ): SabrNgSourceSpec {
         val videoFormat = selectVideoFormat(info, preferredVideoItag)
             ?: throw IOException("No SABR video format for $videoId (itag=$preferredVideoItag)")
@@ -55,7 +54,7 @@ object SabrNgSessionStore {
             ?: throw IOException("No SABR audio format for $videoId (itag=$preferredAudioItag)")
         val token = poToken ?: info.getPoToken() ?: ByteArray(0)
         val initByItag = fetchInitializationSegments(
-            videoId, info, listOf(audioFormat, videoFormat), token
+            videoId, info, listOf(audioFormat, videoFormat), token, tokenMinter
         )
         val audioInit = initByItag[audioFormat.getItag()]
             ?: throw IOException(
@@ -81,7 +80,8 @@ object SabrNgSessionStore {
         videoId: String,
         info: YoutubeSabrInfo,
         formats: List<YoutubeSabrInfo.Format>,
-        token: ByteArray
+        token: ByteArray,
+        tokenMinter: ((Boolean) -> ByteArray?)?
     ): Map<Int, ByteArray> {
         val session = YoutubeSabrSession(info)
         if (token.isNotEmpty()) {
@@ -97,22 +97,19 @@ object SabrNgSessionStore {
                 initByItag[header.getItag()] = segment.getData()
             }
         }
-        var attempts = 0
-        while (initByItag.size < formats.size && attempts < MAX_INIT_ATTEMPTS) {
-            attempts++
-            val backoffMs = session.getBackoffRemainingMs()
-            if (backoffMs > 0) {
-                sleepQuietly(minOf(backoffMs, INIT_BACKOFF_SLEEP_MS))
-                continue
-            }
-            val request = YoutubeSabrRequest.preparation(0, formats)
-            try {
-                session.requestOnce(request, consumer)
-            } catch (e: IOException) {
-                throw e
-            } catch (e: ExtractionException) {
-                throw IOException("SABR initialization request failed for $videoId", e)
-            }
+        // A preparation transaction fetches the init segment (with its fragment index) for the
+        // preferred formats. The coordinator loops requestOnce through the attestation handshake
+        // (re-minting the PO token on rejection) and server backoff until both inits arrive.
+        val coordinator = SabrRequestCoordinator(
+            session, SabrAttestationRetryHandler(videoId, tokenMinter), null
+        )
+        val request = YoutubeSabrRequest.preparation(0, formats)
+        try {
+            coordinator.request(request, consumer) { initByItag.size >= formats.size }
+        } catch (e: IOException) {
+            throw e
+        } catch (e: org.schabi.newpipe.extractor.exceptions.ExtractionException) {
+            throw IOException("SABR initialization request failed for $videoId", e)
         }
         if (initByItag.size < formats.size) {
             Log.w(
@@ -121,14 +118,6 @@ object SabrNgSessionStore {
             )
         }
         return initByItag
-    }
-
-    private fun sleepQuietly(millis: Long) {
-        try {
-            Thread.sleep(millis)
-        } catch (e: InterruptedException) {
-            Thread.currentThread().interrupt()
-        }
     }
 
     private fun selectVideoFormat(

@@ -24,7 +24,6 @@ import com.vayunmathur.youpipe.util.sabr.LocalDomPoTokenProvider
 import com.vayunmathur.youpipe.util.sabr.SabrNgDashMediaSource
 import com.vayunmathur.youpipe.util.sabr.SabrNgSessionStore
 import org.schabi.newpipe.extractor.localization.Localization
-import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isAndroidStreamingUrl
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isIosStreamingUrl
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isVisionOsStreamingUrl
@@ -119,26 +118,19 @@ class PlaybackService : MediaSessionService() {
                     val sabrSource = run {
                         val vAudioItag = audioItag
                         val vAudioTrackId = audioTrackIdOverride
+                        val tokenMinter: (Boolean) -> ByteArray? = { force ->
+                            provider.getPoTokenBytes(videoId, info.getVisitorData(), force)
+                        }
                         val specSupplier: () -> com.vayunmathur.youpipe.util.sabr.SabrNgSourceSpec = {
-                            val poToken = provider.getPoTokenBytes(videoId, info.getVisitorData())
+                            val poToken = tokenMinter(false)
                             SabrNgSessionStore.createSourceSpec(
                                 videoId, vitag, vAudioItag, vAudioTrackId, info, poToken,
-                                localization
-                            )
-                        }
-                        val onAttestationFailure: () -> YoutubeSabrInfo? = {
-                            val fresh = provider.getPoTokenBytes(
-                                videoId, info.getVisitorData(), true
-                            )
-                            YoutubeSabrInfo(
-                                info.getVideoId(), info.getCpn(), info.getClientVersion(),
-                                info.getVisitorData(), info.getServerAbrStreamingUrl(),
-                                info.getVideoPlaybackUstreamerConfig(), info.getFormats(), fresh
+                                localization, tokenMinter
                             )
                         }
                         SabrNgDashMediaSource(
                             this@PlaybackService, mediaItem, videoId, specSupplier,
-                            onAttestationFailure
+                            tokenMinter
                         )
                     }
                     return if (subtitleSources.isNotEmpty()) {

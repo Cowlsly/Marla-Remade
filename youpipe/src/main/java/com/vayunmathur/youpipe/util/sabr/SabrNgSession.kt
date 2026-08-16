@@ -1,11 +1,9 @@
 package com.vayunmathur.youpipe.util.sabr
 
-import android.util.Log
+import org.schabi.newpipe.extractor.exceptions.ExtractionException
 import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
 import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrRequest
 import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrSession
-import org.schabi.newpipe.extractor.services.youtube.sabrng.exception.SabrAttestationException
-import org.schabi.newpipe.extractor.services.youtube.sabrng.exception.SabrProtocolException
 import org.schabi.newpipe.extractor.services.youtube.sabrng.media.SabrMediaSegment
 import org.schabi.newpipe.extractor.services.youtube.sabrng.protocol.SabrStreamingResponseReader
 import java.io.File
@@ -14,19 +12,20 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Drives a session-based ([YoutubeSabrSession]) SABR stream for media3 playback: a background pump
- * repeatedly issues `requestOnce` around the current playhead, caches emitted [SabrMediaSegment]s by
- * (itag, sequence), honors server backoff, and rotates identity on attestation failure via the
- * supplied [onAttestationFailure] hook. Segments are served to the media3 data source through the
- * blocking [getMediaSegment].
+ * repeatedly issues requests (through [SabrRequestCoordinator], which retries the attestation
+ * handshake by re-minting the PO token via [tokenMinter] and honors server backoff) around the
+ * current playhead, caches emitted [SabrMediaSegment]s by (itag, sequence), and serves them to the
+ * media3 data source through the blocking [getMediaSegment].
  */
 class SabrNgSession(
     private val spec: SabrNgSourceSpec,
     spoolDirectory: File?,
-    private val onAttestationFailure: (() -> YoutubeSabrInfo?)? = null
+    tokenMinter: ((Boolean) -> ByteArray?)? = null
 ) {
-    @Volatile
-    private var session: YoutubeSabrSession = newSession(spec.info, spoolDirectory, spec.poToken)
-    private val spoolDirectory: File? = spoolDirectory
+    private val session: YoutubeSabrSession = newSession(spec.info, spoolDirectory, spec.poToken)
+    private val coordinator = SabrRequestCoordinator(
+        session, SabrAttestationRetryHandler(spec.videoId, tokenMinter), null
+    )
 
     private val mediaCache = ConcurrentHashMap<Long, SabrMediaSegment>()
     private val initCache = ConcurrentHashMap<Int, SabrMediaSegment>()
@@ -141,11 +140,6 @@ class SabrNgSession(
     private fun pumpLoop() {
         val consumer = SabrStreamingResponseReader.SegmentConsumer { segment -> onSegment(segment) }
         while (running) {
-            val backoffMs = session.getBackoffRemainingMs()
-            if (backoffMs > 0) {
-                sleepQuietly(minOf(backoffMs, 500L))
-                continue
-            }
             if (isFullyBuffered()) {
                 sleepQuietly(200L)
                 continue
@@ -163,36 +157,17 @@ class SabrNgSession(
                 )
             )
             try {
-                session.requestOnce(request, consumer)
-            } catch (e: SabrAttestationException) {
-                if (!rotateIdentity(e)) {
-                    fail(IOException("SABR attestation failed", e))
-                    return
-                }
-            } catch (e: SabrProtocolException) {
-                fail(IOException("SABR protocol error", e))
-                return
+                coordinator.request(request, consumer)
             } catch (e: IOException) {
                 fail(e)
+                return
+            } catch (e: ExtractionException) {
+                fail(IOException("SABR request failed", e))
                 return
             } catch (e: Exception) {
                 fail(IOException("SABR request failed", e))
                 return
             }
-        }
-    }
-
-    private fun rotateIdentity(cause: SabrAttestationException): Boolean {
-        val refetch = onAttestationFailure ?: return false
-        return try {
-            val refreshed = refetch() ?: return false
-            val replacement = newSession(refreshed, spoolDirectory, refreshed.getPoToken())
-            session = replacement
-            Log.d(TAG, "rotated SABR identity for ${spec.videoId} after attestation failure")
-            true
-        } catch (e: Exception) {
-            Log.d(TAG, "SABR identity rotation failed for ${spec.videoId}: $e", cause)
-            false
         }
     }
 
@@ -244,8 +219,4 @@ class SabrNgSession(
 
     private fun key(itag: Int, sequenceNumber: Int): Long =
         (itag.toLong() shl 32) or (sequenceNumber.toLong() and 0xffffffffL)
-
-    private companion object {
-        private const val TAG = "SabrNgSession"
-    }
 }

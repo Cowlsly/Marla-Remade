@@ -50,7 +50,7 @@ class SabrNgDashMediaSource(
     private val mediaItem: MediaItem,
     private val videoId: String,
     private val specSupplier: () -> SabrNgSourceSpec,
-    private val onAttestationFailure: (() -> YoutubeSabrInfo?)? = null
+    private val tokenMinter: ((Boolean) -> ByteArray?)? = null
 ) : CompositeMediaSource<Int>() {
 
     private val appContext: Context = context.applicationContext
@@ -90,7 +90,7 @@ class SabrNgDashMediaSource(
             // Heavy, off-main: mint the PO token (WebView/DOM JS) and fetch init segments.
             val spec = specSupplier()
             val spoolDir = File(appContext.cacheDir, "sabrng").apply { mkdirs() }
-            val builtSession = SabrNgSession(spec, spoolDir, onAttestationFailure)
+            val builtSession = SabrNgSession(spec, spoolDir, tokenMinter)
             val durationMs = spec.getDurationMs()
             val dataSourceFactory = DataSource.Factory {
                 SabrNgSegmentDataSource(builtSession, SEGMENT_TIMEOUT_MS)

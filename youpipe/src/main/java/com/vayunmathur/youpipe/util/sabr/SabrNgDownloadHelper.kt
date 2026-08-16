@@ -35,15 +35,19 @@ internal object SabrNgDownloadHelper {
         if (!workDir.exists() && !workDir.mkdirs()) {
             throw IOException("Could not create SABR download directory: $workDir")
         }
-        val poToken = LocalDomPoTokenProvider.shared(context.applicationContext)
-            .getPoTokenBytes(videoId, info.getVisitorData())
+        val provider = LocalDomPoTokenProvider.shared(context.applicationContext)
+        val tokenMinter: (Boolean) -> ByteArray? = { force ->
+            provider.getPoTokenBytes(videoId, info.getVisitorData(), force)
+        }
+        val poToken = tokenMinter(false)
         val spec = SabrNgSessionStore.createSourceSpec(
-            videoId, videoItag, audioItag, audioTrackId, info, poToken, DOWNLOAD_LOCALIZATION
+            videoId, videoItag, audioItag, audioTrackId, info, poToken, DOWNLOAD_LOCALIZATION,
+            tokenMinter
         )
         val audioFile = File(workDir, "sabr-audio-$videoId-${spec.audioFormat.getItag()}.media")
         val videoFile = File(workDir, "sabr-video-$videoId-${spec.videoFormat.getItag()}.media")
         val spoolDir = File(workDir, "spool").apply { mkdirs() }
-        val session = SabrNgSession(spec, spoolDir, onAttestationFailure = null)
+        val session = SabrNgSession(spec, spoolDir, tokenMinter)
 
         val totalSegments =
             (spec.audioTimeline.getEndSequence() + spec.videoTimeline.getEndSequence())
