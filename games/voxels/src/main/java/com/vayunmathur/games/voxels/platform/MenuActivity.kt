@@ -7,7 +7,6 @@ import android.content.ClipboardManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -27,6 +26,7 @@ import com.vayunmathur.games.voxels.ui.ShareOnlineDialog
 import com.vayunmathur.games.voxels.ui.WorldCreatorScreen
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.Surface
+import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.util.rememberIsOnline
 import com.vayunmathur.games.voxels.network.VoxelsRoles
 import com.vayunmathur.games.voxels.network.VoxelsSync
@@ -268,7 +268,7 @@ class MenuActivity : ComponentActivity() {
         }
     }
 
-    private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+    private fun toast(msg: String) = AppMessages.show(msg)
 
     private fun copyToClipboard(text: String) {
         if (text.isEmpty()) return

@@ -4,7 +4,6 @@
     <string name="resume">Jätka</string>
     <string name="create_new_world">Loo usu maailm</string>
     <string name="create_world">Loo maailm</string>
-    <string name="products">Tooted</string>
     <string name="close">Sulge</string>
     <string name="rust_lib_missing_vulkan_unavailable">Rusti teek on puudu - Vulkan pole kasutatav</string>
     <string name="save_quit_to_menu">Salvesta ja välju menüüsse</string>
