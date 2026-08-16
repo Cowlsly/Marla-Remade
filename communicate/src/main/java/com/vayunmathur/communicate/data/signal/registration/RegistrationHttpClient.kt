@@ -282,8 +282,15 @@ class RegistrationHttpClient(private val context: Context) {
             sslSocketFactory = SignalTrust.sslSocketFactory(context),
         )
         if (resp.status == 423) throw IllegalStateException("423 RegistrationLock (live-only)")
-        if (!resp.isSuccess) throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
-        return parseSession(resp.body)
+        // Signal keys off session.verified, not strictly the HTTP code. A 409 whose body has verified:true means
+        // the code is already verified (idempotent) — mirror SubmitVerificationCodeResponseHandler, which maps that
+        // 409 to AlreadyVerifiedException and the app then proceeds to POST /v1/registration. So: if the parsed
+        // session is verified (on 200/204 or 409), treat it as success and continue the flow.
+        val session = parseSession(resp.body)
+        if (resp.isSuccess || session.verified) {
+            return session
+        }
+        throw IllegalStateException("HTTP ${resp.status}: ${resp.body.take(500)}")
     }
 
     private suspend fun submitRegistration(sessionId: String, auth: SignalAuthData): RegisterResult {
@@ -370,8 +377,12 @@ class RegistrationHttpClient(private val context: Context) {
             put("registrationId", auth.effectiveAciRegId())
             put("pniRegistrationId", if (auth.pniRegistrationId != 0) auth.pniRegistrationId else auth.effectiveAciRegId())
             put("fetchesMessages", true)
-            put("registrationLock", auth.registrationLock) // null until live SVR2 MasterKey.deriveRegistrationLock
-            if (uakBytes != null) put("unidentifiedAccessKey", b64NoPad(uakBytes)) else put("unidentifiedAccessKey", JSONObject.NULL)
+            // AccountAttributes has no class-level @JsonInclude(NON_NULL): nullable fields serialize as explicit null.
+            put("registrationLock", auth.registrationLock ?: JSONObject.NULL) // null until live SVR2 MasterKey.deriveRegistrationLock
+            put("recoveryPassword", JSONObject.NULL) // live-only SVR re-registration path; null for session-based reg
+            // Jackson serializes AccountAttributes.unidentifiedAccessKey (ByteArray) with its default variant =
+            // standard base64 WITH padding (MIME_NO_LINEFEEDS) — unlike the prekey material which is nopad.
+            if (uakBytes != null) put("unidentifiedAccessKey", b64Padded(uakBytes)) else put("unidentifiedAccessKey", JSONObject.NULL)
             put("unrestrictedUnidentifiedAccess", false)
             put("discoverableByPhoneNumber", true)
             put("capabilities", caps)
@@ -435,3 +446,4 @@ private fun JSONObject.optStringOrNull(key: String): String? = if (has(key) && !
 private fun JSONObject.optBoolean(key: String, default: Boolean): Boolean = if (has(key) && !isNull(key)) optBoolean(key, default) else default
 private fun JSONObject.optIntOrNull(key: String): Int? = if (has(key) && !isNull(key)) optInt(key) else null
 private fun b64NoPad(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP).trimEnd('=')
+private fun b64Padded(bytes: ByteArray): String = Base64.encodeToString(bytes, Base64.NO_WRAP)
