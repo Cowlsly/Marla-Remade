@@ -492,6 +492,11 @@ fun CameraScreen(
         viewModel.shutterEvents.collect { currentCapture() }
     }
 
+    // RAW SCAFFOLD EXCEPTION: full-bleed viewfinder with a black surface and its own custom
+    // top/bottom control bars (TopBar/ShutterRow/ModeSelector/BottomBar). It has no Material
+    // top app bar or title, so AppScaffold would inject an unwanted bar, and TopAppBarOverlay
+    // provides neither the black container surface nor the system-inset padding the preview
+    // relies on. The bare Scaffold(containerColor) is the correct primitive here.
     Scaffold(
         containerColor = Color.Black
     ) { padding ->
