@@ -3,14 +3,12 @@ package com.vayunmathur.youpipe.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Checkbox
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -38,7 +36,7 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
 
     // No top bar at all: clearing all history lives in Settings, and deleting a
     // selection is a FAB, so the list keeps the full height of the screen.
-    Scaffold(
+    LazyListScaffold(
         floatingActionButton = {
             if (inSelectionMode) {
                 FloatingActionButton(onClick = {
@@ -49,9 +47,8 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
                 }
             }
         },
-    ) { paddingValues ->
-        LazyColumn(Modifier.padding(paddingValues)) {
-            items(history, key = { it.id }) { historyItem ->
+    ) {
+        items(history, key = { it.id }) { historyItem ->
                 val isSelected = historyItem.id in selectedIds
                 VideoItem(
                     backStack, youPipeViewModel, historyItem.videoItem, true,
@@ -82,6 +79,5 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
                     } else null,
                 )
             }
-        }
     }
 }

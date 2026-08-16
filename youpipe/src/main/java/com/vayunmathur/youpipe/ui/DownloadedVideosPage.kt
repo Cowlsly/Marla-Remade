@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -19,9 +18,9 @@ import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
@@ -56,7 +55,7 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
     val isSelectionMode = selectedIds.isNotEmpty() || selectedActiveIds.isNotEmpty()
 
     val context = androidx.compose.ui.platform.LocalContext.current
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             TopAppBar(
                 title = { 
@@ -87,11 +86,10 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
                             IconDelete()
                         }
                     }
-                }
+                },
             )
         },
-    ) { paddingValues ->
-        LazyColumn(Modifier.padding(paddingValues)) {
+    ) {
             // Active downloads
             items(activeDownloads.toList(), key = { (videoID, _) -> "active-$videoID" }) { (videoID, status) ->
                 val isSelected = videoID in selectedActiveIds
@@ -178,7 +176,6 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
                     )
                 }
             }
-        }
     }
 }
 

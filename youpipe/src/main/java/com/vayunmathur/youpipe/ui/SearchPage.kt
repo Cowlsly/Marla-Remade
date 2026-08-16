@@ -164,6 +164,11 @@ fun SearchScreen(
 ) {
     var expanded by rememberSaveable { mutableStateOf(false) }
 
+    // RAW SCAFFOLD EXCEPTION: the top chrome is a Material3 SearchBar (not a
+    // TopAppBar) whose expanded state overlays the whole screen with search
+    // results/suggestions, and the body is a 3-way branch (loading spinner /
+    // empty state / recommendation feed). No shared scaffold models a SearchBar
+    // app bar plus this branching content.
     Scaffold(
         topBar = {
             SearchBar(

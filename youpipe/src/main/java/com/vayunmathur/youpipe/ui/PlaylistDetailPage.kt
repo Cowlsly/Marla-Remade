@@ -28,15 +28,14 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDragHandle
 import com.vayunmathur.library.ui.IconNavigation
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
@@ -112,41 +111,39 @@ fun PlaylistDetailPage(
         }
     }
 
-    Scaffold(
-        topBar = {
+    AppScaffold(
+        title = {
             if (isSelectionMode) {
-                TopAppBar(
-                    title = { Text(stringResource(R.string.selected_1, selectedIds.size)) },
-                    navigationIcon = {
-                        IconButton(onClick = { selectedIds.clear() }) { IconClose() }
-                    },
-                    actions = {
-                        IconButton(onClick = {
-                            localData.filter { it.id in selectedIds }
-                                .forEach { youPipeViewModel.removeFromPlaylist(it) }
-                            selectedIds.clear()
-                        }) {
-                            IconDelete()
-                        }
-                    }
-                )
+                Text(stringResource(R.string.selected_1, selectedIds.size))
             } else {
-                TopAppBar(
-                    title = { Text(title) },
-                    navigationIcon = { IconNavigation(backStack) },
-                    actions = {
-                        if (!mandatory) {
-                            IconButton(onClick = {
-                                playlist?.let { youPipeViewModel.deletePlaylist(it) }
-                                backStack.pop()
-                            }) {
-                                IconDelete()
-                            }
-                        }
-                    }
-                )
+                Text(title)
             }
-        }
+        },
+        navigationIcon = {
+            if (isSelectionMode) {
+                IconButton(onClick = { selectedIds.clear() }) { IconClose() }
+            } else {
+                IconNavigation(backStack)
+            }
+        },
+        actions = {
+            if (isSelectionMode) {
+                IconButton(onClick = {
+                    localData.filter { it.id in selectedIds }
+                        .forEach { youPipeViewModel.removeFromPlaylist(it) }
+                    selectedIds.clear()
+                }) {
+                    IconDelete()
+                }
+            } else if (!mandatory) {
+                IconButton(onClick = {
+                    playlist?.let { youPipeViewModel.deletePlaylist(it) }
+                    backStack.pop()
+                }) {
+                    IconDelete()
+                }
+            }
+        },
     ) { paddingValues ->
         if (localData.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {

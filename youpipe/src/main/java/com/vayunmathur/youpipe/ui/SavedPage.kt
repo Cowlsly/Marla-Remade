@@ -3,9 +3,6 @@ package com.vayunmathur.youpipe.ui
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
@@ -32,10 +29,9 @@ import com.vayunmathur.library.ui.IconList
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.ReorderableItem
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
 import com.vayunmathur.library.util.NavBackStack
@@ -104,21 +100,15 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.title_saved)) })
-        },
+    LazyListScaffold(
+        title = stringResource(R.string.title_saved),
+        state = listState,
         floatingActionButton = {
             FloatingActionButton(onClick = { backStack.add(Route.CreatePlaylist) }) {
                 IconAdd()
             }
-        }
-    ) { paddingValues ->
-        LazyColumn(
-            state = listState,
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = paddingValues
-        ) {
+        },
+    ) {
             // Pinned: Downloads (the existing downloads UI, not a real playlist).
             item(key = "pinned-downloads") {
                 ListItem(
@@ -193,6 +183,5 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
                     }
                 }
             }
-        }
     }
 }
