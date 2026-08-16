@@ -4,12 +4,9 @@ import com.vayunmathur.travel.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -19,15 +16,14 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconCheckCircle
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.util.TravelViewModel
@@ -50,15 +46,11 @@ fun ConfirmationPage(
         }
     }
 
-    Scaffold(
-        topBar = { TopAppBar(title = { Text(if (trip?.awaitingPayment == true) stringResource(R.string.on_hold) else stringResource(R.string.booking_confirmed)) }) },
-    ) { padding ->
+    DetailScaffold(
+        title = if (trip?.awaitingPayment == true) stringResource(R.string.on_hold) else stringResource(R.string.booking_confirmed),
+    ) {
         Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

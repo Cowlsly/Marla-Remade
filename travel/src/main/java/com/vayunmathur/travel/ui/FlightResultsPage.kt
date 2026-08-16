@@ -5,7 +5,6 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -28,8 +27,8 @@ import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
@@ -99,65 +98,60 @@ fun FlightResultsScreen(
     state: FlightResultsState,
     actions: FlightResultsActions,
 ) {
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             TopAppBar(
                 title = { Text(title) },
                 navigationIcon = { IconNavigation { actions.back() } },
             )
         },
-    ) { padding ->
+    ) {
         val visible = state.visibleOffers
         val expiry = visible.mapNotNull { it.expiresAt.ifBlank { null } }.minOrNull()
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
-        ) {
-            if (state.allOffers.isNotEmpty()) {
-                item { SortRow(state.sort) { actions.setSort(it) } }
-                item {
-                    FilterRow(
-                        maxStops = state.filters.maxStops,
-                        airlines = state.availableAirlines,
-                        selectedAirlines = state.filters.airlines,
-                        fareBrands = state.availableFareBrands,
-                        selectedFareBrand = state.filters.fareBrand,
-                        onMaxStops = { actions.setMaxStopsFilter(it) },
-                        onToggleAirline = { actions.toggleAirlineFilter(it) },
-                        onSelectFareBrand = { actions.setFareBrandFilter(it) },
+        if (state.allOffers.isNotEmpty()) {
+            item { SortRow(state.sort) { actions.setSort(it) } }
+            item {
+                FilterRow(
+                    maxStops = state.filters.maxStops,
+                    airlines = state.availableAirlines,
+                    selectedAirlines = state.filters.airlines,
+                    fareBrands = state.availableFareBrands,
+                    selectedFareBrand = state.filters.fareBrand,
+                    onMaxStops = { actions.setMaxStopsFilter(it) },
+                    onToggleAirline = { actions.toggleAirlineFilter(it) },
+                    onSelectFareBrand = { actions.setFareBrandFilter(it) },
+                )
+            }
+        }
+        if (expiry != null && visible.isNotEmpty()) {
+            item { OfferExpiryBanner(expiry) { actions.refreshOffers() } }
+        }
+        if (state.polling && visible.isNotEmpty()) {
+            item {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                    Text(
+                        stringResource(R.string.still_searching_for_more_fares),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
             }
-            if (expiry != null && visible.isNotEmpty()) {
-                item { OfferExpiryBanner(expiry) { actions.refreshOffers() } }
-            }
-            if (state.polling && visible.isNotEmpty()) {
-                item {
-                    Row(
-                        Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Text(
-                            stringResource(R.string.still_searching_for_more_fares),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                }
-            }
-            items(visible) { offer ->
-                OfferCard(offer) { actions.openOffer(offer) }
-            }
-            if (state.loading || state.error != null || (state.hasSearched && visible.isEmpty())) {
-                item {
-                    StatusBox(
-                        loading = state.loading,
-                        error = state.error,
-                        isEmpty = state.hasSearched && visible.isEmpty(),
-                    )
-                }
+        }
+        items(visible) { offer ->
+            OfferCard(offer) { actions.openOffer(offer) }
+        }
+        if (state.loading || state.error != null || (state.hasSearched && visible.isEmpty())) {
+            item {
+                StatusBox(
+                    loading = state.loading,
+                    error = state.error,
+                    isEmpty = state.hasSearched && visible.isEmpty(),
+                )
             }
         }
     }

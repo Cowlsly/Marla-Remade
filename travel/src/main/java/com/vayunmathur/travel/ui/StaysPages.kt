@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -33,14 +32,15 @@ import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconCheckCircle
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.DateString
@@ -190,30 +190,25 @@ fun StayResultsScreen(
     state: StaySearchState,
     actions: StayResultsActions,
 ) {
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             TopAppBar(
                 title = { Text(stringResource(R.string.hotels_in, place)) },
                 navigationIcon = { IconNavigation { actions.back() } },
             )
         },
-    ) { padding ->
-        LazyColumn(
-            Modifier.fillMaxSize().padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
-        ) {
-            items(state.results) { result ->
-                StayResultCard(result) { actions.openStay(result) }
-            }
-            if (state.loading || state.error != null || (state.hasSearched && state.results.isEmpty())) {
-                item {
-                    StatusBox(
-                        loading = state.loading,
-                        error = state.error,
-                        isEmpty = state.hasSearched && state.results.isEmpty(),
-                        emptyMessage = "No hotels found for those dates.",
-                    )
-                }
+    ) {
+        items(state.results) { result ->
+            StayResultCard(result) { actions.openStay(result) }
+        }
+        if (state.loading || state.error != null || (state.hasSearched && state.results.isEmpty())) {
+            item {
+                StatusBox(
+                    loading = state.loading,
+                    error = state.error,
+                    isEmpty = state.hasSearched && state.results.isEmpty(),
+                    emptyMessage = "No hotels found for those dates.",
+                )
             }
         }
     }
@@ -272,18 +267,14 @@ fun StayDetailPage(
     val state by viewModel.stayRates.collectAsStateWithLifecycle()
     LaunchedEffect(route.searchResultId) { viewModel.loadStayRates(route.searchResultId, route.name) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(route.name.ifBlank { stringResource(R.string.hotel) }) },
-                navigationIcon = { IconNavigation(backStack) },
-            )
-        },
+    AppScaffold(
+        title = route.name.ifBlank { stringResource(R.string.hotel) },
+        backStack = backStack,
     ) { padding ->
         val rates = state.rates
         if (rates == null) {
             StatusBox(loading = state.loading, error = state.error, isEmpty = !state.loading, modifier = Modifier.padding(padding))
-            return@Scaffold
+            return@AppScaffold
         }
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
@@ -470,9 +461,9 @@ fun StayConfirmationPage(
     val trips by viewModel.bookedTrips.collectAsStateWithLifecycle()
     val trip = trips.find { it.orderId == route.bookingId }
 
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.booking_confirmed)) }) }) { padding ->
+    DetailScaffold(title = stringResource(R.string.booking_confirmed)) {
         Column(
-            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp),
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {

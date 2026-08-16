@@ -21,6 +21,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilterChip
@@ -29,10 +30,8 @@ import com.vayunmathur.library.ui.IconFlight
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedCard
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.data.BookedTrip
@@ -51,19 +50,15 @@ fun HomePage(backStack: NavBackStack<Route>, viewModel: TravelViewModel) {
     val trips by viewModel.bookedTrips.collectAsStateWithLifecycle()
     var product by remember { mutableStateOf(Product.FLIGHTS) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.app_name)) },
-                actions = {
-                    if (trips.isNotEmpty()) {
-                        TextButton(onClick = { backStack.add(Route.Trips) }) { Text(stringResource(R.string.my_trips)) }
-                    }
-                    IconButton(onClick = { backStack.add(Route.Settings) }) {
-                        IconSettings()
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            if (trips.isNotEmpty()) {
+                TextButton(onClick = { backStack.add(Route.Trips) }) { Text(stringResource(R.string.my_trips)) }
+            }
+            IconButton(onClick = { backStack.add(Route.Settings) }) {
+                IconSettings()
+            }
         },
     ) { padding ->
         Column(

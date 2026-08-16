@@ -4,7 +4,6 @@ import com.vayunmathur.travel.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -18,13 +17,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconCheckCircle
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
@@ -42,13 +40,12 @@ fun CancellationPage(
 
     LaunchedEffect(route.orderId) { viewModel.quoteCancellation(route.orderId) }
 
-    Scaffold(
-        topBar = {
-            TopBar(onBack = { backStack.pop() })
-        },
-    ) { padding ->
+    DetailScaffold(
+        title = stringResource(R.string.cancel_order),
+        onNavigateBack = { backStack.pop() },
+    ) {
         Column(
-            Modifier.fillMaxSize().padding(padding).padding(16.dp),
+            Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
@@ -114,13 +111,4 @@ fun CancellationPage(
             }
         }
     }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun TopBar(onBack: () -> Unit) {
-    com.vayunmathur.library.ui.TopAppBar(
-        title = { Text(stringResource(R.string.cancel_order)) },
-        navigationIcon = { IconNavigation { onBack() } },
-    )
 }

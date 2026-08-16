@@ -4,31 +4,25 @@ import com.vayunmathur.travel.R
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.rememberIs24Hour
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.OrderDetailDto
@@ -91,36 +85,23 @@ fun OrderDetailPage(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun OrderDetailScreen(state: OrderDetailUiState, actions: OrderDetailActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.order)) },
-                navigationIcon = { IconNavigation { actions.back() } },
-            )
-        },
-    ) { padding ->
+    DetailScaffold(
+        title = stringResource(R.string.order),
+        onNavigateBack = { actions.back() },
+    ) {
         val order = state.order
         if (order == null) {
             StatusBox(
                 loading = state.loading,
                 error = state.error,
                 isEmpty = !state.loading && state.error == null,
-                modifier = Modifier.padding(padding),
                 emptyMessage = "Order not found.",
             )
-            return@Scaffold
+            return@DetailScaffold
         }
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            state.events.forEach { event -> OrderEventBanner(event.message) }
+        state.events.forEach { event -> OrderEventBanner(event.message) }
 
-            ElevatedCard(Modifier.fillMaxWidth()) {
+        ElevatedCard(Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     OrderRow("Booking reference", order.bookingReference, emphasize = true)
                     HorizontalDivider()
@@ -165,7 +146,6 @@ fun OrderDetailScreen(state: OrderDetailUiState, actions: OrderDetailActions) {
                     modifier = Modifier.fillMaxWidth(),
                 ) { Text(stringResource(R.string.cancel_order)) }
             }
-        }
     }
 }
 

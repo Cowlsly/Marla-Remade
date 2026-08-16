@@ -5,10 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,8 +21,8 @@ import com.vayunmathur.library.ui.rememberIs24Hour
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
@@ -116,7 +114,7 @@ private fun PartialLegScaffold(
     onSelect: (OfferDto) -> Unit,
 ) {
     val state by viewModel.partialFlow.collectAsStateWithLifecycle()
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             TopAppBar(
                 title = {
@@ -132,21 +130,16 @@ private fun PartialLegScaffold(
                 navigationIcon = { IconNavigation(backStack) },
             )
         },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize().padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
-        ) {
-            items(state.offers) { offer -> PartialOfferCard(offer) { onSelect(offer) } }
-            if (state.loading || state.error != null || state.offers.isEmpty()) {
-                item {
-                    StatusBox(
-                        loading = state.loading,
-                        error = state.error,
-                        isEmpty = !state.loading && state.error == null && state.offers.isEmpty(),
-                        emptyMessage = "No flights available for this leg.",
-                    )
-                }
+    ) {
+        items(state.offers) { offer -> PartialOfferCard(offer) { onSelect(offer) } }
+        if (state.loading || state.error != null || state.offers.isEmpty()) {
+            item {
+                StatusBox(
+                    loading = state.loading,
+                    error = state.error,
+                    isEmpty = !state.loading && state.error == null && state.offers.isEmpty(),
+                    emptyMessage = "No flights available for this leg.",
+                )
             }
         }
     }

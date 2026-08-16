@@ -33,13 +33,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.SeatCabinDto
@@ -134,13 +132,9 @@ fun SeatMapScreen(
     selectedSeats: Map<String, SeatElementDto>,
     actions: SeatMapActions,
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.choose_seats)) },
-                navigationIcon = { IconNavigation { actions.back() } },
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.choose_seats),
+        onNavigateBack = { actions.back() },
     ) { padding ->
         val cabins = state.cabins.filter { it.segmentId == segmentId }
         if (state.loading || state.error != null || cabins.isEmpty()) {
@@ -151,7 +145,7 @@ fun SeatMapScreen(
                 modifier = Modifier.padding(padding),
                 emptyMessage = "No seat map available for this flight.",
             )
-            return@Scaffold
+            return@AppScaffold
         }
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
