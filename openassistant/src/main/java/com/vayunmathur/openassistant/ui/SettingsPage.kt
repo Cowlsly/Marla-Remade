@@ -1,7 +1,6 @@
 package com.vayunmathur.openassistant.ui
 
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.*
 import androidx.compose.runtime.*
@@ -12,7 +11,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.BackupButtons
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.room.SqlCipherDbCodec
 import com.vayunmathur.library.util.DatabaseHelper
@@ -88,24 +86,11 @@ fun SettingsScreen(
 ) {
     val memories = state.memories
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.settings_title)) },
-                navigationIcon = {
-                    IconNavigation { actions.back() }
-                },
-                actions = backupButtons
-            )
-        }
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .padding(padding)
-                .fillMaxSize(),
-            contentPadding = PaddingValues(16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
+    DetailLazyColumn(
+        title = stringResource(R.string.settings_title),
+        onNavigateBack = { actions.back() },
+        actions = backupButtons,
+    ) {
             item {
                 Text(
                     text = stringResource(R.string.system_prompt),
@@ -154,7 +139,6 @@ fun SettingsScreen(
                     MemoryItem(memory, onDelete = { actions.deleteMemory(memory) })
                 }
             }
-        }
     }
 }
 

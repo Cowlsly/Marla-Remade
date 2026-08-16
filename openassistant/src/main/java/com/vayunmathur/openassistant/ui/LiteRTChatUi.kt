@@ -229,19 +229,18 @@ fun ChatScreen(
         if (state.messages.isNotEmpty()) listState.animateScrollToItem(state.messages.size - 1)
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
+    AppScaffold(
+        title = {
             val newConv = stringResource(R.string.new_conversation)
-            CenterAlignedTopAppBar(
-                title = { Text(state.title ?: newConv, fontWeight = FontWeight.Bold) },
-                actions = {
-                    IconButton({ actions.openSettings() }) { IconSettings() }
-                    if (state.showNewChatButton) IconButton({ actions.newConversation() }) { IconAdd() }
-                },
-                navigationIcon = { if (state.showConversationsButton) IconButton({ actions.openConversations() }) { IconMenu() } }
-            )
+            Text(state.title ?: newConv, fontWeight = FontWeight.Bold)
         },
+        alignment = AppBarAlignment.Center,
+        actions = {
+            IconButton({ actions.openSettings() }) { IconSettings() }
+            if (state.showNewChatButton) IconButton({ actions.newConversation() }) { IconAdd() }
+        },
+        navigationIcon = { if (state.showConversationsButton) IconButton({ actions.openConversations() }) { IconMenu() } },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             ChatInput(
                 Modifier.padding(bottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()),
@@ -255,7 +254,7 @@ fun ChatScreen(
                 onCancelMedia = { actions.cancelMedia() },
                 onRemoveImage = { actions.removeImage(it) }
             )
-        }
+        },
     ) { padding ->
         SelectionContainer {
             LazyColumn(state = listState, modifier = Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
