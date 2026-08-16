@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">Alchemist</string>
     <string name="alchemy_icon_content_description">Icona alchimia %1$d</string>
     <string name="see_details">Vedi dettagli</string>
     <string name="item_details">Dettagli elemento</string>

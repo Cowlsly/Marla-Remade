@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- HomeScreen / launcher: App name. Noun, proper, title of alchemy combining game -->
-    <string name="app_name">Alchemist</string>
+    <string name="app_name" translatable="false">Alchemist</string>
     <!-- DynamicAlchemyIcon: Accessibility content description for element icon. %1$d = icon/element ID number, e.g. 12. Noun phrase -->
     <string name="alchemy_icon_content_description">Alchemy Icon <xliff:g id="icon_id" example="12">%1$d</xliff:g></string>
     <!-- HomeScreen: Context menu (long-press) action to open detail view. Verb phrase -->
