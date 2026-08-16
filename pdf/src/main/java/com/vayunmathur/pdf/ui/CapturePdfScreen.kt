@@ -21,16 +21,15 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.BottomAppBar
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import androidx.compose.ui.res.painterResource
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -52,7 +51,6 @@ import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconCrop
 import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconUpload
 import com.vayunmathur.pdf.R
@@ -153,66 +151,60 @@ fun CapturePdfScreen(
             onBack = { isCropping = false }
         )
     } else {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text(stringResource(R.string.capture_pdf_title)) },
-                    navigationIcon = {
-                        IconNavigation(onBack)
-                    },
-                    actions = {
-                        val sel = selectedIndex
-                        if (sel != null) {
-                            IconButton(onClick = { isCropping = true }) {
-                                IconCrop()
-                            }
-                            IconButton(onClick = {
-                                viewModel.removeCapturedImage(sel)
-                                selectedIndex = null
-                            }) {
-                                IconDelete()
-                            }
-                        } else {
-                            IconButton(onClick = { galleryLauncher.launch("image/*") }) {
-                                IconUpload()
-                            }
-                            if (images.isNotEmpty()) {
-                                Box {
-                                    IconButton(onClick = { showScanOptions = true }) {
-                                        IconMoreVert()
-                                    }
-                                    com.vayunmathur.library.ui.DropdownMenu(
-                                        expanded = showScanOptions,
-                                        onDismissRequest = { showScanOptions = false },
-                                    ) {
-                                        for (f in com.vayunmathur.pdf.util.ScanFilter.entries) {
-                                            com.vayunmathur.library.ui.DropdownMenuItem(
-                                                leadingIcon = {
-                                                    if (scanFilter == f) com.vayunmathur.library.ui.IconCheck()
-                                                },
-                                                text = { Text(f.name.lowercase().replaceFirstChar { it.uppercase() }) },
-                                                onClick = { scanFilter = f },
-                                            )
-                                        }
-                                        com.vayunmathur.library.ui.HorizontalDivider()
+        AppScaffold(
+            title = stringResource(R.string.capture_pdf_title),
+            onNavigateBack = onBack,
+            actions = {
+                    val sel = selectedIndex
+                    if (sel != null) {
+                        IconButton(onClick = { isCropping = true }) {
+                            IconCrop()
+                        }
+                        IconButton(onClick = {
+                            viewModel.removeCapturedImage(sel)
+                            selectedIndex = null
+                        }) {
+                            IconDelete()
+                        }
+                    } else {
+                        IconButton(onClick = { galleryLauncher.launch("image/*") }) {
+                            IconUpload()
+                        }
+                        if (images.isNotEmpty()) {
+                            Box {
+                                IconButton(onClick = { showScanOptions = true }) {
+                                    IconMoreVert()
+                                }
+                                com.vayunmathur.library.ui.DropdownMenu(
+                                    expanded = showScanOptions,
+                                    onDismissRequest = { showScanOptions = false },
+                                ) {
+                                    for (f in com.vayunmathur.pdf.util.ScanFilter.entries) {
                                         com.vayunmathur.library.ui.DropdownMenuItem(
                                             leadingIcon = {
-                                                if (addOcr) com.vayunmathur.library.ui.IconCheck()
+                                                if (scanFilter == f) com.vayunmathur.library.ui.IconCheck()
                                             },
-                                            text = { Text(stringResource(R.string.searchable_ocr)) },
-                                            onClick = { addOcr = !addOcr },
+                                            text = { Text(f.name.lowercase().replaceFirstChar { it.uppercase() }) },
+                                            onClick = { scanFilter = f },
                                         )
                                     }
+                                    com.vayunmathur.library.ui.HorizontalDivider()
+                                    com.vayunmathur.library.ui.DropdownMenuItem(
+                                        leadingIcon = {
+                                            if (addOcr) com.vayunmathur.library.ui.IconCheck()
+                                        },
+                                        text = { Text(stringResource(R.string.searchable_ocr)) },
+                                        onClick = { addOcr = !addOcr },
+                                    )
                                 }
-                                IconButton(onClick = {
-                                    createDocumentLauncher.launch("captured_${System.currentTimeMillis()}.pdf")
-                                }) {
-                                    IconSave()
-                                }
+                            }
+                            IconButton(onClick = {
+                                createDocumentLauncher.launch("captured_${System.currentTimeMillis()}.pdf")
+                            }) {
+                                IconSave()
                             }
                         }
                     }
-                )
             },
             bottomBar = {
                 BottomAppBar(

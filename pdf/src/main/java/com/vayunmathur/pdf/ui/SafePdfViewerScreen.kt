@@ -57,13 +57,12 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalDrawerSheet
 import com.vayunmathur.library.ui.ModalNavigationDrawer
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.SmallFloatingActionButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -809,11 +808,9 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
             }
         },
     ) {
-    Scaffold(
+    AppScaffold(
         modifier = Modifier.fillMaxSize(),
-        topBar = {
-            TopAppBar(
-                title = {
+        title = {
                     if (searching) {
                         Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                             TextField(
@@ -908,8 +905,6 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
                         }
                     }
                 },
-            )
-        },
         bottomBar = {
             if (editMode) {
                 EditToolbar(

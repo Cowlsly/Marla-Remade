@@ -14,14 +14,12 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.ExtendedFloatingActionButton
 import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.FabPosition
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.Button
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -50,7 +48,6 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.image.compose.AsyncImage
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.pdf.R
 import com.vayunmathur.pdf.model.Quadrilateral
@@ -105,44 +102,30 @@ fun CropScreen(
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.crop_image)) },
-                navigationIcon = {
-                    IconNavigation(navBack = onBack)
-                },
-                actions = {
-                    Button(
-                        onClick = {
-                            decodedBitmap?.let { bmp ->
-                                scope.launch {
-                                    withContext(Dispatchers.Default) {
-                                        AutoFrameDetector.detect(bmp)
-                                    }?.let { quadrilateral = it }
-                                }
-                            }
-                        },
-                        enabled = decodedBitmap != null
-                    ) {
-                        Text(stringResource(R.string.auto_detect))
+    AppScaffold(
+        title = stringResource(R.string.crop_image),
+        onNavigateBack = onBack,
+        actions = {
+            Button(
+                onClick = {
+                    decodedBitmap?.let { bmp ->
+                        scope.launch {
+                            withContext(Dispatchers.Default) {
+                                AutoFrameDetector.detect(bmp)
+                            }?.let { quadrilateral = it }
+                        }
                     }
-                }
-            )
+                },
+                enabled = decodedBitmap != null
+            ) {
+                Text(stringResource(R.string.auto_detect))
+            }
         },
-        floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = { onCropDone(quadrilateral) },
-                text = { Text(stringResource(R.string.continue_label)) },
-                icon = { IconSave() }
-            )
-        },
-        floatingActionButtonPosition = FabPosition.Center
     ) { padding ->
+        Box(Modifier.fillMaxSize().padding(padding)) {
         BoxWithConstraints(
             Modifier
                 .fillMaxSize()
-                .padding(padding)
                 .background(MaterialTheme.colorScheme.background)
                 .padding(top = 32.dp, bottom = 64.dp, start = 48.dp, end = 48.dp),
             contentAlignment = Alignment.Center
@@ -194,6 +177,13 @@ fun CropScreen(
                 modifier = Modifier.fillMaxSize(),
                 contentScale = ContentScale.Fit
             )
+        }
+        ExtendedFloatingActionButton(
+            onClick = { onCropDone(quadrilateral) },
+            text = { Text(stringResource(R.string.continue_label)) },
+            icon = { IconSave() },
+            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp),
+        )
         }
     }
 }

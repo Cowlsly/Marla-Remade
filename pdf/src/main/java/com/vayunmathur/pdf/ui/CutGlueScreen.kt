@@ -23,6 +23,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
@@ -31,9 +32,7 @@ import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -54,7 +53,6 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.pdf.R
 import com.vayunmathur.pdf.util.ComposePdfDocument
@@ -174,17 +172,13 @@ fun CutGlueContent(
         if (from.index < pageKeys.size && to.index < pageKeys.size) onMove(from.index, to.index)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.cut_glue)) },
-                navigationIcon = { IconNavigation { onBack() } },
-                actions = {
-                    if (pageKeys.isNotEmpty()) {
-                        IconButton(onSave) { IconSave() }
-                    }
-                },
-            )
+    AppScaffold(
+        title = stringResource(R.string.cut_glue),
+        onNavigateBack = onBack,
+        actions = {
+            if (pageKeys.isNotEmpty()) {
+                IconButton(onSave) { IconSave() }
+            }
         },
         floatingActionButton = {
             Box {
