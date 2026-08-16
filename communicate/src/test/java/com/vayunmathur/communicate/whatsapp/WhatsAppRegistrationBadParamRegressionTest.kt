@@ -366,7 +366,13 @@ class WhatsAppRegistrationBadParamRegressionTest {
             val snippet = src.substring(existIdx, minOf(src.length, existIdx + 2000))
             assertTrue(snippet.contains("token"), "checkExist must include token param (bad_param fix w2.md §3.1)")
             assertTrue(snippet.contains("computeToken"), "checkExist token must be via computeToken")
-            assertTrue(snippet.contains("EndpointKind.EXIST"), "checkExist must addIntegrity(EXIST)")
+            // Phase-B device-integrity signals are gated OFF by default (restored verified-live
+            // param set from base commit 33dd602): _gi/aid/_gp must NOT be sent, so the master
+            // switch has to be disabled. (The addIntegrity() body itself early-returns on it.)
+            assertTrue(
+                src.contains("SEND_INTEGRITY_SIGNALS = false"),
+                "integrity signals must be gated OFF by default (restored verified-live param set)",
+            )
         }
     }
 

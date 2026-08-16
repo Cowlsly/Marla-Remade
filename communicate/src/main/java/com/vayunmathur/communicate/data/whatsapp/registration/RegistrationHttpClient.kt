@@ -438,12 +438,19 @@ class RegistrationHttpClient(
          * NOT sent — they are bound to the official signed WhatsApp app identity and an unofficial
          * client cannot mint server-valid tokens (documented, not faked).
          *
-         * Inclusion per endpoint:
+         * DEFAULT OFF (see [SEND_INTEGRITY_SIGNALS]): the honest signals we *can* compute
+         * (`_gi` = ENC of THIS app's apk/cert/package, `aid`, `_gp`) positively identify the client
+         * as non-WhatsApp, which is strictly worse than omitting them. The last live-verified
+         * registration (whatsapp-documentation.md §2, pre-`e7e120`) sent NONE of these, so by default
+         * we restore that verified param set and this method is a no-op.
+         *
+         * Inclusion per endpoint (only when the switch is flipped on for experimentation):
          *  - EXIST:    aid,_gi,_gp,_ge,_ga,_gs,db  (+profile_name; no t)
          *  - CODE:     aid,_gi,_gp,_ge,_ga,_gs,t,hasav
          *  - REGISTER: aid,_gi,_gp,_ge,_ga,_gs,t
          */
         fun addIntegrity(kind: EndpointKind) {
+            if (!SEND_INTEGRITY_SIGNALS) return
             val s = runCatching { RegistrationIntegrity.collect(context) }.getOrNull() ?: return
             if (s.aid.isNotEmpty()) a01("aid", s.aid)
             a02("_gi", s.gi)
@@ -520,6 +527,21 @@ class RegistrationHttpClient(
 
     companion object {
         private const val TAG = "WARegHttp"
+
+        /**
+         * Master switch for the Phase-B device-integrity signals
+         * (`aid`,`_gi`,`_gp`,`_ge`,`_ga`,`_gs`,`t`,`hasav`,`db`,`profile_name`) added in `e7e120`.
+         *
+         * DEFAULT **false** — restores the last live-verified registration param set
+         * (whatsapp-documentation.md §2 / base commit `33dd602`, which returned `status:ok`). These
+         * signals were added AFTER that success and never validated live; critically `_gi` is an ENC
+         * blob the server decrypts to `package=com.vayunmathur.communicate` + this app's apk/cert
+         * hash, and `aid`/`_gp` further fingerprint the non-official app. Since we also cannot mint
+         * the server-required Play-Integrity / reCAPTCHA-Enterprise proofs, sending honest-but-wrong
+         * -app integrity can only hurt. Flip to `true` only to experiment (the wire shapes are still
+         * validated by WhatsAppRegistrationBadParamRegressionTest.addIntegrity_perEndpointCorrectFields).
+         */
+        private const val SEND_INTEGRITY_SIGNALS = false
     }
 
     /** WAMSYS endpoint kinds that carry per-endpoint integrity params (w2.md §3.1-3.3). */

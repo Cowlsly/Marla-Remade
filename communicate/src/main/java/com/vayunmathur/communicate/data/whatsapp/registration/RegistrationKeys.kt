@@ -23,6 +23,15 @@ class RegistrationKeys private constructor(
     fun registerBundleFields(): Map<String, String> = bundleFields(authScaffold)
 
     companion object {
+        /**
+         * DEFAULT **false** — do not attach the post-quantum `e_pq_last_resort_*` bundle to the
+         * `/v2` registration request. Restores the last live-verified param set (base commit
+         * `33dd602`, which returned `status:ok` with only the classic 7-field bundle); the PQ bundle
+         * added in `e7e120` was never validated live and its server acceptance is User-Agent-gated.
+         * Flip to `true` to generate + attach it (bundleFields still enforces all-or-none).
+         */
+        const val EMIT_PQ_LAST_RESORT = false
+
         fun generate(phoneNumber: String): RegistrationKeys {
             val rng = SecureRandom()
 
@@ -35,12 +44,20 @@ class RegistrationKeys private constructor(
 
             val signature = WhatsAppE2E.signSignedPreKey(identity.privateKey, signedPreKey.publicKey)
 
-            // Post-quantum last-resort prekey (Phase B 2d). Best-effort: if the KEM API/native
-            // signer is unavailable the PQ fields stay empty and bundleFields omits e_pq_* entirely
-            // (all-or-none), so classic registration still works.
-            val pq = try {
-                WhatsAppPqPreKey.generate(identity.privateKey, WhatsAppRegistrationConstants.PQ_LAST_RESORT_KEY_ID)
-            } catch (t: Throwable) {
+            // Post-quantum last-resort prekey (Phase B 2d). DEFAULT OFF ([EMIT_PQ_LAST_RESORT]):
+            // this e_pq_* bundle was added in `e7e120` AFTER the last live-verified registration
+            // (whatsapp-documentation.md §2 sent only the classic 7-field bundle) and was never
+            // validated live; server PQ expectation is User-Agent-gated, so an unexpected/mismatched
+            // e_pq_* can draw bad_param. When off, the fields stay empty and bundleFields omits
+            // e_pq_* entirely (all-or-none), matching the verified param set. Best-effort even when
+            // enabled: a KEM/native-signer failure also leaves the fields empty.
+            val pq = if (EMIT_PQ_LAST_RESORT) {
+                try {
+                    WhatsAppPqPreKey.generate(identity.privateKey, WhatsAppRegistrationConstants.PQ_LAST_RESORT_KEY_ID)
+                } catch (t: Throwable) {
+                    null
+                }
+            } else {
                 null
             }
 
