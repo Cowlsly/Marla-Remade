@@ -3,8 +3,6 @@ package com.vayunmathur.flashcards.ui
 import android.Manifest
 import android.content.Intent
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -43,6 +41,7 @@ import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.rememberTimePickerState
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.math.roundToInt
@@ -54,9 +53,7 @@ fun SettingsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel)
     val presets by viewModel.deckPresets.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
-    val permissionLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.RequestPermission(),
-    ) {}
+    val requestNotifications = rememberPermissionRequest(Manifest.permission.POST_NOTIFICATIONS)
 
     LaunchedEffect(viewModel) {
         viewModel.shareRequests.collect { uri ->
@@ -80,7 +77,7 @@ fun SettingsPage(backStack: NavBackStack<Route>, viewModel: FlashcardsViewModel)
         override fun setAutoPlay(enabled: Boolean) { viewModel.setAutoPlay(enabled) }
         override fun setReminderEnabled(enabled: Boolean) {
             if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+                requestNotifications()
             }
             viewModel.setReminderEnabled(enabled)
         }
