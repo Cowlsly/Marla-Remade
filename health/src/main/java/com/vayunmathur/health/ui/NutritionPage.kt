@@ -158,7 +158,7 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
 
     var fabExpanded by remember { mutableStateOf(false) }
 
-    Scaffold(
+    LazyListScaffold(
         floatingActionButton = {
             FloatingActionButtonMenu(
                 expanded = fabExpanded,
@@ -184,16 +184,12 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
                     icon = { IconAdd() }
                 )
             }
-        }
-    ) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .padding(horizontal = 16.dp, vertical = 12.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            // Calorie ring
+        },
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        // Calorie ring
+        item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
                 shape = MaterialTheme.shapes.large,
@@ -227,8 +223,10 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
                     }
                 }
             }
+        }
 
-            // Macros as 3 compact rings
+        // Macros as 3 compact rings
+        item {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceEvenly,
@@ -237,8 +235,10 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
                 CompactMacroRing("Carbs", totalCarbs, 275.0, "g", carbsColor)
                 CompactMacroRing("Fat", totalFat, 78.0, "g", fatColor)
             }
+        }
 
-            // Meals link + breakdown CTA
+        // Meals link + breakdown CTA
+        item {
             DashboardSection(accentColor = HealthColors.Nutrition) {
                 ListItem(
                     content = {

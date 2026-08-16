@@ -1,18 +1,14 @@
 package com.vayunmathur.health.ui
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.lazy.LazyColumn
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.ExperimentalMaterial3ExpressiveApi
 import com.vayunmathur.library.ui.FloatingActionButtonMenu
 import com.vayunmathur.library.ui.FloatingActionButtonMenuItem
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.ToggleFloatingActionButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -20,7 +16,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.health.R
@@ -66,7 +61,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
         )
     }
 
-    Scaffold(
+    LazyListScaffold(
         floatingActionButton = {
             FloatingActionButtonMenu(
                 expanded = fabExpanded,
@@ -90,15 +85,8 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                 }
             }
         },
-    ) { paddingValues ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = PaddingValues(
-                top = paddingValues.calculateTopPadding() + 8.dp,
-                bottom = paddingValues.calculateBottomPadding() + 24.dp,
-            ),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
             // Body composition
             item {
                 DashboardSection(
@@ -161,5 +149,4 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
                 }
             }
         }
-    }
 }

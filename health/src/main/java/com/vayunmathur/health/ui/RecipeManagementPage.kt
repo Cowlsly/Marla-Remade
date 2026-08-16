@@ -54,14 +54,10 @@ fun RecipeManagementPage(backStack: NavBackStack<Route>, viewModel: HealthViewMo
         )
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.recipes)) },
-                navigationIcon = { IconNavigation(backStack) },
-                actions = { BackupButtons() }
-            )
-        },
+    AppScaffold(
+        title = stringResource(R.string.recipes),
+        backStack = backStack,
+        actions = { BackupButtons() },
         floatingActionButton = {
             if (!isListEmpty) {
                 FloatingActionButton(onClick = { 
@@ -74,7 +70,7 @@ fun RecipeManagementPage(backStack: NavBackStack<Route>, viewModel: HealthViewMo
                     IconAdd()
                 }
             }
-        }
+        },
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             PrimaryTabRow(

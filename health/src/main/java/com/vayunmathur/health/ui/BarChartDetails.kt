@@ -24,13 +24,12 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.LocalContentColor
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SecondaryTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.TabRowDefaults
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -84,7 +83,6 @@ import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconFavorite
 import com.vayunmathur.library.ui.IconFire
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.round
 import com.vayunmathur.library.util.toStringCommas
 import com.vayunmathur.library.util.toStringDigits
@@ -378,12 +376,10 @@ fun BarChartDetailsScreen(
         actions.loadBarChartData(config, anchorDate, selectedTab)
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(config.titleRes)) },
-                navigationIcon = { IconNavigation({ actions.navigateUp() }) })
-        }) { padding ->
+    AppScaffold(
+        title = stringResource(config.titleRes),
+        onNavigateBack = { actions.navigateUp() },
+    ) { padding ->
         Column(
             modifier = Modifier
                 .padding(top = padding.calculateTopPadding())
