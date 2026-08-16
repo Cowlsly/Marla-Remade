@@ -2,7 +2,7 @@ package com.vayunmathur.youpipe.util.sabr
 
 import android.content.Context
 import org.schabi.newpipe.extractor.NewPipe
-import org.schabi.newpipe.extractor.services.youtube.sabr.SabrProtocolException
+import org.schabi.newpipe.extractor.services.youtube.sabrng.exception.SabrProtocolException
 import java.io.Closeable
 import java.time.Instant
 import java.util.concurrent.CountDownLatch

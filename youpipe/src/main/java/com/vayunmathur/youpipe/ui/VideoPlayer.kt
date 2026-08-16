@@ -309,48 +309,9 @@ fun VideoPlayer(
     val historyVideo by historyFlow.collectAsState(initial = null)
     val timeWatched = historyVideo?.progress ?: 0
 
-    // PipePipe-style prewarm: when a SABR stream is selected (default or after a quality switch),
-    // warm the PoToken + SABR bootstrap for that exact audio+video itag so the eventual play is
-    // instant. The itags parsed here must match what PlaybackService parses from the same sabr://
-    // URIs so the bootstrap cache key lines up.
-    LaunchedEffect(currentVideoStream, currentAudioStream) {
-        val uri = currentVideoStream.url.toUri()
-        if (uri.scheme == "sabr") {
-            val vid = uri.host
-            val itag = uri.getQueryParameter("v")?.toIntOrNull()
-            if (vid != null && itag != null) {
-                val audio = currentAudioStream
-                val audioItag = audio?.url?.toUri()?.getQueryParameter("a")?.toIntOrNull() ?: 0
-                com.vayunmathur.youpipe.util.sabr.SabrSessionStore.prewarm(
-                    context, vid, itag, audioItag, audio?.audioTrackId
-                )
-            }
-        }
-    }
-
     // 3. Updated LaunchedEffect to pass audio URI through Metadata Extras
     LaunchedEffect(controller, currentVideoStream, currentAudioStream, videoInfo.name, videoInfo.author, subtitles) {
         val player = controller ?: return@LaunchedEffect
-
-        // Fully complete the SABR bootstrap OFF the main thread before handing the item to the
-        // player. media3 builds the MediaSource (SabrSessionStore.createSourceSpec) synchronously
-        // on the main thread, so without this a not-yet-cached SABR quality switch (e.g. 1440p)
-        // would block the UI for the whole bootstrap round-trip. Warming first makes that factory
-        // call a cache hit. This coroutine is cancelled if the stream changes again mid-warm.
-        val vUri = currentVideoStream.url.toUri()
-        if (vUri.scheme == "sabr") {
-            val vid = vUri.host
-            val vitag = vUri.getQueryParameter("v")?.toIntOrNull()
-            if (vid != null && vitag != null) {
-                val audio = currentAudioStream
-                val aitag = audio?.url?.toUri()?.getQueryParameter("a")?.toIntOrNull() ?: 0
-                withContext(Dispatchers.IO) {
-                    com.vayunmathur.youpipe.util.sabr.SabrSessionStore.warmBootstrap(
-                        context, vid, vitag, aitag, audio?.audioTrackId
-                    )
-                }
-            }
-        }
 
         val metadataBuilder = MediaMetadata.Builder()
             .setTitle(videoInfo.name)

@@ -5,10 +5,7 @@ import android.os.Handler
 import android.os.Looper
 import android.util.Log
 import androidx.core.content.edit
-import org.schabi.newpipe.extractor.services.youtube.sabr.SabrPoTokenProvider
-import org.schabi.newpipe.extractor.services.youtube.sabr.SabrProtocolException
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrInfo
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrStreamState
+import org.schabi.newpipe.extractor.services.youtube.sabrng.exception.SabrProtocolException
 import org.schabi.newpipe.extractor.localization.ContentCountry
 import org.schabi.newpipe.extractor.localization.Localization
 import org.schabi.newpipe.extractor.services.youtube.InnertubeClientRequestInfo
@@ -46,7 +43,6 @@ internal class CredentialIdentityTracker(private val onChanged: () -> Unit) {
 }
 
 class LocalDomPoTokenProvider(context: Context) :
-    SabrPoTokenProvider,
     YoutubeSessionPoTokenProvider {
     private data class CachedToken(
         val token: ByteArray,
@@ -186,21 +182,9 @@ class LocalDomPoTokenProvider(context: Context) :
         return YoutubeSessionPoToken(visitorData, encoded)
     }
 
-    override fun getPoToken(
-        info: YoutubeSabrInfo,
-        streamState: YoutubeSabrStreamState,
-    ): ByteArray? = getPoToken(info, streamState, false)
-
-    override fun getPoToken(
-        info: YoutubeSabrInfo,
-        streamState: YoutubeSabrStreamState,
-        forceRefresh: Boolean,
-    ): ByteArray? = getPoTokenBytes(info.videoId, info.visitorData, forceRefresh)
-
     /**
-     * Raw PO token bytes for the session-based SABR stack ([SabrNgSession]); mirrors
-     * [getPoToken] but takes the videoId/visitorData directly so it does not depend on the legacy
-     * `YoutubeSabrInfo`/`YoutubeSabrStreamState` types.
+     * Raw PO token bytes for the session-based SABR stack ([SabrNgSession]); takes the
+     * videoId/visitorData directly so it does not depend on the legacy `sabr` package types.
      */
     @JvmOverloads
     fun getPoTokenBytes(
