@@ -658,7 +658,7 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.AUDIO,
             getAudioStreamBuilderHelper(), "audio"
         )
-        // SABR is built alongside the ANDROID_VR direct streams (matching PipePipe's
+        // SABR is built alongside the VISIONOS direct streams (matching PipePipe's
         // re-enabled SABR path); the app merges/dedups progressive + SABR downstream.
         buildSabrStreamsIfNeeded()
         streams.addAll(sabrAudioStreams)
@@ -681,7 +681,7 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.VIDEO_ONLY,
             getVideoStreamBuilderHelper(true), "video-only"
         )
-        // SABR is built alongside the ANDROID_VR direct streams (matching PipePipe's
+        // SABR is built alongside the VISIONOS direct streams (matching PipePipe's
         // re-enabled SABR path); the app merges/dedups progressive + SABR downstream.
         buildSabrStreamsIfNeeded()
         streams.addAll(sabrVideoOnlyStreams)
