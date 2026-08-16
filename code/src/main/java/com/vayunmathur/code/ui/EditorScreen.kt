@@ -71,10 +71,9 @@ import com.vayunmathur.library.ui.ModalDrawerSheet
 import com.vayunmathur.library.ui.ModalNavigationDrawer
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.OverflowMenu
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.rememberDrawerState
 import kotlinx.coroutines.launch
 
@@ -201,21 +200,17 @@ fun EditorScreen(
             }
         },
     ) {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text(state.currentTab?.name ?: "Code") },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) { IconMenu() }
-                    },
-                    actions = {
-                        IconButton(onClick = {
-                            actions.refreshProjectFiles()
-                            showQuickOpen = true
-                        }) { IconSearch() }
-                        IconButton(onClick = onOpenSettings) { IconSettings() }
-                    },
-                )
+        AppScaffold(
+            title = state.currentTab?.name ?: "Code",
+            navigationIcon = {
+                IconButton(onClick = { scope.launch { drawerState.open() } }) { IconMenu() }
+            },
+            actions = {
+                IconButton(onClick = {
+                    actions.refreshProjectFiles()
+                    showQuickOpen = true
+                }) { IconSearch() }
+                IconButton(onClick = onOpenSettings) { IconSettings() }
             },
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
