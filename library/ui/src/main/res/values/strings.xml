@@ -82,4 +82,8 @@
     <string name="clear">Clear</string>
     <string name="share">Share</string>
     <string name="undo">Undo</string>
+    <!-- Shared library: UI – CompassCalibrationBanner: Emphasized title line shown when the magnetometer reports low accuracy -->
+    <string name="compass_low_accuracy_title">Low compass accuracy</string>
+    <!-- Shared library: UI – CompassCalibrationBanner: Instruction line telling the user how to recalibrate the compass -->
+    <string name="compass_calibrate_figure_8">Move phone in a figure 8 to calibrate</string>
 </resources>
