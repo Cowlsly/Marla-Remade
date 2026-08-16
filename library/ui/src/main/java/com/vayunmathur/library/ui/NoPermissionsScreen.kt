@@ -98,6 +98,9 @@ fun NoPermissionsScreen(
     ) { permissionsResult ->
         setHasPermissions(permissionsResult.values.all { it })
     }
+    // Button press recovers from permanent denial by opening app settings; the initial
+    // auto-ask below stays a plain request so entering the screen never jumps to settings.
+    val requestOrOpenSettings = rememberMultiplePermissionRequest(permissions) { setHasPermissions(it) }
     LaunchedEffect(Unit) {
         permissionRequestor.launch(permissions)
     }
@@ -106,7 +109,7 @@ fun NoPermissionsScreen(
             PermissionWall(
                 title = text,
                 actionLabel = text,
-                onRequest = { permissionRequestor.launch(permissions) },
+                onRequest = requestOrOpenSettings,
                 rationale = rationale,
             )
         }
