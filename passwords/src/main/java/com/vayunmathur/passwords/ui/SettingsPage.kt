@@ -7,30 +7,24 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SettingsDivider
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -45,7 +39,6 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.vayunmathur.passwords.R
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.BackupButtons
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.passwords.sync.KdbxPasswordHelper
 import com.vayunmathur.passwords.sync.KdbxSyncScheduler
 import com.vayunmathur.passwords.sync.KdbxSyncSettings
@@ -76,24 +69,15 @@ fun SettingsPage(
         selectedSource = null
     }
 
-    Scaffold(Modifier, {
-        TopAppBar(
-            { Text(stringResource(R.string.title_settings)) },
-            navigationIcon = { IconNavigation(backStack) },
-            actions = {
-                BackupButtons(
-                    format = passwordsViewModel.buildBackupFormat(),
-                )
-            },
-        )
-    }) { paddingValues ->
-        Column(Modifier
-            .padding(paddingValues)
-            .fillMaxSize()
-            .verticalScroll(rememberScrollState())
-            .padding(16.dp), Arrangement.Top
-        ) {
-
+    DetailScaffold(
+        title = stringResource(R.string.title_settings),
+        backStack = backStack,
+        actions = {
+            BackupButtons(
+                format = passwordsViewModel.buildBackupFormat(),
+            )
+        },
+    ) {
             Text(stringResource(R.string.import_csv_warning))
             Spacer(Modifier.height(16.dp))
 
@@ -136,7 +120,6 @@ fun SettingsPage(
             }
 
             KdbxSyncSection()
-        }
     }
 }
 

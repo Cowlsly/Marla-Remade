@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -42,8 +41,8 @@ import com.vayunmathur.library.ui.IconLink
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconVisibilityOff
 import com.vayunmathur.library.ui.IconVisible
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Text
@@ -78,7 +77,7 @@ fun PasswordScreen(
         }
     }
 
-    Scaffold(
+    LazyListScaffold(
         topBar = {
             TopAppBar(
                 title = { Text(password.name.ifBlank { stringResource(R.string.section_password) }) },
@@ -97,16 +96,12 @@ fun PasswordScreen(
                 IconEdit()
             }
         },
-        snackbarHost = { SnackbarHost(snackbarHostState) }
-    ) { paddingValues ->
-        Column(
-            Modifier
-                .padding(paddingValues)
-                .padding(16.dp)
-                .fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            // Header
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        // Header
+        item {
             Card(
                 shape = RoundedCornerShape(12.dp),
                 modifier = Modifier.fillMaxWidth()
@@ -134,9 +129,11 @@ fun PasswordScreen(
                     }
                 }
             }
+        }
 
-            // Login info: username / email
-            if (password.username.isNotBlank() || password.email.isNotBlank()) {
+        // Login info: username / email
+        if (password.username.isNotBlank() || password.email.isNotBlank()) {
+            item {
                 Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         if (password.username.isNotBlank()) {
@@ -159,8 +156,10 @@ fun PasswordScreen(
                     }
                 }
             }
+        }
 
-            // Password card
+        // Password card
+        item {
             Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
                     Text(stringResource(R.string.section_password), style = MaterialTheme.typography.titleMedium)
@@ -188,8 +187,10 @@ fun PasswordScreen(
                     }
                 }
             }
+        }
 
-            // TOTP card: show generated code and circular timer
+        // TOTP card: show generated code and circular timer
+        item {
             Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
                     Text(stringResource(R.string.section_totp), style = MaterialTheme.typography.titleMedium)
@@ -228,9 +229,11 @@ fun PasswordScreen(
                     }
                 }
             }
+        }
 
-            // Note
-            if (password.note.isNotBlank()) {
+        // Note
+        if (password.note.isNotBlank()) {
+            item {
                 Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.fillMaxWidth()) {
@@ -244,8 +247,10 @@ fun PasswordScreen(
                     }
                 }
             }
+        }
 
-            // Websites
+        // Websites
+        item {
             Card(shape = RoundedCornerShape(8.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp)) {
                     Text(stringResource(R.string.section_websites), style = MaterialTheme.typography.titleMedium)

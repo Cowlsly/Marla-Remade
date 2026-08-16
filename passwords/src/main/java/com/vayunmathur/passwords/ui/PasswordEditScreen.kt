@@ -4,9 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.FlowRow
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
@@ -15,7 +13,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalFocusManager
@@ -23,24 +20,20 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.IconClose
-import com.vayunmathur.library.ui.IconNavigation
-import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.InputChip
+import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
-import com.vayunmathur.library.ui.SnackbarHost
-import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.platform.PasswordEditUiState
 import com.vayunmathur.passwords.platform.PasswordsActions
-import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -57,8 +50,7 @@ fun PasswordEditScreen(
     var websiteInput by remember { mutableStateOf("") }
     var showPassword by remember { mutableStateOf(false) }
 
-    val snackbarHostState = remember { SnackbarHostState() }
-    val scope = rememberCoroutineScope()
+    var saveError by remember { mutableStateOf<String?>(null) }
     val nameRequired = stringResource(R.string.name_required)
     val focusManager = LocalFocusManager.current
 
@@ -73,21 +65,15 @@ fun PasswordEditScreen(
         websiteInput = ""
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (current.id == 0L) stringResource(R.string.add_password) else stringResource(R.string.edit_password)) },
-                navigationIcon = {
-                    IconNavigation(onBack)
-                }
-            )
-        },
-        floatingActionButton = {
-            FloatingActionButton(onClick = {
-                val d = draft ?: return@FloatingActionButton
+    DetailScaffold(
+        title = if (current.id == 0L) stringResource(R.string.add_password) else stringResource(R.string.edit_password),
+        onNavigateBack = onBack,
+        actions = {
+            Button(onClick = {
+                val d = draft ?: return@Button
                 if (d.name.isBlank()) {
-                    scope.launch { snackbarHostState.showSnackbar(nameRequired) }
-                    return@FloatingActionButton
+                    saveError = nameRequired
+                    return@Button
                 }
                 // Normalize empty TOTP to null before saving.
                 actions.updateDraft { it.copy(totpSecret = it.totpSecret?.ifBlank { null }) }
@@ -98,13 +84,14 @@ fun PasswordEditScreen(
                     onBack()
                 }
             }) {
-                IconSave()
+                Text(stringResource(UiR.string.save))
             }
         },
-        snackbarHost = { SnackbarHost(hostState = snackbarHostState) }
-    ) { paddingValues ->
-        Column(Modifier.padding(paddingValues).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Card(shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
+    ) {
+        if (saveError != null) {
+            Text(saveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+        }
+        Card(shape = RoundedCornerShape(10.dp), modifier = Modifier.fillMaxWidth()) {
                 Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = current.name,
@@ -201,8 +188,5 @@ fun PasswordEditScreen(
                     }
                 }
             }
-
-            Spacer(Modifier.height(56.dp))
-        }
     }
 }

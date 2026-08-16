@@ -2,21 +2,18 @@ package com.vayunmathur.passwords.ui
 
 import android.text.format.DateFormat
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -25,7 +22,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.platform.PasswordsViewModel
@@ -50,39 +46,25 @@ fun PasskeyPage(
     val shortTime = DateFormat.getTimeFormat(context)
     val dateFormat = { ms: Long -> mediumDate.format(Date(ms)) + " " + shortTime.format(Date(ms)) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(passkey.rpName.ifBlank { stringResource(R.string.passkey_detail_title) }) },
-                actions = {
-                    IconButton(onClick = { viewModel.deletePasskey(passkey); backStack.pop() }) {
-                        IconDelete()
-                    }
-                },
-                navigationIcon = {
-                    IconNavigation(backStack)
-                }
-            )
+    DetailScaffold(
+        title = passkey.rpName.ifBlank { stringResource(R.string.passkey_detail_title) },
+        backStack = backStack,
+        actions = {
+            IconButton(onClick = { viewModel.deletePasskey(passkey); backStack.pop() }) {
+                IconDelete()
+            }
         },
-    ) { paddingValues ->
-        Column(
-            Modifier
-                .padding(paddingValues)
-                .padding(16.dp)
-                .fillMaxSize(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
-        ) {
-            DetailCard(stringResource(R.string.passkey_rp_name), passkey.rpName)
-            DetailCard(stringResource(R.string.passkey_rp_id), passkey.rpId)
-            DetailCard(stringResource(R.string.passkey_user_name), passkey.userName)
-            DetailCard(stringResource(R.string.passkey_user_display_name), passkey.userDisplayName)
-            DetailCard(
-                stringResource(R.string.passkey_credential_id),
-                passkey.credentialId.let { if (it.length > 20) it.take(20) + "…" else it }
-            )
-            DetailCard(stringResource(R.string.passkey_created), dateFormat(passkey.creationTime))
-            DetailCard(stringResource(R.string.passkey_last_used), dateFormat(passkey.lastUsedTime))
-        }
+    ) {
+        DetailCard(stringResource(R.string.passkey_rp_name), passkey.rpName)
+        DetailCard(stringResource(R.string.passkey_rp_id), passkey.rpId)
+        DetailCard(stringResource(R.string.passkey_user_name), passkey.userName)
+        DetailCard(stringResource(R.string.passkey_user_display_name), passkey.userDisplayName)
+        DetailCard(
+            stringResource(R.string.passkey_credential_id),
+            passkey.credentialId.let { if (it.length > 20) it.take(20) + "…" else it }
+        )
+        DetailCard(stringResource(R.string.passkey_created), dateFormat(passkey.creationTime))
+        DetailCard(stringResource(R.string.passkey_last_used), dateFormat(passkey.lastUsedTime))
     }
 }
 
