@@ -219,7 +219,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I)V";
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[I)V";
 
     let array = match env.new_object_array(steps.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
@@ -254,6 +254,18 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         let jcode = make_opt_string(&mut env, step.code_off);
         let jend = make_opt_string(&mut env, step.end_code_off);
 
+        // Packed turn-lane guidance: one int per lane (dir * 2 + valid).
+        let jlanes = match env.new_int_array(step.lanes.len() as i32) {
+            Ok(a) => a,
+            Err(_) => return null,
+        };
+        if !step.lanes.is_empty()
+            && env.set_int_array_region(&jlanes, 0, &step.lanes).is_err()
+        {
+            return null;
+        }
+        let jlanes_obj: JObject = jlanes.into();
+
         let obj = match env.new_object(
             &class,
             ctor,
@@ -269,6 +281,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
                 JValue::Object(&jcode),
                 JValue::Object(&jend),
                 JValue::Int(step.stop_count),
+                JValue::Object(&jlanes_obj),
             ],
         ) {
             Ok(o) => o,

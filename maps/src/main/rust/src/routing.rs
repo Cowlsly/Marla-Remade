@@ -64,6 +64,95 @@ pub struct StepData {
     pub code_off: u32,
     pub end_code_off: u32,
     pub stop_count: i32,
+    /// Derived turn-lane guidance for this step's maneuver. Each entry is one
+    /// available turn lane at the junction, packed as `dir * 2 + valid` where
+    /// `dir` is a maneuver-enum ordinal (see `get_maneuver`) and `valid` is 1
+    /// when that lane leads onto the taken route. Empty when the junction has
+    /// no meaningful choice (single continuation) or no node context.
+    pub lanes: Vec<i32>,
+}
+
+/// Sentinel for "no junction node" in [`StepBuilder::add_segment`].
+const INVALID_NODE: u32 = 0xFFFF_FFFF;
+
+/// Derive the available turn lanes at `junction` for a maneuver taken with the
+/// given `incoming_bearing`. Purely topological: enumerates the junction's
+/// outgoing driveable edges, classifies each by turn direction relative to the
+/// incoming heading, and marks the one(s) matching `taken`. Returns packed
+/// `dir * 2 + valid` entries sorted left→right, or empty when there is no
+/// real choice (<= 1 option).
+fn junction_lanes(
+    g: &Graph,
+    junction: u32,
+    prev_node: u32,
+    incoming_bearing: f64,
+    taken: i32,
+) -> Vec<i32> {
+    if junction >= g.node_count {
+        return Vec::new();
+    }
+    let jnode = g.node(junction);
+    let s = jnode.edge_ptr;
+    let e_ptr = g.node(junction + 1).edge_ptr; // sentinel valid
+    let jlat = jnode.lat_e7;
+    let jlon = jnode.lon_e7;
+
+    let mut coords = [LatLon { lat_e7: 0, lon_e7: 0 }; 256];
+    // (signed angle diff for sorting, turn direction code)
+    let mut opts: Vec<(f64, i32)> = Vec::new();
+
+    for k in s..e_ptr {
+        let edge = g.edge(k);
+        if edge.type_ & TRANSIT_FLAG != 0 {
+            continue;
+        }
+        if !is_mode_allowed(edge.type_, DRIVING) {
+            continue;
+        }
+        if edge.target >= g.node_count {
+            continue;
+        }
+        // Skip the edge back the way we came — that's a U-turn, not a lane.
+        if edge.target == prev_node {
+            continue;
+        }
+
+        // Outgoing heading: junction -> first vertex leaving the junction.
+        let (nlat, nlon) = match g.get_edge_coordinates(k, &mut coords) {
+            Some((count, is_rev)) if count >= 2 => {
+                let p1 = get_pt_at(&coords, count, is_rev, 1);
+                (p1.lat_e7, p1.lon_e7)
+            }
+            _ => {
+                let n = g.get_node(edge.target);
+                (n.lat_e7, n.lon_e7)
+            }
+        };
+
+        let out_bearing = get_bearing(jlat, jlon, nlat, nlon);
+        let mut ad = out_bearing - incoming_bearing;
+        while ad < -180.0 {
+            ad += 360.0;
+        }
+        while ad > 180.0 {
+            ad -= 360.0;
+        }
+        let dir = get_maneuver(incoming_bearing, out_bearing);
+        if !opts.iter().any(|&(_, d)| d == dir) {
+            opts.push((ad, dir));
+        }
+        if opts.len() >= 8 {
+            break;
+        }
+    }
+
+    if opts.len() <= 1 {
+        return Vec::new();
+    }
+    opts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+    opts.iter()
+        .map(|&(_, dir)| dir * 2 + if dir == taken { 1 } else { 0 })
+        .collect()
 }
 
 /// Snap a WGS84 point to the nearest routable edge for `mode`.
@@ -348,6 +437,10 @@ struct StepBuilder<'a> {
     last_bearing: f64,
     current_elapsed_10ms: u32,
     last_was_transit: bool,
+    /// Junction node for the next segment's maneuver (or [`INVALID_NODE`]).
+    pending_junction: u32,
+    /// Node we arrive from at that junction, to exclude the U-turn lane.
+    pending_prev: u32,
 }
 
 impl<'a> StepBuilder<'a> {
@@ -367,6 +460,12 @@ impl<'a> StepBuilder<'a> {
         code_off: u32,
         target_code_off: u32,
     ) {
+        // Junction context for lane derivation is set on the builder before the
+        // first segment of a main-path edge and consumed (then cleared) here.
+        let junction_node = self.pending_junction;
+        let prev_node = self.pending_prev;
+        self.pending_junction = INVALID_NODE;
+        self.pending_prev = INVALID_NODE;
         let mut ratio = 1.0;
         if edge_idx != INVALID_EDGE {
             let traffic_speed = *self.traffic.get(&edge_idx).unwrap_or(&0);
@@ -412,6 +511,7 @@ impl<'a> StepBuilder<'a> {
                         code_off,
                         end_code_off: 0xFFFF_FFFF,
                         stop_count: 0,
+                        lanes: Vec::new(),
                     });
                     self.current_elapsed_10ms += wait + penalty;
                     time_10ms = transit_move;
@@ -466,6 +566,11 @@ impl<'a> StepBuilder<'a> {
             }
         };
         if push_new {
+            let lanes = if junction_node != INVALID_NODE {
+                junction_lanes(self.g, junction_node, prev_node, self.last_bearing, maneuver)
+            } else {
+                Vec::new()
+            };
             self.steps.push(StepData {
                 name_off,
                 dist_mm: 0,
@@ -478,6 +583,7 @@ impl<'a> StepBuilder<'a> {
                 code_off,
                 end_code_off: 0xFFFF_FFFF,
                 stop_count: 0,
+                lanes,
             });
         }
 
@@ -527,6 +633,8 @@ pub fn reconstruct_path(
         last_bearing: 0.0,
         current_elapsed_10ms: 0,
         last_was_transit: false,
+        pending_junction: INVALID_NODE,
+        pending_prev: INVALID_NODE,
     };
 
     let mut coords = [LatLon { lat_e7: 0, lon_e7: 0 }; 256];
@@ -645,6 +753,14 @@ pub fn reconstruct_path(
         let feed = g.get_node_feed_name_off(u);
         let code_u = g.get_node_stop_code_off(u);
         let code_v = g.get_node_stop_code_off(v);
+
+        // Lane guidance is derived at the junction where this edge begins
+        // (node u), excluding the node we arrived from. Set it just before the
+        // edge's first segment; add_segment consumes and clears it so only the
+        // maneuver segment picks up lanes.
+        let prev_node = if i > 0 { path_nodes[i - 1] } else { INVALID_NODE };
+        b.pending_junction = u;
+        b.pending_prev = prev_node;
 
         if let Some((count, is_reversed)) =
             g.get_edge_coordinates(best_e_idx, &mut coords).filter(|&(c, _)| c >= 2)

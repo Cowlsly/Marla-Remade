@@ -198,7 +198,9 @@ object OfflineRouter {
             val gtfsFeed: String?,
             val stopCode: String?,
             val endStopCode: String?,
-            val stopCount: Int
+            val stopCount: Int,
+            /** Packed turn lanes: one int per lane, `maneuverOrdinal * 2 + valid`. */
+            val lanePacked: IntArray
     )
 
     private var isInitialized = false
@@ -312,6 +314,20 @@ object OfflineRouter {
                                     RouteService.API.Maneuver.entries.getOrElse(raw.maneuverId) {
                                         RouteService.API.Maneuver.MANEUVER_UNSPECIFIED
                                     }
+                            // Decode packed turn lanes (dir * 2 + valid) into
+                            // ordered left→right lane guidance.
+                            val lanes = raw.lanePacked.map { code ->
+                                val dir = code shr 1
+                                val active = (code and 1) == 1
+                                RouteService.API.Lane(
+                                        directions = listOf(
+                                                RouteService.API.Maneuver.entries.getOrElse(dir) {
+                                                    RouteService.API.Maneuver.MANEUVER_UNSPECIFIED
+                                                }
+                                        ),
+                                        active = active,
+                                )
+                            }
                             val hasName = raw.roadName.isNotBlank()
                             val instructionText =
                                     when (maneuver) {
@@ -507,6 +523,7 @@ object OfflineRouter {
                                     else if (mode == RouteService.TravelMode.TRANSIT) RouteService.TravelMode.WALK
                                     else mode,
                                     speedRatio = raw.speedRatio,
+                                    lanes = lanes,
                                     transitDetails = if (raw.isTransit && raw.gtfsFeed != null && raw.stopCode != null) {
                                         RouteService.API.TransitDetails(
                                             headsign = "", // Not stored yet
