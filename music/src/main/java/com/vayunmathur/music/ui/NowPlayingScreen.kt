@@ -78,6 +78,7 @@ fun NowPlayingScreen(
         parsedLyrics.indexOfLast { it.timestamp <= state.positionMs }
     }
 
+    // RAW SCAFFOLD EXCEPTION: nested now-playing scaffold
     Scaffold(
         topBar = {
             TopAppBar(
