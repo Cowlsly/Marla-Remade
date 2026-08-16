@@ -229,25 +229,16 @@ fun MessageListScreen(
                                 val accountBandColor = Color(accountColor(message.accountEmail))
                                 val isSelected = message.id in state.selectedUids
                                 val currentMessage by rememberUpdatedState(message)
-                                val dismissState = com.vayunmathur.library.ui.rememberSwipeToDismissBoxState(
-                                    confirmValueChange = { value ->
-                                        when (value) {
-                                            com.vayunmathur.library.ui.SwipeToDismissBoxValue.EndToStart -> { pendingDelete = currentMessage; true }
-                                            com.vayunmathur.library.ui.SwipeToDismissBoxValue.StartToEnd -> {
-                                                actions.markAsRead(currentMessage.accountEmail, currentMessage.folderName, currentMessage.id, !currentMessage.isRead)
-                                                false
-                                            }
-                                            else -> false
-                                        }
-                                    }
-                                )
-                                com.vayunmathur.library.ui.SwipeToDismissBox(
-                                    state = dismissState,
-                                    backgroundContent = {
-                                        when (dismissState.dismissDirection) {
-                                            com.vayunmathur.library.ui.SwipeToDismissBoxValue.EndToStart ->
+                                com.vayunmathur.library.ui.SwipeActionsBox(
+                                    onEndToStart = { pendingDelete = currentMessage },
+                                    onStartToEnd = {
+                                        actions.markAsRead(currentMessage.accountEmail, currentMessage.folderName, currentMessage.id, !currentMessage.isRead)
+                                    },
+                                    background = { side ->
+                                        when (side) {
+                                            com.vayunmathur.library.ui.SwipeActionSide.EndToStart ->
                                                 Box(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp), contentAlignment = Alignment.CenterEnd) { com.vayunmathur.library.ui.IconDelete() }
-                                            com.vayunmathur.library.ui.SwipeToDismissBoxValue.StartToEnd ->
+                                            com.vayunmathur.library.ui.SwipeActionSide.StartToEnd ->
                                                 Box(modifier = Modifier.fillMaxSize().padding(horizontal = 20.dp), contentAlignment = Alignment.CenterStart) { IconMarkRead() }
                                             else -> {}
                                         }
