@@ -29,6 +29,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.IconButton
@@ -38,10 +39,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.PrimaryScrollableTabRow
 import com.vayunmathur.library.ui.R as UiR
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.data.AppUsageSummary
 import com.vayunmathur.vpn.data.DomainBytesSummary
@@ -68,16 +67,13 @@ fun LoggingContent(
     var showDeleteDialog by remember { mutableStateOf(false) }
     var tabIndex by remember { mutableIntStateOf(initialTab) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                actions = {
-                    IconButton(onClick = { showDeleteDialog = true }) {
-                        IconDelete()
-                    }
-                }
-            )
-        }
+    AppScaffold(
+        title = "",
+        actions = {
+            IconButton(onClick = { showDeleteDialog = true }) {
+                IconDelete()
+            }
+        },
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
             PrimaryScrollableTabRow(selectedTabIndex = tabIndex) {

@@ -6,12 +6,10 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Card
@@ -31,11 +29,10 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconDelete
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.data.VpnConfig
 
@@ -54,25 +51,20 @@ fun ConfigListContent(
     onOpen: (VpnConfig) -> Unit = {},
     onDelete: (VpnConfig) -> Unit = {},
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(stringResource(R.string.vpn_wireguard_gotatun)) },
-            )
-        },
+    LazyListScaffold(
+        title = stringResource(R.string.vpn_wireguard_gotatun),
         snackbarHost = { SnackbarHost(snackbar) },
         floatingActionButton = {
             FloatingActionButton(onClick = onImport) {
                 IconAdd()
             }
         },
-    ) { pad ->
-        Column(
-            Modifier.fillMaxSize().padding(pad).padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            if (configs.isEmpty()) {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        horizontalPadding = 16.dp,
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (configs.isEmpty()) {
+            item {
+                Box(Modifier.fillParentMaxSize(), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(stringResource(R.string.no_tunnels_yet), fontSize = 20.sp, fontWeight = FontWeight.Bold)
                         Text(stringResource(R.string.add_a_connection_by_opening_a_conf_file), fontSize = 14.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -80,19 +72,17 @@ fun ConfigListContent(
                         Button(onImport) { Text(stringResource(R.string.open_conf_file)) }
                     }
                 }
-            } else {
-                LazyColumn(Modifier.fillMaxSize(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(configs, key = { it.id }) { cfg ->
-                        ConfigRow(
-                            cfg,
-                            isActive = activeId == cfg.id,
-                            isConnecting = connectingId == cfg.id,
-                            onConnect = { onToggleConnect(cfg) },
-                            onClick = { onOpen(cfg) },
-                            onDelete = { onDelete(cfg) },
-                        )
-                    }
-                }
+            }
+        } else {
+            items(configs, key = { it.id }) { cfg ->
+                ConfigRow(
+                    cfg,
+                    isActive = activeId == cfg.id,
+                    isConnecting = connectingId == cfg.id,
+                    onConnect = { onToggleConnect(cfg) },
+                    onClick = { onOpen(cfg) },
+                    onDelete = { onDelete(cfg) },
+                )
             }
         }
     }
