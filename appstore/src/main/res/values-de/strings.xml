@@ -47,7 +47,6 @@
     <string name="library_title">Bibliothek (%1$d)</string>
     <string name="library_empty_title">Nichts trifft auf diesen Filter zu</string>
     <string name="library_empty_message">Apps die du installierst werden hier aufgelistet, gruppiert nach der Quelle die sie anbietet.</string>
-    <string name="updates">Aktualisierungen</string>
     <string name="update_all">Alle aktualisieren (%1$d)</string>
     <string name="action_check_again">Nochmal prüfen</string>
     <string name="source_chip_grapheneos">GrapheneOS</string>
