@@ -688,12 +688,10 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.AUDIO,
             getAudioStreamBuilderHelper(), "audio"
         )
-        // SABR is a last-resort fallback: only probe/append it when the ANDROID_VR direct
-        // client returned no usable streams.
-        if (streams.isEmpty()) {
-            buildSabrStreamsIfNeeded()
-            streams.addAll(sabrAudioStreams)
-        }
+        // SABR is built alongside the ANDROID_VR direct streams (matching PipePipe's
+        // re-enabled SABR path); the app merges/dedups progressive + SABR downstream.
+        buildSabrStreamsIfNeeded()
+        streams.addAll(sabrAudioStreams)
         return streams
     }
 
@@ -713,12 +711,10 @@ class YoutubeStreamExtractor(
             ADAPTIVE_FORMATS, ItagItem.ItagType.VIDEO_ONLY,
             getVideoStreamBuilderHelper(true), "video-only"
         )
-        // SABR is a last-resort fallback: only probe/append it when the ANDROID_VR direct
-        // client returned no usable streams.
-        if (streams.isEmpty()) {
-            buildSabrStreamsIfNeeded()
-            streams.addAll(sabrVideoOnlyStreams)
-        }
+        // SABR is built alongside the ANDROID_VR direct streams (matching PipePipe's
+        // re-enabled SABR path); the app merges/dedups progressive + SABR downstream.
+        buildSabrStreamsIfNeeded()
+        streams.addAll(sabrVideoOnlyStreams)
         return streams
     }
 
