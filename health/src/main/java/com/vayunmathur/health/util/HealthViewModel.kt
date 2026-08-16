@@ -32,13 +32,13 @@ import com.vayunmathur.health.ui.MetricDashboardData
 import com.vayunmathur.library.util.Tuple4
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.datetime.DateTimeUnit
@@ -133,50 +133,82 @@ class HealthViewModel(
 
     fun loadMainPageMetrics() {
         viewModelScope.launch(Dispatchers.IO) {
+            // Publish each metric to the StateFlow the moment its query resolves,
+            // rather than awaiting all ~15 and assigning once. The Today dashboard
+            // only shows sleep / blood pressure / SpO2 / resting-HR; the other 11
+            // point-in-time metrics feed the Body page. Bulk-awaiting gated those
+            // four visible vitals on the slowest of all fifteen queries, so the
+            // dashboard sat empty until unrelated body-composition reads finished.
+            // Each launch below runs on Room's pool in parallel and updates one
+            // field, so the visible vitals appear as soon as they're read and the
+            // rest fill in progressively. The final aggregate state is unchanged.
             coroutineScope {
-                val spo2D = async { HealthAPI.lastRecord(RecordType.OxygenSaturation)?.value }
-                val brD = async { HealthAPI.lastRecord(RecordType.RespiratoryRate)?.value }
-                val hrvD = async { HealthAPI.lastRecord(RecordType.HeartRateVariabilityRmssd)?.value }
-                val rhrD = async { HealthAPI.lastRecord(RecordType.RestingHeartRate)?.value?.toLong() }
-                val skinTempD = async { HealthAPI.lastRecord(RecordType.SkinTemperature)?.value }
-                val vo2MaxD = async { HealthAPI.lastRecord(RecordType.Vo2Max)?.value }
-                val bloodGlucoseD = async { HealthAPI.lastRecord(RecordType.BloodGlucose)?.value }
-                val bloodPressureD = async {
-                    HealthAPI.lastRecord(RecordType.BloodPressure)?.let { it.value to it.secondaryValue }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.OxygenSaturation)?.value
+                    _mainPageMetrics.update { it.copy(spo2 = v) }
                 }
-                val sleepD = async {
-                    HealthAPI.lastRecord(RecordType.Sleep)?.let { record ->
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.RespiratoryRate)?.value
+                    _mainPageMetrics.update { it.copy(br = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.HeartRateVariabilityRmssd)?.value
+                    _mainPageMetrics.update { it.copy(hrv = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.RestingHeartRate)?.value?.toLong()
+                    _mainPageMetrics.update { it.copy(rhr = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.SkinTemperature)?.value
+                    _mainPageMetrics.update { it.copy(skinTemp = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.Vo2Max)?.value
+                    _mainPageMetrics.update { it.copy(vo2Max = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.BloodGlucose)?.value
+                    _mainPageMetrics.update { it.copy(bloodGlucose = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.BloodPressure)?.let { it.value to it.secondaryValue }
+                    _mainPageMetrics.update { it.copy(bloodPressure = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.Sleep)?.let { record ->
                         val todayStart = java.time.LocalDate.now()
                             .atStartOfDay(ZoneId.systemDefault()).toInstant()
                         if (record.endTime.isAfter(todayStart.minus(java.time.Duration.ofHours(12)))) {
                             (record.value * 60).toLong()
                         } else null
                     }
+                    _mainPageMetrics.update { it.copy(sleepMinutes = v) }
                 }
-                val heightD = async { HealthAPI.lastRecord(RecordType.Height)?.value }
-                val weightD = async { HealthAPI.lastRecord(RecordType.Weight)?.value }
-                val bodyFatD = async { HealthAPI.lastRecord(RecordType.BodyFat)?.value }
-                val boneMassD = async { HealthAPI.lastRecord(RecordType.BoneMass)?.value }
-                val leanBodyMassD = async { HealthAPI.lastRecord(RecordType.LeanBodyMass)?.value }
-                val bodyWaterMassD = async { HealthAPI.lastRecord(RecordType.BodyWaterMass)?.value }
-
-                _mainPageMetrics.value = MainPageMetrics(
-                    br = brD.await(),
-                    spo2 = spo2D.await(),
-                    hrv = hrvD.await(),
-                    rhr = rhrD.await(),
-                    skinTemp = skinTempD.await(),
-                    vo2Max = vo2MaxD.await(),
-                    bloodGlucose = bloodGlucoseD.await(),
-                    bloodPressure = bloodPressureD.await(),
-                    sleepMinutes = sleepD.await(),
-                    height = heightD.await(),
-                    weight = weightD.await(),
-                    bodyFat = bodyFatD.await(),
-                    boneMass = boneMassD.await(),
-                    leanBodyMass = leanBodyMassD.await(),
-                    bodyWaterMass = bodyWaterMassD.await(),
-                )
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.Height)?.value
+                    _mainPageMetrics.update { it.copy(height = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.Weight)?.value
+                    _mainPageMetrics.update { it.copy(weight = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.BodyFat)?.value
+                    _mainPageMetrics.update { it.copy(bodyFat = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.BoneMass)?.value
+                    _mainPageMetrics.update { it.copy(boneMass = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.LeanBodyMass)?.value
+                    _mainPageMetrics.update { it.copy(leanBodyMass = v) }
+                }
+                launch {
+                    val v = HealthAPI.lastRecord(RecordType.BodyWaterMass)?.value
+                    _mainPageMetrics.update { it.copy(bodyWaterMass = v) }
+                }
             }
         }
     }
