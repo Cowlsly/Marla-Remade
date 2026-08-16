@@ -51,6 +51,24 @@
 
     <!-- Place detail: Rating summary. %1$s=stars e.g. "4.5", %2$s=review count e.g. "128" -->
     <string name="reviews_summary"><xliff:g id="rating" example="4.5">%1$s</xliff:g> stars | <xliff:g id="review_count" example="128">%2$s</xliff:g> reviews</string>
+
+    <!-- Place detail: Attribution for scraped POI enrichment. "Google Maps" is a product
+         trademark and must not be translated. -->
+    <string name="poi_google_attribution" translatable="false">Data from Google Maps</string>
+    <!-- Place detail: Photos section header. Noun. -->
+    <string name="poi_photos_header">Photos</string>
+    <!-- Place detail: Reviews section header. Noun. -->
+    <string name="poi_reviews_header">Reviews</string>
+    <!-- Place detail: Popular times section header. Noun phrase. -->
+    <string name="poi_popular_times_header">Popular times</string>
+    <!-- Place detail: About/overview section header. Noun. -->
+    <string name="poi_about_header">About</string>
+    <!-- Place detail: Google hours section header. Noun. -->
+    <string name="poi_hours_header">Hours</string>
+    <!-- Place detail: Content description for a business photo thumbnail. -->
+    <string name="poi_photo_description">Business photo</string>
+    <!-- Place detail: Content description for a reviewer's profile picture. -->
+    <string name="poi_reviewer_photo_description">Reviewer photo</string>
     <!-- Button: Get directions. Noun/Verb. -->
     <string name="directions">Directions</string>
     <!-- Button: Add selected place as stop on route -->

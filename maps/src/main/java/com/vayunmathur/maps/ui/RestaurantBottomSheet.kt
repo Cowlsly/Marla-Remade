@@ -60,7 +60,7 @@ fun goto(context: Context, uri: String) {
 
 @Composable
 fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigation: SpecificFeature.Route?, feature: SpecificFeature.Restaurant, requestDirections: () -> Unit) {
-    val reviews by viewModel.currentReviews.collectAsState()
+    val poi by viewModel.currentPoiInfo.collectAsState()
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -69,8 +69,8 @@ fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigatio
                     feature.name,
                     style = MaterialTheme.typography.titleLarge,
                 )
-            }, supportingContent = reviews?.let { reviews ->
-                { Text(stringResource(R.string.reviews_summary, reviews.rating, reviews.userRatingCount)) }
+            }, supportingContent = poi?.takeIf { it.rating != null }?.let { info ->
+                { Text(stringResource(R.string.reviews_summary, info.rating!!, info.reviewCount ?: 0)) }
             }, trailingContent = {
                 Button({requestDirections()}) {
                     if(inactiveNavigation == null) {
@@ -137,12 +137,13 @@ fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigatio
         feature.phone?.let {
             RestaurantItem({ IconCall() }, it) { goto(context, "tel:$it") }
         }
+        poi?.let { GooglePoiEnrichment(it, hasOsmHours = feature.openingHours != null) }
     }
 }
 
 @Composable
 fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigation: SpecificFeature.Route?, feature: SpecificFeature.GenericPlace, requestDirections: () -> Unit) {
-    val reviews by viewModel.currentReviews.collectAsState()
+    val poi by viewModel.currentPoiInfo.collectAsState()
     val context = LocalContext.current
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -151,8 +152,8 @@ fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigatio
                     feature.name,
                     style = MaterialTheme.typography.titleLarge,
                 )
-            }, supportingContent = reviews?.let { reviews ->
-                { Text(stringResource(R.string.reviews_summary, reviews.rating, reviews.userRatingCount)) }
+            }, supportingContent = poi?.takeIf { it.rating != null }?.let { info ->
+                { Text(stringResource(R.string.reviews_summary, info.rating!!, info.reviewCount ?: 0)) }
             }, trailingContent = {
                 Button({requestDirections()}) {
                     if(inactiveNavigation == null) {
@@ -213,6 +214,7 @@ fun RestaurantBottomSheet(viewModel: SelectedFeatureViewModel, inactiveNavigatio
         feature.phone?.let {
             RestaurantItem({ IconCall() }, it) { goto(context, "tel:$it") }
         }
+        poi?.let { GooglePoiEnrichment(it, hasOsmHours = feature.openingHours != null) }
     }
 }
 

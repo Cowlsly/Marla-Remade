@@ -4,6 +4,8 @@ import android.hardware.SensorManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.google.GooglePoiDataSource
+import com.vayunmathur.maps.data.google.GooglePoiInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
@@ -28,15 +30,6 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     val userHeadingAccuracy = _userHeadingAccuracy.asStateFlow()
 
     val locationManager = FrameworkLocationManager(application)
-
-    // Small cache of reviews keyed by (name, lat, lon) to avoid refetching the
-    // same place when the user toggles back and forth. Bounded to cap memory.
-    private data class ReviewKey(val name: String, val lat: Double, val lon: Double)
-    private val reviewsCache = object : LinkedHashMap<ReviewKey, FullPlaceInfo?>(16, 0.75f, true) {
-        override fun removeEldestEntry(
-            eldest: MutableMap.MutableEntry<ReviewKey, FullPlaceInfo?>
-        ): Boolean = size > 32
-    }
 
     init {
         locationManager.startUpdates(
@@ -65,26 +58,24 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     }
 
     /**
-     * Reviews for the currently selected restaurant or generic place. Emits null
-     * for other feature types or while the network call is in flight. Cancels
-     * the in-flight fetch when the selection changes.
+     * Keyless Google Maps enrichment (rating, reviews, hours, photos, price,
+     * popular times, …) for the currently selected restaurant or generic place.
+     * Emits null for other feature types and while the network scrape is in
+     * flight; cancels the in-flight fetch when the selection changes.
+     * [GooglePoiDataSource] caches and does its own IO, so a re-select is instant.
      */
     @OptIn(ExperimentalCoroutinesApi::class)
-    val currentReviews: StateFlow<FullPlaceInfo?> = selectedFeature
+    val currentPoiInfo: StateFlow<GooglePoiInfo?> = selectedFeature
         .flatMapLatest { feature ->
             val (name, pos) = when (feature) {
                 is SpecificFeature.Restaurant -> feature.name to feature.position
                 is SpecificFeature.GenericPlace -> feature.name to feature.position
                 else -> return@flatMapLatest flowOf(null)
             }
-            val key = ReviewKey(name, pos.latitude, pos.longitude)
-            val cached: FullPlaceInfo? = synchronized(reviewsCache) { reviewsCache[key] }
-            if (cached != null) return@flatMapLatest flowOf(cached)
+            if (name.isBlank()) return@flatMapLatest flowOf(null)
             flow {
                 emit(null)
-                val info = Reviews.getRatingForOsmLocation(name, pos.latitude, pos.longitude)
-                synchronized(reviewsCache) { reviewsCache[key] = info }
-                emit(info)
+                emit(GooglePoiDataSource.fetch(name, pos.latitude, pos.longitude))
             }.flowOn(Dispatchers.IO)
         }
         .stateIn(
