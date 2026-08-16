@@ -8,13 +8,13 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -24,8 +24,13 @@ import com.vayunmathur.games.wordmaker.platform.CompetitiveLobbyActions
 import com.vayunmathur.games.wordmaker.platform.CompetitiveLobbyUiState
 import com.vayunmathur.games.wordmaker.platform.WordMakerViewModel
 import com.vayunmathur.games.wordmaker.ui.components.DifficultyDropdown
-import com.vayunmathur.games.wordmaker.ui.components.WordMakerTopBar
+import com.vayunmathur.games.wordmaker.ui.components.GameModeDropdown
+import com.vayunmathur.library.ui.AppBarAlignment
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.Icon
+import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconSettings
 
 @Composable
 fun CompetitiveLobbyPage(
@@ -62,15 +67,18 @@ fun CompetitiveLobbyScreen(
     val difficulty = state.difficulty
     val result = state.result
 
-    Scaffold(
-        topBar = {
-            WordMakerTopBar(
-                gameMode = state.gameMode,
-                onModeSelected = { actions.setGameMode(it) },
-                onOpenGameCenter = onOpenGameCenter,
-                onOpenSettings = onOpenSettings
-            )
-        }
+    AppScaffold(
+        title = {},
+        navigationIcon = { GameModeDropdown(selected = state.gameMode, onSelected = { actions.setGameMode(it) }) },
+        actions = {
+            IconButton(onClick = onOpenGameCenter) {
+                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
+            }
+            IconButton(onClick = onOpenSettings) {
+                IconSettings()
+            }
+        },
+        alignment = AppBarAlignment.Center,
     ) { innerPadding ->
         Column(
             modifier = Modifier

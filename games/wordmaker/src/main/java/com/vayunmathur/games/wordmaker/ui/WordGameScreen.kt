@@ -53,20 +53,23 @@ import com.vayunmathur.games.wordmaker.ui.components.AnimatedLetter
 import com.vayunmathur.games.wordmaker.ui.components.SurfaceText
 import com.vayunmathur.games.wordmaker.ui.components.WordToAnimate
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppBarAlignment
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledIconButton
 import com.vayunmathur.library.ui.Icon
+import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.games.wordmaker.ui.components.CompetitiveStatusBar
 import com.vayunmathur.games.wordmaker.ui.components.CrosswordBoard
 import com.vayunmathur.games.wordmaker.ui.components.DailyStatusBar
+import com.vayunmathur.games.wordmaker.ui.components.GameModeDropdown
 import com.vayunmathur.games.wordmaker.ui.components.LetterChooser
-import com.vayunmathur.games.wordmaker.ui.components.WordMakerTopBar
 import com.vayunmathur.games.wordmaker.ui.dialogs.BonusWordsDialog
 import com.vayunmathur.games.wordmaker.ui.dialogs.DefinitionDialog
 import kotlinx.coroutines.delay
@@ -198,17 +201,23 @@ fun WordGameScreen(
         }
     }
 
-    Scaffold(
-        Modifier.fillMaxSize(),
-        topBar = {
-            WordMakerTopBar(
-                gameMode = gameMode,
-                onModeSelected = { actions.setGameMode(it) },
-                onOpenGameCenter = onOpenGameCenter,
-                onOpenSettings = onOpenSettings,
-                levelNumber = currentLevel
-            )
-        }
+    AppScaffold(
+        modifier = Modifier.fillMaxSize(),
+        title = {
+            if (gameMode == GameMode.CASUAL) {
+                Text(text = stringResource(R.string.level_number, currentLevel), fontWeight = FontWeight.Bold)
+            }
+        },
+        navigationIcon = { GameModeDropdown(selected = gameMode, onSelected = { actions.setGameMode(it) }) },
+        actions = {
+            IconButton(onClick = onOpenGameCenter) {
+                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
+            }
+            IconButton(onClick = onOpenSettings) {
+                IconSettings()
+            }
+        },
+        alignment = AppBarAlignment.Center,
     ) { innerPadding ->
         Box(
             modifier = Modifier
