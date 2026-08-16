@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
@@ -18,9 +19,7 @@ import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -42,10 +41,8 @@ fun ThingsApp(
     onDeviceClick: (BleManager.BleDevice) -> Unit,
     onDisconnectClick: () -> Unit
 ) {
-    Scaffold(
-        topBar = {
-            TopAppBar(title = { Text(stringResource(R.string.hydration)) })
-        }
+    AppScaffold(
+        title = stringResource(R.string.hydration),
     ) { padding ->
         Column(
             modifier = Modifier
