@@ -104,30 +104,7 @@
     </plurals>
     <string name="custom_label">Niestandardowa etykieta</string>
     <string name="enter_custom_label">Wprowadź niestandardową etykietę</string>
-    <string name="sim_contacts">Kontakty SIM</string>
-    <string name="sim_card">Karta SIM</string>
-    <string name="device">Urządzenie</string>
-    <string name="save_to">Zapisz do</string>
-    <string name="sim_slot">Slot SIM</string>
-    <string name="sim_name">Nazwa</string>
-    <string name="sim_phone">Telefon</string>
-    <string name="sim_email">Email</string>
     <string name="sim_limited_fields_hint">Kontakty na karcie SIM przechowują tylko imię, numer telefonu i adres e-mail.</string>
-    <string name="sim_name_or_phone_required">Wprowadź imię i nazwisko lub numer telefonu</string>
     <string name="save_failed">Nie udało się zapisać</string>
-    <string name="no_sim_available">Brak karty SIM</string>
-    <string name="no_sim_inserted">Nie włożono karty SIM lub nie udzielono zezwolenia.</string>
-    <string name="no_sim_contacts">Brak kontaktów na karcie SIM.</string>
-    <string name="import_all">Importuj wszystko</string>
-    <string name="export_to_sim">Eksportuj na kartę SIM</string>
-    <string name="import_from_sim">Importuj z karty SIM</string>
-    <string name="default_save_location">Domyślna lokalizacja zapisu</string>
-    <string name="default_save_location_summary">Gdzie domyślnie zapisywane są nowe kontakty</string>
-    <string name="import_sim_contacts">Importuj kontakty z karty SIM</string>
     <string name="importing">Importowanie…</string>
-    <string name="exporting_to_sim">Eksportowanie na kartę SIM…</string>
-    <string name="sim_import_success">Zaimportowano %1$d kontakt(ów) z karty SIM</string>
-    <string name="sim_import_failed">Nie udało się zaimportować z karty SIM</string>
-    <string name="sim_export_success">Wyeksportowano na kartę SIM</string>
-    <string name="sim_export_failed">Nie udało się wyeksportować na kartę SIM (karta jest pełna lub niedostępna)</string>
 </resources>
