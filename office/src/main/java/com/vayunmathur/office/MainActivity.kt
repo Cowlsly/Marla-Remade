@@ -7,7 +7,6 @@ import android.print.PrintAttributes
 import android.print.PrintManager
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.core.content.IntentCompat
@@ -18,6 +17,7 @@ import androidx.compose.foundation.pager.rememberPagerState
 import com.vayunmathur.library.ui.PagerTab
 import com.vayunmathur.library.ui.TabStyle
 import com.vayunmathur.library.ui.TabbedPagerScaffold
+import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
@@ -312,13 +312,12 @@ class MainActivity : ComponentActivity() {
     /** Fires a sealed join request to the owner and confirms with a toast. */
     private fun handleJoinLink(link: Pair<String, String>) {
         val (docId, ownerId) = link
-        Toast.makeText(this, getString(R.string.join_request_sending), Toast.LENGTH_SHORT).show()
+        AppMessages.show(getString(R.string.join_request_sending))
         viewModel.requestToJoin(docId, ownerId) { ok ->
-            Toast.makeText(
-                this,
+            AppMessages.show(
                 getString(if (ok) R.string.join_request_sent else R.string.join_request_failed),
-                Toast.LENGTH_LONG,
-            ).show()
+                duration = AppMessages.Duration.Long,
+            )
         }
     }
 
