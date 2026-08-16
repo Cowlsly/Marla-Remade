@@ -40,6 +40,7 @@ import com.vayunmathur.contacts.data.isSimAccountType
 import com.vayunmathur.contacts.data.isLocalAccountType
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -160,26 +161,37 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
 
     // Coalesces system-contact change notifications; collected with debounce so a
     // burst of provider writes triggers a single re-sync instead of one per change.
-    private val syncTrigger = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    private val syncTrigger = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    // Fires on any ContactsContract change (contact/raw/data/account/group). Kept as a
+    // field so onCleared() can unregister it and avoid leaking the ContentResolver.
+    private val contactsObserver = object : android.database.ContentObserver(
+        android.os.Handler(android.os.Looper.getMainLooper())
+    ) {
+        override fun onChange(selfChange: Boolean) { syncTrigger.tryEmit(Unit) }
+    }
 
     init {
+        // notifyForDescendants=true on the top-level authority so any contact/raw/data/
+        // account change fires it; debounced so a sync burst causes a single reload.
+        getApplication<Application>().contentResolver
+            .registerContentObserver(ContactsContract.AUTHORITY_URI, true, contactsObserver)
         viewModelScope.launch {
-            val resolver = getApplication<Application>().contentResolver
-            val observer = object : android.database.ContentObserver(null) {
-                override fun onChange(selfChange: Boolean) { syncTrigger.tryEmit(Unit) }
-            }
-            resolver.registerContentObserver(ContactsContract.AUTHORITY_URI, true, observer)
-            try {
-                // Load immediately so cold-launched screens like InsertOrEdit don't
-                // show empty list while waiting for the 500ms debounce.
-                syncFromSystem()
-                syncTrigger.debounce(500).collectLatest { syncFromSystem() }
-            } finally {
-                resolver.unregisterContentObserver(observer)
-            }
+            // Load immediately so cold-launched screens like InsertOrEdit don't
+            // show empty list while waiting for the debounce.
+            syncFromSystem()
+            syncTrigger.debounce(300).collectLatest { syncFromSystem() }
         }
         loadAccounts()
         loadLastSelectedAccount()
+    }
+
+    override fun onCleared() {
+        getApplication<Application>().contentResolver.unregisterContentObserver(contactsObserver)
+        super.onCleared()
     }
 
     override fun setSearchQuery(query: String) {
