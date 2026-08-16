@@ -345,12 +345,11 @@ object YoutubeStreamHelper {
 
         val headers = getMobileClientHeaders(getVisionOsUserAgent(localization))
 
-        // We must always pass a valid visitorData to get valid player responses, which needs to be
-        // got from YouTube
+        // visitorData is fetched from the gapis host, matching PipePipe's visionos path.
         innertubeClientRequestInfo.clientInfo.visitorData =
             YoutubeParsingHelper.getVisitorDataFromInnertube(
                 innertubeClientRequestInfo, localization, contentCountry, headers,
-                YOUTUBEI_V1_URL, null, false
+                YOUTUBEI_V1_GAPIS_URL, null, false
             )
 
         val builder = prepareJsonBuilder(

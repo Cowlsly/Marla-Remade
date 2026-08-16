@@ -826,7 +826,14 @@ class YoutubeStreamExtractor(
         val poTokenProviderInstance = poTokenProvider
         val noPoTokenProviderSet = poTokenProviderInstance == null
 
-        fetchAndroidVrClient(localization, contentCountry, videoId)
+        // Default anonymous client = VISIONOS, matching PipePipe's current default
+        // (NewPipe.youtubePlayerClient = "visionos"; PipePipe commit 3b2aa5e "default
+        // anonymous YouTube client to VisionOS", which supersedes the earlier android_vr
+        // default). VISIONOS sends a valid visitorData, so YouTube does not bot-flag it.
+        // The anonymous ANDROID_VR request has no visitorData and is now rejected with
+        // SignInConfirmNotBotException (LOGIN_REQUIRED), which is why android_vr must NOT
+        // be the primary/gating client.
+        fetchVisionOsClient(localization, contentCountry, videoId)
 
         setStreamType()
 
@@ -835,8 +842,6 @@ class YoutubeStreamExtractor(
             else poTokenProviderInstance.getIosClientPoToken(videoId)
             fetchIosClient(localization, contentCountry, videoId, iosPoTokenResult)
         }
-
-        fetchVisionOsClient(localization, contentCountry, videoId)
 
         fetchWebClientMetadataAndSetThumbnails(localization, contentCountry, videoId)
 
@@ -850,23 +855,23 @@ class YoutubeStreamExtractor(
     }
 
     @Throws(IOException::class, ExtractionException::class)
-    private fun fetchAndroidVrClient(
+    private fun fetchVisionOsClient(
         localization: Localization,
         contentCountry: ContentCountry,
         videoId: String
     ) {
-        androidCpn = generateContentPlaybackNonce()
+        visionOsCpn = generateContentPlaybackNonce()
 
-        playerResponse = YoutubeStreamHelper.getAndroidVrPlayerResponse(
-            contentCountry, localization, videoId, androidCpn!!
+        playerResponse = YoutubeStreamHelper.getVisionOsPlayerResponse(
+            contentCountry, localization, videoId, visionOsCpn!!
         )
 
         checkPlayabilityStatus(playerResponse!!.getObject(PLAYABILITY_STATUS).orEmptyObject())
         if (isPlayerResponseNotValid(playerResponse, videoId)) {
-            throw ExtractionException("ANDROID_VR player response is not valid")
+            throw ExtractionException("VISIONOS player response is not valid")
         }
 
-        androidStreamingData = playerResponse?.getObject(STREAMING_DATA)
+        visionOsStreamingData = playerResponse?.getObject(STREAMING_DATA)
 
         playerCaptionsTracklistRenderer = playerResponse?.getObject(CAPTIONS)
             ?.getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER)
@@ -895,30 +900,6 @@ class YoutubeStreamExtractor(
 
                 if (iosPoTokenResult != null) {
                     iosStreamingUrlsPoToken = iosPoTokenResult.streamingDataPoToken
-                }
-            }
-        } catch (ignored: Exception) {
-        }
-    }
-
-    private fun fetchVisionOsClient(
-        localization: Localization,
-        contentCountry: ContentCountry,
-        videoId: String
-    ) {
-        try {
-            visionOsCpn = generateContentPlaybackNonce()
-
-            val visionOsPlayerResponse = YoutubeStreamHelper.getVisionOsPlayerResponse(
-                contentCountry, localization, videoId, visionOsCpn!!
-            )
-
-            if (!isPlayerResponseNotValid(visionOsPlayerResponse, videoId)) {
-                visionOsStreamingData = visionOsPlayerResponse.getObject(STREAMING_DATA)
-
-                if (Utils.isNullOrEmpty(playerCaptionsTracklistRenderer)) {
-                    playerCaptionsTracklistRenderer = visionOsPlayerResponse.getObject(CAPTIONS)
-                        ?.getObject(PLAYER_CAPTIONS_TRACKLIST_RENDERER)
                 }
             }
         } catch (ignored: Exception) {
