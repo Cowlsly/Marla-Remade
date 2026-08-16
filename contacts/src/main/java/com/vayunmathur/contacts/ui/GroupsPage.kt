@@ -76,18 +76,15 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
         list
     }
 
-    Scaffold(
+    LazyListScaffold(
         floatingActionButton = {
             FloatingActionButton(onClick = { showAddDialog = true }) {
                 IconAdd()
             }
         },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier.fillMaxSize(),
-            contentPadding = padding + PaddingValues(horizontal = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp)
-        ) {
+        horizontalPadding = 8.dp,
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
             state.groups.forEach { (group, contactsInGroup) ->
                 val isExpanded = group.id in expandedGroups
                 // Combine each group's header + (optional) expanded contacts
@@ -187,7 +184,6 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
                     }
                 }
             }
-        }
     }
 
     if (showAddDialog) {
