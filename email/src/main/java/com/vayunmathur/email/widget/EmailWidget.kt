@@ -23,9 +23,8 @@ import androidx.glance.layout.*
 import androidx.glance.text.*
 import androidx.glance.unit.ColorProvider
 import com.vayunmathur.email.MainActivity
-import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailPreview
 import com.vayunmathur.email.data.accountColor
-import com.vayunmathur.email.data.previewText
 import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.library.widgets.DynamicThemeGlance
@@ -39,7 +38,7 @@ class EmailWidget : GlanceAppWidget() {
         // No read status indicators, so widget doesn't need to refresh on read changes.
         val messages = withContext(Dispatchers.IO) {
             try {
-                EmailRepository.get(context).getDatabase().emailDao().getRecentUnifiedMessages()
+                EmailRepository.get(context).getDatabase().emailDao().getRecentUnifiedPreview()
             } catch (e: Throwable) {
                 Log.e("EmailWidget", "DB fail", e)
                 emptyList()
@@ -60,20 +59,20 @@ class EmailWidget : GlanceAppWidget() {
     override suspend fun providePreview(context: Context, widgetCategory: Int) {
         try {
             val sample = listOf(
-                EmailMessage(
+                EmailPreview(
                     accountEmail = "alex@example.com", folderName = "INBOX", id = 1,
                     subject = "Lunch tomorrow?", from = "Alex Johnson <alex@example.com>",
-                    date = "Jul 6", body = "Are we still on for noon at the usual place?",
+                    date = "Jul 6", peekContent = "Are we still on for noon at the usual place?",
                 ),
-                EmailMessage(
+                EmailPreview(
                     accountEmail = "priya@work.com", folderName = "INBOX", id = 2,
                     subject = "Q3 report is ready", from = "Priya Patel <priya@work.com>",
-                    date = "Jul 5", body = "I've attached the final numbers for review.",
+                    date = "Jul 5", peekContent = "I've attached the final numbers for review.",
                 ),
-                EmailMessage(
+                EmailPreview(
                     accountEmail = "news@digest.com", folderName = "INBOX", id = 3,
                     subject = "Your weekly digest", from = "Tech Weekly <news@digest.com>",
-                    date = "Jul 5", body = "Top stories and updates from this week.",
+                    date = "Jul 5", peekContent = "Top stories and updates from this week.",
                 ),
             )
             provideContent {
@@ -95,7 +94,7 @@ class EmailWidget : GlanceAppWidget() {
 
     @SuppressLint("RestrictedApi")
     @Composable
-    private fun EmailWidgetContent(messages: List<EmailMessage>) {
+    private fun EmailWidgetContent(messages: List<EmailPreview>) {
         val ctx = LocalContext.current
         Scaffold(
             titleBar = {
@@ -137,7 +136,7 @@ class EmailWidget : GlanceAppWidget() {
 
     @SuppressLint("RestrictedApi")
     @Composable
-    private fun EmailItem(msg: EmailMessage) {
+    private fun EmailItem(msg: EmailPreview) {
         val barColor = accountColor(msg.accountEmail)
         
         Row(
@@ -193,7 +192,7 @@ class EmailWidget : GlanceAppWidget() {
                     maxLines = 1
                 )
                 Text(
-                    text = msg.previewText(50),
+                    text = msg.peekContent.take(50),
                     style = TextStyle(
                         fontSize = 12.sp,
                         color = GlanceTheme.colors.onSurfaceVariant

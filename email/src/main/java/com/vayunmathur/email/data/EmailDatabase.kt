@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.RoomDatabase
 import androidx.room.migration.Migration
+import com.vayunmathur.library.util.DatabaseMigrations
 import com.vayunmathur.email.data.EmailFolder
 import com.vayunmathur.email.data.EmailMessage
 import com.vayunmathur.email.data.EmailAccount
@@ -24,13 +25,13 @@ import com.vayunmathur.email.data.Attachment
         BlockedSender::class,
         DeletedUid::class,
     ],
-    version = 19,
+    version = 20,
     exportSchema = false,
 )
 abstract class EmailDatabase : RoomDatabase() {
     abstract fun emailDao(): EmailDao
 
-    companion object {
+    companion object : DatabaseMigrations {
         @Volatile
         private var instance: EmailDatabase? = null
 
@@ -175,6 +176,41 @@ abstract class EmailDatabase : RoomDatabase() {
                 """.trimIndent()
             )
         }
+
+        /**
+         * Adds the stored `peekContent` snippet column (see [EmailMessage.peekContent]).
+         * Purely additive: existing rows get `''` and are backfilled from their body on
+         * app start ([PeekContentBackfill]); the matching `@ColumnInfo(defaultValue = "")`
+         * on the entity keeps the generated schema in sync so Room's post-migration
+         * validation passes. No existing data is read or modified.
+         */
+        private val MIGRATION_19_20 = Migration(19, 20) {
+            it.execSQL("ALTER TABLE EmailMessage ADD COLUMN peekContent TEXT NOT NULL DEFAULT ''")
+        }
+
+        /**
+         * Every migration for this database, registered with the Room builder via the
+         * [DatabaseMigrations] reflection hook in `openRoomDatabase`. Order is
+         * irrelevant to Room; kept numeric here for readability.
+         */
+        override val migrations: List<Migration> = listOf(
+            MIGRATION_4_5,
+            MIGRATION_5_6,
+            MIGRATION_6_7,
+            MIGRATION_7_8,
+            MIGRATION_8_9,
+            MIGRATION_9_10,
+            MIGRATION_10_11,
+            MIGRATION_11_12,
+            MIGRATION_12_13,
+            MIGRATION_13_14,
+            MIGRATION_14_15,
+            MIGRATION_15_16,
+            MIGRATION_16_17,
+            MIGRATION_17_18,
+            MIGRATION_18_19,
+            MIGRATION_19_20,
+        )
 
         fun getInstance(context: Context): EmailDatabase =
             EmailRepository.get(context).getDatabase()

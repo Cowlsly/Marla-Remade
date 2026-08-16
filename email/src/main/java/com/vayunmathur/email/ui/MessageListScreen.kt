@@ -34,9 +34,8 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.email.R
-import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailPreview
 import com.vayunmathur.email.data.accountColor
-import com.vayunmathur.email.data.previewText
 import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.platform.EmailViewModel
 import com.vayunmathur.email.platform.MessageListActions
@@ -70,7 +69,7 @@ import com.vayunmathur.library.ui.Text
 @Composable
 fun MessageListPage(
     viewModel: EmailViewModel,
-    onMessageClick: (EmailMessage) -> Unit,
+    onMessageClick: (EmailPreview) -> Unit,
     onComposeClick: () -> Unit,
     onOpenDrawer: () -> Unit
 ) {
@@ -108,7 +107,7 @@ fun MessageListPage(
 fun MessageListScreen(
     state: MessageListUiState,
     actions: MessageListActions,
-    onMessageClick: (EmailMessage) -> Unit = {},
+    onMessageClick: (EmailPreview) -> Unit = {},
     onComposeClick: () -> Unit = {},
     onOpenDrawer: () -> Unit = {},
     initialSearching: Boolean = false,
@@ -116,7 +115,7 @@ fun MessageListScreen(
     var isSearching by remember { mutableStateOf(initialSearching) }
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var pendingDelete by remember { mutableStateOf<EmailMessage?>(null) }
+    var pendingDelete by remember { mutableStateOf<EmailPreview?>(null) }
 
     LaunchedEffect(pendingDelete) {
         val msg = pendingDelete ?: return@LaunchedEffect
@@ -270,7 +269,7 @@ fun MessageListScreen(
                                             supportingContent = {
                                                 Column {
                                                     Text(text = senderDisplayName(message.from), style = MaterialTheme.typography.titleSmall)
-                                                    val preview = remember(message.body, message.isHtml) { message.previewText(100) }
+                                                    val preview = remember(message.peekContent) { message.peekContent.take(100) }
                                                     Text(text = preview, style = MaterialTheme.typography.bodySmall, maxLines = 1, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                                 }
                                             },

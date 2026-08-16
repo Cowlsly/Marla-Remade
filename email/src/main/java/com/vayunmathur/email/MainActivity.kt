@@ -8,6 +8,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.email.data.DateMillisBackfill
+import com.vayunmathur.email.data.PeekContentBackfill
 import com.vayunmathur.email.data.EmailSyncWorker
 import com.vayunmathur.email.data.ImapIdleService
 import com.vayunmathur.email.data.OutboxSendWorker
@@ -32,6 +33,7 @@ class MainActivity : ComponentActivity() {
         OutboxSendWorker.runNow(this)
         ImapIdleService.start(this)
         DateMillisBackfill.runIfNeeded(lifecycleScope, this)
+        PeekContentBackfill.runIfNeeded(lifecycleScope, this)
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
             if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), 7331)

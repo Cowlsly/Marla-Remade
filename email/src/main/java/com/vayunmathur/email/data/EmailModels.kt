@@ -44,6 +44,44 @@ data class EmailMessage(
     val snoozedUntil: Long = 0, // 0 = not snoozed; else epoch millis to resurface
     val listUnsubscribe: String? = null, // raw List-Unsubscribe header, if present
     val listUnsubscribePost: String? = null, // raw List-Unsubscribe-Post header (RFC 8058), if present
+    /**
+     * Stored plain-text snippet of [body] (first [PEEK_LEN] chars), computed via
+     * [previewText] on every insert (see [EmailDao.insertMessages]). Lets list and
+     * widget screens render a preview without loading the full [body] column.
+     *
+     * `@ColumnInfo(defaultValue = "")` is required so the schema generated from this
+     * entity matches `MIGRATION_19_20`, which `ALTER TABLE`s this column in with a
+     * SQL `DEFAULT ''`; without it Room throws "Migration didn't properly handle:
+     * EmailMessage" on open. Rows persisted before this column existed default to
+     * `""` and are backfilled on app start via [EmailDao.getRowsWithEmptyPeek].
+     */
+    @ColumnInfo(defaultValue = "")
+    val peekContent: String = "",
+)
+
+/** Max length of the stored [EmailMessage.peekContent] snippet — enough for any
+ *  single-line list row, widget item or notification preview. */
+const val PEEK_LEN = 200
+
+/**
+ * Lightweight projection of [EmailMessage] for list and widget screens: every
+ * column those screens draw, but **not** the heavy [EmailMessage.body]. Populated
+ * by the `…Preview` `@Query` variants in [EmailDao], which read the stored
+ * [EmailMessage.peekContent] instead of recomputing a preview from the body.
+ */
+data class EmailPreview(
+    val accountEmail: String,
+    val folderName: String,
+    val id: Long,
+    val threadId: String? = null,
+    val subject: String,
+    val from: String,
+    val date: String,
+    val dateMillis: Long = 0,
+    val isRead: Boolean = false,
+    val hasAttachments: Boolean = false,
+    val snoozedUntil: Long = 0,
+    val peekContent: String = "",
 )
 
 @Entity

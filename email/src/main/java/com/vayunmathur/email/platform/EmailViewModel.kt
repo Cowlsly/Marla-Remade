@@ -10,8 +10,8 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.email.data.EmailAccount
 import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailPreview
 import com.vayunmathur.email.data.Attachment
-import com.vayunmathur.email.data.previewText
 import com.vayunmathur.email.data.senderDisplayName
 import com.vayunmathur.email.data.EmailRepository
 import com.vayunmathur.email.data.EmailSyncState
@@ -150,7 +150,7 @@ class EmailViewModel(application: Application) :
     private val _selectedMessageUids = MutableStateFlow<Set<Long>>(emptySet())
     val selectedMessageUids: StateFlow<Set<Long>> = _selectedMessageUids
 
-    private val messagesRaw: Flow<List<EmailMessage>> = combine(
+    private val messagesRaw: Flow<List<EmailPreview>> = combine(
         _selectedAccountEmail,
         _selectedFolderName,
         _searchQuery
@@ -160,13 +160,13 @@ class EmailViewModel(application: Application) :
         val now = System.currentTimeMillis()
         if (email == null) {
             // Unified Inbox
-            if (query.isEmpty()) dao.getUnifiedMessagesFlow("INBOX", now)
-            else dao.searchUnifiedMessagesFlow("INBOX", query, now)
+            if (query.isEmpty()) dao.getUnifiedMessagesPreviewFlow("INBOX", now)
+            else dao.searchUnifiedMessagesPreviewFlow("INBOX", query, now)
         } else {
             if (query.isEmpty()) {
-                dao.getMessagesFlow(email, folder, now)
+                dao.getMessagesPreviewFlow(email, folder, now)
             } else {
-                dao.searchMessagesFlow(email, folder, query, now)
+                dao.searchMessagesPreviewFlow(email, folder, query, now)
             }
         }
     }
@@ -174,7 +174,7 @@ class EmailViewModel(application: Application) :
     val blockedSenders: Flow<List<com.vayunmathur.email.data.BlockedSender>> = dao.getBlockedSendersFlow()
 
     // Hide messages from blocked senders (matched by email address substring).
-    val messages: Flow<List<EmailMessage>> = combine(messagesRaw, blockedSenders) { msgs, blocked ->
+    val messages: Flow<List<EmailPreview>> = combine(messagesRaw, blockedSenders) { msgs, blocked ->
         val addrs = blocked.map { it.address.lowercase() }
         if (addrs.isEmpty()) msgs
         else msgs.filter { m -> addrs.none { m.from.lowercase().contains(it) } }
@@ -214,7 +214,7 @@ class EmailViewModel(application: Application) :
         }
     }
 
-    override fun requestAiSummary(messages: List<EmailMessage>) {
+    override fun requestAiSummary(messages: List<EmailPreview>) {
         if (_aiSummaryLoading.value) return
 
         val pm = appContext.packageManager
@@ -228,7 +228,7 @@ class EmailViewModel(application: Application) :
         _aiSummary.value = null
 
         val emailSnippets = messages.take(5).joinToString("\n---\n") { msg ->
-            val plainBody = msg.previewText(150)
+            val plainBody = msg.peekContent.take(150)
             "Subject: ${msg.subject}\nFrom: ${senderDisplayName(msg.from)}\n$plainBody"
         }
         val prompt = "Summarize these emails in 1-2 sentences:\n\n$emailSnippets"

@@ -3,6 +3,8 @@ package com.vayunmathur.email
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
+import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailPreview
 import com.vayunmathur.email.ui.AddAccountScreen
 import com.vayunmathur.email.platform.MessageListActions
 import com.vayunmathur.email.platform.MessageListUiState
@@ -128,8 +130,33 @@ private fun message(
     hasAttachments = hasAttachments,
 )
 
+/** Same as [message] but as the light [EmailPreview] projection the list screen now
+ *  consumes; [body] becomes the stored [EmailPreview.peekContent] snippet directly. */
+private fun preview(
+    account: String,
+    id: Long,
+    subject: String,
+    from: String,
+    date: String,
+    body: String,
+    isRead: Boolean = true,
+    hasAttachments: Boolean = false,
+    threadId: String? = null,
+) = EmailPreview(
+    accountEmail = account,
+    folderName = "INBOX",
+    id = id,
+    threadId = threadId,
+    subject = subject,
+    from = from,
+    date = date,
+    isRead = isRead,
+    hasAttachments = hasAttachments,
+    peekContent = body,
+)
+
 private val INBOX = listOf(
-    message(
+    preview(
         account = WORK,
         id = 5121,
         subject = "Re: Northgate rebrand — final round",
@@ -139,7 +166,7 @@ private val INBOX = listOf(
             "updated wordmark over to the print shop before Thursday?",
         isRead = false,
     ),
-    message(
+    preview(
         account = ME,
         id = 4407,
         subject = "Your invoice for July is ready",
@@ -150,7 +177,7 @@ private val INBOX = listOf(
         isRead = false,
         hasAttachments = true,
     ),
-    message(
+    preview(
         account = WORK,
         id = 5118,
         subject = "Standup notes, week 31",
@@ -159,7 +186,7 @@ private val INBOX = listOf(
         body = "Shipping the caching change today. Blocked on the staging certificate, " +
             "which ops say lands tomorrow morning.",
     ),
-    message(
+    preview(
         account = ME,
         id = 4399,
         subject = "Trail run on Saturday?",
@@ -168,7 +195,7 @@ private val INBOX = listOf(
         body = "Thinking of doing the reservoir loop at eight before it gets hot. " +
             "Bring the good water bottle this time.",
     ),
-    message(
+    preview(
         account = WORK,
         id = 5109,
         subject = "Contract renewal — signed copy attached",
@@ -178,7 +205,7 @@ private val INBOX = listOf(
             "your records.",
         hasAttachments = true,
     ),
-    message(
+    preview(
         account = ME,
         id = 4382,
         subject = "Your package is out for delivery",
@@ -186,7 +213,7 @@ private val INBOX = listOf(
         date = "Sun Jul 26 06:41:19 GMT 2026",
         body = "Your parcel is on the van and should arrive between 11:00 and 15:00.",
     ),
-    message(
+    preview(
         account = WORK,
         id = 5094,
         subject = "Q3 hiring plan",
@@ -228,7 +255,7 @@ private val THREAD = listOf(
 )
 
 private val SEARCH_HITS = listOf(
-    message(
+    preview(
         account = ME,
         id = 4407,
         subject = "Your invoice for July is ready",
@@ -237,7 +264,7 @@ private val SEARCH_HITS = listOf(
         body = "Invoice FM-2026-07 for £4.20 has been paid with the card ending 4419.",
         hasAttachments = true,
     ),
-    message(
+    preview(
         account = WORK,
         id = 5088,
         subject = "Invoice 2026-114 — studio, July retainer",
@@ -248,7 +275,7 @@ private val SEARCH_HITS = listOf(
         isRead = false,
         hasAttachments = true,
     ),
-    message(
+    preview(
         account = ME,
         id = 4361,
         subject = "Invoice paid: northgate.co.uk domain renewal",

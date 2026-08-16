@@ -4,6 +4,7 @@ import android.content.Context
 import android.net.Uri
 import com.vayunmathur.email.data.Attachment
 import com.vayunmathur.email.data.EmailMessage
+import com.vayunmathur.email.data.EmailPreview
 import java.io.File
 
 /**
@@ -22,7 +23,7 @@ import java.io.File
 
 /** Everything the message list draws. */
 data class MessageListUiState(
-    val messages: List<EmailMessage> = emptyList(),
+    val messages: List<EmailPreview> = emptyList(),
     /** null means the unified inbox, i.e. every account at once. */
     val selectedAccountEmail: String? = null,
     val selectedFolderName: String = "INBOX",
@@ -47,7 +48,7 @@ interface MessageListActions {
     fun markAsRead(accountEmail: String, folderName: String, uid: Long, isRead: Boolean) {}
     fun deleteMessage(accountEmail: String, folderName: String, uid: Long) {}
     fun refresh(context: Context) {}
-    fun requestAiSummary(messages: List<EmailMessage>) {}
+    fun requestAiSummary(messages: List<EmailPreview>) {}
 
     companion object {
         val Noop: MessageListActions = object : MessageListActions {}
