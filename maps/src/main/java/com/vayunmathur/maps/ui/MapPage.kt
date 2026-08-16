@@ -213,6 +213,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val navState by com.vayunmathur.maps.util.NavigationSessionManager.state.collectAsState()
     val isNavigating = navState !is com.vayunmathur.maps.util.NavigationSessionManager.NavState.Idle
     var autoFollow by remember { mutableStateOf(true) }
+    // North-up vs heading-up during navigation (Vela onCompassTap idea).
+    var navNorthUp by remember { mutableStateOf(false) }
+    // Posted speed limit under the puck (P5b maxspeed overlay; null when the
+    // tileset is unhosted or the road has no limit).
+    var postedLimit by remember { mutableStateOf<com.vayunmathur.maps.data.PostedLimit?>(null) }
     var lastProgrammaticMoveMs by remember { mutableStateOf(0L) }
     val activeRoute = com.vayunmathur.maps.util.NavigationSessionManager.currentRoute
     val navProgress = (navState as? com.vayunmathur.maps.util.NavigationSessionManager.NavState.Navigating)?.progress
@@ -309,19 +314,31 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
     // Camera follow: animate to snapped position / bearing whenever we get
     // a new progress sample AND the user hasn't panned away.
-    LaunchedEffect(navProgress, autoFollow) {
+    LaunchedEffect(navProgress, autoFollow, navNorthUp) {
         val p = navProgress ?: return@LaunchedEffect
         if (!autoFollow) return@LaunchedEffect
         lastProgrammaticMoveMs = System.currentTimeMillis()
         camera.animateTo(
             camera.position.copy(
                 target = p.snappedPosition,
-                bearing = p.courseOverGround.toDouble(),
-                tilt = 60.0,
+                bearing = if (navNorthUp) 0.0 else p.courseOverGround.toDouble(),
+                tilt = if (navNorthUp) 0.0 else 60.0,
                 zoom = 17.0,
             ),
             kotlin.time.Duration.parse("800ms"),
         )
+    }
+
+    // Poll the posted speed limit under the puck from the maxspeed overlay
+    // (P5b). Inert (always null) until the maxspeed tileset is hosted.
+    LaunchedEffect(navProgress) {
+        val p = navProgress
+        val projection = camera.projection
+        postedLimit = if (p != null && projection != null) {
+            queryPostedLimit(projection, p.snappedPosition)
+        } else {
+            null
+        }
     }
 
     // Detect user-initiated camera moves: if isCameraMoving becomes true
@@ -628,11 +645,16 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         com.vayunmathur.maps.util.NavigationSessionManager.stop()
                         context.stopService(android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java))
                         autoFollow = true
+                        navNorthUp = false
                     },
                     onDismissArrival = {
                         com.vayunmathur.maps.util.NavigationSessionManager.stop()
                         context.stopService(android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java))
                     },
+                    postedLimit = postedLimit,
+                    northUp = navNorthUp,
+                    onToggleNorthUp = { navNorthUp = !navNorthUp },
+                    destinationName = com.vayunmathur.maps.util.NavigationSessionManager.destinationName,
                 )
             }
         }

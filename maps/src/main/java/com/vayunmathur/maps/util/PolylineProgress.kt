@@ -254,6 +254,8 @@ data class NavigationProgress(
     val etaEpochMs: Long,
     val courseOverGround: Float,
     val distanceOffRoute: Double,
+    /** Current GPS ground speed in meters/second (0 when unknown/stationary). */
+    val speedMps: Float = 0f,
 )
 
 /**
@@ -265,6 +267,7 @@ fun PolylineIndex.deriveProgress(
     snap: SnapResult,
     courseOverGround: Float,
     nowEpochMs: Long = System.currentTimeMillis(),
+    speedMps: Float = 0f,
 ): NavigationProgress {
     val currentStepIndex = stepIndexForSegment(snap.segmentIndex)
     val nextStepStart = if (currentStepIndex + 1 < route.step.size) {
@@ -297,5 +300,6 @@ fun PolylineIndex.deriveProgress(
         etaEpochMs = nowEpochMs + remainingDurationMs,
         courseOverGround = courseOverGround,
         distanceOffRoute = snap.distanceOffRoute,
+        speedMps = speedMps,
     )
 }

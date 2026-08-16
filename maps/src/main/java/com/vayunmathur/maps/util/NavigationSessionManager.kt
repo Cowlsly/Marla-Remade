@@ -278,7 +278,11 @@ object NavigationSessionManager {
         lastSegmentIndex = snap.segmentIndex
 
         val bearing = chooseBearing(location)
-        val progress = index.deriveProgress(snap, courseOverGround = bearing)
+        val progress = index.deriveProgress(
+            snap,
+            courseOverGround = bearing,
+            speedMps = if (location.hasSpeed()) location.speed else 0f,
+        )
 
         // Arrival check first — once arrived, stop processing and let the UI
         // show its end-of-trip card before being torn down.

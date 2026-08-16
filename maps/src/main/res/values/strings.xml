@@ -250,6 +250,8 @@
     <string name="nav_action_end">End</string>
     <!-- Button: Recenter map on user location. Verb. -->
     <string name="nav_action_recenter">Recenter</string>
+    <!-- Header for the full turn-by-turn step list sheet. -->
+    <string name="nav_steps_title">Steps</string>
     <!-- Button: Start navigation for selected mode. Verb. -->
     <string name="nav_action_start">Start Navigation</string>
     <!-- Notification content for drive. %1$s=distance/duration, %2$s=ETA time -->

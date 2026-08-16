@@ -1,6 +1,5 @@
 package com.vayunmathur.maps.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,48 +10,57 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.ExtendedFloatingActionButton
 import com.vayunmathur.library.ui.FilledTonalButton
+import com.vayunmathur.library.ui.IconButton
+import com.vayunmathur.library.ui.IconCompass
+import com.vayunmathur.library.ui.IconList
 import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.SmallFloatingActionButton
 import com.vayunmathur.library.ui.Text
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.shadow
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import com.vayunmathur.maps.R
+import com.vayunmathur.maps.data.PostedLimit
+import com.vayunmathur.maps.ui.nav.ArrivalSummary
+import com.vayunmathur.maps.ui.nav.ManeuverBanner
+import com.vayunmathur.maps.ui.nav.SpeedWidget
+import com.vayunmathur.maps.ui.nav.StepsSheet
 import com.vayunmathur.maps.util.NavigationProgress
 import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.formatDistance
 import com.vayunmathur.maps.util.formatEta
-import kotlin.math.roundToInt
 
 /**
  * Full-screen overlay drawn on top of [MaplibreMap] while navigation is
- * active. Renders the Google-Maps-style top maneuver card, bottom ETA strip,
- * a recenter FAB when the user has panned away from the snapped position,
- * and an arrival/failure card for terminal states.
+ * active. Renders the Vela-style rich driving UI on top of MA's existing nav
+ * session: a maneuver banner (with lane guidance + route shields), a
+ * speedometer with posted-limit badge, an expandable step list, the bottom ETA
+ * strip, nav controls (recenter + north-up compass toggle), and an
+ * arrival/failure card for terminal states.
  *
- * Hidden when state is [NavigationSessionManager.NavState.Idle] — caller is
- * responsible for only rendering this composable inside a `Box` overlay.
+ * Hidden when state is [NavigationSessionManager.NavState.Idle].
  */
 @Composable
 fun NavigationOverlay(
@@ -62,20 +70,26 @@ fun NavigationOverlay(
     onRecenter: () -> Unit,
     onEndTrip: () -> Unit,
     onDismissArrival: () -> Unit,
+    postedLimit: PostedLimit? = null,
+    northUp: Boolean = false,
+    onToggleNorthUp: () -> Unit = {},
+    destinationName: String? = null,
 ) {
     if (navState is NavigationSessionManager.NavState.Idle) return
 
+    var showSteps by remember { mutableStateOf(false) }
+
     Box(Modifier.fillMaxSize()) {
-        // ---- Top maneuver card ----
+        // ---- Top maneuver banner / status ----
         when (navState) {
             is NavigationSessionManager.NavState.Navigating -> {
-                ManeuverCard(
+                ManeuverBanner(
                     progress = navState.progress,
                     steps = steps,
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
             NavigationSessionManager.NavState.Starting -> {
@@ -85,7 +99,7 @@ fun NavigationOverlay(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
             NavigationSessionManager.NavState.Recalculating -> {
@@ -95,7 +109,7 @@ fun NavigationOverlay(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
             is NavigationSessionManager.NavState.Failed -> {
@@ -105,23 +119,60 @@ fun NavigationOverlay(
                     modifier = Modifier
                         .align(Alignment.TopCenter)
                         .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
                 )
             }
             else -> {}
         }
 
-        // ---- Recenter FAB ----
-        if (navState is NavigationSessionManager.NavState.Navigating && !autoFollow) {
-            ExtendedFloatingActionButton(
-                onClick = onRecenter,
+        // ---- Right-edge nav controls (compass north-up toggle + recenter) ----
+        if (navState is NavigationSessionManager.NavState.Navigating) {
+            Column(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
                     .padding(16.dp),
-                icon = {
-                    IconLocationOn()
-                },
-                text = { Text(stringResource(R.string.nav_action_recenter)) }
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalAlignment = Alignment.End,
+            ) {
+                SmallFloatingActionButton(onClick = onToggleNorthUp) {
+                    IconCompass(
+                        tint = if (northUp) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurface,
+                    )
+                }
+                if (!autoFollow) {
+                    ExtendedFloatingActionButton(
+                        onClick = onRecenter,
+                        icon = { IconLocationOn() },
+                        text = { Text(stringResource(R.string.nav_action_recenter)) },
+                    )
+                }
+            }
+        }
+
+        // ---- Speedometer + posted-limit badge (bottom-left, above ETA) ----
+        if (navState is NavigationSessionManager.NavState.Navigating) {
+            SpeedWidget(
+                speedMps = navState.progress.speedMps,
+                postedLimit = postedLimit,
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(start = 16.dp, bottom = 96.dp),
+            )
+        }
+
+        // ---- Expandable full step list ----
+        if (showSteps && navState is NavigationSessionManager.NavState.Navigating) {
+            StepsSheet(
+                steps = steps,
+                currentStepIndex = navState.progress.currentStepIndex,
+                onClose = { showSteps = false },
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .fillMaxWidth()
+                    .padding(bottom = 84.dp)
+                    .windowInsetsPadding(WindowInsets.systemBars),
             )
         }
 
@@ -131,87 +182,25 @@ fun NavigationOverlay(
                 EtaStrip(
                     progress = navState.progress,
                     onEndTrip = onEndTrip,
+                    onToggleSteps = { showSteps = !showSteps },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
-                        .windowInsetsPadding(WindowInsets.systemBars)
+                        .windowInsetsPadding(WindowInsets.systemBars),
                 )
             }
             NavigationSessionManager.NavState.Arrived -> {
-                ArrivalCard(
+                ArrivalSummary(
                     onDismiss = onDismissArrival,
+                    destinationName = destinationName,
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.systemBars)
-                        .padding(16.dp)
+                        .padding(16.dp),
                 )
             }
             else -> {}
-        }
-    }
-}
-
-@Composable
-private fun ManeuverCard(
-    progress: NavigationProgress,
-    steps: List<RouteService.Step>,
-    modifier: Modifier = Modifier,
-) {
-    val currentStep = steps.getOrNull(progress.currentStepIndex)
-    val nextStep = steps.getOrNull(progress.currentStepIndex + 1)
-    // Per plan: we count down to the NEXT step's maneuver. The instruction
-    // shown is the next maneuver's instruction; the current step's text is
-    // the "you're currently on" peek line below.
-    val primary = nextStep ?: currentStep
-    val primaryInstruction = primary?.navInstruction?.instructions.orEmpty()
-    val primaryIcon = primary?.navInstruction?.maneuver?.iconContent()
-    val distanceText = formatDistance(progress.distanceToNextManeuver)
-
-    Card(
-        modifier = modifier
-            .fillMaxWidth()
-            .shadow(8.dp, RoundedCornerShape(16.dp)),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-        ),
-    ) {
-        Row(
-            modifier = Modifier.padding(16.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            if (primaryIcon != null) {
-                primaryIcon(
-                    Modifier.size(56.dp),
-                    MaterialTheme.colorScheme.onPrimaryContainer,
-                )
-                Spacer(Modifier.width(16.dp))
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    distanceText,
-                    fontSize = 28.sp,
-                    fontWeight = FontWeight.Bold,
-                )
-                Text(
-                    primaryInstruction,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.Medium,
-                )
-                if (nextStep != null && currentStep != null && currentStep !== primary) {
-                    val secondary = steps.getOrNull(progress.currentStepIndex + 2)
-                    if (secondary != null) {
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            stringResource(R.string.then, secondary.navInstruction.instructions),
-                            fontSize = 12.sp,
-                            color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
-                        )
-                    }
-                }
-            }
         }
     }
 }
@@ -240,6 +229,7 @@ private fun StatusCard(
 private fun EtaStrip(
     progress: NavigationProgress,
     onEndTrip: () -> Unit,
+    onToggleSteps: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val etaText = formatEta(progress.etaEpochMs)
@@ -260,17 +250,15 @@ private fun EtaStrip(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(
-                    etaText,
-                    fontSize = 20.sp,
-                    fontWeight = FontWeight.Bold,
-                )
+                Text(etaText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text(
                     stringResource(R.string.min, remainingMinutes, remainingDistance),
                     fontSize = 14.sp,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+            IconButton(onClick = onToggleSteps) { IconList() }
+            Spacer(Modifier.height(0.dp))
             Button(
                 onClick = onEndTrip,
                 colors = ButtonDefaults.buttonColors(
@@ -315,37 +303,6 @@ private fun FailureCard(
                 FilledTonalButton(onClick = onDismiss) {
                     Text(stringResource(R.string.nav_arrived_dismiss))
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ArrivalCard(
-    onDismiss: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Card(
-        modifier = modifier,
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.tertiaryContainer,
-            contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
-        ),
-    ) {
-        Column(
-            Modifier.padding(20.dp).fillMaxWidth(),
-            horizontalAlignment = Alignment.CenterHorizontally,
-        ) {
-            Text(
-                stringResource(R.string.nav_arrived_title),
-                fontSize = 22.sp,
-                fontWeight = FontWeight.Bold,
-                textAlign = TextAlign.Center,
-            )
-            Spacer(Modifier.height(12.dp))
-            FilledTonalButton(onClick = onDismiss) {
-                Text(stringResource(R.string.nav_arrived_dismiss))
             }
         }
     }
