@@ -31,9 +31,8 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text as LibText
-import com.vayunmathur.library.ui.TopAppBar
 
 private sealed class TimelineItem {
     data class ChapterHeader(val chapterId: ChapterId) : TimelineItem()
@@ -71,16 +70,12 @@ fun ProgressionScreen(
 ) {
     val available = Levels.availableLevels(completed)
     val timelineItems = buildTimelineItems()
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { LibText(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
-                actions = {
-                    IconButton(onClick = onOpenGameCenter) {
-                        Icon(painterResource(id = android.R.drawable.btn_star_big_on), contentDescription = stringResource(R.string.cd_achievements))
-                    }
-                }
-            )
+    AppScaffold(
+        title = { LibText(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
+        actions = {
+            IconButton(onClick = onOpenGameCenter) {
+                Icon(painterResource(id = android.R.drawable.btn_star_big_on), contentDescription = stringResource(R.string.cd_achievements))
+            }
         }
     ) { paddingValues ->
         BoxWithConstraints(

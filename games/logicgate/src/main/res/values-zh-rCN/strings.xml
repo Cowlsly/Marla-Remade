@@ -23,6 +23,5 @@
     <string name="loading">正在加载…</string>
     <string name="play">玩</string>
     <string name="level_complete_body">您已解决 <xliff:g id="level_name" example="XOR">%1$s</xliff:g>。</string>
-    <string name="app_name">逻辑门</string>
     <string name="done">完成</string>
 </resources>

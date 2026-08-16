@@ -341,6 +341,10 @@ fun GameScreen(
         val isCompact = maxW < 600.dp
         val isPortrait = maxH > maxW
         val isCompactPortrait = isCompact && isPortrait
+        // RAW SCAFFOLD EXCEPTION: bespoke circuit-editor surface. The top bar uses a
+        // custom Turing dark palette (TopAppBarColors) and the whole scaffold a custom
+        // containerColor, neither of which AppScaffold can express, and the canvas hosts
+        // window-coordinate drag/ghost overlays. A shared scaffold does not fit here.
         Scaffold(
             modifier = Modifier.fillMaxSize(),
             topBar = {
