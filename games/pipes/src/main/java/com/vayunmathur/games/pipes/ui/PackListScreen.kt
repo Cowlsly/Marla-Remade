@@ -3,13 +3,9 @@ package com.vayunmathur.games.pipes.ui
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.plus
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -23,22 +19,19 @@ import com.vayunmathur.games.pipes.platform.PackProgress
 import com.vayunmathur.games.pipes.ui.components.DailyCard
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun PackListScreen(packs: List<PackProgress>, onOpenPack: (Int) -> Unit, onOpenSettings: () -> Unit, onOpenGameCenter: () -> Unit, daily: DailyProgress? = null, onOpenDaily: () -> Unit = {}) {
-    Scaffold(topBar = { TopAppBar(title = { Text(stringResource(R.string.pack_selector)) }, actions = { IconButton(onClick = onOpenSettings) { IconSettings() }; IconButton(onClick = onOpenGameCenter) { Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements") } }) }) { paddingValues ->
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = paddingValues + PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            daily?.let { item { DailyCard(it, onOpenDaily) } }
-            itemsIndexed(packs) { index, pack -> Card(Modifier.clickable { onOpenPack(index) }, colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surface)) { Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Column { Text(pack.name, style = MaterialTheme.typography.headlineMedium); Text(pack.shape.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }; Text("${pack.completed}/${pack.total}", style = MaterialTheme.typography.titleMedium) } } }
-        }
+    DetailLazyColumn(title = stringResource(R.string.pack_selector), actions = { IconButton(onClick = onOpenSettings) { IconSettings() }; IconButton(onClick = onOpenGameCenter) { Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements") } }) {
+        daily?.let { item { DailyCard(it, onOpenDaily) } }
+        itemsIndexed(packs) { index, pack -> Card(Modifier.clickable { onOpenPack(index) }, colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surface)) { Row(Modifier.fillMaxWidth().padding(16.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) { Column { Text(pack.name, style = MaterialTheme.typography.headlineMedium); Text(pack.shape.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }; Text("${pack.completed}/${pack.total}", style = MaterialTheme.typography.titleMedium) } } }
     }
 }
