@@ -20,8 +20,11 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
-import com.vayunmathur.youpipe.util.sabr.SabrDashMediaSource
-import com.vayunmathur.youpipe.util.sabr.SabrSessionStore
+import com.vayunmathur.youpipe.util.sabr.LocalDomPoTokenProvider
+import com.vayunmathur.youpipe.util.sabr.SabrNgDashMediaSource
+import com.vayunmathur.youpipe.util.sabr.SabrNgSessionStore
+import org.schabi.newpipe.extractor.localization.Localization
+import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isAndroidStreamingUrl
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isIosStreamingUrl
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.isVisionOsStreamingUrl
@@ -104,12 +107,27 @@ class PlaybackService : MediaSessionService() {
                             }
                         } catch (_: Exception) {}
                     }
-                    val info = SabrSessionStore.getExtractorInfo(videoId)
+                    val info = SabrNgSessionStore.getExtractorInfo(videoId)
+                        ?: throw RuntimeException("No SABR info available for $videoId")
                     val sabrSource = try {
-                        val spec = SabrSessionStore.createSourceSpec(
-                            videoId, vitag, audioItag, audioTrackIdOverride, info
+                        val poToken = LocalDomPoTokenProvider.shared(applicationContext)
+                            .getPoTokenBytes(videoId, info.getVisitorData())
+                        val spec = SabrNgSessionStore.createSourceSpec(
+                            videoId, vitag, audioItag, audioTrackIdOverride, info, poToken,
+                            Localization("en", "US")
                         )
-                        SabrDashMediaSource(this@PlaybackService, mediaItem, spec)
+                        val onAttestationFailure: () -> YoutubeSabrInfo? = {
+                            val fresh = LocalDomPoTokenProvider.shared(applicationContext)
+                                .getPoTokenBytes(videoId, info.getVisitorData(), true)
+                            YoutubeSabrInfo(
+                                info.getVideoId(), info.getCpn(), info.getClientVersion(),
+                                info.getVisitorData(), info.getServerAbrStreamingUrl(),
+                                info.getVideoPlaybackUstreamerConfig(), info.getFormats(), fresh
+                            )
+                        }
+                        SabrNgDashMediaSource(
+                            this@PlaybackService, mediaItem, spec, onAttestationFailure
+                        )
                     } catch (e: Exception) {
                         throw RuntimeException("Failed to create SABR media source for $videoId", e)
                     }

@@ -12,13 +12,13 @@ import androidx.work.WorkerParameters
 import com.vayunmathur.youpipe.data.DownloadedVideo
 import com.vayunmathur.youpipe.data.SubscriptionRepository
 import com.vayunmathur.youpipe.ui.VideoInfo
-import com.vayunmathur.youpipe.util.sabr.SabrDownloadHelper
+import com.vayunmathur.youpipe.util.sabr.SabrNgDownloadHelper
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.NetworkDataStream
 import org.schabi.newpipe.extractor.ServiceList
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.Stream
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrInfo
+import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.RandomAccessFile
@@ -170,11 +170,12 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                 }?.getDeliveryMethodInfo() as? YoutubeSabrInfo
                     ?: throw IllegalStateException("No SABR info available for $youtubeId")
 
-                SabrDownloadHelper.download(
+                SabrNgDownloadHelper.download(
                     context = applicationContext,
                     videoId = youtubeId,
                     videoItag = videoItag,
                     audioItag = audioItag,
+                    audioTrackId = null,
                     info = info,
                     workDir = workDir,
                     outputFile = outputFile,

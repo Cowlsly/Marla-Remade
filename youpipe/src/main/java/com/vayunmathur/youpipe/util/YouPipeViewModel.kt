@@ -775,11 +775,11 @@ class YouPipeViewModel(
                         if (sabrVideoOnly.isNotEmpty()) {
                             sabrVideoOnly.firstOrNull {
                                 it.getDeliveryMethodInfo() is
-                                    org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrInfo
+                                    org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
                             }?.let {
                                 val sabrInfo = it.getDeliveryMethodInfo() as
-                                    org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrInfo
-                                com.vayunmathur.youpipe.util.sabr.SabrSessionStore.putExtractorInfo(
+                                    org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
+                                com.vayunmathur.youpipe.util.sabr.SabrNgSessionStore.putExtractorInfo(
                                     videoId, sabrInfo
                                 )
                             }

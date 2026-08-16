@@ -48,9 +48,8 @@ import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.getTex
 import org.schabi.newpipe.extractor.services.youtube.YoutubeParsingHelper.prepareDesktopJsonBuilder
 import org.schabi.newpipe.extractor.services.youtube.YoutubeStreamHelper
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeChannelLinkHandlerFactory
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrClientProfile
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrFormat
-import org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrProbe
+import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrInfo
+import org.schabi.newpipe.extractor.services.youtube.sabrng.YoutubeSabrNgInfoBuilder
 import org.schabi.newpipe.extractor.stream.AudioStream
 import org.schabi.newpipe.extractor.stream.DeliveryMethod
 import org.schabi.newpipe.extractor.stream.Description
@@ -268,35 +267,6 @@ class YoutubeStreamExtractor(
             } catch (e: NumberFormatException) {
                 throw ParsingException("Could not parse \"$accessibilityText\" as a long", e)
             }
-        }
-
-        @Throws(ParsingException::class)
-        private fun buildSabrItagItem(format: YoutubeSabrFormat): ItagItem? {
-            val mimeType = format.mimeType ?: ""
-            val codec = if (mimeType.contains("codecs")) {
-                // mimeType like video/mp4; codecs="avc1..."
-                val parts = mimeType.split("\"")
-                if (parts.size > 1) parts[1] else ""
-            } else ""
-            val webm = mimeType.contains("webm")
-            val itagItem: ItagItem = if (format.isAudio) {
-                val mediaFormat = if (webm) {
-                    if (codec.contains("opus")) MediaFormat.WEBMA_OPUS else MediaFormat.WEBMA
-                } else MediaFormat.M4A
-                ItagItem(format.itag, ItagItem.ItagType.AUDIO, mediaFormat, kotlin.math.max(format.bitrate, 0))
-            } else {
-                val mediaFormat = if (webm) MediaFormat.WEBM else MediaFormat.MPEG_4
-                val resolution = if (format.height > 0) "${format.height}p" else ""
-                val item = ItagItem(format.itag, ItagItem.ItagType.VIDEO_ONLY, mediaFormat, resolution)
-                item.width = format.width
-                item.height = format.height
-                item
-            }
-            itagItem.bitrate = format.bitrate
-            itagItem.codec = codec
-            itagItem.contentLength = format.contentLength
-            itagItem.approxDurationMs = format.approxDurationMs
-            return itagItem
         }
     }
 
@@ -1026,10 +996,9 @@ class YoutubeStreamExtractor(
         } catch (e: Exception) {
             return
         }
-        val sabrInfo: org.schabi.newpipe.extractor.services.youtube.sabr.YoutubeSabrInfo = try {
-            YoutubeSabrProbe.fetchSabrInfo(
+        val sabrInfo: YoutubeSabrInfo = try {
+            YoutubeSabrNgInfoBuilder.fetchSabrInfo(
                 videoId,
-                YoutubeSabrClientProfile.WEB,
                 getExtractorLocalization(),
                 getExtractorContentCountry()
             )
@@ -1037,53 +1006,30 @@ class YoutubeStreamExtractor(
             ExtractorLogger.d("YoutubeSabr", "SABR fetch failed for {}: {}", videoId, e)
             return
         }
-        if (sabrInfo.getFormats().isEmpty() && sabrInfo.serverAbrStreamingUrl.isNullOrEmpty()) {
-            // still check formats via getFormats for compatibility
-        }
-        // Use getter for java compatibility + kotlin property both exist
-        val formats = try {
-            sabrInfo.getFormats()
-        } catch (e: Exception) {
-            // fallback to property via reflection not needed; try formats list directly via internal?
-            emptyList<YoutubeSabrFormat>()
-        }
-        // Also try direct access if getFormats empty: use YoutubeSabrInfo's internal formats? But we also have property via earlier version?
-        // We'll just use formats above; if empty and actual list available via extension, keep empty logic.
-
-        val actualFormats = if (formats.isNotEmpty()) formats else {
-            // Try to get via property if kotlin class exposes getFormats
-            try {
-                // SabrInfo was just converted, it has getFormats()
-                sabrInfo.getFormats()
-            } catch (_: Exception) {
-                emptyList()
-            }
-        }
-
+        val actualFormats = sabrInfo.getFormats()
         if (actualFormats.isEmpty()) {
             ExtractorLogger.d("YoutubeSabr", "SABR fetch returned no info/formats for {}", videoId)
-            // still continue to allow serverAbrStreamingUrl check
         }
-        val serverAbrStreamingUrl = sabrInfo.serverAbrStreamingUrl ?: ""
+        val serverAbrStreamingUrl = sabrInfo.getServerAbrStreamingUrl() ?: ""
         var av1Count = 0
         for (format in actualFormats) {
             try {
-                val itagItem = buildSabrItagItem(format) ?: continue
-                val idStr = format.itag.toString()
+                val itagItem = format.toItagItem()
+                val idStr = format.getItag().toString()
 
-                if (format.isAudio) {
+                if (format.isAudio()) {
                     val builder = AudioStream.Builder()
                         .setContent(serverAbrStreamingUrl, false)
                         .setMediaFormat(itagItem.mediaFormat)
-                        .setAverageBitrate(format.bitrate)
+                        .setAverageBitrate(format.getBitrate())
                         .setItagItem(itagItem)
                         .setDeliveryMethod(DeliveryMethod.SABR)
                         .setDeliveryMethodInfo(sabrInfo)
                     var streamId = idStr
-                    val trackId = format.audioTrackId
+                    val trackId = format.getAudioTrackId()
                     if (!trackId.isNullOrEmpty()) {
                         val langPart = trackId.split(".")[0]
-                        val displayName = format.audioTrackDisplayName
+                        val displayName = format.getAudioTrackDisplayName()
                         builder.setAudioTrackId(trackId)
                             .setAudioTrackName(displayName ?: langPart)
                             .setAudioLocale(Locale(langPart.split("-")[0]))
@@ -1094,14 +1040,12 @@ class YoutubeStreamExtractor(
                     if (sabrAudioStreams.none { audioStreamId == it.getId() }) {
                         sabrAudioStreams.add(stream)
                     }
-                } else if (format.isVideo) {
+                } else if (format.isVideo()) {
                     val codec = itagItem.codec
                     if (codec != null && codec.contains("av01")) {
                         av1Count++
                     }
-                    val qualityLabel = format.qualityLabel
-                    val resolution = if (!qualityLabel.isNullOrEmpty()) qualityLabel
-                    else if (format.height > 0) "${format.height}p" else ""
+                    val resolution = if (format.getHeight() > 0) "${format.getHeight()}p" else ""
                     val stream = VideoStream.Builder()
                         .setId(idStr)
                         .setContent(serverAbrStreamingUrl, false)
