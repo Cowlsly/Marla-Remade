@@ -49,7 +49,9 @@ class SignalRegistrationKeys private constructor(val authScaffold: SignalAuthDat
 
             // Account password for Basic e164:password (POST /v1/registration + WS Authorization)
             val password = generatePassword(rng)
-            val uak = ByteArray(32).also { rng.nextBytes(it) }
+            // unidentifiedAccessKey is EXACTLY 16 bytes (UnidentifiedAccess.deriveAccessKeyFrom trims to 16);
+            // the server enforces a 16-byte length, so a 32-byte value is rejected with HTTP 422.
+            val uak = ByteArray(16).also { rng.nextBytes(it) }
 
             // Identity serialization: IdentityKey.serialize() = 33B (0x05||32), private = 32B raw EC
             val aciPubB64 = b64(aciIdentity.publicKey.serialize())

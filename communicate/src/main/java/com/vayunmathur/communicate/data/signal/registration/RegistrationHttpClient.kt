@@ -354,6 +354,8 @@ class RegistrationHttpClient(private val context: Context) {
             return RegisterResult("error", null, null, "423 RegistrationLock (live-only: needs svr2Credentials/recoveryPassword via SVR2/SVR3)", null, resp.body)
         }
         if (!resp.isSuccess) {
+            // Log the full server body so a 422/400 names the rejected field in logcat on the next retest.
+            Log.e(TAG, "submitRegistration HTTP ${resp.status}: ${resp.body.take(1000)}")
             return RegisterResult("error", null, null, "HTTP ${resp.status}", null, resp.body)
         }
         return finalizeRegister(resp.body, auth)
