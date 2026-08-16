@@ -48,4 +48,5 @@
     <string name="transit_1">Kulminatsioon: <xliff:g id="time" example="21:30">%1$s</xliff:g> ?:</string>
     <string name="ra_h_h">Otsetõus tundides: <xliff:g id="hours" example="5.5">%1$s</xliff:g> t</string>
     <string name="magnitude_limit">Nähtava tähesuuruse piir: <xliff:g id="limit" example="4.5">%1$s</xliff:g></string>
+    <string name="settings">Seadistused</string>
 </resources>
