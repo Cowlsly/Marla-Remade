@@ -6,19 +6,16 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedCard
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -101,104 +98,85 @@ fun ScholarHomePage(backStack: NavBackStack<Route>, viewModel: EducationViewMode
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScholarHomeScreen(state: HomeUiState, actions: HomeActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = {
-                    Text(
-                        if (state.learnerName.isBlank()) stringResource(R.string.learn)
-                        else stringResource(R.string.hi_1, state.learnerName)
-                    )
-                },
-                actions = {
-                    IconButton(onClick = { actions.openBadges() }) {
-                        IconEmojiEvents()
-                    }
-                    IconButton(onClick = { actions.openParentArea() }) {
-                        IconSettings()
-                    }
-                },
-            )
+    DetailLazyColumn(
+        title = if (state.learnerName.isBlank()) stringResource(R.string.learn)
+        else stringResource(R.string.hi_1, state.learnerName),
+        actions = {
+            IconButton(onClick = { actions.openBadges() }) {
+                IconEmojiEvents()
+            }
+            IconButton(onClick = { actions.openParentArea() }) {
+                IconSettings()
+            }
         },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
-        ) {
-            item {
-                Row(
-                    Modifier
+    ) {
+        item {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StreakChip(state.streakCount)
+                StarsChip(state.totalStars)
+            }
+        }
+
+        if (state.deadlines.isNotEmpty()) {
+            item { SectionHeader(stringResource(R.string.due_soon)) }
+            items(state.deadlines, key = { it.id }) { d ->
+                OutlinedCard(
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        .clickable { actions.openDeadline(d) },
                 ) {
-                    StreakChip(state.streakCount)
-                    StarsChip(state.totalStars)
-                }
-            }
-
-            if (state.deadlines.isNotEmpty()) {
-                item { SectionHeader(stringResource(R.string.due_soon)) }
-                items(state.deadlines, key = { it.id }) { d ->
-                    OutlinedCard(
-                        modifier = Modifier
+                    Row(
+                        Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .clickable { actions.openDeadline(d) },
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(d.title, style = MaterialTheme.typography.titleMedium)
-                            DeadlineChip(d.dueEpochDay)
-                        }
+                        Text(d.title, style = MaterialTheme.typography.titleMedium)
+                        DeadlineChip(d.dueEpochDay)
                     }
                 }
             }
+        }
 
-            state.sections.forEach { section ->
-                item { SectionHeader(stringResource(section.subject.displayNameRes)) }
-                items(section.courses, key = { it.id }) { course ->
-                    ElevatedCard(
-                        modifier = Modifier
+        state.sections.forEach { section ->
+            item { SectionHeader(stringResource(section.subject.displayNameRes)) }
+            items(section.courses, key = { it.id }) { course ->
+                ElevatedCard(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { actions.openCourse(course.id) },
+                ) {
+                    Row(
+                        Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
-                            .clickable { actions.openCourse(course.id) },
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Row(
-                            Modifier
-                                .fillMaxWidth()
-                                .padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Column(Modifier.weight(1f)) {
-                                Text(course.title, style = MaterialTheme.typography.titleMedium)
-                                Text(
-                                    pluralStringResource(R.plurals.units, course.unitCount, course.unitCount),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
-                            }
-                            IconChevronRight()
+                        Column(Modifier.weight(1f)) {
+                            Text(course.title, style = MaterialTheme.typography.titleMedium)
+                            Text(
+                                pluralStringResource(R.plurals.units, course.unitCount, course.unitCount),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
                         }
+                        IconChevronRight()
                     }
                 }
             }
+        }
 
-            if (state.sections.isEmpty()) {
-                item {
-                    Text(
-                        stringResource(R.string.no_content_packs_are_installed_yet),
-                        modifier = Modifier.padding(16.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+        if (state.sections.isEmpty()) {
+            item {
+                Text(
+                    stringResource(R.string.no_content_packs_are_installed_yet),
+                    modifier = Modifier.padding(16.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

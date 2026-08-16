@@ -5,18 +5,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.foundation.verticalScroll
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.Checkbox
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
@@ -27,10 +26,8 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedCard
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.RadioButton
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -70,7 +67,6 @@ import com.vayunmathur.education.util.QuizActions
 import com.vayunmathur.education.util.QuizUiState
 import com.vayunmathur.library.ui.IconKeyboardArrowDown
 import com.vayunmathur.library.ui.IconKeyboardArrowUp
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.education.R
@@ -130,88 +126,80 @@ fun QuizScreen(
     var checked by remember(questions) { mutableStateOf(initialChecked) }
     var hintsShown by remember(questions) { mutableIntStateOf(0) }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(state.title) },
-                navigationIcon = { IconNavigation({ actions.navigateUp() }) },
-            )
-        },
-    ) { padding ->
-        if (questions.isEmpty()) {
+    if (questions.isEmpty()) {
+        AppScaffold(
+            title = state.title,
+            onNavigateBack = { actions.navigateUp() },
+        ) { padding ->
             MissingContent(padding, stringResource(R.string.this_exercise_has_no_questions_yet))
-            return@Scaffold
+        }
+        return
+    }
+
+    val question = questions[index]
+    val currentAnswer = answers[question.id]
+
+    DetailScaffold(
+        title = state.title,
+        onNavigateBack = { actions.navigateUp() },
+    ) {
+        LinearProgressIndicator(
+            progress = { (index + 1f) / questions.size },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Text(
+            stringResource(R.string.question_of, index + 1, questions.size),
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Text(question.prompt.text, style = MaterialTheme.typography.headlineSmall)
+
+        key(question.id) {
+            QuestionInput(
+                question = question,
+                answer = currentAnswer,
+                enabled = !checked,
+                onAnswer = { answers[question.id] = it },
+            )
         }
 
-        val question = questions[index]
-        val currentAnswer = answers[question.id]
+        // Hints (progressive)
+        if (!checked && question.hints.isNotEmpty()) {
+            question.hints.take(hintsShown).forEach { hint ->
+                Text("\uD83D\uDCA1 $hint", style = MaterialTheme.typography.bodyMedium)
+            }
+            if (hintsShown < question.hints.size) {
+                TextButton(onClick = { hintsShown++ }) { Text(stringResource(R.string.show_a_hint)) }
+            }
+        }
 
-        Column(
-            Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(16.dp),
-            verticalArrangement = Arrangement.spacedBy(16.dp),
-        ) {
-            LinearProgressIndicator(
-                progress = { (index + 1f) / questions.size },
+        if (checked) {
+            FeedbackCard(
+                correct = question.isCorrect(currentAnswer),
+                explanation = question.explanation,
+            )
+        }
+
+        if (!checked) {
+            Button(
+                onClick = { checked = true },
+                enabled = currentAnswer != null,
                 modifier = Modifier.fillMaxWidth(),
-            )
-            Text(
-                stringResource(R.string.question_of, index + 1, questions.size),
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Text(question.prompt.text, style = MaterialTheme.typography.headlineSmall)
-
-            key(question.id) {
-                QuestionInput(
-                    question = question,
-                    answer = currentAnswer,
-                    enabled = !checked,
-                    onAnswer = { answers[question.id] = it },
-                )
-            }
-
-            // Hints (progressive)
-            if (!checked && question.hints.isNotEmpty()) {
-                question.hints.take(hintsShown).forEach { hint ->
-                    Text("💡 $hint", style = MaterialTheme.typography.bodyMedium)
-                }
-                if (hintsShown < question.hints.size) {
-                    TextButton(onClick = { hintsShown++ }) { Text(stringResource(R.string.show_a_hint)) }
-                }
-            }
-
-            if (checked) {
-                FeedbackCard(
-                    correct = question.isCorrect(currentAnswer),
-                    explanation = question.explanation,
-                )
-            }
-
-            if (!checked) {
-                Button(
-                    onClick = { checked = true },
-                    enabled = currentAnswer != null,
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.check)) }
-            } else if (index < questions.lastIndex) {
-                Button(
-                    onClick = {
-                        index++
-                        checked = false
-                        hintsShown = 0
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.next)) }
-            } else {
-                Button(
-                    onClick = { actions.finish(questions, answers) },
-                    modifier = Modifier.fillMaxWidth(),
-                ) { Text(stringResource(R.string.finish)) }
-            }
+            ) { Text(stringResource(R.string.check)) }
+        } else if (index < questions.lastIndex) {
+            Button(
+                onClick = {
+                    index++
+                    checked = false
+                    hintsShown = 0
+                },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.next)) }
+        } else {
+            Button(
+                onClick = { actions.finish(questions, answers) },
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(stringResource(R.string.finish)) }
         }
     }
 }

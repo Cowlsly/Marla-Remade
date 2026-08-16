@@ -8,14 +8,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -63,17 +62,13 @@ fun K2HomePage(backStack: NavBackStack<Route>, viewModel: EducationViewModel) {
         narrator?.speak("Hi ${l.name}! Let's learn. ${nextLesson?.title.orEmpty()}")
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { SunStreak(l.streakCount) },
-                actions = {
-                    IconButton(onClick = { backStack.add(Route.Badges) }) {
-                        Text("🌟", fontSize = 24.sp)
-                    }
-                    IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
-                },
-            )
+    AppScaffold(
+        title = { SunStreak(l.streakCount) },
+        actions = {
+            IconButton(onClick = { backStack.add(Route.Badges) }) {
+                Text("\uD83C\uDF1F", fontSize = 24.sp)
+            }
+            IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
         },
     ) { padding ->
         Column(

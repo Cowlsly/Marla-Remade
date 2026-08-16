@@ -7,24 +7,21 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -75,94 +72,77 @@ fun ExplorerHomePage(backStack: NavBackStack<Route>, viewModel: EducationViewMod
         }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(if (l.name.isBlank()) stringResource(R.string.explore) else stringResource(R.string.hi, l.name)) },
-                actions = {
-                    IconButton(onClick = { backStack.add(Route.Badges) }) {
-                        IconEmojiEvents()
-                    }
-                    IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
-                },
-            )
+    DetailLazyColumn(
+        title = if (l.name.isBlank()) stringResource(R.string.explore) else stringResource(R.string.hi, l.name),
+        actions = {
+            IconButton(onClick = { backStack.add(Route.Badges) }) {
+                IconEmojiEvents()
+            }
+            IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
         },
-    ) { padding ->
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(bottom = 24.dp),
-        ) {
-            item {
-                Row(
-                    Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    StreakChip(l.streakCount)
-                    StarsChip(l.totalStars)
-                }
+    ) {
+        item {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StreakChip(l.streakCount)
+                StarsChip(l.totalStars)
             }
+        }
 
-            continueUnit?.let { unit ->
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = MaterialTheme.colorScheme.primaryContainer,
-                        ),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                            .clickable { backStack.add(Route.UnitScreen(unit.id)) },
-                    ) {
-                        Column(Modifier.padding(16.dp)) {
-                            Text(
-                                stringResource(R.string.jump_back_in),
-                                style = MaterialTheme.typography.labelLarge,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                            Text(
-                                unit.title,
-                                style = MaterialTheme.typography.titleLarge,
-                                color = MaterialTheme.colorScheme.onPrimaryContainer,
-                            )
-                        }
-                    }
-                }
-            }
-
+        continueUnit?.let { unit ->
             item {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text(stringResource(R.string.find_a_topic)) },
-                    singleLine = true,
+                Card(
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                    ),
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp),
-                )
-            }
-
-            content.subjects.forEach { subject ->
-                val subjectCourses = visibleCourses.filter { it.subject == subject }
-                if (subjectCourses.isNotEmpty()) {
-                    item { SectionHeader(stringResource(subject.displayNameRes)) }
-                    items(subjectCourses, key = { it.id }) { course ->
-                        ExplorerCourseCard(course) { backStack.add(Route.Course(course.id)) }
+                        .clickable { backStack.add(Route.UnitScreen(unit.id)) },
+                ) {
+                    Column(Modifier.padding(16.dp)) {
+                        Text(
+                            stringResource(R.string.jump_back_in),
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
+                        Text(
+                            unit.title,
+                            style = MaterialTheme.typography.titleLarge,
+                            color = MaterialTheme.colorScheme.onPrimaryContainer,
+                        )
                     }
                 }
             }
+        }
 
-            if (visibleCourses.isEmpty()) {
-                item {
-                    Text(
-                        stringResource(R.string.nothing_here_yet_ask_a_grown_up_to_add_l),
-                        modifier = Modifier.padding(16.dp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        item {
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                label = { Text(stringResource(R.string.find_a_topic)) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+
+        content.subjects.forEach { subject ->
+            val subjectCourses = visibleCourses.filter { it.subject == subject }
+            if (subjectCourses.isNotEmpty()) {
+                item { SectionHeader(stringResource(subject.displayNameRes)) }
+                items(subjectCourses, key = { it.id }) { course ->
+                    ExplorerCourseCard(course) { backStack.add(Route.Course(course.id)) }
                 }
+            }
+        }
+
+        if (visibleCourses.isEmpty()) {
+            item {
+                Text(
+                    stringResource(R.string.nothing_here_yet_ask_a_grown_up_to_add_l),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -174,7 +154,6 @@ private fun ExplorerCourseCard(course: Course, onClick: () -> Unit) {
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp)
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(20.dp),
     ) {

@@ -9,15 +9,14 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.DetailLazyColumn
 import com.vayunmathur.library.ui.ElevatedCard
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -30,7 +29,6 @@ import com.vayunmathur.education.util.CourseActions
 import com.vayunmathur.education.util.CourseUiState
 import com.vayunmathur.education.util.CourseUnitRow
 import com.vayunmathur.education.util.EducationViewModel
-import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 
@@ -81,71 +79,61 @@ fun ScholarCoursePage(backStack: NavBackStack<Route>, viewModel: EducationViewMo
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ScholarCourseScreen(state: CourseUiState, actions: CourseActions) {
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text(state.title) },
-                navigationIcon = { IconNavigation({ actions.navigateUp() }) },
-            )
-        },
-    ) { padding ->
-        if (!state.available) {
+    if (!state.available) {
+        AppScaffold(
+            title = state.title,
+            onNavigateBack = { actions.navigateUp() },
+        ) { padding ->
             MissingContent(padding, stringResource(R.string.this_course_is_unavailable))
-            return@Scaffold
         }
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding),
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp),
-        ) {
-            if (state.description.isNotBlank()) {
-                item {
-                    Text(
-                        state.description,
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                    )
-                }
+        return
+    }
+    DetailLazyColumn(
+        title = state.title,
+        onNavigateBack = { actions.navigateUp() },
+    ) {
+        if (state.description.isNotBlank()) {
+            item {
+                Text(
+                    state.description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
-            items(state.units, key = { it.id }) { unit ->
-                ElevatedCard(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 4.dp)
-                        .clickable { actions.openUnit(unit.id) },
-                ) {
-                    Column(Modifier.padding(16.dp)) {
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                        ) {
-                            Text(unit.title, style = MaterialTheme.typography.titleMedium)
-                            StarRow(unit.stars)
-                        }
-                        Text(
-                            pluralStringResource(R.plurals.lessons, unit.lessonCount, unit.lessonCount),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                        unit.dueEpochDay?.let {
-                            Row(Modifier.padding(top = 8.dp)) { DeadlineChip(it) }
-                        }
-                    }
-                }
-            }
-            state.challenge?.let { challenge ->
-                item {
-                    FilledTonalButton(
-                        onClick = { actions.openExercise(challenge.id) },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
+        }
+        items(state.units, key = { it.id }) { unit ->
+            ElevatedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { actions.openUnit(unit.id) },
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        Text(challenge.title.ifBlank { stringResource(R.string.course_challenge) })
+                        Text(unit.title, style = MaterialTheme.typography.titleMedium)
+                        StarRow(unit.stars)
                     }
+                    Text(
+                        pluralStringResource(R.plurals.lessons, unit.lessonCount, unit.lessonCount),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    unit.dueEpochDay?.let {
+                        Row(Modifier.padding(top = 8.dp)) { DeadlineChip(it) }
+                    }
+                }
+            }
+        }
+        state.challenge?.let { challenge ->
+            item {
+                FilledTonalButton(
+                    onClick = { actions.openExercise(challenge.id) },
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(challenge.title.ifBlank { stringResource(R.string.course_challenge) })
                 }
             }
         }
