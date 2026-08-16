@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="label_description">Beschreibung</string>
-    <string name="app_name">YouPipe</string>
     <string name="title_history">Verlauf</string>
     <string name="label_search">Suche</string>
     <string name="subscribers_count">%1$s Abbonenten</string>

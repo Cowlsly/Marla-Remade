@@ -1,6 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
-    <string name="app_name">YouPipe</string>
     <string name="label_search">検索</string>
     <string name="subscribers_count"><xliff:g id="count" example="12K">%1$s</xliff:g> 人の登録者</string>
     <string name="empty_recommendations">いくつかのビデオを見てパーソナライズされたおすすめを表示</string>

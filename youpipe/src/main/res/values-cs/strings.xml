@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="label_description">Popis</string>
-    <string name="app_name">YouPipe</string>
     <string name="title_history">Historie</string>
     <string name="label_search">Hledat</string>
     <string name="subscribers_count"><xliff:g id="count" example="12K">%1$s</xliff:g> odběratelů</string>

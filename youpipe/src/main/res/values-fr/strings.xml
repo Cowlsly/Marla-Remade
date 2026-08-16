@@ -76,7 +76,6 @@
     <string name="title_settings">Paramètres</string>
     <string name="action_unmute">Réactiver le son</string>
     <string name="video_info_format"><xliff:g id="channel" example="Linus Tech Tips">%1$s</xliff:g> | <xliff:g id="views" example="1,2 M">%2$s</xliff:g> vues | <xliff:g id="time" example="Il y a 2 jours">%3$s</xliff:g></string>
-    <string name="app_name">YouPipe</string>
     <string name="label_youtube_content">Contenu YouTube</string>
     <string name="label_no_muted_keywords">Aucun mot-clé masqué</string>
     <string name="time_ago_hours">Il y a <xliff:g id="hours" example="3">%1$d</xliff:g> heures</string>

@@ -5,7 +5,6 @@
     <string name="subscribers_count"><xliff:g id="count" example="12K">%1$s</xliff:g> tellijat</string>
     <string name="title_create_subscription_category">Loo tellimuste kategooria</string>
     <string name="title_update_subscription_category">Uuenda tellimuste kategooriat</string>
-    <string name="app_name">YouPipe</string>
     <string name="label_category_name">Kategooria nimi</string>
     <string name="label_select_subscriptions">Vali tellimused:</string>
     <string name="action_create">Loo</string>

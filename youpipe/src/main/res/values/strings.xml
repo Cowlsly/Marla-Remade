@@ -1,6 +1,6 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- App name: launcher label. Proper noun YouPipe -->
-    <string name="app_name">YouPipe</string>
+    <string name="app_name" translatable="false">YouPipe</string>
 
     <!-- Search bar placeholder hint. Noun, also tab label for search -->
     <string name="label_search">Search</string>
