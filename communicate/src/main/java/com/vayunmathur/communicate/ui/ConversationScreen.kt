@@ -14,7 +14,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -439,8 +438,7 @@ private fun ComposeSmsRow(
     Surface(
         tonalElevation = 2.dp,
         modifier = Modifier
-            .fillMaxWidth()
-            .imePadding(),
+            .fillMaxWidth(),
     ) {
         Column(
             modifier = Modifier

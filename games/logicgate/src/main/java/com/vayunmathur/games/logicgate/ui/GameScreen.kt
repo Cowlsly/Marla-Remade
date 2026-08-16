@@ -446,7 +446,7 @@ fun GameScreen(
                     )
                 } else {
                     // Tablet/landscape – keep side panels but still solid blocks
-                    Column(modifier = Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+                    Column(modifier = Modifier.fillMaxSize().navigationBarsPadding()) {
                         Row(modifier = Modifier.weight(1f).fillMaxWidth().background(Turing.bg)) {
                             MobileLeftPanel(tick = selectedIdxMutable, simSpeed = if (selectedIdxMutable == 0) 0 else 20, level = level, inputDecimals = inputDecimals, inputBitSlices = inputBitSlices, desiredDecimals = desiredDecimals, desiredBitSlices = desiredBitSlices, actualDecimals = actualDecimals, modifier = Modifier.width(MobileDimens.leftPanelW).fillMaxHeight())
                             MobileMiddleToolbar(onClear = { actions.clearCircuit() }, onUndo = { actions.undo() }, onRedo = { actions.redo() }, canUndo = state.canUndo, canRedo = state.canRedo, modifier = Modifier.width(MobileDimens.toolbarWidth).fillMaxHeight())
