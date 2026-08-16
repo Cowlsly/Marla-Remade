@@ -144,6 +144,10 @@ fun MyMapLayers(
         // Rendered above traffic but below the user puck.
         GooglePoiLayer(googlePins)
 
+        // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
+        // under the puck during navigation. No-op until the tileset is hosted.
+        MaxspeedLayer()
+
         // Search-result pins (Vela MARKERS_LAYER analog) — drawn above the
         // ambient POI overlay so a query's hits stand out; tap re-selects.
         SearchResultLayer(searchResults)
