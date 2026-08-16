@@ -20,6 +20,12 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
+
+        <!-- Android Auto (media) app descriptor: declares this as a media app for AA. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
+
         <activity
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
             android:name=".MainActivity"
@@ -32,12 +38,17 @@
             </intent-filter>
         </activity>
 
+        <!-- MediaLibraryService: serves phone transport AND the Android Auto browse tree.
+             The MediaBrowserService action lets Android Auto discover the browsable
+             content hierarchy; the media3 actions serve MediaController/MediaBrowser. -->
         <service
             android:name=".service.PlaybackService"
             android:foregroundServiceType="mediaPlayback"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
+                <action android:name="androidx.media3.session.MediaLibraryService" />
                 <action android:name="androidx.media3.session.MediaSessionService" />
+                <action android:name="android.media.browse.MediaBrowserService" />
                 <action android:name="android.intent.action.MEDIA_BUTTON" />
             </intent-filter>
         </service>
