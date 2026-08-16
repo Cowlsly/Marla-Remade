@@ -59,4 +59,6 @@
     <string name="updates_empty_message">Eine Überprüfung der Quellen findet bei Wi-Fi Verbindung alle zwölf Stunden im Hintergund statt.</string>
     <string name="updates_last_checked">Letzte Prüfung %1$s</string>
     <string name="updates_notification_body">Öffne den App Store zur Überprüfung und Installation.</string>
+    <string name="updates_channel_name">App aktualisierungen</string>
+    <string name="updates_channel_description">Informiert über vorhandene Aktualisierungen ihrer installierten Apps</string>
 </resources>
