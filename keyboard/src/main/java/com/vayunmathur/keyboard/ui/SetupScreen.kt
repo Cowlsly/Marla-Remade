@@ -9,11 +9,8 @@ import android.view.inputmethod.InputMethodManager
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
@@ -35,9 +32,10 @@ import com.vayunmathur.keyboard.ime.KeyboardService
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSwitchRow
+import com.vayunmathur.library.ui.AppBarAlignment
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.CenterAlignedTopAppBar
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconCheck
@@ -47,7 +45,6 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
@@ -112,15 +109,10 @@ fun SetupScreen() {
 
     var testText by remember { mutableStateOf("") }
 
-    Scaffold(topBar = { CenterAlignedTopAppBar(title = { Text(stringResource(R.string.app_name)) }) }) { padding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(padding)
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
+    DetailScaffold(
+        title = stringResource(R.string.app_name),
+        alignment = AppBarAlignment.Center,
+    ) {
             StatusCard(enabled = enabled, selected = selected)
 
             Button(
@@ -220,7 +212,6 @@ fun SetupScreen() {
                     .fillMaxWidth()
                     .padding(bottom = 24.dp),
             )
-        }
     }
 }
 
