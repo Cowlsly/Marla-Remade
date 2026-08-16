@@ -207,9 +207,20 @@ object YoutubeStreamHelper {
     ): JsonObject {
         // ANDROID_VR returns direct stream URLs and does not require a PO Token or visitorData,
         // which is why it is far more reliable than the SABR (WEB) path right now.
+        //
+        // The request shape mirrors PipePipe's working android_vr player call:
+        //  - the standard www.youtube.com InnerTube player endpoint (NOT the gapis host, and
+        //    without the &t=/&id= params, which the gapis PO-token flow uses);
+        //  - X-YouTube-Client-Name (28) / X-YouTube-Client-Version headers identifying the client;
+        //  - a playbackContext carrying the signatureTimestamp + HTML5 preference so YouTube
+        //    returns HTML5-decipherable formats instead of an invalid/SABR-only response.
         val innertubeClientRequestInfo = InnertubeClientRequestInfo.ofAndroidVrClient()
 
-        val headers = getMobileClientHeaders(ClientsConstants.ANDROID_VR_USER_AGENT)
+        val headers = mapOf(
+            "User-Agent" to listOf(ClientsConstants.ANDROID_VR_USER_AGENT),
+            "X-YouTube-Client-Name" to listOf(ClientsConstants.ANDROID_VR_CLIENT_ID),
+            "X-YouTube-Client-Version" to listOf(ClientsConstants.ANDROID_VR_CLIENT_VERSION)
+        )
 
         val builder = prepareJsonBuilder(
             localization, contentCountry, innertubeClientRequestInfo, null
@@ -217,10 +228,13 @@ object YoutubeStreamHelper {
 
         addVideoIdCpnAndOkChecks(builder, videoId, cpn)
 
+        addVrPlaybackContext(
+            builder, YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId)
+        )
+
         val body = builder.done().toString().toByteArray(Charsets.UTF_8)
 
-        val url = YOUTUBEI_V1_GAPIS_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER +
-            "&t=" + generateTParameter() + "&id=" + videoId
+        val url = YOUTUBEI_V1_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER
 
         return JsonUtils.toJsonObject(
             getValidJsonResponseBody(
@@ -335,6 +349,18 @@ object YoutubeStreamHelper {
             .`object`("contentPlaybackContext")
             .value("signatureTimestamp", signatureTimestamp)
             .value("referer", referer)
+            .end()
+            .end()
+    }
+
+    private fun addVrPlaybackContext(
+        builder: YoutubeJsonBuilder,
+        signatureTimestamp: Int
+    ) {
+        builder.`object`("playbackContext")
+            .`object`("contentPlaybackContext")
+            .value("html5Preference", "HTML5_PREF_WANTS")
+            .value("signatureTimestamp", signatureTimestamp)
             .end()
             .end()
     }
