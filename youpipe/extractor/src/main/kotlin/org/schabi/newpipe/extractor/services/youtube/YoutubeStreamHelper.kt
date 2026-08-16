@@ -197,6 +197,72 @@ object YoutubeStreamHelper {
         ).getObject("playerResponse")
     }
 
+    /**
+     * ANDROID_VR request headers, matching PipePipe's android_vr player call exactly.
+     *
+     * The standard www.youtube.com InnerTube player endpoint is used (NOT the gapis host, and
+     * without the &t=/&id= params which the gapis PO-token flow uses). X-YouTube-Client-Name (28)
+     * and X-YouTube-Client-Version identify the client.
+     */
+    @JvmStatic
+    fun getAndroidVrHeaders(): Map<String, List<String>> = mapOf(
+        "Content-Type" to listOf("application/json"),
+        "User-Agent" to listOf(ClientsConstants.ANDROID_VR_USER_AGENT),
+        "X-YouTube-Client-Name" to listOf(ClientsConstants.ANDROID_VR_CLIENT_ID),
+        "X-YouTube-Client-Version" to listOf(ClientsConstants.ANDROID_VR_CLIENT_VERSION)
+    )
+
+    @JvmStatic
+    fun getAndroidVrPlayerUrl(): String =
+        YOUTUBEI_V1_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER
+
+    /**
+     * Builds the ANDROID_VR /player request body byte-for-byte identical to PipePipe's
+     * `fetchConfiguredJsonPlayer` for the signed-out path: a minimal context.client (no
+     * request/user/thirdParty objects), a playbackContext carrying html5Preference +
+     * signatureTimestamp, then cpn/videoId/contentCheckOk/racyCheckOk. On the signed-out
+     * path there is no visitorData and no serviceIntegrityDimensions/poToken.
+     *
+     * The field order matches PipePipe exactly so the serialized JSON is identical.
+     */
+    @JvmStatic
+    fun buildAndroidVrPlayerRequestBody(
+        localization: Localization,
+        contentCountry: ContentCountry,
+        videoId: String,
+        cpn: String,
+        signatureTimestamp: Int
+    ): JsonObject {
+        val builder = YoutubeJsonBuilder()
+        builder.`object`("context")
+            .`object`("client")
+            .value("utcOffsetMinutes", 0)
+            .value("timeZone", "UTC")
+            .value("hl", localization.getLocalizationCode())
+            .value("gl", contentCountry.countryCode)
+            .value("userAgent", ClientsConstants.ANDROID_VR_USER_AGENT)
+            .value("clientName", ClientsConstants.ANDROID_VR_CLIENT_NAME)
+            .value("clientVersion", ClientsConstants.ANDROID_VR_CLIENT_VERSION)
+            .value("deviceMake", ClientsConstants.ANDROID_VR_DEVICE_MAKE)
+            .value("deviceModel", ClientsConstants.ANDROID_VR_DEVICE_MODEL)
+            .value("androidSdkVersion", ClientsConstants.ANDROID_VR_SDK_VERSION)
+            .value("osName", ClientsConstants.ANDROID_VR_OS_NAME)
+            .value("osVersion", ClientsConstants.ANDROID_VR_OS_VERSION)
+            .end()
+            .end()
+            .`object`("playbackContext")
+            .`object`("contentPlaybackContext")
+            .value("html5Preference", "HTML5_PREF_WANTS")
+            .value("signatureTimestamp", signatureTimestamp)
+            .end()
+            .end()
+            .value(CPN, cpn)
+            .value(VIDEO_ID, videoId)
+            .value(CONTENT_CHECK_OK, true)
+            .value(RACY_CHECK_OK, true)
+        return builder.done()
+    }
+
     @JvmStatic
     @Throws(IOException::class, ExtractionException::class)
     fun getAndroidVrPlayerResponse(
@@ -207,38 +273,18 @@ object YoutubeStreamHelper {
     ): JsonObject {
         // ANDROID_VR returns direct stream URLs and does not require a PO Token or visitorData,
         // which is why it is far more reliable than the SABR (WEB) path right now.
-        //
-        // The request shape mirrors PipePipe's working android_vr player call:
-        //  - the standard www.youtube.com InnerTube player endpoint (NOT the gapis host, and
-        //    without the &t=/&id= params, which the gapis PO-token flow uses);
-        //  - X-YouTube-Client-Name (28) / X-YouTube-Client-Version headers identifying the client;
-        //  - a playbackContext carrying the signatureTimestamp + HTML5 preference so YouTube
-        //    returns HTML5-decipherable formats instead of an invalid/SABR-only response.
-        val innertubeClientRequestInfo = InnertubeClientRequestInfo.ofAndroidVrClient()
+        val headers = getAndroidVrHeaders()
 
-        val headers = mapOf(
-            "User-Agent" to listOf(ClientsConstants.ANDROID_VR_USER_AGENT),
-            "X-YouTube-Client-Name" to listOf(ClientsConstants.ANDROID_VR_CLIENT_ID),
-            "X-YouTube-Client-Version" to listOf(ClientsConstants.ANDROID_VR_CLIENT_VERSION)
-        )
-
-        val builder = prepareJsonBuilder(
-            localization, contentCountry, innertubeClientRequestInfo, null
-        )
-
-        addVideoIdCpnAndOkChecks(builder, videoId, cpn)
-
-        addVrPlaybackContext(
-            builder, YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId)
-        )
-
-        val body = builder.done().toString().toByteArray(Charsets.UTF_8)
-
-        val url = YOUTUBEI_V1_URL + PLAYER + "?" + DISABLE_PRETTY_PRINT_PARAMETER
+        val body = buildAndroidVrPlayerRequestBody(
+            localization, contentCountry, videoId, cpn,
+            YoutubeJavaScriptPlayerManager.getSignatureTimestamp(videoId)
+        ).toString().toByteArray(Charsets.UTF_8)
 
         return JsonUtils.toJsonObject(
             getValidJsonResponseBody(
-                getDownloader().postWithContentTypeJson(url, headers, body, localization)
+                getDownloader().postWithContentTypeJson(
+                    getAndroidVrPlayerUrl(), headers, body, localization
+                )
             )
         )
     }
@@ -349,18 +395,6 @@ object YoutubeStreamHelper {
             .`object`("contentPlaybackContext")
             .value("signatureTimestamp", signatureTimestamp)
             .value("referer", referer)
-            .end()
-            .end()
-    }
-
-    private fun addVrPlaybackContext(
-        builder: YoutubeJsonBuilder,
-        signatureTimestamp: Int
-    ) {
-        builder.`object`("playbackContext")
-            .`object`("contentPlaybackContext")
-            .value("html5Preference", "HTML5_PREF_WANTS")
-            .value("signatureTimestamp", signatureTimestamp)
             .end()
             .end()
     }
