@@ -1,6 +1,8 @@
 package com.vayunmathur.youpipe.util.sabr
 
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.OptIn
 import androidx.core.net.toUri
 import androidx.media3.common.C
@@ -34,42 +36,101 @@ import java.util.Locale
 /**
  * media3 [MediaSource] that publishes a generated DASH manifest (with exact SABR segment counts)
  * and serves segments from a session-based [SabrNgSession] via [SabrNgSegmentDataSource].
+ *
+ * The heavy play-time work — minting the content PO token and fetching each format's
+ * initialization/segment index to build the [SabrNgSourceSpec] — is deferred to a dedicated
+ * background thread started from [prepareSourceInternal]. This keeps
+ * `MediaSource.Factory.createMediaSource` (called by ExoPlayer on the app main thread during
+ * `setMediaItems`) non-blocking, while preserving the known-working play-time ordering
+ * (token minted lazily on first source open, not prewarmed).
  */
 @OptIn(UnstableApi::class)
-class SabrNgDashMediaSource
-@Throws(IOException::class)
-constructor(
+class SabrNgDashMediaSource(
     context: Context,
     private val mediaItem: MediaItem,
-    private val spec: SabrNgSourceSpec,
-    onAttestationFailure: (() -> YoutubeSabrInfo?)? = null
+    private val videoId: String,
+    private val specSupplier: () -> SabrNgSourceSpec,
+    private val onAttestationFailure: (() -> YoutubeSabrInfo?)? = null
 ) : CompositeMediaSource<Int>() {
 
-    private val session: SabrNgSession
-    private val durationUs: Long
-    private val childSource: DashMediaSource
+    private val appContext: Context = context.applicationContext
 
-    init {
-        val spoolDir = File(context.cacheDir, "sabrng").apply { mkdirs() }
-        session = SabrNgSession(spec, spoolDir, onAttestationFailure)
-        val durationMs = spec.getDurationMs()
-        durationUs = if (durationMs > 0) durationMs * 1000L else C.TIME_UNSET
-        val dataSourceFactory = DataSource.Factory {
-            SabrNgSegmentDataSource(session, SEGMENT_TIMEOUT_MS)
-        }
-        val manifest = buildManifest(spec, durationMs)
-        childSource = DashMediaSource.Factory(
-            DefaultDashChunkSource.Factory(dataSourceFactory),
-            /* manifestDataSourceFactory= */ null
-        ).createMediaSource(manifest, mediaItem)
-    }
+    @Volatile
+    private var session: SabrNgSession? = null
+
+    @Volatile
+    private var childSource: DashMediaSource? = null
+
+    @Volatile
+    private var buildError: IOException? = null
+
+    @Volatile
+    private var released = false
+
+    private var playbackHandler: Handler? = null
+    private var buildThread: Thread? = null
+    private val lifecycleLock = Any()
 
     override fun getMediaItem(): MediaItem = mediaItem
 
     override fun prepareSourceInternal(mediaTransferListener: TransferListener?) {
         super.prepareSourceInternal(mediaTransferListener)
-        session.start()
-        prepareChildSource(0, childSource)
+        // prepareSourceInternal runs on ExoPlayer's playback thread (not main); capture its looper
+        // so the built child source can be prepared back on it once the background build finishes.
+        val handler = Handler(checkNotNull(Looper.myLooper()))
+        playbackHandler = handler
+        val thread = Thread({ buildAndPrepare(handler) }, "SabrNgSourceOpen-$videoId")
+        thread.isDaemon = true
+        buildThread = thread
+        thread.start()
+    }
+
+    private fun buildAndPrepare(handler: Handler) {
+        try {
+            // Heavy, off-main: mint the PO token (WebView/DOM JS) and fetch init segments.
+            val spec = specSupplier()
+            val spoolDir = File(appContext.cacheDir, "sabrng").apply { mkdirs() }
+            val builtSession = SabrNgSession(spec, spoolDir, onAttestationFailure)
+            val durationMs = spec.getDurationMs()
+            val dataSourceFactory = DataSource.Factory {
+                SabrNgSegmentDataSource(builtSession, SEGMENT_TIMEOUT_MS)
+            }
+            val manifest = buildManifest(spec, durationMs)
+            val builtChild = DashMediaSource.Factory(
+                DefaultDashChunkSource.Factory(dataSourceFactory),
+                /* manifestDataSourceFactory= */ null
+            ).createMediaSource(manifest, mediaItem)
+            // Publish the built session/child under the lifecycle lock so a concurrent
+            // releaseSourceInternal on the playback thread can always tear the session down,
+            // even if it races with this background build completing.
+            synchronized(lifecycleLock) {
+                if (released) {
+                    builtSession.stop()
+                    return
+                }
+                session = builtSession
+                childSource = builtChild
+            }
+            handler.post {
+                if (released) {
+                    return@post
+                }
+                builtSession.start()
+                prepareChildSource(0, builtChild)
+            }
+        } catch (e: Throwable) {
+            buildError = if (e is IOException) {
+                e
+            } else {
+                IOException("Failed to open SABR media source for $videoId", e)
+            }
+        }
+    }
+
+    @Throws(IOException::class)
+    override fun maybeThrowSourceInfoRefreshError() {
+        buildError?.let { throw it }
+        super.maybeThrowSourceInfoRefreshError()
     }
 
     override fun onChildSourceInfoRefreshed(
@@ -85,21 +146,33 @@ constructor(
         allocator: Allocator,
         startPositionUs: Long
     ): MediaPeriod {
+        val child = checkNotNull(childSource)
         if (startPositionUs > 0) {
-            session.requestSeek(startPositionUs / 1000L)
+            session?.requestSeek(startPositionUs / 1000L)
         }
-        val child = childSource.createPeriod(id, allocator, startPositionUs)
-        return SabrNgMediaPeriod(child)
+        val childPeriod = child.createPeriod(id, allocator, startPositionUs)
+        return SabrNgMediaPeriod(childPeriod)
     }
 
     override fun releasePeriod(mediaPeriod: MediaPeriod) {
         val period = mediaPeriod as SabrNgMediaPeriod
-        childSource.releasePeriod(period.child)
+        childSource?.releasePeriod(period.child)
     }
 
     override fun releaseSourceInternal() {
         super.releaseSourceInternal()
-        session.stop()
+        val sessionToStop: SabrNgSession?
+        synchronized(lifecycleLock) {
+            released = true
+            sessionToStop = session
+            session = null
+            childSource = null
+        }
+        buildThread?.interrupt()
+        buildThread = null
+        playbackHandler?.removeCallbacksAndMessages(null)
+        playbackHandler = null
+        sessionToStop?.stop()
     }
 
     private inner class SabrNgMediaPeriod(val child: MediaPeriod) : MediaPeriod {
@@ -143,7 +216,7 @@ constructor(
         override fun readDiscontinuity(): Long = child.readDiscontinuity()
 
         override fun seekToUs(positionUs: Long): Long {
-            session.requestSeek(maxOf(0, positionUs) / 1000L)
+            session?.requestSeek(maxOf(0, positionUs) / 1000L)
             return child.seekToUs(positionUs)
         }
 
