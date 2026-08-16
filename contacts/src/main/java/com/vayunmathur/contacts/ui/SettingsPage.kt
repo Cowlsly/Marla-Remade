@@ -2,12 +2,15 @@ package com.vayunmathur.contacts.ui
 
 import android.Manifest
 import android.content.pm.PackageManager
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.plus
@@ -16,6 +19,7 @@ import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -23,6 +27,8 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.vayunmathur.contacts.data.isLocalAccountType
+import com.vayunmathur.contacts.util.ContactAccount
 import com.vayunmathur.contacts.util.ContactViewModel
 import com.vayunmathur.contacts.R
 import com.vayunmathur.contacts.Route
@@ -43,6 +49,9 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
 
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+
+    var renameTarget by remember { mutableStateOf<ContactAccount?>(null) }
+    var deleteTarget by remember { mutableStateOf<ContactAccount?>(null) }
 
     val calendarPermissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
@@ -199,10 +208,26 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                     content = { Text(displayName) },
                     supportingContent = { Text(account.type) },
                     trailingContent = {
-                        Checkbox(
-                            checked = isVisible,
-                            onCheckedChange = { viewModel.setAccountVisibility(account, it) }
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            if (isLocalAccountType(account.type)) {
+                                OverflowMenu(icon = { IconMoreVert() }) {
+                                    Item(
+                                        text = stringResource(UiR.string.rename),
+                                        leadingIcon = { IconEdit() },
+                                        onClick = { renameTarget = account }
+                                    )
+                                    Item(
+                                        text = stringResource(UiR.string.delete),
+                                        leadingIcon = { IconDelete() },
+                                        onClick = { deleteTarget = account }
+                                    )
+                                }
+                            }
+                            Checkbox(
+                                checked = isVisible,
+                                onCheckedChange = { viewModel.setAccountVisibility(account, it) }
+                            )
+                        }
                     }
                 )
                 HorizontalDivider()
@@ -210,6 +235,60 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
             item {
                 Spacer(modifier = Modifier.height(80.dp))
             }
+        }
+
+        renameTarget?.let { target ->
+            var newName by remember(target) { mutableStateOf(target.name) }
+            AlertDialog(
+                onDismissRequest = { renameTarget = null },
+                title = { Text(stringResource(R.string.rename_account)) },
+                text = {
+                    TextField(
+                        value = newName,
+                        onValueChange = { newName = it },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true,
+                        label = { Text(stringResource(R.string.account_name)) }
+                    )
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        val name = newName.trim()
+                        if (name.isNotEmpty()) {
+                            viewModel.renameLocalAccount(target, name) { ok, err ->
+                                if (!ok && err == "collision") {
+                                    Toast.makeText(
+                                        context,
+                                        context.getString(R.string.account_name_exists),
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                }
+                            }
+                            renameTarget = null
+                        }
+                    }) { Text(stringResource(UiR.string.save)) }
+                },
+                dismissButton = {
+                    TextButton(onClick = { renameTarget = null }) {
+                        Text(stringResource(UiR.string.cancel))
+                    }
+                }
+            )
+        }
+
+        deleteTarget?.let { target ->
+            ConfirmDialog(
+                title = stringResource(R.string.delete_account),
+                message = stringResource(R.string.delete_local_account_confirm),
+                confirmLabel = stringResource(UiR.string.delete),
+                dismissLabel = stringResource(UiR.string.cancel),
+                destructive = true,
+                onConfirm = {
+                    viewModel.deleteLocalAccount(target)
+                    deleteTarget = null
+                },
+                onDismiss = { deleteTarget = null }
+            )
         }
     }
 }

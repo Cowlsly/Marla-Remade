@@ -27,7 +27,12 @@ data class SimContact(
 
 const val SIM_ACCOUNT_TYPE = "com.vayunmathur.contacts.sim"
 
+/** Account type for the app's on-device local accounts (renamable/deletable by the user). */
+const val LOCAL_ACCOUNT_TYPE = "com.vayunmathur.contacts.local"
+
 fun isSimAccountType(type: String?): Boolean = type == SIM_ACCOUNT_TYPE
+
+fun isLocalAccountType(type: String?): Boolean = type == LOCAL_ACCOUNT_TYPE
 
 object SimContactsDataSource {
 

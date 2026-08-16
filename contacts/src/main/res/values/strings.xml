@@ -81,6 +81,14 @@
     <string name="enter_account_name">Enter a name for the new local account:</string>
     <!-- Text field label for account name input -->
     <string name="account_name">Account Name</string>
+    <!-- Overflow action / dialog title to rename a local account -->
+    <string name="rename_account">Rename account</string>
+    <!-- Overflow action / dialog title to delete a local account -->
+    <string name="delete_account">Delete account</string>
+    <!-- Confirmation message when deleting a local account and its contacts -->
+    <string name="delete_local_account_confirm">Delete this account and all its contacts? This cannot be undone.</string>
+    <!-- Error toast when the new account name is already used -->
+    <string name="account_name_exists">An account with that name already exists</string>
 
     <!-- Delete contact flow -->
     <!-- Dialog title for delete single contact confirmation -->

@@ -33,9 +33,11 @@ import com.vayunmathur.contacts.data.PhoneNumber
 import com.vayunmathur.contacts.data.Photo
 import com.vayunmathur.contacts.data.PrefillValue
 import com.vayunmathur.contacts.data.SIM_ACCOUNT_TYPE
+import com.vayunmathur.contacts.data.LOCAL_ACCOUNT_TYPE
 import com.vayunmathur.contacts.data.SimContact
 import com.vayunmathur.contacts.data.SimContactsDataSource
 import com.vayunmathur.contacts.data.isSimAccountType
+import com.vayunmathur.contacts.data.isLocalAccountType
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
@@ -290,7 +292,7 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
         val savedAccounts = dataStore.stringSetFlow("extra_accounts_set").first().mapNotNull { entry ->
             val parts = entry.split("|")
             parts.firstOrNull()?.takeIf { it.isNotEmpty() }?.let { name ->
-                ContactAccount(name, parts.getOrElse(1) { "com.vayunmathur.contacts.local" })
+                ContactAccount(name, parts.getOrElse(1) { LOCAL_ACCOUNT_TYPE })
             }
         }
         // Virtual SIM accounts
@@ -357,7 +359,7 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
         }
     }
 
-    fun createAccount(name: String, type: String = "com.vayunmathur.contacts.local", onComplete: (() -> Unit)? = null) {
+    fun createAccount(name: String, type: String = LOCAL_ACCOUNT_TYPE, onComplete: (() -> Unit)? = null) {
         viewModelScope.launch {
             if (dataStore.addStringToSetIfAbsent("extra_accounts_set", "$name|$type")) {
                 loadAccounts()
@@ -365,6 +367,126 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             withContext(Dispatchers.Main) {
                 onComplete?.invoke()
             }
+        }
+    }
+
+    /**
+     * Renames a local (on-device) account. Guards that [account] is a local account and that
+     * [newName] is non-blank and does not collide with an existing account of the same type.
+     * Re-points every RawContact stored under the old name to [newName] and migrates the
+     * DataStore references (saved-accounts set, hidden-accounts key, last-selected account).
+     * [onResult] is invoked on the main thread with success and an optional error message key.
+     */
+    fun renameLocalAccount(
+        account: ContactAccount,
+        newName: String,
+        onResult: ((Boolean, String?) -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            val trimmed = newName.trim()
+            if (!isLocalAccountType(account.type)) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
+                return@launch
+            }
+            if (trimmed.isEmpty()) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "blank") }
+                return@launch
+            }
+            if (trimmed == account.name) {
+                withContext(Dispatchers.Main) { onResult?.invoke(true, null) }
+                return@launch
+            }
+            val collides = _accounts.value.any { it.type == account.type && it.name == trimmed }
+            if (collides) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "collision") }
+                return@launch
+            }
+            withContext(Dispatchers.IO) {
+                try {
+                    val resolver = getApplication<Application>().contentResolver
+                    val ops = ArrayList<ContentProviderOperation>()
+                    ops.add(
+                        ContentProviderOperation.newUpdate(ContactsContract.RawContacts.CONTENT_URI)
+                            .withSelection(
+                                "${ContactsContract.RawContacts.ACCOUNT_TYPE} = ? AND ${ContactsContract.RawContacts.ACCOUNT_NAME} = ?",
+                                arrayOf(account.type, account.name)
+                            )
+                            .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, trimmed)
+                            .build()
+                    )
+                    resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+                } catch (e: Exception) {
+                    Log.e("ContactViewModel", "Error renaming local account", e)
+                }
+                // Migrate the saved-accounts label so an empty account (no contacts) is renamed too.
+                dataStore.removeStringFromSet("extra_accounts_set", "${account.name}|${account.type}")
+                dataStore.addStringToSetIfAbsent("extra_accounts_set", "$trimmed|${account.type}")
+                // Migrate the hidden-accounts visibility key ("type|name").
+                val hidden = dataStore.getStringSetAwait("hidden_accounts")
+                val oldHiddenKey = "${account.type}|${account.name}"
+                if (oldHiddenKey in hidden) {
+                    dataStore.removeStringFromSet("hidden_accounts", oldHiddenKey)
+                    dataStore.addStringToSet("hidden_accounts", "${account.type}|$trimmed")
+                }
+                // Migrate last-selected (the implicit default save location).
+                if (dataStore.getString("last_account_type") == account.type &&
+                    dataStore.getString("last_account_name") == account.name
+                ) {
+                    dataStore.setString("last_account_name", trimmed)
+                    _lastSelectedAccount.value = ContactAccount(trimmed, account.type)
+                }
+            }
+            loadAccounts()
+            loadContacts()
+            withContext(Dispatchers.Main) { onResult?.invoke(true, null) }
+        }
+    }
+
+    /**
+     * Deletes a local (on-device) account and all of its contacts. Guards that [account] is a
+     * local account. Hard-deletes every RawContact for the account (via the
+     * CALLER_IS_SYNCADAPTER URI param, since the local account has no sync adapter) and clears
+     * the DataStore references. [onResult] is invoked on the main thread.
+     */
+    fun deleteLocalAccount(
+        account: ContactAccount,
+        onResult: ((Boolean, String?) -> Unit)? = null,
+    ) {
+        viewModelScope.launch {
+            if (!isLocalAccountType(account.type)) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
+                return@launch
+            }
+            withContext(Dispatchers.IO) {
+                try {
+                    val resolver = getApplication<Application>().contentResolver
+                    val uri = ContactsContract.RawContacts.CONTENT_URI.buildUpon()
+                        .appendQueryParameter(ContactsContract.CALLER_IS_SYNCADAPTER, "true")
+                        .build()
+                    resolver.delete(
+                        uri,
+                        "${ContactsContract.RawContacts.ACCOUNT_TYPE} = ? AND ${ContactsContract.RawContacts.ACCOUNT_NAME} = ?",
+                        arrayOf(account.type, account.name)
+                    )
+                } catch (e: Exception) {
+                    Log.e("ContactViewModel", "Error deleting local account", e)
+                }
+                dataStore.removeStringFromSet("extra_accounts_set", "${account.name}|${account.type}")
+                dataStore.removeStringFromSet("hidden_accounts", "${account.type}|${account.name}")
+                // Legacy name-only hidden key.
+                dataStore.removeStringFromSet("hidden_accounts", account.name)
+                // If this account was the default save location, reset to on-device.
+                if (dataStore.getString("last_account_type") == account.type &&
+                    dataStore.getString("last_account_name") == account.name
+                ) {
+                    dataStore.setString("last_account_name", "")
+                    dataStore.setString("last_account_type", "")
+                    _lastSelectedAccount.value = ContactAccount("", "")
+                }
+            }
+            loadAccounts()
+            loadContacts()
+            withContext(Dispatchers.Main) { onResult?.invoke(true, null) }
         }
     }
 
