@@ -41,8 +41,8 @@ fun HomeDirectoryPage(viewModel: FilesViewModel) {
             viewModel.refreshPermissions()
         }
 
-    val notificationsLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { _ ->
+    val notificationsRequest =
+        rememberPermissionRequest(Manifest.permission.POST_NOTIFICATIONS) {
             viewModel.setNotificationsPrompted()
             showNotificationDialog = false
         }
@@ -72,9 +72,7 @@ fun HomeDirectoryPage(viewModel: FilesViewModel) {
                 TextButton(
                     onClick = {
                         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                            notificationsLauncher.launch(
-                                Manifest.permission.POST_NOTIFICATIONS
-                            )
+                            notificationsRequest()
                         }
                     }) { Text(stringResource(R.string.enable)) }
             },
