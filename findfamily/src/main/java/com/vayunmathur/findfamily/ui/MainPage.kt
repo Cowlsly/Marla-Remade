@@ -83,6 +83,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -385,6 +386,11 @@ fun MainPageContent(
 ) {
     val scaffoldState = rememberBottomSheetScaffoldState()
 
+    // Under Layoutlib (store-listing previews) there is no frame clock or real layout pass,
+    // so animation/offset-driven effects either no-op or hang the render. Skip them in
+    // inspection mode; the page still lays out (peeked sheet + top bar + FAB) statically.
+    val inPreview = LocalInspectionMode.current
+
     // In history mode drop the sheet entirely (peek 0); the name goes in the app bar.
     val peekHeight = if (state.historyMode) 0.dp else SheetPeekHeight
 
@@ -403,29 +409,31 @@ fun MainPageContent(
     // so they move 1:1 with the sheet. Peek is constant (128) whenever overlays show,
     // so a single capture stays correct across list/detail/back-from-history.
     val collapsedSheetOffset = remember { mutableFloatStateOf(Float.NaN) }
-    LaunchedEffect(scaffoldState) {
-        snapshotFlow {
-            val st = scaffoldState.bottomSheetState
-            val settled = st.currentValue == SheetValue.PartiallyExpanded &&
-                st.targetValue == SheetValue.PartiallyExpanded
-            val hist = state.historyMode
-            if (settled && !hist) runCatching { st.requireOffset() }.getOrNull() else null
-        }.collect { off ->
-            if (off != null && collapsedSheetOffset.floatValue.isNaN()) {
-                collapsedSheetOffset.floatValue = off
+    if (!inPreview) {
+        LaunchedEffect(scaffoldState) {
+            snapshotFlow {
+                val st = scaffoldState.bottomSheetState
+                val settled = st.currentValue == SheetValue.PartiallyExpanded &&
+                    st.targetValue == SheetValue.PartiallyExpanded
+                val hist = state.historyMode
+                if (settled && !hist) runCatching { st.requireOffset() }.getOrNull() else null
+            }.collect { off ->
+                if (off != null && collapsedSheetOffset.floatValue.isNaN()) {
+                    collapsedSheetOffset.floatValue = off
+                }
             }
         }
-    }
 
-    // Leaving history sets the peek back to non-zero, but the collapsed sheet needs
-    // a nudge to animate back to its peek. Retry until the anchor is ready.
-    LaunchedEffect(state.historyMode) {
-        if (!state.historyMode) {
-            repeat(10) {
-                if (runCatching { scaffoldState.bottomSheetState.partialExpand() }.isSuccess) {
-                    return@LaunchedEffect
+        // Leaving history sets the peek back to non-zero, but the collapsed sheet needs
+        // a nudge to animate back to its peek. Retry until the anchor is ready.
+        LaunchedEffect(state.historyMode) {
+            if (!state.historyMode) {
+                repeat(10) {
+                    if (runCatching { scaffoldState.bottomSheetState.partialExpand() }.isSuccess) {
+                        return@LaunchedEffect
+                    }
+                    kotlinx.coroutines.delay(50)
                 }
-                kotlinx.coroutines.delay(50)
             }
         }
     }
@@ -559,32 +567,45 @@ fun MainPageContent(
             ) {
                 MaterialTheme(colorScheme = lightScheme) {
                     if (state.nothingSelected) {
-                        var expanded by remember { mutableStateOf(false) }
-                        FloatingActionButtonMenu(expanded, {
-                            ToggleFloatingActionButton(
-                                expanded,
-                                { expanded = it },
-                                containerColor = { progress -> lerp(fabContainerColor, fabExpandedColor, progress) }
+                        if (inPreview) {
+                            // The expressive FloatingActionButtonMenu is animation-driven and
+                            // does not render under Layoutlib; show the representative collapsed
+                            // "+" FAB (its default state) so the store image still reads right.
+                            FloatingActionButton(
+                                {},
+                                containerColor = fabContainerColor,
+                                contentColor = fabContentColor
                             ) {
-                                if (!expanded)
-                                    IconAdd(tint = fabContentColor)
-                                else
-                                    IconClose(tint = fabContentColor)
+                                IconAdd(tint = fabContentColor)
                             }
-                        }) {
-                            FloatingActionButtonMenuItem({ actions.addPerson() },
-                                { Text(stringResource(R.string.fab_person)) },
-                                { IconPerson() })
-                            FloatingActionButtonMenuItem({ actions.beginCreateWaypoint() },
-                                { Text(stringResource(R.string.fab_location)) },
-                                { IconLocationOn() })
-                            FloatingActionButtonMenuItem({ actions.addLink() },
-                                { Text(stringResource(R.string.fab_link)) },
-                                { IconLink() })
-                            if (BuildConfig.DEV_BUILD) {
-                                FloatingActionButtonMenuItem({ actions.addTracker() },
-                                    { Text(stringResource(R.string.fab_tracker)) },
-                                    { IconNavigationArrow() })
+                        } else {
+                            var expanded by remember { mutableStateOf(false) }
+                            FloatingActionButtonMenu(expanded, {
+                                ToggleFloatingActionButton(
+                                    expanded,
+                                    { expanded = it },
+                                    containerColor = { progress -> lerp(fabContainerColor, fabExpandedColor, progress) }
+                                ) {
+                                    if (!expanded)
+                                        IconAdd(tint = fabContentColor)
+                                    else
+                                        IconClose(tint = fabContentColor)
+                                }
+                            }) {
+                                FloatingActionButtonMenuItem({ actions.addPerson() },
+                                    { Text(stringResource(R.string.fab_person)) },
+                                    { IconPerson() })
+                                FloatingActionButtonMenuItem({ actions.beginCreateWaypoint() },
+                                    { Text(stringResource(R.string.fab_location)) },
+                                    { IconLocationOn() })
+                                FloatingActionButtonMenuItem({ actions.addLink() },
+                                    { Text(stringResource(R.string.fab_link)) },
+                                    { IconLink() })
+                                if (BuildConfig.DEV_BUILD) {
+                                    FloatingActionButtonMenuItem({ actions.addTracker() },
+                                        { Text(stringResource(R.string.fab_tracker)) },
+                                        { IconNavigationArrow() })
+                                }
                             }
                         }
                     } else if (state.selectedWaypointId != null) {
