@@ -107,6 +107,8 @@ import com.vayunmathur.findfamily.ui.dialogs.SecurityCodeDialog
 import com.vayunmathur.findfamily.util.FamilyListActions
 import com.vayunmathur.findfamily.util.FamilyListUiState
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
+import com.vayunmathur.findfamily.util.MainPageActions
+import com.vayunmathur.findfamily.util.MainPageUiState
 import com.vayunmathur.findfamily.util.Networking
 import com.vayunmathur.findfamily.util.PersonActions
 import com.vayunmathur.findfamily.util.PersonUiState
@@ -189,11 +191,23 @@ fun MainPage(
     val usersByLocationName by ffViewModel.usersByLocationName.collectAsState()
     val userPositions by ffViewModel.latestLocationByUser.collectAsState()
 
-    val scaffoldState = rememberBottomSheetScaffoldState()
+    val context = LocalContext.current
 
-    // The sheets are stateless so the store-listing previews can render them (the map
-    // behind them cannot be rendered off-device). The ViewModel supplies the actions it
-    // already implements; the two that need the nav stack or the clipboard go here.
+    // The selected contact, resolved from the full user list (the same source
+    // `userByIdState` reads). Drives the person sheet, the history title and delete.
+    val users by ffViewModel.users.collectAsState()
+    val selectedUser = selectedUserId?.let { id -> users.firstOrNull { it.id == id } }
+
+    // Contact re-pick launcher: created unconditionally (activity-result launchers must
+    // be registered during composition) and reused by the hoisted PersonActions. The
+    // callback re-reads the current selection when a contact is actually picked.
+    val requestPickContact = platform.requestPickContact { name, photo ->
+        selectedUser?.let { ffViewModel.updateContactNamePhoto(it.id, name, photo) }
+    }
+
+    // The sheets/layout are stateless so the store-listing previews can render them (the
+    // map behind them cannot be rendered off-device). The ViewModel supplies the actions
+    // it already implements; the ones needing the nav stack or the clipboard go here.
     val familyActions = remember(ffViewModel, backStack, platform) {
         object : FamilyListActions by ffViewModel {
             override fun acceptRequest(userId: Long) {
@@ -208,203 +222,80 @@ fun MainPage(
         }
     }
 
-    // In history mode drop the sheet entirely (peek 0); the name goes in the app bar.
-    val peekHeight = if (historyMode) 0.dp else SheetPeekHeight
-
-    // The FAB sits on top of the always-light map, so color it from a light dynamic
-    // scheme regardless of the app's (possibly dark) theme. Captured OUTSIDE the
-    // scaffold to avoid the library's in-scaffold color-resolution quirk. Remembered
-    // so we don't rebuild the whole palette on every recomposition.
-    val context = LocalContext.current
-    val lightScheme = remember(context) { dynamicLightColorScheme(context) }
-    val fabContainerColor = lightScheme.primaryContainer
-    val fabExpandedColor = lightScheme.primary
-    val fabContentColor = lightScheme.onPrimaryContainer
-
-    // The sheet's offset when settled at its peek, captured ONCE. Overlays then sit
-    // at their default position plus (currentSheetOffset - peekOffset), clamped <= 0,
-    // so they move 1:1 with the sheet. Peek is constant (128) whenever overlays show,
-    // so a single capture stays correct across list/detail/back-from-history.
-    val collapsedSheetOffset = remember { mutableFloatStateOf(Float.NaN) }
-    LaunchedEffect(scaffoldState) {
-        snapshotFlow {
-            val st = scaffoldState.bottomSheetState
-            val settled = st.currentValue == SheetValue.PartiallyExpanded &&
-                st.targetValue == SheetValue.PartiallyExpanded
-            val hist = selectedUserId != null && !isShowingPresent
-            if (settled && !hist) runCatching { st.requireOffset() }.getOrNull() else null
-        }.collect { off ->
-            if (off != null && collapsedSheetOffset.floatValue.isNaN()) {
-                collapsedSheetOffset.floatValue = off
-            }
-        }
+    val personActions = object : PersonActions by ffViewModel {
+        override fun changeConnectedContact() = requestPickContact()
     }
 
-    // Leaving history sets the peek back to non-zero, but the collapsed sheet needs
-    // a nudge to animate back to its peek. Retry until the anchor is ready.
-    LaunchedEffect(historyMode) {
-        if (!historyMode) {
-            repeat(10) {
-                if (runCatching { scaffoldState.bottomSheetState.partialExpand() }.isSuccess) {
-                    return@LaunchedEffect
-                }
-                kotlinx.coroutines.delay(50)
-            }
+    val mainActions = object : MainPageActions {
+        override fun clearSelection() = ffViewModel.clearSelection()
+        override fun setShowingPresent(present: Boolean) = ffViewModel.setShowingPresent(present)
+        override fun onGpsWarningClick() { showGpsWarning = true }
+        override fun onShowSecurityCode() { showSecurityCode = true }
+        override fun openUwbRanging(userId: Long) { backStack.add(Route.UwbRangingPage(userId)) }
+        override fun deleteSelectedUser() {
+            selectedUser?.let { ffViewModel.deleteUser(it) }
+            ffViewModel.setSelectedUserId(null)
         }
+        override fun deleteSelectedWaypoint() {
+            selectedWaypointId?.let { id -> waypoints.firstOrNull { it.id == id } }
+                ?.let { ffViewModel.deleteWaypoint(it) }
+            ffViewModel.setSelectedWaypointId(null)
+        }
+        override fun addPerson() { backStack.add(Route.AddPersonDialog()) }
+        override fun beginCreateWaypoint() = ffViewModel.beginCreateWaypoint()
+        override fun addLink() { backStack.add(Route.AddLinkDialog) }
+        override fun addTracker() { backStack.add(Route.AddTrackerDialog) }
+        override fun saveCurrentWaypoint() = ffViewModel.saveCurrentWaypoint()
+        override fun enterHistory() = ffViewModel.setShowingPresent(false)
+        override fun setWaypointName(name: String) = ffViewModel.setWaypointName(name)
+        override fun setWaypointRange(range: String) = ffViewModel.setWaypointRange(range)
     }
 
-    BottomSheetScaffold(
-        scaffoldState = scaffoldState,
-        sheetPeekHeight = peekHeight,
-        sheetSwipeEnabled = !historyMode,
-        sheetDragHandle = if (historyMode) null else { { BottomSheetDefaults.DragHandle() } },
-        sheetContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
-        // Default (solid) app bar so the map stays cut off beneath it while panning.
-        topBar = {
-            TopAppBar(
-                title = {
-                    if (historyMode) {
-                        val historyUser by ffViewModel.userByIdState(selectedUserId!!)
-                        Text(stringResource(R.string.history_title, historyUser?.name ?: ""))
-                    } else if (selectedUserId == null && selectedWaypointId == null) {
-                        Text(stringResource(R.string.app_name))
-                    }
-                },
-                navigationIcon = {
-                    if (selectedUserId != null || selectedWaypointId != null) {
-                        IconNavigation {
-                            if (historyMode) {
-                                ffViewModel.setShowingPresent(true)
-                            } else {
-                                ffViewModel.clearSelection()
-                            }
-                        }
-                    }
-                },
-                actions = {
-                    if (selectedUserId == null && (selectedWaypointId == null || selectedWaypointId == 0L)) {
-                        if (usingGpsFallback) {
-                            IconButton({ showGpsWarning = true }) {
-                                // Use Image (not the tinting IconWarning) so the
-                                // custom yellow-and-red drawable keeps both colors.
-                                Image(
-                                    painter = painterResource(R.drawable.ic_warning_gps),
-                                    contentDescription = stringResource(
-                                        R.string.gps_fallback_warning_content_description
-                                    )
-                                )
-                            }
-                        }
-                        BackupButtons(
-                            dbConfigs = listOf("passwords-db" to ffViewModel.backupPassphrase),
-                            dbCodec = SqlCipherDbCodec,
-                            extraFiles = emptyList()
-                        )
-                    } else if (selectedUserId != null && !historyMode) {
-                        if (selectedUserId != Networking.userid) {
-                            val user by ffViewModel.userByIdState(selectedUserId!!)
-                            // Find Nearby (UWB) needs both the public
-                            // android.ranging API (Android 16+) and an actual
-                            // UWB radio. Hide the entry point otherwise.
-                            if (UwbSessionManager.isAvailable(context)) {
-                                IconButton({
-                                    backStack.add(Route.UwbRangingPage(selectedUserId!!))
-                                }) {
-                                    IconNavigationArrow()
-                                }
-                            }
-                            IconButton({ showSecurityCode = true }) {
-                                IconVerify()
-                            }
-                            IconButton({
-                                user?.let { ffViewModel.deleteUser(it) }
-                                ffViewModel.setSelectedUserId(null)
-                            }) {
-                                IconDelete()
-                            }
-                        }
-                    } else if (selectedWaypointId != null && selectedWaypointId != 0L) {
-                        val waypoint by ffViewModel.waypointByIdState(selectedWaypointId!!)
-                        IconButton({
-                            waypoint?.let { ffViewModel.deleteWaypoint(it) }
-                            ffViewModel.setSelectedWaypointId(null)
-                        }) {
-                            IconDelete()
-                        }
-                    }
-                }
+    val state = MainPageUiState(
+        selectedUserId = selectedUserId,
+        selectedWaypointId = selectedWaypointId,
+        isShowingPresent = isShowingPresent,
+        usingGpsFallback = usingGpsFallback,
+        uwbAvailable = UwbSessionManager.isAvailable(context),
+        selfUserId = Networking.userid,
+        selectedUser = selectedUser,
+        waypointName = waypointName,
+        waypointRange = waypointRange,
+        familyList = FamilyListUiState(
+            connectedUsers = connectedUsers,
+            awaitingRequestUsers = awaitingRequestUsers,
+            temporaryLinks = temporaryLinks,
+            waypoints = waypoints,
+            locationByUser = userPositions,
+            userNamesByLocationName = usersByLocationName
+        ),
+        person = selectedUser?.let { PersonUiState(it, userPositions[it.id], waypoints) }
+    )
+
+    MainPageContent(
+        state = state,
+        familyActions = familyActions,
+        personActions = personActions,
+        actions = mainActions,
+        backupButtons = {
+            BackupButtons(
+                dbConfigs = listOf("passwords-db" to ffViewModel.backupPassphrase),
+                dbCodec = SqlCipherDbCodec,
+                extraFiles = emptyList()
             )
         },
-        sheetContent = {
-            if (selectedUserId == null && selectedWaypointId == null) {
-                FamilyListSheet(
-                    FamilyListUiState(
-                        connectedUsers = connectedUsers,
-                        awaitingRequestUsers = awaitingRequestUsers,
-                        temporaryLinks = temporaryLinks,
-                        waypoints = waypoints,
-                        locationByUser = userPositions,
-                        userNamesByLocationName = usersByLocationName
-                    ),
-                    familyActions
-                )
-            } else if (historyMode) {
-                // History mode has no sheet; the name is shown in the app bar.
-            } else if (selectedUserId != null) {
-                val selectedUser by ffViewModel.userByIdState(selectedUserId!!)
-                val requestPickContact = platform.requestPickContact { name, photo ->
-                    selectedUser?.let { ffViewModel.updateContactNamePhoto(it.id, name, photo) }
-                }
-                selectedUser?.let { user ->
-                    val personActions = object : PersonActions by ffViewModel {
-                        override fun changeConnectedContact() = requestPickContact()
-                    }
-                    PersonDetailSheet(PersonUiState(user, userPositions[user.id], waypoints), personActions)
-                }
-            } else if (selectedWaypointId != null) {
-                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 4.dp)) {
-                    OutlinedTextField(
-                        waypointName,
-                        { ffViewModel.setWaypointName(it) },
-                        Modifier.fillMaxWidth(),
-                        isError = waypointName.isBlank(),
-                        supportingText = if (waypointName.isBlank()) {
-                            { Text(stringResource(R.string.waypoint_name_blank_error)) }
-                        } else null
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        waypointRange,
-                        { ffViewModel.setWaypointRange(it) },
-                        Modifier.fillMaxWidth(),
-                        suffix = { Text(stringResource(R.string.waypoint_range_suffix)) },
-                        keyboardOptions = KeyboardOptions(
-                            keyboardType = KeyboardType.Number
-                        ),
-                        isError = waypointRange.toDoubleOrNull() == null,
-                        supportingText = if (waypointRange.toDoubleOrNull() == null) {
-                            { Text(stringResource(R.string.waypoint_range_error)) }
-                        } else null
-                    )
-                }
+        historyScrubber = {
+            if (historyMode) {
+                HistoryScrubber(
+                    backStack,
+                    ffViewModel,
+                    selectedUserId!!
+                ) { ffViewModel.setHistoricalPosition(it) }
             }
-        }
-    ) { _ ->
-        // Full-bleed map; overlays (FAB, history bar) sit just above the collapsed
-        // sheet peek and lift upward as the sheet expands.
-        Box(Modifier.fillMaxSize()) {
-            // Lift overlays above their peek baseline as the sheet expands:
-            // (current - settledPeekOffset), clamped to <= 0. Uses the settled peek
-            // offset (sampled above) so transitions never push overlays off-screen.
-            val sheetLiftPx: () -> Int = {
-                val base = collapsedSheetOffset.floatValue
-                val cur = runCatching { scaffoldState.bottomSheetState.requireOffset() }.getOrNull()
-                if (cur != null && !base.isNaN()) (cur - base).roundToInt().coerceAtMost(0) else 0
-            }
-
+        },
+        map = {
             val selectedUserObj = if (selectedUserId != null) {
-                val user by ffViewModel.userByIdState(selectedUserId!!)
-                user?.let { SelectedUser(it, isShowingPresent, historicalPosition) }
+                selectedUser?.let { SelectedUser(it, isShowingPresent, historicalPosition) }
             } else null
 
             val selectedWaypointObj = if (selectedWaypointId != null) {
@@ -425,82 +316,8 @@ fun MainPage(
                 selectedUser = selectedUserObj,
                 selectedWaypoint = selectedWaypointObj
             )
-
-            if (historyMode) {
-                HistoryScrubber(
-                    backStack,
-                    ffViewModel,
-                    selectedUserId!!
-                ) { ffViewModel.setHistoricalPosition(it) }
-            }
-
-            // FAB floats just above the sheet peek, lifting as the sheet expands.
-            // Wrapped in the light scheme so it reads correctly over the light map.
-            Box(
-                Modifier.align(Alignment.BottomEnd)
-                    .padding(end = 16.dp, bottom = peekHeight + 16.dp)
-                    .offset { IntOffset(0, sheetLiftPx()) }
-            ) {
-                MaterialTheme(colorScheme = lightScheme) {
-                    if (selectedUserId == null && selectedWaypointId == null) {
-                        var expanded by remember { mutableStateOf(false) }
-                        FloatingActionButtonMenu(expanded, {
-                            ToggleFloatingActionButton(
-                                expanded,
-                                { expanded = it },
-                                containerColor = { progress -> lerp(fabContainerColor, fabExpandedColor, progress) }
-                            ) {
-                                if (!expanded)
-                                    IconAdd(tint = fabContentColor)
-                                else
-                                    IconClose(tint = fabContentColor)
-                            }
-                        }) {
-                            FloatingActionButtonMenuItem({
-                                backStack.add(Route.AddPersonDialog())
-                            },
-                                { Text(stringResource(R.string.fab_person)) },
-                                { IconPerson() })
-                            FloatingActionButtonMenuItem({
-                                ffViewModel.beginCreateWaypoint()
-                            },
-                                { Text(stringResource(R.string.fab_location)) },
-                                { IconLocationOn() })
-                            FloatingActionButtonMenuItem({
-                                backStack.add(Route.AddLinkDialog)
-                            },
-                                { Text(stringResource(R.string.fab_link)) },
-                                { IconLink() })
-                            if (BuildConfig.DEV_BUILD) {
-                                FloatingActionButtonMenuItem({
-                                    backStack.add(Route.AddTrackerDialog)
-                                },
-                                    { Text(stringResource(R.string.fab_tracker)) },
-                                    { IconNavigationArrow() })
-                            }
-                        }
-                    } else if (selectedWaypointId != null) {
-                        FloatingActionButton(
-                            { ffViewModel.saveCurrentWaypoint() },
-                            containerColor = fabContainerColor,
-                            contentColor = fabContentColor
-                        ) {
-                            IconSave()
-                        }
-                    } else if (selectedUserId != null && isShowingPresent) {
-                        // Enter history mode; exit is via back.
-                        FloatingActionButton(
-                            { ffViewModel.setShowingPresent(false) },
-                            containerColor = fabContainerColor,
-                            contentColor = fabContentColor
-                        ) {
-                            IconRestore()
-                        }
-                    }
-                }
-            }
         }
-    }
+    )
 
     // Map animation logic
     LaunchedEffect(selectedUserId, isShowingPresent, historicalPosition) {
@@ -542,6 +359,255 @@ fun MainPage(
 
     if (showGpsWarning) {
         GpsFallbackWarningDialog { showGpsWarning = false }
+    }
+}
+
+/**
+ * The stateless map-page layout: the [BottomSheetScaffold] (top bar + sheet) with a
+ * full-bleed [map] slot and the floating action button on top. It reads only [state] and
+ * calls back through [actions]/[familyActions]/[personActions], so both the real app (via
+ * the [MainPage] wrapper) and the store-listing previews render the *same* page — the app
+ * injects the live [MapView] into [map], the previews inject a static backdrop.
+ *
+ * [backupButtons] and [historyScrubber] are slots for the two chrome pieces that genuinely
+ * need the ViewModel/nav stack; previews leave them empty.
+ */
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun MainPageContent(
+    state: MainPageUiState,
+    familyActions: FamilyListActions,
+    personActions: PersonActions,
+    actions: MainPageActions,
+    map: @Composable () -> Unit,
+    backupButtons: @Composable () -> Unit = {},
+    historyScrubber: @Composable BoxScope.() -> Unit = {},
+) {
+    val scaffoldState = rememberBottomSheetScaffoldState()
+
+    // In history mode drop the sheet entirely (peek 0); the name goes in the app bar.
+    val peekHeight = if (state.historyMode) 0.dp else SheetPeekHeight
+
+    // The FAB sits on top of the always-light map, so color it from a light dynamic
+    // scheme regardless of the app's (possibly dark) theme. Captured OUTSIDE the
+    // scaffold to avoid the library's in-scaffold color-resolution quirk. Remembered
+    // so we don't rebuild the whole palette on every recomposition.
+    val context = LocalContext.current
+    val lightScheme = remember(context) { dynamicLightColorScheme(context) }
+    val fabContainerColor = lightScheme.primaryContainer
+    val fabExpandedColor = lightScheme.primary
+    val fabContentColor = lightScheme.onPrimaryContainer
+
+    // The sheet's offset when settled at its peek, captured ONCE. Overlays then sit
+    // at their default position plus (currentSheetOffset - peekOffset), clamped <= 0,
+    // so they move 1:1 with the sheet. Peek is constant (128) whenever overlays show,
+    // so a single capture stays correct across list/detail/back-from-history.
+    val collapsedSheetOffset = remember { mutableFloatStateOf(Float.NaN) }
+    LaunchedEffect(scaffoldState) {
+        snapshotFlow {
+            val st = scaffoldState.bottomSheetState
+            val settled = st.currentValue == SheetValue.PartiallyExpanded &&
+                st.targetValue == SheetValue.PartiallyExpanded
+            val hist = state.historyMode
+            if (settled && !hist) runCatching { st.requireOffset() }.getOrNull() else null
+        }.collect { off ->
+            if (off != null && collapsedSheetOffset.floatValue.isNaN()) {
+                collapsedSheetOffset.floatValue = off
+            }
+        }
+    }
+
+    // Leaving history sets the peek back to non-zero, but the collapsed sheet needs
+    // a nudge to animate back to its peek. Retry until the anchor is ready.
+    LaunchedEffect(state.historyMode) {
+        if (!state.historyMode) {
+            repeat(10) {
+                if (runCatching { scaffoldState.bottomSheetState.partialExpand() }.isSuccess) {
+                    return@LaunchedEffect
+                }
+                kotlinx.coroutines.delay(50)
+            }
+        }
+    }
+
+    BottomSheetScaffold(
+        scaffoldState = scaffoldState,
+        sheetPeekHeight = peekHeight,
+        sheetSwipeEnabled = !state.historyMode,
+        sheetDragHandle = if (state.historyMode) null else { { BottomSheetDefaults.DragHandle() } },
+        sheetContainerColor = MaterialTheme.colorScheme.surfaceContainerLow,
+        // Default (solid) app bar so the map stays cut off beneath it while panning.
+        topBar = {
+            TopAppBar(
+                title = {
+                    if (state.historyMode) {
+                        Text(stringResource(R.string.history_title, state.selectedUser?.name ?: ""))
+                    } else if (state.nothingSelected) {
+                        Text(stringResource(R.string.app_name))
+                    }
+                },
+                navigationIcon = {
+                    if (state.selectedUserId != null || state.selectedWaypointId != null) {
+                        IconNavigation {
+                            if (state.historyMode) {
+                                actions.setShowingPresent(true)
+                            } else {
+                                actions.clearSelection()
+                            }
+                        }
+                    }
+                },
+                actions = {
+                    if (state.selectedUserId == null &&
+                        (state.selectedWaypointId == null || state.selectedWaypointId == 0L)) {
+                        if (state.usingGpsFallback) {
+                            IconButton({ actions.onGpsWarningClick() }) {
+                                // Use Image (not the tinting IconWarning) so the
+                                // custom yellow-and-red drawable keeps both colors.
+                                Image(
+                                    painter = painterResource(R.drawable.ic_warning_gps),
+                                    contentDescription = stringResource(
+                                        R.string.gps_fallback_warning_content_description
+                                    )
+                                )
+                            }
+                        }
+                        backupButtons()
+                    } else if (state.selectedUserId != null && !state.historyMode) {
+                        if (!state.isSelfSelected) {
+                            // Find Nearby (UWB) needs both the public
+                            // android.ranging API (Android 16+) and an actual
+                            // UWB radio. Hide the entry point otherwise.
+                            if (state.uwbAvailable) {
+                                IconButton({ actions.openUwbRanging(state.selectedUserId) }) {
+                                    IconNavigationArrow()
+                                }
+                            }
+                            IconButton({ actions.onShowSecurityCode() }) {
+                                IconVerify()
+                            }
+                            IconButton({ actions.deleteSelectedUser() }) {
+                                IconDelete()
+                            }
+                        }
+                    } else if (state.selectedWaypointId != null && state.selectedWaypointId != 0L) {
+                        IconButton({ actions.deleteSelectedWaypoint() }) {
+                            IconDelete()
+                        }
+                    }
+                }
+            )
+        },
+        sheetContent = {
+            if (state.nothingSelected) {
+                FamilyListSheet(state.familyList, familyActions)
+            } else if (state.historyMode) {
+                // History mode has no sheet; the name is shown in the app bar.
+            } else if (state.selectedUserId != null) {
+                state.person?.let { PersonDetailSheet(it, personActions) }
+            } else if (state.selectedWaypointId != null) {
+                Column(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 4.dp)) {
+                    OutlinedTextField(
+                        state.waypointName,
+                        { actions.setWaypointName(it) },
+                        Modifier.fillMaxWidth(),
+                        isError = state.waypointName.isBlank(),
+                        supportingText = if (state.waypointName.isBlank()) {
+                            { Text(stringResource(R.string.waypoint_name_blank_error)) }
+                        } else null
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        state.waypointRange,
+                        { actions.setWaypointRange(it) },
+                        Modifier.fillMaxWidth(),
+                        suffix = { Text(stringResource(R.string.waypoint_range_suffix)) },
+                        keyboardOptions = KeyboardOptions(
+                            keyboardType = KeyboardType.Number
+                        ),
+                        isError = state.waypointRange.toDoubleOrNull() == null,
+                        supportingText = if (state.waypointRange.toDoubleOrNull() == null) {
+                            { Text(stringResource(R.string.waypoint_range_error)) }
+                        } else null
+                    )
+                }
+            }
+        }
+    ) { _ ->
+        // Full-bleed map slot; overlays (FAB, history bar) sit just above the collapsed
+        // sheet peek and lift upward as the sheet expands.
+        Box(Modifier.fillMaxSize()) {
+            // Lift overlays above their peek baseline as the sheet expands:
+            // (current - settledPeekOffset), clamped to <= 0. Uses the settled peek
+            // offset (sampled above) so transitions never push overlays off-screen.
+            val sheetLiftPx: () -> Int = {
+                val base = collapsedSheetOffset.floatValue
+                val cur = runCatching { scaffoldState.bottomSheetState.requireOffset() }.getOrNull()
+                if (cur != null && !base.isNaN()) (cur - base).roundToInt().coerceAtMost(0) else 0
+            }
+
+            map()
+
+            historyScrubber()
+
+            // FAB floats just above the sheet peek, lifting as the sheet expands.
+            // Wrapped in the light scheme so it reads correctly over the light map.
+            Box(
+                Modifier.align(Alignment.BottomEnd)
+                    .padding(end = 16.dp, bottom = peekHeight + 16.dp)
+                    .offset { IntOffset(0, sheetLiftPx()) }
+            ) {
+                MaterialTheme(colorScheme = lightScheme) {
+                    if (state.nothingSelected) {
+                        var expanded by remember { mutableStateOf(false) }
+                        FloatingActionButtonMenu(expanded, {
+                            ToggleFloatingActionButton(
+                                expanded,
+                                { expanded = it },
+                                containerColor = { progress -> lerp(fabContainerColor, fabExpandedColor, progress) }
+                            ) {
+                                if (!expanded)
+                                    IconAdd(tint = fabContentColor)
+                                else
+                                    IconClose(tint = fabContentColor)
+                            }
+                        }) {
+                            FloatingActionButtonMenuItem({ actions.addPerson() },
+                                { Text(stringResource(R.string.fab_person)) },
+                                { IconPerson() })
+                            FloatingActionButtonMenuItem({ actions.beginCreateWaypoint() },
+                                { Text(stringResource(R.string.fab_location)) },
+                                { IconLocationOn() })
+                            FloatingActionButtonMenuItem({ actions.addLink() },
+                                { Text(stringResource(R.string.fab_link)) },
+                                { IconLink() })
+                            if (BuildConfig.DEV_BUILD) {
+                                FloatingActionButtonMenuItem({ actions.addTracker() },
+                                    { Text(stringResource(R.string.fab_tracker)) },
+                                    { IconNavigationArrow() })
+                            }
+                        }
+                    } else if (state.selectedWaypointId != null) {
+                        FloatingActionButton(
+                            { actions.saveCurrentWaypoint() },
+                            containerColor = fabContainerColor,
+                            contentColor = fabContentColor
+                        ) {
+                            IconSave()
+                        }
+                    } else if (state.selectedUserId != null && state.isShowingPresent) {
+                        // Enter history mode; exit is via back.
+                        FloatingActionButton(
+                            { actions.enterHistory() },
+                            containerColor = fabContainerColor,
+                            contentColor = fabContentColor
+                        ) {
+                            IconRestore()
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 

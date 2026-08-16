@@ -76,3 +76,63 @@ interface PersonActions {
         val Noop: PersonActions = object : PersonActions {}
     }
 }
+
+/**
+ * Everything the stateless map-page layout (`MainPageContent`) needs to lay out its chrome:
+ * which sheet to show, the top-bar contents and the floating action button. It carries plain
+ * data only — no ViewModel — so both the real app and the store-listing previews can build it.
+ *
+ * The map itself is passed to `MainPageContent` as a slot, so this state deliberately says
+ * nothing about map tiles or the camera.
+ */
+data class MainPageUiState(
+    val selectedUserId: Long? = null,
+    val selectedWaypointId: Long? = null,
+    /** False while viewing a contact's past track (history mode). */
+    val isShowingPresent: Boolean = true,
+    val usingGpsFallback: Boolean = false,
+    /** Whether UWB "Find Nearby" is available on this device (controls the top-bar entry). */
+    val uwbAvailable: Boolean = false,
+    /** This device's own user id, so the layout can hide self-only controls. */
+    val selfUserId: Long = -1L,
+    /** The selected contact, resolved for the person sheet, history title and delete action. */
+    val selectedUser: User? = null,
+    val waypointName: String = "",
+    val waypointRange: String = "",
+    val familyList: FamilyListUiState = FamilyListUiState(),
+    /** Built for [selectedUser] when a person (not a place) is selected. */
+    val person: PersonUiState? = null,
+) {
+    /** A contact is selected and we're viewing their past track. */
+    val historyMode: Boolean get() = selectedUserId != null && !isShowingPresent
+    val isSelfSelected: Boolean get() = selectedUserId != null && selectedUserId == selfUserId
+    val nothingSelected: Boolean get() = selectedUserId == null && selectedWaypointId == null
+}
+
+/**
+ * Top-bar and FAB callbacks for the map page. Same no-op-default arrangement as the sheet
+ * action interfaces so [Noop] is all a preview needs. The stateful `MainPage` wires these to
+ * the ViewModel and nav back stack.
+ */
+interface MainPageActions {
+    fun clearSelection() {}
+    fun setShowingPresent(present: Boolean) {}
+    fun onGpsWarningClick() {}
+    fun onShowSecurityCode() {}
+    fun openUwbRanging(userId: Long) {}
+    fun deleteSelectedUser() {}
+    fun deleteSelectedWaypoint() {}
+    fun addPerson() {}
+    fun beginCreateWaypoint() {}
+    fun addLink() {}
+    fun addTracker() {}
+    fun saveCurrentWaypoint() {}
+    /** Enter history mode for the selected contact. */
+    fun enterHistory() {}
+    fun setWaypointName(name: String) {}
+    fun setWaypointRange(range: String) {}
+
+    companion object {
+        val Noop: MainPageActions = object : MainPageActions {}
+    }
+}

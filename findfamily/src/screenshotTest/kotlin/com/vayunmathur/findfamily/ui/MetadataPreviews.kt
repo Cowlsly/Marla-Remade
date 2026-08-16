@@ -1,9 +1,14 @@
 package com.vayunmathur.findfamily.ui
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.tooling.preview.Preview
+import androidx.compose.ui.unit.dp
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.findfamily.data.Coord
 import com.vayunmathur.findfamily.data.LocationValue
@@ -13,13 +18,14 @@ import com.vayunmathur.findfamily.data.User
 import com.vayunmathur.findfamily.data.Waypoint
 import com.vayunmathur.findfamily.util.FamilyListActions
 import com.vayunmathur.findfamily.util.FamilyListUiState
+import com.vayunmathur.findfamily.util.MainPageActions
+import com.vayunmathur.findfamily.util.MainPageUiState
 import com.vayunmathur.findfamily.util.PersonActions
 import com.vayunmathur.findfamily.util.PersonUiState
 import com.vayunmathur.findfamily.util.UwbSessionManager
 import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.library.ui.Surface
 import kotlin.time.Clock
 import kotlin.time.Duration.Companion.minutes
 
@@ -32,9 +38,10 @@ private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
  * The app's headline screen is a map with everyone's pins on it, and that is exactly the
  * part Layoutlib cannot draw: the map is a tile renderer fed from the network, and the
  * marker layer only appears once the camera projection resolves — neither happens in a
- * preview. So these render the chrome instead: the bottom sheet that lists the family, the
- * per-person sharing controls, and the full-screen UWB Find Nearby view. [MainPage] itself
- * is not previewable and is deliberately left alone.
+ * preview. So instead of drawing isolated bottom sheets, these render the *real* page
+ * layout ([MainPageContent]) with a static, muted map backdrop injected into its `map`
+ * slot. The app and these previews therefore share one layout with zero duplication: the
+ * family list, the per-person sharing controls and the full-screen UWB Find Nearby view.
  *
  * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but
  * is not collected as a screenshot test. Previews must also be class members, not top-level
@@ -86,47 +93,77 @@ class MetadataPreviews {
 
     private val mayaLocation = report(1, 37.7749, -122.4194, speed = 0f, battery = 78f, minutesAgo = 3)
 
+    private val sampleWaypoints = listOf(
+        Waypoint("Home", 150.0, Coord(37.7749, -122.4194), id = 1),
+        Waypoint("Lincoln High School", 250.0, Coord(37.7899, -122.4094), id = 2),
+        Waypoint("Soccer practice", 120.0, Coord(37.7649, -122.4294), id = 3),
+    )
+
+    private fun sampleFamilyList() = FamilyListUiState(
+        connectedUsers = listOf(maya, ravi, dad),
+        awaitingRequestUsers = listOf(
+            // Inbound requests are only known by their id until accepted.
+            person(5_432_109L, "Grandma", "Unnamed Location", arrivedMinutesAgo = 0)
+                .copy(requestStatus = RequestStatus.AWAITING_REQUEST)
+        ),
+        temporaryLinks = listOf(
+            TemporaryLink(
+                name = "Dog walker",
+                deleteAt = now + 45.minutes,
+                pqcPublicKey = "",
+                pqcKey = "",
+                id = 91,
+            ),
+        ),
+        waypoints = sampleWaypoints,
+        locationByUser = mapOf(
+            1L to mayaLocation,
+            2L to report(2, 37.7899, -122.4094, speed = 0f, battery = 41f, minutesAgo = 12),
+            3L to report(3, 37.7681, -122.4370, speed = 13.4f, battery = 16f, minutesAgo = 1),
+        ),
+        userNamesByLocationName = mapOf(
+            "Home" to listOf("Maya Chen"),
+            "Lincoln High School" to listOf("Ravi Patel"),
+        ),
+    )
+
+    /**
+     * Stand-in for the live [MapView] in the `map` slot: a muted, map-ish neutral fill with a
+     * faint grid so the full page reads as "map behind chrome" without any tile rendering.
+     */
+    @Composable
+    private fun StaticMapBackdrop() {
+        val gridColor = MaterialTheme.colorScheme.outline.copy(alpha = 0.25f)
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant)) {
+            Canvas(Modifier.fillMaxSize()) {
+                val step = 48.dp.toPx()
+                val stroke = 1.dp.toPx()
+                var x = step
+                while (x < size.width) {
+                    drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), stroke)
+                    x += step
+                }
+                var y = step
+                while (y < size.height) {
+                    drawLine(gridColor, Offset(0f, y), Offset(size.width, y), stroke)
+                    y += step
+                }
+            }
+        }
+    }
+
     @PreviewTest
     @Preview(name = "1-family", device = PHONE, showSystemUi = true)
     @Composable
     fun Preview1Family() {
         DynamicTheme(darkTheme = true) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                FamilyListSheet(
-                    FamilyListUiState(
-                        connectedUsers = listOf(maya, ravi, dad),
-                        awaitingRequestUsers = listOf(
-                            // Inbound requests are only known by their id until accepted.
-                            person(5_432_109L, "Grandma", "Unnamed Location", arrivedMinutesAgo = 0)
-                                .copy(requestStatus = RequestStatus.AWAITING_REQUEST)
-                        ),
-                        temporaryLinks = listOf(
-                            TemporaryLink(
-                                name = "Dog walker",
-                                deleteAt = now + 45.minutes,
-                                pqcPublicKey = "",
-                                pqcKey = "",
-                                id = 91,
-                            ),
-                        ),
-                        waypoints = listOf(
-                            Waypoint("Home", 150.0, Coord(37.7749, -122.4194), id = 1),
-                            Waypoint("Lincoln High School", 250.0, Coord(37.7899, -122.4094), id = 2),
-                            Waypoint("Soccer practice", 120.0, Coord(37.7649, -122.4294), id = 3),
-                        ),
-                        locationByUser = mapOf(
-                            1L to mayaLocation,
-                            2L to report(2, 37.7899, -122.4094, speed = 0f, battery = 41f, minutesAgo = 12),
-                            3L to report(3, 37.7681, -122.4370, speed = 13.4f, battery = 16f, minutesAgo = 1),
-                        ),
-                        userNamesByLocationName = mapOf(
-                            "Home" to listOf("Maya Chen"),
-                            "Lincoln High School" to listOf("Ravi Patel"),
-                        ),
-                    ),
-                    FamilyListActions.Noop,
-                )
-            }
+            MainPageContent(
+                state = MainPageUiState(familyList = sampleFamilyList()),
+                familyActions = FamilyListActions.Noop,
+                personActions = PersonActions.Noop,
+                actions = MainPageActions.Noop,
+                map = { StaticMapBackdrop() },
+            )
         }
     }
 
@@ -135,12 +172,17 @@ class MetadataPreviews {
     @Composable
     fun Preview2Person() {
         DynamicTheme(darkTheme = true) {
-            Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.surfaceContainerLow) {
-                PersonDetailSheet(
-                    PersonUiState(user = maya, location = mayaLocation),
-                    PersonActions.Noop,
-                )
-            }
+            MainPageContent(
+                state = MainPageUiState(
+                    selectedUserId = maya.id,
+                    selectedUser = maya,
+                    person = PersonUiState(user = maya, location = mayaLocation, waypoints = sampleWaypoints),
+                ),
+                familyActions = FamilyListActions.Noop,
+                personActions = PersonActions.Noop,
+                actions = MainPageActions.Noop,
+                map = { StaticMapBackdrop() },
+            )
         }
     }
 
