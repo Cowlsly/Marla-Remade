@@ -63,6 +63,18 @@
             android:foregroundServiceType="location"
             android:exported="false" />
 
+        <!-- Live family-location channel for co-signed apps (the maps app binds
+             this while its map screen is open). Guarded by the signature
+             permission below so only apps signed with the same key can bind. -->
+        <service
+            android:name=".ipc.FamilyLocationService"
+            android:exported="true"
+            android:permission="com.vayunmathur.findfamily.permissions.ACCESS_FAMILY">
+            <intent-filter>
+                <action android:name="com.vayunmathur.findfamily.action.FAMILY_LOCATIONS" />
+            </intent-filter>
+        </service>
+
         <!-- Quick Settings tile to turn location tracking on/off (GitHub #487). -->
         <service
             android:name=".util.TrackingTileService"
