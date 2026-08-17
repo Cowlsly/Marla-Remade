@@ -129,3 +129,10 @@
 -dontwarn javax.management.**
 -dontwarn org.ietf.jgss.**
 -dontwarn org.slf4j.impl.**
+
+# --- Room migrations — keep reflective Companion access (see SqlCipher.kt:93, FFDatabase.kt:160) ---
+-keep class * extends androidx.room.RoomDatabase { *; }
+-keep class * implements com.vayunmathur.library.util.DatabaseMigrations { *; }
+-keepclassmembers class * { *** Companion; }
+-keep class androidx.room.migration.Migration { *; }
+-keep class com.vayunmathur.findfamily.data.FFDatabase$Companion { *; }
