@@ -215,8 +215,16 @@ public:
                         if(this->stop && this->tasks.empty()) return;
                         task = move(this->tasks.front());
                         this->tasks.pop();
+                        // Count this task as in-flight while still holding the
+                        // lock, so wait_finished() can never observe an empty
+                        // queue with a task mid-execution.
+                        this->active_tasks.fetch_add(1, std::memory_order_relaxed);
                     }
                     task();
+                    // Release-decrement so a subsequent acquire-load in
+                    // wait_finished() establishes happens-before for all of this
+                    // task's writes (masks, cached_ways, nodes_raw, ...).
+                    this->active_tasks.fetch_sub(1, std::memory_order_release);
                 }
             });
     }
@@ -230,12 +238,17 @@ public:
         condition.notify_one();
     }
     void wait_finished() {
+        // Wait until the queue is drained AND every dequeued task has finished.
+        // Checking only tasks.empty() (the old behaviour) returned while worker
+        // threads were still executing the last tasks, letting stragglers mutate
+        // shared state (nodes_raw/masks/cached_ways) after the caller moved on —
+        // a data race that produced nondeterministic counts and heap corruption.
         for(;;) {
             {
                 unique_lock<mutex> lock(queue_mutex);
-                if (tasks.empty()) break;
+                if (tasks.empty() && active_tasks.load(std::memory_order_acquire) == 0) break;
             }
-            this_thread::sleep_for(chrono::milliseconds(10));
+            this_thread::sleep_for(chrono::milliseconds(1));
         }
     }
     ~ThreadPool() {
@@ -254,6 +267,7 @@ private:
     condition_variable condition;
     condition_variable condition_throttle;
     bool stop;
+    std::atomic<int> active_tasks{0}; // tasks dequeued but not yet finished
 };
 
 // ==========================================
