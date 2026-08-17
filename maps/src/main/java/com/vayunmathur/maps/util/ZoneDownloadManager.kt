@@ -18,6 +18,40 @@ class ZoneDownloadManager(private val context: Context) {
 
     enum class ZoneStatus { NOT_STARTED, DOWNLOADING, FINISHED }
 
+    /** Status of the single global routing graph (P16), independent of zones. */
+    enum class GraphStatus { NOT_STARTED, DOWNLOADING, FINISHED }
+
+    companion object {
+        private const val HOST = "https://data.vayunmathur.com"
+
+        /**
+         * The SINGLE GLOBAL routing-graph files consumed by the Rust router
+         * (maps/src/main/rust/src/graph.rs). Downloaded once as a whole, NOT
+         * per Morton zone — the routing graph is no longer zoned (P16). The
+         * per-zone offline TILE packs (`zone_$id.pmtiles`) and the P11 transit
+         * index (`zone_$id.transit`) remain per-zone and are handled separately.
+         */
+        val GRAPH_FILES = listOf(
+            "metadata.bin",
+            "nodes.bin",
+            "edges.bin",
+            "road_names.bin",
+            "transit_voyages.bin",
+            "transit_attributes.bin",
+            "lanes.bin",
+        )
+
+        // Files that must exist for graph.rs to load a usable graph; the rest
+        // (transit_*/lanes) are optional and 404 gracefully for metros without
+        // that data, so FINISHED keys off these three only.
+        private val GRAPH_REQUIRED = listOf("metadata.bin", "nodes.bin", "edges.bin")
+
+        // DownloadManager title prefix for graph parts. Deliberately distinct
+        // from the "Map Zone " prefix so the per-zone progress/scan logic never
+        // picks these up.
+        private const val GRAPH_TITLE_PREFIX = "Routing Graph"
+    }
+
     /**
      * A Flow that emits a Map of all zones currently being downloaded.
      * Key: Zone ID, Value: Progress (0.0 to 1.0).
@@ -194,5 +228,83 @@ class ZoneDownloadManager(private val context: Context) {
                 .setAllowedOverMetered(true)
 
         downloadManager.enqueue(transitRequest)
+    }
+
+    // --- Single global routing graph (P16) -----------------------------------
+
+    /** True once the mandatory global graph files are present on disk. */
+    fun isGraphDownloaded(): Boolean =
+        GRAPH_REQUIRED.all { File(context.getExternalFilesDir(null), it).exists() }
+
+    /** Whether any graph part is currently enqueued/running in DownloadManager. */
+    private fun graphDownloadActive(): Boolean {
+        downloadManager.query(DownloadManager.Query()).use { cursor ->
+            while (cursor.moveToNext()) {
+                val title = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TITLE))
+                    ?: continue
+                if (!title.startsWith(GRAPH_TITLE_PREFIX)) continue
+                val status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))
+                if (status == DownloadManager.STATUS_RUNNING ||
+                    status == DownloadManager.STATUS_PAUSED ||
+                    status == DownloadManager.STATUS_PENDING) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    fun getGraphStatus(): GraphStatus = when {
+        isGraphDownloaded() -> GraphStatus.FINISHED
+        graphDownloadActive() -> GraphStatus.DOWNLOADING
+        else -> GraphStatus.NOT_STARTED
+    }
+
+    fun getGraphStatusFlow(): Flow<GraphStatus> = flow {
+        while (true) {
+            emit(getGraphStatus())
+            delay(2000)
+        }
+    }
+        .distinctUntilChanged()
+        .conflate()
+        .flowOn(Dispatchers.IO)
+
+    /**
+     * Download the single global routing graph into the base dir the Rust
+     * router loads from. Enqueues one DownloadManager request per graph file;
+     * optional parts (transit/lanes) that 404 for a given build are ignored.
+     */
+    fun startGraphDownload() {
+        deleteGraph()
+        GRAPH_FILES.forEach { fileName ->
+            val request = DownloadManager.Request("$HOST/$fileName".toUri())
+                .setTitle("$GRAPH_TITLE_PREFIX ($fileName)")
+                .setDescription(context.getString(R.string.routing_graph_download_desc))
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(context, null, fileName)
+                .setAllowedOverMetered(true)
+            downloadManager.enqueue(request)
+        }
+    }
+
+    /** Cancel any in-flight graph downloads and remove the graph files. */
+    fun deleteGraph() {
+        downloadManager.query(DownloadManager.Query()).use { cursor ->
+            while (cursor.moveToNext()) {
+                val title = cursor.getString(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_TITLE))
+                    ?: continue
+                if (title.startsWith(GRAPH_TITLE_PREFIX)) {
+                    val id = cursor.getLong(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID))
+                    downloadManager.remove(id)
+                }
+            }
+        }
+        GRAPH_FILES.forEach { fileName ->
+            val file = File(context.getExternalFilesDir(null), fileName)
+            if (file.exists()) {
+                file.delete()
+            }
+        }
     }
 }
