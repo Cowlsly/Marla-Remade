@@ -6,6 +6,8 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -100,24 +102,36 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                 val hasCalendarPermissions = arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR)
                     .all { ContextCompat.checkSelfPermission(context, it) == PackageManager.PERMISSION_GRANTED }
 
+                // #537 RU overflow: Button was in trailingContent (horizontal Row) and
+                // clipped for long translations. Move it below the description in a
+                // vertical supportingContent Column so it wraps in any locale; Switch
+                // stays in trailingContent only when permission is granted.
                 ListItem(
                     content = { Text(stringResource(R.string.sync_contacts_calendar)) },
-                    trailingContent = {
-                        if (hasCalendarPermissions) {
+                    supportingContent = if (!hasCalendarPermissions) {
+                        {
+                            Column(
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                modifier = Modifier.padding(top = 4.dp)
+                            ) {
+                                Button(onClick = {
+                                    calendarPermissionLauncher.launch(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR))
+                                }) {
+                                    Text(stringResource(R.string.grant_calendar_permissions))
+                                }
+                            }
+                        }
+                    } else null,
+                    trailingContent = if (hasCalendarPermissions) {
+                        {
                             Switch(
                                 checked = isCalendarSyncEnabled,
                                 onCheckedChange = { enabled ->
                                     viewModel.setCalendarSyncEnabled(enabled)
                                 }
                             )
-                        } else {
-                            Button(onClick = {
-                                calendarPermissionLauncher.launch(arrayOf(Manifest.permission.READ_CALENDAR, Manifest.permission.WRITE_CALENDAR))
-                            }) {
-                                Text(stringResource(R.string.grant_calendar_permissions))
-                            }
                         }
-                    }
+                    } else null
                 )
                 HorizontalDivider()
             }
