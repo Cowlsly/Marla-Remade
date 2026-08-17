@@ -16,6 +16,9 @@
 
     <!-- BottomSheet: Current location label. Noun. -->
     <string name="your_location">Your location</string>
+    <!-- Place-pane title for a bare coordinate opened from a geo:/maps deep link
+         that has no name and no reverse-geocode match. Noun. -->
+    <string name="dropped_pin">Dropped pin</string>
     <!-- BottomSheet: Error when routing fails -->
     <string name="no_route_found">No route found</string>
     <!-- BottomSheet: Loading state while route is calculated -->

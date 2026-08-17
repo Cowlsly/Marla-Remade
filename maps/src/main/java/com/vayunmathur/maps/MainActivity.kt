@@ -1,14 +1,18 @@
 package com.vayunmathur.maps
 
 import android.Manifest
+import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.viewModels
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.downloadservice.InitialDownloadChecker
 import com.vayunmathur.library.ui.DynamicTheme
@@ -18,6 +22,10 @@ import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
+import com.vayunmathur.maps.data.MapLink
+import com.vayunmathur.maps.data.MapLinkParser
+import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.google.GoogleSearchDataSource
 import com.vayunmathur.maps.ui.MapPage
 import com.vayunmathur.maps.ui.SavedPlacesPage
 import com.vayunmathur.maps.ui.SearchPage
@@ -26,17 +34,32 @@ import com.vayunmathur.maps.data.MapPreferences
 import com.vayunmathur.maps.data.ThemeMode
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.MapsSearchViewModel
+import com.vayunmathur.maps.util.NavigationService
+import com.vayunmathur.maps.util.NavigationSessionManager
+import com.vayunmathur.maps.util.OfflineRouter
+import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import org.maplibre.android.log.Logger
+import org.maplibre.spatialk.geojson.Position
 import java.io.File
 
 class MainActivity : ComponentActivity() {
+
+    // Same instances the Compose tree gets via viewModel() (both resolve to this
+    // Activity's ViewModelStore), so an external geo:/maps/navigation intent handled
+    // here shows up in the map UI: selecting a place opens its bottom pane, and a
+    // navigation link drives the shared NavigationSessionManager.
+    private val selectedVm: SelectedFeatureViewModel by viewModels()
+    private val searchVm: MapsSearchViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -51,14 +74,9 @@ class MainActivity : ComponentActivity() {
         File(filesDir, "world_z0-6.pmtiles").delete()
         val ds = DataStoreUtils.getInstance(this)
         Logger.setVerbosity(Logger.INFO)
-//
-//        runBlocking {
-//            ds.setBoolean("dbSetupComplete", false)
-//            ds.setBoolean("done_metadata.bin", false)
-//            ds.setBoolean("done_road_names.bin", false)
-//            File(getExternalFilesDir(null), "metadata.bin").delete()
-//            File(getExternalFilesDir(null), "road_names.bin").delete()
-//        }
+
+        // Deep link that launched us cold (geo:/google.navigation:/maps URL).
+        handleIntent(intent)
 
         setContent {
             val themeMode by ds.stringFlow(MapPreferences.KEY_THEME_MODE)
@@ -94,6 +112,147 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+    }
+
+    // Warm start: the app was already running when another app fired a geo:/maps/
+    // navigation intent at us. singleTop (see AndroidManifest) routes it here.
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIntent(intent)
+    }
+
+    /**
+     * Turn an external ACTION_VIEW `geo:` / `google.navigation:` / Google-Maps web
+     * link into either an opened place (select + bottom pane) or a started
+     * navigation session. Malformed/empty links are ignored (never crash).
+     */
+    private fun handleIntent(intent: Intent?) {
+        if (intent?.action != Intent.ACTION_VIEW) return
+        val data = intent.dataString ?: return
+        val link = MapLinkParser.parse(data)
+        if (link == null) {
+            Log.i(TAG, "ACTION_VIEW ignored (unparseable): $data")
+            return
+        }
+        Log.i(TAG, "ACTION_VIEW routed data=$data -> $link")
+        if (link.navigate) navigateTo(link) else openPlace(link)
+    }
+
+    /** Select a place from the link and open its bottom pane (Vela place-card). */
+    private fun openPlace(link: MapLink) {
+        val lat = link.lat
+        val lng = link.lng
+        val query = link.query
+        when {
+            // A point with a name/label → drop it straight in (no network).
+            lat != null && lng != null && !query.isNullOrBlank() -> {
+                selectedVm.selectAndFocus(genericPlace(query, lat, lng), link.zoom)
+            }
+            // A bare point → reverse-geocode for a name; fall back to a plain pin.
+            lat != null && lng != null -> {
+                searchVm.reverseGeocode(lat, lng) { place ->
+                    selectedVm.selectAndFocus(
+                        place ?: genericPlace(getString(R.string.dropped_pin), lat, lng),
+                        link.zoom,
+                    )
+                }
+            }
+            // A query only → run the Google search and auto-select the first hit
+            // (same path as the contact-address shortcut).
+            !query.isNullOrBlank() -> {
+                val near = biasPosition()
+                searchVm.searchAndSelectFirst(query, near.latitude, near.longitude) { first ->
+                    if (first != null) selectedVm.selectAndFocus(searchVm.toFeature(first), link.zoom)
+                    else Log.i(TAG, "openPlace: no search result for \"$query\"")
+                }
+            }
+        }
+    }
+
+    /** Resolve the link's destination, route from the user's location, and start guidance. */
+    private fun navigateTo(link: MapLink) {
+        lifecycleScope.launch {
+            val mode = link.mode ?: RouteService.TravelMode.DRIVE
+            // Destination position: an explicit coord, else geocode the query.
+            val destPos: Position?
+            val destName: String
+            if (link.lat != null && link.lng != null) {
+                destPos = Position(link.lng, link.lat)
+                destName = link.query ?: getString(R.string.dropped_pin)
+            } else if (!link.query.isNullOrBlank()) {
+                val near = biasPosition()
+                val hit = GoogleSearchDataSource.search(link.query, near.latitude, near.longitude).firstOrNull()
+                destPos = hit?.let { Position(it.lng, it.lat) }
+                destName = hit?.name ?: link.query
+            } else {
+                destPos = null
+                destName = getString(R.string.dropped_pin)
+            }
+            if (destPos == null) {
+                Log.i(TAG, "navigateTo: could not resolve destination for $link")
+                return@launch
+            }
+
+            val destFeature = SpecificFeature.GenericPlace(
+                name = destName, phone = null, website = null, openingHours = null, position = destPos,
+            )
+            // A null first waypoint means "from current location".
+            val route = SpecificFeature.Route(listOf(null, destFeature))
+
+            // Wait briefly for a real GPS fix so the first leg starts from the user.
+            val origin = awaitUserPosition()
+            if (origin == null) {
+                // No fix yet: fall back to opening the destination place + pane so the
+                // user can hit Start Navigation manually (which waits for location).
+                Log.i(TAG, "navigateTo: no location fix; opening destination place instead")
+                selectedVm.selectAndFocus(destFeature)
+                return@launch
+            }
+
+            val computed = try {
+                OfflineRouter.getRouteMulti(applicationContext, route, origin, mode)
+            } catch (e: Exception) {
+                Log.w(TAG, "navigateTo: routing failed", e); null
+            }
+            if (computed == null) {
+                Log.i(TAG, "navigateTo: no route ($mode) to $destName; opening place instead")
+                selectedVm.selectAndFocus(destFeature)
+                return@launch
+            }
+
+            startForegroundService(Intent(applicationContext, NavigationService::class.java))
+            NavigationSessionManager.init(applicationContext)
+            NavigationSessionManager.start(
+                route = computed,
+                mode = mode,
+                destination = destPos,
+                destinationLabel = destName,
+            )
+            Log.i(TAG, "navigateTo: started $mode navigation to $destName")
+        }
+    }
+
+    /** First valid GPS fix within [timeoutMs], or null. (0,0) means "no fix yet". */
+    private suspend fun awaitUserPosition(timeoutMs: Long = 8_000): Position? =
+        withTimeoutOrNull(timeoutMs) {
+            selectedVm.userPosition.first { it.latitude != 0.0 || it.longitude != 0.0 }
+        }
+
+    /** Search bias: the user's live position when known, else the map's default centre. */
+    private fun biasPosition(): Position {
+        val p = selectedVm.userPosition.value
+        return if (p.latitude != 0.0 || p.longitude != 0.0) p else Position(-118.243683, 34.052235)
+    }
+
+    private fun genericPlace(name: String, lat: Double, lng: Double) =
+        SpecificFeature.GenericPlace(
+            name = name, phone = null, website = null, openingHours = null,
+            position = Position(lng, lat),
+        )
+
+    companion object {
+        private const val TAG = "MapsIntent"
     }
 }
 
