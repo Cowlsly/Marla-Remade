@@ -11,6 +11,7 @@ import com.vayunmathur.library.util.BottomBarItem
 import com.vayunmathur.library.util.BottomNavBar
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
+import com.vayunmathur.taxi.data.BookingTrip
 import com.vayunmathur.taxi.ui.AccountsScreen
 import com.vayunmathur.taxi.ui.CurrentRideScreen
 import com.vayunmathur.taxi.ui.LyftSignInScreen
@@ -18,7 +19,7 @@ import com.vayunmathur.taxi.ui.RideScreen
 import com.vayunmathur.taxi.ui.RideTrackingScreen
 
 @Composable
-fun Navigation(trackRideId: MutableState<String?>) {
+fun Navigation(trackRideId: MutableState<String?>, bookingTrip: MutableState<BookingTrip?>) {
     val backStack = rememberNavBackStack<Route>(Route.Ride)
     val currentPage = backStack.backStack.last()
 
@@ -26,6 +27,13 @@ fun Navigation(trackRideId: MutableState<String?>) {
         val id = trackRideId.value ?: return@LaunchedEffect
         backStack.add(Route.RideTracking(id))
         trackRideId.value = null
+    }
+
+    // A `taxi://book` trip pre-fills the ride screen: make sure that tab is the one shown, then
+    // RideScreen consumes the trip. (Cold-start already opens on Route.Ride.)
+    LaunchedEffect(bookingTrip.value) {
+        if (bookingTrip.value == null) return@LaunchedEffect
+        if (backStack.backStack.lastOrNull() != Route.Ride) backStack.add(Route.Ride)
     }
 
     val pages = listOf(
@@ -38,7 +46,7 @@ fun Navigation(trackRideId: MutableState<String?>) {
         backStack = backStack,
         bottomBar = { BottomNavBar(backStack, pages, currentPage) },
     ) {
-        entry<Route.Ride> { RideScreen() }
+        entry<Route.Ride> { RideScreen(bookingTrip) }
         entry<Route.CurrentRide> { CurrentRideScreen() }
         entry<Route.Accounts> {
             AccountsScreen(onConnectLyft = { backStack.add(Route.LyftSignIn) })

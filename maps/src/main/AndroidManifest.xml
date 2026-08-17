@@ -25,6 +25,12 @@
          is simply absent. -->
     <uses-permission android:name="com.vayunmathur.fooddelivery.permissions.ACCESS_ORDERS" />
 
+    <!-- Taxi integration (P20): read taxi's exported ride-estimate provider to show a
+         fare/ETA inline on the route sheet. Signature-level, granted only because both
+         MA apps share the signing key; on any other signer it is not granted and the
+         estimate simply doesn't resolve (the taxi option falls back to launch-only). -->
+    <uses-permission android:name="com.vayunmathur.taxi.permissions.ACCESS_RIDES" />
+
     <!-- Voice search (P8): records audio for the system SpeechRecognizer, which
          routes to the user-selected recognition service (the MA speech app when
          installed). -->
@@ -53,6 +59,10 @@
         <!-- Android 11+ package visibility: resolve fooddelivery's orderable-lookup
              provider (P19) and its fooddelivery://restaurant/<id> order deep link. -->
         <package android:name="com.vayunmathur.fooddelivery" />
+        <!-- Android 11+ package visibility: resolve taxi's ride-estimate provider (P20),
+             detect whether the taxi app is installed, and launch its taxi://book deep
+             link with the route's origin+destination pre-filled. -->
+        <package android:name="com.vayunmathur.taxi" />
     </queries>
 
 

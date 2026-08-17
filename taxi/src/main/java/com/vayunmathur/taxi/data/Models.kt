@@ -11,6 +11,15 @@ data class Place(
     val location: LatLng,
 )
 
+/**
+ * A trip handed to the app from a co-signed caller (the maps app) via the `taxi://book` deep
+ * link — the origin + destination to pre-fill on the ride screen and immediately compare.
+ */
+data class BookingTrip(
+    val pickup: Place,
+    val destination: Place,
+)
+
 enum class Provider(val label: String, val packageName: String) {
     UBER("Uber", "com.ubercab"),
     LYFT("Lyft", "me.lyft.android"),

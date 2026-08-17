@@ -248,6 +248,18 @@
     <!-- Travel mode: Public transit. Noun. -->
     <string name="travel_mode_transit">Transit</string>
 
+    <!-- Route sheet: header of the option to book a taxi/ride for this origin→destination
+         via the MA taxi app. -->
+    <string name="route_taxi_title">Get a ride</string>
+    <!-- Route sheet: button that opens the taxi app with this trip pre-filled to book a ride. -->
+    <string name="route_taxi_book">Book ride</string>
+    <!-- Route sheet: taxi pickup ETA shown inline, e.g. "4 min away". %1$d = minutes until
+         pickup. -->
+    <string name="route_taxi_eta_minutes"><xliff:g id="minutes" example="4">%1$d</xliff:g> min away</string>
+    <!-- Route sheet: the MA taxi app's name, shown as the ride option subtitle. Product/app
+         name, so it is not translated. -->
+    <string name="route_taxi_provider" translatable="false">Taxi</string>
+
     <!-- Notification channel name for foreground nav service -->
     <string name="nav_channel_name">Navigation</string>
     <!-- Notification channel description -->

@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
@@ -32,11 +33,15 @@ import com.vayunmathur.library.ui.LocalContentColor
 import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.ipc.RideEstimateClient
+import com.vayunmathur.maps.ipc.RideHandoffContract
+import com.vayunmathur.maps.ipc.rememberRideEstimate
 import com.vayunmathur.maps.util.NavigationService
 import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import org.maplibre.spatialk.geojson.Position
 
 @Composable
 fun BottomSheetContent(
@@ -95,7 +100,8 @@ fun BottomSheetContent(
         }
         is SpecificFeature.Route -> {
             if(route != null) {
-                RouteSheet(selectedFeature, route, selectedRouteType, setSelectedRouteType, navState)
+                val userPosition by viewModel.userPosition.collectAsState()
+                RouteSheet(selectedFeature, route, selectedRouteType, setSelectedRouteType, navState, userPosition)
             }
         }
         else -> Unit
@@ -116,6 +122,7 @@ fun RouteSheet(
     selectedRouteType: RouteService.TravelMode,
     setSelectedRouteType: (RouteService.TravelMode) -> Unit,
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
+    userPosition: Position? = null,
 ) {
     Column {
         PrimaryTabRow(route.entries.indexOfFirst { it.key == selectedRouteType }) {
@@ -188,6 +195,25 @@ fun RouteSheet(
                         Text(stringResource(R.string.nav_action_start))
                     }
                 }
+                // Taxi/ride option (P20): offer a ride for this route's origin→destination
+                // via the MA taxi app. Origin is the first waypoint (or the user's live
+                // position when the route starts "from here"); destination is the last.
+                val taxiOrigin = selectedFeature.waypoints.firstOrNull()
+                val taxiDest = selectedFeature.waypoints.lastOrNull()
+                // Origin may be "from here" (a null waypoint) → the user's live position; the
+                // destination must be a real waypoint, so it never falls back to userPosition.
+                val taxiOriginPos = taxiOrigin?.position ?: userPosition
+                val taxiDestPos = taxiDest?.position
+                if (selectedFeature.waypoints.size >= 2 && taxiOriginPos != null && taxiDestPos != null) {
+                    RouteTaxiOption(
+                        originLat = taxiOriginPos.latitude,
+                        originLng = taxiOriginPos.longitude,
+                        originLabel = taxiOrigin?.name,
+                        destLat = taxiDestPos.latitude,
+                        destLng = taxiDestPos.longitude,
+                        destLabel = taxiDest.name,
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
             }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
@@ -219,6 +245,62 @@ fun RouteSheet(
             ListItem({
                 Text(stringResource(R.string.generating_route))
             })
+        }
+    }
+}
+
+/**
+ * The taxi/ride option shown under a route (P20): if the MA taxi app is installed, offer a ride
+ * for the route's origin→destination. When the signature-guarded estimate resolves, the fare/ETA
+ * is shown inline; "Book ride" opens the taxi app with the trip pre-filled. If taxi is absent the
+ * option renders nothing; if the estimate is unavailable it degrades to a launch-only button — no
+ * crash either way.
+ */
+@Composable
+private fun RouteTaxiOption(
+    originLat: Double,
+    originLng: Double,
+    originLabel: String?,
+    destLat: Double,
+    destLng: Double,
+    destLabel: String?,
+) {
+    val context = LocalContext.current
+    val installed = remember { RideEstimateClient.isInstalled(context) }
+    if (!installed) return
+    val estimate by rememberRideEstimate(
+        context, originLat, originLng, destLat, destLng, originLabel, destLabel,
+    )
+    val available = estimate?.takeIf { it.available }
+
+    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+        Column(Modifier.padding(vertical = 4.dp)) {
+            ListItem({ Text(stringResource(R.string.route_taxi_title)) }, supportingContent = {
+                val subtitle = listOfNotNull(
+                    available?.fareEstimate,
+                    available?.etaMinutes?.let { stringResource(R.string.route_taxi_eta_minutes, it) },
+                ).joinToString(" · ").ifBlank { stringResource(R.string.route_taxi_provider) }
+                Text(subtitle)
+            })
+            Button(
+                onClick = {
+                    goto(
+                        context,
+                        RideHandoffContract.bookingDeepLink(
+                            originLat, originLng, originLabel, destLat, destLng, destLabel,
+                        ),
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary,
+                ),
+            ) {
+                Text(stringResource(R.string.route_taxi_book))
+            }
         }
     }
 }

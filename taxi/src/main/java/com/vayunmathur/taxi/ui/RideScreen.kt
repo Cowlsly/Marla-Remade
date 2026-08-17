@@ -23,6 +23,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -62,6 +63,7 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.taxi.R
+import com.vayunmathur.taxi.data.BookingTrip
 import com.vayunmathur.taxi.data.Place
 import com.vayunmathur.taxi.data.Provider
 import com.vayunmathur.taxi.data.QuoteResult
@@ -85,7 +87,7 @@ private fun providerColor(provider: Provider): Color = when (provider) {
 private enum class RouteField { PICKUP, DESTINATION }
 
 @Composable
-fun RideScreen() {
+fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val focus = LocalFocusManager.current
@@ -216,6 +218,21 @@ fun RideScreen() {
                 ?: LocationProvider.search(context, q).firstOrNull()
             if (place != null) select(place)
         }
+    }
+
+    // A trip handed in from the maps route sheet via the taxi://book deep link: pre-fill both
+    // endpoints and immediately compare fares. Consumed once, then cleared.
+    LaunchedEffect(bookingTrip?.value) {
+        val state = bookingTrip ?: return@LaunchedEffect
+        val trip = state.value ?: return@LaunchedEffect
+        pickup = trip.pickup
+        pickupQuery = trip.pickup.name
+        destination = trip.destination
+        destinationQuery = trip.destination.name
+        suggestions = emptyList()
+        active = null
+        state.value = null
+        quote()
     }
 
     AppScaffold(title = stringResource(R.string.nav_ride)) { padding ->
