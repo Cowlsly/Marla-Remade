@@ -97,7 +97,6 @@ aws s3 sync "$DATA_DIR" "s3://$BUCKET_NAME/" \
     --exclude "*" \
     --include "metadata.bin" \
     --include "road_names.bin" \
-    --include "amenities.db" \
     --include "nodes.bin" \
     --include "edges.bin" \
     --include "transit_voyages.bin" \
