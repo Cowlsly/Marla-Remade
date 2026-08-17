@@ -58,6 +58,7 @@ fun MyMapLayers(
     savedPlaces: List<com.vayunmathur.maps.data.SavedPlace> = emptyList(),
     parkingSpot: com.vayunmathur.maps.data.ParkingSpot? = null,
     transitStops: List<com.vayunmathur.maps.data.transit.TransitStop> = emptyList(),
+    familyMembers: List<com.vayunmathur.maps.ipc.FamilyMember> = emptyList(),
     trafficEnabled: Boolean = true,
     satelliteEnabled: Boolean = false,
     safetyEnabled: Boolean = false,
@@ -147,6 +148,10 @@ fun MyMapLayers(
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).
         SavedPlacesLayer(savedPlaces)
+
+        // Live family-location pins (P18), pushed by the findfamily bound
+        // service while the map is open. Tap → select the person → Directions.
+        FamilyLocationLayer(familyMembers)
 
         // Parking pin (P9). Tap → parking sheet (handled in MapPage.onMapClick).
         ParkingLayer(parkingSpot)

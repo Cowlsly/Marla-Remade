@@ -159,6 +159,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // Search-result pins (from the Google search page) drawn on the map.
     val searchResults by searchViewModel.results.collectAsState()
 
+    // Live family-location pins (P18): the findfamily bound service is bound
+    // while this screen is composed (see rememberFamilyMembers' DisposableEffect)
+    // and pushes updates only while bound. Empty when findfamily is absent.
+    val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
+
     // --- ZONE DOWNLOAD STATE ---
     val camera = rememberCameraState(CameraPosition(target = Position(-118.243683,34.052235), zoom = 5.0))
 
@@ -464,6 +469,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     )?.firstNotNullOfOrNull { it.toSelectedSavedPlace() }
                                     ?: projection?.queryRenderedFeatures(
                                         offset,
+                                        setOf(FAMILY_LOCATION_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
+                                    ?: projection?.queryRenderedFeatures(
+                                        offset,
                                         setOf(GOOGLE_POI_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
                                 if (pinHit != null) {
@@ -520,7 +529,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, transitStops, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
                     }
                 }
 
