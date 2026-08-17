@@ -90,3 +90,49 @@ data class MotisPlace(
     val track: String? = null,
     @SerialName("scheduledTrack") val scheduledTrack: String? = null,
 )
+
+// --- MOTIS v1 journey planning (`GET /api/v1/plan`) — P11d online fallback ---
+
+/** Response of `GET /api/v1/plan`: a list of candidate itineraries. */
+@Serializable
+data class MotisPlanResponse(
+    val itineraries: List<MotisItinerary> = emptyList(),
+)
+
+/** One end-to-end itinerary; `duration` is whole seconds. */
+@Serializable
+data class MotisItinerary(
+    val duration: Long = 0,
+    val legs: List<MotisLeg> = emptyList(),
+)
+
+/**
+ * One leg of an itinerary. `mode` is `WALK` for walking legs, otherwise a
+ * transit mode (`BUS`, `TRAM`, `SUBWAY`, `RAIL`, …). `duration` is whole
+ * seconds and `distance` is metres.
+ */
+@Serializable
+data class MotisLeg(
+    val mode: String? = null,
+    val from: MotisPlanPlace? = null,
+    val to: MotisPlanPlace? = null,
+    val duration: Long = 0,
+    val distance: Double = 0.0,
+    val routeShortName: String? = null,
+    val routeColor: String? = null,
+    val headsign: String? = null,
+    val tripId: String? = null,
+)
+
+/** A leg endpoint in a plan response (position + name + ISO-8601 times). */
+@Serializable
+data class MotisPlanPlace(
+    val name: String? = null,
+    val stopId: String? = null,
+    val lat: Double = 0.0,
+    val lon: Double = 0.0,
+    val arrival: String? = null,
+    val departure: String? = null,
+    @SerialName("scheduledArrival") val scheduledArrival: String? = null,
+    @SerialName("scheduledDeparture") val scheduledDeparture: String? = null,
+)

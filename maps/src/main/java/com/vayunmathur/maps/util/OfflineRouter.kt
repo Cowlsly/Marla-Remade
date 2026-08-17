@@ -99,6 +99,24 @@ object OfflineRouter {
             mode: Int,
             startTime: Long
     ): Array<RawStep>?
+    /**
+     * Offline transit journey planning (P11b): RAPTOR over the per-region
+     * `<feed>.transit` index at `<basePath>/<feed>.transit`. `depSecs` is seconds
+     * since local midnight, `weekday` is 0=Mon..6=Sun, `date` is yyyymmdd.
+     * Returns walk + ride legs as [RawStep]s, or null when the feed is missing,
+     * doesn't cover the endpoints, or no journey exists.
+     */
+    private external fun findTransitRouteNative(
+            basePath: String,
+            feed: String,
+            sLat: Double,
+            sLon: Double,
+            eLat: Double,
+            eLon: Double,
+            depSecs: Int,
+            weekday: Int,
+            date: Int
+    ): Array<RawStep>?
     private external fun updateTrafficNative(
             edgeIds: LongArray,
             speeds: ByteArray,
@@ -204,11 +222,14 @@ object OfflineRouter {
     )
 
     private var isInitialized = false
+    /** Base dir (external files) holding downloaded packs incl. `*.transit`. */
+    private var basePath: String? = null
 
     @Synchronized
     fun initialize(context: Context) {
         if (isInitialized) return
         val path = context.getExternalFilesDir(null)?.absolutePath ?: return
+        basePath = path
         Log.d("OfflineRouter", "Initializing with path: $path")
 
         val presentFeeds = context.assets.list("")?.filter {
@@ -268,6 +289,53 @@ object OfflineRouter {
         RouteService.Route(duration = totalSec.seconds, distanceMeters = totalDist, polyline = combinedPolyline, step = combinedSteps)
     }
 
+    /**
+     * Offline transit routing (P11d): plan a journey with the on-device RAPTOR
+     * planner over any downloaded per-region `*.transit` index that covers the
+     * endpoints. Returns null when no index is present/covering or no journey is
+     * found — the caller then falls back to the P10 online Transitous planner.
+     */
+    suspend fun getTransitRouteOffline(
+            context: Context,
+            start: Position,
+            end: Position
+    ): RouteService.Route? = withContext(Dispatchers.Default) {
+        if (!isInitialized) initialize(context)
+        val base = basePath ?: return@withContext null
+        val feeds = File(base)
+                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
+                ?.map { it.name.removeSuffix(".transit") }
+                ?: emptyList()
+        if (feeds.isEmpty()) return@withContext null
+
+        val now = java.util.Calendar.getInstance()
+        val depSecs = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
+                now.get(java.util.Calendar.MINUTE) * 60 +
+                now.get(java.util.Calendar.SECOND)
+        // Calendar: SUNDAY=1..SATURDAY=7 -> Mon=0..Sun=6 for the index masks.
+        val weekday = (now.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
+        val date = now.get(java.util.Calendar.YEAR) * 10000 +
+                (now.get(java.util.Calendar.MONTH) + 1) * 100 +
+                now.get(java.util.Calendar.DAY_OF_MONTH)
+
+        for (feed in feeds) {
+            val raw = try {
+                findTransitRouteNative(
+                        base, feed,
+                        start.latitude, start.longitude,
+                        end.latitude, end.longitude,
+                        depSecs, weekday, date
+                )
+            } catch (_: Exception) {
+                null
+            }
+            if (raw != null && raw.isNotEmpty()) {
+                return@withContext buildRoute(context, raw, RouteService.TravelMode.TRANSIT)
+            }
+        }
+        null
+    }
+
     suspend fun getRoute(
             context: Context,
             start: Position,
@@ -298,6 +366,20 @@ object OfflineRouter {
                         )
                                 ?: throw IllegalStateException("No route found")
 
+                buildRoute(context, rawSteps, mode)
+            }
+
+    /**
+     * Convert native [RawStep]s into a [RouteService.Route]: decode geometry,
+     * localize maneuver text, attach transit details, and coalesce consecutive
+     * same-road maneuvers. Shared by the driving/walking [findRouteNative] path
+     * and the offline transit [findTransitRouteNative] path.
+     */
+    private fun buildRoute(
+            context: Context,
+            rawSteps: Array<RawStep>,
+            mode: RouteService.TravelMode
+    ): RouteService.Route {
                 val fullPolyline = mutableListOf<Position>()
                 val processedSteps =
                         rawSteps.map { raw ->
@@ -575,14 +657,14 @@ object OfflineRouter {
                     }
                 }
 
-                RouteService.Route(
+                return RouteService.Route(
                         duration =
                                 coalescedSteps.sumOf { it.staticDuration.inWholeSeconds }.seconds,
                         distanceMeters = coalescedSteps.sumOf { it.distanceMeters },
                         polyline = fullPolyline,
                         step = coalescedSteps
                 )
-            }
+    }
 
     /**
      * Maneuvers that we treat as "still on the same road" when their

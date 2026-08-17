@@ -96,10 +96,22 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
                 // Start with an empty map
                 emit(emptyMap())
 
-                // Offline-only routing with chained multi-waypoint support
+                // Offline-first routing with chained multi-waypoint support.
+                // TRANSIT prefers the on-device RAPTOR planner over any
+                // downloaded region index (P11d); if none covers the trip, it
+                // falls back to the P10 online Transitous (MOTIS) planner.
                 RouteService.TravelMode.entries.forEach { mode ->
                     val result = try {
-                        OfflineRouter.getRouteMulti(application, routeFeature, pos, mode)
+                        if (mode == RouteService.TravelMode.TRANSIT) {
+                            val positions = routeFeature.waypoints.map { it?.position ?: pos }
+                            val start = positions.first()
+                            val end = positions.last()
+                            OfflineRouter.getTransitRouteOffline(application, start, end)
+                                ?: com.vayunmathur.maps.data.transit.TransitousDataSource
+                                    .planRoute(start, end)
+                        } else {
+                            OfflineRouter.getRouteMulti(application, routeFeature, pos, mode)
+                        }
                     } catch (_: Exception) {
                         null
                     }

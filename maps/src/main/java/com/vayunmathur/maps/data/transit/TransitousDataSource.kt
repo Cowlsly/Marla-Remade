@@ -1,11 +1,14 @@
 package com.vayunmathur.maps.data.transit
 
 import com.vayunmathur.library.network.NetworkClient
+import com.vayunmathur.maps.util.RouteService
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.maplibre.spatialk.geojson.Position
 import java.net.URLEncoder
 import java.time.Instant
 import java.time.OffsetDateTime
+import kotlin.time.Duration.Companion.seconds
 
 /**
  * Online public-transit data source (P10) backed by **Transitous** — a free,
@@ -120,6 +123,88 @@ object TransitousDataSource {
             "?stopId=${enc(stopId)}&n=$DEPARTURE_COUNT&arriveBy=false"
         val resp: MotisStoptimes = NetworkClient.getJson(url, REQUEST_HEADERS, useSystemTrust = true)
         resp.stopTimes.mapNotNull { it.toDeparture() }
+    }
+
+    /**
+     * Online transit journey planning (P11d fallback) via MOTIS
+     * `GET /api/v1/plan`. Used when no offline `*.transit` index covers the
+     * route. Never throws — returns null on any failure so the UI simply shows
+     * no transit route. On-device only (needs the network); verified by shape.
+     *
+     * NOTE: per-leg geometry uses the leg's from/to endpoints (a straight line)
+     * rather than decoding MOTIS's encoded `legGeometry` polyline — enough to
+     * draw the route in the directions UI; a polyline decoder is a future
+     * refinement.
+     */
+    suspend fun planRoute(
+        from: Position,
+        to: Position,
+    ): RouteService.Route? = withContext(Dispatchers.IO) {
+        runCatching {
+            val url = "$BASE_URL/api/v1/plan" +
+                "?fromPlace=${enc("${from.latitude},${from.longitude}")}" +
+                "&toPlace=${enc("${to.latitude},${to.longitude}")}&arriveBy=false"
+            val resp: MotisPlanResponse =
+                NetworkClient.getJson(url, REQUEST_HEADERS, useSystemTrust = true)
+            val itinerary = resp.itineraries.firstOrNull() ?: return@runCatching null
+
+            val polyline = mutableListOf<Position>()
+            val steps = mutableListOf<RouteService.Step>()
+            var totalDistance = 0.0
+            var totalSeconds = 0L
+
+            for (leg in itinerary.legs) {
+                val f = leg.from ?: continue
+                val t = leg.to ?: continue
+                val fp = Position(f.lon, f.lat)
+                val tp = Position(t.lon, t.lat)
+                if (polyline.isEmpty() || polyline.last() != fp) polyline.add(fp)
+                polyline.add(tp)
+
+                val isTransit = !"WALK".equals(leg.mode, ignoreCase = true)
+                totalDistance += leg.distance
+                totalSeconds += leg.duration
+
+                steps.add(
+                    RouteService.Step(
+                        distanceMeters = leg.distance,
+                        staticDuration = leg.duration.seconds,
+                        polyline = listOf(fp, tp),
+                        navInstruction = RouteService.API.NavInstruction(
+                            if (isTransit) RouteService.API.Maneuver.RIDE
+                            else RouteService.API.Maneuver.MANEUVER_UNSPECIFIED,
+                            ""
+                        ),
+                        travelMode = if (isTransit) RouteService.TravelMode.TRANSIT
+                        else RouteService.TravelMode.WALK,
+                        transitDetails = if (isTransit) RouteService.API.TransitDetails(
+                            headsign = leg.headsign ?: "",
+                            stopCount = 0,
+                            transitLine = RouteService.API.TransitLine(
+                                name = leg.routeShortName ?: leg.mode ?: "",
+                                color = leg.routeColor?.ifBlank { null }
+                                    ?.let { if (it.startsWith("#")) it else "#$it" }
+                                    ?: "#FF0000"
+                            ),
+                            stopDetails = RouteService.API.StopDetails(
+                                arrivalTime = t.arrival ?: t.scheduledArrival ?: "",
+                                departureTime = f.departure ?: f.scheduledDeparture ?: "",
+                                arrivalStop = RouteService.API.Stop(t.name ?: ""),
+                                departureStop = RouteService.API.Stop(f.name ?: "")
+                            ),
+                            feedName = null
+                        ) else null
+                    )
+                )
+            }
+            if (steps.isEmpty()) return@runCatching null
+            RouteService.Route(
+                duration = totalSeconds.seconds,
+                distanceMeters = totalDistance,
+                polyline = polyline,
+                step = steps,
+            )
+        }.getOrNull()
     }
 
     /** Map a MOTIS stoptime → app [Departure]; drop entries with no usable
