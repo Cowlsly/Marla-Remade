@@ -373,6 +373,8 @@ private fun Cursor.postalAddress(): String? {
         ?.takeIf { it.isNotBlank() }
 
     col(StructuredPostal.FORMATTED_ADDRESS)
+        ?.normalizeAddress()
+        ?.takeIf { it.isNotBlank() }
         ?.let { return it }
 
     return listOfNotNull(
@@ -383,6 +385,11 @@ private fun Cursor.postalAddress(): String? {
         col(StructuredPostal.COUNTRY),
     ).joinToString(", ").ifBlank { null }
 }
+
+/** Collapse a multi-line postal address to one comma-separated line so it makes
+ *  a valid single-line search query (FORMATTED_ADDRESS embeds newlines). */
+private fun String.normalizeAddress(): String =
+    lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ")
 
 /** Projection for the Android 17 session URI: MIMETYPE (to spot the postal row)
  *  plus the postal columns. */
