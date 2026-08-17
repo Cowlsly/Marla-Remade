@@ -6,6 +6,7 @@ set -euo pipefail
 # v5.pmtiles = Protomaps base schema (unchanged, style.json-compatible)
 #            + safety     (baked road-furniture: cameras/ALPR/stops/signals)
 #            + maxspeed   (posted speed limits for the P5b MaxspeedSource)
+#            + transit_lines (OSM rail/subway/tram/… lines for the P22 highlight)
 #            + admin_country / admin_region / admin_city  (borders; replaces .fgb)
 #
 # This single file REPLACES both:
@@ -16,8 +17,9 @@ set -euo pipefail
 #   1. build_base_layers.sh   -> base.pmtiles           (planetiler OR reuse v4)
 #   2. build_safety_layer.sh  -> safety.pmtiles         (osmium + tippecanoe)
 #   3. build_maxspeed_layer.sh-> maxspeed.pmtiles       (osmium + tippecanoe)
-#   4. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
-#   5. tile-join              -> v5.pmtiles             (merge all layers)
+#   4. build_transit_lines_layer.sh -> transit_lines.pmtiles (osmium/ogr2ogr + tippecanoe)
+#   5. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
+#   6. tile-join              -> v5.pmtiles             (merge all layers)
 #
 # Full planet build is the user's infra step (large + long). Prove correctness
 # first with a metro dry run:
@@ -39,6 +41,7 @@ set -euo pipefail
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
 #   --skip-maxspeed   omit maxspeed layer
+#   --skip-transit-lines omit transit_lines layer
 #   --skip-admin      omit admin layers
 #   --publish         after a successful build, upload $OUT to R2 (publish_r2.sh;
 #                     reads R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY from env)
@@ -59,6 +62,7 @@ BASE_AREA="planet"
 SKIP_BASE=0
 SKIP_SAFETY=0
 SKIP_MAXSPEED=0
+SKIP_TRANSIT_LINES=0
 SKIP_ADMIN=0
 KEEP_WORK=0
 PUBLISH=0
@@ -76,11 +80,12 @@ while [[ $# -gt 0 ]]; do
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
         --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
+        --skip-transit-lines) SKIP_TRANSIT_LINES=1; shift ;;
         --skip-admin) SKIP_ADMIN=1; shift ;;
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,62p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,52p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -121,7 +126,16 @@ if [[ "$SKIP_MAXSPEED" == "0" ]]; then
     INPUTS+=("$WORK/maxspeed.pmtiles")
 fi
 
-# --- 4. admin ---
+# --- 4. transit_lines ---
+if [[ "$SKIP_TRANSIT_LINES" == "0" ]]; then
+    [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for transit_lines layer (or --skip-transit-lines)" >&2; exit 1; }
+    TL_ARGS=(--pbf "$PBF" --out "$WORK/transit_lines.pmtiles")
+    [[ -n "$BBOX" ]] && TL_ARGS+=(--bbox "$BBOX")
+    "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
+    INPUTS+=("$WORK/transit_lines.pmtiles")
+fi
+
+# --- 5. admin ---
 if [[ "$SKIP_ADMIN" == "0" ]]; then
     ADMIN_ARGS=(--outdir "$WORK/admin")
     [[ -n "$PBF" ]] && ADMIN_ARGS+=(--pbf "$PBF")
@@ -133,7 +147,7 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     done
 fi
 
-# --- 5. merge ---
+# --- 6. merge ---
 echo "[v5] merging ${#INPUTS[@]} source(s) -> $OUT"
 printf '  + %s\n' "${INPUTS[@]}"
 # --no-tile-size-limit: don't drop features when combining dense base + overlays.
@@ -144,7 +158,7 @@ echo "[v5] done: $OUT (${SIZE} bytes)"
 echo ""
 echo "Layers now in $OUT:"
 echo "  base : earth landcover landuse water roads buildings boundaries pois places"
-echo "  new  : safety maxspeed admin_country admin_region admin_city"
+echo "  new  : safety maxspeed transit_lines admin_country admin_region admin_city"
 echo ""
 
 if [[ "$PUBLISH" == "1" ]]; then

@@ -1,0 +1,12 @@
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.42,37.77],[-122.41,37.78]]},"properties":{"railway":"subway","name":"Market St Subway","id":"way/5001"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.41,37.78],[-122.40,37.79]]},"properties":{"railway":"tram","name":"F Line","ref":"F","id":"way/5002"}}
+{"type":"Feature","geometry":{"type":"MultiLineString","coordinates":[[[-122.40,37.79],[-122.39,37.80]]]},"properties":{"railway":"light_rail","id":"way/5003"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.38,37.81],[-122.37,37.82]]},"properties":{"railway":"rail","name":"Caltrain Corridor","id":"way/5004"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.37,37.82],[-122.36,37.83]]},"properties":{"railway":"monorail","id":"way/5005"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.36,37.83],[-122.35,37.84]]},"properties":{"railway":"narrow_gauge","name":"Heritage Line","id":"way/5006"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.35,37.84],[-122.34,37.85]]},"properties":{"railway":"platform","name":"Platform 1","id":"way/5007"}}
+{"type":"Feature","geometry":{"type":"LineString","coordinates":[[-122.34,37.85],[-122.33,37.86]]},"properties":{"highway":"residential","name":"Nob Hill Rd","id":"way/5008"}}
+{"type":"Feature","geometry":{"type":"MultiLineString","coordinates":[[[-122.42,37.77],[-122.41,37.78]]]},"properties":{"osm_id":"9001","name":"Red Line","type":"route","other_tags":"\"route\"=>\"subway\",\"ref\"=>\"Red\",\"colour\"=>\"#DA291C\",\"operator\"=>\"BART\""}}
+{"type":"Feature","geometry":{"type":"MultiLineString","coordinates":[[[-122.41,37.78],[-122.40,37.79]]]},"properties":{"osm_id":"9002","name":"N Judah","type":"route","other_tags":"\"route\"=>\"tram\",\"ref\"=>\"N\",\"color\"=>\"blue\""}}
+{"type":"Feature","geometry":{"type":"MultiLineString","coordinates":[[[-122.40,37.79],[-122.39,37.80]]]},"properties":{"osm_id":"9003","name":"38 Geary","type":"route","other_tags":"\"route\"=>\"bus\",\"ref\"=>\"38\",\"colour\"=>\"#008000\""}}
+{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.42,37.77]},"properties":{"railway":"station","name":"Embarcadero","id":"node/5099"}}

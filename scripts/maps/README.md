@@ -10,8 +10,10 @@ Builds the custom **`v5.pmtiles`** consumed by the `maps` app. This single file
 
 On top of the base it also **bakes** (a) safety / road-furniture data (speed
 cameras, ALPR/surveillance, stop signs, traffic signals) so the app never needs
-a runtime Overpass query, and (b) posted **speed limits** (`maxspeed`) for the
-P5b speed-limit feature — all from the same file.
+a runtime Overpass query, (b) posted **speed limits** (`maxspeed`) for the
+P5b speed-limit feature, and (c) OSM **transit lines** (`transit_lines`:
+rail/subway/tram/light-rail/monorail/train) for the P22 transit-line highlight —
+all from the same file.
 
 > This directory is the **generator**. Running the full planet build is an infra
 > step (large + long-running); the scripts are designed to be correct, modular
@@ -63,6 +65,7 @@ earth  landcover  landuse  water  roads  buildings  boundaries  pois  places
 |---|---|---|
 | `safety` | Point | `kind` ∈ {`speed_camera`,`alpr`,`surveillance`,`stop_sign`,`traffic_signals`}, `name?`, `direction?`, `operator?`, `ref?`, `osm_id` |
 | `maxspeed` | LineString/MultiLineString | **`maxspeed`** (raw OSM value, e.g. `"35 mph"`, `"50"`, `"50 km/h"`), `highway?`, `name?`, `osm_id` |
+| `transit_lines` | LineString/MultiLineString | **`kind`** ∈ {`rail`,`subway`,`light_rail`,`tram`,`monorail`,`train`}, `name?`, `ref?`, `colour?` (route colour, e.g. `"#DA291C"`), `osm_id` |
 | `admin_country` | Polygon/MultiPolygon | `admin_level=2`, `name`, `name_en`, **`ISO_A2`**, `iso_a3` |
 | `admin_region` | Polygon/MultiPolygon | `admin_level=4`, `name`, `name_en`, **`iso_3166_2`**, `country_iso` |
 | `admin_city` | Polygon/MultiPolygon | `admin_level=8`, `name`, `name_en` |
@@ -76,6 +79,16 @@ limit via `queryRenderedFeatures` on **source-layer `maxspeed`**, property
 **`maxspeed`**. It is a dedicated layer (not an attribute on the base `roads`
 layer) so it works whether the base is freshly built or the upstream Protomaps
 base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
+
+The `transit_lines` layer feeds the **P22** transit-line highlight: the app
+queries **source-layer `transit_lines`** and styles each feature by **`kind`**
+(rail/subway/light_rail/tram/monorail/train) and, where present, the route
+**`colour`** (raw OSM `colour`/`color` value from the route relation, e.g.
+`"#DA291C"` or a colour name). `name`/`ref` are carried for labels. Features come
+from both railway ways (complete geometry, kind from `railway=*`) and route
+relations (named/coloured lines, kind from `route=*`), so a given corridor may be
+covered by both a way feature and a relation feature — filter on `colour`/`ref`
+presence if the app wants only the named route features.
 
 ---
 
@@ -97,6 +110,17 @@ base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
   the app parses `mph`/`km/h`/bare numbers itself. Non-numeric OSM values
   (`none`, `signals`, `walk`, etc.) are also passed through raw — the app-side
   parser (`MaxspeedSource`) decides how to render them.
+* **Transit lines** — OpenStreetMap. Two inputs feed the `transit_lines` layer:
+  * railway **ways** where `railway` ∈ {`rail`,`subway`,`light_rail`,`tram`,
+    `monorail`,`narrow_gauge`} → `kind` (`narrow_gauge` folds into `rail`).
+    Exported by `osmium export` (ways export cleanly as LineStrings).
+  * route **relations** where `route` ∈ {`subway`,`tram`,`light_rail`,`train`,
+    `monorail`} (bus is intentionally excluded) → `kind`, and the relation
+    `colour`/`color` is carried onto the geometry. `osmium export` does not emit
+    linear relations as geometry, so these are assembled by GDAL's OSM
+    `multilinestrings` layer (`ogr2ogr`), whose `other_tags` HSTORE is parsed by
+    the normalizer to recover `route`/`colour`/`ref`. If `ogr2ogr` is not
+    installed the layer is still built from railway ways alone (colour omitted).
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
     `ne_10m_admin_1_states_provinces`). Chosen because the current `.fgb` are
@@ -112,14 +136,16 @@ base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
 
 | File | Purpose |
 |---|---|
-| `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + admin → merge → `v5.pmtiles` |
+| `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + maxspeed + transit_lines + admin → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
+| `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
+| `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested) |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
 | `test/fixtures/*` | Tiny sample inputs for the test |
@@ -193,6 +219,7 @@ Individual layers can also be built standalone — see each script's `--help`.
 |---|---|---|
 | `safety.pmtiles` | planet | ~0.3–1 GB (point features only) |
 | `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
+| `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
 | **`v5.pmtiles`** | planet | ≈ **137 GB** (dominated by the base; overlays add < 3%) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
@@ -258,9 +285,10 @@ Then **P13** (separate task, app code) points the style at the new file:
 ```
 
 …adds style layers for `safety`, points `MaxspeedSource.PMTILES_URL` at the same
-file (source-layer `maxspeed`), and switches the country/state mask in
-`CountryMap.kt` / `MyMapLayers.kt` from the `.fgb` assets to the
-`admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /
+file (source-layer `maxspeed`), adds the P22 transit-line highlight against
+source-layer `transit_lines` (styling by `kind` + `colour`), and switches the
+country/state mask in `CountryMap.kt` / `MyMapLayers.kt` from the `.fgb` assets
+to the `admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /
 `iso_3166_2`, which are preserved).
 
 > **Mask caveat for P13:** vector tiles clip polygons at tile boundaries. The
@@ -350,14 +378,16 @@ passes:
 ```
 $ python3 scripts/maps/test/test_normalize.py
 ...
-37 passed, 0 failed
+52 passed, 0 failed
 ```
 
 This validates: all five safety `kind` classifications (incl. DeFlock ALPR
 detection), maxspeed value passthrough (mph/km/h/bare + `maxspeed:forward`
 fallback + non-numeric `none`/`walk`/`signals` raw passthrough, lines only),
-non-safety/non-point features dropped, `admin_level`
-mapping (2/4/8), `ISO_A2` / `iso_3166_2` preservation, county-vs-city
-`admin_level` filtering, and that every emitted line is valid GeoJSON
-(tippecanoe input). Run the metro dry run above on a box with the toolchain
-installed for a full end-to-end check.
+the `transit_lines` `kind` mapping (railway ways + route relations,
+`narrow_gauge`→`rail`, bus excluded) with route `colour`/`ref` recovered from
+GDAL's `other_tags` HSTORE (both `colour`/`color` spellings), non-safety/non-line
+features dropped, `admin_level` mapping (2/4/8), `ISO_A2` / `iso_3166_2`
+preservation, county-vs-city `admin_level` filtering, and that every emitted line
+is valid GeoJSON (tippecanoe input). Run the metro dry run above on a box with
+the toolchain installed for a full end-to-end check.

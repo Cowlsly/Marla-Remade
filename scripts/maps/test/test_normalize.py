@@ -24,6 +24,7 @@ sys.path.insert(0, str(ROOT))
 import normalize_admin  # noqa: E402
 import normalize_maxspeed  # noqa: E402
 import normalize_safety  # noqa: E402
+import normalize_transit_lines  # noqa: E402
 
 
 def _load(path: Path) -> str:
@@ -68,6 +69,53 @@ def test_safety() -> None:
     check("osm_id carried", all("osm_id" in f["properties"] for f in feats))
 
 
+def test_maxspeed() -> None:
+    print("maxspeed layer:")
+    raw = _load(FIX / "maxspeed_sample.geojsonseq")
+    feats = list(normalize_maxspeed.normalize(normalize_maxspeed.iter_features(raw)))
+    # 7 line features with maxspeed; service (no maxspeed) + Point node dropped.
+    check("emits 7 line features", len(feats) == 7, f"got {len(feats)}")
+    check("all line geometry", all(f["geometry"]["type"] in ("LineString", "MultiLineString") for f in feats))
+    values = [f["properties"]["maxspeed"] for f in feats]
+    check("keeps raw mph value", "25 mph" in values)
+    check("keeps bare number value", "50" in values)
+    check("keeps km/h value", "100 km/h" in values)
+    check("falls back to maxspeed:forward", "30 mph" in values)
+    # Non-numeric OSM values are passed through raw; the app parser handles them.
+    check("passes through 'none' raw", "none" in values)
+    check("passes through 'walk' raw", "walk" in values)
+    check("passes through 'signals' raw", "signals" in values)
+    check("every feature has maxspeed property", all(f["properties"].get("maxspeed") for f in feats))
+    check("no point node leaked", all(f["geometry"]["type"] != "Point" for f in feats))
+
+
+def test_transit_lines() -> None:
+    print("transit_lines layer:")
+    raw = _load(FIX / "transit_lines_sample.geojsonseq")
+    feats = list(normalize_transit_lines.normalize(normalize_transit_lines.iter_features(raw)))
+    kinds = sorted(f["properties"]["kind"] for f in feats)
+    # 6 railway ways + 2 route relations; platform way, highway way, bus route
+    # relation, and the station point are all dropped.
+    check("emits 8 features", len(feats) == 8, f"got {len(feats)}")
+    check("all line geometry", all(f["geometry"]["type"] in ("LineString", "MultiLineString") for f in feats))
+    check("railway subway + route subway -> subway", kinds.count("subway") == 2, f"kinds={kinds}")
+    check("railway tram + route tram -> tram", kinds.count("tram") == 2, f"kinds={kinds}")
+    check("light_rail kind", "light_rail" in kinds)
+    check("monorail kind", "monorail" in kinds)
+    check("narrow_gauge folds into rail", kinds.count("rail") == 2, f"kinds={kinds}")
+    check("platform/highway/station dropped", "platform" not in kinds and None not in kinds)
+    # Route-relation colour recovered from the GDAL other_tags HSTORE string.
+    red = next(f for f in feats if f["properties"].get("name") == "Red Line")
+    check("relation colour parsed from HSTORE", red["properties"].get("colour") == "#DA291C")
+    check("relation ref parsed from HSTORE", red["properties"].get("ref") == "Red")
+    check("relation kind from route tag", red["properties"]["kind"] == "subway")
+    njudah = next(f for f in feats if f["properties"].get("name") == "N Judah")
+    check("US 'color' spelling accepted", njudah["properties"].get("colour") == "blue")
+    check("bus route relation dropped", all(f["properties"].get("ref") != "38" for f in feats))
+    check("way ref carried", any(f["properties"].get("ref") == "F" for f in feats))
+    check("osm_id carried", all("osm_id" in f["properties"] for f in feats))
+
+
 def test_admin_country() -> None:
     print("admin_country layer:")
     raw = _load(FIX / "admin_country_sample.geojson")
@@ -93,26 +141,6 @@ def test_admin_region() -> None:
     check("MultiPolygon kept", feats[1]["geometry"]["type"] == "MultiPolygon")
 
 
-def test_maxspeed() -> None:
-    print("maxspeed layer:")
-    raw = _load(FIX / "maxspeed_sample.geojsonseq")
-    feats = list(normalize_maxspeed.normalize(normalize_maxspeed.iter_features(raw)))
-    # 7 line features with maxspeed; service (no maxspeed) + Point node dropped.
-    check("emits 7 line features", len(feats) == 7, f"got {len(feats)}")
-    check("all line geometry", all(f["geometry"]["type"] in ("LineString", "MultiLineString") for f in feats))
-    values = [f["properties"]["maxspeed"] for f in feats]
-    check("keeps raw mph value", "25 mph" in values)
-    check("keeps bare number value", "50" in values)
-    check("keeps km/h value", "100 km/h" in values)
-    check("falls back to maxspeed:forward", "30 mph" in values)
-    # Non-numeric OSM values are passed through raw; the app parser handles them.
-    check("passes through 'none' raw", "none" in values)
-    check("passes through 'walk' raw", "walk" in values)
-    check("passes through 'signals' raw", "signals" in values)
-    check("every feature has maxspeed property", all(f["properties"].get("maxspeed") for f in feats))
-    check("no point node leaked", all(f["geometry"]["type"] != "Point" for f in feats))
-
-
 def test_admin_city() -> None:
     print("admin_city layer:")
     raw = _load(FIX / "admin_city_sample.geojsonseq")
@@ -136,6 +164,7 @@ def test_valid_geojson_output() -> None:
 def main() -> int:
     test_safety()
     test_maxspeed()
+    test_transit_lines()
     test_admin_country()
     test_admin_region()
     test_admin_city()
