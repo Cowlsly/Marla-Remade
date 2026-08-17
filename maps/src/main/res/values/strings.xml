@@ -294,6 +294,27 @@
     <string name="layer_safety_desc">Show speed cameras, stop signs and signals</string>
     <!-- LayersSheet: safety layers description while the data isn't available yet. -->
     <string name="layer_safety_unavailable">Coming soon</string>
+    <!-- LayersSheet: public-transit layer toggle. Noun. -->
+    <string name="layer_transit">Transit</string>
+    <!-- LayersSheet: transit layer description. -->
+    <string name="layer_transit_desc">Show nearby stops and live departures</string>
+
+    <!-- Departure board: section subtitle under the stop name. Noun. -->
+    <string name="transit_departures_title">Departures</string>
+    <!-- Departure board: shown while the live board is loading. -->
+    <string name="transit_departures_loading">Loading departures\u2026</string>
+    <!-- Departure board: shown when no upcoming departures were found. -->
+    <string name="transit_departures_none">No upcoming departures</string>
+    <!-- Departure board: platform/track label. %1$s = platform name e.g. "3" -->
+    <string name="transit_platform">Platform %1$s</string>
+    <!-- Departure board: a cancelled trip. -->
+    <string name="transit_cancelled">Cancelled</string>
+    <!-- Departure board: a departure that is due now / already departing. -->
+    <string name="transit_now">Now</string>
+    <!-- Departure board: minutes until departure. %1$d = whole minutes e.g. "5 min" -->
+    <string name="transit_minutes">%1$d min</string>
+    <!-- Departure board: realtime delay vs schedule, signed. %1$d = signed minutes e.g. "+3 min" -->
+    <string name="transit_delay_minutes">%1$+d min</string>
 
     <!-- Settings: screen title. Noun. -->
     <string name="settings_title">Settings</string>

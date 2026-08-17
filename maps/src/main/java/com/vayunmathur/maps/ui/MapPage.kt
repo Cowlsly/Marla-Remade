@@ -112,7 +112,7 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -134,7 +134,14 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
     val satelliteEnabled by settingsViewModel.satelliteLayer.collectAsState()
     val safetyEnabled by settingsViewModel.safetyLayer.collectAsState()
+    val transitEnabled by settingsViewModel.transitLayer.collectAsState()
     var showLayersSheet by remember { mutableStateOf(false) }
+
+    // Public transit (P10): nearby stops overlay + live departure board. Stops
+    // are only fetched/drawn while the Transit layer is on.
+    val transitStops by transitViewModel.stops.collectAsState()
+    val selectedTransitStop by transitViewModel.selected.collectAsState()
+    val departuresState by transitViewModel.departures.collectAsState()
 
     // Google POI overlay pins (viewport scrape → custom layer, replacing the
     // suppressed native basemap POIs).
@@ -154,7 +161,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         )
     }
 
-    LaunchedEffect(camera.position) {
+    LaunchedEffect(camera.position, transitEnabled) {
         if (camera.position.zoom >= 11.0) {
             delay(300) // Debounce traffic loading
             val projection = camera.projection
@@ -168,6 +175,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 // Refresh the Google POI overlay for the idle viewport (VM
                 // debounces + LRU-caches the keyless scrape).
                 poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
+                // Refresh nearby transit stops (P10) only while the layer is on
+                // (VM debounces + caches; wide views clear the overlay).
+                if (transitEnabled) {
+                    transitViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
+                }
             }
         }
     }
@@ -412,6 +424,20 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     return@launch
                                 }
 
+                                // Transit stop (P10): tapping a stop opens its
+                                // live departure board instead of selecting a
+                                // place. Only hit-tested while the layer is on.
+                                if (transitEnabled) {
+                                    val stopHit = projection?.queryRenderedFeatures(
+                                        offset,
+                                        setOf(TRANSIT_STOP_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toTransitStop() }
+                                    if (stopHit != null) {
+                                        transitViewModel.openStop(stopHit)
+                                        return@launch
+                                    }
+                                }
+
                                 // Hit-test the search-result pins first, then the
                                 // ambient Google POI overlay — a pin tap re-selects
                                 // the place as a GenericPlace so
@@ -483,7 +509,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, trafficEnabled, satelliteEnabled, safetyEnabled)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, transitStops, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
                     }
                 }
 
@@ -731,6 +757,8 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         onSatelliteChange = { settingsViewModel.setSatelliteLayer(it) },
                         safetyEnabled = safetyEnabled,
                         onSafetyChange = { settingsViewModel.setSafetyLayer(it) },
+                        transitEnabled = transitEnabled,
+                        onTransitChange = { settingsViewModel.setTransitLayer(it) },
                     )
                 }
 
@@ -759,6 +787,16 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             onNoteChange = { parkingViewModel.updateNote(it) },
                         )
                     }
+                }
+
+                // Departure board (P10): opened by tapping a transit stop. Live
+                // board from Transitous (online-only); dismiss clears selection.
+                if (selectedTransitStop != null) {
+                    DeparturesSheet(
+                        state = departuresState,
+                        onDismiss = { transitViewModel.closeStop() },
+                        onRefresh = { transitViewModel.refresh() },
+                    )
                 }
             }
         }

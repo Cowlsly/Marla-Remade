@@ -57,9 +57,11 @@ fun MyMapLayers(
     searchResults: List<SearchResult> = emptyList(),
     savedPlaces: List<com.vayunmathur.maps.data.SavedPlace> = emptyList(),
     parkingSpot: com.vayunmathur.maps.data.ParkingSpot? = null,
+    transitStops: List<com.vayunmathur.maps.data.transit.TransitStop> = emptyList(),
     trafficEnabled: Boolean = true,
     satelliteEnabled: Boolean = false,
     safetyEnabled: Boolean = false,
+    transitEnabled: Boolean = false,
 ) {
     val trafficVersion by OfflineRouter.trafficVersion.collectAsState()
     val context = LocalContext.current
@@ -165,6 +167,12 @@ fun MyMapLayers(
 
         // Parking pin (P9). Tap → parking sheet (handled in MapPage.onMapClick).
         ParkingLayer(parkingSpot)
+
+        // Nearby transit stops (P10). Shown only when the Transit layer is on;
+        // tap a stop → live departure board (handled in MapPage.onMapClick).
+        if (transitEnabled) {
+            TransitStopsLayer(transitStops)
+        }
 
         // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
         // under the puck during navigation. No-op until the tileset is hosted.

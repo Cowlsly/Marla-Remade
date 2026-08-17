@@ -15,11 +15,13 @@ object MapPreferences {
     const val KEY_LAYER_TRAFFIC = "layer_traffic"
     const val KEY_LAYER_SATELLITE = "layer_satellite"
     const val KEY_LAYER_SAFETY = "layer_safety"
+    const val KEY_LAYER_TRANSIT = "layer_transit"
 
     const val DEFAULT_VOICE_GUIDANCE = true
     const val DEFAULT_LAYER_TRAFFIC = true
     const val DEFAULT_LAYER_SATELLITE = false
     const val DEFAULT_LAYER_SAFETY = false
+    const val DEFAULT_LAYER_TRANSIT = false
 }
 
 /** App theme selection persisted under [MapPreferences.KEY_THEME_MODE]. */

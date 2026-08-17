@@ -8,6 +8,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.IconDirections
 import com.vayunmathur.library.ui.IconShield
 import com.vayunmathur.library.ui.IconStyle
 import com.vayunmathur.library.ui.IconWarning
@@ -38,6 +39,8 @@ fun LayersSheet(
     onSatelliteChange: (Boolean) -> Unit,
     safetyEnabled: Boolean,
     onSafetyChange: (Boolean) -> Unit,
+    transitEnabled: Boolean,
+    onTransitChange: (Boolean) -> Unit,
 ) {
     ModalBottomSheet(onDismissRequest = onDismiss) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
@@ -67,6 +70,16 @@ fun LayersSheet(
                     leadingContent = { IconStyle() },
                 )
             }
+
+            // Transit — live (P10). Shows nearby stops; tap a stop for its
+            // live departure board (Transitous, online-only).
+            SettingsSwitchRow(
+                title = stringResource(R.string.layer_transit),
+                supportingText = stringResource(R.string.layer_transit_desc),
+                checked = transitEnabled,
+                onCheckedChange = onTransitChange,
+                leadingContent = { IconDirections() },
+            )
 
             // Safety layers — surfaced now, gated on the P13 PMTiles v5.
             SettingsSwitchRow(

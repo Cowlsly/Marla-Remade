@@ -69,6 +69,9 @@ class MapSettingsViewModel(application: Application) : AndroidViewModel(applicat
     val safetyLayer: StateFlow<Boolean> = boolPref(
         MapPreferences.KEY_LAYER_SAFETY, MapPreferences.DEFAULT_LAYER_SAFETY,
     )
+    val transitLayer: StateFlow<Boolean> = boolPref(
+        MapPreferences.KEY_LAYER_TRANSIT, MapPreferences.DEFAULT_LAYER_TRANSIT,
+    )
 
     fun setTrafficLayer(enabled: Boolean) =
         launch { ds.setBoolean(MapPreferences.KEY_LAYER_TRAFFIC, enabled) }
@@ -78,6 +81,9 @@ class MapSettingsViewModel(application: Application) : AndroidViewModel(applicat
 
     fun setSafetyLayer(enabled: Boolean) =
         launch { ds.setBoolean(MapPreferences.KEY_LAYER_SAFETY, enabled) }
+
+    fun setTransitLayer(enabled: Boolean) =
+        launch { ds.setBoolean(MapPreferences.KEY_LAYER_TRANSIT, enabled) }
 
     private fun boolPref(key: String, default: Boolean): StateFlow<Boolean> =
         ds.booleanFlow(key).stateIn(
