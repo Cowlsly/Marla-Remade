@@ -387,9 +387,13 @@ private fun Cursor.postalAddress(): String? {
 }
 
 /** Collapse a multi-line postal address to one comma-separated line so it makes
- *  a valid single-line search query (FORMATTED_ADDRESS embeds newlines). */
+ *  a valid single-line search query (FORMATTED_ADDRESS embeds newlines). Runs of
+ *  whitespace within a line collapse to a single space; blank lines are dropped. */
 private fun String.normalizeAddress(): String =
-    lines().map { it.trim() }.filter { it.isNotEmpty() }.joinToString(", ")
+    lines()
+        .map { it.replace(Regex("\\s+"), " ").trim() }
+        .filter { it.isNotEmpty() }
+        .joinToString(", ")
 
 /** Projection for the Android 17 session URI: MIMETYPE (to spot the postal row)
  *  plus the postal columns. */
