@@ -106,4 +106,15 @@
     <string name="problems">Vead ja probleemid</string>
     <string name="fold_all">Lappa kõik kokku</string>
     <string name="unfold_all">Lappa kõik lahti</string>
+    <string name="go_to_symbol_hint">Sisesta sümboli nimi</string>
+    <string name="go_to_symbol">Mine sümboli juurde</string>
+    <string name="resolve_conflicts">Konfliktide lahendamine</string>
+    <string name="no_conflicts">Selles failis pole mestimiskonflikte.</string>
+    <string name="conflict_keep_ours">Meie</string>
+    <string name="conflict_keep_theirs">Nende</string>
+    <string name="conflict_keep_both">Mõlemad</string>
+    <string name="split_view">Poolitatud vaade</string>
+    <string name="experimental_editor">Katseline muutmisvaade</string>
+    <string name="conflict_ours">Praegune (meie)</string>
+    <string name="conflict_theirs">Lisatav (nende)</string>
 </resources>
