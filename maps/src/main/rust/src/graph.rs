@@ -75,9 +75,9 @@ pub struct LatLon {
 }
 
 /// Owns a read-only `mmap` region and unmaps it on drop.
-struct MmapRegion {
+pub(crate) struct MmapRegion {
     ptr: *mut libc::c_void,
-    len: usize,
+    pub(crate) len: usize,
 }
 
 // The graph is only ever read after init, so sharing the raw pointer across
@@ -88,7 +88,7 @@ unsafe impl Sync for MmapRegion {}
 impl MmapRegion {
     /// mmap `path` read-only. Returns `None` for missing/empty/unreadable files,
     /// mirroring the C++ `m_file` lambda.
-    fn map(path: &str) -> Option<MmapRegion> {
+    pub(crate) fn map(path: &str) -> Option<MmapRegion> {
         let c = CString::new(path).ok()?;
         unsafe {
             let fd = libc::open(c.as_ptr(), libc::O_RDONLY);
@@ -118,7 +118,7 @@ impl MmapRegion {
     }
 
     #[inline]
-    fn base(&self) -> *const u8 {
+    pub(crate) fn base(&self) -> *const u8 {
         self.ptr as *const u8
     }
 }
@@ -134,7 +134,7 @@ impl Drop for MmapRegion {
 /// Read a `Copy` value of type `T` from `base` at element index `idx`
 /// (byte offset `idx * size_of::<T>()`), tolerating any alignment.
 #[inline(always)]
-unsafe fn read_at<T: Copy>(base: *const u8, idx: usize) -> T {
+pub(crate) unsafe fn read_at<T: Copy>(base: *const u8, idx: usize) -> T {
     (base.add(idx * std::mem::size_of::<T>()) as *const T).read_unaligned()
 }
 

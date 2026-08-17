@@ -12,6 +12,7 @@ mod graph;
 mod mvt;
 mod routing;
 mod state;
+mod transit;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
@@ -281,6 +282,159 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
                 JValue::Object(&jcode),
                 JValue::Object(&jend),
                 JValue::Int(step.stop_count),
+                JValue::Object(&jlanes_obj),
+            ],
+        ) {
+            Ok(o) => o,
+            Err(_) => return null,
+        };
+        if env.set_object_array_element(&array, i as i32, &obj).is_err() {
+            return null;
+        }
+    }
+
+    array.into_raw()
+}
+
+// ---------------------------------------------------------------------------
+// JNI: findTransitRouteNative (offline RAPTOR over a per-region transit index)
+// ---------------------------------------------------------------------------
+
+/// Plan an offline transit journey using the compact `.transit` index at
+/// `<base_path>/<feed>.transit` (produced by `scripts/maps/gtfs_ingest`).
+/// Returns `OfflineRouter.RawStep[]` (walk + ride legs) or `null` when the feed
+/// is absent, does not cover the endpoints, or no journey exists — in which case
+/// the Kotlin side falls back to the P10 online Transitous planner.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitRouteNative<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _thiz: JObject<'local>,
+    base_path: JString<'local>,
+    feed: JString<'local>,
+    s_lat: jdouble,
+    s_lon: jdouble,
+    e_lat: jdouble,
+    e_lon: jdouble,
+    dep_secs: jint,
+    weekday: jint,
+    date: jint,
+) -> jobjectArray {
+    let null = std::ptr::null_mut();
+    let base: String = match env.get_string(&base_path) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let feed_name: String = match env.get_string(&feed) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+
+    let index = match transit::TransitIndex::load(&base, &feed_name) {
+        Some(i) => i,
+        None => return null,
+    };
+    if !index.covers(s_lat, s_lon) || !index.covers(e_lat, e_lon) {
+        return null;
+    }
+
+    let legs = match transit::plan(
+        &index,
+        s_lat,
+        s_lon,
+        e_lat,
+        e_lon,
+        dep_secs.max(0) as u32,
+        weekday.max(0) as u32,
+        date.max(0) as u32,
+    ) {
+        Some(l) if !l.is_empty() => l,
+        _ => return null,
+    };
+
+    let class = match env.find_class("com/vayunmathur/maps/util/OfflineRouter$RawStep") {
+        Ok(c) => c,
+        Err(_) => return null,
+    };
+    let ctor =
+        "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[I)V";
+    let array = match env.new_object_array(legs.len() as i32, &class, JObject::null()) {
+        Ok(a) => a,
+        Err(_) => return null,
+    };
+
+    for (i, leg) in legs.iter().enumerate() {
+        let jname: JObject = match env.new_string(&leg.name) {
+            Ok(s) => s.into(),
+            Err(_) => return null,
+        };
+        let jgeom = match env.new_double_array(leg.coords.len() as i32) {
+            Ok(a) => a,
+            Err(_) => return null,
+        };
+        if !leg.coords.is_empty()
+            && env.set_double_array_region(&jgeom, 0, &leg.coords).is_err()
+        {
+            return null;
+        }
+        let jgeom_obj: JObject = jgeom.into();
+
+        let opt_str = |env: &mut JNIEnv<'local>, s: &str| -> JObject<'local> {
+            if s.is_empty() {
+                JObject::null()
+            } else {
+                match env.new_string(s) {
+                    Ok(js) => js.into(),
+                    Err(_) => JObject::null(),
+                }
+            }
+        };
+        let jfeed = if leg.is_transit {
+            opt_str(&mut env, &leg.feed)
+        } else {
+            JObject::null()
+        };
+        let jcode = if leg.is_transit {
+            opt_str(&mut env, &leg.from_code)
+        } else {
+            JObject::null()
+        };
+        let jend = if leg.is_transit {
+            opt_str(&mut env, &leg.to_code)
+        } else {
+            JObject::null()
+        };
+
+        let duration_10ms: i64 = if leg.is_transit {
+            (leg.arr_secs.saturating_sub(leg.dep_secs) as i64) * 100
+        } else {
+            (leg.dist_m / crate::graph::WALK_SPEED_M_S * 100.0) as i64
+        };
+        let dist_mm: i64 = (leg.dist_m * 1000.0) as i64;
+        let maneuver: i32 = if leg.is_transit { 23 } else { 0 };
+
+        let jlanes = match env.new_int_array(0) {
+            Ok(a) => a,
+            Err(_) => return null,
+        };
+        let jlanes_obj: JObject = jlanes.into();
+
+        let obj = match env.new_object(
+            &class,
+            ctor,
+            &[
+                JValue::Int(maneuver),
+                JValue::Object(&jname),
+                JValue::Long(dist_mm),
+                JValue::Long(duration_10ms),
+                JValue::Object(&jgeom_obj),
+                JValue::Double(1.0),
+                JValue::Bool(leg.is_transit as u8),
+                JValue::Object(&jfeed),
+                JValue::Object(&jcode),
+                JValue::Object(&jend),
+                JValue::Int(leg.stop_count),
                 JValue::Object(&jlanes_obj),
             ],
         ) {
