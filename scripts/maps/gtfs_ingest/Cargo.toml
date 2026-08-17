@@ -1,0 +1,26 @@
+# Host-side GTFS ingest tool for the Maps offline transit packs (P11a).
+#
+# Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
+# table below): it is a std-only host binary with zero external dependencies, so
+# `cargo build` here resolves offline and never pulls the aarch64-android
+# toolchain or the app crates' lints. It emits a compact per-region transit
+# index consumed on-device by `maps/src/main/rust/src/transit.rs` (P11b).
+[package]
+name = "gtfs_ingest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "GTFS -> compact on-device transit index for the Maps offline packs"
+
+[[bin]]
+name = "gtfs_ingest"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+
+# Detach from the repo-root workspace so this host tool builds standalone/offline.
+[workspace]
