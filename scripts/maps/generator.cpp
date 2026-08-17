@@ -32,7 +32,6 @@ using namespace std;
 
 // --- CONFIGURATION ---
 const uint64_t BITSET_SIZE = 20000000000ULL;
-const int NUM_ZONES = 64;
 const string DATA_DIR = "map_data/";
 const double DEG_TO_RAD = M_PI / 180.0;
 const int ID_TILE_BITS = 16;
@@ -40,9 +39,9 @@ const size_t NUM_ID_TILES = 1 << ID_TILE_BITS;
 const uint64_t ID_TILE_SHIFT = 64 - ID_TILE_BITS;
 
 // --- OSM turn:lanes indication bits (one uint16_t mask per lane) ---
-// Emitted per directed edge into the per-zone lanes files below and decoded by
-// the Rust router (maps/src/main/rust/src/graph.rs LANE_* constants). Keep the
-// two in sync: this is an on-disk contract.
+// Emitted per directed edge into the single global lanes.bin below and decoded
+// by the Rust router (maps/src/main/rust/src/graph.rs LANE_* constants). Keep
+// the two in sync: this is an on-disk contract.
 const uint16_t LANE_NONE = 1 << 0;
 const uint16_t LANE_THROUGH = 1 << 1;
 const uint16_t LANE_LEFT = 1 << 2;
@@ -76,6 +75,25 @@ struct FinalEdge {
 struct TransitVoyage {
     uint32_t dep_10ms;
     uint32_t arr_10ms;
+};
+
+// --- Final on-disk structs consumed by maps/src/main/rust/src/graph.rs ---
+// These describe the SINGLE GLOBAL graph layout (no zones). Keep them
+// byte-for-byte in sync with the #[repr(C, packed)] structs in graph.rs.
+struct FinalNode {            // graph.rs NodeMaster (16 bytes)
+    int32_t lat_e7;
+    int32_t lon_e7;
+    uint64_t edge_ptr;        // global edge index (u64)
+};
+
+struct FinalTransitAttr {     // graph.rs TransitAttribute (8 bytes)
+    uint32_t stop_code_off;
+    uint32_t feed_name_off;
+};
+
+struct TransitVoyageCompact { // graph.rs TransitVoyageCompact (4 bytes)
+    uint16_t dep_delta;
+    uint16_t duration;
 };
 
 #define TRANSIT_FLAG 0x80
@@ -744,12 +762,10 @@ int main(int argc, char* argv[]) {
     parallel_radix_sort(nodes_raw, 64);
     vector<NodeMaster> node_masters(total_local_nodes);
     vector<IDMapping> id_to_local(total_local_nodes);
-    vector<uint32_t> zone_node_counts(NUM_ZONES, 0);
 
     for (uint32_t i = 0; i < total_local_nodes; ++i) {
         node_masters[i] = { nodes_raw[i].lat_e7, nodes_raw[i].lon_e7, nodes_raw[i].spatial_value, 0, nodes_raw[i].stop_code_off, nodes_raw[i].feed_name_off };
         id_to_local[i] = { nodes_raw[i].osm_id, i };
-        zone_node_counts[(int)((nodes_raw[i].spatial_value >> 58) & 0x3F)]++;
     }
     vector<NodeTemp>().swap(nodes_raw);
 
@@ -988,87 +1004,117 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // STEP 4: Finalizing & Writing
-    cout << "Parallel Finalization..." << endl;
-    vector<uint32_t> current_zone_edge_starts(NUM_ZONES);
-    vector<uint32_t> current_zone_node_starts(NUM_ZONES);
-    uint32_t g_node_ptr = 0, g_edge_ptr = 0;
-    for (int zid = 0; zid < NUM_ZONES; ++zid) {
-        current_zone_node_starts[zid] = g_node_ptr;
-        current_zone_edge_starts[zid] = g_edge_ptr;
-        uint32_t node_count = zone_node_counts[zid];
-        uint32_t edge_count = 0;
-        for (uint32_t i = 0; i < node_count; ++i) {
-            uint32_t lid = g_node_ptr + i;
-            while (g_edge_ptr + edge_count < tmp_edges.size() && tmp_edges[g_edge_ptr + edge_count].source_lid == lid) edge_count++;
-        }
-        g_node_ptr += node_count; g_edge_ptr += edge_count;
-    }
+    // STEP 4: Finalize & write the SINGLE GLOBAL graph (no zones, no separate
+    // merge stage). Emit exactly the on-disk layout that
+    // maps/src/main/rust/src/graph.rs loads:
+    //   metadata.bin            single u64 node_count
+    //   nodes.bin               FinalNode[node_count + 1] (trailing sentinel)
+    //   edges.bin               FinalEdge[edge_count]
+    //   transit_attributes.bin  FinalTransitAttr[node_count]
+    //   transit_voyages.bin     compact per-edge voyage records (see below)
+    //   lanes.bin               u64 offsets[edge_count + 1] + u16 mask blob
+    //   road_names.bin          string pool (already streamed above)
+    // tmp_edges is globally sorted by source_lid, so a single linear cursor
+    // assigns each node its global edge range in one pass.
+    cout << "Finalizing single global graph..." << endl;
 
-    vector<future<void>> zone_tasks;
-    for (int zid = 0; zid < NUM_ZONES; ++zid) {
-        zone_tasks.push_back(async(launch::async, [=, &node_masters, &tmp_edges, &zone_node_counts, &current_zone_node_starts, &current_zone_edge_starts, &transit_groups, &lane_pool]() {
-            uint32_t node_count = zone_node_counts[zid];
-            if (node_count == 0) return;
-            uint32_t edge_start = current_zone_edge_starts[zid];
-            uint32_t node_start = current_zone_node_starts[zid];
-            uint32_t local_edge_ptr = 0;
-            uint32_t local_transit_voyage_ptr = 0;
-            ofstream node_out(DATA_DIR + "nodes_zone_" + to_string(zid) + ".bin", ios::binary);
-            ofstream edge_out(DATA_DIR + "edges_zone_" + to_string(zid) + ".bin", ios::binary);
-            ofstream transit_out(DATA_DIR + "transit_voyages_zone_" + to_string(zid) + ".bin", ios::binary);
-            // Real OSM turn:lanes for each directed edge, emitted in the same
-            // edge order as edges_zone. lane_offsets[e] is the byte offset of
-            // edge e's masks in lane_blob; a trailing sentinel gives edge e's
-            // length as offsets[e+1]-offsets[e]. Mirrors the graph.rs lanes.bin
-            // layout ([u64 offsets[edge_count+1]][u16 blob]) at zone scope.
-            vector<uint64_t> lane_offsets;
-            vector<uint16_t> lane_blob;
-            for (uint32_t i = 0; i < node_count; ++i) {
-                uint32_t lid = node_start + i;
-                node_masters[lid].edge_ptr = local_edge_ptr;
-                while (edge_start + local_edge_ptr < tmp_edges.size() && tmp_edges[edge_start + local_edge_ptr].source_lid == lid) {
-                    auto te = tmp_edges[edge_start + local_edge_ptr];
-                    if (te.type & TRANSIT_FLAG) {
-                        auto it = transit_groups.find({te.source_lid, te.target_lid});
-                        if (it != transit_groups.end()) {
-                            te.dist_mm = local_transit_voyage_ptr;
-                            te.speed_limit = (uint8_t)min((size_t)255, it->second.voyages.size());
-                            for (size_t v = 0; v < te.speed_limit; ++v) {
-                                transit_out.write((char*)&it->second.voyages[v], sizeof(TransitVoyage));
-                            }
-                            local_transit_voyage_ptr += te.speed_limit;
-                        }
+    ofstream nodes_out(DATA_DIR + "nodes.bin", ios::binary);
+    ofstream edges_out(DATA_DIR + "edges.bin", ios::binary);
+    ofstream attrs_out(DATA_DIR + "transit_attributes.bin", ios::binary);
+    ofstream voyages_out(DATA_DIR + "transit_voyages.bin", ios::binary);
+    ofstream lanes_out(DATA_DIR + "lanes.bin", ios::binary);
+
+    // lanes.bin: one byte offset into the u16 mask blob per edge + a trailing
+    // sentinel, so edge e's masks are blob[offsets[e]..offsets[e+1]].
+    vector<uint64_t> lane_offsets;
+    lane_offsets.reserve(tmp_edges.size() + 1);
+    vector<uint16_t> lane_blob;
+
+    uint64_t global_edge_ptr = 0;
+    uint64_t transit_voyage_slots = 0; // in TransitVoyageCompact (4-byte) units
+    size_t e_cursor = 0;
+
+    for (uint32_t lid = 0; lid < total_local_nodes; ++lid) {
+        FinalNode fn = { node_masters[lid].lat_e7, node_masters[lid].lon_e7, global_edge_ptr };
+        nodes_out.write((char*)&fn, sizeof(FinalNode));
+
+        FinalTransitAttr fa = { node_masters[lid].stop_code_off, node_masters[lid].feed_name_off };
+        attrs_out.write((char*)&fa, sizeof(FinalTransitAttr));
+
+        while (e_cursor < tmp_edges.size() && tmp_edges[e_cursor].source_lid == lid) {
+            const TmpEdge& te = tmp_edges[e_cursor];
+            uint32_t out_dist = te.dist_mm;
+            uint8_t out_speed = te.speed_limit;
+
+            if (te.type & TRANSIT_FLAG) {
+                // Compact this transit edge's schedule into transit_voyages.bin.
+                // Per edge, starting at slot `voyage_offset` (4-byte slots):
+                //   [slot 0]     u32 absolute departure of voyage 0 (10ms units)
+                //   [slot 1]     {dep_delta = voyage 0 travel time (10ms), 0}
+                //   [slot 1 + i] {dep_delta = (dep_i - dep_{i-1}) seconds,
+                //                 duration = voyage i travel time (10ms)}
+                // graph.rs stores voyage_offset in the edge's dist_mm and the
+                // voyage count in speed_limit; geometry.rs decodes it this way.
+                auto it = transit_groups.find({te.source_lid, te.target_lid});
+                if (it != transit_groups.end() && !it->second.voyages.empty()) {
+                    const auto& vs = it->second.voyages; // sorted by dep_10ms
+                    uint32_t vc = (uint32_t)min((size_t)255, vs.size());
+                    out_dist = (uint32_t)transit_voyage_slots;
+                    out_speed = (uint8_t)vc;
+
+                    uint32_t dep0 = vs[0].dep_10ms;
+                    voyages_out.write((char*)&dep0, sizeof(uint32_t));
+                    TransitVoyageCompact c0 = {
+                        (uint16_t)min<uint32_t>(0xFFFF, vs[0].arr_10ms - vs[0].dep_10ms), 0 };
+                    voyages_out.write((char*)&c0, sizeof(TransitVoyageCompact));
+                    transit_voyage_slots += 2;
+
+                    uint32_t dep_prev = dep0;
+                    for (uint32_t i = 1; i < vc; ++i) {
+                        uint32_t dep = vs[i].dep_10ms;
+                        TransitVoyageCompact ci = {
+                            (uint16_t)min<uint32_t>(0xFFFF, (dep - dep_prev) / 100),
+                            (uint16_t)min<uint32_t>(0xFFFF, vs[i].arr_10ms - vs[i].dep_10ms) };
+                        voyages_out.write((char*)&ci, sizeof(TransitVoyageCompact));
+                        transit_voyage_slots += 1;
+                        dep_prev = dep;
                     }
-                    FinalEdge fe = { te.target_lid, te.dist_mm, te.name_offset, te.type, te.speed_limit };
-                    edge_out.write((char*)&fe, sizeof(FinalEdge));
-                    // Record this edge's real turn:lanes (empty when none).
-                    lane_offsets.push_back((uint64_t)lane_blob.size() * sizeof(uint16_t));
-                    if (te.lane_count > 0 && te.lane_off != 0xFFFFFFFF) {
-                        for (uint16_t l = 0; l < te.lane_count; ++l) {
-                            lane_blob.push_back(lane_pool[te.lane_off + l]);
-                        }
-                    }
-                    local_edge_ptr++;
+                } else {
+                    out_speed = 0; // transit edge with no usable schedule
                 }
             }
-            node_out.write((char*)&node_masters[node_start], sizeof(NodeMaster) * node_count);
-            NodeMaster sentinel = {0, 0, 0, local_edge_ptr};
-            node_out.write((char*)&sentinel, sizeof(NodeMaster));
 
-            // Finalize per-zone lanes file: offsets (with trailing sentinel)
-            // followed by the u16 mask blob.
+            FinalEdge fe = { te.target_lid, out_dist, te.name_offset, te.type, out_speed };
+            edges_out.write((char*)&fe, sizeof(FinalEdge));
+
             lane_offsets.push_back((uint64_t)lane_blob.size() * sizeof(uint16_t));
-            ofstream lanes_out(DATA_DIR + "lanes_zone_" + to_string(zid) + ".bin", ios::binary);
-            lanes_out.write((char*)lane_offsets.data(), sizeof(uint64_t) * lane_offsets.size());
-            if (!lane_blob.empty())
-                lanes_out.write((char*)lane_blob.data(), sizeof(uint16_t) * lane_blob.size());
-        }));
-    }
-    for (auto& task : zone_tasks) task.wait();
+            if (te.lane_count > 0 && te.lane_off != 0xFFFFFFFF) {
+                for (uint16_t l = 0; l < te.lane_count; ++l)
+                    lane_blob.push_back(lane_pool[te.lane_off + l]);
+            }
 
+            global_edge_ptr++;
+            e_cursor++;
+        }
+    }
+
+    // Trailing sentinel node: edge_ptr == edge_count so graph.rs can read
+    // node(v + 1).edge_ptr as the end of node v's edge range.
+    FinalNode sentinel = { 0, 0, global_edge_ptr };
+    nodes_out.write((char*)&sentinel, sizeof(FinalNode));
+
+    // Finalize lanes.bin: offsets (with trailing sentinel) then the mask blob.
+    lane_offsets.push_back((uint64_t)lane_blob.size() * sizeof(uint16_t));
+    lanes_out.write((char*)lane_offsets.data(), sizeof(uint64_t) * lane_offsets.size());
+    if (!lane_blob.empty())
+        lanes_out.write((char*)lane_blob.data(), sizeof(uint16_t) * lane_blob.size());
+
+    // metadata.bin: a single u64 node_count (graph.rs reads read_at::<u64>(_, 0)).
     ofstream meta_out(DATA_DIR + "metadata.bin", ios::binary);
-    meta_out.write((char*)zone_node_counts.data(), sizeof(uint32_t) * NUM_ZONES);
-    cout << "Processing Complete." << endl;
+    uint64_t node_count_out = total_local_nodes;
+    meta_out.write((char*)&node_count_out, sizeof(uint64_t));
+
+    cout << "Processing Complete. Nodes: " << total_local_nodes
+         << " Edges: " << global_edge_ptr << endl;
     return 0;
 }
