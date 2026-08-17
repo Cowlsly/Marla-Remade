@@ -175,19 +175,24 @@ fun ContactAddressButton(onAddress: (String) -> Unit, modifier: Modifier = Modif
 
     IconButton(
         onClick = {
-            val launchedNewPicker =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
-                    try {
-                        addressPicker.launch(newSystemContactPickerIntent())
-                        true
-                    } catch (_: ActivityNotFoundException) {
-                        // Android 17 image without the system picker — use the old path.
-                        false
+            // Read the address purely from the picker's returned URI (temporary
+            // per-URI read grant) — no READ_CONTACTS. On Android 17 the system
+            // Contact Picker returns a session URI we query directly.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.CINNAMON_BUN) {
+                try {
+                    addressPicker.launch(newSystemContactPickerIntent())
+                } catch (_: ActivityNotFoundException) {
+                    runCatching {
+                        Toast.makeText(
+                            context,
+                            context.getString(com.vayunmathur.maps.R.string.no_contact_picker),
+                            Toast.LENGTH_SHORT,
+                        ).show()
                     }
-                } else {
-                    false
                 }
-            if (!launchedNewPicker) {
+            } else {
+                // Older devices: the legacy postal-row ACTION_PICK also returns a
+                // row URI with an implicit read grant (no READ_CONTACTS).
                 launchPostalPicker(context, postalPicker, contactPicker)
             }
         },
@@ -247,14 +252,12 @@ private fun newSystemContactPickerIntent(): Intent =
     Intent(ContactsPickerSessionContract.ACTION_PICK_CONTACTS).apply {
         // Also engage the system picker when targeting a lower SDK on Android 17.
         putExtra(Intent.EXTRA_USE_SYSTEM_CONTACTS_PICKER, true)
-        // Ask only for postal-address rows → picker surfaces addresses, not names.
+        // Ask only for postal-address rows.
         putStringArrayListExtra(
             ContactsPickerSessionContract.EXTRA_PICK_CONTACTS_REQUESTED_DATA_FIELDS,
             arrayListOf(StructuredPostal.CONTENT_ITEM_TYPE),
         )
-        // Native single-item selection: the user picks ONE address.
         putExtra(ContactsPickerSessionContract.EXTRA_PICK_CONTACTS_SELECTION_LIMIT, 1)
-        // Single-select: intentionally do NOT set Intent.EXTRA_ALLOW_MULTIPLE.
     }
 
 /** Legacy postal-picker path: try the postal-row picker, then the whole-contact

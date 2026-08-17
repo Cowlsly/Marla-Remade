@@ -35,10 +35,9 @@
          routes to the user-selected recognition service (the MA speech app when
          installed). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Contact address shortcut (P17): fallback only. The system postal-address
-         picker grants an implicit per-row read, so this is requested at runtime
-         solely when an OEM refuses that read; the common path needs no grant. -->
-    <uses-permission android:name="android.permission.READ_CONTACTS" />
+    <!-- Contact address shortcut (P17): NO READ_CONTACTS. The system Contact
+         Picker returns a URI with a temporary per-URI read grant, so the picked
+         address is read directly from that URI without any contacts permission. -->
     <!-- Android 11+ package visibility: needed so SpeechRecognizer can see and
          bind the installed on-device recognition service for voice search. -->
     <queries>
