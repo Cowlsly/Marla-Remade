@@ -83,20 +83,26 @@ fi
 # --- 6. AUTOMATED UPLOAD ---
 echo "[6/6] Uploading files to Cloudflare R2..."
 
-# 6a. Upload Global Files
-echo "Syncing data directory to R2..."
+# 6a. Upload the SINGLE GLOBAL routing graph (no per-zone artifacts).
+# These are exactly the files maps/src/main/rust/src/graph.rs mmaps from one
+# directory. The offline TILE packs (zone_*.pmtiles) and the P11 transit index
+# (zone_*.transit) are published separately (extract_pmtiles.sh / gtfs_ingest)
+# and are intentionally NOT part of this graph upload.
+echo "Syncing single global graph to R2..."
 
 aws s3 sync "$DATA_DIR" "s3://$BUCKET_NAME/" \
     --endpoint-url "$R2_ENDPOINT" \
     --profile r2 \
     --content-type "application/octet-stream" \
     --exclude "*" \
-    --include "road_names.bin" \
     --include "metadata.bin" \
+    --include "road_names.bin" \
     --include "amenities.db" \
-    --include "nodes_zone_*.bin" \
-    --include "edges_zone_*.bin" \
-    --include "transit_voyages_zone_*.bin"
+    --include "nodes.bin" \
+    --include "edges.bin" \
+    --include "transit_voyages.bin" \
+    --include "transit_attributes.bin" \
+    --include "lanes.bin"
 
 echo "---------------------------------------------------------"
 echo "Pipeline Finished Successfully."
