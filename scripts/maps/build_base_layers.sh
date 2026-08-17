@@ -32,14 +32,15 @@ set -euo pipefail
 #                          "planet", or a path to a .osm.pbf). build mode only.
 #   --jar FILE             Protomaps basemap planetiler jar. build mode only.
 #   --source URL          upstream base for reuse mode
-#                          (default https://demo-bucket.protomaps.com/v4.pmtiles)
+#                          (default https://data.vayunmathur.com/v4.pmtiles — the
+#                          app's own hosted base; demo-bucket.protomaps.com is dead/404)
 #   --bbox BOX             optional metro bbox for a small build/extract dry run
 
 MODE="reuse"
 OUT="base.pmtiles"
 AREA="planet"
 JAR=""
-SOURCE_URL="https://demo-bucket.protomaps.com/v4.pmtiles"
+SOURCE_URL="https://data.vayunmathur.com/v4.pmtiles"
 BBOX=""
 
 while [[ $# -gt 0 ]]; do
