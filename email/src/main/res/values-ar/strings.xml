@@ -6,7 +6,7 @@
     <string name="reply">رد</string>
     <string name="forward">تحويل</string>
     <string name="from_label">من</string>
-    <string name="select_account">اختر الحساب</string>
+    <string name="select_account">اختر حسابًا</string>
     <string name="select_sender">اختر المرسل</string>
     <string name="to_label">إلى</string>
     <string name="subject_label">الموضوع</string>
@@ -31,8 +31,8 @@
     <string name="smtp_outgoing">SMTP (الصادر)</string>
     <string name="imap_incoming">IMAP (الوارد)</string>
     <string name="how_to_get_your_app_password">كيفية الحصول على كلمة مرور تطبيق خاصتك</string>
-    <string name="security">الأمان:</string>
-    <string name="no_recent_emails">لا رسائل بريد حديثه</string>
+    <string name="security">الأمن:</string>
+    <string name="no_recent_emails">لا رسائل بريد حديثة</string>
     <string name="retry">إعادة المحاولة</string>
     <string name="couldn_t_open_this_eml_file">تعذّر فتح ملف .eml هذا</string>
     <string name="signature_saved">تم حفظ التوقيع</string>
@@ -65,7 +65,7 @@
     <string name="ai_summary">ملخص الذكاء الاصطناعي</string>
     <string name="deleted_from_outbox">تم حذفها من صندوق الصادر</string>
     <string name="attachments_2">المرفقات:</string>
-    <string name="unified_inbox">صندوق وارد موحد</string>
+    <string name="unified_inbox">صندوق الوارد الموحَّد</string>
     <string name="saved_to_downloads">تم الحفظ في التنزيلات</string>
     <string name="generating_summary">جارٍ إنشاء الملخص…</string>
     <string name="block_sender">حظر المرسل</string>
@@ -102,7 +102,7 @@
     <string name="clear_formatting">مسح التنسيق</string>
     <string name="email_sync_channel_name">مزامنة البريد الإلكتروني في الخلفية</string>
     <string name="email_sync_channel_desc">يحافظ على اتصال IMAP مفتوحًا حتى يصل البريد الجديد فورًا.</string>
-    <string name="unified_inbox_label">صندوق وارد موحد</string>
+    <string name="unified_inbox_label">صندوق الوارد الموحَّد</string>
     <string name="app_name">إيميل</string>
     <string name="later_today_6_pm">اليوم لاحقًا (٦ مساءً)</string>
     <string name="download_failed">فشل التنزيل: <xliff:g id="error" example="Network error">%1$s</xliff:g></string>
@@ -114,10 +114,36 @@
     <string name="no_content_1">(بدون محتوى)</string>
     <string name="no_content">(بدون محتوى)</string>
     <string name="no_subject">(بدون موضوع)</string>
-    <string name="to_me">إلى أنا</string>
+    <string name="to_me">إلي أنا</string>
     <string name="from">من <xliff:g id="account" example="me@example.com">%1$s</xliff:g></string>
     <string name="compose">إنشاء</string>
     <string name="outbox_with_count">صندوق الصادر (<xliff:g id="count" example="2">%1$d</xliff:g>)</string>
     <string name="selected_count">تم تحديد <xliff:g id="count" example="3">%1$d</xliff:g></string>
     <string name="open">فتح</string>
+    <string name="load_remote_images">تحميل الصور البعيدة</string>
+    <string name="remote_images_blocked">تم حظر الصور البعيدة</string>
+    <string name="email_widget_description">الرسائل الأخيرة من صندوق الوارد الموحَّد - اضغط لفتح البريد الإلكتروني</string>
+    <string name="failed">فشل: <xliff:g id="error" example="Auth error">%1$s</xliff:g></string>
+    <string name="to_1">إلى <xliff:g id="recipient" example="bob@example.com">%1$s</xliff:g></string>
+    <string name="load_remote_images_summary">عرض الصور المستضافة على الويب دون سؤال. يمكن للمرسلين استخدامها لمعرفة متى فتحت رسالة.</string>
+    <string name="saved_to_outbox">تم الحفظ إلي صندوق الصادر: <xliff:g id="reason" example="No network">%1$s</xliff:g></string>
+    <plurals name="retrying_pending_messages">
+        <item quantity="zero">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
+        <item quantity="one">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
+        <item quantity="two">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالتان معلقتان…</item>
+        <item quantity="few">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسائل معلقة…</item>
+        <item quantity="many">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
+        <item quantity="other">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
+    </plurals>
+    <string name="cc_bcc"></string>
+    <string name="in_1_hour">في ساعة واحدة</string>
+    <string name="in_1_week">في أسبوع واحد</string>
+    <plurals name="attempts">
+        <item quantity="zero"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
+        <item quantity="one"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
+        <item quantity="two"><xliff:g id="count" example="2">%1$s</xliff:g> محاولتان</item>
+        <item quantity="few"><xliff:g id="count" example="2">%1$s</xliff:g> محاولات</item>
+        <item quantity="many"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
+        <item quantity="other"><xliff:g id="count" example="2">%1$s</xliff:g> محاولة</item>
+    </plurals>
 </resources>
