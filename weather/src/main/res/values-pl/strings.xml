@@ -73,7 +73,7 @@
     <string name="aqi_very_unhealthy">Bardzo niezdrowe</string>
     <string name="aqi_hazardous">Niebezpieczny</string>
     <string name="precip_raining_now">Opady deszczu</string>
-    <string name="precip_no_rain_next_2h">W ciągu najbliższych 2 godzin nie będzie deszczu</string>
+    <string name="precip_no_rain_next_2h">Brak deszczu przez 2 godziny</string>
     <string name="precip_rain_starting_now">Zaczyna padać deszcz</string>
     <string name="precip_rain_in_min">Deszcz za ~<xliff:g id="minutes" example="15">%1$d</xliff:g> min</string>
     <string name="last_updated">Zaktualizowano <xliff:g id="time_ago" example="2h ago">%1$s</xliff:g></string>
@@ -105,4 +105,5 @@
     <string name="moon_phase_waning_crescent">Sierp ubywający</string>
     <string name="weather_blob_widget_description">Wyświetla aktualną pogodę w nowoczesnym, obłym kształcie z dużą temperaturą i ikoną na ciemnoturkusowym tle</string>
     <string name="set_units">Jednostki</string>
+    <string name="gusts">Porywy wiatru: <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
 </resources>
