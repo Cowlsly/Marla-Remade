@@ -134,6 +134,7 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
                     disabledContainerColor = Color.Transparent,
                 ),
                 leadingIcon = { IconSearch() },
+                trailingIcon = { VoiceSearchButton(onResult = { actions.setQuery(it) }) },
                 singleLine = true
             )
         },

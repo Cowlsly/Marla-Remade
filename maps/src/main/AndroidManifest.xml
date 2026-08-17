@@ -13,6 +13,19 @@
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- Voice search (P8): records audio for the system SpeechRecognizer, which
+         routes to the user-selected recognition service (the MA speech app when
+         installed). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Android 11+ package visibility: needed so SpeechRecognizer can see and
+         bind the installed on-device recognition service for voice search. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+    </queries>
+
 
     <application
         android:largeHeap="true"

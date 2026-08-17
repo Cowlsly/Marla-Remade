@@ -538,6 +538,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 Text(name)
                             }, colors = ListItemDefaults.colors(Color.Transparent), modifier = Modifier.clickable {
                                 openSearch()
+                            }, trailingContent = {
+                                // Voice search (P8): a transcript opens the
+                                // search page pre-filled, which runs the P3
+                                // Google search via SearchPage's query effect.
+                                VoiceSearchButton(onResult = { openCategorySearch(it) })
                             })
                         }
                         Spacer(Modifier.height(8.dp))
