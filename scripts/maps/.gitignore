@@ -2,3 +2,4 @@
 *.pmtiles
 map_data/
 generator
+ne/
