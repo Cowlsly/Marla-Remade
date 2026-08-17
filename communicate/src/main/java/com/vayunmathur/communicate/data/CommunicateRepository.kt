@@ -754,6 +754,57 @@ object CommunicateRepository {
         }.getOrDefault(emptyList())
     }
 
+    // ── Delete ( #542 ) ────────────────────────────────────────────────
+
+    /** Delete an entire conversation/thread, routing by [CommunicateLine]. */
+    suspend fun deleteConversation(context: Context, thread: SmsThread): Boolean = withContext(Dispatchers.IO) {
+        when (thread.line) {
+            CommunicateLine.Sim -> deleteSimThread(context, thread.threadId)
+            CommunicateLine.GoogleVoice -> thread.remoteId?.let {
+                runCatching { GoogleVoiceClient.get(context).updateThreadAttributes(it, com.vayunmathur.communicate.data.googlevoice.GoogleVoiceParser.ThreadAction.Archive) }.getOrDefault(false)
+            } ?: false
+            CommunicateLine.WhatsApp -> thread.remoteId?.let { jid ->
+                runCatching { WhatsAppClient.deleteChat(jid, leaveGroup = true) }.getOrDefault(false)
+            } ?: false
+            CommunicateLine.Signal -> thread.remoteId?.let { id ->
+                runCatching {
+                    val db = SignalDatabase.getDatabase(context)
+                    db.conversationDao().delete(id)
+                    db.cachedMessageDao().deleteConversation(id)
+                    true
+                }.getOrDefault(false)
+            } ?: false
+        }
+    }
+
+    private fun deleteSimThread(context: Context, threadId: Long): Boolean = runCatching {
+        // Provider deletes the thread + its SMS/MMS rows when the conversation is removed.
+        val deleted = context.contentResolver.delete(
+            android.net.Uri.parse("content://mms-sms/conversations/$threadId"), null, null,
+        )
+        if (deleted > 0) return true
+        // Fallback: delete SMS and MMS rows directly.
+        context.contentResolver.delete(Telephony.Sms.CONTENT_URI, "${Telephony.Sms.THREAD_ID} = ?", arrayOf(threadId.toString()))
+        context.contentResolver.delete(Telephony.Mms.CONTENT_URI, "${Telephony.Mms.THREAD_ID} = ?", arrayOf(threadId.toString()))
+        true
+    }.getOrDefault(false)
+
+    /** Delete a call-log entry, routing by [CommunicateLine]. */
+    suspend fun deleteCallLog(context: Context, entry: CommunicateCallLogEntry): Boolean = withContext(Dispatchers.IO) {
+        when (entry.line) {
+            CommunicateLine.Sim -> runCatching {
+                context.contentResolver.delete(
+                    CallLog.Calls.CONTENT_URI, "${CallLog.Calls._ID} = ?", arrayOf(entry.id.toString()),
+                ) >= 0
+            }.getOrDefault(false)
+            CommunicateLine.GoogleVoice -> entry.let {
+                // GV calls are read-only from the GV API; treat as no-op success locally.
+                true
+            }
+            else -> false
+        }
+    }
+
     /** Stable positive Long key for a GV remote id, kept clear of provider thread ids. */
     fun stableThreadId(remoteId: String): Long = (remoteId.hashCode().toLong() and 0xFFFFFFFFL) or 0x1_0000_0000L
 

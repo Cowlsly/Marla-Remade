@@ -239,6 +239,41 @@ fun ConversationScreen(
         },
         onNavigateBack = onBack,
         actions = {
+            var showDeleteConfirm by remember { mutableStateOf(false) }
+            if (showDeleteConfirm) {
+                com.vayunmathur.library.ui.ConfirmDialog(
+                    title = stringResource(com.vayunmathur.communicate.R.string.delete_conversation_title),
+                    message = stringResource(com.vayunmathur.communicate.R.string.delete_conversation_message),
+                    confirmLabel = stringResource(com.vayunmathur.library.ui.R.string.delete),
+                    dismissLabel = stringResource(com.vayunmathur.library.ui.R.string.cancel),
+                    destructive = true,
+                    onConfirm = {
+                        showDeleteConfirm = false
+                        scope.launch {
+                            val ok = withContext(Dispatchers.IO) {
+                                CommunicateRepository.deleteConversation(
+                                    context,
+                                    SmsThread(
+                                        threadId = threadId,
+                                        address = address,
+                                        displayName = null,
+                                        snippet = "",
+                                        timestampMillis = 0L,
+                                        unreadCount = 0,
+                                        line = line,
+                                        remoteId = remoteId,
+                                        isGroup = isGroup,
+                                        participants = participants,
+                                        groupTitle = groupTitle,
+                                    ),
+                                )
+                            }
+                            if (ok) onBack() else AppMessages.show(context.getString(com.vayunmathur.communicate.R.string.delete_failed))
+                        }
+                    },
+                    onDismiss = { showDeleteConfirm = false },
+                )
+            }
             if (line == CommunicateLine.GoogleVoice && remoteId != null) {
                 IconButton(onClick = {
                     scope.launch {
@@ -249,6 +284,13 @@ fun ConversationScreen(
                         if (ok) onBack() else AppMessages.show(context.getString(R.string.gv_action_failed))
                     }
                 }) { IconArchive() }
+            }
+            com.vayunmathur.library.ui.OverflowMenu(icon = { com.vayunmathur.library.ui.IconMoreVert() }) {
+                Item(
+                    text = stringResource(com.vayunmathur.library.ui.R.string.delete),
+                    leadingIcon = { com.vayunmathur.library.ui.IconDelete() },
+                    onClick = { showDeleteConfirm = true },
+                )
             }
         },
         bottomBar = {

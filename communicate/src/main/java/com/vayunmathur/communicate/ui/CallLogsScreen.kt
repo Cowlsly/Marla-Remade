@@ -20,7 +20,9 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.IconCall
+import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconHistory
+import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
@@ -30,12 +32,17 @@ import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.CommunicateCallLogEntry
 import com.vayunmathur.communicate.data.CommunicateCallType
 import com.vayunmathur.communicate.data.CommunicateRepository
+import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 @Composable
 fun CallLogsScreen() {
     val context = LocalContext.current
+    val scope = androidx.compose.runtime.rememberCoroutineScope()
+    var tick by androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    var pendingDelete by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<CommunicateCallLogEntry?>(null) }
     AppScaffold(
         title = stringResource(R.string.call_logs_title),
     ) { padding ->
@@ -45,7 +52,7 @@ fun CallLogsScreen() {
                 message = stringResource(R.string.permission_call_logs_message),
                 modifier = Modifier.padding(padding),
             ) { permissionRevision ->
-                val callLogs = produceState<List<CommunicateCallLogEntry>?>(initialValue = null, roleRevision, permissionRevision) {
+                val callLogs = produceState<List<CommunicateCallLogEntry>?>(initialValue = null, roleRevision, permissionRevision, tick) {
                     value = withContext(Dispatchers.IO) { CommunicateRepository.loadCallLogsMerged(context) }
                 }
                 when (val rows = callLogs.value) {
@@ -62,11 +69,31 @@ fun CallLogsScreen() {
                         contentPadding = PaddingValues(vertical = 8.dp),
                     ) {
                         items(rows, key = { it.id }) { entry ->
-                            CallLogRow(entry) {
-                                CommunicateRepository.placeCall(context, entry.phoneNumber)
-                            }
+                            CallLogRow(
+                                entry = entry,
+                                onClick = { CommunicateRepository.placeCall(context, entry.phoneNumber) },
+                                onDelete = { pendingDelete = entry },
+                            )
                         }
                     }
+                }
+                val toDelete = pendingDelete
+                if (toDelete != null) {
+                    com.vayunmathur.library.ui.ConfirmDialog(
+                        title = stringResource(R.string.delete_call_log_title),
+                        message = stringResource(R.string.delete_call_log_message),
+                        confirmLabel = stringResource(R.string.delete),
+                        dismissLabel = stringResource(com.vayunmathur.library.ui.R.string.cancel),
+                        destructive = true,
+                        onConfirm = {
+                            pendingDelete = null
+                            scope.launch {
+                                val ok = withContext(Dispatchers.IO) { CommunicateRepository.deleteCallLog(context, toDelete) }
+                                if (ok) tick++ else AppMessages.show(context.getString(R.string.delete_failed))
+                            }
+                        },
+                        onDismiss = { pendingDelete = null },
+                    )
                 }
             }
         }
@@ -74,7 +101,7 @@ fun CallLogsScreen() {
 }
 
 @Composable
-private fun CallLogRow(entry: CommunicateCallLogEntry, onClick: () -> Unit) {
+private fun CallLogRow(entry: CommunicateCallLogEntry, onClick: () -> Unit, onDelete: () -> Unit = {}) {
     val context = LocalContext.current
     val title = entry.displayName ?: entry.phoneNumber
     ListItem(
@@ -105,7 +132,18 @@ private fun CallLogRow(entry: CommunicateCallLogEntry, onClick: () -> Unit) {
             }
         },
         leadingContent = { IconForCallType(entry.type) },
-        trailingContent = { IconCall() },
+        trailingContent = {
+            Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                com.vayunmathur.library.ui.IconButton(onClick = onClick) { IconCall() }
+                com.vayunmathur.library.ui.OverflowMenu(icon = { IconMoreVert() }) {
+                    Item(
+                        text = stringResource(com.vayunmathur.library.ui.R.string.delete),
+                        leadingIcon = { IconDelete() },
+                        onClick = onDelete,
+                    )
+                }
+            }
+        },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickable(onClick = onClick),
     )

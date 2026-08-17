@@ -36,7 +36,9 @@ import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconClose
+import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconGroup
+import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.IconPerson
 import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.ListItem
@@ -236,15 +238,42 @@ fun MessagesScreen(onOpenThread: (SmsThread) -> Unit, onOpenAccounts: () -> Unit
                         icon = { IconSms() },
                         modifier = Modifier.padding(padding),
                     )
-                    else -> LazyColumn(
-                        modifier = Modifier
-                            .padding(padding)
-                            .fillMaxSize(),
-                        contentPadding = PaddingValues(bottom = 88.dp),
-                    ) {
-                        items(rows, key = { it.threadId }) { thread ->
-                            MessageThreadRow(thread = thread, onClick = { onOpenThread(thread) })
-                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                    else -> {
+                        var pendingDelete by remember { mutableStateOf<SmsThread?>(null) }
+                        LazyColumn(
+                            modifier = Modifier
+                                .padding(padding)
+                                .fillMaxSize(),
+                            contentPadding = PaddingValues(bottom = 88.dp),
+                        ) {
+                            items(rows, key = { it.threadId }) { thread ->
+                                MessageThreadRow(
+                                    thread = thread,
+                                    onClick = { onOpenThread(thread) },
+                                    onDelete = { pendingDelete = thread },
+                                )
+                                HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                            }
+                        }
+                        val toDelete = pendingDelete
+                        if (toDelete != null) {
+                            com.vayunmathur.library.ui.ConfirmDialog(
+                                title = stringResource(R.string.delete_conversation_title),
+                                message = stringResource(R.string.delete_conversation_message),
+                                confirmLabel = stringResource(R.string.delete),
+                                dismissLabel = stringResource(com.vayunmathur.library.ui.R.string.cancel),
+                                destructive = true,
+                                onConfirm = {
+                                    pendingDelete = null
+                                    scope.launch {
+                                        val ok = withContext(Dispatchers.IO) {
+                                            CommunicateRepository.deleteConversation(context, toDelete)
+                                        }
+                                        if (ok) tick++ else AppMessages.show(context.getString(R.string.delete_failed))
+                                    }
+                                },
+                                onDismiss = { pendingDelete = null },
+                            )
                         }
                     }
                 }
@@ -254,7 +283,7 @@ fun MessagesScreen(onOpenThread: (SmsThread) -> Unit, onOpenAccounts: () -> Unit
 }
 
 @Composable
-private fun MessageThreadRow(thread: SmsThread, onClick: () -> Unit) {
+private fun MessageThreadRow(thread: SmsThread, onClick: () -> Unit, onDelete: () -> Unit = {}) {
     val context = LocalContext.current
     val title = when {
         thread.isGroup -> thread.groupTitle
@@ -293,7 +322,16 @@ private fun MessageThreadRow(thread: SmsThread, onClick: () -> Unit) {
         },
         leadingContent = { ThreadAvatar(title = title, isGroup = thread.isGroup) },
         trailingContent = {
-            if (thread.unreadCount > 0) UnreadBadge(thread.unreadCount)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (thread.unreadCount > 0) UnreadBadge(thread.unreadCount)
+                com.vayunmathur.library.ui.OverflowMenu(icon = { IconMoreVert() }) {
+                    Item(
+                        text = stringResource(com.vayunmathur.library.ui.R.string.delete),
+                        leadingIcon = { IconDelete() },
+                        onClick = onDelete,
+                    )
+                }
+            }
         },
         colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier.clickable(onClick = onClick),

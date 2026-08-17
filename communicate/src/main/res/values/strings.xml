@@ -102,4 +102,9 @@
     <string name="account_signal">Signal</string>
     <string name="signal_send_failed">Couldn\'t send via Signal</string>
     <string name="signal_action_failed">Signal action failed</string>
+    <string name="delete_conversation_title">Delete conversation?</string>
+    <string name="delete_conversation_message">This will delete the conversation and its messages.</string>
+    <string name="delete_call_log_title">Delete call?</string>
+    <string name="delete_call_log_message">This will remove this entry from your call history.</string>
+    <string name="delete_failed">Delete failed</string>
 </resources>
