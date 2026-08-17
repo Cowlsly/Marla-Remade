@@ -232,11 +232,12 @@ fun ShareOnlineDialog(
             Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Text(stringResource(R.string.share_world), style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.primary)
                 Text(world.meta.name, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface)
-                // Share sheet: sends voxels://join/<worldId>?owner=<ownerId> (public ids only) so the
-                // invitee can request access without you typing their device id.
+                // Share sheet: sends an https link that bounces to voxels://join/<worldId>?owner=<ownerId>
+                // (public ids only) so the invitee can request access without you typing their device id.
+                // The ids ride in the fragment, which browsers never send to the server.
                 OutlinedButton(
                     onClick = {
-                        val link = "voxels://join/${world.meta.worldId}?owner=${world.meta.ownerDeviceId}"
+                        val link = "https://ma.vayunmathur.com/vx/share#id=${world.meta.worldId}&owner=${world.meta.ownerDeviceId}"
                         ExternalIntents.shareText(context, link, context.getString(R.string.share_link_chooser))
                     },
                     modifier = Modifier.fillMaxWidth(),

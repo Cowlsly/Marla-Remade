@@ -2349,8 +2349,11 @@ class OfficeViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    /** Builds a tappable invite link for a document this device owns (public ids only). */
-    fun shareLinkFor(docId: String): String = "office://join/$docId?owner=${OfficeSync.deviceId}"
+    /** Builds a tappable invite link for a document this device owns (public ids only).
+     *  An https link that bounces to `office://join/...`, since messengers won't linkify
+     *  a bare custom scheme. The ids ride in the fragment, which browsers never send. */
+    fun shareLinkFor(docId: String): String =
+        "https://ma.vayunmathur.com/of/share#id=$docId&owner=${OfficeSync.deviceId}"
 
     /**
      * Sends a PQC-sealed join request to [ownerId]'s inbox after ensuring this device is registered.

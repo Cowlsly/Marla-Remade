@@ -77,12 +77,14 @@ fun AddPersonDialog(
                     readOnly = true
                 )
 
-                // Share sheet instead of copy/paste: sends findfamily://add/<myId>,
-                // which prefills the recipient's Add Person dialog. The link carries
-                // only a public id — never a key — so it's safe to share anywhere.
+                // Share sheet instead of copy/paste: sends an https link that bounces to
+                // findfamily://add/<myId>, which prefills the recipient's Add Person dialog.
+                // The web hop exists because many messengers won't linkify a bare custom
+                // scheme. The id rides in the fragment, which browsers never send, so the
+                // server sees only that some share page was opened.
                 OutlinedButton(
                     {
-                        val link = "findfamily://add/${Networking.userid.encodeBase26()}"
+                        val link = "https://ma.vayunmathur.com/ff/share#id=${Networking.userid.encodeBase26()}"
                         ExternalIntents.shareText(
                             context,
                             link,

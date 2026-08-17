@@ -560,8 +560,8 @@ fun ShareOnlineDialog(
                         TextButton(enabled = docName.isNotBlank() && docName.trim() != initialName, onClick = { onRename(docName.trim()) }) { Text(stringResource(UiR.string.rename)) }
                         Spacer(Modifier.height(8.dp))
                     }
-                    // Share sheet: sends office://join/<docId>?owner=<deviceId> (public ids only) so
-                    // the recipient can request access without you typing their device id.
+                    // Share sheet: sends an https link that bounces to office://join/<docId>?owner=<deviceId>
+                    // (public ids only) so the recipient can request access without you typing their device id.
                     shareLink?.let { link ->
                         OutlinedButton(
                             onClick = { ExternalIntents.shareText(context, link, context.getString(R.string.share_link_chooser)) },
