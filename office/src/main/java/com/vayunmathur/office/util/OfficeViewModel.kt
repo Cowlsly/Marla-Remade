@@ -138,8 +138,19 @@ class OfficeViewModel(application: Application) : AndroidViewModel(application) 
     private val _nightMode = MutableStateFlow(false)
     val nightMode: StateFlow<Boolean> = _nightMode
 
+    enum class DocumentThemeMode {
+        UNCHANGED,
+        FOLLOW_SYSTEM
+    }
+
+    // Persisted document theme preference: view-only, does not mutate file (#479).
+    // UNCHANGED = always show as authored; FOLLOW_SYSTEM = follow system dark theme via view inversion.
+    private val _documentThemeMode = MutableStateFlow(DocumentThemeMode.UNCHANGED)
+    val documentThemeMode: StateFlow<DocumentThemeMode> = _documentThemeMode
+
+    // Legacy in-memory toggle (kept for View menu compat). Derived from persisted theme when needed.
     // Google-Docs-style dark mode: inverts the displayed colors of the document so the
-    // paper appears dark, without modifying the document itself. View-only, not persisted.
+    // paper appears dark, without modifying the document itself. View-only inversion.
     private val _documentDarkMode = MutableStateFlow(false)
     val documentDarkMode: StateFlow<Boolean> = _documentDarkMode
 
@@ -182,15 +193,42 @@ class OfficeViewModel(application: Application) : AndroidViewModel(application) 
         val autoSave = prefs.getBoolean("auto_save", false)
         val interval = prefs.getInt("auto_save_interval", 60)
         setAutoSave(autoSave, interval)
+        val themeName = prefs.getString("document_theme_mode", DocumentThemeMode.UNCHANGED.name)
+        val mode = try { DocumentThemeMode.valueOf(themeName ?: DocumentThemeMode.UNCHANGED.name) } catch (_: Exception) { DocumentThemeMode.UNCHANGED }
+        val legacyDark = if (prefs.contains("document_dark_mode")) prefs.getBoolean("document_dark_mode", false) else null
+        val resolved = if (legacyDark != null && !prefs.contains("document_theme_mode")) {
+            if (legacyDark) DocumentThemeMode.FOLLOW_SYSTEM else DocumentThemeMode.UNCHANGED
+        } else mode
+        _documentThemeMode.value = resolved
+        _documentDarkMode.value = resolved == DocumentThemeMode.FOLLOW_SYSTEM
     }
 
     fun saveSettings(context: Context, autoSave: Boolean, autoSaveInterval: Int, defaultFontSize: Float) {
+        saveSettings(context, autoSave, autoSaveInterval, defaultFontSize, _documentThemeMode.value)
+    }
+
+    fun saveSettings(context: Context, autoSave: Boolean, autoSaveInterval: Int, defaultFontSize: Float, documentThemeMode: DocumentThemeMode) {
         context.getSharedPreferences("office_settings", Context.MODE_PRIVATE).edit {
             putBoolean("auto_save", autoSave)
             putInt("auto_save_interval", autoSaveInterval)
             putFloat("default_font_size", defaultFontSize)
+            putString("document_theme_mode", documentThemeMode.name)
         }
         setAutoSave(autoSave, autoSaveInterval)
+        _documentThemeMode.value = documentThemeMode
+        _documentDarkMode.value = documentThemeMode == DocumentThemeMode.FOLLOW_SYSTEM
+    }
+
+    fun getDocumentThemeMode(context: Context): DocumentThemeMode {
+        val prefs = context.getSharedPreferences("office_settings", Context.MODE_PRIVATE)
+        val name = prefs.getString("document_theme_mode", DocumentThemeMode.UNCHANGED.name)
+        return try { DocumentThemeMode.valueOf(name ?: DocumentThemeMode.UNCHANGED.name) } catch (_: Exception) { DocumentThemeMode.UNCHANGED }
+    }
+
+    fun setDocumentThemeMode(context: Context, mode: DocumentThemeMode) {
+        _documentThemeMode.value = mode
+        _documentDarkMode.value = mode == DocumentThemeMode.FOLLOW_SYSTEM
+        context.getSharedPreferences("office_settings", Context.MODE_PRIVATE).edit { putString("document_theme_mode", mode.name) }
     }
 
     fun getDefaultFontSize(context: Context): Float {
@@ -307,7 +345,19 @@ class OfficeViewModel(application: Application) : AndroidViewModel(application) 
 
     // --- Night mode ---
     fun toggleNightMode() { _nightMode.value = !_nightMode.value }
-    fun toggleDocumentDarkMode() { _documentDarkMode.value = !_documentDarkMode.value }
+    fun toggleDocumentDarkMode() {
+        val next = if (_documentThemeMode.value == DocumentThemeMode.UNCHANGED) DocumentThemeMode.FOLLOW_SYSTEM else DocumentThemeMode.UNCHANGED
+        _documentThemeMode.value = next
+        _documentDarkMode.value = next == DocumentThemeMode.FOLLOW_SYSTEM
+        try {
+            val app = getApplication<Application>()
+            app.getSharedPreferences("office_settings", Context.MODE_PRIVATE).edit { putString("document_theme_mode", next.name) }
+        } catch (_: Exception) {}
+    }
+    fun toggleDocumentDarkModePersisted(context: Context) {
+        val next = if (_documentThemeMode.value == DocumentThemeMode.UNCHANGED) DocumentThemeMode.FOLLOW_SYSTEM else DocumentThemeMode.UNCHANGED
+        setDocumentThemeMode(context, next)
+    }
 
     // --- Load / Clear ---
 

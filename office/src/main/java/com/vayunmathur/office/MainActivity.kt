@@ -120,6 +120,7 @@ import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.office.R
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -781,7 +782,12 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
     val canRedo by viewModel.canRedo.collectAsState()
     val autoSaveEnabled by viewModel.autoSaveEnabled.collectAsState()
     val nightMode by viewModel.nightMode.collectAsState()
-    val documentDarkMode by viewModel.documentDarkMode.collectAsState()
+    val documentThemeMode by viewModel.documentThemeMode.collectAsState()
+    val isSystemDark = isSystemInDarkTheme()
+    val documentDarkMode = when (documentThemeMode) {
+        OfficeViewModel.DocumentThemeMode.FOLLOW_SYSTEM -> isSystemDark
+        OfficeViewModel.DocumentThemeMode.UNCHANGED -> false
+    }
     var showWordBar by remember { mutableStateOf(false) }
     var showComments by remember { mutableStateOf(false) }
     var showChanges by remember { mutableStateOf(false) }
@@ -1285,8 +1291,8 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
             dismissButton = { TextButton(onClick = { exportWarning = null }) { Text(stringResource(UiR.string.cancel)) } })
     }
     if (showSettings) SettingsDialog(autoSave = viewModel.getAutoSaveEnabled(context), autoSaveInterval = viewModel.getAutoSaveInterval(context),
-        defaultFontSize = viewModel.getDefaultFontSize(context),
-        onSave = { a, i, f -> viewModel.saveSettings(context, a, i, f) }, onDismiss = { showSettings = false })
+        defaultFontSize = viewModel.getDefaultFontSize(context), documentThemeMode = viewModel.getDocumentThemeMode(context),
+        onSave = { a, i, f, m -> viewModel.saveSettings(context, a, i, f, m) }, onDismiss = { showSettings = false })
     if (showColorPicker) ColorPickerDialog("Text Color", onColorSelected = { c -> if (activeRunStart >= 0) viewModel.applyRunSpanStyle(activeRunStart, activeRunEnd, selStart, selEnd) { it.copy(color = c) } }, onDismiss = { showColorPicker = false })
     if (showFontSizePicker) FontSizePickerDialog(onSizeSelected = { sz -> if (activeRunStart >= 0) viewModel.applyRunSpanStyle(activeRunStart, activeRunEnd, selStart, selEnd) { it.copy(fontSize = sz) } }, onDismiss = { showFontSizePicker = false })
     if (showInsertTable) InsertTableDialog(onInsert = { r, c -> viewModel.insertTable(maxOf(0, focusedPara), r, c) }, onDismiss = { showInsertTable = false })

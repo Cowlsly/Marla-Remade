@@ -533,11 +533,7 @@
     <string name="night_reading_mode">✓ Night reading mode</string>
     <!-- MainActivity: Unchecked menu night reading mode -->
     <string name="night_reading_mode_1">Night reading mode</string>
-    <!-- MainActivity: Checked menu document dark mode with checkmark -->
-    <string name="document_dark_mode">✓ Document dark mode</string>
-    <!-- MainActivity: Unchecked menu document dark mode -->
-    <string name="document_dark_mode_1">Document dark mode</string>
-    <!-- MainActivity: Checked menu word count bar with checkmark -->
+        <!-- MainActivity: Checked menu word count bar with checkmark -->
     <string name="word_count_bar">✓ Word count bar</string>
     <!-- MainActivity: Unchecked menu word count bar -->
     <string name="word_count_bar_1">Word count bar</string>
@@ -575,4 +571,16 @@
     <string name="wide">● Wide</string>
     <!-- MainActivity: Wide margins radio unselected -->
     <string name="wide_1">Wide</string>
+    <!-- MainActivity: Checked menu document dark mode with checkmark -->
+    <string name="document_dark_mode">✓ Document dark mode</string>
+    <!-- MainActivity: Unchecked menu document dark mode -->
+    <string name="document_dark_mode_1">Document dark mode</string>
+    <!-- Settings: Document theme section -->
+    <string name="document_theme">Document theme</string>
+    <!-- Settings: Document theme summary -->
+    <string name="document_theme_summary">Controls how documents appear. Does not change the file.</string>
+    <!-- Settings: Document theme option - keep authored colors -->
+    <string name="document_theme_unchanged">Unchanged</string>
+    <!-- Settings: Document theme option - follow system dark theme (Google Docs-like dark inversion) -->
+    <string name="document_theme_follow_system">Follow system theme</string>
 </resources>
