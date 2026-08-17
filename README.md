@@ -32,7 +32,9 @@ Every released and planned app is listed here:
 
 Though some apps may have exceptions, generally a 64-bit device running at least Android 12 is required.
 
-**ADD THIS REPO TO YOUR F-DROID CLIENT: [https://ma.vayunmathur.com/fdroid](https://ma.vayunmathur.com/fdroid)** (for faster updates and apps unavailable on the main repo)
+**THE RECOMMENDED INSTALLATION METHOD IS MA APP STORE.** It is the most secure way to download MA apps. 
+
+**FOR F-DROID USERS, ADD THIS REPO TO YOUR CLIENT: [https://ma.vayunmathur.com/fdroid](https://ma.vayunmathur.com/fdroid)** (for faster updates and apps unavailable on the main repo)
 
 | App Name | Homepage | F-Droid | Obtainium |
 | :--- | :---: | :---: | :---: |
