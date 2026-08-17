@@ -55,6 +55,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.retain.retain
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -75,7 +76,6 @@ import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.parse
 import com.vayunmathur.maps.util.MapTileCache
-import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
@@ -167,24 +167,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
     LaunchedEffect(camera.position, transitEnabled) {
         if (camera.position.zoom >= 11.0) {
-            delay(300) // Debounce traffic loading
+            delay(300) // Debounce idle-driven overlay refresh
             val projection = camera.projection
             if (projection != null) {
                 val bbox = projection.queryVisibleBoundingBox()
-                // Only fetch live traffic when the layer is on. Fetching drives
-                // trafficVersion, which in turn mounts the loopback traffic tile
-                // layer (see MyMapLayers); skipping it when off avoids needless
-                // network + native work and keeps the tile layer unmounted.
-                if (trafficEnabled) {
-                    // Load traffic for all four corners to ensure the current view is covered
-                    OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.east, true)
-                    OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.west, true)
-                    OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.east, true)
-                    OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.west, true)
-                }
-                // Refresh the Google POI overlay for the idle viewport (VM
-                // debounces + LRU-caches the keyless scrape).
-                poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
                 // Refresh nearby transit stops (P10) only while the layer is on
                 // (VM debounces + caches; wide views clear the overlay).
                 if (transitEnabled) {
@@ -192,6 +178,21 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 }
             }
         }
+    }
+
+    // P23: feed the Google POI overlay the live viewport as the camera MOVES
+    // (not only on idle) so the VM can refresh snappily when the centre jumps.
+    // The VM debounces, applies a min-interval and LRU-caches the keyless scrape,
+    // and prefetches a padded bbox, so streaming every camera change here can't
+    // hammer Google.
+    LaunchedEffect(Unit) {
+        snapshotFlow { camera.position }
+            .collect { pos ->
+                if (pos.zoom >= 11.0) {
+                    val bbox = camera.projection?.queryVisibleBoundingBox() ?: return@collect
+                    poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
+                }
+            }
     }
 
     // Online-tiles-only: the basemap always streams live (offline zone tile

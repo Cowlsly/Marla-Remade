@@ -55,9 +55,9 @@ object GooglePoiDiscovery {
 
     @Volatile private var sessionWarmed = false
 
-    // Bounded access-ordered LRU keyed on rounded centre + query. Guarded by
-    // synchronized(cache).
-    private data class Key(val lat: Double, val lon: Double, val query: String)
+    // Bounded access-ordered LRU keyed on rounded centre + query + radius bucket.
+    // Guarded by synchronized(cache).
+    private data class Key(val lat: Double, val lon: Double, val query: String, val scale: Int)
     private val cache = object : LinkedHashMap<Key, List<GooglePoiPin>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, List<GooglePoiPin>>) = size > 32
     }
@@ -66,19 +66,33 @@ object GooglePoiDiscovery {
      * Discover POIs around [lat],[lon]. Never throws — returns an empty list when
      * the scrape fails or the positional paths drift. LRU-cached on the centre
      * rounded to ~100 m so re-visiting an area is instant.
+     *
+     * [radiusScale] widens the requested viewport (1.0 = the calibrated default);
+     * the caller passes > 1 to prefetch a padded box so a small pan is already
+     * covered. It's bucketed into the cache key so different scales don't collide.
      */
-    suspend fun nearby(lat: Double, lon: Double, query: String = DEFAULT_QUERY): List<GooglePoiPin> {
-        val key = Key(round3(lat), round3(lon), query)
+    suspend fun nearby(
+        lat: Double,
+        lon: Double,
+        query: String = DEFAULT_QUERY,
+        radiusScale: Double = 1.0,
+    ): List<GooglePoiPin> {
+        val key = Key(round3(lat), round3(lon), query, (radiusScale * 10).toInt())
         synchronized(cache) { cache[key]?.let { return it } }
-        val pins = runCatching { fetch(lat, lon, query) }.getOrDefault(emptyList())
+        val pins = runCatching { fetch(lat, lon, query, radiusScale) }.getOrDefault(emptyList())
         synchronized(cache) { cache[key] = pins }
         return pins
     }
 
-    private suspend fun fetch(lat: Double, lon: Double, query: String): List<GooglePoiPin> =
+    private suspend fun fetch(
+        lat: Double,
+        lon: Double,
+        query: String,
+        radiusScale: Double,
+    ): List<GooglePoiPin> =
         withContext(Dispatchers.IO) {
             warmSession()
-            val pb = buildViewportPb(query, lat, lon)
+            val pb = buildViewportPb(query, lat, lon, radiusScale)
             val url = "$SEARCH_ENDPOINT&q=${query.enc()}&pb=${pb.enc()}"
             val body = get(url) ?: return@withContext emptyList()
             val root = GoogleResponse.parseOrNull(body) ?: return@withContext emptyList()
@@ -142,19 +156,26 @@ object GooglePoiDiscovery {
         return if (resp.isSuccess) resp.body else null
     }
 
-    private fun buildViewportPb(query: String, lat: Double, lon: Double): String =
+    private fun buildViewportPb(query: String, lat: Double, lon: Double, radiusScale: Double): String =
         SEARCH_PB_TEMPLATE
             .replace("{QUERY}", query.replace('!', ' ').trim())
+            .replace("{ALT}", (BASE_ALTITUDE * radiusScale).toString())
             .replace("{LNG}", lon.toString())
             .replace("{LAT}", lat.toString())
 
     private fun round3(v: Double): Double = Math.round(v * 1000.0) / 1000.0
     private fun String.enc(): String = URLEncoder.encode(this, "UTF-8")
 
+    // The camera "altitude" in the pb `!1d…` slot: larger = more zoomed out =
+    // wider ground coverage. Scaling it (radiusScale) is how a padded prefetch
+    // box is requested. This is the calibrated default the template shipped with.
+    private const val BASE_ALTITUDE = 25229.167291701906
+
     // Same calibrated pb template as GooglePoiDataSource — the `!2d<lng>!3d<lat>`
-    // block centres the viewport and results come back at [Paths.RESULTS].
+    // block centres the viewport, `!1d<alt>` sets its span, and results come back
+    // at [Paths.RESULTS].
     private const val SEARCH_PB_TEMPLATE =
-        "!1s{QUERY}!4m8!1m3!1d25229.167291701906!2d{LNG}!3d{LAT}!3m2!1i1024!2i768!4f13.1!7i20" +
+        "!1s{QUERY}!4m8!1m3!1d{ALT}!2d{LNG}!3d{LAT}!3m2!1i1024!2i768!4f13.1!7i20" +
             "!10b1!12m52!1m5!18b1!30b1!31m1!1b1!34e1!2m4!5m1!6e2!20e3!39b1!6m25!32i1!49b1!63m0!66b1" +
             "!85b1!114b1!149b1!206b1!209b1!212b1!216b1!222b1!223b1!232b1!234b1!235b1!244b1!246b1" +
             "!250b1!253b1!260b1!266b1!273b1!281b1!291m0!10b1!12b1!13b1!14b1!16b1!17m1!3e1!20m3!5e2" +
