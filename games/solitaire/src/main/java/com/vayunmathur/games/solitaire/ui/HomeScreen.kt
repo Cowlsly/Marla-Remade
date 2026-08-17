@@ -75,7 +75,7 @@ fun HomeScreen(backStack: NavBackStack<Route>, viewModel: SolitaireViewModel) {
                     Card(Modifier.weight(1f), colors = CardDefaults.cardColors(MaterialTheme.colorScheme.surface)) {
                         Column(Modifier.padding(12.dp).fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(modeName, style = MaterialTheme.typography.titleSmall, textAlign = TextAlign.Center)
-                            Text("{stats.gamesWon}/{stats.gamesPlayed}", style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
+                            Text("${stats.gamesWon}/${stats.gamesPlayed}", style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
                             Text(stringResource(R.string.won), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), textAlign = TextAlign.Center)
                             if (stats.bestTimeSeconds < Int.MAX_VALUE) {
                                 Text("%02d:%02d".format(stats.bestTimeSeconds / 60, stats.bestTimeSeconds % 60), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), textAlign = TextAlign.Center)
