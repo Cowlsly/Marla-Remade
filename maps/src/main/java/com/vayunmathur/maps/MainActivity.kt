@@ -122,11 +122,12 @@ fun Navigation(
     savedPlacesViewModel: SavedPlacesViewModel = viewModel(),
     poiViewModel: GooglePoiMapViewModel = viewModel(),
     settingsViewModel: MapSettingsViewModel = viewModel(),
+    parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel = viewModel(),
 ) {
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel)
+            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel, parkingViewModel)
         }
         entry<Route.DownloadedMapsPage> {
             DownloadedMapsPage(backStack, zonesViewModel)

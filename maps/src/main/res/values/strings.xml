@@ -355,4 +355,15 @@
     <string name="saved_action_remove">Remove</string>
     <!-- SavedPlacesPage: generic cancel button. Verb. -->
     <string name="saved_cancel">Cancel</string>
+
+    <!-- Parking memory (P9): title of the parking sheet and FAB label. Noun. -->
+    <string name="parking_title">Parking</string>
+    <!-- Parking FAB glyph — the standard "P" parking symbol; not translated. -->
+    <string name="parking_pin_glyph" translatable="false">P</string>
+    <!-- Parking sheet: when the car was parked. %1$s=formatted date/time e.g. "Aug 17, 9:41 AM" -->
+    <string name="parking_saved_at">Parked <xliff:g id="time" example="Aug 17, 9:41 AM">%1$s</xliff:g></string>
+    <!-- Parking sheet: placeholder for the optional note field. -->
+    <string name="parking_note_hint">Add a note (level, section…)</string>
+    <!-- Parking sheet: clears the saved parking spot. Verb. -->
+    <string name="parking_clear">Clear</string>
 </resources>

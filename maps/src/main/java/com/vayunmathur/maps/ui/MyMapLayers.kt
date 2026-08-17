@@ -56,6 +56,7 @@ fun MyMapLayers(
     googlePins: List<GooglePoiPin> = emptyList(),
     searchResults: List<SearchResult> = emptyList(),
     savedPlaces: List<com.vayunmathur.maps.data.SavedPlace> = emptyList(),
+    parkingSpot: com.vayunmathur.maps.data.ParkingSpot? = null,
     trafficEnabled: Boolean = true,
     satelliteEnabled: Boolean = false,
     safetyEnabled: Boolean = false,
@@ -161,6 +162,9 @@ fun MyMapLayers(
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).
         SavedPlacesLayer(savedPlaces)
+
+        // Parking pin (P9). Tap → parking sheet (handled in MapPage.onMapClick).
+        ParkingLayer(parkingSpot)
 
         // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
         // under the puck during navigation. No-op until the tileset is hosted.

@@ -112,7 +112,7 @@ import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -125,6 +125,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val savedPins = remember(savedHome, savedWork, savedList) {
         (listOfNotNull(savedHome, savedWork) + savedList).distinct()
     }
+
+    // Parking memory (P9): the single active parking spot (pin + recall).
+    val parkingSpot by parkingViewModel.active.collectAsState()
+    var showParkingSheet by remember { mutableStateOf(false) }
 
     // Map-layer visibility toggles (P6 layers sheet, persisted via DataStore).
     val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
@@ -396,6 +400,18 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         onMapClick = { latLng, offset ->
                             coroutineScope.launch {
                                 val projection = camera.projection
+                                // Parking pin (P9): tapping the saved car spot
+                                // opens the parking sheet instead of selecting a
+                                // place.
+                                val parkingHit = projection?.queryRenderedFeatures(
+                                    offset,
+                                    setOf(PARKING_PIN_LAYER_ID)
+                                )?.isNotEmpty() == true
+                                if (parkingHit) {
+                                    showParkingSheet = true
+                                    return@launch
+                                }
+
                                 // Hit-test the search-result pins first, then the
                                 // ambient Google POI overlay — a pin tap re-selects
                                 // the place as a GenericPlace so
@@ -467,7 +483,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, trafficEnabled, satelliteEnabled, safetyEnabled)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, trafficEnabled, satelliteEnabled, safetyEnabled)
                     }
                 }
 
@@ -639,6 +655,32 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             },
                         )
                         LayersButton(onClick = { showLayersSheet = true })
+                        // Parking memory (P9): with no saved spot, tap saves the
+                        // current location; with a saved spot, tap recenters on
+                        // it and opens the parking sheet ("find my car").
+                        FloatingActionButton(
+                            onClick = {
+                                val spot = parkingSpot
+                                if (spot == null) {
+                                    val p = userPosition
+                                    if (p.latitude != 0.0 || p.longitude != 0.0) {
+                                        parkingViewModel.saveParking(p.latitude, p.longitude)
+                                    }
+                                } else {
+                                    coroutineScope.launch {
+                                        camera.animateTo(
+                                            camera.position.copy(
+                                                target = Position(spot.lon, spot.lat),
+                                                zoom = maxOf(camera.position.zoom, 15.0),
+                                            )
+                                        )
+                                    }
+                                    showParkingSheet = true
+                                }
+                            }
+                        ) {
+                            Text(stringResource(MapsR.string.parking_pin_glyph))
+                        }
                         FloatingActionButton(
                             onClick = {
                                 coroutineScope.launch {
@@ -690,6 +732,33 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         safetyEnabled = safetyEnabled,
                         onSafetyChange = { settingsViewModel.setSafetyLayer(it) },
                     )
+                }
+
+                // Parking sheet (P9): saved time + note, clear, and directions
+                // back to the car through the existing routing path.
+                if (showParkingSheet) {
+                    parkingSpot?.let { spot ->
+                        ParkingSheet(
+                            spot = spot,
+                            onDismiss = { showParkingSheet = false },
+                            onClear = {
+                                parkingViewModel.clear()
+                                showParkingSheet = false
+                            },
+                            onDirections = {
+                                val feature = spot.toFeature(
+                                    context.getString(MapsR.string.parking_title)
+                                )
+                                if (selectedFeature is SpecificFeature.Route) {
+                                    viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
+                                }
+                                viewModel.set(SpecificFeature.Route(listOf(null, feature)))
+                                showParkingSheet = false
+                                coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                            },
+                            onNoteChange = { parkingViewModel.updateNote(it) },
+                        )
+                    }
                 }
             }
         }
