@@ -4,4 +4,117 @@
     <string name="app_name">جهات الاتصال</string>
     <string name="contact_not_found">لم يتم العثور على جهة اتصال</string>
     <string name="name_nickname_format"><xliff:g id="name" example="John Doe">%1$s</xliff:g> (<xliff:g id="nickname" example="Johnny">%2$s</xliff:g>)</string>
+    <string name="contact_photo_description"><xliff:g id="contact_name" example="John Doe">%1$s</xliff:g> صورة</string>
+    <string name="share_contact">مشاركة جهة الاتصال</string>
+    <string name="about_name">حول <xliff:g id="first_name" example="John">%1$s</xliff:g></string>
+    <string name="birthday">تاريخ الميلاد</string>
+    <string name="note">ملاحظة</string>
+    <string name="favorites">المفضلة</string>
+    <string name="export_contacts">تصدير جميع جهات الاتصال</string>
+    <string name="on_device">على الجهاز</string>
+    <string name="add_contact">إضافة جهة اتصال</string>
+    <string name="edit_contact">تعديل جهة الاتصال</string>
+    <string name="first_name">الاسم الأول</string>
+    <string name="middle_name">الاسم الأوسط</string>
+    <string name="last_name">اسم العائلة</string>
+    <string name="nickname">الاسم المستعار</string>
+    <string name="company">الشركة</string>
+    <string name="account">الحساب</string>
+    <string name="add_phone">إضافة رقم هاتف</string>
+    <string name="remove_phone">إزالة رقم الهاتف</string>
+    <string name="add_email">إضافة بريد إلكتروني</string>
+    <string name="remove_email">إزالة بريد الإلكتروني</string>
+    <string name="add_address">إضافة العنوان</string>
+    <string name="remove_address">إزالة العنوان</string>
+    <string name="add_date">إضافة التاريخ</string>
+    <string name="dates">التواريخ</string>
+    <string name="phone">أرقام الهاتف</string>
+    <string name="email">البريد الإلكتروني</string>
+    <string name="addresses">العناوين</string>
+    <string name="contact_photo">صورة جهة الاتصال</string>
+    <string name="add_picture">إضافة صورة</string>
+    <string name="change_picture">تغيير</string>
+    <string name="remove_picture">إزالة</string>
+    <string name="visible_accounts">الحسابات المرئية</string>
+    <string name="add_contacts_account">إضافة حساب جهات الاتصال</string>
+    <string name="enter_account_name">أدخل اسمًا للحساب المحلي الجديد:</string>
+    <string name="account_name">اسم الحساب</string>
+    <string name="rename_account">إعادة تسمية الحساب</string>
+    <string name="delete_account">حذف الحساب</string>
+    <string name="delete_local_account_confirm">حذف هذا الحساب وجميع جهات الاتصال خاصته؟ هذا لا يمكن التراجع عنه.</string>
+    <string name="account_name_exists">يوجد حساب بهذا الاسم بالفعل</string>
+    <string name="delete_contact_title">حذف جهة الاتصال</string>
+    <string name="delete_contact_confirm">هل أنت متأكد أنك تريد حذف جهة الاتصال هذه؟ لا يمكن التراجع عن هذا الإجراء.</string>
+    <string name="delete_contact_name_confirm">هل أنت متأكد أنك تريد حذف \"<xliff:g id="contact_name" example="John Doe">%1$s</xliff:g>\"؟ لا يمكن التراجع عن هذا الإجراء.</string>
+    <string name="grant_contacts_permission">يرجى منح إذن جهات الاتصال</string>
+    <string name="select_contact_hint">حدد جهة اتصال لعرض التفاصيل</string>
+    <string name="import_contacts">استيراد جهات الاتصال</string>
+    <string name="action_call">مكالمة</string>
+    <string name="action_message">مراسلة</string>
+    <string name="action_video">مكالمة فيديو</string>
+    <string name="calendar_sync">مزامنة التقويم</string>
+    <string name="sync_contacts_calendar">إظهار أعياد الميلاد في التقويم</string>
+    <string name="contacts_calendar_name">جهات الاتصال</string>
+    <string name="anniversary">الذكرى السنوية</string>
+    <string name="backup_and_export">النسخ الاحتياطي والتصدير</string>
+    <string name="grant_calendar_permissions">منح أذونات التقويم</string>
+    <string name="delete_selected_contacts_title">حذف جهات الاتصال المحددة</string>
+    <plurals name="delete_selected_contacts_confirm">
+        <item quantity="zero">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهة اتصال محددة؟ لا يمكن التراجع عن هذا الإجراء.</item>
+        <item quantity="one">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهة اتصال محددة؟ لا يمكن التراجع عن هذا الإجراء.</item>
+        <item quantity="two">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهاتان اتصال محددتان؟ لا يمكن التراجع عن هذا الإجراء.</item>
+        <item quantity="few">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهات اتصال محددة؟ لا يمكن التراجع عن هذا الإجراء.</item>
+        <item quantity="many">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهة اتصال محددة؟ لا يمكن التراجع عن هذا الإجراء.</item>
+        <item quantity="other">هل أنت متأكد أنك تريد حذف <xliff:g id="count" example="5">%1$d</xliff:g> جهة اتصال محددة؟ لا يمكن التراجع عن هذا الإجراء.</item>
+    </plurals>
+    <string name="show_account_labels">إظهار حسابات جهة الاتصال</string>
+    <string name="search_contacts">البحث في جهات الاتصال</string>
+    <string name="system_default">افتراضي النظام</string>
+    <string name="signal">سيجنال</string>
+    <string name="whatsapp">واتساب</string>
+    <string name="telegram">تيليجرام</string>
+    <string name="google_meet">جوجل Meet</string>
+    <string name="contacts">جهات الاتصال</string>
+    <string name="groups">المجموعات</string>
+    <string name="select_group_hint">حدد مجموعة لعرض جهات الاتصال</string>
+    <string name="add_to_group">إضافة إلى مجموعة</string>
+    <string name="add_group">إضافة مجموعة</string>
+    <string name="enter_group_name">أدخل اسم المجموعة</string>
+    <string name="delete_group_title">حذف المجموعة</string>
+    <string name="delete_group_confirm">هل أنت متأكد أنك تريد حذف هذه المجموعة؟ لن يتم حذف جهات الاتصال.</string>
+    <string name="no_groups_found">لم يتم العثور على مجموعات. أنشئ واحدة في علامة تبويب المجموعات.</string>
+    <string name="import_vcf_file">استيراد ملف .vcf</string>
+    <string name="import_to_existing_account">استيراد إلى حساب موجود</string>
+    <string name="create_new_account_option">إنشاء حساب جديد</string>
+    <string name="no_contacts_found">لم يتم العثور على جهات اتصال</string>
+    <plurals name="import_summary_contacts">
+        <item quantity="zero">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهة اتصال جاهزة للاستيراد</item>
+        <item quantity="one">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهة اتصال جاهزة للاستيراد</item>
+        <item quantity="two">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهاتان اتصال جاهزتان للاستيراد</item>
+        <item quantity="few">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهات اتصال جاهزة للاستيراد</item>
+        <item quantity="many">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهة اتصال جاهزة للاستيراد</item>
+        <item quantity="other">xliff:g id=\"count\" example=\"10\"&amp;gt;%1$d&lt;/xliff:g&gt; جهة اتصال جاهزة للاستيراد</item>
+    </plurals>
+    <string name="select_account">اختر حسابًا</string>
+    <string name="no_name">(بدون اسم)</string>
+    <plurals name="contacts_count">
+        <item quantity="zero"><xliff:g id="count" example="42">%1$d</xliff:g> جهة اتصال</item>
+        <item quantity="one"><xliff:g id="count" example="42">%1$d</xliff:g> جهة اتصال</item>
+        <item quantity="two"><xliff:g id="count" example="42">%1$d</xliff:g> جهاتان اتصال</item>
+        <item quantity="few"><xliff:g id="count" example="42">%1$d</xliff:g> جهات اتصال</item>
+        <item quantity="many"><xliff:g id="count" example="42">%1$d</xliff:g> جهة اتصال</item>
+        <item quantity="other"><xliff:g id="count" example="42">%1$d</xliff:g> جهة اتصال</item>
+    </plurals>
+    <string name="add_number_to_contact">إضافة رقم إلى جهة الاتصال</string>
+    <string name="create_new_contact">إنشاء جهة اتصال جديدة</string>
+    <string name="crop_photo">اقتصاص الصورة</string>
+    <string name="import_contacts_from_vcf_files">استيراد جهات الاتصال من ملفات .vcf</string>
+    <string name="custom_label">تسمية مخصصة</string>
+    <string name="enter_custom_label">أدخل تسمية مخصصة</string>
+    <string name="sim_limited_fields_hint">جهات اتصال بطاقة SIM تُخزِّن فقط الاسم، الهاتف، والبريد الإلكتروني.</string>
+    <string name="save_failed">فشل الحفظ</string>
+    <string name="importing">جارٍ الاستيراد…</string>
+    <string name="account_display_format"><xliff:g id="account_name" example="Personal">%1$s</xliff:g> (<xliff:g id="account_type" example="com.google">%2$s</xliff:g>)</string>
+    <string name="include_year">تضمين السنة</string>
+    <string name="display">العرض</string>
 </resources>
