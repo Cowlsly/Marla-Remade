@@ -33,6 +33,15 @@ class MapsZonesViewModel(application: Application) : AndroidViewModel(applicatio
             initialValue = emptyMap(),
         )
 
+    /** Status of the single global routing graph (P16), independent of zones. */
+    val graphStatus: StateFlow<ZoneDownloadManager.GraphStatus> = zoneManager
+        .getGraphStatusFlow()
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5000),
+            initialValue = ZoneDownloadManager.GraphStatus.NOT_STARTED,
+        )
+
     fun getZoneStatus(zoneId: Int): ZoneDownloadManager.ZoneStatus =
         zoneManager.getZoneStatus(zoneId)
 
@@ -42,5 +51,13 @@ class MapsZonesViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun deleteZone(zoneId: Int) {
         zoneManager.deleteZone(zoneId)
+    }
+
+    fun startGraphDownload() {
+        zoneManager.startGraphDownload()
+    }
+
+    fun deleteGraph() {
+        zoneManager.deleteGraph()
     }
 }
