@@ -828,15 +828,34 @@ fun CameraScreen(
                             val uri = lastCaptureUri?.takeIf {
                                 runCatching { context.contentResolver.getType(it) }.getOrNull() != null
                             }
-                            val intent = if (uri != null) {
+                            val baseIntent = if (uri != null) {
                                 Intent(Intent.ACTION_VIEW).apply {
                                     setDataAndType(uri, context.contentResolver.getType(uri) ?: "image/*")
                                     addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    clipData = ClipData.newRawUri(null, uri)
                                 }
                             } else {
-                                Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                                Intent(Intent.ACTION_MAIN).apply {
+                                    addCategory(Intent.CATEGORY_APP_GALLERY)
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
                             }
-                            ExternalIntents.launch(context, intent)
+                            try {
+                                if (!ExternalIntents.launch(context, baseIntent)) {
+                                    throw ActivityNotFoundException("System gallery not found")
+                                }
+                            } catch (_: ActivityNotFoundException) {
+                                val fallback = if (uri != null) {
+                                    Intent(Intent.ACTION_VIEW).apply {
+                                        setDataAndType(uri, context.contentResolver.getType(uri) ?: "image/*")
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        clipData = ClipData.newRawUri(null, uri)
+                                    }
+                                } else {
+                                    Intent(Intent.ACTION_VIEW, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
+                                }
+                                ExternalIntents.launch(context, Intent.createChooser(fallback, null))
+                            }
                         }.onFailure { Log.w("CameraScreen", "Could not open image viewer", it) }
                     },
                     iconRotation = animatedRotation,
