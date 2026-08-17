@@ -79,9 +79,17 @@ fun MyMapLayers(
         var routeSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         var userSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         
+        // Traffic tiles come from OfflineRouter's on-device loopback tile server,
+        // which only has data to serve after a live traffic fetch has populated
+        // the native store (trafficVersion increments then). Gating the source +
+        // layer on trafficVersion > 0 (and a non-blank server URL) means we never
+        // request http://localhost/traffic/... before the server/traffic is
+        // actually available — that had spammed hundreds of "Failed to connect to
+        // localhost" tile errors on every startup/pan.
         val trafficUrl = OfflineRouter.trafficTileUrl
+        val trafficReady = trafficEnabled && trafficUrl.isNotBlank() && trafficVersion > 0
         val trafficSource = rememberVectorSource(
-            tiles = if (trafficUrl.isNotBlank()) listOf("$trafficUrl?v=$trafficVersion") else emptyList(),
+            tiles = if (trafficReady) listOf("$trafficUrl?v=$trafficVersion") else emptyList(),
             options = TileSetOptions(maxZoom = 14)
         )
 
@@ -119,7 +127,7 @@ fun MyMapLayers(
         // the overlays.
         SatelliteLayer(satelliteEnabled)
 
-        if (trafficEnabled) {
+        if (trafficReady) {
             LineLayer(
                 "traffic-layer",
                 trafficSource,

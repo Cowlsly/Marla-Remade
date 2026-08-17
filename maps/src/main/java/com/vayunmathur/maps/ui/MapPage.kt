@@ -1,6 +1,7 @@
 package com.vayunmathur.maps.ui
 
 import android.content.Context
+import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.foundation.Canvas
@@ -182,11 +183,17 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             val projection = camera.projection
             if (projection != null) {
                 val bbox = projection.queryVisibleBoundingBox()
-                // Load traffic for all four corners to ensure the current view is covered
-                OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.east, true)
-                OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.west, true)
-                OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.east, true)
-                OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.west, true)
+                // Only fetch live traffic when the layer is on. Fetching drives
+                // trafficVersion, which in turn mounts the loopback traffic tile
+                // layer (see MyMapLayers); skipping it when off avoids needless
+                // network + native work and keeps the tile layer unmounted.
+                if (trafficEnabled) {
+                    // Load traffic for all four corners to ensure the current view is covered
+                    OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.east, true)
+                    OfflineRouter.ensureTrafficLoadedNative(bbox.north, bbox.west, true)
+                    OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.east, true)
+                    OfflineRouter.ensureTrafficLoadedNative(bbox.south, bbox.west, true)
+                }
                 // Refresh the Google POI overlay for the idle viewport (VM
                 // debounces + LRU-caches the keyless scrape).
                 poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
@@ -227,6 +234,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 darkMap,
             )
         }
+        Log.d(
+            "MapPage",
+            "style patched base=${MapTileCache.BASEMAP_PMTILES_URL} hybrid=$hybridUrl " +
+                "darkMap=$darkMap jsonLen=${updatedStyle.length}",
+        )
         json = updatedStyle
     }
 

@@ -2,6 +2,7 @@ package com.vayunmathur.maps.util
 
 import kotlin.time.Duration.Companion.hours
 import android.content.Context
+import android.util.Log
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.Build
@@ -73,14 +74,17 @@ object MapTileCache {
 
     internal const val CACHE_DIR_NAME = "tilecache"
 
+    internal const val TAG = "MapTileCache"
+
     /**
      * Marker written into the cache dir. Entries are wiped when it changes, so
-     * it carries both the origin host and a format revision — v2 stores the
-     * headers [HttpResponder.onResponse] actually consumes (ETag, Last-Modified,
-     * Cache-Control, Expires, Retry-After, x-rate-limit-reset) rather than the
-     * Content-Type/Content-Range/Accept-Ranges the OkHttp interceptor needed.
+     * it carries the origin host, a format revision, AND the exact pmtiles URL:
+     * if [BASEMAP_PMTILES_URL] is repointed (or its bytes are regenerated under
+     * the same name), every cached range keyed off the old file is dropped so we
+     * can never serve a stale/short chunk from a previous build. v3 also only
+     * ever stores validated 206 partials (see [CachingHttpRequest.load]).
      */
-    private const val CACHE_ORIGIN = "$TILE_HOST/v2"
+    private const val CACHE_ORIGIN = "$TILE_HOST/v3/$BASEMAP_PMTILES_URL"
 
     @Volatile private var installed = false
 
@@ -174,6 +178,12 @@ object MapTileCache {
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: Exception) {
+                    Log.e(
+                        TAG,
+                        "FAILURE url=$resourceUrl range=$dataRange etag=$etag modified=$modified " +
+                            "type=${failureType(e)} ex=${e.javaClass.name} msg=${e.message}",
+                        e,
+                    )
                     responder.handleFailure(
                         failureType(e),
                         e.message ?: "Error processing the request",
@@ -215,6 +225,8 @@ object MapTileCache {
             val cacheable = host == TILE_HOST && uri?.encodedPath?.contains(".pmtiles") == true
             if (!cacheable) return fetch(url, dataRange, etag, modified)
 
+            val expectedLen = expectedRangeLength(dataRange)
+
             val key = keyFor(url, dataRange)
             val dataFile = File(cacheDir, "$key.data")
             val metaFile = File(cacheDir, "$key.meta")
@@ -225,7 +237,15 @@ object MapTileCache {
             // Serve from cache without touching the network when the entry is
             // still fresh, or whenever we're offline (stale-but-usable).
             if (cached && (fresh || !isOnline())) {
-                readCache(dataFile, metaFile)?.let { return it }
+                readCache(dataFile, metaFile)?.let {
+                    if (isValidRangeBody(it, expectedLen)) {
+                        Log.d(TAG, "cache HIT url=$url range=$dataRange status=${it.code} bytes=${it.body.size} expected=$expectedLen fresh=$fresh")
+                        return it
+                    }
+                    // Corrupt/short cached entry: drop it and fall through to network.
+                    Log.w(TAG, "cache DROP (short/invalid) url=$url range=$dataRange status=${it.code} bytes=${it.body.size} expected=$expectedLen")
+                    dataFile.delete(); metaFile.delete()
+                }
             }
 
             val networkResponse = try {
@@ -240,11 +260,21 @@ object MapTileCache {
             if (networkResponse.code !in 200..299) {
                 // Server error / 304: keep serving the existing cache rather
                 // than replacing it.
-                if (cached) readCache(dataFile, metaFile)?.let { return it }
+                if (cached) readCache(dataFile, metaFile)?.let {
+                    if (isValidRangeBody(it, expectedLen)) return it
+                }
                 return networkResponse
             }
 
-            writeCache(dataFile, metaFile, networkResponse)
+            // Only cache a body we trust: a 206 partial whose length matches the
+            // requested range. A 200 (whole-file) reply to a range request, or a
+            // byte count that doesn't match, must never be stored — that is what
+            // produced the "Prefix string too short" pmtiles header failures.
+            if (isValidRangeBody(networkResponse, expectedLen)) {
+                writeCache(dataFile, metaFile, networkResponse)
+            } else {
+                Log.w(TAG, "skip-cache (unexpected body) url=$url range=$dataRange status=${networkResponse.code} bytes=${networkResponse.body.size} expected=$expectedLen")
+            }
             return networkResponse
         }
 
@@ -264,6 +294,11 @@ object MapTileCache {
                 }
             }
             val response = NetworkClient.execute(url, "GET", headers)
+            Log.d(
+                TAG,
+                "network url=$url range=$dataRange status=${response.status} " +
+                    "bytes=${response.bytes.size} contentRange=${response.header("Content-Range")}",
+            )
             return Loaded(
                 code = response.status,
                 eTag = response.header("ETag"),
@@ -274,6 +309,32 @@ object MapTileCache {
                 xRateLimitReset = response.header("x-rate-limit-reset"),
                 body = response.bytes,
             )
+        }
+
+        /**
+         * Number of bytes a `bytes=start-end` range asks for, or null when the
+         * range is open-ended / unparseable (then we can't length-check).
+         */
+        private fun expectedRangeLength(dataRange: String): Long? {
+            val spec = dataRange.substringAfter("bytes=", "").substringBefore(",").trim()
+            if (spec.isEmpty()) return null
+            val start = spec.substringBefore("-").toLongOrNull() ?: return null
+            val end = spec.substringAfter("-", "").toLongOrNull() ?: return null
+            if (end < start) return null
+            return end - start + 1
+        }
+
+        /**
+         * A cacheable pmtiles range reply is only trustworthy when the server
+         * honoured the range: HTTP 206 and (when we know the requested length)
+         * exactly that many bytes. A 200 whole-file reply or a truncated body is
+         * rejected so it is never stored or served as a tile/header chunk.
+         */
+        private fun isValidRangeBody(loaded: Loaded, expectedLen: Long?): Boolean {
+            if (loaded.code != 206) return false
+            if (loaded.body.isEmpty()) return false
+            if (expectedLen != null && loaded.body.size.toLong() != expectedLen) return false
+            return true
         }
 
         private fun readCache(dataFile: File, metaFile: File): Loaded? {
