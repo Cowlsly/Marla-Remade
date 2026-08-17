@@ -404,26 +404,34 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
                             maxLines = 1,
                         )
-                        // Contact address shortcut (P17): pick a contact's postal
-                        // address, run the P3 Google search and auto-select the
-                        // first hit — same path as tapping a search result.
+                        // Contact address shortcut (P17/P31): pick a contact's
+                        // postal address, GEOCODE it and open the resolved place
+                        // DIRECTLY (fly there + peek pane) — never through the
+                        // search box (no query prefill, no results list).
                         ContactAddressButton(onAddress = { address ->
                             val bbox = camera.projection?.queryVisibleBoundingBox()
                             val nearLat = ((bbox?.north ?: 85.0) + (bbox?.south ?: -85.0)) / 2.0
                             val nearLon = ((bbox?.east ?: 180.0) + (bbox?.west ?: -180.0)) / 2.0
-                            searchViewModel.searchAndSelectFirst(address, nearLat, nearLon) { first ->
-                                if (first != null) {
+                            searchViewModel.resolveAndSelect(address, nearLat, nearLon) { place ->
+                                if (place != null) {
                                     if (selectedFeature is SpecificFeature.Route) {
                                         viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
                                     }
-                                    // Select the top hit + fly there + open the place PANE
-                                    // (peek), the Vela place-card behaviour. The callback fires
-                                    // after the (possibly delayed) scrape resolves, so late
-                                    // results still land correctly.
+                                    // Fly to the resolved place + open the peek pane
+                                    // (Vela place-card), the same direct-open path as
+                                    // a geo:/maps deep link.
                                     viewModel.selectAndFocus(
-                                        searchViewModel.toFeature(first),
+                                        place,
                                         zoom = maxOf(camera.position.zoom, 14.0),
                                     )
+                                } else {
+                                    runCatching {
+                                        android.widget.Toast.makeText(
+                                            context,
+                                            context.getString(MapsR.string.no_results_found),
+                                            android.widget.Toast.LENGTH_SHORT,
+                                        ).show()
+                                    }
                                 }
                             }
                         })
@@ -449,7 +457,17 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         BaseStyle.Json(json),
                         camera,
                         options = MapOptions(
-                            RenderOptions(),
+                            // TextureView (not the default SurfaceView): a
+                            // SurfaceView renders into a separate surface and goes
+                            // black + stops taking input after this composable is
+                            // disposed on push to SearchPage and recomposed on the
+                            // back-pop through Nav3's AnimatedContent transition
+                            // (it only repaints once a later recomposition forces a
+                            // relayout). TextureView draws in the normal view
+                            // hierarchy, so it composites + stays interactive across
+                            // the transition, restoring a live map immediately on
+                            // back.
+                            RenderOptions(renderMode = RenderOptions.RenderMode.TextureView),
                             GestureOptions.Standard,
                             OrnamentOptions.AllDisabled
                         ),

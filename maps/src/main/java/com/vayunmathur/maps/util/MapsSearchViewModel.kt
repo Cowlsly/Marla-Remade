@@ -117,6 +117,47 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Resolve a free-text [address] (e.g. a picked contact postal address) to a
+     * single place and hand it back — WITHOUT touching the query text or the
+     * result list. The contact-address shortcut (P17/P31) opens the place
+     * directly instead of going through the search box, so this must NOT set
+     * [_query] or populate [_results] (that would prefill the search bar and
+     * draw the search-result pins).
+     *
+     * A full address string is resolved via the Google text [GoogleSearchDataSource.search]
+     * (the only path that maps a string to a coordinate; [reverseGeocode] takes a
+     * coordinate, not an address). The search does its own [Dispatchers.IO] and
+     * never throws; [onResolved] fires on the main thread so the caller can
+     * safely drive [SelectedFeatureViewModel.selectAndFocus]. Returns null when
+     * nothing resolves.
+     */
+    fun resolveAndSelect(
+        address: String,
+        nearLat: Double,
+        nearLon: Double,
+        onResolved: (SpecificFeature.GenericPlace?) -> Unit,
+    ) {
+        if (address.isBlank()) {
+            onResolved(null)
+            return
+        }
+        viewModelScope.launch {
+            val hit = GoogleSearchDataSource.search(address, nearLat, nearLon).firstOrNull()
+            onResolved(
+                hit?.let {
+                    SpecificFeature.GenericPlace(
+                        name = it.name.ifBlank { it.address ?: address },
+                        phone = null,
+                        website = null,
+                        openingHours = null,
+                        position = Position(it.lng, it.lat),
+                    )
+                }
+            )
+        }
+    }
+
     /** Resets the search state (keeps recents). */
     fun reset() {
         searchJob?.cancel()
