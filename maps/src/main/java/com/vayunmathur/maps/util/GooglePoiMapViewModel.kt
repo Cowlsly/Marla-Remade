@@ -104,8 +104,18 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
     }
 
     private suspend fun fetch(vp: Viewport) {
+        // Derive a rough zoom band from the viewport's latitude span (we're only
+        // fed the bbox). At close zoom, query the ACTUAL (tight) viewport with
+        // little padding so a POI you zoomed next to isn't washed out by a wider,
+        // prominence-ranked box, and keep many more of the returned pins so
+        // local/small POIs (restaurants) survive. Farther out, prefetch a padded
+        // box so small pans are pre-covered.
+        val closeZoom = abs(vp.north - vp.south) <= CLOSE_LAT_SPAN
+        val prefetchScale = if (closeZoom) TIGHT_SCALE else PREFETCH_SCALE
+        val cap = if (closeZoom) MAX_PINS_CLOSE else MAX_PINS_FAR
+
         val pins = withContext(Dispatchers.IO) {
-            GooglePoiDiscovery.nearby(vp.lat, vp.lon, radiusScale = PREFETCH_SCALE)
+            GooglePoiDiscovery.nearby(vp.lat, vp.lon, radiusScale = prefetchScale, maxPins = cap)
         }
         lastFetchCenter = vp.lat to vp.lon
         lastFetchAt = System.currentTimeMillis()
@@ -113,10 +123,10 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         // the overlay never blinks to empty.
         if (pins.isEmpty()) return
 
-        // Padded (prefetch) bbox: keep in-view pins across the refresh, drop ones
-        // we've panned away from so old areas don't accumulate forever.
-        val padLat = (vp.north - vp.south) * (PREFETCH_SCALE - 1.0) / 2.0
-        val padLon = (vp.east - vp.west) * (PREFETCH_SCALE - 1.0) / 2.0
+        // Prune shown pins to the (padded, per-zoom) box so old areas don't
+        // accumulate; at close zoom the pad is ~0 so we track the tight viewport.
+        val padLat = (vp.north - vp.south) * (prefetchScale - 1.0) / 2.0
+        val padLon = (vp.east - vp.west) * (prefetchScale - 1.0) / 2.0
         val north = vp.north + padLat
         val south = vp.south - padLat
         val east = vp.east + padLon
@@ -156,7 +166,22 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         const val BIG_MOVE_M = 1_200.0
 
         // Fetch a padded bbox (~1.8x the viewport) so small pans are pre-covered.
+        // Used at medium/far zoom; close zoom uses the tight box below.
         const val PREFETCH_SCALE = 1.8
+
+        // Close zoom: query the actual viewport with only a hair of padding so a
+        // POI you zoomed next to isn't dropped in favour of wider, more prominent
+        // ones.
+        const val TIGHT_SCALE = 1.1
+
+        // Latitude span (~4.4 km) at/under which we treat the view as "close" and
+        // switch to the tight box + higher cap.
+        const val CLOSE_LAT_SPAN = 0.04
+
+        // Pin caps: keep the modest cap when zoomed out, but raise it a lot at
+        // close zoom so local/small POIs (restaurants) aren't filtered away.
+        const val MAX_PINS_FAR = 60
+        const val MAX_PINS_CLOSE = 200
 
         // ~16 km of latitude — roughly city-zoom; wider views skip the scrape.
         const val MAX_LAT_SPAN = 0.15

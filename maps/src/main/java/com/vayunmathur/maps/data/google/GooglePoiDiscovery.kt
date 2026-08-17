@@ -49,8 +49,10 @@ object GooglePoiDiscovery {
      *  than filtered to a single business type. */
     private const val DEFAULT_QUERY = "points of interest"
 
-    /** Cap pins per fetch so a dense downtown viewport doesn't push hundreds of
-     *  symbols onto the map (kept by descending [GooglePoiPin.prominence]). */
+    /** Default cap on pins per fetch so a wide/medium viewport doesn't push
+     *  hundreds of symbols onto the map (kept by descending
+     *  [GooglePoiPin.prominence]). Callers at close zoom pass a higher cap so
+     *  local/small POIs (e.g. the restaurant you just zoomed next to) survive. */
     private const val MAX_PINS = 60
 
     @Volatile private var sessionWarmed = false
@@ -70,18 +72,23 @@ object GooglePoiDiscovery {
      * [radiusScale] widens the requested viewport (1.0 = the calibrated default);
      * the caller passes > 1 to prefetch a padded box so a small pan is already
      * covered. It's bucketed into the cache key so different scales don't collide.
+     *
+     * [maxPins] caps how many of the ranked pins are returned. The full ranked
+     * list is cached, so a close-zoom caller can ask for many more without a
+     * refetch — easing the prominence filter so smaller POIs aren't cut.
      */
     suspend fun nearby(
         lat: Double,
         lon: Double,
         query: String = DEFAULT_QUERY,
         radiusScale: Double = 1.0,
+        maxPins: Int = MAX_PINS,
     ): List<GooglePoiPin> {
         val key = Key(round3(lat), round3(lon), query, (radiusScale * 10).toInt())
-        synchronized(cache) { cache[key]?.let { return it } }
+        synchronized(cache) { cache[key]?.let { return it.take(maxPins) } }
         val pins = runCatching { fetch(lat, lon, query, radiusScale) }.getOrDefault(emptyList())
         synchronized(cache) { cache[key] = pins }
-        return pins
+        return pins.take(maxPins)
     }
 
     private suspend fun fetch(
@@ -103,7 +110,8 @@ object GooglePoiDiscovery {
      * The list-returning generalisation of `pickEntry`/`parsePlace`: walk every
      * result entry at [Paths.RESULTS] and pull the pin fields. Entries missing a
      * name or position are dropped; the rest are de-duped by feature id and
-     * ranked by [prominenceOf] before the [MAX_PINS] cap.
+     * ranked by [prominenceOf]. The full ranked list is returned (no cap) — the
+     * [MAX_PINS]/caller cap is applied in [nearby] so the cache keeps everything.
      */
     private fun parsePins(root: JsonElement): List<GooglePoiPin> {
         val list = root.at(*Paths.RESULTS).arr() ?: return emptyList()
@@ -125,7 +133,6 @@ object GooglePoiDiscovery {
         }
             .distinctBy { it.id }
             .sortedByDescending { it.prominence }
-            .take(MAX_PINS)
     }
 
     /** Cheap stand-in for Vela's `ambientProminence`: rating weighted by the log
