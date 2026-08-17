@@ -38,4 +38,12 @@ dependencies {
     implementation(libs.flatgeobuf)
 
     implementation(project(":library:downloadservice"))
+
+    // Android Auto (P12): AndroidX Car App Library. `app` provides the
+    // CarAppService/Session/Screen/template model; `app-projected` provides the
+    // phone-projected (Android Auto) host connection. Coordinates are declared
+    // inline (rather than via the version catalog) to keep this phase confined
+    // to maps/. Only pulled into the car code path — the phone UI is untouched.
+    implementation("androidx.car.app:app:1.4.0")
+    implementation("androidx.car.app:app-projected:1.4.0")
 }

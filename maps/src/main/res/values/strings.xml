@@ -387,4 +387,14 @@
     <string name="parking_note_hint">Add a note (level, section…)</string>
     <!-- Parking sheet: clears the saved parking spot. Verb. -->
     <string name="parking_clear">Clear</string>
+
+    <!-- Android Auto (P12) car app strings. -->
+    <string name="car_search_title">Search</string>
+    <string name="car_search_action">Search</string>
+    <string name="car_recenter">Recenter</string>
+    <string name="car_voice_hint">Tap search, then speak a place or address.</string>
+    <string name="car_no_results">No results. Tap search to try again.</string>
+    <string name="car_searching">Searching\u2026</string>
+    <string name="car_route_failed">Couldn\'t find a route there.</string>
+    <string name="car_continue">Continue</string>
 </resources>

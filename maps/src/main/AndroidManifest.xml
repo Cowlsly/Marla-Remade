@@ -55,6 +55,33 @@
             android:name=".util.NavigationService"
             android:foregroundServiceType="location"
             android:exported="false" />
+
+        <!-- Android Auto (P12): the Car App Library entry point. The host
+             (Android Auto, projected) binds this CarAppService via the
+             androidx.car.app.CarAppService action; the NAVIGATION category
+             marks it as a turn-by-turn navigation app so it may draw to the
+             car Surface and use the NavigationTemplate. The map/nav session
+             reuses the existing routing + NavigationSessionManager + system
+             TTS stack; the phone UI (MainActivity) is unaffected. -->
+        <service
+            android:name=".car.MapsCarAppService"
+            android:exported="true"
+            android:foregroundServiceType="location">
+            <intent-filter>
+                <action android:name="androidx.car.app.CarAppService" />
+                <category android:name="androidx.car.app.category.NAVIGATION" />
+            </intent-filter>
+        </service>
+
+        <!-- Minimum Car App API level this app targets (Car App Library). -->
+        <meta-data
+            android:name="androidx.car.app.minCarApiLevel"
+            android:value="1" />
+
+        <!-- Declares this app to the Android Auto host as a template app. -->
+        <meta-data
+            android:name="com.google.android.gms.car.application"
+            android:resource="@xml/automotive_app_desc" />
     </application>
 
 </manifest>
