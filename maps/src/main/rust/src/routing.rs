@@ -65,22 +65,116 @@ pub struct StepData {
     pub end_code_off: u32,
     pub stop_count: i32,
     /// Derived turn-lane guidance for this step's maneuver. Each entry is one
-    /// available turn lane at the junction, packed as `dir * 2 + valid` where
-    /// `dir` is a maneuver-enum ordinal (see `get_maneuver`) and `valid` is 1
-    /// when that lane leads onto the taken route. Empty when the junction has
-    /// no meaningful choice (single continuation) or no node context.
+    /// available turn lane at the junction (ordered left→right), packed as
+    /// `dir_mask * 2 + valid` where `dir_mask` is a bitmask of maneuver-enum
+    /// ordinals the lane offers (a real OSM lane can allow several turns, e.g.
+    /// through+right) and `valid` is 1 when that lane leads onto the taken route.
+    /// Built from real OSM `turn:lanes` when present, else from junction
+    /// topology. Empty when the junction has no meaningful choice (single
+    /// continuation) or no node context.
     pub lanes: Vec<i32>,
 }
 
 /// Sentinel for "no junction node" in [`StepBuilder::add_segment`].
 const INVALID_NODE: u32 = 0xFFFF_FFFF;
 
+/// Convert an OSM lane indication mask (`LANE_*` bits from the generator) into a
+/// maneuver-ordinal bitmask (bit `i` set => `Maneuver` ordinal `i` is offered by
+/// the lane). Ordinals match [`get_maneuver`] and the Kotlin
+/// `RouteService.API.Maneuver` enum. An unmarked ("none") lane maps to STRAIGHT
+/// so every lane always carries at least one arrow.
+fn osm_mask_to_dir_mask(osm: u16) -> u32 {
+    let mut m: u32 = 0;
+    if osm & LANE_THROUGH != 0 {
+        m |= 1 << 9; // STRAIGHT
+    }
+    if osm & LANE_NONE != 0 {
+        m |= 1 << 9; // unmarked -> through
+    }
+    if osm & LANE_LEFT != 0 {
+        m |= 1 << 4; // TURN_LEFT
+    }
+    if osm & LANE_SLIGHT_LEFT != 0 {
+        m |= 1 << 1; // TURN_SLIGHT_LEFT
+    }
+    if osm & LANE_SHARP_LEFT != 0 {
+        m |= 1 << 2; // TURN_SHARP_LEFT
+    }
+    if osm & LANE_RIGHT != 0 {
+        m |= 1 << 8; // TURN_RIGHT
+    }
+    if osm & LANE_SLIGHT_RIGHT != 0 {
+        m |= 1 << 5; // TURN_SLIGHT_RIGHT
+    }
+    if osm & LANE_SHARP_RIGHT != 0 {
+        m |= 1 << 6; // TURN_SHARP_RIGHT
+    }
+    if osm & LANE_REVERSE != 0 {
+        m |= 1 << 3; // UTURN_LEFT
+    }
+    if osm & LANE_MERGE_TO_LEFT != 0 {
+        m |= 1 << 1; // slight left
+    }
+    if osm & LANE_MERGE_TO_RIGHT != 0 {
+        m |= 1 << 5; // slight right
+    }
+    if m == 0 {
+        m |= 1 << 9; // default to STRAIGHT
+    }
+    m
+}
+
+/// Whether a lane whose maneuver set is `dir_mask` leads onto the route when the
+/// taken maneuver is `taken`. Exact match, with a small tolerance so a dedicated
+/// left lane also serves a slight/sharp-left maneuver (and symmetrically right).
+fn lane_serves(dir_mask: u32, taken: i32) -> bool {
+    let has = |o: i32| o >= 0 && o < 31 && (dir_mask & (1u32 << o)) != 0;
+    match taken {
+        9 => has(9),           // STRAIGHT
+        4 => has(4) || has(1), // TURN_LEFT
+        1 => has(1) || has(4), // TURN_SLIGHT_LEFT
+        2 => has(2) || has(4), // TURN_SHARP_LEFT
+        3 => has(3),           // UTURN_LEFT
+        8 => has(8) || has(5), // TURN_RIGHT
+        5 => has(5) || has(8), // TURN_SLIGHT_RIGHT
+        6 => has(6) || has(8), // TURN_SHARP_RIGHT
+        _ => has(taken),
+    }
+}
+
+/// Build packed lane guidance from the real OSM lanes of the `approach` edge —
+/// the edge the driver is on as they reach the maneuver junction. Each returned
+/// int is `dir_mask * 2 + valid` where `dir_mask` is a maneuver-ordinal bitmask
+/// (a lane can offer several turns) and `valid` marks a lane that leads onto the
+/// taken route. Returns `None` when the edge has no real lane tags, so callers
+/// fall back to [`junction_lanes`] topology inference.
+fn real_lanes(g: &Graph, approach: u64, taken: i32) -> Option<Vec<i32>> {
+    if approach == INVALID_EDGE {
+        return None;
+    }
+    let masks = g.edge_lane_masks(approach)?;
+    if masks.is_empty() {
+        return None;
+    }
+    let packed = masks
+        .iter()
+        .map(|&osm| {
+            let dir_mask = osm_mask_to_dir_mask(osm);
+            let valid = if lane_serves(dir_mask, taken) { 1 } else { 0 };
+            ((dir_mask as i32) << 1) | valid
+        })
+        .collect();
+    Some(packed)
+}
+
 /// Derive the available turn lanes at `junction` for a maneuver taken with the
 /// given `incoming_bearing`. Purely topological: enumerates the junction's
 /// outgoing driveable edges, classifies each by turn direction relative to the
 /// incoming heading, and marks the one(s) matching `taken`. Returns packed
-/// `dir * 2 + valid` entries sorted left→right, or empty when there is no
-/// real choice (<= 1 option).
+/// `dir_mask * 2 + valid` entries sorted left→right (each topology lane offers a
+/// single direction, so `dir_mask` has one bit set), or empty when there is no
+/// real choice (<= 1 option). Used as the fallback when an edge has no real OSM
+/// turn:lanes.
 fn junction_lanes(
     g: &Graph,
     junction: u32,
@@ -151,7 +245,10 @@ fn junction_lanes(
     }
     opts.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
     opts.iter()
-        .map(|&(_, dir)| dir * 2 + if dir == taken { 1 } else { 0 })
+        .map(|&(_, dir)| {
+            let dir_mask: i32 = if (0..31).contains(&dir) { 1 << dir } else { 0 };
+            (dir_mask << 1) | if dir == taken { 1 } else { 0 }
+        })
         .collect()
 }
 
@@ -441,6 +538,9 @@ struct StepBuilder<'a> {
     pending_junction: u32,
     /// Node we arrive from at that junction, to exclude the U-turn lane.
     pending_prev: u32,
+    /// Edge the driver is on approaching that junction, source of real OSM
+    /// turn:lanes ([`INVALID_EDGE`] when unknown / at the first maneuver).
+    pending_approach: u64,
 }
 
 impl<'a> StepBuilder<'a> {
@@ -464,8 +564,10 @@ impl<'a> StepBuilder<'a> {
         // first segment of a main-path edge and consumed (then cleared) here.
         let junction_node = self.pending_junction;
         let prev_node = self.pending_prev;
+        let approach_edge = self.pending_approach;
         self.pending_junction = INVALID_NODE;
         self.pending_prev = INVALID_NODE;
+        self.pending_approach = INVALID_EDGE;
         let mut ratio = 1.0;
         if edge_idx != INVALID_EDGE {
             let traffic_speed = *self.traffic.get(&edge_idx).unwrap_or(&0);
@@ -567,7 +669,11 @@ impl<'a> StepBuilder<'a> {
         };
         if push_new {
             let lanes = if junction_node != INVALID_NODE {
-                junction_lanes(self.g, junction_node, prev_node, self.last_bearing, maneuver)
+                // Prefer real OSM turn:lanes from the approach edge; fall back to
+                // topology inference at the junction when the edge has no tags.
+                real_lanes(self.g, approach_edge, maneuver).unwrap_or_else(|| {
+                    junction_lanes(self.g, junction_node, prev_node, self.last_bearing, maneuver)
+                })
             } else {
                 Vec::new()
             };
@@ -635,6 +741,7 @@ pub fn reconstruct_path(
         last_was_transit: false,
         pending_junction: INVALID_NODE,
         pending_prev: INVALID_NODE,
+        pending_approach: INVALID_EDGE,
     };
 
     let mut coords = [LatLon { lat_e7: 0, lon_e7: 0 }; 256];
@@ -721,6 +828,7 @@ pub fn reconstruct_path(
     }
 
     // 2. Main path segments
+    let mut prev_edge_idx = INVALID_EDGE;
     for i in 0..path_nodes.len() - 1 {
         let u = path_nodes[i];
         let v = path_nodes[i + 1];
@@ -757,10 +865,14 @@ pub fn reconstruct_path(
         // Lane guidance is derived at the junction where this edge begins
         // (node u), excluding the node we arrived from. Set it just before the
         // edge's first segment; add_segment consumes and clears it so only the
-        // maneuver segment picks up lanes.
+        // maneuver segment picks up lanes. `pending_approach` is the edge the
+        // driver is on reaching u (the previous main-path edge), which carries
+        // the real OSM turn:lanes for the maneuver at u.
         let prev_node = if i > 0 { path_nodes[i - 1] } else { INVALID_NODE };
         b.pending_junction = u;
         b.pending_prev = prev_node;
+        b.pending_approach = prev_edge_idx;
+        prev_edge_idx = best_e_idx;
 
         if let Some((count, is_reversed)) =
             g.get_edge_coordinates(best_e_idx, &mut coords).filter(|&(c, _)| c >= 2)

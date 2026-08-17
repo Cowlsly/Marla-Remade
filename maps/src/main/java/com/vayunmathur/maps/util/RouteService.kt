@@ -15,10 +15,12 @@ object RouteService {
         @Serializable data class NavInstruction(val maneuver: Maneuver = Maneuver.MANEUVER_UNSPECIFIED, val instructions: String = "")
         @Serializable enum class Maneuver { MANEUVER_UNSPECIFIED, TURN_SLIGHT_LEFT, TURN_SHARP_LEFT, UTURN_LEFT, TURN_LEFT, TURN_SLIGHT_RIGHT, TURN_SHARP_RIGHT, UTURN_RIGHT, TURN_RIGHT, STRAIGHT, RAMP_LEFT, RAMP_RIGHT, MERGE, FORK_LEFT, FORK_RIGHT, FERRY, FERRY_TRAIN, ROUNDABOUT_LEFT, ROUNDABOUT_RIGHT, DEPART, NAME_CHANGE, WAIT, RIDE }
         /**
-         * One available turn lane at the maneuver's junction. [directions] are the
-         * turn indications the lane offers (currently one per lane, derived from
-         * the Rust router's junction topology); [active] marks a lane that leads
-         * onto the taken route (highlighted in the lane-guidance UI).
+         * One available turn lane at the maneuver's junction, ordered left→right.
+         * [directions] are the turn indications the lane offers — real OSM
+         * `turn:lanes` can list several per lane (e.g. through + right), falling
+         * back to a single topology-inferred direction when tags are absent.
+         * [active] marks a lane that leads onto the taken route (highlighted in
+         * the lane-guidance UI).
          */
         @Serializable data class Lane(val directions: List<Maneuver>, val active: Boolean)
     }

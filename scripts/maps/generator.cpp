@@ -39,6 +39,22 @@ const int ID_TILE_BITS = 16;
 const size_t NUM_ID_TILES = 1 << ID_TILE_BITS;
 const uint64_t ID_TILE_SHIFT = 64 - ID_TILE_BITS;
 
+// --- OSM turn:lanes indication bits (one uint16_t mask per lane) ---
+// Emitted per directed edge into the per-zone lanes files below and decoded by
+// the Rust router (maps/src/main/rust/src/graph.rs LANE_* constants). Keep the
+// two in sync: this is an on-disk contract.
+const uint16_t LANE_NONE = 1 << 0;
+const uint16_t LANE_THROUGH = 1 << 1;
+const uint16_t LANE_LEFT = 1 << 2;
+const uint16_t LANE_SLIGHT_LEFT = 1 << 3;
+const uint16_t LANE_SHARP_LEFT = 1 << 4;
+const uint16_t LANE_RIGHT = 1 << 5;
+const uint16_t LANE_SLIGHT_RIGHT = 1 << 6;
+const uint16_t LANE_SHARP_RIGHT = 1 << 7;
+const uint16_t LANE_REVERSE = 1 << 8;
+const uint16_t LANE_MERGE_TO_LEFT = 1 << 9;
+const uint16_t LANE_MERGE_TO_RIGHT = 1 << 10;
+
 #pragma pack(push, 1)
 struct NodeMaster {
     int32_t lat_e7;
@@ -88,6 +104,8 @@ struct TmpEdge {
     uint32_t name_offset;
     uint8_t type;
     uint8_t speed_limit;
+    uint32_t lane_off;    // index into g_lane_pool, 0xFFFFFFFF if none
+    uint16_t lane_count;  // per-lane masks for this directed edge (0 if none)
     uint32_t sort_key() const { return source_lid; }
 };
 
@@ -98,6 +116,10 @@ struct CachedWay {
     uint8_t type;
     uint8_t speed_limit;
     bool oneway;
+    uint32_t fwd_lane_off;   // index into lane pool for forward-direction lanes
+    uint16_t fwd_lane_count; // 0 when the way has no forward turn:lanes
+    uint32_t bwd_lane_off;   // index into lane pool for backward-direction lanes
+    uint16_t bwd_lane_count; // 0 when the way has no backward turn:lanes
 };
 #pragma pack(pop)
 
@@ -345,6 +367,78 @@ uint8_t get_hw_id(const char* type) {
     return it != m.end() ? it->second : 0;
 }
 
+// --- OSM turn:lanes parsing ---
+// A single lane token may hold several ';'-separated indications (e.g.
+// "through;right"); map each to its bit. An empty token or "none" => LANE_NONE.
+static uint16_t parse_lane_token(const string& tok) {
+    uint16_t mask = 0;
+    size_t start = 0;
+    while (start <= tok.size()) {
+        size_t semi = tok.find(';', start);
+        string ind = tok.substr(start, semi == string::npos ? string::npos : semi - start);
+        // Trim surrounding whitespace.
+        size_t b = ind.find_first_not_of(" \t");
+        size_t e = ind.find_last_not_of(" \t");
+        if (b != string::npos) ind = ind.substr(b, e - b + 1);
+        else ind.clear();
+
+        if (ind == "left") mask |= LANE_LEFT;
+        else if (ind == "slight_left") mask |= LANE_SLIGHT_LEFT;
+        else if (ind == "sharp_left") mask |= LANE_SHARP_LEFT;
+        else if (ind == "through") mask |= LANE_THROUGH;
+        else if (ind == "right") mask |= LANE_RIGHT;
+        else if (ind == "slight_right") mask |= LANE_SLIGHT_RIGHT;
+        else if (ind == "sharp_right") mask |= LANE_SHARP_RIGHT;
+        else if (ind == "reverse") mask |= LANE_REVERSE;
+        else if (ind == "merge_to_left") mask |= LANE_MERGE_TO_LEFT;
+        else if (ind == "merge_to_right") mask |= LANE_MERGE_TO_RIGHT;
+        // "none", "" and unknown values contribute no bit.
+
+        if (semi == string::npos) break;
+        start = semi + 1;
+    }
+    if (mask == 0) mask = LANE_NONE;
+    return mask;
+}
+
+// Parse a pipe-separated turn:lanes value into one mask per lane (left->right).
+// Returns empty when val is null/empty.
+static vector<uint16_t> parse_turn_lanes(const char* val) {
+    vector<uint16_t> lanes;
+    if (!val || !*val) return lanes;
+    string s(val);
+    size_t start = 0;
+    while (true) {
+        size_t bar = s.find('|', start);
+        lanes.push_back(parse_lane_token(
+            s.substr(start, bar == string::npos ? string::npos : bar - start)));
+        if (bar == string::npos) break;
+        start = bar + 1;
+    }
+    return lanes;
+}
+
+// Build the per-lane mask list for one direction. Real turn:lanes take priority;
+// when a plain lane count is known it pads/truncates so the count stays accurate.
+// Returns empty (=> the router uses topology inference) when no turn:lanes exist.
+static vector<uint16_t> build_dir_lanes(const char* turn_spec, int count_hint) {
+    vector<uint16_t> lanes = parse_turn_lanes(turn_spec);
+    if (lanes.empty()) return lanes;
+    if (count_hint > 0) {
+        if ((int)lanes.size() < count_hint)
+            lanes.resize(count_hint, LANE_NONE);
+        else if ((int)lanes.size() > count_hint)
+            lanes.resize(count_hint);
+    }
+    return lanes;
+}
+
+static int parse_int_tag(const char* v) {
+    if (!v) return 0;
+    int n = atoi(v);
+    return n > 0 ? n : 0;
+}
+
 bool is_transit_way(const osmium::TagList& tags) {
     const char* railway = tags.get_value_by_key("railway");
     if (railway && (strcmp(railway, "rail") == 0 || strcmp(railway, "subway") == 0 ||
@@ -411,6 +505,7 @@ int main(int argc, char* argv[]) {
 
     vector<CachedWay> cached_ways;
     vector<uint64_t> way_nodes_topology;
+    vector<uint16_t> lane_pool; // per-lane OSM turn masks referenced by ways/edges
     mutex way_cache_mtx;
 
     // STEP 1: Discovery & Caching (Pass 1 - Ways)
@@ -427,6 +522,7 @@ int main(int argc, char* argv[]) {
             pool.enqueue([&, buf = move(buf)]() mutable {
                 vector<CachedWay> local_ways;
                 vector<uint64_t> local_topology;
+                vector<uint16_t> local_lane_pool;
 
                 for (const auto& node : buf.select<osmium::Node>()) {
                     const char* hw = node.tags().get_value_by_key("highway");
@@ -468,6 +564,40 @@ int main(int argc, char* argv[]) {
                     bool oneway = (strcmp(way.tags().get_value_by_key("oneway", ""), "yes") == 0);
                     const auto& nodes = way.nodes();
 
+                    // Real OSM turn:lanes -> per-direction lane masks. Forward
+                    // uses turn:lanes:forward (or plain turn:lanes on a oneway);
+                    // backward uses turn:lanes:backward. Plain lanes[:forward|
+                    // :backward] only refine the count. Absent => no lane data,
+                    // so the router falls back to junction topology inference.
+                    const char* tl = way.tags().get_value_by_key("turn:lanes");
+                    const char* tlf = way.tags().get_value_by_key("turn:lanes:forward");
+                    const char* tlb = way.tags().get_value_by_key("turn:lanes:backward");
+                    int cnt_all = parse_int_tag(way.tags().get_value_by_key("lanes"));
+                    int cnt_fwd = parse_int_tag(way.tags().get_value_by_key("lanes:forward"));
+                    int cnt_bwd = parse_int_tag(way.tags().get_value_by_key("lanes:backward"));
+
+                    const char* fwd_spec = tlf ? tlf : (oneway ? tl : nullptr);
+                    int fwd_hint = cnt_fwd > 0 ? cnt_fwd : (oneway ? cnt_all : 0);
+                    const char* bwd_spec = oneway ? nullptr : tlb;
+                    int bwd_hint = cnt_bwd;
+                    vector<uint16_t> fwd_lanes = build_dir_lanes(fwd_spec, fwd_hint);
+                    vector<uint16_t> bwd_lanes = build_dir_lanes(bwd_spec, bwd_hint);
+
+                    uint32_t fwd_lane_off = 0xFFFFFFFF;
+                    uint16_t fwd_lane_count = 0;
+                    if (!fwd_lanes.empty()) {
+                        fwd_lane_off = local_lane_pool.size();
+                        fwd_lane_count = (uint16_t)fwd_lanes.size();
+                        local_lane_pool.insert(local_lane_pool.end(), fwd_lanes.begin(), fwd_lanes.end());
+                    }
+                    uint32_t bwd_lane_off = 0xFFFFFFFF;
+                    uint16_t bwd_lane_count = 0;
+                    if (!bwd_lanes.empty()) {
+                        bwd_lane_off = local_lane_pool.size();
+                        bwd_lane_count = (uint16_t)bwd_lanes.size();
+                        local_lane_pool.insert(local_lane_pool.end(), bwd_lanes.begin(), bwd_lanes.end());
+                    }
+
                     uint32_t topology_start = local_topology.size();
                     for (const auto& n : nodes) {
                         if (n.ref() < BITSET_SIZE) {
@@ -482,7 +612,7 @@ int main(int argc, char* argv[]) {
                         local_topology.push_back(n.ref());
                     }
 
-                    local_ways.push_back({ n_off, topology_start, (uint16_t)nodes.size(), (uint8_t)(is_transit ? (hw | TRANSIT_FLAG) : hw), speed, oneway });
+                    local_ways.push_back({ n_off, topology_start, (uint16_t)nodes.size(), (uint8_t)(is_transit ? (hw | TRANSIT_FLAG) : hw), speed, oneway, fwd_lane_off, fwd_lane_count, bwd_lane_off, bwd_lane_count });
                     if (hw > 0) {
                         total_edges += (nodes.size() - 1) * (oneway ? 1 : 2);
                     }
@@ -491,8 +621,14 @@ int main(int argc, char* argv[]) {
                 if (!local_ways.empty()) {
                     lock_guard<mutex> lock(way_cache_mtx);
                     uint32_t global_topo_base = way_nodes_topology.size();
-                    for (auto& cw : local_ways) cw.first_node_idx += global_topo_base;
+                    uint32_t global_lane_base = lane_pool.size();
+                    for (auto& cw : local_ways) {
+                        cw.first_node_idx += global_topo_base;
+                        if (cw.fwd_lane_count > 0) cw.fwd_lane_off += global_lane_base;
+                        if (cw.bwd_lane_count > 0) cw.bwd_lane_off += global_lane_base;
+                    }
                     way_nodes_topology.insert(way_nodes_topology.end(), local_topology.begin(), local_topology.end());
+                    lane_pool.insert(lane_pool.end(), local_lane_pool.begin(), local_lane_pool.end());
                     cached_ways.insert(cached_ways.end(), local_ways.begin(), local_ways.end());
                 }
                 pool.notify_worker_done();
@@ -721,8 +857,8 @@ int main(int argc, char* argv[]) {
                         if (u_lid == 0xFFFFFFFF || v_lid == 0xFFFFFFFF) continue;
                         uint32_t dist = accurate_dist_mm(node_masters[u_lid].lat_e7, node_masters[u_lid].lon_e7,
                                                          node_masters[v_lid].lat_e7, node_masters[v_lid].lon_e7);
-                        local_buffer.push_back({ u_lid, v_lid, dist, cw.name_offset, cw.type, cw.speed_limit });
-                        if (!cw.oneway) local_buffer.push_back({ v_lid, u_lid, dist, cw.name_offset, cw.type, cw.speed_limit });
+                        local_buffer.push_back({ u_lid, v_lid, dist, cw.name_offset, cw.type, cw.speed_limit, cw.fwd_lane_off, cw.fwd_lane_count });
+                        if (!cw.oneway) local_buffer.push_back({ v_lid, u_lid, dist, cw.name_offset, cw.type, cw.speed_limit, cw.bwd_lane_off, cw.bwd_lane_count });
                         if (local_buffer.size() >= 9000) {
                             uint64_t start = global_edge_idx.fetch_add(local_buffer.size());
                             memcpy(&tmp_edges[start], local_buffer.data(), local_buffer.size() * sizeof(TmpEdge));
@@ -741,7 +877,7 @@ int main(int argc, char* argv[]) {
         for (auto& entry : transit_groups) {
             uint32_t u_lid = entry.first.first;
             uint32_t v_lid = entry.first.second;
-            tmp_edges[global_edge_idx.fetch_add(1)] = { u_lid, v_lid, 0, entry.second.name_off, TRANSIT_FLAG, (uint8_t)min((size_t)255, entry.second.voyages.size()) };
+            tmp_edges[global_edge_idx.fetch_add(1)] = { u_lid, v_lid, 0, entry.second.name_off, TRANSIT_FLAG, (uint8_t)min((size_t)255, entry.second.voyages.size()), 0xFFFFFFFF, 0 };
         }
 
         // NEW: Add transfer edges for shared stop nodes
@@ -753,8 +889,8 @@ int main(int argc, char* argv[]) {
                     if (node_masters[i].stop_code_off != 0xFFFFFFFF) {
                         uint32_t road_lid = i;
                         // 15 meter transfer distance (15000mm)
-                        tmp_edges[global_edge_idx.fetch_add(1)] = { road_lid, transit_lid, 15000, 0xFFFFFFFF, 12, 5 };
-                        tmp_edges[global_edge_idx.fetch_add(1)] = { transit_lid, road_lid, 15000, 0xFFFFFFFF, 12, 5 };
+                        tmp_edges[global_edge_idx.fetch_add(1)] = { road_lid, transit_lid, 15000, 0xFFFFFFFF, 12, 5, 0xFFFFFFFF, 0 };
+                        tmp_edges[global_edge_idx.fetch_add(1)] = { transit_lid, road_lid, 15000, 0xFFFFFFFF, 12, 5, 0xFFFFFFFF, 0 };
                     }
                 }
             }
@@ -839,8 +975,8 @@ int main(int argc, char* argv[]) {
                 }
 
                 if (best_node != 0xFFFFFFFF) {
-                    new_edges.push_back({ i, (uint32_t)best_node, best_dist, 0xFFFFFFFF, 12, 5 });
-                    new_edges.push_back({ (uint32_t)best_node, i, best_dist, 0xFFFFFFFF, 12, 5 });
+                    new_edges.push_back({ i, (uint32_t)best_node, best_dist, 0xFFFFFFFF, 12, 5, 0xFFFFFFFF, 0 });
+                    new_edges.push_back({ (uint32_t)best_node, i, best_dist, 0xFFFFFFFF, 12, 5, 0xFFFFFFFF, 0 });
                 }
             }
         }
@@ -871,7 +1007,7 @@ int main(int argc, char* argv[]) {
 
     vector<future<void>> zone_tasks;
     for (int zid = 0; zid < NUM_ZONES; ++zid) {
-        zone_tasks.push_back(async(launch::async, [=, &node_masters, &tmp_edges, &zone_node_counts, &current_zone_node_starts, &current_zone_edge_starts, &transit_groups]() {
+        zone_tasks.push_back(async(launch::async, [=, &node_masters, &tmp_edges, &zone_node_counts, &current_zone_node_starts, &current_zone_edge_starts, &transit_groups, &lane_pool]() {
             uint32_t node_count = zone_node_counts[zid];
             if (node_count == 0) return;
             uint32_t edge_start = current_zone_edge_starts[zid];
@@ -881,6 +1017,13 @@ int main(int argc, char* argv[]) {
             ofstream node_out(DATA_DIR + "nodes_zone_" + to_string(zid) + ".bin", ios::binary);
             ofstream edge_out(DATA_DIR + "edges_zone_" + to_string(zid) + ".bin", ios::binary);
             ofstream transit_out(DATA_DIR + "transit_voyages_zone_" + to_string(zid) + ".bin", ios::binary);
+            // Real OSM turn:lanes for each directed edge, emitted in the same
+            // edge order as edges_zone. lane_offsets[e] is the byte offset of
+            // edge e's masks in lane_blob; a trailing sentinel gives edge e's
+            // length as offsets[e+1]-offsets[e]. Mirrors the graph.rs lanes.bin
+            // layout ([u64 offsets[edge_count+1]][u16 blob]) at zone scope.
+            vector<uint64_t> lane_offsets;
+            vector<uint16_t> lane_blob;
             for (uint32_t i = 0; i < node_count; ++i) {
                 uint32_t lid = node_start + i;
                 node_masters[lid].edge_ptr = local_edge_ptr;
@@ -899,12 +1042,27 @@ int main(int argc, char* argv[]) {
                     }
                     FinalEdge fe = { te.target_lid, te.dist_mm, te.name_offset, te.type, te.speed_limit };
                     edge_out.write((char*)&fe, sizeof(FinalEdge));
+                    // Record this edge's real turn:lanes (empty when none).
+                    lane_offsets.push_back((uint64_t)lane_blob.size() * sizeof(uint16_t));
+                    if (te.lane_count > 0 && te.lane_off != 0xFFFFFFFF) {
+                        for (uint16_t l = 0; l < te.lane_count; ++l) {
+                            lane_blob.push_back(lane_pool[te.lane_off + l]);
+                        }
+                    }
                     local_edge_ptr++;
                 }
             }
             node_out.write((char*)&node_masters[node_start], sizeof(NodeMaster) * node_count);
             NodeMaster sentinel = {0, 0, 0, local_edge_ptr};
             node_out.write((char*)&sentinel, sizeof(NodeMaster));
+
+            // Finalize per-zone lanes file: offsets (with trailing sentinel)
+            // followed by the u16 mask blob.
+            lane_offsets.push_back((uint64_t)lane_blob.size() * sizeof(uint16_t));
+            ofstream lanes_out(DATA_DIR + "lanes_zone_" + to_string(zid) + ".bin", ios::binary);
+            lanes_out.write((char*)lane_offsets.data(), sizeof(uint64_t) * lane_offsets.size());
+            if (!lane_blob.empty())
+                lanes_out.write((char*)lane_blob.data(), sizeof(uint16_t) * lane_blob.size());
         }));
     }
     for (auto& task : zone_tasks) task.wait();

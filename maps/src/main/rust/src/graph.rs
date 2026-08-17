@@ -24,6 +24,23 @@ pub const STEPS: u8 = 15;
 pub const REVERSE_GEOMETRY_FLAG: u8 = 0x40;
 pub const TRANSIT_FLAG: u8 = 0x80;
 
+// --- OSM turn:lanes indication bits (one u16 mask per lane) ---
+// Emitted per directed edge by `scripts/maps/generator.cpp` into `lanes.bin`
+// and decoded here into per-lane turn-direction sets. A lane with no marking
+// ("none"/empty) is stored as `LANE_NONE`. These bits are an on-disk contract
+// with the generator; keep the two in sync.
+pub const LANE_NONE: u16 = 1 << 0;
+pub const LANE_THROUGH: u16 = 1 << 1;
+pub const LANE_LEFT: u16 = 1 << 2;
+pub const LANE_SLIGHT_LEFT: u16 = 1 << 3;
+pub const LANE_SHARP_LEFT: u16 = 1 << 4;
+pub const LANE_RIGHT: u16 = 1 << 5;
+pub const LANE_SLIGHT_RIGHT: u16 = 1 << 6;
+pub const LANE_SHARP_RIGHT: u16 = 1 << 7;
+pub const LANE_REVERSE: u16 = 1 << 8;
+pub const LANE_MERGE_TO_LEFT: u16 = 1 << 9;
+pub const LANE_MERGE_TO_RIGHT: u16 = 1 << 10;
+
 /// Sentinel for "no edge" where a u64 global edge index is expected.
 pub const INVALID_EDGE: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
@@ -147,6 +164,7 @@ pub struct Graph {
     _transit_attributes_region: Option<MmapRegion>,
     _intermediate_region: Option<MmapRegion>,
     _road_names_region: Option<MmapRegion>,
+    _lanes_region: Option<MmapRegion>,
 
     nodes: *const u8,
     pub node_count: u32, // real nodes; nodes.bin has node_count + 1 (sentinel)
@@ -160,6 +178,13 @@ pub struct Graph {
     intermediate_edge_offsets: *const u8, // u64[edge_count + 1] byte offsets
     intermediate_data: *const u8,         // delta-encoded coordinate bytes
     has_intermediate: bool,
+
+    // Real OSM turn-lane data, indexed by edge (see `edge_lane_masks`). Optional:
+    // absent until the graph is regenerated with lane extraction, in which case
+    // routing falls back to topology-inferred lanes.
+    lane_edge_offsets: *const u8, // u64[edge_count + 1] byte offsets into lane_data
+    lane_data: *const u8,         // packed u16 per-lane masks
+    has_lanes: bool,
 
     road_names: *const u8,
     pub road_names_size: usize,
@@ -225,6 +250,24 @@ impl Graph {
             None => (ptr::null(), 0),
         };
 
+        // lanes.bin: [ u64 edge_offsets[edge_count + 1] ][ u16 lane-mask blob ].
+        // Optional and validated: a truncated/mismatched file disables real
+        // lanes so routing falls back to topology inference.
+        let lanes_region = MmapRegion::map(&format!("{base}lanes.bin"));
+        let (lane_edge_offsets, lane_data, has_lanes) = match &lanes_region {
+            Some(r)
+                if r.len as u64 >= (edge_count + 1) * std::mem::size_of::<u64>() as u64 =>
+            {
+                let offsets = r.base();
+                let data = unsafe {
+                    r.base()
+                        .add(((edge_count + 1) * std::mem::size_of::<u64>() as u64) as usize)
+                };
+                (offsets, data, true)
+            }
+            _ => (ptr::null(), ptr::null(), false),
+        };
+
         let nodes = nodes_region.base();
         let edges = edges_region.base();
         let transit_voyages = transit_voyages_region
@@ -281,6 +324,7 @@ impl Graph {
             _transit_attributes_region: transit_attributes_region,
             _intermediate_region: intermediate_region,
             _road_names_region: road_names_region,
+            _lanes_region: lanes_region,
             nodes,
             node_count,
             edges,
@@ -291,6 +335,9 @@ impl Graph {
             intermediate_edge_offsets,
             intermediate_data,
             has_intermediate,
+            lane_edge_offsets,
+            lane_data,
+            has_lanes,
             road_names,
             road_names_size,
             present_feeds,
@@ -325,6 +372,32 @@ impl Graph {
     #[inline]
     pub fn edge(&self, idx: u64) -> Edge {
         unsafe { read_at::<Edge>(self.edges, idx as usize) }
+    }
+
+    /// Real OSM per-lane turn-indication masks for directed edge `idx`, ordered
+    /// left→right. Each `u16` is a set of `LANE_*` bits. Returns `None` when the
+    /// graph has no lane data or this edge carries none (callers then fall back
+    /// to topology-inferred lanes).
+    pub fn edge_lane_masks(&self, idx: u64) -> Option<Vec<u16>> {
+        if !self.has_lanes || idx >= self.edge_count {
+            return None;
+        }
+        let start = unsafe { read_at::<u64>(self.lane_edge_offsets, idx as usize) };
+        let end = unsafe { read_at::<u64>(self.lane_edge_offsets, idx as usize + 1) };
+        if end <= start {
+            return None;
+        }
+        let count = ((end - start) / std::mem::size_of::<u16>() as u64) as usize;
+        if count == 0 {
+            return None;
+        }
+        let mut out = Vec::with_capacity(count);
+        for k in 0..count {
+            let byte_off = start as usize + k * std::mem::size_of::<u16>();
+            let mask = unsafe { (self.lane_data.add(byte_off) as *const u16).read_unaligned() };
+            out.push(mask);
+        }
+        Some(out)
     }
 
     #[inline]

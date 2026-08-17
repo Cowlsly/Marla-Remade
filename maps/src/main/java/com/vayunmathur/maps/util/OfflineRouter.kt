@@ -217,7 +217,8 @@ object OfflineRouter {
             val stopCode: String?,
             val endStopCode: String?,
             val stopCount: Int,
-            /** Packed turn lanes: one int per lane, `maneuverOrdinal * 2 + valid`. */
+            /** Packed turn lanes: one int per lane, `dirMask * 2 + valid`, where
+             * `dirMask` is a bitmask of Maneuver ordinals the lane offers. */
             val lanePacked: IntArray
     )
 
@@ -396,17 +397,23 @@ object OfflineRouter {
                                     RouteService.API.Maneuver.entries.getOrElse(raw.maneuverId) {
                                         RouteService.API.Maneuver.MANEUVER_UNSPECIFIED
                                     }
-                            // Decode packed turn lanes (dir * 2 + valid) into
-                            // ordered left→right lane guidance.
+                            // Decode packed turn lanes into ordered left→right
+                            // lane guidance. Each int is `dirMask * 2 + valid`,
+                            // where dirMask is a bitmask of Maneuver ordinals the
+                            // lane offers (real OSM turn:lanes can allow several
+                            // turns, e.g. through+right) and bit0 is the active
+                            // flag (lane leads onto the taken route).
                             val lanes = raw.lanePacked.map { code ->
-                                val dir = code shr 1
                                 val active = (code and 1) == 1
+                                val mask = code ushr 1
+                                val directions =
+                                        RouteService.API.Maneuver.entries.filter { m ->
+                                            (mask and (1 shl m.ordinal)) != 0
+                                        }
                                 RouteService.API.Lane(
-                                        directions = listOf(
-                                                RouteService.API.Maneuver.entries.getOrElse(dir) {
-                                                    RouteService.API.Maneuver.MANEUVER_UNSPECIFIED
-                                                }
-                                        ),
+                                        directions = directions.ifEmpty {
+                                            listOf(RouteService.API.Maneuver.STRAIGHT)
+                                        },
                                         active = active,
                                 )
                             }

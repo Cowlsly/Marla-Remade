@@ -38,15 +38,14 @@ fun LaneGuidance(
     ) {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             lanes.forEach { lane ->
-                val dir = lane.directions.firstOrNull()
-                    ?: RouteService.API.Maneuver.STRAIGHT
                 val tint = if (lane.active) activeColor else inactiveColor
-                val icon = dir.iconContent()
-                if (icon != null) {
-                    icon(Modifier.size(26.dp), tint)
-                } else {
-                    // Fallback glyph for a lane with no drawable maneuver icon.
-                    Box(Modifier.size(26.dp)) {}
+                // A real OSM lane can offer several turns (e.g. through+right):
+                // overlay each direction's arrow in the lane cell. A single
+                // direction renders exactly as before.
+                Box(Modifier.size(26.dp), contentAlignment = Alignment.Center) {
+                    lane.directions.forEach { dir ->
+                        dir.iconContent()?.invoke(Modifier.size(26.dp), tint)
+                    }
                 }
             }
         }
