@@ -100,8 +100,13 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.vayunmathur.contacts.data.hasYear
 import kotlinx.datetime.LocalDate
+import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
+import kotlinx.datetime.toLocalDateTime
+import kotlin.time.Clock
+import kotlin.time.ExperimentalTime
 
 /** Binds [ContactViewModel] to the stateless [ContactDetailsScreen]. */
 @Composable
@@ -317,15 +322,17 @@ fun ContactDetailsScreen(
                         val birthday = contact.birthday
                         if (birthday != null) {
                             val birthdayText = birthday.startDate.formatDisplay()
+                            val age = calculateAge(birthday.startDate)
+                            val displayText = if (age != null) "$birthdayText ($age)" else birthdayText
                             ListItem(
-                                content = { Text(birthdayText) },
+                                content = { Text(displayText) },
                                 supportingContent = { Text(stringResource(R.string.birthday)) },
                                 leadingContent = { IconCake() },
                                 colors = ListItemDefaults.colors(containerColor = Color.Transparent),
                                 modifier = Modifier.combinedClickable(
                                     onClick = { },
                                     onLongClick = {
-                                        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("date", birthdayText))) }
+                                        scope.launch { clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("date", displayText))) }
                                     }
                                 )
                             )
@@ -864,6 +871,19 @@ fun GroupedSection(
         )
         content()
     }
+}
+
+@OptIn(ExperimentalTime::class)
+internal fun calculateAge(birthDate: LocalDate, currentDate: LocalDate = Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date): Int? {
+    if (!birthDate.hasYear) return null
+    if (currentDate < birthDate) return null
+    var age = currentDate.year - birthDate.year
+    if (currentDate.monthNumber < birthDate.monthNumber ||
+        (currentDate.monthNumber == birthDate.monthNumber && currentDate.dayOfMonth < birthDate.dayOfMonth)
+    ) {
+        age--
+    }
+    return age
 }
 
 fun formatPhoneNumber(numberString: String, defaultRegion: String = "US"): String {
