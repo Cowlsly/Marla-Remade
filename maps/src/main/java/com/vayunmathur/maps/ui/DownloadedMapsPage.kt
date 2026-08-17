@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AppScaffold
@@ -47,6 +48,7 @@ import com.vayunmathur.library.image.ImageLoader
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.util.MapsZonesViewModel
+import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.ZoneDownloadManager
 import kotlin.math.*
 
@@ -56,25 +58,81 @@ fun DownloadedMapsPage(backStack: NavBackStack<Route>, zonesViewModel: MapsZones
     val context = LocalContext.current
     val downloadedMaps by zonesViewModel.downloadedZones.collectAsState()
     val downloadingZones by zonesViewModel.downloadingZones.collectAsState()
+    val graphStatus by zonesViewModel.graphStatus.collectAsState()
 
     var showDownloadDialogForZone by remember { mutableStateOf<Int?>(null) }
     var showDeleteDialogForZone by remember { mutableStateOf<Int?>(null) }
+    var showGraphDownloadDialog by remember { mutableStateOf(false) }
+    var showGraphDeleteDialog by remember { mutableStateOf(false) }
     val imageLoader = remember {
         ImageLoader.Builder(context)
             .build()
+    }
+
+    // When the single global routing graph finishes downloading, reload the
+    // router so it mmaps the freshly downloaded nodes.bin/edges.bin/… .
+    LaunchedEffect(graphStatus) {
+        if (graphStatus == ZoneDownloadManager.GraphStatus.FINISHED) {
+            OfflineRouter.reload(context)
+        }
     }
 
     AppScaffold(
         title = stringResource(R.string.downloaded_maps),
         backStack = backStack,
     ) { paddingValues ->
-        Box(
+        Column(
             Modifier
                 .padding(paddingValues)
                 .fillMaxSize()
                 .padding(16.dp),
-            contentAlignment = Alignment.Center
         ) {
+            // Single global routing graph (P16) — one download for the whole
+            // world's roads/lanes/transit, separate from the per-zone tiles.
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(bottom = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        stringResource(R.string.routing_graph_title),
+                        fontWeight = FontWeight.Bold,
+                    )
+                    Text(
+                        when (graphStatus) {
+                            ZoneDownloadManager.GraphStatus.FINISHED ->
+                                stringResource(R.string.routing_graph_downloaded)
+                            ZoneDownloadManager.GraphStatus.DOWNLOADING ->
+                                stringResource(R.string.routing_graph_downloading)
+                            ZoneDownloadManager.GraphStatus.NOT_STARTED ->
+                                stringResource(R.string.routing_graph_not_downloaded)
+                        },
+                        fontSize = 12.sp,
+                    )
+                }
+                when (graphStatus) {
+                    ZoneDownloadManager.GraphStatus.FINISHED ->
+                        IconButton(onClick = { showGraphDeleteDialog = true }) {
+                            IconDelete()
+                        }
+                    ZoneDownloadManager.GraphStatus.DOWNLOADING -> {
+                        // Progress shown via the system download notification.
+                    }
+                    ZoneDownloadManager.GraphStatus.NOT_STARTED ->
+                        Button(onClick = { showGraphDownloadDialog = true }) {
+                            Text(stringResource(R.string.download))
+                        }
+                }
+            }
+
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
             val imgMinLat = -85.0
             val imgMaxLat = 85.0
 
@@ -143,6 +201,7 @@ fun DownloadedMapsPage(backStack: NavBackStack<Route>, zonesViewModel: MapsZones
                     }
                 }
             }
+            }
         }
     }
 
@@ -182,6 +241,48 @@ fun DownloadedMapsPage(backStack: NavBackStack<Route>, zonesViewModel: MapsZones
             text = { Text(stringResource(R.string.delete_offline_map_text, zoneId)) },
             dismissButton = {
                 TextButton({ showDeleteDialogForZone = null }) {
+                    Text(stringResource(UiR.string.cancel))
+                }
+            }
+        )
+    }
+
+    if (showGraphDownloadDialog) {
+        AlertDialog(
+            onDismissRequest = { showGraphDownloadDialog = false },
+            confirmButton = {
+                Button({
+                    zonesViewModel.startGraphDownload()
+                    showGraphDownloadDialog = false
+                }) {
+                    Text(stringResource(R.string.download))
+                }
+            },
+            title = { Text(stringResource(R.string.download_routing_graph_title)) },
+            text = { Text(stringResource(R.string.download_routing_graph_text)) },
+            dismissButton = {
+                TextButton({ showGraphDownloadDialog = false }) {
+                    Text(stringResource(UiR.string.cancel))
+                }
+            }
+        )
+    }
+
+    if (showGraphDeleteDialog) {
+        AlertDialog(
+            onDismissRequest = { showGraphDeleteDialog = false },
+            confirmButton = {
+                Button({
+                    zonesViewModel.deleteGraph()
+                    showGraphDeleteDialog = false
+                }) {
+                    Text(stringResource(UiR.string.delete))
+                }
+            },
+            title = { Text(stringResource(R.string.delete_routing_graph_title)) },
+            text = { Text(stringResource(R.string.delete_routing_graph_text)) },
+            dismissButton = {
+                TextButton({ showGraphDeleteDialog = false }) {
                     Text(stringResource(UiR.string.cancel))
                 }
             }
