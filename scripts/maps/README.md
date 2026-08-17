@@ -35,11 +35,14 @@ P5b speed-limit feature — all from the same file.
   Attribute schema (`ISO_A2`, `iso_3166_2`) is Natural-Earth-derived.
 * **Offline packs / routing** (context for later phases, **not built here**):
   * `extract_pmtiles.sh` slices the world pmtiles into 64 Morton-grid
-    `zone_$i.pmtiles` offline packs.
-  * `generator.cpp` + `run_generator.sh` build the **routing graph** binaries
-    (`nodes_zone_*.bin`, `edges_zone_*.bin`, `transit_voyages_zone_*.bin`, …)
-    with libosmium. **This is the offline-region-pack / routing-graph generator
-    that P11 edits for GTFS** — it already has transit/GTFS scaffolding.
+    `zone_$i.pmtiles` offline packs. Tiles stay **zoned** (a single global
+    basemap is a ~137 GB download — see the size table below).
+  * `generator.cpp` + `run_generator.sh` build the **routing graph** as a
+    **single global graph** (`nodes.bin`, `edges.bin`, `transit_voyages.bin`,
+    `transit_attributes.bin`, `lanes.bin`, `metadata.bin`, `road_names.bin`)
+    with libosmium — see [Single global routing graph](#single-global-routing-graph-p16)
+    below. **This is the routing-graph generator that P11 edits for GTFS** — it
+    already has transit/GTFS scaffolding.
 
 ---
 
@@ -266,6 +269,74 @@ file (source-layer `maxspeed`), and switches the country/state mask in
 > polygons as whole as possible for mask reassembly, but for a pixel-perfect
 > full-country mask the app may still prefer querying the layer at a low zoom
 > level. Evaluate during P13.
+
+---
+
+## Single global routing graph (P16)
+
+The offline **routing graph** is a **single global graph** — there is no
+per-zone splitting and no separate merge/compaction stage. `generator.cpp`
+emits, in one pass, exactly the on-disk layout the Rust router
+(`maps/src/main/rust/src/graph.rs`) mmaps:
+
+| File | Contents | Consumed by (graph.rs) |
+|---|---|---|
+| `metadata.bin` | one `u64` node count | `load` |
+| `nodes.bin` | `NodeMaster[node_count + 1]` (16 B: `i32 lat_e7`, `i32 lon_e7`, `u64 edge_ptr`), trailing sentinel | `node` / `get_node` |
+| `edges.bin` | `Edge[edge_count]` (14 B: `u32 target`, `u32 dist_mm`, `u32 name_offset`, `u8 type`, `u8 speed_limit`) | `edge` |
+| `transit_attributes.bin` | `TransitAttribute[node_count]` (8 B: `u32 stop_code_off`, `u32 feed_name_off`) | `get_node_transit_attr` |
+| `transit_voyages.bin` | compact per-edge schedules (see below) | `transit_voyage_at` / `transit_dep_u32` |
+| `lanes.bin` | `u64 offsets[edge_count + 1]` then a `u16` turn-mask blob | `edge_lane_masks` |
+| `road_names.bin` | NUL-terminated string pool | `road_name` |
+
+`intermediate.bin` (delta-encoded edge geometry) is **optional** and is not
+produced by this generator; `graph.rs` treats its absence gracefully and the
+router falls back to straight node-to-node segments. It can be added later
+without changing any of the files above.
+
+**Why single global (drop graph zoning):** the previous pipeline wrote per-zone
+`*_zone_N.bin` artifacts in a layout `graph.rs` could not load and relied on a
+merge/compaction stage that never existed in the repo (the old un-checked-in
+`native-lib.cpp` toolchain — "Gap 1" in `TRANSIT_PACK_NOTES.md`). Folding the
+final layout directly into the generator closes that gap: freshly generated
+road data is now loadable by the shipping router with no extra step.
+
+**Transit voyage compaction** (per transit edge, 4-byte slots starting at the
+`voyage_offset` stored in the edge's `dist_mm`, count in `speed_limit`):
+
+```
+slot 0      u32  absolute departure of voyage 0 (10 ms units)
+slot 1      {u16 dep_delta = voyage 0 travel time (10 ms), u16 duration = 0}
+slot 1 + i  {u16 dep_delta = (dep_i − dep_{i-1}) seconds,
+             u16 duration  = voyage i travel time (10 ms)}   for i = 1..count-1
+```
+
+This mirrors the decoder in `maps/src/main/rust/src/geometry.rs`
+(`get_transit_edge_time_10ms`); keep the two in sync.
+
+### How the app obtains it — download-size implications
+
+The routing graph and the map **tiles** have very different size profiles, so
+they are delivered differently:
+
+* **Routing graph — one global download.** `ZoneDownloadManager.startGraphDownload()`
+  fetches the files above from `https://data.vayunmathur.com/<file>` into the
+  app's external files dir (the same dir `Graph::load` reads). It is a single
+  logical download surfaced once in `DownloadedMapsPage` (not per Morton zone).
+  A planet routing graph is on the order of a few GB (nodes/edges/lanes; far
+  smaller than the tile basemap), so shipping it whole is practical and removes
+  the per-zone bookkeeping.
+* **Map tiles — stay zoned.** The vector basemap (`v5.pmtiles`) is ≈137 GB
+  (see the size table above), so it can never be one download. Offline tile
+  packs remain the 64 Morton-grid `zone_$id.pmtiles` files, downloaded per zone.
+* **Transit index — stays per-zone (documented exception).** The P11 offline
+  transit index ships as per-zone `zone_$id.transit` files built by
+  `gtfs_ingest`; it is self-contained and independent of the road graph. See
+  `TRANSIT_PACK_NOTES.md` for why it is not folded into the global graph and
+  what a single global transit index would require.
+
+`run_generator.sh` publishes only the single global graph files listed above to
+R2 (no `*_zone_*.bin`).
 
 ---
 
