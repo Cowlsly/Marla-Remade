@@ -256,7 +256,29 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     )
 
     LaunchedEffect(Unit) {
-        if(selectedFeature != null) scaffoldState.bottomSheetState.expand()
+        // Restore-on-recompose: raise the sheet if something is already selected —
+        // unless a deep link / auto-select is about to open the compact PANE instead
+        // (handled by the pendingFocus effect below), so we don't full-expand first.
+        if (selectedFeature != null && viewModel.pendingFocus.value == null) {
+            scaffoldState.bottomSheetState.expand()
+        }
+    }
+
+    // Search auto-select (P17 contact address) + external geo:/maps deep links land
+    // here: fly to the place and open the Vela-style bottom PANE (partial/peek), not a
+    // full-screen sheet. A StateFlow-backed request survives a cold start, so a link
+    // that selected a place before the map composed still animates + peeks once ready.
+    val pendingFocus by viewModel.pendingFocus.collectAsState()
+    LaunchedEffect(pendingFocus) {
+        val req = pendingFocus ?: return@LaunchedEffect
+        camera.animateTo(
+            camera.position.copy(
+                target = req.position,
+                zoom = req.zoom ?: maxOf(camera.position.zoom, 14.0),
+            )
+        )
+        scaffoldState.bottomSheetState.partialExpand()
+        viewModel.consumeFocus()
     }
 
     suspend fun hide() {
@@ -394,16 +416,14 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     if (selectedFeature is SpecificFeature.Route) {
                                         viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
                                     }
-                                    viewModel.set(searchViewModel.toFeature(first))
-                                    coroutineScope.launch {
-                                        camera.animateTo(
-                                            camera.position.copy(
-                                                target = Position(first.lon, first.lat),
-                                                zoom = maxOf(camera.position.zoom, 14.0),
-                                            )
-                                        )
-                                    }
-                                    coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                    // Select the top hit + fly there + open the place PANE
+                                    // (peek), the Vela place-card behaviour. The callback fires
+                                    // after the (possibly delayed) scrape resolves, so late
+                                    // results still land correctly.
+                                    viewModel.selectAndFocus(
+                                        searchViewModel.toFeature(first),
+                                        zoom = maxOf(camera.position.zoom, 14.0),
+                                    )
                                 }
                             }
                         })

@@ -18,6 +18,15 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     private val _inactiveNavigation = MutableStateFlow<SpecificFeature.Route?>(null)
     val inactiveNavigation = _inactiveNavigation.asStateFlow()
 
+    /** A pending request for the map to fly to [position] (at [zoom] when set) and
+     *  show the place bottom PANE (peek), the Vela-style place card. Backed by a
+     *  StateFlow so a request made before MapPage is composed (a cold-start deep
+     *  link) survives until the map consumes it via [consumeFocus]. */
+    data class PlaceFocus(val position: Position, val zoom: Double? = null)
+
+    private val _pendingFocus = MutableStateFlow<PlaceFocus?>(null)
+    val pendingFocus = _pendingFocus.asStateFlow()
+
     private val _userPosition = MutableStateFlow(Position(0.0, 0.0))
     val userPosition = _userPosition.asStateFlow()
 
@@ -51,6 +60,24 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
 
     fun set(feature: SpecificFeature?) {
         _selectedFeature.value = feature
+    }
+
+    /**
+     * Select [feature] AND ask the map to fly to it and open the place bottom pane
+     * (peek). This is the single "search → auto-select first / deep link → open a
+     * place" path shared by the contact-address shortcut (P17) and the external
+     * intent handler (geo:/maps links). Selecting a [SpecificFeature.RoutableFeature]
+     * triggers [currentPoiInfo] enrichment so the pane fills with details.
+     */
+    fun selectAndFocus(feature: SpecificFeature, zoom: Double? = null) {
+        _selectedFeature.value = feature
+        val pos = (feature as? SpecificFeature.RoutableFeature)?.position
+        _pendingFocus.value = pos?.let { PlaceFocus(it, zoom) }
+    }
+
+    /** Clear a consumed [pendingFocus] once the map has flown there + opened the pane. */
+    fun consumeFocus() {
+        _pendingFocus.value = null
     }
 
     fun setInactiveNavigation(route: SpecificFeature.Route?) {
