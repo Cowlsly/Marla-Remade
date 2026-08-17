@@ -2,7 +2,6 @@ package com.vayunmathur.findfamily.ui.dialogs
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
@@ -54,13 +53,13 @@ fun AddLinkDialog(backStack: NavBackStack<Route>, ffViewModel: FindFamilyViewMod
     var failed by remember { mutableStateOf(false) }
 
     Dialog({backStack.pop()}) {
-        Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
-            Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        Card {
+            Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
                 Text(stringResource(R.string.add_link_title), style = MaterialTheme.typography.headlineMedium)
 
-                OutlinedTextField(name, {name = it}, modifier = Modifier.fillMaxWidth(), label = {Text(stringResource(R.string.add_link_label))})
+                OutlinedTextField(name, {name = it}, label = {Text("Title")})
 
-                DropdownField(expiryTime, { expiryTime = it }, options.keys, Modifier.fillMaxWidth())
+                DropdownField(expiryTime, { expiryTime = it }, options.keys)
 
                 if (failed) {
                     Text(
@@ -88,12 +87,11 @@ fun AddLinkDialog(backStack: NavBackStack<Route>, ffViewModel: FindFamilyViewMod
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun DropdownField(value: String, setValue: (String) -> Unit, options: Collection<String>, modifier: Modifier = Modifier) {
+fun DropdownField(value: String, setValue: (String) -> Unit, options: Collection<String>) {
     var expanded by remember { mutableStateOf(false) }
-    Box(modifier) {
+    Box {
         OutlinedTextField(
             value, {},
-            modifier = Modifier.fillMaxWidth(),
             interactionSource = interactionSourceClickable { expanded = true },
             readOnly = true,
             label = { Text(stringResource(R.string.expiry_time_label)) },
