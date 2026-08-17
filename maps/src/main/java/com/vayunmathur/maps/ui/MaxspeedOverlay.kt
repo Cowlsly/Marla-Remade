@@ -21,16 +21,15 @@ import org.maplibre.spatialk.geojson.Position
  * under the puck (see [queryPostedLimit]) and shows the parsed value on the
  * speed widget.
  *
- * ⚠️ INERT UNTIL HOSTED: [PMTILES_URL] is intentionally blank. The maxspeed
- * tileset is not yet hosted on `data.vayunmathur.com`, and the Vela clone that
- * held the original hosted URL was removed after research (see
- * `maps/VELA_PORT_PLAN.md`). When blank, the probe layer is not mounted and
- * [queryPostedLimit] returns `null`, so no badge is shown. To activate: host a
- * `maxspeed.pmtiles` (source-layer [SOURCE_LAYER], feature property [PROP]) and
- * set [PMTILES_URL] to e.g. `pmtiles://https://data.vayunmathur.com/maxspeed.pmtiles`.
+ * The maxspeed data is baked into the v5 PMTiles (P13), so the probe reads the
+ * same file as the basemap — [MaxspeedSource.PMTILES_URL] delegates to the
+ * single [com.vayunmathur.maps.util.MapTileCache.BASEMAP_PMTILES_URL] source of
+ * truth (source-layer [SOURCE_LAYER], feature property [PROP]). Switching to the
+ * global v5 file is therefore a one-line change in [MapTileCache].
  */
 object MaxspeedSource {
-    const val PMTILES_URL: String = ""
+    /** Baked into the v5 basemap PMTiles — read from the shared base URL. */
+    val PMTILES_URL: String get() = com.vayunmathur.maps.util.MapTileCache.BASEMAP_PMTILES_URL
     const val LAYER_ID: String = "maxspeed-probe"
     const val SOURCE_LAYER: String = "maxspeed"
     const val PROP: String = "maxspeed"

@@ -11,10 +11,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import com.vayunmathur.maps.data.CountryMap
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiPin
+import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchResult
@@ -22,6 +22,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import org.maplibre.compose.expressions.dsl.const
 import org.maplibre.compose.expressions.dsl.convertToColor
+import org.maplibre.compose.expressions.dsl.eq
 import org.maplibre.compose.expressions.dsl.feature
 import org.maplibre.compose.expressions.dsl.image
 import org.maplibre.compose.expressions.dsl.interpolate
@@ -35,13 +36,12 @@ import org.maplibre.compose.sources.GeoJsonData
 import org.maplibre.compose.sources.GeoJsonOptions
 import org.maplibre.compose.sources.GeoJsonSource
 import org.maplibre.compose.sources.TileSetOptions
+import org.maplibre.compose.sources.VectorSource
 import org.maplibre.compose.sources.rememberVectorSource
 import org.maplibre.compose.util.MaplibreComposable
 import org.maplibre.spatialk.geojson.Feature
 import org.maplibre.spatialk.geojson.FeatureCollection
 import org.maplibre.spatialk.geojson.LineString
-import org.maplibre.spatialk.geojson.MultiPolygon
-import org.maplibre.spatialk.geojson.Polygon
 import org.maplibre.spatialk.geojson.Position
 
 @Composable
@@ -76,7 +76,6 @@ fun MyMapLayers(
 
     key(styleJson) {
         var routeSource by remember { mutableStateOf<GeoJsonSource?>(null) }
-        var outlineSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         var userSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         
         val trafficUrl = OfflineRouter.trafficTileUrl
@@ -85,6 +84,11 @@ fun MyMapLayers(
             options = TileSetOptions(maxZoom = 14)
         )
 
+        // Admin borders (country/region/city) are baked into the v5 basemap
+        // PMTiles (P13), replacing the old admin0/admin1 FlatGeobuf assets. This
+        // one vector source feeds the search/selection highlight below.
+        val adminSource = rememberVectorSource(MapTileCache.BASEMAP_PMTILES_URL)
+
         LaunchedEffect(Unit) {
             userSource = GeoJsonSource(
                 "user-location-geojson",
@@ -92,27 +96,6 @@ fun MyMapLayers(
                     Feature(
                         org.maplibre.spatialk.geojson.Point(userPosition),
                         JsonObject(mapOf("bearing" to JsonPrimitive(userBearing)))
-                    )
-                ),
-                GeoJsonOptions()
-            )
-            outlineSource = GeoJsonSource(
-                "selected-country-geojson",
-                GeoJsonData.Features(
-                    Feature(
-                        Polygon(
-                            coordinates =
-                            listOf(
-                                listOf(
-                                    Position(-180.0, -90.0),
-                                    Position(180.0, -90.0),
-                                    Position(180.0, 90.0),
-                                    Position(-180.0, 90.0),
-                                    Position(-180.0, -90.0)
-                                )
-                            )
-                        ),
-                        JsonObject(emptyMap())
                     )
                 ),
                 GeoJsonOptions()
@@ -214,119 +197,83 @@ fun MyMapLayers(
             )
         }
 
-        outlineSource?.let { outlineSource ->
-            routeSource?.let { routeSource ->
-                when (selectedFeature) {
-                    is SpecificFeature.Admin0Label -> {
-                        LaunchedEffect(selectedFeature, outlineSource, styleJson) {
-                            // Loading the admin0 FlatGeobuf is a few MB +
-                            // linear scan — do it on IO. And tolerate ISOs
-                            // missing from the asset (small territories,
-                            // Wikidata changes) instead of crashing.
-                            val polygon = kotlinx.coroutines.withContext(
-                                kotlinx.coroutines.Dispatchers.IO
-                            ) {
-                                runCatching { CountryMap.getAdmin0(context, selectedFeature.iso) }.getOrNull()
-                            } ?: return@LaunchedEffect
-                            outlineSource.setData(
-                                GeoJsonData.Features(
-                                    FeatureCollection(
-                                        listOf(createInvertedMask(polygon))
-                                    )
+        routeSource?.let { routeSource ->
+            when (selectedFeature) {
+                is SpecificFeature.Admin0Label ->
+                    // Country highlight: filter the v5 admin_country layer by
+                    // ISO_A2 (the key CountryMap.getAdmin0 matched on the FGB).
+                    AdminHighlight(adminSource, "admin_country", "ISO_A2", selectedFeature.iso)
+                is SpecificFeature.Admin1Label ->
+                    // Region/state highlight: filter admin_region by iso_3166_2
+                    // (the key CountryMap.getAdmin1 matched on the FGB).
+                    AdminHighlight(adminSource, "admin_region", "iso_3166_2", selectedFeature.iso)
+                is SpecificFeature.Route -> {
+                    if (route != null) {
+                        LaunchedEffect(
+                            route, routeSource, styleJson,
+                            navProgress?.segmentIndex,
+                            navProgress?.distanceAlongRoute?.let { (it / 5.0).toInt() }
+                        ) {
+                            if (route is RouteService.Route) {
+                                val features: List<Feature1> = buildRouteFeatures(
+                                    route, context, navProgress
                                 )
-                            )
-                        }
-                        FillLayer(
-                            "global-mask",
-                            outlineSource,
-                            color = const(Color.Black.copy(alpha = 0.4f))
-                        )
-                        LineLayer(
-                            "layer2",
-                            outlineSource,
-                            color = const(Color.Red)
-                        )
-                    }
-                    is SpecificFeature.Admin1Label -> {
-                        LaunchedEffect(selectedFeature, outlineSource, styleJson) {
-                            val polygon = kotlinx.coroutines.withContext(
-                                kotlinx.coroutines.Dispatchers.IO
-                            ) {
-                                runCatching { CountryMap.getAdmin1(context, selectedFeature.iso) }.getOrNull()
-                            } ?: return@LaunchedEffect
-                            outlineSource.setData(
-                                GeoJsonData.Features(
-                                    FeatureCollection(
-                                        listOf(createInvertedMask(polygon))
-                                    )
+                                routeSource.setData(
+                                    GeoJsonData.Features(FeatureCollection(features))
                                 )
-                            )
-                        }
-                        FillLayer(
-                            "global-mask",
-                            outlineSource,
-                            color = const(Color.Black.copy(alpha = 0.4f))
-                        )
-                        LineLayer(
-                            "layer2",
-                            outlineSource,
-                            color = const(Color.Red)
-                        )
-                    }
-                    is SpecificFeature.Route -> {
-                        if (route != null) {
-                            LaunchedEffect(
-                                route, routeSource, styleJson,
-                                navProgress?.segmentIndex,
-                                navProgress?.distanceAlongRoute?.let { (it / 5.0).toInt() }
-                            ) {
-                                if (route is RouteService.Route) {
-                                    val features: List<Feature1> = buildRouteFeatures(
-                                        route, context, navProgress
-                                    )
-                                    routeSource.setData(
-                                        GeoJsonData.Features(FeatureCollection(features))
-                                    )
-                                }
                             }
-                            LineLayer(
-                                "route",
-                                routeSource,
-                                color = feature["route-color"].cast<StringValue>().convertToColor(),
-                                width = const(8.dp),
-                                cap = const(LineCap.Round)
-                            )
                         }
+                        LineLayer(
+                            "route",
+                            routeSource,
+                            color = feature["route-color"].cast<StringValue>().convertToColor(),
+                            width = const(8.dp),
+                            cap = const(LineCap.Round)
+                        )
                     }
-                    else -> Unit
                 }
+                else -> Unit
             }
         }
     }
 }
 
-private fun createInvertedMask(countryFeature: Feature1): Feature1 {
-    // 1. World Rectangle (Clockwise)
-    val worldOuterRing =
-        listOf(
-            Position(-180.0, 90.0), // Top Left
-            Position(180.0, 90.0), // Top Right
-            Position(180.0, -90.0), // Bottom Right
-            Position(-180.0, -90.0), // Bottom Left
-            Position(-180.0, 90.0) // Close
-        )
-
-    // 2. Extract and Reverse the country rings (force them to be holes)
-    val holes =
-        when (val geom = countryFeature.geometry) {
-            is Polygon -> listOf(geom.coordinates.first().reversed())
-            is MultiPolygon -> geom.coordinates.map { it.first().reversed() }
-            else -> emptyList()
-        }
-
-    // 3. Create Polygon: [Outer, Hole1, Hole2...]
-    val donutGeometry = Polygon(listOf(worldOuterRing) + holes)
-    return Feature(geometry = donutGeometry, properties = countryFeature.properties)
+/**
+ * Highlight the searched/selected admin area (country or region) from the v5
+ * admin vector-tile layer, replacing the old FlatGeobuf inverted-mask.
+ *
+ * Vector tiles clip geometry per-tile, so rather than reconstruct the full
+ * polygon for an inverted world-mask we render the feature itself — a translucent
+ * fill plus a bold outline — filtered to the one feature whose [key] equals
+ * [value] ([key]=`ISO_A2` for countries, `iso_3166_2` for regions). MapLibre
+ * applies the filter across every tile the feature spans, so the whole area
+ * lights up equivalently to the old mask. Matching by the same keys CountryMap
+ * used keeps the search→highlight UX intact.
+ */
+@Composable
+@MaplibreComposable
+private fun AdminHighlight(
+    source: VectorSource,
+    sourceLayer: String,
+    key: String,
+    value: String,
+) {
+    val match = feature[key].cast<StringValue>() eq const(value)
+    FillLayer(
+        "admin-highlight-fill",
+        source,
+        sourceLayer = sourceLayer,
+        filter = match,
+        color = const(Color.Red.copy(alpha = 0.12f)),
+    )
+    LineLayer(
+        "admin-highlight-outline",
+        source,
+        sourceLayer = sourceLayer,
+        filter = match,
+        color = const(Color.Red),
+        width = const(3.dp),
+    )
 }
 
 /**

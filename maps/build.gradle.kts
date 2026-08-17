@@ -35,8 +35,6 @@ dependencies {
     // implementation.
     implementation(project(":library:network"))
 
-    implementation(libs.flatgeobuf)
-
     implementation(project(":library:downloadservice"))
 
     // Android Auto (P12): AndroidX Car App Library. `app` provides the

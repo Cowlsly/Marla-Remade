@@ -34,27 +34,3 @@ fun SatelliteLayer(enabled: Boolean) {
     if (!enabled || !SatelliteSource.available) return
     // Intentionally empty until a raster tileset is hosted (see SatelliteSource).
 }
-
-/**
- * Safety / road-furniture layer (P6), gated on the P13 deliverable.
- *
- * ⚠️ GATED — REQUIRES PMTILES v5: [available] is false until the new PMTiles
- * (safety/road-furniture features: speed cameras, stop signs, traffic signals)
- * lands in P13 and replaces `v4.pmtiles`. The toggle is surfaced now (disabled)
- * so the UI is ready; the layer renders nothing until v5 exists.
- */
-object SafetyLayersSource {
-    /** Flip to true once the P13 PMTiles v5 (with safety layers) is hosted. */
-    const val available: Boolean = false
-}
-
-/**
- * Mount the safety-layers overlay when [enabled] and the v5 tileset exists.
- * No-op until P13 lands the PMTiles safety features.
- */
-@Composable
-@MaplibreComposable
-fun SafetyLayer(enabled: Boolean) {
-    if (!enabled || !SafetyLayersSource.available) return
-    // Intentionally empty until PMTiles v5 ships the safety layers (P13).
-}

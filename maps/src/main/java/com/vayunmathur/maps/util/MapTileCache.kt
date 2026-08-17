@@ -52,8 +52,21 @@ import javax.net.ssl.SSLException
  *    a *successful* online refetch. A failed refetch falls back to the cache.
  */
 object MapTileCache {
+    /**
+     * The single source of truth for the streamed basemap PMTiles URL.
+     *
+     * v5 (P13) bakes the safety/road-furniture and admin border layers into the
+     * same file as the base schema, so the base style source, the maxspeed probe
+     * ([com.vayunmathur.maps.ui.MaxspeedSource]), the safety overlay
+     * ([com.vayunmathur.maps.ui.SafetyLayersSource]) and the admin
+     * search-highlight all read from THIS one URL.
+     *
+     * Currently the California test build (`v5-ca.pmtiles`, hosted + verified).
+     * To ship globally, swap this one line to `v5.pmtiles` once the planet build
+     * is hosted (same pipeline, bigger bbox) — nothing else needs to change.
+     */
     const val BASEMAP_PMTILES_URL =
-        "pmtiles://https://data.vayunmathur.com/v4.pmtiles"
+        "pmtiles://https://data.vayunmathur.com/v5-ca.pmtiles"
 
     internal const val TILE_HOST = "data.vayunmathur.com"
     private val REFRESH_INTERVAL_MS = 24.hours.inWholeMilliseconds
