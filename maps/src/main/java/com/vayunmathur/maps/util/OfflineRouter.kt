@@ -242,6 +242,18 @@ object OfflineRouter {
         cacheDirPath = context.cacheDir.absolutePath
     }
 
+    /**
+     * Force a re-load of the routing graph from disk. Call after the single
+     * global routing graph (P16) finishes downloading so the freshly downloaded
+     * nodes.bin/edges.bin/… replace whatever was (or wasn't) loaded at startup.
+     * Re-init is safe: the Rust side atomically swaps the graph behind its lock.
+     */
+    @Synchronized
+    fun reload(context: Context) {
+        isInitialized = false
+        initialize(context)
+    }
+
     suspend fun getRoute(
             context: Context,
             route: SpecificFeature.Route,
