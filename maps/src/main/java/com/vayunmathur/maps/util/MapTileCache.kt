@@ -371,15 +371,15 @@ object MapTileCache {
                 // Write meta first, then data, each via temp+rename so a reader
                 // never sees a half-written file. Presence of the data file then
                 // implies the meta file is already in place.
-                val metaTmp = File.createTempFile("m", null, cacheDir)
+                val metaTmp = File.createTempFile("meta", null, cacheDir)
                 metaTmp.outputStream().use { props.store(it, null) }
                 metaTmp.renameTo(metaFile)
 
-                val dataTmp = File.createTempFile("d", null, cacheDir)
+                val dataTmp = File.createTempFile("data", null, cacheDir)
                 dataTmp.outputStream().use { it.write(loaded.body) }
                 dataTmp.renameTo(dataFile)
                 dataFile.setLastModified(System.currentTimeMillis())
-            } catch (_: IOException) {
+            } catch (_: Exception) {
                 // Caching is best-effort; a write failure must not break the map.
             }
         }
