@@ -2,7 +2,6 @@ package com.vayunmathur.maps.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -14,12 +13,15 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiPin
+import com.vayunmathur.maps.data.google.GoogleTrafficSource
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SearchResult
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import org.maplibre.compose.expressions.dsl.case
+import org.maplibre.compose.expressions.dsl.coalesce
 import org.maplibre.compose.expressions.dsl.const
 import org.maplibre.compose.expressions.dsl.convertToColor
 import org.maplibre.compose.expressions.dsl.eq
@@ -27,16 +29,18 @@ import org.maplibre.compose.expressions.dsl.feature
 import org.maplibre.compose.expressions.dsl.image
 import org.maplibre.compose.expressions.dsl.interpolate
 import org.maplibre.compose.expressions.dsl.linear
+import org.maplibre.compose.expressions.dsl.switch
 import org.maplibre.compose.expressions.dsl.zoom
 import org.maplibre.compose.expressions.value.LineCap
 import org.maplibre.compose.expressions.value.StringValue
 import org.maplibre.compose.layers.FillLayer
 import org.maplibre.compose.layers.LineLayer
+import org.maplibre.compose.layers.RasterLayer
 import org.maplibre.compose.sources.GeoJsonData
 import org.maplibre.compose.sources.GeoJsonOptions
 import org.maplibre.compose.sources.GeoJsonSource
-import org.maplibre.compose.sources.TileSetOptions
 import org.maplibre.compose.sources.VectorSource
+import org.maplibre.compose.sources.rememberRasterSource
 import org.maplibre.compose.sources.rememberVectorSource
 import org.maplibre.compose.util.MaplibreComposable
 import org.maplibre.spatialk.geojson.Feature
@@ -64,7 +68,6 @@ fun MyMapLayers(
     safetyEnabled: Boolean = false,
     transitEnabled: Boolean = false,
 ) {
-    val trafficVersion by OfflineRouter.trafficVersion.collectAsState()
     val context = LocalContext.current
 
     LaunchedEffect(Unit) {
@@ -78,24 +81,11 @@ fun MyMapLayers(
     key(styleJson) {
         var routeSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         var userSource by remember { mutableStateOf<GeoJsonSource?>(null) }
-        
-        // Traffic tiles come from OfflineRouter's on-device loopback tile server,
-        // which only has data to serve after a live traffic fetch has populated
-        // the native store (trafficVersion increments then). Gating the source +
-        // layer on trafficVersion > 0 (and a non-blank server URL) means we never
-        // request http://localhost/traffic/... before the server/traffic is
-        // actually available — that had spammed hundreds of "Failed to connect to
-        // localhost" tile errors on every startup/pan.
-        val trafficUrl = OfflineRouter.trafficTileUrl
-        val trafficReady = trafficEnabled && trafficUrl.isNotBlank() && trafficVersion > 0
-        val trafficSource = rememberVectorSource(
-            tiles = if (trafficReady) listOf("$trafficUrl?v=$trafficVersion") else emptyList(),
-            options = TileSetOptions(maxZoom = 14)
-        )
 
-        // Admin borders (country/region/city) are baked into the v5 basemap
-        // PMTiles (P13), replacing the old admin0/admin1 FlatGeobuf assets. This
-        // one vector source feeds the search/selection highlight below.
+        // Admin borders (country/region/city) and the OSM transit lines are baked
+        // into the v5 basemap PMTiles (P13/P22), replacing the old admin0/admin1
+        // FlatGeobuf assets. This one vector source feeds the search/selection
+        // highlight below AND the transit-lines overlay.
         val adminSource = rememberVectorSource(MapTileCache.BASEMAP_PMTILES_URL)
 
         LaunchedEffect(Unit) {
@@ -127,27 +117,33 @@ fun MyMapLayers(
         // the overlays.
         SatelliteLayer(satelliteEnabled)
 
-        if (trafficReady) {
-            LineLayer(
-                "traffic-layer",
+        // P21: live Google traffic congestion overlay (keyless raster tiles from
+        // Google's mapstiles hosts), replacing the removed OfflineRouter loopback
+        // vector-traffic tile server. Drawn above the basemap but below the POI
+        // pins / user puck. Gated on the P6 "Traffic" toggle.
+        if (trafficEnabled && GoogleTrafficSource.available) {
+            val trafficSource = rememberRasterSource(
+                tiles = GoogleTrafficSource.TILE_URLS,
+                tileSize = GoogleTrafficSource.TILE_SIZE,
+            )
+            RasterLayer(
+                "traffic-raster",
                 trafficSource,
-                sourceLayer = "traffic",
-                color = feature["color"].cast<StringValue>().convertToColor(),
-                width = interpolate(
-                    linear(),
-                    zoom(),
-                    11 to const(0.8.dp),
-                    12 to const(1.2.dp),
-                    14 to const(2.dp),
-                    18 to const(4.dp)
-                ),
-                opacity = const(0.6f),
-                cap = const(LineCap.Butt)
+                opacity = const(0.7f),
             )
         }
 
         // Safety / road-furniture layer (P6). Gated on the P13 PMTiles v5.
         SafetyLayer(safetyEnabled)
+
+        // P22: OSM transit-lines overlay — rail/subway/light_rail/tram/monorail
+        // baked into the v5 basemap PMTiles as the `transit_lines` source-layer.
+        // Shown with the P6 "Transit" toggle (alongside the P10 Transitous
+        // stops). Harmless no-op while the layer is absent (until v5 is
+        // regenerated with it).
+        if (transitEnabled) {
+            TransitLinesLayer(adminSource)
+        }
 
         // Custom Google POI overlay (replaces suppressed native basemap POIs).
         // Rendered above traffic but below the user puck.
@@ -249,6 +245,51 @@ fun MyMapLayers(
             }
         }
     }
+}
+
+/**
+ * OSM transit-lines overlay (P22-APP): draws the `transit_lines` source-layer
+ * baked into the v5 basemap PMTiles by the generator. Each feature carries
+ * `kind` (rail/subway/light_rail/tram/monorail/train), plus optional `name`,
+ * `ref` and `colour`. Lines are colored by the feature's own `colour` when the
+ * generator provides one, otherwise by a per-[kind] palette. Rendered only when
+ * the Transit layer toggle is on (see [MyMapLayers]); it is a harmless no-op
+ * while the source-layer is absent (until v5 is regenerated with it).
+ */
+@Composable
+@MaplibreComposable
+private fun TransitLinesLayer(source: VectorSource) {
+    // Fallback palette keyed on `kind` when the feature has no `colour`.
+    val byKind = switch(
+        feature["kind"].cast<StringValue>(),
+        case("subway", const(Color(0xFF0055A4))),      // metro blue
+        case("light_rail", const(Color(0xFF00843D))),  // green
+        case("tram", const(Color(0xFFE4002B))),        // red
+        case("monorail", const(Color(0xFF6A1B9A))),    // purple
+        case("train", const(Color(0xFF455A64))),       // slate
+        fallback = const(Color(0xFF616161)),           // rail / unknown grey
+    )
+    // Prefer the baked `colour` attribute; coalesce falls back to [byKind] when
+    // it's missing/unparseable.
+    val lineColor = coalesce(
+        feature["colour"].cast<StringValue>().convertToColor(),
+        byKind,
+    )
+    LineLayer(
+        "transit-lines",
+        source,
+        sourceLayer = "transit_lines",
+        color = lineColor,
+        width = interpolate(
+            linear(),
+            zoom(),
+            8 to const(0.6.dp),
+            12 to const(1.5.dp),
+            16 to const(3.dp),
+        ),
+        opacity = const(0.9f),
+        cap = const(LineCap.Round),
+    )
 }
 
 /**
