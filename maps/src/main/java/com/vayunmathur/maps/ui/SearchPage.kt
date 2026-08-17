@@ -8,9 +8,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.ListItem
@@ -31,11 +33,15 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.R
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconHistory
+import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconSearch
+import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.Route
+import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.util.MapsSearchViewModel
+import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SearchActions
 import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SearchUiState
@@ -52,6 +58,7 @@ fun SearchPage(
     backStack: NavBackStack<Route>,
     viewModel: SelectedFeatureViewModel,
     searchViewModel: MapsSearchViewModel,
+    savedPlacesViewModel: SavedPlacesViewModel,
     idx: Int?,
     east: Double,
     west: Double,
@@ -62,6 +69,8 @@ fun SearchPage(
     val searchQuery by searchViewModel.query.collectAsState()
     val results by searchViewModel.results.collectAsState()
     val recents by searchViewModel.recents.collectAsState()
+    val savedHome by savedPlacesViewModel.home.collectAsState()
+    val savedWork by savedPlacesViewModel.work.collectAsState()
 
     // Bias the Google search toward the centre of the visible viewport.
     val nearLat = (north + south) / 2.0
@@ -82,6 +91,13 @@ fun SearchPage(
 
             override fun clearRecents() {
                 searchViewModel.clearRecents()
+            }
+
+            override fun selectSavedPlace(place: SavedPlace) {
+                // Mirror the old map-overlay chip's showSavedPlace: select the
+                // saved place and return to the map, which recenters onto it.
+                viewModel.set(place.toFeature())
+                backStack.pop()
             }
 
             override fun selectResult(result: SearchResult) {
@@ -122,7 +138,7 @@ fun SearchPage(
         }
     }
 
-    SearchScreen(SearchUiState(searchQuery, results, recents), actions)
+    SearchScreen(SearchUiState(searchQuery, results, recents, savedHome, savedWork), actions)
 }
 
 /** The rendered half of [SearchPage]: query text in, results out, no ViewModel. */
@@ -160,6 +176,28 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),
             )
+            // Home/Work quick-access chips (P24: moved here from the map browse
+            // overlay). Tapping a set slot selects it and returns to the map; an
+            // unset slot is a no-op here (the user is already in search).
+            Row(
+                modifier = Modifier.padding(horizontal = 16.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                AssistChip(
+                    onClick = { state.savedHome?.let { actions.selectSavedPlace(it) } },
+                    label = {
+                        Text(stringResource(if (state.savedHome != null) R.string.saved_place_home else R.string.set_home))
+                    },
+                    leadingIcon = { IconHome(Modifier.size(18.dp)) },
+                )
+                AssistChip(
+                    onClick = { state.savedWork?.let { actions.selectSavedPlace(it) } },
+                    label = {
+                        Text(stringResource(if (state.savedWork != null) R.string.saved_place_work else R.string.set_work))
+                    },
+                    leadingIcon = { IconWork(Modifier.size(18.dp)) },
+                )
+            }
             Box(modifier = Modifier.fillMaxSize()) {
                 when {
                     state.query.length >= 2 && state.results.isEmpty() -> {

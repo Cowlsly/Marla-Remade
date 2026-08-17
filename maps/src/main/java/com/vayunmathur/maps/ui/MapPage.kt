@@ -27,7 +27,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconDragHandle
-import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.BottomSheetScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
@@ -66,13 +65,10 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.R
 import com.vayunmathur.library.ui.IconClose
-import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconSettings
-import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.maps.Route
-import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.parse
 import com.vayunmathur.maps.util.MapTileCache
@@ -297,21 +293,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 query,
             )
         )
-    }
-
-    // Tapping a saved Home/Work chip recenters onto the place and opens its
-    // bottom sheet, from which the user can start Directions or remove the slot.
-    fun showSavedPlace(place: SavedPlace) {
-        coroutineScope.launch {
-            camera.animateTo(
-                camera.position.copy(
-                    target = Position(place.lon, place.lat),
-                    zoom = maxOf(camera.position.zoom, 14.0),
-                )
-            )
-        }
-        viewModel.set(place.toFeature())
-        coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
     }
 
     BackHandler(selectedFeature != null) {
@@ -617,32 +598,20 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                     }
                 } else {
                     Column(Modifier.padding(16.dp).fillMaxWidth()) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            AssistChip(
-                                onClick = { savedHome?.let { showSavedPlace(it) } ?: openSearch() },
-                                label = {
-                                    Text(stringResource(if (savedHome != null) MapsR.string.saved_place_home else MapsR.string.set_home))
-                                },
-                                leadingIcon = { IconHome(Modifier.size(18.dp)) },
-                            )
-                            AssistChip(
-                                onClick = { savedWork?.let { showSavedPlace(it) } ?: openSearch() },
-                                label = {
-                                    Text(stringResource(if (savedWork != null) MapsR.string.saved_place_work else MapsR.string.set_work))
-                                },
-                                leadingIcon = { IconWork(Modifier.size(18.dp)) },
-                            )
-                        }
-                        Spacer(Modifier.height(8.dp))
                         // Quick category chips (Vela's browse CategoryChips),
-                        // wired to the P3 Google search categories.
+                        // wired to the P3 Google search categories. (Home/Work
+                        // quick-access slots moved to the search page.)
                         CategoryChips(
                             onCategory = { openCategorySearch(it) },
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Spacer(Modifier.height(8.dp))
-                        // Compass calibration hint for the heading puck; self-hides at HIGH accuracy.
-                        CompassCalibrationBanner(userHeadingAccuracy)
+                        // Compass calibration hint for the heading puck. Only show
+                        // when the heading is genuinely unreliable (UNRELIABLE/LOW);
+                        // MEDIUM is good enough and shouldn't nag the user.
+                        if (userHeadingAccuracy <= android.hardware.SensorManager.SENSOR_STATUS_ACCURACY_LOW) {
+                            CompassCalibrationBanner(userHeadingAccuracy)
+                        }
                     }
                 }
 
@@ -822,10 +791,17 @@ fun patchStyleForHybrid(
         putJsonObject("protomaps_base") {
             put("type", "vector")
             put("url", baseLocalUrl)
+            // The v5-ca base data stops at z15 but the merged pmtiles advertise
+            // maxzoom 16, so base layers vanish at z16 while the separate overlay
+            // sources (safety/maxspeed/transit_lines/admin) keep rendering. Cap the
+            // source at 15 so MapLibre OVERZOOMS z15 tiles past z15, keeping the
+            // base visible at max zoom.
+            put("maxzoom", 15)
         }
         putJsonObject("protomaps_hybrid") {
             put("type", "vector")
             put("url", hybridUrl)
+            put("maxzoom", 15)
         }
     }
 

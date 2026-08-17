@@ -132,7 +132,7 @@ fun Navigation(
             SavedPlacesPage(backStack, savedPlacesViewModel)
         }
         entry<Route.SearchPage> {
-            SearchPage(backStack, viewModel, searchViewModel, it.idx, it.east, it.west, it.north, it.south, it.query)
+            SearchPage(backStack, viewModel, searchViewModel, savedPlacesViewModel, it.idx, it.east, it.west, it.north, it.south, it.query)
         }
     }
 }
