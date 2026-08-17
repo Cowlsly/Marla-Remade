@@ -3317,20 +3317,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
-name = "whatsapp_signal"
-version = "0.1.0"
-dependencies = [
- "aes 0.8.4",
- "curve25519-dalek",
- "hmac 0.12.1",
- "jni",
- "rand_core 0.6.4",
- "sha2 0.10.9",
- "subtle",
- "x25519-dalek",
-]
-
-[[package]]
 name = "which"
 version = "4.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
