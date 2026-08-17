@@ -135,7 +135,6 @@
         <item quantity="many">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
         <item quantity="other">جارٍ إعادة محاولة <xliff:g id="count" example="3">%1$s</xliff:g> رسالة معلقة…</item>
     </plurals>
-    <string name="cc_bcc"></string>
     <string name="in_1_hour">في ساعة واحدة</string>
     <string name="in_1_week">في أسبوع واحد</string>
     <plurals name="attempts">
