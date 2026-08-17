@@ -30,7 +30,6 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.ui.LocalContentColor
-import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.ipc.RideEstimateClient
@@ -41,6 +40,7 @@ import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import com.vayunmathur.maps.util.formatDistance
 import org.maplibre.spatialk.geojson.Position
 
 @Composable
@@ -144,7 +144,7 @@ fun RouteSheet(
         if(routeForMode != null) {
             if(routeForMode !is RouteService.EmptyRoute) {
                 ListItem({ Text(routeForMode.duration.toString()) }, supportingContent = {
-                    Text(stringResource(R.string.distance_km, (routeForMode.distanceMeters / 1000.0).round(2)))
+                    Text(formatDistance(routeForMode.distanceMeters))
                 })
                 // "Start Navigation" only when we have a concrete
                 // Route (steps + polyline) and aren't already in

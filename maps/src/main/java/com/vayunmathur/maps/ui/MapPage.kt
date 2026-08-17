@@ -75,7 +75,6 @@ import com.vayunmathur.maps.data.SavedPlace
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.parse
 import com.vayunmathur.maps.util.MapTileCache
-import com.vayunmathur.maps.util.MapsZonesViewModel
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
@@ -83,7 +82,6 @@ import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
-import com.vayunmathur.maps.util.ZoneDownloadManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -110,13 +108,12 @@ import org.maplibre.spatialk.geojson.Position
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.draggableHandle
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
-import java.io.File
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, zonesViewModel: MapsZonesViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -166,16 +163,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // and pushes updates only while bound. Empty when findfamily is absent.
     val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
 
-    // --- ZONE DOWNLOAD STATE ---
     val camera = rememberCameraState(CameraPosition(target = Position(-118.243683,34.052235), zoom = 5.0))
-
-    val activeZone = remember(camera.position) {
-        calculateZoneId(
-            camera.position.target.latitude,
-            camera.position.target.longitude,
-            camera.position.zoom.toFloat()
-        )
-    }
 
     LaunchedEffect(camera.position, transitEnabled) {
         if (camera.position.zoom >= 11.0) {
@@ -206,17 +194,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }
 
-    val hybridUrl = remember(activeZone) {
-        if (activeZone == null) return@remember MapTileCache.BASEMAP_PMTILES_URL
-
-        val localFile = File(context.getExternalFilesDir(null), "zone_$activeZone.pmtiles")
-        if (zonesViewModel.getZoneStatus(activeZone) == ZoneDownloadManager.ZoneStatus.FINISHED) {
-            "pmtiles://file://${localFile.absolutePath}"
-        } else {
-            // No offline zone downloaded here — stream this area live.
-            MapTileCache.BASEMAP_PMTILES_URL
-        }
-    }
+    // Online-tiles-only: the basemap always streams live (offline zone tile
+    // packs were removed). Offline ROUTING still works via the downloaded graph.
+    val hybridUrl = MapTileCache.BASEMAP_PMTILES_URL
 
     // Inside MapPage
     var json by remember { mutableStateOf<String?>(null) }
@@ -821,37 +801,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             }
         }
     }
-}
-
-/**
- * Maps GPS coordinates to your 45x22.5 grid.
- */
-fun calculateZoneId(lat: Double, lon: Double, zoom: Float): Int? {
-    if(zoom < 7f) return null
-    // 1. Normalize coordinates to [0, 1] range
-    val normX = (lon + 180.0) / 360.0
-    val normY = (lat + 90.0) / 180.0
-
-    // 2. Map to 32-bit unsigned integer space (matching C++ uint32_t)
-    // We use Long in Kotlin to safely handle unsigned 32-bit range, then toUInt
-    val ix = (normX * 4294967295.0).toLong().toUInt()
-    val iy = (normY * 4294967295.0).toLong().toUInt()
-
-    // 3. Interleave the bits (Morton Encoding)
-    // Since we only need the Zone ID (top 6 bits of the 64-bit spatial ID),
-    // we only actually need to interleave the top 3 bits of ix and iy.
-    var spatialId: Long = 0
-    for (i in 0 until 32) {
-        val xBit = (ix.toLong() shr i) and 1L
-        val yBit = (iy.toLong() shr i) and 1L
-
-        spatialId = spatialId or (xBit shl (2 * i))
-        spatialId = spatialId or (yBit shl (2 * i + 1))
-    }
-
-    // 4. Extract top 6 bits (matching C++: (spatial_id >> 58) & 0x3F)
-    // In Kotlin, for signed Long, we use ushr for logical right shift
-    return ((spatialId ushr 58) and 0x3F).toInt()
 }
 
 // Native basemap layers suppressed at runtime — amenities are Google-only now

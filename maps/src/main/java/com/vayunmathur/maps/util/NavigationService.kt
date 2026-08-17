@@ -326,17 +326,6 @@ class NavigationService : Service() {
     }
 }
 
-/**
- * Format a distance in meters as a short user-facing string.
- * - "<X m" under 1 km
- * - "X.Y km" otherwise (one decimal)
- */
-internal fun formatDistance(meters: Double): String {
-    if (meters < 1000.0) return "${meters.roundToInt()} m"
-    val km = meters / 1000.0
-    return "%.1f km".format(km)
-}
-
 /** Format epoch-ms as local HH:mm AM/PM. */
 internal fun formatEta(etaEpochMs: Long): String {
     val instant = Instant.fromEpochMilliseconds(etaEpochMs)

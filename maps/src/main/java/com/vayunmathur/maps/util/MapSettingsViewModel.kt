@@ -4,7 +4,6 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.maps.data.DistanceUnit
 import com.vayunmathur.maps.data.MapPreferences
 import com.vayunmathur.maps.data.ThemeMode
 import kotlinx.coroutines.flow.SharingStarted
@@ -29,14 +28,6 @@ class MapSettingsViewModel(application: Application) : AndroidViewModel(applicat
 
     // --- Settings screen ---------------------------------------------------
 
-    val distanceUnit: StateFlow<DistanceUnit> =
-        ds.stringFlow(MapPreferences.KEY_DISTANCE_UNITS)
-            .map { DistanceUnit.from(it) }
-            .stateIn(
-                viewModelScope, SharingStarted.Eagerly,
-                DistanceUnit.from(ds.getString(MapPreferences.KEY_DISTANCE_UNITS)),
-            )
-
     val themeMode: StateFlow<ThemeMode> =
         ds.stringFlow(MapPreferences.KEY_THEME_MODE)
             .map { ThemeMode.from(it) }
@@ -48,9 +39,6 @@ class MapSettingsViewModel(application: Application) : AndroidViewModel(applicat
     val voiceGuidance: StateFlow<Boolean> = boolPref(
         MapPreferences.KEY_VOICE_GUIDANCE, MapPreferences.DEFAULT_VOICE_GUIDANCE,
     )
-
-    fun setDistanceUnit(unit: DistanceUnit) =
-        launch { ds.setString(MapPreferences.KEY_DISTANCE_UNITS, unit.pref) }
 
     fun setThemeMode(mode: ThemeMode) =
         launch { ds.setString(MapPreferences.KEY_THEME_MODE, mode.pref) }

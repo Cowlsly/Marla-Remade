@@ -9,7 +9,6 @@ package com.vayunmathur.maps.data
 object MapPreferences {
     const val KEY_VOICE_GUIDANCE = "voice_guidance_enabled"
     const val KEY_THEME_MODE = "theme_mode"
-    const val KEY_DISTANCE_UNITS = "distance_units"
 
     // Layer toggles surfaced in the P6 layers sheet.
     const val KEY_LAYER_TRAFFIC = "layer_traffic"
@@ -40,15 +39,5 @@ enum class ThemeMode(val pref: String) {
 
     companion object {
         fun from(pref: String?): ThemeMode = entries.firstOrNull { it.pref == pref } ?: SYSTEM
-    }
-}
-
-/** Distance unit selection persisted under [MapPreferences.KEY_DISTANCE_UNITS]. */
-enum class DistanceUnit(val pref: String) {
-    KILOMETERS("km"),
-    MILES("mi");
-
-    companion object {
-        fun from(pref: String?): DistanceUnit = entries.firstOrNull { it.pref == pref } ?: KILOMETERS
     }
 }

@@ -20,8 +20,6 @@
     <string name="no_route_found">No route found</string>
     <!-- BottomSheet: Loading state while route is calculated -->
     <string name="generating_route">Generating Route…</string>
-    <!-- BottomSheet: Distance badge. %1$s=distance value e.g. "2.5" -->
-    <string name="distance_km"><xliff:g id="distance" example="2.5">%1$s</xliff:g> km</string>
 
     <!-- SearchPage: Hint in search box for places and addresses -->
     <string name="search_nearby">Search places &amp; addresses…</string>
@@ -47,39 +45,6 @@
     <string name="search_category_atms">ATMs</string>
     <!-- SearchPage: Displays lat/lon. %1$s=latitude e.g. "37.7749", %2$s=longitude e.g. "-122.4194" -->
     <string name="coordinates">Coordinates: <xliff:g id="latitude" example="37.7749">%1$s</xliff:g>, <xliff:g id="longitude" example="-122.4194">%2$s</xliff:g></string>
-
-    <!-- DownloadedMapsPage: Title for offline maps list -->
-    <string name="downloaded_maps">Downloaded Maps</string>
-    <!-- DownloadedMapsPage: Dialog title for downloading zone -->
-    <string name="download_offline_map_title">Download Offline Map?</string>
-    <!-- DownloadedMapsPage: Dialog body prompting download. %1$d=zone number e.g. 5 -->
-    <string name="download_offline_map_text">You are viewing Zone <xliff:g id="zone" example="5">%1$d</xliff:g>. Would you like to download the high-detail offline map and enable navigation in this area?</string>
-    <!-- Button: Verb. Download action -->
-    <string name="download">Download</string>
-    <!-- DownloadedMapsPage: Dialog title for deleting offline map -->
-    <string name="delete_offline_map_title">Delete Offline Map?</string>
-    <!-- DownloadedMapsPage: Confirmation for deleting zone. %1$d=zone number -->
-    <string name="delete_offline_map_text">Are you sure you want to delete or cancel the download for Zone <xliff:g id="zone" example="5">%1$d</xliff:g>?</string>
-    <!-- DownloadedMapsPage: Download progress percent. %1$d=0-100 -->
-    <string name="download_progress"><xliff:g id="progress" example="50">%1$d</xliff:g>%%</string>
-    <!-- DownloadedMapsPage: Header label for the single global routing graph download -->
-    <string name="routing_graph_title">Routing data (global)</string>
-    <!-- DownloadedMapsPage: Subtitle when the routing graph has not been downloaded -->
-    <string name="routing_graph_not_downloaded">Not downloaded — navigation uses online routing</string>
-    <!-- DownloadedMapsPage: Subtitle while the routing graph is downloading -->
-    <string name="routing_graph_downloading">Downloading routing data…</string>
-    <!-- DownloadedMapsPage: Subtitle when the routing graph is present -->
-    <string name="routing_graph_downloaded">Downloaded — offline navigation enabled</string>
-    <!-- DownloadedMapsPage: Dialog title to download the routing graph -->
-    <string name="download_routing_graph_title">Download Routing Data?</string>
-    <!-- DownloadedMapsPage: Dialog body for routing graph download -->
-    <string name="download_routing_graph_text">Download the global routing graph (roads, lanes and transit schedules) to enable fully offline navigation everywhere. This is one large download, separate from the per-zone map tiles.</string>
-    <!-- DownloadedMapsPage: Dialog title to delete the routing graph -->
-    <string name="delete_routing_graph_title">Delete Routing Data?</string>
-    <!-- DownloadedMapsPage: Dialog body for routing graph deletion -->
-    <string name="delete_routing_graph_text">Are you sure you want to delete the offline routing graph? Offline navigation will be disabled until you download it again.</string>
-    <!-- ZoneDownloadManager: notification description for the routing graph download -->
-    <string name="routing_graph_download_desc">Downloading offline routing graph data</string>
 
     <!-- Place detail: Rating summary. %1$s=stars e.g. "4.5", %2$s=review count e.g. "128" -->
     <string name="reviews_summary"><xliff:g id="rating" example="4.5">%1$s</xliff:g> stars | <xliff:g id="review_count" example="128">%2$s</xliff:g> reviews</string>
@@ -307,8 +272,6 @@
     <string name="then">Then: <xliff:g id="next_instruction" example="Turn left onto Main St">%1$s</xliff:g></string>
     <!-- NavigationOverlay: Route summary. %1$s=duration e.g. "12", %2$s=distance e.g. "1.2 km" -->
     <string name="min"><xliff:g id="minutes" example="12">%1$s</xliff:g> min · <xliff:g id="distance" example="1.2 km">%2$s</xliff:g></string>
-    <string name="map_zone_download_title">Map Zone <xliff:g id="zone" example="7">%1$d</xliff:g> (Map)</string>
-    <string name="map_zone_download_desc">Downloading high-detail offline map data</string>
 
     <!-- LayersSheet: title of the map-layers toggle sheet. Noun. -->
     <string name="layers_title">Map layers</string>
@@ -356,12 +319,6 @@
     <string name="settings_section_navigation">Navigation</string>
     <!-- Settings: section header for places and maps entries. Noun. -->
     <string name="settings_section_places">Places &amp; maps</string>
-    <!-- Settings: distance-units setting title. Noun. -->
-    <string name="settings_units">Distance units</string>
-    <!-- Settings: kilometres unit option. -->
-    <string name="settings_units_km">Kilometers</string>
-    <!-- Settings: miles unit option. -->
-    <string name="settings_units_mi">Miles</string>
     <!-- Settings: map-theme setting title. Noun. -->
     <string name="settings_theme">Map theme</string>
     <!-- Settings: theme option following the system day/night setting. -->

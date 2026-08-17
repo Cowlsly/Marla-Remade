@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.maps.util.isImperialUnits
 import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.floor
@@ -39,8 +40,9 @@ fun MapScaleBar(zoom: Double, latitude: Double, modifier: Modifier = Modifier) {
     val metersPerPixel = 156543.03392 * cos(latitude * PI / 180.0) / 2.0.pow(zoom)
     if (!metersPerPixel.isFinite() || metersPerPixel <= 0.0) return
 
-    val niceMeters = niceRoundDistance(metersPerPixel * maxBarPx)
-    val barWidth = with(density) { (niceMeters / metersPerPixel).toFloat().toDp() }
+    val imperial = isImperialUnits()
+    val (barMeters, label) = scaleBar(metersPerPixel * maxBarPx, imperial)
+    val barWidth = with(density) { (barMeters / metersPerPixel).toFloat().toDp() }
 
     Surface(
         modifier = modifier,
@@ -49,7 +51,7 @@ fun MapScaleBar(zoom: Double, latitude: Double, modifier: Modifier = Modifier) {
     ) {
         Column(Modifier.padding(horizontal = 8.dp, vertical = 4.dp)) {
             Text(
-                text = scaleLabel(niceMeters),
+                text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurface,
             )
@@ -76,6 +78,26 @@ private fun niceRoundDistance(maxMeters: Double): Double {
     return best
 }
 
-/** Nice distances are always whole, so integer m / km rendering is exact. */
-private fun scaleLabel(meters: Double): String =
-    if (meters >= 1000.0) "${(meters / 1000.0).roundToInt()} km" else "${meters.roundToInt()} m"
+/**
+ * Pick a "nice" round scale-bar distance that fits within [maxMeters] and label
+ * it in the regional unit ([imperial] = ft/mi, else m/km). Returns the distance
+ * in METERS (for bar width) paired with the display label.
+ */
+private fun scaleBar(maxMeters: Double, imperial: Boolean): Pair<Double, String> {
+    if (imperial) {
+        val maxMiles = maxMeters / 1609.34
+        return if (maxMiles < 1.0) {
+            val ft = niceRoundDistance(maxMeters * 3.28084)
+            (ft / 3.28084) to "${ft.roundToInt()} ft"
+        } else {
+            val mi = niceRoundDistance(maxMiles)
+            (mi * 1609.34) to "${mi.roundToInt()} mi"
+        }
+    }
+    val meters = niceRoundDistance(maxMeters)
+    return meters to if (meters >= 1000.0) {
+        "${(meters / 1000.0).roundToInt()} km"
+    } else {
+        "${meters.roundToInt()} m"
+    }
+}

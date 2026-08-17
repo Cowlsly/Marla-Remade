@@ -18,7 +18,6 @@ import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.maps.ui.DownloadedMapsPage
 import com.vayunmathur.maps.ui.MapPage
 import com.vayunmathur.maps.ui.SavedPlacesPage
 import com.vayunmathur.maps.ui.SearchPage
@@ -27,7 +26,6 @@ import com.vayunmathur.maps.data.MapPreferences
 import com.vayunmathur.maps.data.ThemeMode
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.MapsSearchViewModel
-import com.vayunmathur.maps.util.MapsZonesViewModel
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
@@ -104,8 +102,6 @@ sealed interface Route: NavKey {
     @Serializable
     data object MapPage: Route
     @Serializable
-    data object DownloadedMapsPage: Route
-    @Serializable
     data object SettingsPage: Route
     @Serializable
     data object SavedPlacesPage: Route
@@ -118,7 +114,6 @@ sealed interface Route: NavKey {
 fun Navigation(
     viewModel: SelectedFeatureViewModel = viewModel(),
     searchViewModel: MapsSearchViewModel = viewModel(),
-    zonesViewModel: MapsZonesViewModel = viewModel(),
     savedPlacesViewModel: SavedPlacesViewModel = viewModel(),
     poiViewModel: GooglePoiMapViewModel = viewModel(),
     settingsViewModel: MapSettingsViewModel = viewModel(),
@@ -128,10 +123,7 @@ fun Navigation(
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, zonesViewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel, parkingViewModel, transitViewModel)
-        }
-        entry<Route.DownloadedMapsPage> {
-            DownloadedMapsPage(backStack, zonesViewModel)
+            MapPage(backStack, viewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel, parkingViewModel, transitViewModel)
         }
         entry<Route.SettingsPage> {
             MapSettingsPage(backStack, settingsViewModel)

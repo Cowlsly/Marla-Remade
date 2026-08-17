@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.data.PostedLimit
+import com.vayunmathur.maps.util.isImperialUnits
 import kotlin.math.roundToInt
 
 private const val MPS_TO_KMH = 3.6
@@ -40,7 +41,7 @@ fun SpeedWidget(
     speedMps: Float,
     postedLimit: PostedLimit?,
     modifier: Modifier = Modifier,
-    defaultMph: Boolean = false,
+    defaultMph: Boolean = isImperialUnits(),
 ) {
     val useMph = postedLimit?.displayIsMph ?: defaultMph
     val speed = if (useMph) (speedMps * MPS_TO_MPH).roundToInt() else (speedMps * MPS_TO_KMH).roundToInt()
