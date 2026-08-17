@@ -62,6 +62,24 @@
     <string name="delete_offline_map_text">Are you sure you want to delete or cancel the download for Zone <xliff:g id="zone" example="5">%1$d</xliff:g>?</string>
     <!-- DownloadedMapsPage: Download progress percent. %1$d=0-100 -->
     <string name="download_progress"><xliff:g id="progress" example="50">%1$d</xliff:g>%%</string>
+    <!-- DownloadedMapsPage: Header label for the single global routing graph download -->
+    <string name="routing_graph_title">Routing data (global)</string>
+    <!-- DownloadedMapsPage: Subtitle when the routing graph has not been downloaded -->
+    <string name="routing_graph_not_downloaded">Not downloaded — navigation uses online routing</string>
+    <!-- DownloadedMapsPage: Subtitle while the routing graph is downloading -->
+    <string name="routing_graph_downloading">Downloading routing data…</string>
+    <!-- DownloadedMapsPage: Subtitle when the routing graph is present -->
+    <string name="routing_graph_downloaded">Downloaded — offline navigation enabled</string>
+    <!-- DownloadedMapsPage: Dialog title to download the routing graph -->
+    <string name="download_routing_graph_title">Download Routing Data?</string>
+    <!-- DownloadedMapsPage: Dialog body for routing graph download -->
+    <string name="download_routing_graph_text">Download the global routing graph (roads, lanes and transit schedules) to enable fully offline navigation everywhere. This is one large download, separate from the per-zone map tiles.</string>
+    <!-- DownloadedMapsPage: Dialog title to delete the routing graph -->
+    <string name="delete_routing_graph_title">Delete Routing Data?</string>
+    <!-- DownloadedMapsPage: Dialog body for routing graph deletion -->
+    <string name="delete_routing_graph_text">Are you sure you want to delete the offline routing graph? Offline navigation will be disabled until you download it again.</string>
+    <!-- ZoneDownloadManager: notification description for the routing graph download -->
+    <string name="routing_graph_download_desc">Downloading offline routing graph data</string>
 
     <!-- Place detail: Rating summary. %1$s=stars e.g. "4.5", %2$s=review count e.g. "128" -->
     <string name="reviews_summary"><xliff:g id="rating" example="4.5">%1$s</xliff:g> stars | <xliff:g id="review_count" example="128">%2$s</xliff:g> reviews</string>
