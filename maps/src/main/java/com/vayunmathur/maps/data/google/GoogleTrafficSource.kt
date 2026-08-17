@@ -10,10 +10,20 @@ import kotlinx.coroutines.withContext
  * Replaces the old on-device OfflineRouter loopback vector-traffic tile server
  * (`http://localhost/traffic/{z}/{x}/{y}`) with Google's own colored congestion
  * overlay — the same transparent raster tiles maps.google.com layers over its
- * basemap when Traffic is turned on. Like the other `data/google` scrapes there
- * is NO API key: the request is authorised by a browser-like `User-Agent` +
- * google.com `Referer`, and served from Google's public map-tiles ("mapstiles")
- * hosts `mt0-3.google.com`.
+ * basemap when Traffic is turned on.
+ *
+ * ENDPOINT: the web map's own `/maps/vt` tile on `www.google.com` — a public,
+ * keyless PNG on the same host the other `data/google` scrapes already use. The
+ * tile is selected by a trimmed protobuf `pb` param (no map-version epoch, so it
+ * doesn't rot):
+ *  - `!1m4!1m3!1i{z}!2i{x}!3i{y}` — standard XYZ tile coords (z, then x, then y);
+ *  - `!2m9!1e2!2straffic` — `!1e2` = overlay layer, `!2straffic` = the traffic
+ *    layer (transparent everywhere there's no congestion data);
+ *  - the trailing `!4m2!1sincidents…` block enables incident markers, and the
+ *    `!3m8!2sen!3sus…!2sRoadmap` block pins language/region + roadmap styling.
+ * This is the exact tile URL the logged-out web map fetches, so it needs no API
+ * key, session token, or referer — a plain GET returns the PNG. A bad/blocked
+ * tile degrades to a transparent gap, never a crash.
  *
  * Two ways to consume it:
  *  - [TILE_URLS] / [tileTemplate] — plug straight into a maplibre `RasterSource`
@@ -21,38 +31,33 @@ import kotlinx.coroutines.withContext
  *  - [tile] (z,x,y) → PNG bytes — a manual keyless fetch mirroring
  *    [StreetViewDataSource.tile], for callers that need the bytes directly.
  *
- * ASSUMPTION (endpoint): the transparent traffic overlay is requested with
- * `lyrs=traffic` on the mt hosts. This is the long-standing keyless form a
- * logged-out browser / Leaflet-style clients use; if Google reshapes it, swap
- * [LAYER_SPEC] (e.g. to `h@159000000,traffic|seconds_into_week:-1`). A
- * bad/blocked tile degrades to a transparent gap, never a crash.
- *
  * NOTE (on-device): live tiles need a device with network — they can't be
  * exercised at compile time.
  */
 object GoogleTrafficSource {
 
-    // Layer spec selecting Google's live-traffic overlay (transparent elsewhere).
-    private const val LAYER_SPEC = "traffic"
-
-    // mapstiles hosts; MapLibre round-robins the list, spreading tile load.
-    private val HOSTS = listOf("mt0", "mt1", "mt2", "mt3")
-
-    /** Google mt tiles are 256 px (vs the 512 px vector basemap). */
+    /** Google's `/maps/vt` PNG tiles are 256 px (vs the 512 px vector basemap). */
     const val TILE_SIZE = 256
 
-    /** `{x}`/`{y}`/`{z}` raster template for one host — MapLibre substitutes the
-     *  tokens per requested tile. */
-    fun tileTemplate(host: String = "mt1"): String =
-        "https://$host.google.com/vt?lyrs=$LAYER_SPEC&x={x}&y={y}&z={z}"
+    // The trimmed `pb` spec selecting Google's live-traffic overlay tile. Kept as
+    // a template with `{z}`/`{x}`/`{y}` tokens (order matters: `!1i{z}!2i{x}!3i{y}`)
+    // so both MapLibre and the manual [tile] fetch build the same URL.
+    private const val TILE_PB =
+        "https://www.google.com/maps/vt/pb=!1m4!1m3!1i{z}!2i{x}!3i{y}!2m9!1e2!2straffic!3i999999" +
+            "!4m2!1sincidents!2s1!4m2!1sincidents_text!2s1!3m8!2sen!3sus!5e1105!12m4!1e68!2m2!1sset!2sRoadmap!4e0!5m1!1e0"
 
-    /** All four mapstiles hosts as maplibre `RasterSource` tile URLs. */
-    val TILE_URLS: List<String> = HOSTS.map { tileTemplate(it) }
+    /** `{x}`/`{y}`/`{z}` raster template — MapLibre substitutes the tokens per
+     *  requested tile. */
+    fun tileTemplate(): String = TILE_PB
+
+    /** The traffic tile URL as a single-element maplibre `RasterSource` tile list. */
+    val TILE_URLS: List<String> = listOf(TILE_PB)
 
     val available: Boolean get() = TILE_URLS.isNotEmpty()
 
-    // Browser-like identity — these headers ARE the credential (no key). The tile
-    // host also wants the Google referer, exactly like the other scrapes.
+    // Browser-like identity for the manual [tile] path. The `/maps/vt` endpoint is
+    // keyless and serves the PNG to a plain GET, but sending the same headers as
+    // the other google scrapes keeps the direct-bytes fetch consistent.
     private const val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -64,12 +69,13 @@ object GoogleTrafficSource {
 
     /**
      * Fetch one traffic tile's PNG bytes, or null on any non-2xx / transport
-     * error / empty body. Never throws. The host is chosen per-tile so load
-     * spreads across mt0-3 the same way the raster source does.
+     * error / empty body. Never throws.
      */
     suspend fun tile(z: Int, x: Int, y: Int): ByteArray? = withContext(Dispatchers.IO) {
-        val host = HOSTS[Math.floorMod(x + y, HOSTS.size)]
-        val url = "https://$host.google.com/vt?lyrs=$LAYER_SPEC&x=$x&y=$y&z=$z"
+        val url = TILE_PB
+            .replace("{z}", z.toString())
+            .replace("{x}", x.toString())
+            .replace("{y}", y.toString())
         val (status, bytes) = runCatching {
             NetworkClient.performRequestBytes(url = url, headers = REQUEST_HEADERS, useSystemTrust = true)
         }.getOrNull() ?: return@withContext null
