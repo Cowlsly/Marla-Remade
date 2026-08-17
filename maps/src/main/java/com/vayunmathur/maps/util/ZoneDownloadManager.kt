@@ -107,9 +107,11 @@ class ZoneDownloadManager(private val context: Context) {
             }
         }
 
-        // 2. Remove the files from disk
+        // 2. Remove the files from disk. The transit index (P11c) is an
+        // optional second pack part alongside the pmtiles tiles.
         val files = listOf(
-            "zone_$zoneId.pmtiles"
+            "zone_$zoneId.pmtiles",
+            "zone_$zoneId.transit"
         )
         files.forEach { fileName ->
             val file = File(context.getExternalFilesDir(null), fileName)
@@ -176,5 +178,21 @@ class ZoneDownloadManager(private val context: Context) {
             .setAllowedOverMetered(true)
 
         downloadManager.enqueue(request)
+
+        // Optional second pack part (P11c): the per-region offline transit index
+        // (RAPTOR data from scripts/maps/gtfs_ingest). Best-effort — zones with
+        // no transit coverage 404 and are silently ignored (getZoneStatus keys
+        // FINISHED off the pmtiles part only). The title keeps the
+        // "Map Zone $id ($part)" convention so progress tracking recognises it.
+        val transitFile = "zone_$zoneId.transit"
+        val transitRequest =
+            DownloadManager.Request("https://data.vayunmathur.com/zone_$zoneId.transit".toUri())
+                .setTitle("Map Zone $zoneId (Transit)")
+                .setDescription(context.getString(R.string.map_zone_download_desc))
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setDestinationInExternalFilesDir(context, null, transitFile)
+                .setAllowedOverMetered(true)
+
+        downloadManager.enqueue(transitRequest)
     }
 }
