@@ -35,28 +35,26 @@ cp ./out/sf_bay.transit zone_7.transit        # see "feed -> zone" below
 ./publish_r2.sh zone_7.transit
 ```
 
-## Gap (1): road-graph producer/consumer format mismatch — NOT fixed here
+## Gap (1): road-graph producer/consumer format mismatch — CLOSED by P16
 
-`scripts/maps/generator.cpp` emits **per-zone** road-graph binaries
-(`nodes_zone_*.bin`, 28-byte `NodeMaster`, 8-byte voyages, etc.), but the
-shipping Rust router (`graph.rs`) mmaps a **single merged** `nodes.bin`
-(16-byte `NodeMaster`, separate `transit_attributes.bin` / `intermediate.bin`,
-4-byte `TransitVoyageCompact`). No merge/compaction stage exists in the repo
-(it was part of an un-checked-in `native-lib.cpp` toolchain).
+*(Historical, kept for context.)* `scripts/maps/generator.cpp` used to emit
+**per-zone** road-graph binaries (`nodes_zone_*.bin`, 28-byte `NodeMaster`,
+8-byte voyages, etc.), while the shipping Rust router (`graph.rs`) mmaps a
+**single merged** `nodes.bin` (16-byte `NodeMaster`, separate
+`transit_attributes.bin`, 4-byte `TransitVoyageCompact`). No merge/compaction
+stage existed in the repo (it was part of an un-checked-in `native-lib.cpp`
+toolchain), so freshly generated road data could not be loaded.
 
-**This is untouched by P11** and does not block offline *transit*: the transit
-index is fully self-contained (its own stop ids, string pool and RAPTOR tables)
-and does not depend on the road graph — access/egress/transfer legs use a
-straight-line walk heuristic in `transit.rs`, not the road graph. So freshly
-`generator.cpp`-built road data still cannot be loaded by the shipping router
-until a merge stage is written, but offline transit works independently of that.
-
-**If/when the merge stage is built** (LANGUAGE RULE: prefer Rust; extending
-`generator.cpp` in C++ is acceptable if cleaner; Python last resort): it should
-consume the per-zone `*_zone_*.bin` set and emit the merged
-`nodes.bin`/`edges.bin`/`intermediate.bin`/`transit_attributes.bin`/
-`transit_voyages.bin`/`metadata.bin` layout that `graph.rs` expects. It is a
-separate, greenfield stage — tracked here, deliberately out of P11's scope.
+**P16 fixes this.** `generator.cpp` now emits the **single global** graph in the
+exact layout `graph.rs` loads (`nodes.bin`/`edges.bin`/`transit_voyages.bin`/
+`transit_attributes.bin`/`lanes.bin`/`metadata.bin`) in one pass — no per-zone
+artifacts, no separate merge stage. See
+[`README.md` → Single global routing graph](README.md#single-global-routing-graph-p16)
+for the on-disk contract and the app download path
+(`ZoneDownloadManager.startGraphDownload`). This did **not** touch offline
+transit: the transit index is still fully self-contained and independent of the
+road graph (access/egress/transfer legs use a straight-line walk heuristic in
+`transit.rs`, not the road graph).
 
 ## Gap (2): zone (Morton) vs feed (metro) boundaries
 
