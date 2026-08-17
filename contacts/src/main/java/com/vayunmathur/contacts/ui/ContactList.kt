@@ -435,7 +435,7 @@ fun getAvatarColor(id: Long): Color {
         Color(0xFF004B5B),
         Color(0xFF5528A1),
     )
-    val index = (id % colors.size).toInt()
+    val index = Math.floorMod(id, colors.size.toLong()).toInt()
     return colors[index]
 }
 
