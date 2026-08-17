@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -27,6 +28,7 @@ import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
+import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.TextButton
@@ -37,7 +39,7 @@ fun GameModeDropdown(selected: GameMode, onSelected: (GameMode) -> Unit) {
     Box {
         TextButton(onClick = { expanded = true }) {
             Text(stringResource(gameModeLabel(selected)), fontWeight = FontWeight.Bold)
-            Text("  Γû╛", fontWeight = FontWeight.Bold)
+            IconArrowDropDown(modifier = Modifier.size(18.dp))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             GameMode.entries.forEach { mode ->
@@ -85,7 +87,7 @@ fun DifficultyDropdown(selected: Difficulty, onSelected: (Difficulty) -> Unit) {
     Box {
         TextButton(onClick = { expanded = true }) {
             Text(stringResource(label(selected)))
-            Text(" Γû╛")
+            IconArrowDropDown(modifier = Modifier.size(18.dp))
         }
         DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             Difficulty.values().forEach { d ->
