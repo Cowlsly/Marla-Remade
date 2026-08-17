@@ -109,6 +109,8 @@
     <string name="place_action_call">Call</string>
     <!-- Place sheet action row: open the place's website -->
     <string name="place_action_website">Website</string>
+    <!-- Place sheet action row: order from this restaurant via the food-delivery app -->
+    <string name="place_action_order">Order</string>
     <!-- Place sheet action row: share the place -->
     <string name="place_action_share">Share</string>
     <!-- Place sheet action row: save the place (bookmark) -->

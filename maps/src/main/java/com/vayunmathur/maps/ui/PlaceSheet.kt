@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.IconMenuBook
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconSchedule
 import com.vayunmathur.library.ui.IconShare
+import com.vayunmathur.library.ui.IconShoppingCart
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.IconStarBorder
 import com.vayunmathur.library.ui.ListItem
@@ -61,6 +62,7 @@ import com.vayunmathur.maps.data.OpeningHours
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiInfo
 import com.vayunmathur.maps.data.google.StreetViewDataSource
+import com.vayunmathur.maps.ipc.rememberOrderDeepLink
 import com.vayunmathur.maps.data.google.StreetViewPano
 import com.vayunmathur.maps.ui.streetview.StreetViewScreen
 import com.vayunmathur.maps.data.timeFormat
@@ -130,6 +132,9 @@ private fun PlaceSheetContent(
 ) {
     val poi by viewModel.currentPoiInfo.collectAsState()
     val context = LocalContext.current
+    // If this is a restaurant/food place, ask fooddelivery whether it's orderable
+    // (off the main thread, null-safe). Absent/not-orderable → null → no Order button.
+    val orderDeepLink by rememberOrderDeepLink(context, feature, poi?.category)
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         PlaceHeader(feature.name, poi, hasOsmHours = openingHours != null)
         PlaceActionRow(
@@ -139,6 +144,7 @@ private fun PlaceSheetContent(
             inactiveNavigation = inactiveNavigation,
             savedPlacesViewModel = savedPlacesViewModel,
             requestDirections = requestDirections,
+            orderDeepLink = orderDeepLink,
         )
         menu?.let {
             RestaurantItem({ IconMenuBook() }, stringResource(R.string.menu_label)) { goto(context, it) }
@@ -236,6 +242,7 @@ private fun PlaceActionRow(
     inactiveNavigation: SpecificFeature.Route?,
     savedPlacesViewModel: SavedPlacesViewModel,
     requestDirections: () -> Unit,
+    orderDeepLink: String?,
 ) {
     val context = LocalContext.current
     val saved by savedPlacesViewModel.saved.collectAsState()
@@ -256,6 +263,12 @@ private fun PlaceActionRow(
         website?.let {
             PlaceAction(Modifier.weight(1f), { IconGlobe() }, stringResource(R.string.place_action_website)) {
                 goto(context, it)
+            }
+        }
+        // Order (P19): only present when fooddelivery reports this place orderable.
+        orderDeepLink?.let { uri ->
+            PlaceAction(Modifier.weight(1f), { IconShoppingCart() }, stringResource(R.string.place_action_order)) {
+                goto(context, uri)
             }
         }
         PlaceAction(Modifier.weight(1f), { IconShare() }, stringResource(R.string.place_action_share)) {

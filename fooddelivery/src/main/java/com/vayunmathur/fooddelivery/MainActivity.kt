@@ -36,6 +36,7 @@ import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.CartItem
 import com.vayunmathur.fooddelivery.data.CartStore
+import com.vayunmathur.fooddelivery.ipc.OrderLookupContract
 import com.vayunmathur.fooddelivery.notifications.OrderLiveUpdate
 import com.vayunmathur.fooddelivery.ui.AccountScreen
 import com.vayunmathur.fooddelivery.ui.CartScreen
@@ -61,6 +62,11 @@ class MainActivity : ComponentActivity() {
     // Compose state so onNewIntent can push a new deep link into the running UI.
     private val trackOrderId = mutableStateOf<Int?>(null)
 
+    // A restaurant to open, set from a fooddelivery://restaurant/<id> deep link
+    // (e.g. the maps place-sheet "Order" button). Same Compose-state pattern so
+    // onNewIntent can re-deep-link into the running UI.
+    private val openRestaurantId = mutableStateOf<Int?>(null)
+
     private val requestNotificationPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
 
@@ -68,6 +74,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
 
         trackOrderId.value = intent.trackOrderIdOrNull()
+        openRestaurantId.value = intent.restaurantIdOrNull()
         requestNotificationPermissionIfNeeded()
         // api.deliverycollective.com is on AWS Elastic Beanstalk and serves an ACM cert
         // chaining to Amazon Root CA 1, which FIRST_PARTY (ISRG + GTS only) doesn't carry —
@@ -89,7 +96,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             DynamicTheme {
-                FoodDeliveryApp(trackOrderId)
+                FoodDeliveryApp(trackOrderId, openRestaurantId)
             }
         }
     }
@@ -98,6 +105,7 @@ class MainActivity : ComponentActivity() {
         super.onNewIntent(intent)
         setIntent(intent)
         intent.trackOrderIdOrNull()?.let { trackOrderId.value = it }
+        intent.restaurantIdOrNull()?.let { openRestaurantId.value = it }
     }
 
     private fun requestNotificationPermissionIfNeeded() {
@@ -111,8 +119,16 @@ class MainActivity : ComponentActivity() {
 private fun Intent.trackOrderIdOrNull(): Int? =
     getIntExtra(OrderLiveUpdate.EXTRA_TRACK_ORDER_ID, -1).takeIf { it > 0 }
 
+// fooddelivery://restaurant/<id> — the cross-app "open this restaurant's order
+// page" deep link (see OrderLookupContract). Returns null for anything else.
+private fun Intent.restaurantIdOrNull(): Int? {
+    val uri = data ?: return null
+    if (uri.scheme != OrderLookupContract.DEEP_LINK_SCHEME || uri.host != OrderLookupContract.DEEP_LINK_HOST) return null
+    return uri.lastPathSegment?.toIntOrNull()?.takeIf { it > 0 }
+}
+
 @Composable
-private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>) {
+private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>, openRestaurantId: MutableState<Int?>) {
     val context = LocalContext.current
     val backStack = rememberNavBackStack<Route>(Route.Main())
 
@@ -121,6 +137,13 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>) {
         val id = trackOrderId.value ?: return@LaunchedEffect
         backStack.add(Route.OrderTracking(id))
         trackOrderId.value = null
+    }
+
+    // A fooddelivery://restaurant/<id> deep link opens that restaurant's page.
+    LaunchedEffect(openRestaurantId.value) {
+        val id = openRestaurantId.value ?: return@LaunchedEffect
+        backStack.add(Route.Restaurant(id))
+        openRestaurantId.value = null
     }
     val cart = remember { mutableStateListOf<CartItem>().also { it.addAll(CartStore.getAll(context)) } }
 

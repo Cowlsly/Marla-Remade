@@ -19,6 +19,12 @@
          the family-pins feature is absent. -->
     <uses-permission android:name="com.vayunmathur.findfamily.permissions.ACCESS_FAMILY" />
 
+    <!-- Order integration (P19): read fooddelivery's exported orderable-lookup
+         provider. Signature-level, granted only because both MA apps share the
+         signing key; on any other signer it is not granted and the Order button
+         is simply absent. -->
+    <uses-permission android:name="com.vayunmathur.fooddelivery.permissions.ACCESS_ORDERS" />
+
     <!-- Voice search (P8): records audio for the system SpeechRecognizer, which
          routes to the user-selected recognition service (the MA speech app when
          installed). -->
@@ -44,6 +50,9 @@
         <intent>
             <action android:name="com.vayunmathur.findfamily.action.FAMILY_LOCATIONS" />
         </intent>
+        <!-- Android 11+ package visibility: resolve fooddelivery's orderable-lookup
+             provider (P19) and its fooddelivery://restaurant/<id> order deep link. -->
+        <package android:name="com.vayunmathur.fooddelivery" />
     </queries>
 
 
