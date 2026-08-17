@@ -117,6 +117,8 @@
     <string name="set_home">Set home</string>
     <!-- Button: Create Work saved place. Verb. -->
     <string name="set_work">Set work</string>
+    <!-- Toast shown when no app on the device can pick a contact -->
+    <string name="no_contact_picker">No contacts app available</string>
     <!-- Button: Save selected place as Home -->
     <string name="save_as_home">Save as Home</string>
     <!-- Button: Save selected place as Work -->
