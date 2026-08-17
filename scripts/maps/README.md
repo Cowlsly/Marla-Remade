@@ -114,6 +114,7 @@ base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
+| `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
@@ -197,18 +198,54 @@ The base dominates; the safety + admin overlays are a rounding error on top.
 
 ---
 
-## Publish to data.vayunmathur.com
+## Publishing to R2
 
-Upload with a bumped key so the app can switch atomically:
+Upload the built `v5.pmtiles` to Cloudflare R2 with
+[`publish_r2.sh`](publish_r2.sh). It reads **all** credentials/config from
+**environment variables** — nothing secret is stored in the repo.
+
+**Required env** (placeholders — set your real values):
+
+| Var | Meaning |
+|---|---|
+| `R2_ENDPOINT` | S3 API endpoint, e.g. `https://<ACCOUNT_ID>.r2.cloudflarestorage.com` |
+| `R2_ACCESS_KEY_ID` | R2 access key id |
+| `R2_SECRET_ACCESS_KEY` | R2 secret access key |
+| `R2_BUCKET` | *(optional)* bucket name, default `maps` (served at `data.vayunmathur.com`) |
 
 ```bash
-R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com \
-AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
-R2_KEY=v5.pmtiles ./scripts/maps/vendor_pmtiles.sh --local v5.pmtiles --source v5.pmtiles
+# export secrets (do NOT pass them as CLI args — they leak into shell history)
+export R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com
+export R2_ACCESS_KEY_ID=...        # your key id
+export R2_SECRET_ACCESS_KEY=...    # your secret
+# export R2_BUCKET=maps            # optional; this is the default
+
+# upload (uses rclone if present, else aws s3 cp --endpoint-url "$R2_ENDPOINT")
+./scripts/maps/publish_r2.sh v5.pmtiles --key v5.pmtiles
+
+# ...or let the build publish automatically after a successful merge:
+./build_v5_pmtiles.sh --pbf planet-latest.osm.pbf --out v5.pmtiles --publish
 ```
 
-(`vendor_pmtiles.sh` handles multipart upload, cache headers and a Range-request
-verification against the public custom domain.)
+`publish_r2.sh` sets `Content-Type: application/octet-stream` and a long
+immutable `Cache-Control`, and fails clearly if any required env var is unset.
+It auto-detects the upload tool (`--tool auto|rclone|aws`):
+
+* **rclone** — `rclone copyto … :s3:$R2_BUCKET/<key>` with `--s3-*` flags.
+* **aws-cli** — `aws s3 cp … --endpoint-url "$R2_ENDPOINT"` (creds scoped to the
+  invocation via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from the R2 vars).
+
+Since v5 **bakes the maxspeed layer in**, you normally publish just the single
+`v5.pmtiles`. The script also accepts multiple files
+(`publish_r2.sh v5.pmtiles aux.pmtiles`) for any siblings built separately.
+
+> **Secret hygiene:** never commit keys, never paste them on the command line
+> (shell history), prefer a secret manager / `.env` that is git-ignored, and
+> **rotate** R2 keys periodically and immediately if one is ever exposed.
+
+> (The older [`vendor_pmtiles.sh`](vendor_pmtiles.sh) — which streams the 137 GB
+> upstream base to R2 — remains for the base-vendoring workflow; `publish_r2.sh`
+> is the general publisher for locally built `.pmtiles`.)
 
 Then **P13** (separate task, app code) points the style at the new file:
 
@@ -217,7 +254,8 @@ Then **P13** (separate task, app code) points the style at the new file:
 "url": "pmtiles://https://data.vayunmathur.com/v5.pmtiles"
 ```
 
-…adds style layers for `safety`, and switches the country/state mask in
+…adds style layers for `safety`, points `MaxspeedSource.PMTILES_URL` at the same
+file (source-layer `maxspeed`), and switches the country/state mask in
 `CountryMap.kt` / `MyMapLayers.kt` from the `.fgb` assets to the
 `admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /
 `iso_3166_2`, which are preserved).

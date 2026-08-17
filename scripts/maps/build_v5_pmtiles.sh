@@ -40,6 +40,9 @@ set -euo pipefail
 #   --skip-safety     omit safety layer
 #   --skip-maxspeed   omit maxspeed layer
 #   --skip-admin      omit admin layers
+#   --publish         after a successful build, upload $OUT to R2 (publish_r2.sh;
+#                     reads R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY from env)
+#   --publish-key K   remote object key when publishing (default: basename of --out)
 #   --keep-work       keep intermediates
 #
 # Tools: tile-join + tippecanoe, osmium, ogr2ogr (GDAL), python3, and either
@@ -58,6 +61,8 @@ SKIP_SAFETY=0
 SKIP_MAXSPEED=0
 SKIP_ADMIN=0
 KEEP_WORK=0
+PUBLISH=0
+PUBLISH_KEY=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -73,7 +78,9 @@ while [[ $# -gt 0 ]]; do
         --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
         --skip-admin) SKIP_ADMIN=1; shift ;;
         --keep-work) KEEP_WORK=1; shift ;;
-        -h|--help) sed -n '4,60p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        --publish) PUBLISH=1; shift ;;
+        --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
+        -h|--help) sed -n '4,62p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -139,8 +146,19 @@ echo "Layers now in $OUT:"
 echo "  base : earth landcover landuse water roads buildings boundaries pois places"
 echo "  new  : safety maxspeed admin_country admin_region admin_city"
 echo ""
-echo "Publish (bump key to v5.pmtiles):"
-echo "  R2_KEY=v5.pmtiles ./scripts/maps/vendor_pmtiles.sh --local $OUT --source $OUT"
-echo "Then P13 updates style.json url -> pmtiles://https://data.vayunmathur.com/v5.pmtiles"
+
+if [[ "$PUBLISH" == "1" ]]; then
+    PUB_ARGS=("$OUT")
+    [[ -n "$PUBLISH_KEY" ]] && PUB_ARGS+=(--key "$PUBLISH_KEY")
+    echo "[v5] publishing to R2 (creds from env: R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY)"
+    "$HERE/publish_r2.sh" "${PUB_ARGS[@]}"
+else
+    echo "Publish (creds from environment variables — see README 'Publishing to R2'):"
+    echo "  export R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
+    echo "  export R2_ACCESS_KEY_ID=...  R2_SECRET_ACCESS_KEY=..."
+    echo "  ./scripts/maps/publish_r2.sh $OUT --key v5.pmtiles"
+    echo "  # or re-run this build with --publish"
+    echo "Then P13 updates style.json url -> pmtiles://https://data.vayunmathur.com/v5.pmtiles"
+fi
 
 [[ "$KEEP_WORK" == "1" ]] || echo "(intermediates kept in $WORK; pass --keep-work to silence)"
