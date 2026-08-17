@@ -63,47 +63,79 @@ object DateString {
             .withLocale(locale)
             .format(date.toJavaLocalDate())
 
-    /** A long, readable date — `14 March 2025`. */
+    /**
+     * A long, readable date — locale-aware ordering via [FormatStyle.LONG].
+     * e.g. `August 17, 2026` in en-US, `17 August 2026` in en-GB, `2026年8月17日` in ja-JP.
+     * Replaces the previous hard-coded "day month year" order.
+     */
     fun dateLong(date: LocalDate, locale: Locale = Locale.getDefault()): String =
-        date.format(LocalDate.Format {
-            day(Padding.NONE)
-            char(' ')
-            monthName(MonthNames(localizedMonthNames(DateNameStyle.FULL, locale)))
-            char(' ')
-            year()
-        })
+        DateTimeFormatter.ofLocalizedDate(FormatStyle.LONG)
+            .withLocale(locale)
+            .format(date.toJavaLocalDate())
 
-    /** Date with weekday and year — `Mon, Jan 3, 2025`. */
-    fun dateWeekday(date: LocalDate, locale: Locale = Locale.getDefault()): String =
-        date.format(LocalDate.Format {
-            dayOfWeek(DayOfWeekNames(localizedDayOfWeekNames(DateNameStyle.SHORT, locale)))
-            char(','); char(' ')
-            monthName(MonthNames(localizedMonthNames(DateNameStyle.SHORT, locale)))
-            char(' ')
-            day(Padding.NONE)
-            char(','); char(' ')
-            year(Padding.NONE)
-        })
+    /**
+     * Date with weekday and year — locale-aware ordering.
+     * e.g. `Mon, Jan 3, 2025` in en-US, `Mon, 3 Jan 2025` in en-GB.
+     * Uses the skeleton `EEE MMM d y` so ordering and punctuation follow the system locale.
+     */
+    fun dateWeekday(date: LocalDate, locale: Locale = Locale.getDefault()): String {
+        val pattern = DateFormat.getBestDateTimePattern(locale, "EEE MMM d y")
+        return DateTimeFormatter.ofPattern(pattern, locale).format(date.toJavaLocalDate())
+    }
 
-    /** Date with weekday, no year — `Mon, Jan 3`. */
-    fun dateWeekdayNoYear(date: LocalDate, locale: Locale = Locale.getDefault()): String =
-        date.format(LocalDate.Format {
-            dayOfWeek(DayOfWeekNames(localizedDayOfWeekNames(DateNameStyle.SHORT, locale)))
-            char(','); char(' ')
-            monthName(MonthNames(localizedMonthNames(DateNameStyle.SHORT, locale)))
-            char(' ')
-            day(Padding.NONE)
-        })
+    /** Date with weekday, no year — locale-aware, e.g. `Mon, Jan 3` / `Mon, 3 Jan`. */
+    fun dateWeekdayNoYear(date: LocalDate, locale: Locale = Locale.getDefault()): String {
+        val pattern = DateFormat.getBestDateTimePattern(locale, "EEE MMM d")
+        return DateTimeFormatter.ofPattern(pattern, locale).format(date.toJavaLocalDate())
+    }
 
-    /** Date without a weekday — `Jan 3, 2025`. */
+    /**
+     * Date without a weekday — locale-aware medium style.
+     * e.g. `Jan 3, 2025` in en-US, `3 Jan 2025` in en-GB, `2025/01/03` in ja-JP (medium).
+     */
     fun monthDayYear(date: LocalDate, locale: Locale = Locale.getDefault()): String =
-        date.format(LocalDate.Format {
-            monthName(MonthNames(localizedMonthNames(DateNameStyle.SHORT, locale)))
-            char(' ')
-            day(Padding.NONE)
-            char(','); char(' ')
-            year()
-        })
+        DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)
+            .withLocale(locale)
+            .format(date.toJavaLocalDate())
+
+    /**
+     * Month and day without year — locale-aware, e.g. `August 17` / `17 August`.
+     * Uses skeleton `MMMM d` for full month name. For short month use [monthDayShort].
+     */
+    fun dateMonthDay(date: LocalDate, locale: Locale = Locale.getDefault()): String {
+        val pattern = DateFormat.getBestDateTimePattern(locale, "MMMM d")
+        return DateTimeFormatter.ofPattern(pattern, locale).format(date.toJavaLocalDate())
+    }
+
+    /** Month and day, short month name — e.g. `Aug 17` / `17 Aug`. */
+    fun monthDayShort(date: LocalDate, locale: Locale = Locale.getDefault()): String {
+        val pattern = DateFormat.getBestDateTimePattern(locale, "MMM d")
+        return DateTimeFormatter.ofPattern(pattern, locale).format(date.toJavaLocalDate())
+    }
+
+    /**
+     * Helper for UIs that optionally include the year (e.g. birthday picker with "no year" toggle).
+     * When [includeYear] is true uses [dateLong] (full, locale-aware); otherwise [dateMonthDay].
+     */
+    fun dateWithOptionalYear(date: LocalDate, includeYear: Boolean, locale: Locale = Locale.getDefault()): String =
+        if (includeYear) dateLong(date, locale) else dateMonthDay(date, locale)
+
+    /**
+     * Ordered date fields for a locale, derived from the best pattern for `yMMMd`.
+     * Returns the permutation of [DateField] that matches the system ordering:
+     * e.g. en-US → [MONTH, DAY, YEAR], en-GB → [DAY, MONTH, YEAR], ja-JP → [YEAR, MONTH, DAY].
+     */
+    fun dateFieldOrder(locale: Locale = Locale.getDefault()): List<DateField> {
+        val pattern = DateFormat.getBestDateTimePattern(locale, "yMMMd")
+        val y = pattern.indexOf('y').takeIf { it >= 0 } ?: Int.MAX_VALUE
+        val m = pattern.indexOf('M').takeIf { it >= 0 } ?: Int.MAX_VALUE
+        val d = pattern.indexOf('d').takeIf { it >= 0 } ?: Int.MAX_VALUE
+        return listOf(DateField.YEAR to y, DateField.MONTH to m, DateField.DAY to d)
+            .sortedBy { it.second }.map { it.first }
+    }
+
+    /** Date component for wheel ordering. */
+    enum class DateField { YEAR, MONTH, DAY }
 
     // ── Time-only forms (input LocalTime + the 12/24-hour flag) ────────────
 

@@ -16,6 +16,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -25,10 +26,10 @@ import com.vayunmathur.contacts.data.hasYear
 import com.vayunmathur.library.util.LocalNavResultRegistry
 import kotlinx.coroutines.launch
 import kotlinx.datetime.*
-import kotlinx.datetime.format.MonthNames
 import com.vayunmathur.library.util.localizedMonthNames
 import kotlin.math.abs
 import kotlin.time.Clock
+import java.util.Locale
 
 @Composable
 fun EventDatePickerDialog(id: String, initialDate: LocalDate?, onDismiss: () -> Unit) {
@@ -81,27 +82,21 @@ fun EventDatePickerDialog(id: String, initialDate: LocalDate?, onDismiss: () -> 
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Date Preview
+                // Date Preview — region-aware: ordering, month names and punctuation follow system locale.
+                val locale: Locale = LocalConfiguration.current.locales[0] ?: Locale.getDefault()
                 val previewText = try {
                     val date = LocalDate(selectedYear, selectedMonth, selectedDay)
-                    date.format(LocalDate.Format {
-                        monthName(MonthNames(localizedMonthNames(DateNameStyle.FULL)))
-                        chars(" ")
-                        day()
-                        if (includeYear) {
-                            chars(", ")
-                            year()
-                        }
-                    })
+                    com.vayunmathur.library.ui.DateString.dateWithOptionalYear(date, includeYear, locale)
                 } catch (_: Exception) { "" }
-                
+
                 Text(
                     text = previewText,
                     style = MaterialTheme.typography.headlineMedium,
                     modifier = Modifier.padding(bottom = 24.dp)
                 )
 
-                // Spinners
+                // Spinners — wheel order follows the system date field order (MDY / DMY / YMD).
+                val fieldOrder = remember(locale) { com.vayunmathur.library.ui.DateString.dateFieldOrder(locale) }
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -109,25 +104,29 @@ fun EventDatePickerDialog(id: String, initialDate: LocalDate?, onDismiss: () -> 
                     horizontalArrangement = Arrangement.SpaceEvenly,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    WheelPicker(
-                        items = months.map { localizedMonthNames(DateNameStyle.SHORT)[it - 1] },
-                        initialIndex = selectedMonth - 1,
-                        onIndexSelected = { selectedMonth = it + 1 },
-                        modifier = Modifier.weight(1f)
-                    )
-                    WheelPicker(
-                        items = (1..daysInMonth).map { it.toString() },
-                        initialIndex = selectedDay - 1,
-                        onIndexSelected = { selectedDay = it + 1 },
-                        modifier = Modifier.weight(1f)
-                    )
-                    WheelPicker(
-                        items = years.map { it.toString() },
-                        initialIndex = years.indexOf(selectedYear).coerceAtLeast(0),
-                        onIndexSelected = { selectedYear = years[it] },
-                        modifier = Modifier.weight(1f),
-                        enabled = includeYear
-                    )
+                    for (field in fieldOrder) {
+                        when (field) {
+                            com.vayunmathur.library.ui.DateString.DateField.MONTH -> WheelPicker(
+                                items = months.map { localizedMonthNames(DateNameStyle.SHORT, locale)[it - 1] },
+                                initialIndex = selectedMonth - 1,
+                                onIndexSelected = { selectedMonth = it + 1 },
+                                modifier = Modifier.weight(1f)
+                            )
+                            com.vayunmathur.library.ui.DateString.DateField.DAY -> WheelPicker(
+                                items = (1..daysInMonth).map { it.toString() },
+                                initialIndex = (selectedDay - 1).coerceIn(0, daysInMonth - 1),
+                                onIndexSelected = { selectedDay = it + 1 },
+                                modifier = Modifier.weight(1f)
+                            )
+                            com.vayunmathur.library.ui.DateString.DateField.YEAR -> WheelPicker(
+                                items = years.map { it.toString() },
+                                initialIndex = years.indexOf(selectedYear).coerceAtLeast(0),
+                                onIndexSelected = { selectedYear = years[it] },
+                                modifier = Modifier.weight(1f),
+                                enabled = includeYear
+                            )
+                        }
+                    }
                 }
 
                 Spacer(modifier = Modifier.height(24.dp))
