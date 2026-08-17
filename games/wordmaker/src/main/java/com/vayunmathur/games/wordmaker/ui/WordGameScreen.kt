@@ -306,7 +306,19 @@ fun WordGameScreen(
                                 val isSolution = word in crosswordData.solutionWords
                                 val isBonus = !isSolution && word.length >= 3 && actions.isInDictionary(word)
 
+                                // #543 — re-entering an already-found/bonus word must not
+                                // replay the board/bonus animation. Check for duplicates
+                                // first, including words that are mid-animation (not yet
+                                // flushed to DataStore + foundWords/bonusWords flow).
+                                val alreadyFound = word in foundWords || word == wordToAnimate?.word
+                                val alreadyBonus = word in bonusWords || word == animatedWord
                                 when {
+                                    isSolution && alreadyFound -> shakeAnim(wordShakeAnim)
+                                    isBonus && alreadyBonus -> {
+                                        val j = launch { shakeAnim(bonusShakeAnim, 60) }
+                                        shakeAnim(wordShakeAnim)
+                                        j.join()
+                                    }
                                     isSolution && word !in foundWords -> {
                                         wordToAnimate = WordToAnimate(word, ids)
                                         actions.onSolutionWordFound(word)
@@ -319,11 +331,6 @@ fun WordGameScreen(
                                             actions.addBonusWord(word)
                                             animatedWord = null
                                         }
-                                    }
-                                    isBonus && word in bonusWords -> {
-                                        val j = launch { shakeAnim(bonusShakeAnim, 60) }
-                                        shakeAnim(wordShakeAnim)
-                                        j.join()
                                     }
                                     else -> shakeAnim(wordShakeAnim)
                                 }
