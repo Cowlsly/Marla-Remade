@@ -13,6 +13,8 @@ launcherIcon {
 
 android {
     defaultConfig {
+        versionCode = 20260816
+        versionName = "v2.6.7"
         applicationId = "com.vayunmathur.networklocation"
     }
     androidResources {

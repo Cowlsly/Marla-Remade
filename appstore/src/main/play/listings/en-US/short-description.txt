@@ -1,0 +1,1 @@
+An app store that verifies every install and tells you how far it can vouch for it
