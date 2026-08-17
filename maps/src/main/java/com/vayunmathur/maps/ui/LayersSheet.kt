@@ -22,8 +22,8 @@ import com.vayunmathur.maps.R
  * Map-layers toggle sheet (P6), opened from the browse [LayersButton]. Only the
  * layers MA can actually support are surfaced, each gated on what exists:
  *
- *  - **Traffic** — LIVE. MA already renders `traffic-layer` in [MyMapLayers]; the
- *    toggle controls its visibility.
+ *  - **Traffic** — LIVE. MA renders the keyless Google `traffic-raster` overlay
+ *    in [MyMapLayers]; the toggle controls its visibility.
  *  - **Satellite** — GATED. Only shown when a raster tile source is hosted
  *    ([SatelliteSource.available]); hidden entirely otherwise (Decision D11).
  *  - **Safety layers** — GATED on the P13 PMTiles v5. The toggle is shown now but
