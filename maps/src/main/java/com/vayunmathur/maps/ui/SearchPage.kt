@@ -108,6 +108,14 @@ fun SearchPage(
                 backStack.pop()
             }
 
+            override fun pickContactAddress(address: String) {
+                // Run the P3 Google search for the picked address and auto-select
+                // the first hit through the shared selectResult path.
+                searchViewModel.searchAndSelectFirst(address, nearLat, nearLon) { first ->
+                    if (first != null) selectResult(first)
+                }
+            }
+
             override fun back() {
                 backStack.pop()
             }
@@ -134,7 +142,12 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
                     disabledContainerColor = Color.Transparent,
                 ),
                 leadingIcon = { IconSearch() },
-                trailingIcon = { VoiceSearchButton(onResult = { actions.setQuery(it) }) },
+                trailingIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        ContactAddressButton(onAddress = { actions.pickContactAddress(it) })
+                        VoiceSearchButton(onResult = { actions.setQuery(it) })
+                    }
+                },
                 singleLine = true
             )
         },

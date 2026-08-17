@@ -17,12 +17,21 @@
          routes to the user-selected recognition service (the MA speech app when
          installed). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
+    <!-- Contact address shortcut (P17): fallback only. The system postal-address
+         picker grants an implicit per-row read, so this is requested at runtime
+         solely when an OEM refuses that read; the common path needs no grant. -->
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
     <!-- Android 11+ package visibility: needed so SpeechRecognizer can see and
          bind the installed on-device recognition service for voice search. -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <!-- Resolve the system postal-address picker (ACTION_PICK over the
+             Contacts provider) for the P17 contact address shortcut. -->
+        <intent>
+            <action android:name="android.intent.action.PICK" />
+            <data android:mimeType="vnd.android.cursor.dir/postal-address_v2" />
         </intent>
     </queries>
 

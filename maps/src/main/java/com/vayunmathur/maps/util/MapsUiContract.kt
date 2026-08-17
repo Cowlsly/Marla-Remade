@@ -31,6 +31,12 @@ data class SearchUiState(
 interface SearchActions {
     fun setQuery(query: String) {}
     fun selectResult(result: SearchResult) {}
+    /**
+     * Handle a postal address picked from a contact (P17): run the Google search
+     * for [address] and auto-select the first result — the same path as tapping
+     * the top search row, no user tap required. No-op when the search is empty.
+     */
+    fun pickContactAddress(address: String) {}
     fun clearRecents() {}
     fun back() {}
 

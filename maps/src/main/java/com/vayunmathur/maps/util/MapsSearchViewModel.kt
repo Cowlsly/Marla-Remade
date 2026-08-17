@@ -90,6 +90,33 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
         }
     }
 
+    /**
+     * Runs the Google search for [query] immediately (no debounce), publishes the
+     * results so the list + map pins update, and hands back the FIRST result (or
+     * null) so a caller can auto-select it programmatically.
+     *
+     * Used by the P17 contact-address shortcut: pick an address → search → open
+     * the top hit without a user tap. Cancels any in-flight keystroke search
+     * first so results don't race.
+     */
+    fun searchAndSelectFirst(
+        query: String,
+        nearLat: Double,
+        nearLon: Double,
+        onFirst: (SearchResult?) -> Unit,
+    ) {
+        _query.value = query
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
+            // GoogleSearchDataSource.search does its own Dispatchers.IO + never
+            // throws (empty list on any scrape/path failure).
+            val results = GoogleSearchDataSource.search(query, nearLat, nearLon)
+                .map { it.toSearchResult() }
+            _results.value = results
+            onFirst(results.firstOrNull())
+        }
+    }
+
     /** Resets the search state (keeps recents). */
     fun reset() {
         searchJob?.cancel()

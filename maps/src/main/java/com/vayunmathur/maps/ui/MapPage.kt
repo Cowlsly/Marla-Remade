@@ -592,10 +592,39 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             }, colors = ListItemDefaults.colors(Color.Transparent), modifier = Modifier.clickable {
                                 openSearch()
                             }, trailingContent = {
-                                // Voice search (P8): a transcript opens the
-                                // search page pre-filled, which runs the P3
-                                // Google search via SearchPage's query effect.
-                                VoiceSearchButton(onResult = { openCategorySearch(it) })
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    // Contact address shortcut (P17): pick a
+                                    // contact's postal address, run the P3 Google
+                                    // search and auto-select the first hit (open
+                                    // its pin/sheet + center the map) — the same
+                                    // path as tapping a search result.
+                                    ContactAddressButton(onAddress = { address ->
+                                        val bbox = camera.projection?.queryVisibleBoundingBox()
+                                        val nearLat = ((bbox?.north ?: 85.0) + (bbox?.south ?: -85.0)) / 2.0
+                                        val nearLon = ((bbox?.east ?: 180.0) + (bbox?.west ?: -180.0)) / 2.0
+                                        searchViewModel.searchAndSelectFirst(address, nearLat, nearLon) { first ->
+                                            if (first != null) {
+                                                if (selectedFeature is SpecificFeature.Route) {
+                                                    viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
+                                                }
+                                                viewModel.set(searchViewModel.toFeature(first))
+                                                coroutineScope.launch {
+                                                    camera.animateTo(
+                                                        camera.position.copy(
+                                                            target = Position(first.lon, first.lat),
+                                                            zoom = maxOf(camera.position.zoom, 14.0),
+                                                        )
+                                                    )
+                                                }
+                                                coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                            }
+                                        }
+                                    })
+                                    // Voice search (P8): a transcript opens the
+                                    // search page pre-filled, which runs the P3
+                                    // Google search via SearchPage's query effect.
+                                    VoiceSearchButton(onResult = { openCategorySearch(it) })
+                                }
                             })
                         }
                         Spacer(Modifier.height(8.dp))
