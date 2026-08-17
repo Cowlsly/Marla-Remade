@@ -10,7 +10,7 @@ import kotlinx.coroutines.withContext
  * Replaces the old on-device OfflineRouter loopback vector-traffic tile server
  * (`http://localhost/traffic/{z}/{x}/{y}`) with Google's own colored congestion
  * overlay — the same transparent raster tiles maps.google.com layers over its
- * basemap when Traffic is turned on. Like the other `data/google/*` scrapes there
+ * basemap when Traffic is turned on. Like the other `data/google` scrapes there
  * is NO API key: the request is authorised by a browser-like `User-Agent` +
  * google.com `Referer`, and served from Google's public map-tiles ("mapstiles")
  * hosts `mt0-3.google.com`.
