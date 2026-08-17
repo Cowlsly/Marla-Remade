@@ -11,4 +11,10 @@
     <string name="general">عام</string>
     <string name="share_link">مشاركة الرابط</string>
     <string name="save_failed">فشل الحفظ: <xliff:g id="error" example="Permission denied">%1$s</xliff:g></string>
+    <string name="name">الاسم</string>
+    <string name="line">السطر</string>
+    <string name="go">انتقل</string>
+    <string name="discard">تجاهل</string>
+    <string name="auto_save">الحفظ التلقائي</string>
+    <string name="apply">تطبيق</string>
 </resources>
