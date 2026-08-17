@@ -1,22 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="update_all">Aktualizuj wszystko (%1$s)</string>
+    <string name="update_all">Aktualizuj wszystko (%1$d)</string>
     <string name="last_sync">Ostatnia synchronizacja: %1$s</string>
     <string name="installed">Zainstalowano</string>
-    <string name="all_apps_up_to_date">Wszystkie aplikacje aktualne</string>
+    <string name="all_apps_up_to_date">Wszystko jest aktualne</string>
     <string name="uninstall">Odinstaluj</string>
-    <string name="this_will_uninstall_you_can_reinstall_la">Spowoduje to odinstalowanie %1$s. Możesz zainstalować ponownie później ze sklepu.</string>
+    <string name="this_will_uninstall_you_can_reinstall_la">Aplikacja %1$s zostanie usunięta. Możesz ją zainstalować ponownie w dowolnym momencie.</string>
     <plurals name="updates_count">
-        <item quantity="one">%1$s aktualizacja</item>
-        <item quantity="few">%1$s aktualizacje</item>
-        <item quantity="many">%1$s aktualizacji</item>
-        <item quantity="other">%1$s aktualizacji</item>
+        <item quantity="one">Dostępna jest %1$d aktualizacja</item>
+        <item quantity="few">Dostępne są %1$d aktualizacje</item>
+        <item quantity="many">Dostępne jest %1$d aktualizacji</item>
+        <item quantity="other">Dostępne jest %1$d aktualizacji</item>
     </plurals>
     <string name="open">Otwórz</string>
     <string name="uninstall_3">Odinstalować %1$s?</string>
     <string name="view_in_play_store">Zobacz w Sklepie Play</string>
     <string name="installed_2">Zainstalowano %1$s</string>
-    <string name="repositories">Repozytoria</string>
+    <string name="repositories">Źródła</string>
     <string name="filter_all">Wszystko</string>
     <string name="section_play_top_charts">Najpopularniejsze w Sklepie Play</string>
     <string name="nav_library">Biblioteka</string>
@@ -28,7 +28,7 @@
     <string name="section_recently_updated_subtitle">Najnowsze kompilacje na F-Droid</string>
     <string name="nav_updates">Aktualizacje</string>
     <string name="section_modern_apps">Z Modern Apps</string>
-    <string name="sources_are_fixed">Te trzy źródła są wbudowane i nie można ich zmienić. Inne repozytoria F-Droid udostępniają pliki binarne stworzone przez kogoś innego, więc nie ma możliwości ich porównania.</string>
+    <string name="sources_are_fixed">Te źródła są wbudowane i nie można ich zmienić. Inne repozytoria F-Droid udostępniają pliki binarne stworzone przez kogoś innego, więc nie ma możliwości ich porównania.</string>
     <string name="section_modern_apps_subtitle">Zbudowano w tym repozytorium i podpisano tym samym kluczem co ten sklep</string>
     <string name="section_recently_updated">Nowe i zaktualizowane</string>
     <string name="filter_with_count">%1$s (%2$d)</string>
@@ -187,4 +187,9 @@
     <string name="trust_accrescent_check_list_signed">Lista aplikacji jest podpisana i sprawdzana na podstawie klucza wbudowanego w ten sklep, z sygnaturą czasową, której nie można cofnąć</string>
     <string name="trust_accrescent_check_key">Pobieranie jest podpisane dokładnie tym kluczem, co podpisano na liście nazw dla tej aplikacji</string>
     <string name="trust_accrescent_check_min_version">Wersja do pobrania jest równa lub wyższa od minimalnej wersji dozwolonej na liście podpisów</string>
+    <string name="store_rule_modern_android_title">Tylko Modern Android</string>
+    <string name="trust_accrescent_practice_signed_list">Lista zaufanych aplikacji oraz klucz oczekiwany dla każdej z nich pochodzą z jednego dokumentu podpisanego kluczem Ed25519.”</string>
+    <string name="trust_accrescent_limits">Accrescent nie publikuje żadnych skrótów dla poszczególnych plików ani powtarzalnych kompilacji, więc gwarancją jest podpis i minimalna wersja, a nie zgodność ze źródłem. Listy i linki do pobrania pochodzą ze zwykłego serwera za pośrednictwem gRPC; błędna odpowiedź może skutkować jedynie plikiem, który nie przejdzie kontroli podpisu i wersji. Nikt nie skanuje aplikacji i nie ma możliwości wycofania wadliwej wersji z telefonów.</string>
+    <string name="source_accrescent">Accrescent</string>
+    <string name="source_accrescent_pin">Przypięto do klucza podpisu repodata Accrescent (ed25519)</string>
 </resources>
