@@ -65,6 +65,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.R
 import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconHome
+import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconWork
 import com.vayunmathur.library.util.NavBackStack
@@ -229,21 +230,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         json = updatedStyle
     }
 
-    var dismissedZone by remember { mutableStateOf<Int?>(null) }
-    var showDownloadDialog by remember { mutableStateOf(false) }
-
-    // Zone Prompting Logic
-    LaunchedEffect(activeZone) {
-        if (activeZone != null && activeZone != dismissedZone) {
-            val status = zonesViewModel.getZoneStatus(activeZone)
-
-            // Only prompt if the user hasn't started the download yet
-            if (status == ZoneDownloadManager.ZoneStatus.NOT_STARTED) {
-                showDownloadDialog = true
-            }
-        }
-    }
-
     // --- LOCATION & OSM INITIALIZATION ---
     val userPosition by viewModel.userPosition.collectAsState()
     val userBearing by viewModel.userBearing.collectAsState()
@@ -404,7 +390,55 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }, Modifier, scaffoldState, 170.dp) { paddingValues ->
         AppScaffold(
-            title = "",
+            title = {
+                // Search bar lives IN the top app bar (Google-Maps style).
+                val searchName = if (selectedFeature is SpecificFeature.RoutableFeature) {
+                    (selectedFeature as SpecificFeature.RoutableFeature).name
+                } else {
+                    stringResource(MapsR.string.search_placeholder)
+                }
+                Card(shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.clickable { openSearch() }.padding(start = 12.dp),
+                    ) {
+                        IconSearch(Modifier.size(20.dp))
+                        Text(
+                            searchName,
+                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
+                            maxLines = 1,
+                        )
+                        // Contact address shortcut (P17): pick a contact's postal
+                        // address, run the P3 Google search and auto-select the
+                        // first hit — same path as tapping a search result.
+                        ContactAddressButton(onAddress = { address ->
+                            val bbox = camera.projection?.queryVisibleBoundingBox()
+                            val nearLat = ((bbox?.north ?: 85.0) + (bbox?.south ?: -85.0)) / 2.0
+                            val nearLon = ((bbox?.east ?: 180.0) + (bbox?.west ?: -180.0)) / 2.0
+                            searchViewModel.searchAndSelectFirst(address, nearLat, nearLon) { first ->
+                                if (first != null) {
+                                    if (selectedFeature is SpecificFeature.Route) {
+                                        viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
+                                    }
+                                    viewModel.set(searchViewModel.toFeature(first))
+                                    coroutineScope.launch {
+                                        camera.animateTo(
+                                            camera.position.copy(
+                                                target = Position(first.lon, first.lat),
+                                                zoom = maxOf(camera.position.zoom, 14.0),
+                                            )
+                                        )
+                                    }
+                                    coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                }
+                            }
+                        })
+                        // Voice search (P8): a transcript opens the search page
+                        // pre-filled, which runs the P3 Google search.
+                        VoiceSearchButton(onResult = { openCategorySearch(it) })
+                    }
+                }
+            },
             modifier = Modifier.padding(top = paddingValues.calculateTopPadding()),
             actions = {
                 IconButton({
@@ -589,54 +623,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         }
                     }
                 } else {
-                    val name = if(selectedFeature is SpecificFeature.RoutableFeature) {
-                        (selectedFeature as SpecificFeature.RoutableFeature).name
-                    } else {
-                        stringResource(MapsR.string.search_placeholder)
-                    }
                     Column(Modifier.padding(16.dp).fillMaxWidth()) {
-                        Card(shape = RoundedCornerShape(12.dp)) {
-                            ListItem({
-                                Text(name)
-                            }, colors = ListItemDefaults.colors(Color.Transparent), modifier = Modifier.clickable {
-                                openSearch()
-                            }, trailingContent = {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    // Contact address shortcut (P17): pick a
-                                    // contact's postal address, run the P3 Google
-                                    // search and auto-select the first hit (open
-                                    // its pin/sheet + center the map) — the same
-                                    // path as tapping a search result.
-                                    ContactAddressButton(onAddress = { address ->
-                                        val bbox = camera.projection?.queryVisibleBoundingBox()
-                                        val nearLat = ((bbox?.north ?: 85.0) + (bbox?.south ?: -85.0)) / 2.0
-                                        val nearLon = ((bbox?.east ?: 180.0) + (bbox?.west ?: -180.0)) / 2.0
-                                        searchViewModel.searchAndSelectFirst(address, nearLat, nearLon) { first ->
-                                            if (first != null) {
-                                                if (selectedFeature is SpecificFeature.Route) {
-                                                    viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
-                                                }
-                                                viewModel.set(searchViewModel.toFeature(first))
-                                                coroutineScope.launch {
-                                                    camera.animateTo(
-                                                        camera.position.copy(
-                                                            target = Position(first.lon, first.lat),
-                                                            zoom = maxOf(camera.position.zoom, 14.0),
-                                                        )
-                                                    )
-                                                }
-                                                coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
-                                            }
-                                        }
-                                    })
-                                    // Voice search (P8): a transcript opens the
-                                    // search page pre-filled, which runs the P3
-                                    // Google search via SearchPage's query effect.
-                                    VoiceSearchButton(onResult = { openCategorySearch(it) })
-                                }
-                            })
-                        }
-                        Spacer(Modifier.height(8.dp))
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             AssistChip(
                                 onClick = { savedHome?.let { showSavedPlace(it) } ?: openSearch() },
@@ -664,34 +651,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         // Compass calibration hint for the heading puck; self-hides at HIGH accuracy.
                         CompassCalibrationBanner(userHeadingAccuracy)
                     }
-                }
-
-                // DOWNLOAD DIALOG
-                if (showDownloadDialog && activeZone != null) {
-                    AlertDialog(
-                        {
-                            showDownloadDialog = false
-                            dismissedZone = activeZone
-                        }, {
-                            Button({
-                                zonesViewModel.startDownload(activeZone)
-                                showDownloadDialog = false
-                                // We don't need to set dismissedZone here because getZoneStatus
-                                // will now return DOWNLOADING, preventing the effect from re-triggering
-                            }) {
-                                Text(stringResource(MapsR.string.download))
-                            }
-                        }, title = { Text(stringResource(MapsR.string.download_offline_map_title)) },
-                        text = { Text(stringResource(MapsR.string.download_offline_map_text_overview, activeZone)) },
-                        dismissButton = {
-                            TextButton({
-                                showDownloadDialog = false
-                                dismissedZone = activeZone
-                            }) {
-                                Text(stringResource(UiR.string.cancel))
-                            }
-                        }
-                    )
                 }
 
                 // Browse map controls (Decision D6): a scale bar plus the FAB
