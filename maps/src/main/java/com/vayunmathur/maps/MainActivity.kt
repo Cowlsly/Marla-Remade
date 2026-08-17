@@ -69,11 +69,11 @@ class MainActivity : ComponentActivity() {
                 InitialDownloadChecker(ds, listOf(
                     Triple("https://data.vayunmathur.com/metadata.bin", "metadata.bin", getString(R.string.downloading_navigation_metadata)),
                     Triple("https://data.vayunmathur.com/road_names.bin", "road_names.bin", getString(R.string.downloading_road_data)),
-                    Triple("https://data.vayunmathur.com/intermediate.bin", "intermediate.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/nodes.bin", "nodes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/edges.bin", "edges.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/transit_voyages.bin", "transit_voyages.bin", getString(R.string.downloading_road_data)),
-                    Triple("https://data.vayunmathur.com/transit_attributes.bin", "transit_attributes.bin", getString(R.string.downloading_road_data))
+                    Triple("https://data.vayunmathur.com/transit_attributes.bin", "transit_attributes.bin", getString(R.string.downloading_road_data)),
+                    Triple("https://data.vayunmathur.com/lanes.bin", "lanes.bin", getString(R.string.downloading_road_data))
                 )) {
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         // POST_NOTIFICATIONS is runtime-grantable on API 33+
