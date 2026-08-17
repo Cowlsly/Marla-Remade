@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="all">الكل</string>
     <string name="hide">إخفاء</string>
     <string name="normal">عادي</string>
@@ -10,4 +10,5 @@
     <string name="bookmarks">الإشارات المرجعية</string>
     <string name="general">عام</string>
     <string name="share_link">مشاركة الرابط</string>
+    <string name="save_failed">فشل الحفظ: <xliff:g id="error" example="Permission denied">%1$s</xliff:g></string>
 </resources>
