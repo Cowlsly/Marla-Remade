@@ -10,7 +10,7 @@
     <string name="settings_aspect_ratio">Proporcje obrazu</string>
     <string name="settings_location">Lokalizacja</string>
     <string name="codec_av1_label">AV1</string>
-    <string name="warmth">Temperatura</string>
+    <string name="warmth">Ciepło</string>
     <string name="no_app_to_open_url">Brak aplikacji do otwarcia tego linku</string>
     <string name="codec_av1_description">Najbardziej wydajny</string>
     <string name="grant_camera_permission">Zezwól na dostęp do aparatu</string>
@@ -30,7 +30,7 @@
     <string name="brightness">Jasność</string>
     <string name="open_gallery">Galeria</string>
     <string name="settings_audio_source">Źródło sygnału dźwieku</string>
-    <string name="settings_audio_source_label">Źródło wejściowe audio</string>
+    <string name="settings_audio_source_label">Źródło wejściowe dźwięku</string>
     <string name="audio_source_camcorder_label">Kamera</string>
     <string name="audio_source_camcorder_description">Domyślne, dostrojone do wideo</string>
     <string name="audio_source_mic_label">Mikrofon</string>
