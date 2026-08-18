@@ -1,5 +1,6 @@
 package com.vayunmathur.maps.data.google
 
+import android.util.Log
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -43,6 +44,8 @@ data class GoogleSearchResult(
  */
 object GoogleSearchDataSource {
 
+    private const val TAG = "GoogleSearchDataSource"
+
     // Same calibrated endpoints/identity as GooglePoiDataSource (Vela, 2026-06).
     private const val SEARCH_ENDPOINT =
         "https://www.google.com/search?tbm=map&authuser=0&hl=en&gl=us"
@@ -69,7 +72,13 @@ object GoogleSearchDataSource {
      */
     suspend fun search(query: String, nearLat: Double, nearLon: Double): List<GoogleSearchResult> {
         if (query.isBlank()) return emptyList()
-        return runCatching { fetchSearch(query, nearLat, nearLon) }.getOrDefault(emptyList())
+        val results = runCatching { fetchSearch(query, nearLat, nearLon) }.getOrDefault(emptyList())
+        Log.i(
+            TAG,
+            "search \"$query\" near $nearLat,$nearLon -> ${results.size} results" +
+                (results.firstOrNull()?.let { " first=\"${it.name}\"@${it.lat},${it.lng}" } ?: ""),
+        )
+        return results
     }
 
     /**
@@ -87,7 +96,10 @@ object GoogleSearchDataSource {
             val url = "$SEARCH_ENDPOINT&q=${query.enc()}&pb=${pb.enc()}"
             val body = get(url) ?: return@withContext emptyList()
             val root = GoogleResponse.parseOrNull(body) ?: return@withContext emptyList()
-            parseResults(root)
+            resolveEntries(root)
+                .mapNotNull { entry -> entryToResult(entry) }
+                .distinctBy { it.id }
+                .take(MAX_RESULTS)
         }
 
     private suspend fun fetchReverse(lat: Double, lon: Double): GoogleSearchResult? =
@@ -100,26 +112,48 @@ object GoogleSearchDataSource {
             val url = "$SEARCH_ENDPOINT&q=${query.enc()}&pb=${pb.enc()}"
             val body = get(url) ?: return@withContext null
             val root = GoogleResponse.parseOrNull(body) ?: return@withContext null
-            parseResults(root).firstOrNull() ?: parseSingle(root)
+            resolveEntries(root).firstNotNullOfOrNull { entry -> entryToResult(entry) }
         }
 
     /**
-     * The list-returning parse: walk every entry at [Paths.RESULTS] and pull the
-     * result fields. Entries missing a name or position are dropped; the rest are
-     * de-duped by feature id and capped at [MAX_RESULTS].
+     * Resolve the response to a list of result *entries* whose place node is at
+     * `[1]`, mirroring Vela's `SearchParser.parse` resolution order so an ADDRESS
+     * query resolves too (not just POI names/categories):
+     *  1. the `[64]` POI list — a name/category search ("restaurants");
+     *  2. [Paths.AT_THIS_PLACE] — a bare address that IS a business ("1020 Olive
+     *     Dr" → the In-N-Out at it); the businesses at the geocoded address, each
+     *     entry's node at `[i][0]`;
+     *  3. [Paths.SINGLE] — a plain/far address that geocodes to one node.
+     * Cases 2/3 wrap the node as `[null, node]` so the entry-relative paths
+     * (place node at `[1]`) resolve unchanged. Empty when nothing matched.
      */
-    private fun parseResults(root: JsonElement): List<GoogleSearchResult> {
-        val list = root.at(*Paths.RESULTS).arr() ?: return emptyList()
-        return list.mapNotNull { entry -> entryToResult(entry) }
-            .distinctBy { it.id }
-            .take(MAX_RESULTS)
+    private fun resolveEntries(root: JsonElement): List<JsonElement> {
+        root.at(*Paths.RESULTS).arr()?.takeIf { it.isNotEmpty() }?.let { return it }
+        atThisPlaceEntries(root)?.let { return it }
+        singleEntry(root)?.let { return listOf(it) }
+        return emptyList()
     }
 
-    /** A single geocoded node → wrap as [null, node] so the entry-relative paths
-     *  (place node at [1]) resolve unchanged, then map it. */
-    private fun parseSingle(root: JsonElement): GoogleSearchResult? {
+    /** Businesses AT a geocoded address ([Paths.AT_THIS_PLACE]): each list entry's
+     *  place node is at `[i][0]`; wrap as [null, node] and gate on a real name. */
+    private fun atThisPlaceEntries(root: JsonElement): List<JsonElement>? {
+        val list = root.at(*Paths.AT_THIS_PLACE).arr() ?: return null
+        val entries = list.mapNotNull { e ->
+            val node = e.at(0) ?: return@mapNotNull null
+            val entry = JsonArray(listOf(JsonNull, node))
+            if (entry.at(*Paths.NAME).str() == null) return@mapNotNull null
+            entry
+        }
+        return entries.ifEmpty { null }
+    }
+
+    /** A single geocoded node ([Paths.SINGLE]) → wrap as [null, node] so the
+     *  entry-relative paths (place node at [1]) resolve unchanged; null when the
+     *  wrapped node carries no name. */
+    private fun singleEntry(root: JsonElement): JsonElement? {
         val node = root.at(*Paths.SINGLE) ?: return null
-        return entryToResult(JsonArray(listOf(JsonNull, node)))
+        val entry = JsonArray(listOf(JsonNull, node))
+        return if (entry.at(*Paths.NAME).str() != null) entry else null
     }
 
     private fun entryToResult(entry: JsonElement): GoogleSearchResult? {
@@ -200,7 +234,11 @@ object GoogleSearchDataSource {
         val LNG = intArrayOf(1, 9, 3)
         val CATEGORY = intArrayOf(1, 13, 0)
         val FEATURE_ID = intArrayOf(1, 10)
-        val ADDRESS = intArrayOf(1, 18)
+        // Businesses listed at a geocoded address (Vela `atThisPlace`).
+        val AT_THIS_PLACE = intArrayOf(0, 1, 0, 14, 68)
+        // Full formatted address (Vela `address` = [1][39]); ADDRESS_LINES is the
+        // component array fallback.
+        val ADDRESS = intArrayOf(1, 39)
         val ADDRESS_LINES = intArrayOf(1, 2)
     }
 }

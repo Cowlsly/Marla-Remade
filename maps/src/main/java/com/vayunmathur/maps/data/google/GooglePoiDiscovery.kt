@@ -1,11 +1,20 @@
 package com.vayunmathur.maps.data.google
 
+import android.util.Log
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonElement
 import java.net.URLEncoder
+import kotlin.math.cos
+import kotlin.math.hypot
 import kotlin.math.ln
+import kotlin.math.log2
 
 /**
  * Viewport / near discovery of Google POIs for the custom overlay layer.
@@ -15,6 +24,22 @@ import kotlin.math.ln
  * keep the WHOLE list and map each entry to a [GooglePoiPin] (id + lat/lng +
  * name + category + rating) so the pins can be drawn and tapped.
  *
+ * COVERAGE (ported from Vela `GoogleMapsDataSource.nearbyPlaces`, 2026-06): a
+ * single wide "points of interest" query returns only the ~20 most prominent
+ * places over a ~25 km baked window, so a strip mall shows almost none of its
+ * small businesses. To match what Google Maps actually renders we instead:
+ *  - TIGHTEN the requested viewport to the caller's real span (`!1d` = span in
+ *    metres, `!4f` = the matching zoom) instead of the baked ~25 km net;
+ *  - FAN OUT across category terms ("restaurants", "coffee", "gas station", …)
+ *    and merge — one "places" query is biased to prominent food/shops and misses
+ *    whole tiers (a nail salon, a plumber, a small taqueria), so the fan-out
+ *    roughly doubles local coverage;
+ *  - ask for a DEEPER pool per term (`!7i60`, up from 20) so the take-N cap can
+ *    reach smaller POIs;
+ *  - dedup by feature id and rank prominence-first (Vela `ambientProminence`),
+ *    so recognizable landmarks win the label slot but the small restaurant you
+ *    zoomed next to still survives the (raised) cap.
+ *
  * Same keyless google.com/maps scrape caveats as [GooglePoiDataSource]: it calls
  * the same undocumented `search?tbm=map` endpoint a logged-out browser hits (no
  * API key), the response is a guard-prefixed positional JSON array parsed by the
@@ -22,15 +47,19 @@ import kotlin.math.ln
  * fields go null rather than throw), and keyless responses are bot-degraded. All
  * network runs on [Dispatchers.IO].
  *
- * Debounced + LRU-cached (D3/D7): the ViewModel debounces the camera-idle
- * trigger, and results are cached here per viewport centre rounded to ~100 m so
- * a small pan back into a visited area doesn't refetch.
+ * Quota-safe (D3/D7/P23): the ViewModel debounces the camera trigger and floors
+ * a min-interval, results are LRU-cached here per viewport centre + span so a
+ * small pan back into a visited area doesn't refetch, and the per-fetch category
+ * fan-out is bounded by [FANOUT] permits so a fresh viewport fires only a few
+ * requests at a time rather than all terms at once.
  *
  * NOTE (on-device): the live scrape needs a device with network — it can't be
  * exercised at compile time. See [GooglePoiDataSource] for the cookie-warming
  * device-verification caveat.
  */
 object GooglePoiDiscovery {
+
+    private const val TAG = "GooglePoiDiscovery"
 
     // Same calibrated endpoints/identity as GooglePoiDataSource (Vela, 2026-06).
     private const val SEARCH_ENDPOINT =
@@ -45,73 +74,116 @@ object GooglePoiDiscovery {
         "Referer" to "https://www.google.com/maps/",
     )
 
-    /** Broad default so a viewport comes back populated with mixed POIs rather
-     *  than filtered to a single business type. */
-    private const val DEFAULT_QUERY = "points of interest"
+    /**
+     * Category fan-out terms (Vela `nearbyPlaces.allTerms`). "places" is the
+     * broad ambient query; the rest pull the tiers a single prominent-biased
+     * query under-returns so the map shows a Google-like MIX (a gas station, a
+     * gym, a grocer, a small restaurant) rather than only the few big names.
+     * Low-signal extras a term drags in sink under the prominence sort.
+     */
+    private val FANOUT_TERMS = listOf(
+        "places", "restaurants", "coffee", "stores", "shopping", "services",
+        "beauty salon", "fast food", "grocery store", "gas station", "gym",
+        "bar", "pharmacy", "school", "park",
+    )
 
-    /** Default cap on pins per fetch so a wide/medium viewport doesn't push
-     *  hundreds of symbols onto the map (kept by descending
-     *  [GooglePoiPin.prominence]). Callers at close zoom pass a higher cap so
-     *  local/small POIs (e.g. the restaurant you just zoomed next to) survive. */
-    private const val MAX_PINS = 60
+    /** Caps how many category requests run AT ONCE per fetch, so a fresh viewport
+     *  doesn't fire all [FANOUT_TERMS] at once (request burst + transient parse
+     *  heap). Shared across calls so a pan mid-load can't double the burst. */
+    private val FANOUT = Semaphore(4)
+
+    /** Default cap on pins per fetch. The full ranked pool is cached, so a
+     *  close-zoom caller can pass a higher cap to keep smaller POIs without a
+     *  refetch (see [GooglePoiMapViewModel]). Raised well above the old 60 so the
+     *  fan-out's comprehensive pool isn't filtered back down to a few names. */
+    private const val MAX_PINS = 120
+
+    /** Per-term result pool. Deeper than the old !7i20 so zooming in can reach
+     *  down the prominence rank to small/local POIs. */
+    private const val POOL_SIZE = 60
+
+    /** Clamp for the requested ground span (`!1d`). Floored so a very tight zoom
+     *  still asks a sensible window; capped so a wide view doesn't request a
+     *  continent. */
+    private const val MIN_SPAN_M = 500.0
+    private const val MAX_SPAN_M = 40_000.0
 
     @Volatile private var sessionWarmed = false
 
-    // Bounded access-ordered LRU keyed on rounded centre + query + radius bucket.
-    // Guarded by synchronized(cache).
-    private data class Key(val lat: Double, val lon: Double, val query: String, val scale: Int)
+    // Bounded access-ordered LRU keyed on rounded centre + span bucket. The FULL
+    // ranked pool is stored so a higher-cap caller reuses it. Guarded by
+    // synchronized(cache).
+    private data class Key(val lat: Double, val lon: Double, val spanBucket: Int)
     private val cache = object : LinkedHashMap<Key, List<GooglePoiPin>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, List<GooglePoiPin>>) = size > 32
     }
 
     /**
-     * Discover POIs around [lat],[lon]. Never throws — returns an empty list when
-     * the scrape fails or the positional paths drift. LRU-cached on the centre
-     * rounded to ~100 m so re-visiting an area is instant.
-     *
-     * [radiusScale] widens the requested viewport (1.0 = the calibrated default);
-     * the caller passes > 1 to prefetch a padded box so a small pan is already
-     * covered. It's bucketed into the cache key so different scales don't collide.
+     * Discover POIs around [lat],[lon] within a viewport of [spanMeters] ground
+     * span. Never throws — returns an empty list when the scrape fails or the
+     * positional paths drift. LRU-cached on the centre (rounded to ~100 m) plus
+     * a span bucket so re-visiting an area is instant.
      *
      * [maxPins] caps how many of the ranked pins are returned. The full ranked
-     * list is cached, so a close-zoom caller can ask for many more without a
+     * pool is cached, so a close-zoom caller can ask for many more without a
      * refetch — easing the prominence filter so smaller POIs aren't cut.
      */
     suspend fun nearby(
         lat: Double,
         lon: Double,
-        query: String = DEFAULT_QUERY,
-        radiusScale: Double = 1.0,
+        spanMeters: Double,
         maxPins: Int = MAX_PINS,
     ): List<GooglePoiPin> {
-        val key = Key(round3(lat), round3(lon), query, (radiusScale * 10).toInt())
+        val span = spanMeters.coerceIn(MIN_SPAN_M, MAX_SPAN_M)
+        val key = Key(round3(lat), round3(lon), (span / 250.0).toInt())
         synchronized(cache) { cache[key]?.let { return it.take(maxPins) } }
-        val pins = runCatching { fetch(lat, lon, query, radiusScale) }.getOrDefault(emptyList())
+        val pins = runCatching { fetch(lat, lon, span) }.getOrDefault(emptyList())
         synchronized(cache) { cache[key] = pins }
+        Log.i(
+            TAG,
+            "nearby lat=$lat lon=$lon span=${span.toInt()}m terms=${FANOUT_TERMS.size} " +
+                "pool=${pins.size} returned=${minOf(pins.size, maxPins)} (cap=$maxPins)",
+        )
         return pins.take(maxPins)
     }
 
-    private suspend fun fetch(
-        lat: Double,
-        lon: Double,
-        query: String,
-        radiusScale: Double,
-    ): List<GooglePoiPin> =
+    /**
+     * Fan out the [FANOUT_TERMS] across the viewport, merge, dedup by feature id
+     * and rank prominence-first. Each term is a separate keyless `search?tbm=map`
+     * hit with the viewport tightened to [span]; any single term failing/​drifting
+     * yields an empty list for that term and never sinks the others.
+     */
+    private suspend fun fetch(lat: Double, lon: Double, span: Double): List<GooglePoiPin> =
         withContext(Dispatchers.IO) {
             warmSession()
-            val pb = buildViewportPb(query, lat, lon, radiusScale)
-            val url = "$SEARCH_ENDPOINT&q=${query.enc()}&pb=${pb.enc()}"
-            val body = get(url) ?: return@withContext emptyList()
-            val root = GoogleResponse.parseOrNull(body) ?: return@withContext emptyList()
-            parsePins(root)
+            // Match the zoom to the tightened window (Vela: span 25229 ↔ zoom 13.1).
+            val zoom = (13.1 + log2(25229.0 / span)).coerceIn(13.0, 17.5)
+            val pool = coroutineScope {
+                FANOUT_TERMS.map { term ->
+                    async { runCatching { fetchTerm(term, lat, lon, span, zoom) }.getOrDefault(emptyList()) }
+                }.awaitAll().flatten()
+            }
+            rank(pool, lat, lon)
         }
+
+    private suspend fun fetchTerm(
+        term: String,
+        lat: Double,
+        lon: Double,
+        span: Double,
+        zoom: Double,
+    ): List<GooglePoiPin> = FANOUT.withPermit {
+        val pb = buildViewportPb(term, lat, lon, span, zoom)
+        val url = "$SEARCH_ENDPOINT&q=${term.enc()}&pb=${pb.enc()}"
+        val body = get(url) ?: return@withPermit emptyList()
+        val root = GoogleResponse.parseOrNull(body) ?: return@withPermit emptyList()
+        parsePins(root)
+    }
 
     /**
      * The list-returning generalisation of `pickEntry`/`parsePlace`: walk every
      * result entry at [Paths.RESULTS] and pull the pin fields. Entries missing a
-     * name or position are dropped; the rest are de-duped by feature id and
-     * ranked by [prominenceOf]. The full ranked list is returned (no cap) — the
-     * [MAX_PINS]/caller cap is applied in [nearby] so the cache keeps everything.
+     * name or position are dropped.
      */
     private fun parsePins(root: JsonElement): List<GooglePoiPin> {
         val list = root.at(*Paths.RESULTS).arr() ?: return emptyList()
@@ -131,16 +203,27 @@ object GooglePoiDiscovery {
                 prominence = prominenceOf(rating, reviews),
             )
         }
-            .distinctBy { it.id }
-            .sortedByDescending { it.prominence }
     }
 
-    /** Cheap stand-in for Vela's `ambientProminence`: rating weighted by the log
-     *  of the review count, so a well-reviewed 4.5 outranks a lone 5.0. */
-    private fun prominenceOf(rating: Double?, reviews: Int): Double {
-        val r = rating ?: return 0.0
-        return r * (1.0 + ln(1.0 + reviews.coerceAtLeast(0)))
-    }
+    /**
+     * Dedup by feature id (the same place returned under several terms) then rank
+     * for the map: prominence-first, exact distance from the viewport centre only
+     * as a tiebreak (Vela `rankAmbientPlaces`). The recognizable landmarks lead
+     * and win the label slot; the low-signal junk the fan-out drags in sinks and
+     * is dropped by the caller's take-N cap.
+     */
+    private fun rank(pool: List<GooglePoiPin>, lat: Double, lon: Double): List<GooglePoiPin> =
+        pool.distinctBy { it.id }
+            .sortedWith(
+                compareByDescending<GooglePoiPin> { it.prominence }
+                    .thenBy { metersBetween(lat, lon, it.lat, it.lng) },
+            )
+
+    /** Vela's `ambientProminence`: review count dominates (log-compressed so a
+     *  mega-chain doesn't utterly bury everything), nudged by rating so among
+     *  similarly-popular places the better-rated wins. */
+    private fun prominenceOf(rating: Double?, reviews: Int): Double =
+        ln(reviews.coerceAtLeast(0) + 1.0) * (0.6 + (rating ?: 3.5) / 10.0)
 
     // --- HTTP plumbing (mirrors GooglePoiDataSource) ------------------------
 
@@ -163,26 +246,41 @@ object GooglePoiDiscovery {
         return if (resp.isSuccess) resp.body else null
     }
 
-    private fun buildViewportPb(query: String, lat: Double, lon: Double, radiusScale: Double): String =
+    /** Build the viewport `pb`: substitute the query + centre, then tighten the
+     *  baked span/zoom/pool tokens to this fetch (Vela `nearbyPlaces`): `!1d` =
+     *  ground span in metres, `!4f` = matching zoom, `!7i` = the deeper pool. */
+    private fun buildViewportPb(
+        query: String,
+        lat: Double,
+        lon: Double,
+        span: Double,
+        zoom: Double,
+    ): String =
         SEARCH_PB_TEMPLATE
             .replace("{QUERY}", query.replace('!', ' ').trim())
-            .replace("{ALT}", (BASE_ALTITUDE * radiusScale).toString())
             .replace("{LNG}", lon.toString())
             .replace("{LAT}", lat.toString())
+            .replaceFirst(Regex("!1d[0-9.]+"), "!1d${span.toInt()}")
+            .replaceFirst(Regex("!4f[0-9.]+"), "!4f${String.format(java.util.Locale.US, "%.1f", zoom)}")
+            .replaceFirst(Regex("!7i\\d+"), "!7i$POOL_SIZE")
 
     private fun round3(v: Double): Double = Math.round(v * 1000.0) / 1000.0
     private fun String.enc(): String = URLEncoder.encode(this, "UTF-8")
 
-    // The camera "altitude" in the pb `!1d…` slot: larger = more zoomed out =
-    // wider ground coverage. Scaling it (radiusScale) is how a padded prefetch
-    // box is requested. This is the calibrated default the template shipped with.
-    private const val BASE_ALTITUDE = 25229.167291701906
+    /** Rough planar metres between two lat/lon points — enough for a rank
+     *  tiebreak at viewport scale; no need for full haversine here. */
+    private fun metersBetween(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
+        val mPerDegLat = 111_320.0
+        val dLat = (bLat - aLat) * mPerDegLat
+        val dLon = (bLon - aLon) * mPerDegLat * cos(Math.toRadians((aLat + bLat) / 2.0))
+        return hypot(dLat, dLon)
+    }
 
     // Same calibrated pb template as GooglePoiDataSource — the `!2d<lng>!3d<lat>`
-    // block centres the viewport, `!1d<alt>` sets its span, and results come back
-    // at [Paths.RESULTS].
+    // block centres the viewport; the `!1d`/`!4f`/`!7i` tokens are rewritten
+    // per-fetch (see buildViewportPb) and results come back at [Paths.RESULTS].
     private const val SEARCH_PB_TEMPLATE =
-        "!1s{QUERY}!4m8!1m3!1d{ALT}!2d{LNG}!3d{LAT}!3m2!1i1024!2i768!4f13.1!7i20" +
+        "!1s{QUERY}!4m8!1m3!1d25229.167291701906!2d{LNG}!3d{LAT}!3m2!1i1024!2i768!4f13.1!7i20" +
             "!10b1!12m52!1m5!18b1!30b1!31m1!1b1!34e1!2m4!5m1!6e2!20e3!39b1!6m25!32i1!49b1!63m0!66b1" +
             "!85b1!114b1!149b1!206b1!209b1!212b1!216b1!222b1!223b1!232b1!234b1!235b1!244b1!246b1" +
             "!250b1!253b1!260b1!266b1!273b1!281b1!291m0!10b1!12b1!13b1!14b1!16b1!17m1!3e1!20m3!5e2" +

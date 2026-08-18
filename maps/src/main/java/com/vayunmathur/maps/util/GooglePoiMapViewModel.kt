@@ -114,8 +114,14 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         val prefetchScale = if (closeZoom) TIGHT_SCALE else PREFETCH_SCALE
         val cap = if (closeZoom) MAX_PINS_CLOSE else MAX_PINS_FAR
 
+        // The (padded, per-zoom) ground span the fan-out should request — the
+        // vertical extent of the box scaled by the prefetch pad, in metres. Vela
+        // tightens `!1d` to this so a strip mall's small POIs come back instead of
+        // only the ~20 most prominent over a baked ~25 km window.
+        val spanMeters = (vp.north - vp.south) * prefetchScale * METERS_PER_DEG_LAT
+
         val pins = withContext(Dispatchers.IO) {
-            GooglePoiDiscovery.nearby(vp.lat, vp.lon, radiusScale = prefetchScale, maxPins = cap)
+            GooglePoiDiscovery.nearby(vp.lat, vp.lon, spanMeters = spanMeters, maxPins = cap)
         }
         lastFetchCenter = vp.lat to vp.lon
         lastFetchAt = System.currentTimeMillis()
@@ -178,12 +184,19 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         // switch to the tight box + higher cap.
         const val CLOSE_LAT_SPAN = 0.04
 
-        // Pin caps: keep the modest cap when zoomed out, but raise it a lot at
-        // close zoom so local/small POIs (restaurants) aren't filtered away.
-        const val MAX_PINS_FAR = 60
-        const val MAX_PINS_CLOSE = 200
+        // Pin caps: keep a modest cap when zoomed out, but raise it a lot at
+        // close zoom so local/small POIs (restaurants) from the category fan-out
+        // aren't filtered away. Raised from the old 60/200 now that the fetch
+        // returns a comprehensive Google-like pool rather than ~20 prominent
+        // names (Vela parity).
+        const val MAX_PINS_FAR = 120
+        const val MAX_PINS_CLOSE = 350
 
         // ~16 km of latitude — roughly city-zoom; wider views skip the scrape.
         const val MAX_LAT_SPAN = 0.15
+
+        // Degrees of latitude → metres, for turning the viewport's lat span into
+        // the ground span the discovery fetch tightens its `!1d` window to.
+        const val METERS_PER_DEG_LAT = 111_320.0
     }
 }
