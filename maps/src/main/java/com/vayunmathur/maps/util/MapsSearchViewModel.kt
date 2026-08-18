@@ -7,6 +7,7 @@ import com.vayunmathur.maps.data.RecentSearchStore
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GoogleSearchDataSource
 import com.vayunmathur.maps.data.google.GoogleSearchResult
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -15,6 +16,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import org.maplibre.spatialk.geojson.Position
 
 /**
@@ -39,6 +41,15 @@ private fun GoogleSearchResult.toSearchResult() = SearchResult(
     lat = lat,
     lon = lng,
     category = category,
+)
+
+private fun PoiIndex.PoiRecord.toSearchResult() = SearchResult(
+    id = "poi:$latE7:$lonE7:${name.hashCode()}",
+    title = name,
+    subtitle = PoiCategories.label(type),
+    lat = lat,
+    lon = lon,
+    category = PoiCategories.label(type),
 )
 
 /**
@@ -83,6 +94,18 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
         }
         searchJob = viewModelScope.launch {
             delay(250)
+            // Try the offline OSM POI index first (P27): resolving a POI name
+            // locally avoids a Google call. Google stays the fallback (and
+            // handles addresses, which the POI index doesn't carry).
+            val app = getApplication<Application>()
+            val offline = withContext(Dispatchers.IO) {
+                PoiIndex.initialize(app)
+                PoiIndex.searchByName(query, nearLat, nearLon, limit = 20)
+            }
+            if (offline.isNotEmpty()) {
+                _results.value = offline.map { it.toSearchResult() }
+                return@launch
+            }
             // GoogleSearchDataSource.search does its own Dispatchers.IO + never
             // throws (empty list on any scrape/path failure).
             _results.value = GoogleSearchDataSource.search(query, nearLat, nearLon)

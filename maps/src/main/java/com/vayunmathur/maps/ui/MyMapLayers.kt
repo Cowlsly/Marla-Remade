@@ -145,9 +145,12 @@ fun MyMapLayers(
             TransitLinesLayer(adminSource)
         }
 
-        // Custom Google POI overlay (replaces suppressed native basemap POIs).
-        // Rendered above traffic but below the user puck.
-        GooglePoiLayer(googlePins)
+        // OUR baked OSM POI overlay (P27): placement/name/type come from the
+        // `ma_pois` source-layer in the v5 basemap PMTiles, replacing the Google
+        // viewport scrape for ambient pins. Google is hit only on tap for rich
+        // details (see MapPage.onMapClick -> toSelectedMaPoi). Reuses the shared
+        // vector source; harmless no-op until v5 ships the `ma_pois` layer.
+        MaPoisLayer(adminSource)
 
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).

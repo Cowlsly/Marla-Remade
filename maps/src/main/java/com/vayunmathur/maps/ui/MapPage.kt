@@ -54,7 +54,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.retain.retain
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -147,8 +146,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val selectedTransitStop by transitViewModel.selected.collectAsState()
     val departuresState by transitViewModel.departures.collectAsState()
 
-    // Google POI overlay pins (viewport scrape → custom layer, replacing the
-    // suppressed native basemap POIs).
+    // Retired ambient Google POI pins (P27): the overlay no longer renders these
+    // (MyMapLayers draws the baked `ma_pois` layer instead) and no viewport is
+    // fed, so this stays empty. Kept for the positional MyMapLayers call.
     val googlePins by poiViewModel.pins.collectAsState()
 
     // Search-result pins (from the Google search page) drawn on the map.
@@ -176,20 +176,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }
 
-    // P23: feed the Google POI overlay the live viewport as the camera MOVES
-    // (not only on idle) so the VM can refresh snappily when the centre jumps.
-    // The VM debounces, applies a min-interval and LRU-caches the keyless scrape,
-    // and prefetches a padded bbox, so streaming every camera change here can't
-    // hammer Google.
-    LaunchedEffect(Unit) {
-        snapshotFlow { camera.position }
-            .collect { pos ->
-                if (pos.zoom >= 11.0) {
-                    val bbox = camera.projection?.queryVisibleBoundingBox() ?: return@collect
-                    poiViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
-                }
-            }
-    }
+    // P27: ambient POIs now come from OUR baked `ma_pois` layer (the v5 PMTiles
+    // source-layer), so the Google viewport scrape that used to discover pins as
+    // the camera moved is RETIRED — Google is hit only on tap for rich details.
+    // The GooglePoiMapViewModel is left wired but never fed a viewport, so no
+    // ambient scrape happens.
 
     // Online-tiles-only: the basemap always streams live (offline zone tile
     // packs were removed). Offline ROUTING still works via the downloaded graph.
@@ -501,10 +492,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
 
                                 // Hit-test the search-result pins first, then the
-                                // ambient Google POI overlay — a pin tap re-selects
-                                // the place as a GenericPlace so
+                                // baked ma_pois layer — a POI tap selects the
+                                // place (name + coord) as a GenericPlace so
                                 // SelectedFeatureViewModel.currentPoiInfo fetches
-                                // the enrichment and GooglePoiEnrichment renders.
+                                // the Google rich details and GooglePoiEnrichment
+                                // renders.
                                 val pinHit = projection?.queryRenderedFeatures(
                                     offset,
                                     setOf(SEARCH_RESULT_LAYER_ID)
@@ -519,8 +511,8 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
                                     ?: projection?.queryRenderedFeatures(
                                         offset,
-                                        setOf(GOOGLE_POI_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
+                                        setOf(MA_POIS_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
                                 if (pinHit != null) {
                                     if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
                                         selectedFeature as SpecificFeature.Route

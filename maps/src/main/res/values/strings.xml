@@ -137,6 +137,8 @@
     <string name="downloading_navigation_metadata">Downloading Navigation Tiling Metadata…</string>
     <!-- MainActivity: Status text while road data downloads -->
     <string name="downloading_road_data">Downloading Road Data…</string>
+    <!-- MainActivity: Status text while offline POI index downloads -->
+    <string name="downloading_poi_data">Downloading Points of Interest…</string>
     <!-- MainActivity: Button to request location permission -->
     <string name="grant_location_permission">Grant Location Permission</string>
 
