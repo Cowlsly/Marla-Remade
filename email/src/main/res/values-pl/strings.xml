@@ -13,12 +13,12 @@
     <string name="to_label">Do</string>
     <string name="subject_label">Temat</string>
     <string name="outbox">Skrzynka nadawcza</string>
-    <string name="outbox_with_count">Skrzynka nadawcza (%1$d)</string>
+    <string name="outbox_with_count">Skrzynka nadawcza (<xliff:g id="count" example="2">%1$d</xliff:g>)</string>
     <string name="send_now">Wyślij teraz</string>
     <string name="email_address">Adres e-mail</string>
     <string name="testing_connection">Testowanie połączenia…</string>
     <string name="test_connection_and_save">Przetestuj połączenie i zapisz</string>
-    <string name="open_app_password_help">Otwórz pomoc dotyczącą haseł aplikacji dla %1$s</string>
+    <string name="open_app_password_help">Pomoc dotycząca haseł aplikacji <xliff:g id="provider" example="Google">%1$s</xliff:g></string>
     <string name="host_label">Host</string>
     <string name="port_label">Port</string>
     <string name="ssl_tls">SSL/TLS</string>
@@ -27,7 +27,7 @@
     <string name="compose">Utwórz</string>
     <string name="body_label">Treść</string>
     <string name="drafts">Wersje robocze</string>
-    <string name="email_widget_description">Ostatnie wiadomości z Twojej ujednoliconej skrzynki odbiorczej — dotknij, aby otworzyć pocztę e-mail</string>
+    <string name="email_widget_description">Ostatnie wiadomości z Twojej ujednoliconej skrzynki odbiorczej - dotknij, aby otworzyć pocztę e-mail</string>
     <string name="open">Otwórz</string>
     <string name="account_added">Konto dodane</string>
     <string name="added">Dodano <xliff:g id="email" example="user@example.com">%1$s</xliff:g></string>
@@ -90,4 +90,62 @@
     <string name="saved_to_outbox">Zapisano w Skrzynce nadawczej: <xliff:g id="reason" example="No network">%1$s</xliff:g></string>
     <string name="generating_summary">Generowanie podsumowania…</string>
     <string name="block_sender">Zablokuj nadawcę</string>
+    <string name="choose_your_email_provider">Wybierz swojego dostawcę poczty e-mail</string>
+    <string name="enter_imap_smtp_server_details_manually">Wprowadź ręcznie dane serwera IMAP/SMTP</string>
+    <string name="app_password">Hasło aplikacji</string>
+    <string name="password">Hasło</string>
+    <string name="hide">Ukryj</string>
+    <string name="show">Pokaż</string>
+    <string name="e_mail_file">Plik e-mail</string>
+    <string name="unknown_error">Nieznany błąd</string>
+    <string name="no_content_1">(Brak zawartości)</string>
+    <string name="no_messages_found_pull_down_to_refresh">Nie znaleziono wiadomości. Przesuń w dół, aby odświeżyć.</string>
+    <string name="to_me">do mnie</string>
+    <string name="hide_quoted_text">Ukryj cytowany tekst</string>
+    <string name="show_quoted_text">Pokaż cytowany tekst</string>
+    <string name="no_content">(Brak zawartości)</string>
+    <string name="total_attachment_size_exceeds_25_mb_many">Łączny rozmiar załącznika przekracza 25 MB; wielu dostawców odrzuci taki załącznik.</string>
+    <string name="outbox_is_empty">Skrzynka nadawcza jest pusta</string>
+    <string name="no_subject">(bez tematu)</string>
+    <string name="from">Od: <xliff:g id="account" example="me@example.com">%1$s</xliff:g></string>
+    <string name="to_1">Do: <xliff:g id="recipient" example="bob@example.com">%1$s</xliff:g></string>
+    <string name="failed">Błąd: <xliff:g id="error" example="Auth error">%1$s</xliff:g></string>
+    <string name="cd_insert_image">Wstaw obraz</string>
+    <string name="normal">Normalny</string>
+    <string name="heading_1">Nagłówek 1</string>
+    <string name="heading_2">Nagłówek 2</string>
+    <string name="heading_3">Nagłówek 3</string>
+    <string name="left">Lewo</string>
+    <string name="center">Środek</string>
+    <string name="right">Prawo</string>
+    <string name="small">Małe</string>
+    <string name="large">Duże</string>
+    <string name="extra_large">Bardzo duże</string>
+    <string name="font_default">Domyślne</string>
+    <string name="sans">Sans</string>
+    <string name="serif">Serif</string>
+    <string name="monospace"></string>
+    <string name="alignment">Wyrównanie</string>
+    <string name="inline_code">Kod wbudowany</string>
+    <string name="horizontal_rule">Linia pozioma</string>
+    <string name="text_color">Kolor tekstu</string>
+    <string name="font_size">Rozmiar czcionki</string>
+    <string name="clear_formatting">Wyczyść formatowanie</string>
+    <string name="email_sync_channel_name">Synchronizacja poczty e-mail w tle</string>
+    <string name="email_sync_channel_desc">Utrzymuje otwarte połączenie IMAP, dzięki czemu nowa poczta dociera do Ciebie natychmiast.</string>
+    <string name="unified_inbox_label">Współdzielona skrzynka odbiorcza</string>
+    <plurals name="retrying_pending_messages">
+        <item quantity="one">Ponawianie próby wysłania <xliff:g id="count" example="3">%1$s</xliff:g> oczekującej wiadomości…</item>
+        <item quantity="few">Ponawianie próby wysłania <xliff:g id="count" example="3">%1$s</xliff:g> oczekujących wiadomości…</item>
+        <item quantity="many">Ponawianie próby wysłania <xliff:g id="count" example="3">%1$s</xliff:g> oczekujących wiadomości…</item>
+        <item quantity="other">Ponawianie próby wysłania <xliff:g id="count" example="3">%1$s</xliff:g> oczekujących wiadomości…</item>
+    </plurals>
+    <string name="conversation">Konwersacja</string>
+    <plurals name="attempts">
+        <item quantity="one"><xliff:g id="count" example="2">%1$s</xliff:g> próba</item>
+        <item quantity="few"><xliff:g id="count" example="2">%1$s</xliff:g> próby</item>
+        <item quantity="many"><xliff:g id="count" example="2">%1$s</xliff:g> prób</item>
+        <item quantity="other"><xliff:g id="count" example="2">%1$s</xliff:g> prób</item>
+    </plurals>
+    <string name="font_family">Rodzina czcionek</string>
 </resources>
