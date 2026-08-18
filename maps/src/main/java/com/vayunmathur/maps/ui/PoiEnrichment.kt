@@ -1,6 +1,7 @@
 package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,10 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -76,12 +81,21 @@ fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle:
         }
 
         // Google's weekly hours — only when OSM didn't already provide them, to
-        // avoid showing the same schedule twice.
+        // avoid showing the same schedule twice. Collapsed to TODAY's line by
+        // default (tap to expand all 7 days) so the sheet stays short.
         if (!hasOsmHours && info.hours.isNotEmpty()) {
+            var showAllHours by remember { mutableStateOf(false) }
+            val todayName = Clock.System.now()
+                .toLocalDateTime(TimeZone.currentSystemDefault())
+                .date.dayOfWeek.name.lowercase().firstLetterUppercase()
+            val todayLine = info.hours.firstOrNull {
+                it.substringBefore(':', "").trim().equals(todayName, ignoreCase = true)
+            } ?: info.hours.first()
+            val shownHours = if (showAllHours) info.hours else listOf(todayLine)
             SectionHeader(stringResource(R.string.poi_hours_header)) { IconSchedule() }
-            Card {
+            Card(modifier = Modifier.clickable { showAllHours = !showAllHours }) {
                 Column {
-                    info.hours.forEach { line ->
+                    shownHours.forEach { line ->
                         val day = line.substringBefore(':', "").trim()
                         val hours = line.substringAfter(':', line).trim()
                         ListItem(
