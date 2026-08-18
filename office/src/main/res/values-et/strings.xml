@@ -286,4 +286,8 @@
     <string name="turn_on_online_sharing_to_collaborate_on">Lülita sisse veebipõhine jagamine, et dokumente reaalajas ühiselt töödelda. See loob su krüptovõtmed ja seadme tunnuse ning registreerib su seadme, et teised saaksid sinuga faile jagada. Mitte midagi ei looda ega saadeta enne, kui sa selle funktsionaalsuse sisse lülitad.</string>
     <string name="document_dark_mode">✓ Dokumendivaade tumedas kujunduses</string>
     <string name="document_dark_mode_1">Dokumendivaade tumedas kujunduses</string>
+    <string name="document_theme">Dokumendi kujundus</string>
+    <string name="document_theme_summary">Saad hallata, kuidas dokumenti kuvatakse. Ei muuda faili sisu.</string>
+    <string name="document_theme_unchanged">Muutmata kujul</string>
+    <string name="document_theme_follow_system">Järgi süsteemi kujundust</string>
 </resources>
