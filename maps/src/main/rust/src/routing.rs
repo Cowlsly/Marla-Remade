@@ -426,7 +426,9 @@ pub fn perform_search_loop(
     scratch: &mut RoutingScratchpad,
     heap: &mut RadixHeap,
 ) {
-    while !heap.empty() && ctx.iterations < 1_000_000 {
+    // Cap is a safety net only. The 36M-node CA graph needs ~6.4M expansions for
+    // the longest routes (SF->LA), so the old 1M cap aborted them ("no route").
+    while !heap.empty() && ctx.iterations < 25_000_000 {
         ctx.iterations += 1;
         let u_idx = heap.pop();
         let u = u_idx >> 1;

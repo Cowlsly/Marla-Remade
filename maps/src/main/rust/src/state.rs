@@ -13,28 +13,22 @@ struct HeapNode {
     id: u32,
 }
 
-const BUCKET_CAPACITY: usize = 256 * 1024;
 const NUM_BUCKETS: usize = 33;
 
-/// Ultra-fast monotonic radix heap with flat, pre-allocated buckets.
+/// Monotonic radix heap with growable per-bucket vectors. Buckets grow on demand
+/// so a large search (e.g. a cross-state route over the 36M-node graph) can never
+/// overflow a fixed bucket and silently corrupt the open set (which produced
+/// garbled / wrong-direction paths). Still O(1) amortized push and near-O(1) pop.
 pub struct RadixHeap {
-    // Flat `NUM_BUCKETS * BUCKET_CAPACITY` array, indexed `bucket * CAP + pos`.
-    buckets: Box<[HeapNode]>,
-    sizes: [u32; NUM_BUCKETS],
-    bucket_mask: u64,
+    buckets: Vec<Vec<HeapNode>>,
     last_pop_value: u32,
     count: u32,
 }
 
 impl RadixHeap {
     pub fn new() -> RadixHeap {
-        // Single ~67 MB zeroed allocation (avoids constructing on the stack).
-        let buckets = vec![HeapNode { score: 0, id: 0 }; NUM_BUCKETS * BUCKET_CAPACITY]
-            .into_boxed_slice();
         RadixHeap {
-            buckets,
-            sizes: [0; NUM_BUCKETS],
-            bucket_mask: 0,
+            buckets: (0..NUM_BUCKETS).map(|_| Vec::new()).collect(),
             last_pop_value: 0,
             count: 0,
         }
@@ -53,55 +47,39 @@ impl RadixHeap {
     #[inline]
     pub fn push(&mut self, score: u32, node_id: u32) {
         let i = self.get_bucket_idx(score) as usize;
-        let pos = self.sizes[i] as usize;
-        self.sizes[i] += 1;
-        self.buckets[i * BUCKET_CAPACITY + pos] = HeapNode { score, id: node_id };
-        self.bucket_mask |= 1u64 << i;
+        self.buckets[i].push(HeapNode { score, id: node_id });
         self.count += 1;
     }
 
     #[inline]
     pub fn pop(&mut self) -> u32 {
-        if self.sizes[0] == 0 {
-            let i = (self.bucket_mask & !1u64).trailing_zeros() as usize;
-            let b_size = self.sizes[i] as usize;
-
-            let mut min_score = self.buckets[i * BUCKET_CAPACITY].score;
-            for j in 1..b_size {
-                let s = self.buckets[i * BUCKET_CAPACITY + j].score;
-                if s < min_score {
-                    min_score = s;
-                }
-            }
+        if self.buckets[0].is_empty() {
+            // Lowest non-empty bucket above 0 holds the current minimum; drain it
+            // down against the new last_pop_value (standard radix-heap advance).
+            let i = (1..NUM_BUCKETS)
+                .find(|&b| !self.buckets[b].is_empty())
+                .expect("pop from non-empty heap");
+            let min_score = self.buckets[i].iter().map(|n| n.score).min().unwrap();
             self.last_pop_value = min_score;
 
-            for j in 0..b_size {
-                let node = self.buckets[i * BUCKET_CAPACITY + j];
+            let moved = std::mem::take(&mut self.buckets[i]);
+            for node in moved {
                 let idx = self.get_bucket_idx(node.score) as usize;
-                let dpos = self.sizes[idx] as usize;
-                self.sizes[idx] += 1;
-                self.buckets[idx * BUCKET_CAPACITY + dpos] = node;
-                self.bucket_mask |= 1u64 << idx;
+                self.buckets[idx].push(node);
             }
-
-            self.sizes[i] = 0;
-            self.bucket_mask &= !(1u64 << i);
         }
 
-        self.sizes[0] -= 1;
-        let node_id = self.buckets[self.sizes[0] as usize].id;
-        if self.sizes[0] == 0 {
-            self.bucket_mask &= !1u64;
-        }
+        let node = self.buckets[0].pop().expect("bucket 0 non-empty after refill");
         self.count -= 1;
-        node_id
+        node.id
     }
 
     pub fn clear(&mut self) {
-        self.sizes = [0; NUM_BUCKETS];
+        for b in self.buckets.iter_mut() {
+            b.clear();
+        }
         self.last_pop_value = 0;
         self.count = 0;
-        self.bucket_mask = 0;
     }
 
     #[inline]
