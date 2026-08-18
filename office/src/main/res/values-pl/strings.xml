@@ -387,7 +387,7 @@
     <!-- OfficeBottomBar: Action rotate 90 degrees. Verb phrase. -->
     <string name="rotate_90">Obróć o 90°</string>
     <!-- OfficeBottomBar: Alignment option right. Adjective/Adverb. -->
-    <string name="right">Do prawej</string>
+    <string name="right">Prawo</string>
     <!-- OfficeBottomBar: Alignment justify. Verb. -->
     <string name="justify">Wyjustuj</string>
     <!-- OfficeBottomBar: Button Table. Noun. -->
@@ -465,7 +465,7 @@
     <!-- OfficeBottomBar: Fill color action. Noun/Verb. -->
     <string name="fill">Wypełnienie</string>
     <!-- OfficeBottomBar: Alignment left. Adjective. -->
-    <string name="left">Do lewej</string>
+    <string name="left">Lewo</string>
     <!-- OfficeBottomBar: Menu font size with ellipsis alternative -->
     <string name="font_size_2">Rozmiar czcionki…</string>
     <!-- OfficeBottomBar: Action restart list numbering. Verb phrase. -->
@@ -489,7 +489,7 @@
     <!-- OfficeBottomBar: Number format number with 2 decimal places -->
     <string name="number_2_dp">Liczba (2 m. po przecinku)</string>
     <!-- OfficeBottomBar: Alignment center. Noun/Adjective. -->
-    <string name="center">Do środka</string>
+    <string name="center">Środek</string>
     <!-- OfficeViewModel: Toast error when save fails. %1$s=error reason/message -->
     <string name="save_failed">Błąd zapisu: <xliff:g id="error" example="Permission denied">%1$s</xliff:g></string>
     <!-- OfficeViewModel: Toast saved successfully -->
@@ -570,4 +570,8 @@
     <string name="wide_1">Szerokie</string>
     <string name="document_dark_mode">✓ Tryb ciemny dokumentu</string>
     <string name="document_dark_mode_1">Dokument w trybie ciemnym</string>
+    <string name="document_theme">Motyw dokumentu</string>
+    <string name="document_theme_summary">Kontroluje sposób wyświetlania dokumentów. Nie zmienia pliku.</string>
+    <string name="document_theme_unchanged">Bez zmian</string>
+    <string name="document_theme_follow_system">Zgodnie z motywem systemu</string>
 </resources>
