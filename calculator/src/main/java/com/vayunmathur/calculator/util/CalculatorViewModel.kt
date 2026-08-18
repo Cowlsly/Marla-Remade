@@ -1,12 +1,14 @@
 package com.vayunmathur.calculator.util
 
+import android.app.Application
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
-import androidx.lifecycle.ViewModel
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.launch
 import kotlin.math.hypot
 
@@ -34,7 +36,10 @@ data class GraphMarker(
  * Holds all calculator state at the Activity scope so it survives switching between the
  * Calculator and Graph tabs (which reset the nav back stack).
  */
-class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitConverterActions {
+class CalculatorViewModel(application: Application) :
+    AndroidViewModel(application), CalculatorActions, GraphActions, UnitConverterActions {
+
+    private val dataStore = DataStoreUtils.getInstance(application)
 
     // ---- Shared ----
     var angleMode by mutableStateOf(AngleMode.RADIANS)
@@ -277,6 +282,12 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
     private var currencyLoading by mutableStateOf(false)
     private var currencyError by mutableStateOf<String?>(null)
 
+    /**
+     * The pair last converted in each category, keyed by category name. Mirrors what is persisted
+     * so switching tabs never has to touch the (asynchronously hydrated) preference snapshot.
+     */
+    private val lastUnits = mutableMapOf<String, Pair<String, String>>()
+
     /** Static physical-unit categories plus the (possibly still-empty) live Currency tab. */
     private val converterCategories: List<UnitCategory>
         get() = UnitRegistry.categories + (currencyCategory ?: EMPTY_CURRENCY_CATEGORY)
@@ -311,13 +322,55 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
         val categories = converterCategories
         if (index !in categories.indices) return
         converterCategoryIndex = index
-        val units = categories[index].units
-        converterFromToken = units.getOrNull(0)?.token ?: ""
-        converterToToken = units.getOrElse(1) { units.getOrNull(0) }?.token ?: converterFromToken
+        applyRememberedUnits(categories[index])
+        persist(KEY_UNITS_CATEGORY, categories[index].name)
     }
 
-    override fun setFrom(token: String) { converterFromToken = token }
-    override fun setTo(token: String) { converterToToken = token }
+    /**
+     * Restores the pair the user last converted in [category], falling back to its first two units.
+     * A remembered token is dropped if the category no longer offers it, which happens when a
+     * currency disappears from the rate list.
+     */
+    private fun applyRememberedUnits(category: UnitCategory) {
+        val units = category.units
+        val remembered = rememberedUnits(category.name)
+        val defaultFrom = units.getOrNull(0)?.token ?: ""
+        val defaultTo = units.getOrElse(1) { units.getOrNull(0) }?.token ?: defaultFrom
+        converterFromToken = remembered?.first?.takeIf { token -> units.any { it.token == token } }
+            ?: defaultFrom
+        converterToToken = remembered?.second?.takeIf { token -> units.any { it.token == token } }
+            ?: defaultTo
+    }
+
+    private fun rememberedUnits(categoryName: String): Pair<String, String>? {
+        lastUnits[categoryName]?.let { return it }
+        val from = dataStore.getString(unitsFromKey(categoryName)) ?: return null
+        val to = dataStore.getString(unitsToKey(categoryName)) ?: return null
+        return (from to to).also { lastUnits[categoryName] = it }
+    }
+
+    private fun rememberUnits() {
+        val categories = converterCategories
+        val name = categories[converterCategoryIndex.coerceIn(categories.indices)].name
+        lastUnits[name] = converterFromToken to converterToToken
+        persist(unitsFromKey(name), converterFromToken)
+        persist(unitsToKey(name), converterToToken)
+    }
+
+    private fun persist(key: String, value: String) {
+        viewModelScope.launch { dataStore.setString(key, value) }
+    }
+
+    override fun setFrom(token: String) {
+        converterFromToken = token
+        rememberUnits()
+    }
+
+    override fun setTo(token: String) {
+        converterToToken = token
+        rememberUnits()
+    }
+
     override fun setConverterInput(text: String) { converterValueText = text }
     override fun swapUnits() {
         val categories = converterCategories
@@ -326,6 +379,7 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
         converterFromToken = converterToToken
         converterToToken = from
         if (swappedInput.toDoubleOrNull() != null) converterValueText = swappedInput
+        rememberUnits()
     }
 
     override fun retryCurrency() = loadCurrencyRates()
@@ -343,13 +397,10 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
                     } else {
                         val wasEmpty = currencyCategory?.units.isNullOrEmpty()
                         currencyCategory = category
-                        // If the user is already on the Currency tab with nothing picked yet,
-                        // seed sensible defaults (USD -> EUR) now that units exist.
+                        // If the user is already on the Currency tab with nothing picked yet, fill
+                        // in their remembered pair (or USD -> EUR) now that units exist.
                         if (converterCategoryIndex == currencyIndex && wasEmpty) {
-                            val units = category.units
-                            converterFromToken = units.getOrNull(0)?.token ?: converterFromToken
-                            converterToToken =
-                                units.getOrElse(1) { units.getOrNull(0) }?.token ?: converterToToken
+                            applyRememberedUnits(category)
                         }
                     }
                 }
@@ -360,6 +411,27 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
 
     init {
         loadCurrencyRates()
+        restoreConverterSelection()
+    }
+
+    /**
+     * Reopens the converter on the tab and unit pair the user left it on. Uses the awaiting getters
+     * because at construction the mirrored preference snapshot may not be hydrated yet.
+     */
+    private fun restoreConverterSelection() {
+        viewModelScope.launch {
+            val name = dataStore.getStringAwait(KEY_UNITS_CATEGORY) ?: return@launch
+            val from = dataStore.getStringAwait(unitsFromKey(name))
+            val to = dataStore.getStringAwait(unitsToKey(name))
+            if (from != null && to != null) lastUnits.putIfAbsent(name, from to to)
+
+            val categories = converterCategories
+            val index = categories.indexOfFirst { it.name == name }
+            if (index < 0) return@launch
+            converterCategoryIndex = index
+            // Currency has no units until rates arrive; loadCurrencyRates applies them then.
+            if (categories[index].units.isNotEmpty()) applyRememberedUnits(categories[index])
+        }
     }
 
     /**
@@ -405,5 +477,11 @@ class CalculatorViewModel : ViewModel(), CalculatorActions, GraphActions, UnitCo
         /** The Currency tab's stand-in before rates load: present so the tab shows, but empty. */
         private val EMPTY_CURRENCY_CATEGORY =
             UnitCategory("Currency", emptyList(), inEquations = false)
+
+        private const val KEY_UNITS_CATEGORY = "calculator_units_category"
+
+        private fun unitsFromKey(categoryName: String) = "calculator_units_from_$categoryName"
+
+        private fun unitsToKey(categoryName: String) = "calculator_units_to_$categoryName"
     }
 }

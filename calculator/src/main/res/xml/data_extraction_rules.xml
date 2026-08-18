@@ -1,15 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Calculator. Audited state: none. There is no Room database, no
-  SharedPreferences, no DataStore and no file I/O anywhere in the module. The
-  calculation history shown by HistoryDialog is held in Compose state
-  (remember / rememberSaveable) and is gone when the process dies, so there is
-  nothing on disk to back up today.
-
-  The rules are still declared explicitly rather than inherited so that the app
-  keeps "back up whatever exists" semantics on its own terms, and so that if
-  history or settings persistence is added later it is covered by default
-  instead of being silently dropped.
+  Calculator. Audited state: the converter's last-used tab and unit pair, written
+  through the shared DataStoreUtils into file/datastore_default.preferences_pb.
+  Everything else (calculation history, graphed functions, the memory register) is
+  held in Compose state and is gone when the process dies.
+  The rules include whole domains rather than that one file so that if further
+  persistence is added later it is covered by default instead of being silently
+  dropped.
 -->
 <data-extraction-rules>
     <cloud-backup>
