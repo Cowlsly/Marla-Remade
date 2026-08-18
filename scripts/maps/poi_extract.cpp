@@ -27,11 +27,12 @@
 //                       name_off (that is the dedup win).
 //
 // A POI is any node OR way/relation-area that has BOTH a `name` tag AND one of
-// the recognised POI keys (amenity/shop/tourism/leisure/office/healthcare). The
-// value maps to a stable type number; a recognised key with an unmapped value
-// falls into the 255 = "other" bucket. Way/relation geometry is reduced to a
-// representative centroid (average of outer-ring node locations; nodes use their
-// own location) — POIs render as points.
+// the recognised POI keys (amenity/shop/tourism/leisure/office/healthcare, plus
+// station-like railway/public_transport values -> type 50). The value maps to a
+// stable type number; a recognised key with an unmapped value falls into the
+// 255 = "other" bucket. Way/relation geometry is reduced to a representative
+// centroid (average of outer-ring node locations; nodes use their own location)
+// — POIs render as points.
 //
 // ================================ TYPE MAP ================================
 // Stable POI type-number enum (KEEP IN SYNC with the app + README). Never
@@ -52,7 +53,7 @@
 //   12 park              26 hardware          40 tourism_info
 //   13 gym               27 beauty            41 florist
 //   42 jewelry   43 optician   44 laundry   45 pet   46 liquor   47 toys
-//   48 gift     49 marketplace
+//   48 gift     49 marketplace   50 station (train/tram/metro/bus, has departures)
 //   255 other
 //
 // Build:  g++ -O3 -std=c++17 poi_extract.cpp -o poi_extract -lz -lexpat -lbz2 -pthread
@@ -120,6 +121,7 @@ static const unordered_map<string, uint16_t>& amenity_map() {
         {"veterinary", 36},
         {"charging_station", 37},
         {"marketplace", 49},
+        {"bus_station", 50},
     };
     return m;
 }
@@ -185,6 +187,23 @@ static const unordered_map<string, uint16_t>& healthcare_map() {
 // (has one of the recognised POI keys). `office=*` maps to the generic office
 // type (39) unless a higher-precedence key already matched.
 static bool classify(const osmium::TagList& tags, uint16_t& out_type) {
+    // Transit stations (type 50) take precedence. Only station-like values
+    // qualify — bare railway/public_transport values (tracks, signals, bus
+    // poles, platforms) are NOT POIs, so we must NOT fall through to the generic
+    // "recognised key -> TYPE_OTHER" path for them (that would flood the map).
+    {
+        const char* rw = tags.get_value_by_key("railway");
+        if (rw && (strcmp(rw, "station") == 0 || strcmp(rw, "halt") == 0 ||
+                   strcmp(rw, "tram_stop") == 0)) {
+            out_type = 50;
+            return true;
+        }
+        const char* pt = tags.get_value_by_key("public_transport");
+        if (pt && strcmp(pt, "station") == 0) {
+            out_type = 50;
+            return true;
+        }
+    }
     struct KV { const char* key; const unordered_map<string, uint16_t>* map; };
     const KV order[] = {
         {"amenity", &amenity_map()},
