@@ -15,7 +15,7 @@ object PoiCategories {
     const val TYPE_OTHER: Int = 255
 
     /** Every type number the generator can emit, for building the icon switch. */
-    val ALL_TYPES: List<Int> = (0..49).toList() + TYPE_OTHER
+    val ALL_TYPES: List<Int> = (0..50).toList() + TYPE_OTHER
 
     /** Human-readable category label (used as the search-result subtitle). */
     fun label(type: Int): String = when (type) {
@@ -69,6 +69,7 @@ object PoiCategories {
         47 -> "Toys"
         48 -> "Gift"
         49 -> "Marketplace"
+        50 -> "Station"
         else -> "Place"
     }
 
@@ -91,6 +92,7 @@ object PoiCategories {
         14 -> "#8D6E63"                     // place of worship
         15, 40 -> "#FF6D00"                // attraction / tourist info
         16, 20, 21, 22, 23, 39 -> "#5F6368" // civic/parking/office (slate)
+        50 -> "#3949AB"                      // transit station (indigo)
         17, 18 -> "#AB47BC"                // cinema / theatre
         24, 27, 41, 42, 47, 48 -> "#E91E63" // apparel/beauty/florist/jewelry/toys/gift
         25, 43 -> "#1A73E8"                // electronics / optician

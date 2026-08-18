@@ -1,9 +1,19 @@
 package com.vayunmathur.maps.ui
 
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Canvas
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.vector.VectorPainter
+import androidx.compose.ui.graphics.vector.rememberVectorPainter
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
+import androidx.compose.ui.unit.LayoutDirection
+import com.vayunmathur.library.ui.MapsPoiVectors
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
@@ -58,9 +68,9 @@ object MaPoisSource {
 @Composable
 @MaplibreComposable
 fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
-    val icons = remember { poiIcons() }
+    val icons = rememberPoiIcons()
 
-    // Category filter (browse chips): show only features whose `type` is in the
+    // Category filter (browse chips):
     // selected set, or everything when no category is active.
     val typeFilter = filterTypes
         ?.takeIf { it.isNotEmpty() }
@@ -83,9 +93,9 @@ fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
         ),
         iconSize = interpolate(
             linear(), zoom(),
-            12 to const(0.55f),
-            15 to const(0.8f),
-            18 to const(1.1f),
+            12 to const(0.75f),
+            15 to const(1.05f),
+            18 to const(1.4f),
         ),
     )
 }
@@ -104,31 +114,38 @@ fun Feature1.toSelectedMaPoi(): SpecificFeature? {
     return SpecificFeature.GenericPlace(name, null, null, null, Position(pos.longitude, pos.latitude))
 }
 
-/** Generate one category disc icon per POI type (Decision D5: Compose/Canvas
- *  runtime bitmaps rather than sprite assets). */
-private fun poiIcons(): Map<Int, ImageBitmap> =
-    PoiCategories.ALL_TYPES.associateWith { t ->
-        poiDisc(PoiCategories.colorHex(t), PoiCategories.glyph(t))
+/** Build one category disc bitmap per POI type: a white-ringed colour disc with
+ *  the category's Material vector icon (from [MapsPoiVectors], the one module
+ *  allowed to reference Material icons) rasterized white on top. Rendered ~3x the
+ *  old resolution (144px) so the enlarged markers stay crisp. */
+@Composable
+private fun rememberPoiIcons(): Map<Int, ImageBitmap> {
+    val density = LocalDensity.current
+    // rememberVectorPainter is @Composable, so build a painter per (stable) type.
+    val painters: Map<Int, VectorPainter> = PoiCategories.ALL_TYPES.associateWith { t ->
+        rememberVectorPainter(MapsPoiVectors.of(t))
     }
+    return remember(density) {
+        painters.mapValues { (t, painter) -> poiDisc(PoiCategories.colorHex(t), painter, density) }
+    }
+}
 
-/** A white-ringed colour disc with a centred white glyph. */
-private fun poiDisc(colorHex: String, glyph: String): ImageBitmap {
-    val size = 64
-    val bmp = android.graphics.Bitmap.createBitmap(size, size, android.graphics.Bitmap.Config.ARGB_8888)
-    val canvas = android.graphics.Canvas(bmp)
-    val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
-    val cx = size / 2f
-    val cy = size / 2f
-    paint.color = android.graphics.Color.WHITE
-    canvas.drawCircle(cx, cy, size / 2f - 2f, paint)
-    paint.color = runCatching { android.graphics.Color.parseColor(colorHex) }
-        .getOrDefault(android.graphics.Color.parseColor("#5F6368"))
-    canvas.drawCircle(cx, cy, size / 2f - 6f, paint)
-    paint.color = android.graphics.Color.WHITE
-    paint.textAlign = android.graphics.Paint.Align.CENTER
-    paint.textSize = size * 0.46f
-    paint.isFakeBoldText = true
-    val fm = paint.fontMetrics
-    canvas.drawText(glyph, cx, cy - (fm.ascent + fm.descent) / 2f, paint)
-    return bmp.asImageBitmap()
+private fun poiDisc(colorHex: String, painter: VectorPainter, density: Density): ImageBitmap {
+    val sizePx = 144
+    val bitmap = ImageBitmap(sizePx, sizePx)
+    val canvas = Canvas(bitmap)
+    val fill = Color(
+        runCatching { android.graphics.Color.parseColor(colorHex) }
+            .getOrDefault(android.graphics.Color.parseColor("#5F6368")),
+    )
+    val full = Size(sizePx.toFloat(), sizePx.toFloat())
+    CanvasDrawScope().draw(density, LayoutDirection.Ltr, canvas, full) {
+        drawCircle(Color.White, radius = sizePx / 2f - 4f, center = center)
+        drawCircle(fill, radius = sizePx / 2f - 11f, center = center)
+        val iconSide = sizePx * 0.5f
+        translate(left = (sizePx - iconSide) / 2f, top = (sizePx - iconSide) / 2f) {
+            with(painter) { draw(Size(iconSide, iconSide), colorFilter = ColorFilter.tint(Color.White)) }
+        }
+    }
+    return bitmap
 }
