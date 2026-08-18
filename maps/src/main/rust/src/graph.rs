@@ -46,6 +46,18 @@ pub const INVALID_EDGE: u64 = 0xFFFF_FFFF_FFFF_FFFF;
 
 pub const WALK_SPEED_M_S: f64 = 4.5 / 3.6;
 pub const BICYCLE_SPEED_M_S: f64 = 16.0 / 3.6;
+/// Upper bound on any driving edge's effective speed (km/h). The A* heuristic is
+/// scaled to this speed AND every edge's effective speed is clamped to it in
+/// [`crate::geometry::get_edge_time_10ms`], which together keep the heuristic
+/// CONSISTENT (never overestimates a single edge). This is required for the
+/// monotonic radix heap: if an edge could be faster than the heuristic assumes,
+/// a relaxed node's f-value can fall below the last popped key, the heap
+/// mis-buckets it, and A* terminates on a suboptimal path (the "detours the
+/// wrong way / no route" bug). 130 km/h ≈ 80 mph covers every real US limit.
+pub const MAX_DRIVING_KMH: f64 = 130.0;
+/// Upper bound on any transit in-vehicle speed (km/h) for the same consistency
+/// reason — CA rail (BART/Caltrain/Amtrak) all exceed the old 80 km/h estimate.
+pub const MAX_TRANSIT_KMH: f64 = 150.0;
 pub const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 
 // --- On-disk packed structs ---
@@ -292,9 +304,12 @@ impl Graph {
         let mut time_scale_fixed = [0u64; 4];
         time_scale_fixed[WALK as usize] = calc_scale(WALK_SPEED_M_S);
         time_scale_fixed[BICYCLE as usize] = calc_scale(BICYCLE_SPEED_M_S);
-        time_scale_fixed[DRIVING as usize] = calc_scale(105.0 / 3.6);
-        // Optimistic 80 km/h transit velocity keeps the heuristic admissible.
-        time_scale_fixed[PUBLIC_TRANSIT as usize] = calc_scale(80.0 / 3.6);
+        // Heuristic speed MUST be >= the fastest achievable edge speed (which is
+        // clamped to MAX_DRIVING_KMH in get_edge_time_10ms) so the heuristic stays
+        // consistent for the monotonic radix heap. See MAX_DRIVING_KMH.
+        time_scale_fixed[DRIVING as usize] = calc_scale(MAX_DRIVING_KMH / 3.6);
+        // Same consistency requirement for transit in-vehicle speed.
+        time_scale_fixed[PUBLIC_TRANSIT as usize] = calc_scale(MAX_TRANSIT_KMH / 3.6);
 
         let mut edge_time_multipliers = [[0u64; 16]; 4];
         for (m, row) in edge_time_multipliers.iter_mut().enumerate() {

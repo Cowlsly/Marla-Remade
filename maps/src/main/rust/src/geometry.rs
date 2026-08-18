@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use crate::graph::{
-    Edge, Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MOTORWAY, PUBLIC_TRANSIT, STEPS,
-    TRANSIT_FLAG,
+    Edge, Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MAX_DRIVING_KMH, MOTORWAY,
+    PUBLIC_TRANSIT, STEPS, TRANSIT_FLAG,
 };
 
 /// Live traffic snapshot: global edge id -> speed (km/h). 0 means "unknown".
@@ -89,6 +89,10 @@ pub fn get_edge_time_10ms(
             0
         };
         let effective_limit = if traffic_speed > 0 { traffic_speed } else { limit };
+        // Clamp to the heuristic's max speed so no edge is ever faster than the
+        // heuristic assumes — required to keep the A* heuristic consistent for the
+        // monotonic radix heap (see MAX_DRIVING_KMH).
+        let effective_limit = effective_limit.min(MAX_DRIVING_KMH as u8);
         if effective_limit > 0 {
             let speed_m_s = effective_limit as f64 / 3.6;
             return (dist_mm as f64 / (speed_m_s * 10.0)) as u32;
