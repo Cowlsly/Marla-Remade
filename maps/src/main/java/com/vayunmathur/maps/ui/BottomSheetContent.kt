@@ -40,6 +40,7 @@ import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import com.vayunmathur.maps.util.TransitStopsViewModel
 import com.vayunmathur.maps.util.formatDistance
 import org.maplibre.spatialk.geojson.Position
 
@@ -53,6 +54,7 @@ fun BottomSheetContent(
     setSelectedRouteType: (RouteService.TravelMode) -> Unit,
     inactiveNavigation: SpecificFeature.Route?,
     savedPlacesViewModel: SavedPlacesViewModel,
+    transitViewModel: TransitStopsViewModel,
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
 ) {
     when (selectedFeature) {
@@ -82,7 +84,17 @@ fun BottomSheetContent(
         }
         is SpecificFeature.GenericPlace -> {
             Column {
-                PlaceSheet(viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature) {
+                PlaceSheet(
+                    viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature,
+                    onDepartures = if (selectedFeature.poiType == 50) {
+                        {
+                            transitViewModel.openNearestStop(
+                                selectedFeature.position.latitude,
+                                selectedFeature.position.longitude,
+                            )
+                        }
+                    } else null,
+                ) {
                     if (inactiveNavigation == null) {
                         setSelectedFeature(SpecificFeature.Route(listOf(null, selectedFeature)))
                     } else {

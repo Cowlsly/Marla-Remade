@@ -25,7 +25,7 @@ sealed interface SpecificFeature {
                           override val position: Position): RoutableFeature
     @Serializable
     data class GenericPlace(override val name: String, val phone: String?, val website: String?, val openingHours: OpeningHours?,
-                          override val position: Position): RoutableFeature
+                          override val position: Position, val poiType: Int? = null): RoutableFeature
     @Serializable
     data class Route(val waypoints: List<RoutableFeature?>) : SpecificFeature
 }

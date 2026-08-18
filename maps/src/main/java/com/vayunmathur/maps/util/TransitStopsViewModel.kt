@@ -23,6 +23,8 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.mapLatest
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -97,6 +99,26 @@ class TransitStopsViewModel(application: Application) : AndroidViewModel(applica
     fun openStop(stop: TransitStop) {
         _refreshTick.value = 0
         _selected.value = stop
+    }
+
+    /**
+     * Resolve the nearest Transitous stop to [lat],[lon] (a tapped station POI
+     * carries no stop id) and open its board. Queries a small bbox and picks the
+     * closest stop; no-op if none are found nearby.
+     */
+    fun openNearestStop(lat: Double, lon: Double) {
+        viewModelScope.launch {
+            val d = 0.01 // ~1.1km search box around the tapped station
+            val stops = withContext(Dispatchers.IO) {
+                TransitousDataSource.stopsInBbox(lat - d, lon - d, lat + d, lon + d)
+            }
+            val nearest = stops.minByOrNull { s ->
+                val dLat = s.lat - lat
+                val dLon = s.lon - lon
+                dLat * dLat + dLon * dLon
+            } ?: return@launch
+            openStop(nearest)
+        }
     }
 
     /** Close the board. */

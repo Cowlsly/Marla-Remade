@@ -111,7 +111,8 @@ fun Feature1.toSelectedMaPoi(): SpecificFeature? {
     val props = properties ?: return null
     val name = props.string("name")?.ifBlank { null } ?: return null
     val pos = (geometry as? Point)?.coordinates ?: return null
-    return SpecificFeature.GenericPlace(name, null, null, null, Position(pos.longitude, pos.latitude))
+    val type = props.string("type")?.toIntOrNull()
+    return SpecificFeature.GenericPlace(name, null, null, null, Position(pos.longitude, pos.latitude), poiType = type)
 }
 
 /** Build one category disc bitmap per POI type: a white-ringed colour disc with

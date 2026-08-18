@@ -111,11 +111,13 @@ fun PlaceSheet(
     savedPlacesViewModel: SavedPlacesViewModel,
     inactiveNavigation: SpecificFeature.Route?,
     feature: SpecificFeature.GenericPlace,
+    onDepartures: (() -> Unit)? = null,
     requestDirections: () -> Unit,
 ) = PlaceSheetContent(
     viewModel, savedPlacesViewModel, inactiveNavigation, feature,
     phone = feature.phone, website = feature.website, menu = null,
-    openingHours = feature.openingHours, requestDirections = requestDirections,
+    openingHours = feature.openingHours, onDepartures = onDepartures,
+    requestDirections = requestDirections,
 )
 
 @Composable
@@ -128,6 +130,7 @@ private fun PlaceSheetContent(
     website: String?,
     menu: String?,
     openingHours: OpeningHours?,
+    onDepartures: (() -> Unit)? = null,
     requestDirections: () -> Unit,
 ) {
     val poi by viewModel.currentPoiInfo.collectAsState()
@@ -146,6 +149,11 @@ private fun PlaceSheetContent(
             requestDirections = requestDirections,
             orderDeepLink = orderDeepLink,
         )
+        // Departures (train/transit stations): resolve the nearest Transitous
+        // stop by coordinate and open its live board (see MapPage DeparturesSheet).
+        onDepartures?.let { open ->
+            RestaurantItem({ IconSchedule() }, stringResource(R.string.transit_departures_title)) { open() }
+        }
         menu?.let {
             RestaurantItem({ IconMenuBook() }, stringResource(R.string.menu_label)) { goto(context, it) }
         }
