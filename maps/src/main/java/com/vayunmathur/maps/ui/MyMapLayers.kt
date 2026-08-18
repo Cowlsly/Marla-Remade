@@ -12,7 +12,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
-import com.vayunmathur.maps.data.google.GooglePoiPin
 import com.vayunmathur.maps.data.google.GoogleTrafficSource
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.OfflineRouter
@@ -57,7 +56,6 @@ fun MyMapLayers(
     userPosition: Position,
     userBearing: Float,
     navProgress: com.vayunmathur.maps.util.NavigationProgress? = null,
-    googlePins: List<GooglePoiPin> = emptyList(),
     searchResults: List<SearchResult> = emptyList(),
     savedPlaces: List<com.vayunmathur.maps.data.SavedPlace> = emptyList(),
     parkingSpot: com.vayunmathur.maps.data.ParkingSpot? = null,
@@ -145,14 +143,14 @@ fun MyMapLayers(
             TransitLinesLayer(adminSource)
         }
 
-        // Ambient POI overlay (P29): pins now come from the OFFLINE POI index
-        // (poi_index.bin, queried per-viewport by GooglePoiMapViewModel) and are
-        // drawn through GooglePoiLayer — the proven GeoJSON pin renderer. This
-        // replaces the P27 baked `ma_pois` PMTiles SymbolLayer, which failed to
-        // render (PMTiles directory parse error on the overlay source). Google is
-        // still hit only on tap for rich details (see MapPage.onMapClick ->
-        // toSelectedGooglePoi).
-        GooglePoiLayer(googlePins)
+        // Ambient POI overlay (P29): rendered NATIVELY from the baked `ma_pois`
+        // PMTiles source-layer (P27) via the EXISTING single vector source
+        // (`adminSource`) — the same one the admin/transit overlays reuse. This
+        // avoids the second-source "PMTiles directory" parse error that broke the
+        // original overlay, and it removes the slow per-viewport offline-index
+        // GeoJSON pins path. Google is still hit only on tap for rich details
+        // (see MapPage.onMapClick -> toSelectedMaPoi).
+        MaPoisLayer(adminSource)
 
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).

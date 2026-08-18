@@ -2,10 +2,8 @@ package com.vayunmathur.maps.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
@@ -20,8 +18,6 @@ import org.maplibre.compose.expressions.dsl.linear
 import org.maplibre.compose.expressions.dsl.switch
 import org.maplibre.compose.expressions.dsl.zoom
 import org.maplibre.compose.expressions.value.IntValue
-import org.maplibre.compose.expressions.value.StringValue
-import org.maplibre.compose.expressions.value.SymbolAnchor
 import org.maplibre.compose.layers.SymbolLayer
 import org.maplibre.compose.sources.VectorSource
 import org.maplibre.compose.util.MaplibreComposable
@@ -31,7 +27,6 @@ import org.maplibre.spatialk.geojson.Position
 /** Symbol layer id for the OSM POI icons — hit-tested in MapPage.onMapClick so a
  *  POI tap selects the place (name/coord) and fetches Google rich details. */
 const val MA_POIS_LAYER_ID = "ma-pois-icons"
-private const val MA_POIS_LABEL_LAYER_ID = "ma-pois-labels"
 
 /**
  * OUR baked OSM POI layer (P27). Placement / name / type come from the
@@ -49,9 +44,11 @@ object MaPoisSource {
 
 /**
  * Draw the `ma_pois` source-layer: a category icon per feature (data-driven off
- * the numeric `type`, see [PoiCategories]) plus a name label, from z12 up. Reads
- * the same shared [VectorSource] the admin/transit overlays use. Harmless no-op
- * while the source-layer is absent (until v5 is regenerated with `ma_pois`).
+ * the numeric `type`, see [PoiCategories]), from z12 up. Reads the SAME shared
+ * [VectorSource] the admin/transit overlays use (single source — a second source
+ * on the same PMTiles triggers a directory parse error). The disc icons are
+ * runtime Canvas bitmaps (no sprite/glyph assets needed), so this renders even
+ * while the style's remote glyphs 404; the POI NAME is shown in the sheet on tap.
  */
 @Composable
 @MaplibreComposable
@@ -77,19 +74,6 @@ fun MaPoisLayer(source: VectorSource) {
             15 to const(0.5f),
             18 to const(0.7f),
         ),
-    )
-
-    // Name label under the icon.
-    SymbolLayer(
-        MA_POIS_LABEL_LAYER_ID,
-        source,
-        sourceLayer = MaPoisSource.SOURCE_LAYER,
-        minZoom = 14f,
-        textField = feature["name"].cast<StringValue>(),
-        textColor = const(Color(0xFF37474F)),
-        textHaloColor = const(Color.White),
-        textHaloWidth = const(1.5.dp),
-        textAnchor = const(SymbolAnchor.Top),
     )
 }
 

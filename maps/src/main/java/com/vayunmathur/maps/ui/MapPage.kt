@@ -147,12 +147,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val selectedTransitStop by transitViewModel.selected.collectAsState()
     val departuresState by transitViewModel.departures.collectAsState()
 
-    // Ambient POI pins (P29): now sourced from the OFFLINE POI index
-    // (poi_index.bin) via GooglePoiMapViewModel.onViewportOffline as the camera
-    // moves, and rendered by GooglePoiLayer (the proven GeoJSON pin renderer).
-    // This replaces the P27 baked `ma_pois` PMTiles layer, which failed to render.
-    val googlePins by poiViewModel.pins.collectAsState()
-
     // Search-result pins (from the Google search page) drawn on the map.
     val searchResults by searchViewModel.results.collectAsState()
 
@@ -161,7 +155,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // and pushes updates only while bound. Empty when findfamily is absent.
     val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
 
-    val camera = rememberCameraState(CameraPosition(target = Position(-118.243683,34.052235), zoom = 5.0))
+    // TEST: default to San Francisco at z14 so the native ma_pois POIs are
+    // visible on cold start.
+    val camera = rememberCameraState(CameraPosition(target = Position(-122.4194, 37.7749), zoom = 14.0))
 
     LaunchedEffect(camera.position, transitEnabled) {
         if (camera.position.zoom >= 11.0) {
@@ -169,9 +165,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             val projection = camera.projection
             if (projection != null) {
                 val bbox = projection.queryVisibleBoundingBox()
-                // Ambient POI pins (P29): query the OFFLINE index for the visible
-                // box and publish pins for GooglePoiLayer. Only at zoom >= 11.
-                poiViewModel.onViewportOffline(bbox.north, bbox.east, bbox.south, bbox.west)
+                // Ambient POIs (P29) are now rendered NATIVELY from the baked
+                // `ma_pois` PMTiles source-layer (see MaPoisLayer in MyMapLayers),
+                // so no per-viewport offline-index query is needed here. PoiIndex
+                // is still used for offline SEARCH only.
                 // Refresh nearby transit stops (P10) only while the layer is on
                 // (VM debounces + caches; wide views clear the overlay).
                 if (transitEnabled) {
@@ -181,9 +178,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }
 
-    // P29: ambient POIs now come from the OFFLINE POI index (poi_index.bin),
-    // queried per-viewport and rendered via the proven GooglePoiLayer, replacing
-    // the P27 baked `ma_pois` PMTiles layer (which failed to parse/render).
+    // Offline POI SEARCH index (poi_index.bin / poi_names.bin, P27). Ambient POI
+    // rendering is now native from the baked `ma_pois` PMTiles source-layer (see
+    // MaPoisLayer), so this index is only used to answer offline search queries.
     // Re-map the side files once the map is ready so a first-run download that
     // landed AFTER PoiIndex.initialize first ran (and no-op'd because the files
     // were absent) is picked up instead of staying poisoned. reload() is a cheap
@@ -521,8 +518,8 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
                                     ?: projection?.queryRenderedFeatures(
                                         offset,
-                                        setOf(GOOGLE_POI_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
+                                        setOf(MA_POIS_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
                                 if (pinHit != null) {
                                     if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
                                         selectedFeature as SpecificFeature.Route
@@ -577,7 +574,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, googlePins, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
                     }
                 }
 
