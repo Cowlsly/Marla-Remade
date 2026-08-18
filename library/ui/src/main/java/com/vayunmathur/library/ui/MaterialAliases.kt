@@ -45,6 +45,7 @@ typealias NavigationSuiteType = androidx.compose.material3.adaptive.navigationsu
 
 // --- Component defaults ---
 typealias AssistChipDefaults = androidx.compose.material3.AssistChipDefaults
+typealias BadgeDefaults = androidx.compose.material3.BadgeDefaults
 typealias BottomSheetDefaults = androidx.compose.material3.BottomSheetDefaults
 typealias ButtonDefaults = androidx.compose.material3.ButtonDefaults
 typealias CardDefaults = androidx.compose.material3.CardDefaults

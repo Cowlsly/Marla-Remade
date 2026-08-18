@@ -16,6 +16,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.union
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.contentColorFor
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.ShortNavigationBar
 import androidx.compose.material3.ShortNavigationBarDefaults
@@ -35,6 +37,8 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.takeOrElse
 import androidx.compose.ui.unit.dp
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.scene.DialogSceneStrategy
@@ -156,13 +160,33 @@ private val NavPredictivePop: ContentTransform =
  * Single owner of the IME (keyboard) inset for every screen it hosts: it applies
  * [imePadding] once to all hosted content. Screens and reusable components rendered
  * inside must NOT call [imePadding] themselves, or the inset is applied twice.
+ *
+ * [containerColor] is [Color.Unspecified] by default, which leaves the scaffold's own
+ * opaque `colorScheme.background`. Pass [Color.Transparent] when something behind the
+ * activity window has to show through - the launcher needs the wallpaper visible, and an
+ * opaque scaffold paints over it.
  */
 @OptIn(ExperimentalMaterial3AdaptiveApi::class)
 @Composable
-fun <T: NavKey> MainNavigation(backStack: NavBackStack<T>, bottomBar: @Composable () -> Unit = {}, entryProvider: EntryProviderScope<T>.() -> Unit) {
+fun <T: NavKey> MainNavigation(
+    backStack: NavBackStack<T>,
+    bottomBar: @Composable () -> Unit = {},
+    containerColor: Color = Color.Unspecified,
+    entryProvider: EntryProviderScope<T>.() -> Unit,
+) {
     val sceneStrategy: ListDetailSceneStrategy<T> = rememberListDetailSceneStrategy()
     val resultRegistry = remember { NavResultRegistry() }
     val snackbarHostState = remember { SnackbarHostState() }
+
+    val resolvedContainerColor = containerColor.takeOrElse { MaterialTheme.colorScheme.background }
+
+    // Resolved rather than left to Scaffold's own default, which is `contentColorFor(container)`.
+    // That has no answer for a colour outside the scheme and falls back to LocalContentColor -
+    // which is plain black unless something upstream set it. A transparent container is exactly
+    // that case, so the launcher's icons and text were coming out black on the wallpaper.
+    val resolvedContentColor = MaterialTheme.colorScheme
+        .contentColorFor(resolvedContainerColor)
+        .takeOrElse { MaterialTheme.colorScheme.onBackground }
 
     // Drain messages posted from outside composition - ViewModels, workers,
     // anything without a Context. See AppMessages.
@@ -183,6 +207,8 @@ fun <T: NavKey> MainNavigation(backStack: NavBackStack<T>, bottomBar: @Composabl
 
     Scaffold(
         contentWindowInsets = WindowInsets(),
+        containerColor = resolvedContainerColor,
+        contentColor = resolvedContentColor,
         snackbarHost = { SnackbarHost(snackbarHostState) },
         bottomBar = bottomBar
     ) { paddingValues ->

@@ -101,6 +101,8 @@ import androidx.compose.material.icons.filled.Air
 import androidx.compose.material.icons.filled.Alarm
 import androidx.compose.material.icons.filled.Album
 import androidx.compose.material.icons.filled.Apartment
+import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Widgets
 import androidx.compose.material.icons.filled.Receipt
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.ArrowDropDown
@@ -129,6 +131,7 @@ import androidx.compose.material.icons.filled.Contrast
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.DarkMode
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DeleteForever
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Directions
 import androidx.compose.material.icons.filled.Download
@@ -1101,6 +1104,19 @@ fun IconShapeArrowOutline(modifier: Modifier = Modifier, tint: Color = LocalCont
 @Composable
 fun IconWallpaper(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Wallpaper, "Wallpaper", modifier, tint)
+
+@Composable
+fun IconApps(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Apps, "Apps", modifier, tint)
+
+@Composable
+fun IconWidgets(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Widgets, "Widgets", modifier, tint)
+
+/** Removing the app itself, as opposed to [IconDelete], which only takes it off a screen. */
+@Composable
+fun IconUninstall(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.DeleteForever, "Uninstall", modifier, tint)
 
 // --- Email composer rich formatting ---
 @Composable

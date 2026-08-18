@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launcher. Audited state:
+
+   - launcher-db (SQLCipher, databases/) — the home screen layout: one row per icon,
+     folder, widget and pinned shortcut, holding the container/page/cell/span plus the
+     target package, class and user serial. No content from the apps themselves.
+   - preferences, via DataStoreUtils into filesDir/datastore_default.preferences_pb
+     (LauncherViewModel) — grid size, icon scale, whether labels are shown.
+
+  No file I/O, nothing on external storage. The layout is worth restoring onto a new
+  device and reveals nothing beyond which apps are installed, which the package list
+  already says. Widget ids are the exception: they are allocated by the system
+  AppWidgetHost and are meaningless in another install, so a restored widget row is
+  dropped by reconciliation on first launch rather than rendered. Back everything up.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!--
+        A home screen has to show the user's wallpaper, which is drawn by the system
+        behind the activity window rather than by the app. That needs two things the
+        shared Theme.General cannot have, since every other app wants an opaque window:
+        windowShowWallpaper, which asks the system to draw it, and a transparent
+        windowBackground, so the activity window does not cover it up.
+
+        Inheriting from Theme.General keeps the rest of its behaviour (notably
+        windowSoftInputMode=stateUnchanged). Note that the Compose side needs the
+        matching change too - MainNavigation's Scaffold is passed
+        containerColor = Color.Transparent, or it paints colorScheme.background over
+        the wallpaper this theme just exposed.
+    -->
+    <style name="Theme.Launcher" parent="Theme.General">
+        <item name="android:windowShowWallpaper">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

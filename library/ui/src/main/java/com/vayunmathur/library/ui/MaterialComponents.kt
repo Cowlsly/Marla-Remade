@@ -782,6 +782,13 @@ fun BadgedBox(
     content: @Composable BoxScope.() -> Unit,
 ) = androidx.compose.material3.BadgedBox(badge = badge, modifier = modifier, content = content)
 
+@Composable
+fun Badge(
+    modifier: Modifier = Modifier,
+    containerColor: Color = BadgeDefaults.containerColor,
+    content: (@Composable RowScope.() -> Unit)? = null,
+) = androidx.compose.material3.Badge(modifier = modifier, containerColor = containerColor, content = content)
+
 // --- Navigation drawer ---
 @Composable
 fun ModalNavigationDrawer(
