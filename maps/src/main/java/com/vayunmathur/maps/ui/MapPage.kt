@@ -61,6 +61,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.R
 import com.vayunmathur.library.ui.IconClose
@@ -154,6 +155,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // while this screen is composed (see rememberFamilyMembers' DisposableEffect)
     // and pushes updates only while bound. Empty when findfamily is absent.
     val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
+
+    // Active browse-category POI filter (P29): when set, the on-map `ma_pois`
+    // layer is filtered to this category's OSM types (see MaPoisLayer). null =
+    // no filter (all POIs shown). Toggled by the CategoryChips row below.
+    var selectedCategory by remember { mutableStateOf<MapCategory?>(null) }
 
     // TEST: default to San Francisco at z14 so the native ma_pois POIs are
     // visible on cold start.
@@ -472,11 +478,17 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         onMapClick = { latLng, offset ->
                             coroutineScope.launch {
                                 val projection = camera.projection
+                                // Give pin taps a tolerance box (~22dp radius)
+                                // around the touch point so tapping NEAR a small
+                                // POI glyph still selects it, instead of only
+                                // registering on a pixel-exact hit.
+                                val pad = 22.dp
+                                val hitBox = DpRect(offset.x - pad, offset.y - pad, offset.x + pad, offset.y + pad)
                                 // Parking pin (P9): tapping the saved car spot
                                 // opens the parking sheet instead of selecting a
                                 // place.
                                 val parkingHit = projection?.queryRenderedFeatures(
-                                    offset,
+                                    hitBox,
                                     setOf(PARKING_PIN_LAYER_ID)
                                 )?.isNotEmpty() == true
                                 if (parkingHit) {
@@ -489,7 +501,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 // place. Only hit-tested while the layer is on.
                                 if (transitEnabled) {
                                     val stopHit = projection?.queryRenderedFeatures(
-                                        offset,
+                                        hitBox,
                                         setOf(TRANSIT_STOP_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toTransitStop() }
                                     if (stopHit != null) {
@@ -505,19 +517,19 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 // the Google rich details and GooglePoiEnrichment
                                 // renders.
                                 val pinHit = projection?.queryRenderedFeatures(
-                                    offset,
+                                    hitBox,
                                     setOf(SEARCH_RESULT_LAYER_ID)
                                 )?.firstNotNullOfOrNull { it.toSelectedSearchResult() }
                                     ?: projection?.queryRenderedFeatures(
-                                        offset,
+                                        hitBox,
                                         setOf(SAVED_PLACE_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toSelectedSavedPlace() }
                                     ?: projection?.queryRenderedFeatures(
-                                        offset,
+                                        hitBox,
                                         setOf(FAMILY_LOCATION_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
                                     ?: projection?.queryRenderedFeatures(
-                                        offset,
+                                        hitBox,
                                         setOf(MA_POIS_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
                                 if (pinHit != null) {
@@ -574,7 +586,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types)
                     }
                 }
 
@@ -635,11 +647,16 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                     }
                 } else {
                     Column(Modifier.padding(16.dp).fillMaxWidth()) {
-                        // Quick category chips (Vela's browse CategoryChips),
-                        // wired to the P3 Google search categories. (Home/Work
-                        // quick-access slots moved to the search page.)
+                        // Quick category chips (Vela's browse CategoryChips):
+                        // tapping one FILTERS the on-map POIs to that category's
+                        // OSM types (toggle off by tapping the active chip) rather
+                        // than running a text search. (Home/Work quick-access slots
+                        // moved to the search page.)
                         CategoryChips(
-                            onCategory = { openCategorySearch(it) },
+                            onCategory = { cat ->
+                                selectedCategory = if (selectedCategory == cat) null else cat
+                            },
+                            selected = selectedCategory,
                             modifier = Modifier.fillMaxWidth(),
                         )
                         Spacer(Modifier.height(8.dp))

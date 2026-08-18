@@ -171,7 +171,7 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
     ) { paddingValues ->
         Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
             CategoryChips(
-                onCategory = { actions.setQuery(it) },
+                onCategory = { actions.setQuery(it.query) },
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 16.dp, vertical = 8.dp),

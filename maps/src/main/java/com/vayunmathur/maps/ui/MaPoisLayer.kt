@@ -9,8 +9,10 @@ import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.PoiCategories
+import org.maplibre.compose.expressions.dsl.any
 import org.maplibre.compose.expressions.dsl.case
 import org.maplibre.compose.expressions.dsl.const
+import org.maplibre.compose.expressions.dsl.eq
 import org.maplibre.compose.expressions.dsl.feature
 import org.maplibre.compose.expressions.dsl.image
 import org.maplibre.compose.expressions.dsl.interpolate
@@ -49,11 +51,21 @@ object MaPoisSource {
  * on the same PMTiles triggers a directory parse error). The disc icons are
  * runtime Canvas bitmaps (no sprite/glyph assets needed), so this renders even
  * while the style's remote glyphs 404; the POI NAME is shown in the sheet on tap.
+ *
+ * When [filterTypes] is non-null and non-empty the layer is filtered to just
+ * those numeric types (the browse category chips, see MapPage); null shows all.
  */
 @Composable
 @MaplibreComposable
-fun MaPoisLayer(source: VectorSource) {
+fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
     val icons = remember { poiIcons() }
+
+    // Category filter (browse chips): show only features whose `type` is in the
+    // selected set, or everything when no category is active.
+    val typeFilter = filterTypes
+        ?.takeIf { it.isNotEmpty() }
+        ?.let { types -> any(*types.map { feature["type"].cast<IntValue>() eq const(it) }.toTypedArray()) }
+        ?: const(true)
 
     // Category icon, chosen by the numeric `type` (0..49, 255 = other).
     SymbolLayer(
@@ -61,6 +73,7 @@ fun MaPoisLayer(source: VectorSource) {
         source,
         sourceLayer = MaPoisSource.SOURCE_LAYER,
         minZoom = 12f,
+        filter = typeFilter,
         iconImage = switch(
             feature["type"].cast<IntValue>(),
             *PoiCategories.ALL_TYPES

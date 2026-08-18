@@ -65,6 +65,7 @@ fun MyMapLayers(
     satelliteEnabled: Boolean = false,
     safetyEnabled: Boolean = false,
     transitEnabled: Boolean = false,
+    poiFilterTypes: Set<Int>? = null,
 ) {
     val context = LocalContext.current
 
@@ -149,8 +150,9 @@ fun MyMapLayers(
         // avoids the second-source "PMTiles directory" parse error that broke the
         // original overlay, and it removes the slow per-viewport offline-index
         // GeoJSON pins path. Google is still hit only on tap for rich details
-        // (see MapPage.onMapClick -> toSelectedMaPoi).
-        MaPoisLayer(adminSource)
+        // (see MapPage.onMapClick -> toSelectedMaPoi). A non-null [poiFilterTypes]
+        // (set by tapping a category chip) filters the layer to those OSM types.
+        MaPoisLayer(adminSource, poiFilterTypes)
 
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).
