@@ -10,10 +10,6 @@
     <string name="tab_year">Год</string>
     <string name="no_data_available">Данные за этот период отсутствуют</string>
     <string name="unit_per_day_avg_format"><xliff:g id="unit" example="steps">%1$s</xliff:g> в день (avg)</string>
-    <string name="unit_only_format"></string>
-    <string name="month_year_format"></string>
-    <string name="value_unit_space_format"></string>
-    <string name="k_format"></string>
     <string name="metric_energy_burned">Сожжено калорий</string>
     <string name="metric_active_calories">Калории в движении</string>
     <string name="metric_basal_metabolic_rate">Базовый метаболизм</string>
@@ -63,7 +59,6 @@
     <string name="label_lean_body_mass">Сухая масса</string>
     <string name="label_bone_mass">Костная масса</string>
     <string name="label_body_water_mass">Содержание воды</string>
-    <string name="unit_bpm"></string>
     <string name="unit_steps">шаги</string>
     <string name="unit_pushes">толкания</string>
     <string name="nutrition_breakdown">Пищевая ценность</string>
