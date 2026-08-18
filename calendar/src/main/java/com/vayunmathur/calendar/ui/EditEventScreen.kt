@@ -47,6 +47,7 @@ import com.vayunmathur.calendar.data.Event
 import com.vayunmathur.calendar.util.CalendarViewModel
 import com.vayunmathur.calendar.R
 import com.vayunmathur.calendar.util.RRule
+import com.vayunmathur.calendar.util.RecurrenceDates
 import com.vayunmathur.calendar.util.RecurrenceParams
 import com.vayunmathur.calendar.Route
 import com.vayunmathur.library.ui.IconGlobe
@@ -138,7 +139,19 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
     var endTime by remember { mutableStateOf(event?.endDateTimeDisplay?.time ?: initialEndLdt?.time ?: startTime) }
     var timezone by remember { mutableStateOf(event?.timezone ?: TimeZone.currentSystemDefault().id) }
     var rruleObj by remember { mutableStateOf(event?.rrule) }
-    val rruleString by remember { derivedStateOf {rruleObj?.describe(context) ?: ""} }
+    var rdateObj by remember { mutableStateOf(event?.rdate ?: emptyList()) }
+    val repeatSummary by remember {
+        derivedStateOf {
+            when {
+                rdateObj.isNotEmpty() ->
+                    // The event's own date counts as an occurrence alongside the picked ones.
+                    context.resources.getQuantityString(
+                        R.plurals.repeat_dates_summary, rdateObj.size + 1, rdateObj.size + 1,
+                    )
+                else -> rruleObj?.describe(context) ?: ""
+            }
+        }
+    }
     var reminders by remember { mutableStateOf(event?.reminders ?: emptyList()) }
 
     // Shift the end date/time to preserve the current event duration when the start moves.
@@ -178,9 +191,14 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
         }
     }
 
-    // Recurrence dialog result: receives an RRULE string or empty string
+    // Recurrence dialog result: either a pattern or a hand-picked set of dates, never both.
     ResultEffect<RRule>(KEY_RECURRENCE) { res ->
         rruleObj = res
+        rdateObj = emptyList()
+    }
+    ResultEffect<RecurrenceDates>(KEY_RECURRENCE) { res ->
+        rdateObj = res.dates
+        rruleObj = null
     }
 
     // Result key for calendar picker
@@ -217,6 +235,7 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
                     allDay = allDay,
                     rrule = rruleObj,
                     exdate = event?.exdate ?: emptyList(),
+                    rdate = rdateObj,
                     reminders = reminders,
                 )
                 viewModel.upsertEvent(eventId, newEvent.toContentValues(selectedCalendar), reminders)
@@ -265,15 +284,17 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
             )
 
             // Recurrence selector
+            val repeats = rruleObj != null || rdateObj.isNotEmpty()
             Item(
                 { /* icon placeholder */ },
-                { Text(if (rruleObj == null) stringResource(R.string.does_not_repeat) else rruleString.ifBlank { stringResource(R.string.repeats) }, Modifier.clickable {
+                { Text(if (!repeats) stringResource(R.string.does_not_repeat) else repeatSummary.ifBlank { stringResource(R.string.repeats) }, Modifier.clickable {
                     // pass initial RecurrenceParams based on existing rrule
                     val initial = RecurrenceParams.fromRRule(rruleObj)
-                    backStack.add(Route.EditEvent.RecurrenceDialog(KEY_RECURRENCE, startDate, initial))
+                    backStack.add(Route.EditEvent.RecurrenceDialog(KEY_RECURRENCE, startDate, initial, rdateObj))
                 }) },
-                { if (rruleObj != null) Text(stringResource(UiR.string.remove), Modifier.clickable {
+                { if (repeats) Text(stringResource(UiR.string.remove), Modifier.clickable {
                     rruleObj = null
+                    rdateObj = emptyList()
                 }) }
             )
 

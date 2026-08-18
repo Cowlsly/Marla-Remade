@@ -14,6 +14,7 @@ import kotlinx.datetime.toLocalDateTime
 import com.vayunmathur.calendar.util.RRule
 import com.vayunmathur.calendar.util.parseIcalBasicDate
 import com.vayunmathur.calendar.util.toIcalBasic
+import com.vayunmathur.calendar.util.toIcalUtcDateTime
 import kotlinx.serialization.Serializable
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.milliseconds
@@ -34,8 +35,17 @@ data class Event(
     val allDay: Boolean,
     val rrule: RRule?,
     val exdate: List<LocalDate> = emptyList(),
+    /**
+     * Extra dates this event also happens on, beyond the pattern in [rrule]. RFC 5545 RDATE, which
+     * is how "repeat on these specific days" is expressed without a pattern: [rrule] is then null
+     * and the occurrences are the start date plus these.
+     */
+    val rdate: List<LocalDate> = emptyList(),
     val reminders: List<Int> = emptyList(), // minutes before start
 ) {
+
+    /** RRULE and RDATE are independent ways to repeat, and either one makes this a series. */
+    val isRecurring: Boolean get() = rrule != null || rdate.isNotEmpty()
 
     val startDateTimeDisplay: LocalDateTime
         get() = Instant.fromEpochMilliseconds(start).toLocalDateTime(TimeZone.of(timezone))
@@ -59,16 +69,24 @@ data class Event(
             put(CalendarContract.Events.EVENT_LOCATION, location)
             put(CalendarContract.Events.CALENDAR_ID, calendarId)
             put(CalendarContract.Events.DTSTART, dtstart)
-            if (rrule != null) {
+            if (isRecurring) {
                 put(CalendarContract.Events.DTEND, null as Long?)
                 val duration = (dtendActual - dtstart).milliseconds
                 put(CalendarContract.Events.DURATION, duration.toIsoString())
-                put(CalendarContract.Events.RRULE, rrule.asString(startDateTimeDisplay.date, tzObj))
+                put(CalendarContract.Events.RRULE, rrule?.asString(startDateTimeDisplay.date, tzObj))
             } else {
                 put(CalendarContract.Events.DTEND, dtendActual)
                 put(CalendarContract.Events.DURATION, null as String?)
                 put(CalendarContract.Events.RRULE, null as String?)
             }
+            // Always written, including as null, so clearing the repeat also clears the dates.
+            put(
+                CalendarContract.Events.RDATE,
+                rdate.takeIf { it.isNotEmpty() }?.joinToString(",") { date ->
+                    if (allDay) date.toIcalBasic()
+                    else date.toIcalUtcDateTime(startDateTimeDisplay.time, tzObj)
+                },
+            )
             put(CalendarContract.Events.ALL_DAY, if (allDay) 1 else 0)
             put(CalendarContract.Events.EVENT_TIMEZONE, tz)
             if (exdate.isNotEmpty()) {
@@ -97,7 +115,8 @@ data class Event(
                 CalendarContract.Events.DELETED,
                 CalendarContract.Events.RRULE,
                 CalendarContract.Events.DURATION,
-                CalendarContract.Events.EXDATE
+                CalendarContract.Events.EXDATE,
+                CalendarContract.Events.RDATE
             )
             try {
                 val cursor = context.contentResolver.query(uri, projection, null, null, null)
@@ -117,6 +136,7 @@ data class Event(
                     val rruleIdx = it.getColumnIndexOrThrow(CalendarContract.Events.RRULE)
                     val durationIdx = it.getColumnIndexOrThrow(CalendarContract.Events.DURATION)
                     val exdateIdx = it.getColumnIndexOrThrow(CalendarContract.Events.EXDATE)
+                    val rdateIdx = it.getColumnIndexOrThrow(CalendarContract.Events.RDATE)
 
                     while (it.moveToNext()) {
                         try {
@@ -137,6 +157,7 @@ data class Event(
                             val rrule = it.getStringOrNull(rruleIdx) ?: ""
                             val duration = it.getStringOrNull(durationIdx)
                             val exdateStr = it.getStringOrNull(exdateIdx)
+                            val rdateStr = it.getStringOrNull(rdateIdx)
 
 
                             val durationMillis = duration?.let { duration -> try {Duration.parse(duration).inWholeMilliseconds } catch(_: Exception) {0} }
@@ -148,6 +169,12 @@ data class Event(
                             // Parse EXDATE field - comma-separated RFC 5545 dates (YYYYMMDD or YYYYMMDDTHHMMSSZ)
                             val exdate = exdateStr?.split(",")?.mapNotNull { parseIcalBasicDate(it.trim()) }
                                 ?: emptyList()
+
+                            // RDATE is the same shape, and may carry a leading "TZID=...:" or
+                            // "VALUE=DATE:" parameter when another client wrote it.
+                            val rdate = rdateStr?.split(",")?.mapNotNull {
+                                parseIcalBasicDate(it.trim().substringAfterLast(':'))
+                            } ?: emptyList()
 
                             if (deleted) continue
 
@@ -165,6 +192,7 @@ data class Event(
                                 allDay,
                                 RRule.parse(rrule, tz),
                                 exdate,
+                                rdate,
                                 remindersByEvent[id]?.sorted() ?: emptyList(),
                             )
                             events.add(event)

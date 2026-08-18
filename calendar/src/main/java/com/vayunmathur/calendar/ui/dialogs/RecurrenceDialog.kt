@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.calendar.util.RRule
 import com.vayunmathur.calendar.R
+import com.vayunmathur.calendar.util.RecurrenceDates
 import com.vayunmathur.calendar.util.RecurrenceParams
 import com.vayunmathur.calendar.Route
 import com.vayunmathur.library.ui.DateString
@@ -53,12 +54,28 @@ import kotlinx.datetime.isoDayNumber
 import kotlinx.datetime.number
 
 private const val KEY_UNTIL = "RecurranceDialog.until"
+private const val KEY_ADD_DATE = "RecurranceDialog.addDate"
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun RecurrenceDialog(backStack: NavBackStack<Route>, resultKey: String, startDate: LocalDate, initial: RecurrenceParams?) {
+fun RecurrenceDialog(
+    backStack: NavBackStack<Route>,
+    resultKey: String,
+    startDate: LocalDate,
+    initial: RecurrenceParams?,
+    initialDates: List<LocalDate> = emptyList(),
+) {
     val registry = LocalNavResultRegistry.current
     val scope = rememberCoroutineScope()
+
+    // Two ways to repeat: a pattern (RRULE) or a hand-picked set of dates (RDATE). They are
+    // mutually exclusive, so the dialog is a mode switch over one confirm button.
+    var onDates by remember { mutableStateOf(initialDates.isNotEmpty()) }
+    var dates by remember { mutableStateOf(initialDates.filter { it != startDate }.distinct().sorted()) }
+
+    ResultEffect<LocalDate>(KEY_ADD_DATE) { selected ->
+        if (selected != startDate) dates = (dates + selected).distinct().sorted()
+    }
 
     var freq by remember { mutableStateOf(initial?.freq ?: "days") }
     var intervalStr by remember { mutableStateOf((initial?.interval ?: 1).toString()) }
@@ -94,6 +111,11 @@ fun RecurrenceDialog(backStack: NavBackStack<Route>, resultKey: String, startDat
         onDismissRequest = { backStack.pop() },
         confirmButton = {
             Button(onClick = {
+                if (onDates) {
+                    scope.launch { registry.dispatchResult(resultKey, RecurrenceDates(dates)) }
+                    backStack.pop()
+                    return@Button
+                }
                 val interval = intervalStr.toIntOrNull() ?: 1
                 val rrule: RRule = when (freq) {
                     "days" -> RRule.EveryXDays(interval, endCondition)
@@ -134,6 +156,33 @@ fun RecurrenceDialog(backStack: NavBackStack<Route>, resultKey: String, startDat
         },
         text = {
             Column(Modifier.padding(8.dp).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+
+                SingleChoiceSegmentedButtonRow(Modifier.fillMaxWidth()) {
+                    SegmentedButton(!onDates, { onDates = false }, shape = SegmentedButtonDefaults.itemShape(0, 2)) {
+                        Text(stringResource(R.string.repeat_mode_pattern))
+                    }
+                    SegmentedButton(onDates, { onDates = true }, shape = SegmentedButtonDefaults.itemShape(1, 2)) {
+                        Text(stringResource(R.string.repeat_mode_dates))
+                    }
+                }
+
+                if (onDates) {
+                    ChosenDates(
+                        startDate = startDate,
+                        dates = dates,
+                        onRemove = { dates = dates - it },
+                        onAdd = {
+                            backStack.add(
+                                Route.EditEvent.DatePickerDialog(
+                                    KEY_ADD_DATE,
+                                    dates.lastOrNull() ?: startDate,
+                                    startDate,
+                                )
+                            )
+                        },
+                    )
+                    return@Column
+                }
 
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically) {
                     Text(stringResource(R.string.repeat))
@@ -253,6 +302,37 @@ fun RecurrenceDialog(backStack: NavBackStack<Route>, resultKey: String, startDat
             }
         }
     )
+}
+
+/**
+ * The picked dates, newest edit last. The event's own start date is always the first occurrence and
+ * cannot be removed here — moving it means changing the event's date.
+ */
+@Composable
+private fun ChosenDates(
+    startDate: LocalDate,
+    dates: List<LocalDate>,
+    onRemove: (LocalDate) -> Unit,
+    onAdd: () -> Unit,
+) {
+    Text(stringResource(R.string.repeat_on_dates))
+    Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(
+            stringResource(R.string.repeat_date_first, DateString.dateWeekday(startDate)),
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        dates.forEach { date ->
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(DateString.dateWeekday(date), Modifier.weight(1f))
+                Text(
+                    stringResource(UiR.string.remove),
+                    Modifier.clickable { onRemove(date) },
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+        }
+    }
+    Button(onClick = onAdd) { Text(stringResource(R.string.repeat_add_date)) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

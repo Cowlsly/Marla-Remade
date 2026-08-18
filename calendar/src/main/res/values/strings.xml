@@ -147,6 +147,21 @@
     <string name="until">Until</string>
     <!-- Shows selected until date. %1$s = formatted date -->
     <string name="until_date">Until: <xliff:g id="date" example="Dec 31, 2025">%1$s</xliff:g></string>
+    <!-- Repeat mode: a recurring pattern such as every 2 weeks -->
+    <string name="repeat_mode_pattern">Pattern</string>
+    <!-- Repeat mode: a hand-picked set of dates rather than a pattern -->
+    <string name="repeat_mode_dates">Specific dates</string>
+    <!-- Header for the list of hand-picked repeat dates -->
+    <string name="repeat_on_dates">Repeats on these dates</string>
+    <!-- The event's own date, always the first occurrence. %1$s = formatted date -->
+    <string name="repeat_date_first"><xliff:g id="date" example="Mon, Dec 1">%1$s</xliff:g> (event date)</string>
+    <!-- Button that opens a date picker to add another repeat date -->
+    <string name="repeat_add_date">Add date</string>
+    <!-- Repeat summary for hand-picked dates. %1$d = how many days the event happens on -->
+    <plurals name="repeat_dates_summary">
+        <item quantity="one">On <xliff:g id="count" example="1">%1$d</xliff:g> date</item>
+        <item quantity="other">On <xliff:g id="count" example="4">%1$d</xliff:g> dates</item>
+    </plurals>
 
     <!-- Add calendar dialog -->
     <!-- Dialog title for creating new local calendar -->

@@ -105,7 +105,7 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
                 }
                 Box {
                     IconButton({
-                        if (instance.rrule != null) {
+                        if (event.isRecurring) {
                             // Recurring event - show dropdown menu
                             showDeleteMenu = true
                         } else {

@@ -227,7 +227,12 @@ sealed interface Route: NavKey {
         data class TimezonePickerDialog(val key: String): Route
 
         @Serializable
-        data class RecurrenceDialog(val key: String, val startDate: LocalDate, val initial: RecurrenceParams? = null): Route
+        data class RecurrenceDialog(
+            val key: String,
+            val startDate: LocalDate,
+            val initial: RecurrenceParams? = null,
+            val initialDates: List<LocalDate> = emptyList(),
+        ): Route
     }
 }
 
@@ -289,7 +294,7 @@ fun Navigation(viewModel: CalendarViewModel, initialRoute: Route?, onImportClear
         }
 
         entry<Route.EditEvent.RecurrenceDialog>(metadata = DialogPage()) { key ->
-            RecurrenceDialog(backStack, key.key, key.startDate, key.initial)
+            RecurrenceDialog(backStack, key.key, key.startDate, key.initial, key.initialDates)
         }
 
         entry<Route.Settings.ChangeColor>(metadata = DialogPage()) { key ->

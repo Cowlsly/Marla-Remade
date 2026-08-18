@@ -1,6 +1,15 @@
 package com.vayunmathur.calendar.util
 import kotlinx.datetime.DayOfWeek
+import kotlinx.datetime.LocalDate
 import kotlinx.serialization.Serializable
+
+/**
+ * The dates half of [RecurrenceDialog]'s result. A wrapper rather than a bare list because results
+ * are matched by type at the receiving end, and erasure makes a `List<LocalDate>` check match any
+ * list.
+ */
+@Serializable
+data class RecurrenceDates(val dates: List<LocalDate>)
 
 @Serializable
 data class RecurrenceParams(
