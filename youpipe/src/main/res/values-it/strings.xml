@@ -122,4 +122,18 @@
     <string name="settings_data">Dati e backup</string>
     <string name="settings_sponsorblock_summary">%1$d di %2$d bloccati</string>
     <string name="preset_custom">Personalizzato</string>
+    <string name="video_stat_paid_format">Pagato | <xliff:g id="time" example="3 days ago">%1$s</xliff:g></string>
+    <string name="video_info_paid_format"><xliff:g id="channel" example="Linus Tech Tips">%1$s</xliff:g> | Pagato | <xliff:g id="time" example="2 days ago">%2$s</xliff:g></string>
+    <string name="label_hide_paid">Nascondi video a pagamento</string>
+    <string name="playback_tempo">Velocità</string>
+    <string name="playback_pitch">Pitch</string>
+    <string name="playback_tempo_value"><xliff:g id="value" example="1.5">%1$s</xliff:g>x</string>
+    <string name="playback_pitch_value"><xliff:g id="value" example="100">%1$d</xliff:g>%%</string>
+    <string name="playback_unhook_pitch">Sgancia pitch (potrebbe distorcere)</string>
+    <string name="playback_reset">Reimposta</string>
+    <string name="lock_controls">Blocca controlli</string>
+    <string name="unlock_controls">Sblocca controlli</string>
+    <string name="label_player">Player</string>
+    <string name="label_keep_controls_visible">Mantieni i controlli del player visibili</string>
+    <string name="label_keep_controls_visible_description">I controlli rimangono visibili invece di nascondersi dopo 2 secondi. Utile per l\'accessibilità.</string>
 </resources>
