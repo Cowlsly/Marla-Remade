@@ -11,7 +11,17 @@ data class EmojiCategory(val label: String, val emojis: List<String>)
  * One emoji plus the text search matches against: the CLDR short name ("grinning face")
  * and its keywords ("happy", "smile", ...). Both are lowercase.
  */
-data class EmojiEntry(val char: String, val name: String, val keywords: List<String>)
+data class EmojiEntry(val char: String, val name: String, val keywords: List<String>) {
+    /**
+     * The words of [name] after the first. Search runs over every entry on every keystroke,
+     * so splitting the name there allocated a list per emoji per keypress; this does it once
+     * when the palette is read instead.
+     *
+     * The first word is left out because it cannot add a match: a query that starts it also
+     * starts the whole name, which search has already ranked higher.
+     */
+    val laterNameWords: List<String> = name.split(' ').drop(1)
+}
 
 /**
  * The emoji the user picked most recently, newest first. Kept out of [KeyboardSettings]
@@ -59,7 +69,7 @@ class EmojiData(
         for (entry in entries) {
             val bucket = when {
                 entry.name.startsWith(q) -> name
-                entry.name.split(' ').any { it.startsWith(q) } -> word
+                entry.laterNameWords.any { it.startsWith(q) } -> word
                 entry.keywords.any { it.startsWith(q) } -> keyword
                 else -> continue
             }

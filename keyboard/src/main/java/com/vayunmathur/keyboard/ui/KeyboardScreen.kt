@@ -9,6 +9,9 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
@@ -41,6 +44,10 @@ import com.vayunmathur.library.ui.Text
  * Root of the keyboard view: a suggestion strip (when enabled) above whichever page of keys
  * is active. All sizing is weight-based so it fills the width; key height scales with the
  * user's height-scale setting.
+ *
+ * The pieces below are split into their own composables along the lines of what changes
+ * while typing: a keystroke produces new suggestions and usually flips shift, and reading
+ * either of those here would redraw every key on the keyboard twice per keypress.
  */
 @Composable
 fun KeyboardScreen(state: KeyboardState, actions: ImeActions) {
@@ -52,91 +59,116 @@ fun KeyboardScreen(state: KeyboardState, actions: ImeActions) {
     // with a floor so there's breathing room even when the inset reads small (gesture nav).
     val bottomInset = with(LocalDensity.current) { state.bottomInsetPx.toDp() }
     val bottomPad = (bottomInset + 18.dp).coerceAtLeast(30.dp)
+    // Derived rather than read straight: the query changes on every keystroke of a search,
+    // and only arriving at or leaving search should rearrange the keyboard.
+    val searching by remember(state) { derivedStateOf { state.emojiQuery != null } }
     Surface(color = MaterialTheme.colorScheme.surfaceContainer) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(bottom = bottomPad),
         ) {
-            val query = state.emojiQuery
-            if (query != null) {
+            if (searching) {
                 // Search borrows the ordinary letter keys rather than shipping a second
                 // keyboard: the query bar and the results sit on top of LettersPage, and the
                 // service routes keystrokes into the query while this is showing.
-                EmojiSearchBar(height = StripHeight, query = query, onClose = actions::endEmojiSearch)
-                EmojiSearchResults(
-                    height = StripHeight,
-                    results = state.emojiResults,
-                    onPick = actions::commitEmoji,
-                )
+                EmojiSearchStrip(state, actions)
                 LettersPage(state, actions, keyHeight)
-                return@Column
-            }
-            // The strip belongs to text entry only; numeric/phone/emoji pages never compose
-            // words, so (like FUTO) they show no strip. Nor do layouts that have nothing to
-            // put in it: the one dictionary we ship is English.
-            val layout = state.settings.activeLayout
-            val textPage = state.page == KeyboardPage.LETTERS ||
-                state.page == KeyboardPage.SYMBOLS ||
-                state.page == KeyboardPage.MORE_SYMBOLS
-            val clip = state.clipSuggestion
-            when {
-                // A fresh clip outranks suggestions because the two never really compete:
-                // the chip is offered before anything has been typed and the service drops
-                // it on the first keypress, which is exactly when suggestions appear.
-                clip != null -> ClipboardStrip(
-                    height = StripHeight,
-                    item = clip,
-                    onOpen = { actions.setPage(KeyboardPage.CLIPBOARD) },
-                    onPaste = { actions.pasteClip(clip) },
-                    onDelete = { actions.deleteClip(clip) },
-                )
-                // Candidates are not a suggestion the user can decline — on a Chinese layout
-                // they are the only way a character gets typed — so the "show suggestions"
-                // preference does not apply to them.
-                textPage && layout.offersCandidates -> CandidateStrip(
-                    height = StripHeight,
-                    candidates = state.suggestions,
-                    onPick = actions::commitSuggestion,
-                )
-                textPage && layout.englishDictionary && state.settings.showSuggestions ->
-                    SuggestionStrip(
-                        height = StripHeight,
-                        suggestions = state.suggestions,
-                        onPick = actions::commitSuggestion,
-                    )
-            }
-            when (state.page) {
-                KeyboardPage.LETTERS -> LettersPage(state, actions, keyHeight)
-                KeyboardPage.SYMBOLS ->
-                    SymbolPage(state, actions, keyHeight, Layouts.SYMBOL_ROWS, KeyboardPage.MORE_SYMBOLS, "=\\<")
-                KeyboardPage.MORE_SYMBOLS ->
-                    SymbolPage(state, actions, keyHeight, Layouts.MORE_SYMBOL_ROWS, KeyboardPage.SYMBOLS, "?123")
-                KeyboardPage.NUMERIC -> NumericPage(state, actions, keyHeight)
-                KeyboardPage.PHONE -> PhonePage(state, actions, keyHeight)
-                KeyboardPage.PHONE_SYMBOLS -> PhoneSymbolsPage(state, actions, keyHeight)
-                KeyboardPage.EMOJI -> EmojiPage(
-                    data = state.emojiData,
-                    recents = state.recentEmoji,
-                    keyHeight = keyHeight,
-                    rows = 4,
-                    onEmoji = actions::commitEmoji,
-                    onSearch = actions::startEmojiSearch,
-                    onBackspace = actions::onBackspace,
-                    onBack = { actions.setPage(state.basePage) },
-                )
-                KeyboardPage.CLIPBOARD -> ClipboardPage(
-                    clips = state.clips,
-                    keyHeight = keyHeight,
-                    rows = 4,
-                    onPaste = actions::pasteClip,
-                    onDelete = actions::deleteClip,
-                    onClearAll = actions::clearClips,
-                    onBackspace = actions::onBackspace,
-                    onBack = { actions.setPage(state.basePage) },
-                )
+            } else {
+                Strip(state, actions)
+                KeyPage(state, actions, keyHeight)
             }
         }
+    }
+}
+
+/** The emoji-search query bar and its results, which change together on every keystroke. */
+@Composable
+private fun EmojiSearchStrip(state: KeyboardState, actions: ImeActions) {
+    val query = state.emojiQuery ?: return
+    EmojiSearchBar(height = StripHeight, query = query, onClose = actions::endEmojiSearch)
+    EmojiSearchResults(
+        height = StripHeight,
+        results = state.emojiResults,
+        onPick = actions::commitEmoji,
+    )
+}
+
+/** Whatever occupies the strip above the keys, or nothing. */
+@Composable
+private fun Strip(state: KeyboardState, actions: ImeActions) {
+    // A fresh clip outranks suggestions because the two never really compete: the chip is
+    // offered before anything has been typed and the service drops it on the first keypress,
+    // which is exactly when suggestions appear.
+    val clip = state.clipSuggestion
+    if (clip != null) {
+        ClipboardStrip(
+            height = StripHeight,
+            item = clip,
+            onOpen = { actions.setPage(KeyboardPage.CLIPBOARD) },
+            onPaste = { actions.pasteClip(clip) },
+            onDelete = { actions.deleteClip(clip) },
+        )
+        return
+    }
+    // The strip belongs to text entry only; numeric/phone/emoji pages never compose words,
+    // so (like FUTO) they show no strip.
+    val page = state.page
+    val textPage = page == KeyboardPage.LETTERS ||
+        page == KeyboardPage.SYMBOLS ||
+        page == KeyboardPage.MORE_SYMBOLS
+    if (!textPage) return
+    // Nor do layouts that have nothing to put in it: the one dictionary we ship is English.
+    val layout = state.settings.activeLayout
+    when {
+        // Candidates are not a suggestion the user can decline — on a Chinese layout they
+        // are the only way a character gets typed — so the "show suggestions" preference
+        // does not apply to them.
+        layout.offersCandidates -> CandidateStrip(
+            height = StripHeight,
+            candidates = state.suggestions,
+            onPick = actions::commitSuggestion,
+        )
+        layout.englishDictionary && state.settings.showSuggestions -> SuggestionStrip(
+            height = StripHeight,
+            suggestions = state.suggestions,
+            onPick = actions::commitSuggestion,
+        )
+    }
+}
+
+/** The active page of keys. */
+@Composable
+private fun KeyPage(state: KeyboardState, actions: ImeActions, keyHeight: Dp) {
+    when (state.page) {
+        KeyboardPage.LETTERS -> LettersPage(state, actions, keyHeight)
+        KeyboardPage.SYMBOLS ->
+            SymbolPage(state, actions, keyHeight, Layouts.SYMBOL_ROWS, KeyboardPage.MORE_SYMBOLS, "=\\<")
+        KeyboardPage.MORE_SYMBOLS ->
+            SymbolPage(state, actions, keyHeight, Layouts.MORE_SYMBOL_ROWS, KeyboardPage.SYMBOLS, "?123")
+        KeyboardPage.NUMERIC -> NumericPage(state, actions, keyHeight)
+        KeyboardPage.PHONE -> PhonePage(state, actions, keyHeight)
+        KeyboardPage.PHONE_SYMBOLS -> PhoneSymbolsPage(state, actions, keyHeight)
+        KeyboardPage.EMOJI -> EmojiPage(
+            data = state.emojiData,
+            recents = state.recentEmoji,
+            keyHeight = keyHeight,
+            rows = 4,
+            onEmoji = actions::commitEmoji,
+            onSearch = actions::startEmojiSearch,
+            onBackspace = actions::onBackspace,
+            onBack = { actions.setPage(state.basePage) },
+        )
+        KeyboardPage.CLIPBOARD -> ClipboardPage(
+            clips = state.clips,
+            keyHeight = keyHeight,
+            rows = 4,
+            onPaste = actions::pasteClip,
+            onDelete = actions::deleteClip,
+            onClearAll = actions::clearClips,
+            onBackspace = actions::onBackspace,
+            onBack = { actions.setPage(state.basePage) },
+        )
     }
 }
 
@@ -156,8 +188,6 @@ private val StripHeight = 44.dp
 private fun LettersPage(state: KeyboardState, actions: ImeActions, keyHeight: Dp) {
     val layout = state.settings.activeLayout
     val rows = layout.rows
-    val shift = state.shift
-    val slack = { row: Int -> (layout.width - rows[row].length) / 2f }
     if (state.settings.numberRow && rows.size < 4) {
         Row(Modifier.fillMaxWidth()) {
             DIGITS.forEach {
@@ -169,6 +199,36 @@ private fun LettersPage(state: KeyboardState, actions: ImeActions, keyHeight: Dp
     // The two are mutually exclusive so a digit is never reachable two ways at once, and
     // layouts with four rows already spend that row on their own script.
     val topRowDigits = !state.settings.numberRow && rows.size < 4
+    LetterRows(state, layout, actions, keyHeight, topRowDigits)
+    // Email/URL fields surface @ or / where the comma usually sits.
+    val commaChar = when (state.textVariation) {
+        TextVariation.EMAIL -> "@"
+        TextVariation.URL -> "/"
+        TextVariation.NORMAL -> layout.comma
+    }
+    BottomRow(
+        state, actions, keyHeight,
+        leftLabel = "?123", leftTarget = KeyboardPage.SYMBOLS,
+        commaChar = commaChar, periodChar = layout.period,
+    )
+}
+
+/**
+ * The letter rows proper, which are the only part of the page whose labels depend on shift.
+ * Separated from the rest so that a shift change — which auto-capitalisation makes on most
+ * keystrokes — redraws these and leaves the number row and the bottom row alone.
+ */
+@Composable
+private fun LetterRows(
+    state: KeyboardState,
+    layout: KeyboardLayout,
+    actions: ImeActions,
+    keyHeight: Dp,
+    topRowDigits: Boolean,
+) {
+    val rows = layout.rows
+    val shift = state.shift
+    val slack = { row: Int -> (layout.width - rows[row].length) / 2f }
     for (r in 0 until rows.size - 1) {
         Row(Modifier.fillMaxWidth()) {
             if (slack(r) > 0f) Spacer(Modifier.weight(slack(r)))
@@ -196,17 +256,6 @@ private fun LettersPage(state: KeyboardState, actions: ImeActions, keyHeight: Dp
         }
         RepeatKey(keyHeight, edge, actions::onBackspace) { IconBackspace() }
     }
-    // Email/URL fields surface @ or / where the comma usually sits.
-    val commaChar = when (state.textVariation) {
-        TextVariation.EMAIL -> "@"
-        TextVariation.URL -> "/"
-        TextVariation.NORMAL -> layout.comma
-    }
-    BottomRow(
-        state, actions, keyHeight,
-        leftLabel = "?123", leftTarget = KeyboardPage.SYMBOLS,
-        commaChar = commaChar, periodChar = layout.period,
-    )
 }
 
 /**

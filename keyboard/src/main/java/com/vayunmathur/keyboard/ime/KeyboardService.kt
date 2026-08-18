@@ -101,6 +101,16 @@ class KeyboardService : InputMethodService(),
     private val composing = StringBuilder()
 
     /**
+     * What is in front of the cursor, mirrored locally rather than read back from the field
+     * on every keystroke. Every edit below goes through [commit], [setComposing],
+     * [finishComposing] or [deleteBackward] so it stays in step.
+     */
+    private val before = TextBeforeCursor()
+
+    /** The composition currently shown, so finalizing it can be mirrored into [before]. */
+    private var pendingComposition: CharSequence = ""
+
+    /**
      * The composition engine for the active layout, or null for layouts whose keys are
      * already characters. Owns everything about Hangul/pinyin/kana input; the service only
      * applies what it returns to the [InputConnection].
@@ -230,13 +240,13 @@ class KeyboardService : InputMethodService(),
      * becomes final, then whatever is still being composed goes back under it.
      */
     private fun applyComposition(ic: InputConnection, engine: Composer, result: ComposeResult) {
-        if (result.commit.isNotEmpty()) ic.commitText(result.commit, 1)
+        if (result.commit.isNotEmpty()) commit(ic, result.commit)
         if (result.composing.isNotEmpty()) {
-            ic.setComposingText(result.composing, 1)
+            setComposing(ic, result.composing)
         } else if (result.commit.isEmpty()) {
             // Nothing settled and nothing left: the last backspace emptied the composition.
-            ic.setComposingText("", 1)
-            ic.finishComposingText()
+            setComposing(ic, "")
+            finishComposing(ic)
         }
         kbState.suggestions = engine.candidates
     }
@@ -247,13 +257,53 @@ class KeyboardService : InputMethodService(),
         if (engine.isComposing) {
             val result = engine.finish()
             if (result != null && result.commit.isNotEmpty()) {
-                ic.commitText(result.commit, 1)
+                commit(ic, result.commit)
             } else {
-                ic.finishComposingText()
+                finishComposing(ic)
             }
         }
         engine.reset()
         kbState.suggestions = emptyList()
+    }
+
+    // --- Edits ---
+
+    /**
+     * The four ways this service changes the field, each mirrored into [before]. Going
+     * through these rather than touching the [InputConnection] directly is what lets
+     * auto-capitalisation and the double-space period answer from memory instead of asking
+     * the target app — see [TextBeforeCursor].
+     */
+    private fun commit(ic: InputConnection, text: CharSequence) {
+        ic.commitText(text, 1)
+        pendingComposition = ""
+        before.committed(text)
+    }
+
+    private fun setComposing(ic: InputConnection, text: CharSequence) {
+        ic.setComposingText(text, 1)
+        pendingComposition = text.toString()
+        before.composing(text)
+    }
+
+    private fun finishComposing(ic: InputConnection) {
+        ic.finishComposingText()
+        before.composingFinished(pendingComposition)
+        pendingComposition = ""
+    }
+
+    private fun deleteBackward(ic: InputConnection) {
+        ic.deleteSurroundingText(1, 0)
+        before.deleted()
+    }
+
+    /** The text in front of the cursor, asking the field only when the mirror cannot say. */
+    private fun textBeforeCursor(): CharSequence {
+        before.peek()?.let { return it }
+        val ic = currentInputConnection ?: return ""
+        val text = ic.getTextBeforeCursor(TextBeforeCursor.WINDOW, 0) ?: return ""
+        before.fill(text)
+        return text
     }
 
     private inline fun update(transform: KeyboardSettings.() -> KeyboardSettings) {
@@ -305,6 +355,8 @@ class KeyboardService : InputMethodService(),
     override fun onStartInputView(info: EditorInfo, restarting: Boolean) {
         super.onStartInputView(info, restarting)
         composing.setLength(0)
+        pendingComposition = ""
+        before.onStartInput(info.initialSelStart, info.initialSelEnd)
         // Open on whatever subtype the system currently has selected for us, so the app's
         // active layout tracks the framework (e.g. after a system-level switch).
         val current = getSystemService(InputMethodManager::class.java)?.currentInputMethodSubtype
@@ -353,9 +405,25 @@ class KeyboardService : InputMethodService(),
         lifecycleRegistry.currentState = Lifecycle.State.STARTED
     }
 
+    override fun onUpdateSelection(
+        oldSelStart: Int,
+        oldSelEnd: Int,
+        newSelStart: Int,
+        newSelEnd: Int,
+        candidatesStart: Int,
+        candidatesEnd: Int,
+    ) {
+        super.onUpdateSelection(
+            oldSelStart, oldSelEnd, newSelStart, newSelEnd, candidatesStart, candidatesEnd,
+        )
+        before.onSelectionChanged(newSelStart, newSelEnd)
+    }
+
     override fun onFinishInputView(finishingInput: Boolean) {
         super.onFinishInputView(finishingInput)
         composing.setLength(0)
+        pendingComposition = ""
+        before.invalidate()
         composer?.reset()
     }
 
@@ -466,17 +534,17 @@ class KeyboardService : InputMethodService(),
             }
             // Punctuation, a symbol-page key: settle the composition and type it plainly.
             finishComposition(ic)
-            ic.commitText(text, 1)
+            commit(ic, text)
             consumeShift()
             return
         }
         if (useComposing() && text.length == 1 && text[0].isLetter()) {
             composing.append(text)
-            ic.setComposingText(composing, 1)
+            setComposing(ic, composing)
             updateSuggestions()
         } else {
             commitCurrentWord(ic, autoCorrect = false)
-            ic.commitText(text, 1)
+            commit(ic, text)
             kbState.suggestions = emptyList()
         }
         consumeShift()
@@ -506,21 +574,20 @@ class KeyboardService : InputMethodService(),
         if (composing.isNotEmpty()) {
             composing.deleteCharAt(composing.length - 1)
             if (composing.isEmpty()) {
-                ic.setComposingText("", 1)
-                ic.finishComposingText()
+                setComposing(ic, "")
+                finishComposing(ic)
                 kbState.suggestions = emptyList()
             } else {
-                ic.setComposingText(composing, 1)
+                setComposing(ic, composing)
                 updateSuggestions()
             }
+        } else if (before.hasSelection) {
+            // Deleting a selection leaves whatever preceded it in front of the cursor, which
+            // is text we never saw, so the mirror has to start again.
+            commit(ic, "")
+            before.invalidate()
         } else {
-            // Delete a selection if there is one, else one char before the cursor.
-            val selected = ic.getSelectedText(0)
-            if (!selected.isNullOrEmpty()) {
-                ic.commitText("", 1)
-            } else {
-                ic.deleteSurroundingText(1, 0)
-            }
+            deleteBackward(ic)
         }
         updateAutoCapShift()
     }
@@ -543,6 +610,9 @@ class KeyboardService : InputMethodService(),
         if (!handled) {
             sendDownUpKeyEvents(KeyEvent.KEYCODE_ENTER)
         }
+        // Either way the field is now the app's business — it may have inserted a newline,
+        // moved focus or submitted and cleared itself.
+        before.invalidate()
         kbState.suggestions = emptyList()
         updateAutoCapShift()
     }
@@ -561,20 +631,21 @@ class KeyboardService : InputMethodService(),
                 return
             }
             finishComposition(ic)
-            ic.commitText(" ", 1)
+            commit(ic, " ")
             lastSpaceTime = SystemClock.uptimeMillis()
             return
         }
         commitCurrentWord(ic, autoCorrect = kbState.settings.autoCorrect)
-        val before = ic.getTextBeforeCursor(2, 0)
+        val text = textBeforeCursor()
         val now = SystemClock.uptimeMillis()
-        val doubleSpace = kbState.settings.doubleSpacePeriod && before != null && before.length == 2 &&
-            before[1] == ' ' && before[0].isLetterOrDigit() && now - lastSpaceTime < 1000
+        val doubleSpace = kbState.settings.doubleSpacePeriod && text.length >= 2 &&
+            text[text.length - 1] == ' ' && text[text.length - 2].isLetterOrDigit() &&
+            now - lastSpaceTime < 1000
         if (doubleSpace) {
-            ic.deleteSurroundingText(1, 0)
-            ic.commitText(". ", 1)
+            deleteBackward(ic)
+            commit(ic, ". ")
         } else {
-            ic.commitText(" ", 1)
+            commit(ic, " ")
         }
         lastSpaceTime = now
         kbState.suggestions = emptyList()
@@ -617,9 +688,9 @@ class KeyboardService : InputMethodService(),
             applyComposition(ic, engine, engine.pick(word))
             return
         }
-        ic.setComposingText(word, 1)
-        ic.finishComposingText()
-        ic.commitText(" ", 1)
+        setComposing(ic, word)
+        finishComposing(ic)
+        commit(ic, " ")
         composing.setLength(0)
         lastSpaceTime = SystemClock.uptimeMillis()
         kbState.suggestions = emptyList()
@@ -700,6 +771,7 @@ class KeyboardService : InputMethodService(),
             finishComposition(it)
             commitCurrentWord(it, autoCorrect = false)
         }
+
         kbState.settings = kbState.settings.copy(activeLayoutId = id)
         kbState.shift = ShiftState.OFF
         kbState.suggestions = emptyList()
@@ -770,7 +842,7 @@ class KeyboardService : InputMethodService(),
         } else {
             finishComposition(ic)
             commitCurrentWord(ic, autoCorrect = false)
-            ic.commitText(item.text, 1)
+            commit(ic, item.text)
             kbState.suggestions = emptyList()
         }
         updateAutoCapShift()
@@ -797,6 +869,8 @@ class KeyboardService : InputMethodService(),
             InputConnectionCompat.INPUT_CONTENT_GRANT_READ_URI_PERMISSION,
             null,
         )
+        // How the field represents an image — if it takes it at all — is up to the app.
+        before.invalidate()
     }
 
     /**
@@ -884,15 +958,15 @@ class KeyboardService : InputMethodService(),
     private fun commitCurrentWord(ic: InputConnection, autoCorrect: Boolean) {
         if (composing.isEmpty()) return
         if (autoCorrect) {
+            // autocorrect already declines to rewrite a word it knows, so there is no need
+            // to look the typed word up separately first.
             val typed = composing.toString()
-            if (!dictionary.contains(typed)) {
-                val fix = dictionary.autocorrect(typed)
-                if (fix != null && !fix.equals(typed, ignoreCase = true)) {
-                    ic.setComposingText(fix, 1)
-                }
+            val fix = dictionary.autocorrect(typed)
+            if (fix != null && !fix.equals(typed, ignoreCase = true)) {
+                setComposing(ic, fix)
             }
         }
-        ic.finishComposingText()
+        finishComposing(ic)
         composing.setLength(0)
     }
 
@@ -923,25 +997,31 @@ class KeyboardService : InputMethodService(),
     }
 
     private fun isAtSentenceStart(): Boolean {
-        val ic = currentInputConnection ?: return true
-        val before = ic.getTextBeforeCursor(2, 0) ?: return true
-        if (before.isEmpty()) return true
-        val last = before[before.length - 1]
+        val text = textBeforeCursor()
+        if (text.isEmpty()) return true
+        val last = text[text.length - 1]
         if (last == '\n') return true
-        if (before.length < 2) return false
-        val prev = before[before.length - 2]
+        if (text.length < 2) return false
+        val prev = text[text.length - 2]
         return last == ' ' && (prev == '.' || prev == '?' || prev == '!')
     }
 
     // --- Feedback ---
 
+    /**
+     * A light key "tick" (like the stock keyboard), not a full-strength buzz. Built once:
+     * this runs before the edit on every single keypress, and both the effect and the
+     * service lookup were being redone each time.
+     */
+    private val keyTick by lazy { VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK) }
+    private val audio by lazy { getSystemService(AudioManager::class.java) }
+
     private fun feedback() {
         if (kbState.settings.haptic) {
-            // A light key "tick" (like the stock keyboard), not a full-strength buzz.
-            vibrator?.vibrate(VibrationEffect.createPredefined(VibrationEffect.EFFECT_TICK))
+            vibrator?.vibrate(keyTick)
         }
         if (kbState.settings.sound) {
-            getSystemService(AudioManager::class.java)?.playSoundEffect(AudioManager.FX_KEYPRESS_STANDARD)
+            audio?.playSoundEffect(AudioManager.FX_KEYPRESS_STANDARD)
         }
     }
 }

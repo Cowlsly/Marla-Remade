@@ -144,6 +144,29 @@ class DictionaryTest {
         assertNull(d.autocorrect("abc"))
     }
 
+    /**
+     * The three cases below are the ones the candidate index is easiest to get wrong: each
+     * one is a correction whose first character is not the first character the user typed,
+     * so a naive "same length, same first letter" bucket would never find it.
+     */
+    @Test
+    fun aTranspositionOfTheFirstTwoCharactersIsCorrected() {
+        val d = Dictionary.fromEntries(listOf("you" to 100))
+        assertEquals("you", d.autocorrect("oyu"))
+    }
+
+    @Test
+    fun anExtraCharacterTypedBeforeTheWordIsCorrected() {
+        val d = Dictionary.fromEntries(listOf("the" to 100))
+        assertEquals("the", d.autocorrect("xthe"))
+    }
+
+    @Test
+    fun aMissingFirstCharacterIsCorrected() {
+        val d = Dictionary.fromEntries(listOf("the" to 100))
+        assertEquals("the", d.autocorrect("he"))
+    }
+
     @Test
     fun twoEditsAwayIsNotCorrected() {
         assertNull(editDict.autocorrect("xyzzy"))

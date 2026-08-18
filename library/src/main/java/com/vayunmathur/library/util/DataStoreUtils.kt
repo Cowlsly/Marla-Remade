@@ -18,6 +18,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
@@ -62,8 +63,12 @@ class DataStoreUtils private constructor(context: Context) {
         return dataStore.data.first()[longPreferencesKey(name)]
     }
 
+    // `dataStore.data` re-emits the whole preference set on every write, so without this a
+    // collector of one key wakes up for every change to any other. Anything watching a
+    // handful of keys at once (the keyboard watches twelve) otherwise does that much
+    // redundant work on each save.
     fun booleanFlow(name: String): Flow<Boolean> {
-        return dataStore.data.mapNotNull { it[booleanPreferencesKey(name)] }
+        return dataStore.data.mapNotNull { it[booleanPreferencesKey(name)] }.distinctUntilChanged()
     }
 
     /** Suspend variant that awaits DataStore hydration. */
@@ -78,11 +83,11 @@ class DataStoreUtils private constructor(context: Context) {
     }
 
     fun longFlow(s: String): Flow<Long> {
-        return dataStore.data.mapNotNull { it[longPreferencesKey(s)] }
+        return dataStore.data.mapNotNull { it[longPreferencesKey(s)] }.distinctUntilChanged()
     }
 
     fun longFlow(name: String, default: Long): Flow<Long> {
-        return dataStore.data.map { it[longPreferencesKey(name)] ?: default }
+        return dataStore.data.map { it[longPreferencesKey(name)] ?: default }.distinctUntilChanged()
     }
 
     suspend fun setLong(s: String, userid: Long, onlyIfAbsent: Boolean = false) {
@@ -106,7 +111,7 @@ class DataStoreUtils private constructor(context: Context) {
     }
 
     fun doubleFlow(string: String): Flow<Double> {
-        return dataStore.data.mapNotNull { it[doublePreferencesKey(string)] }
+        return dataStore.data.mapNotNull { it[doublePreferencesKey(string)] }.distinctUntilChanged()
     }
 
     fun getDouble(name: String): Double? {
@@ -136,11 +141,11 @@ class DataStoreUtils private constructor(context: Context) {
     }
 
     fun stringFlow(key: String): Flow<String> {
-        return dataStore.data.mapNotNull { it[stringPreferencesKey(key)] }
+        return dataStore.data.mapNotNull { it[stringPreferencesKey(key)] }.distinctUntilChanged()
     }
 
     fun stringSetFlow(key: String): Flow<Set<String>> {
-        return dataStore.data.map { it[stringSetPreferencesKey(key)] ?: emptySet() }
+        return dataStore.data.map { it[stringSetPreferencesKey(key)] ?: emptySet() }.distinctUntilChanged()
     }
 
     /**

@@ -24,7 +24,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
@@ -113,8 +112,12 @@ fun RowScope.CharKey(
     val pressed by interaction.collectIsPressedAsState()
     // -1 while the popup is closed, otherwise the alternate under the finger.
     var selected by remember { mutableIntStateOf(-1) }
-    var keyLeft by remember { mutableFloatStateOf(0f) }
-    var keyWidth by remember { mutableFloatStateOf(0f) }
+    // Where the key sits, recorded on layout. Deliberately *not* snapshot state: writing
+    // state from onGloballyPositioned that composition then reads schedules another
+    // recomposition and another layout pass, and with every key on the keyboard doing it
+    // that doubles the cost of every relayout. Nothing needs these until a long press has
+    // opened the popup, by which point the key has long since been positioned.
+    val bounds = remember { KeyBounds() }
 
     val density = LocalDensity.current
     val screenWidth = LocalWindowInfo.current.containerSize.width.toFloat()
@@ -138,25 +141,13 @@ fun RowScope.CharKey(
         if (options.isEmpty()) full else minOf(full, screenWidth / options.length)
     }
 
-    // Where the popup's left edge sits relative to the key's: centred on the key, then
-    // nudged back inside the screen. The drag-to-select maths below uses the same number,
-    // so what the finger is over is always what is highlighted.
-    val popupOffset = remember(options, itemWidth, keyLeft, keyWidth) {
-        val total = itemWidth * options.length
-        val centred = keyLeft + (keyWidth - total) / 2f
-        val clamped = centred.coerceIn(0f, (screenWidth - total).coerceAtLeast(0f))
-        clamped - keyLeft
-    }
-
     // The gesture below reads all of these through snapshots rather than capturing them, so it
-    // never has to be restarted to pick up a new value — including popupOffset, which is still
-    // 0 on the first composition and only gets its real value once the key has been positioned.
-    // See the note on `pointerInput(Unit)`.
+    // never has to be restarted to pick up a new value. See the note on `pointerInput(Unit)`.
     val currentOnClick by rememberUpdatedState(onClick)
     val currentOnAlternate by rememberUpdatedState(onAlternate)
     val currentOptions by rememberUpdatedState(options)
     val currentItemWidth by rememberUpdatedState(itemWidth)
-    val currentPopupOffset by rememberUpdatedState(popupOffset)
+    val currentScreenWidth by rememberUpdatedState(screenWidth)
 
     Box(
         modifier = Modifier
@@ -166,8 +157,8 @@ fun RowScope.CharKey(
             // down, but only for the visual (clip + background), never for hit-testing.
             .height(height + KeyPadding * 2)
             .onGloballyPositioned {
-                keyLeft = it.positionInWindow().x
-                keyWidth = it.size.width.toFloat()
+                bounds.left = it.positionInWindow().x
+                bounds.width = it.size.width.toFloat()
             }
             // Written out rather than assembled from detectTapGestures because tap and
             // long-press are one continuous gesture here: the long press opens the popup
@@ -201,12 +192,13 @@ fun RowScope.CharKey(
                             continue
                         }
                         val picked = awaitPointerEventScope {
-                            selected = indexAt(down.position.x, currentPopupOffset, currentItemWidth, opts.length)
+                            val offset = alternatesOffset(bounds, currentItemWidth, opts.length, currentScreenWidth)
+                            selected = indexAt(down.position.x, offset, currentItemWidth, opts.length)
                             var change = down
                             while (change.pressed) {
                                 change = awaitPointerEvent().changes
                                     .firstOrNull { it.id == down.id } ?: break
-                                selected = indexAt(change.position.x, currentPopupOffset, currentItemWidth, opts.length)
+                                selected = indexAt(change.position.x, offset, currentItemWidth, opts.length)
                             }
                             selected
                         }
@@ -273,7 +265,7 @@ fun RowScope.CharKey(
                 options = options,
                 selected = selected,
                 itemWidth = with(density) { itemWidth.toDp() },
-                offsetX = popupOffset.toInt(),
+                offsetX = alternatesOffset(bounds, itemWidth, options.length, screenWidth).toInt(),
             )
             // FUTO/AOSP-style preview: while held, balloon the character above the key so
             // the finger doesn't hide it. clippingEnabled=false lets it float above the
@@ -281,6 +273,24 @@ fun RowScope.CharKey(
             pressed -> KeyPreview(label)
         }
     }
+}
+
+/** Where a key ended up on screen, as of the last layout pass. */
+private class KeyBounds {
+    var left = 0f
+    var width = 0f
+}
+
+/**
+ * Where the alternates row's left edge sits relative to the key's: centred on the key, then
+ * nudged back inside the screen. The gesture that picks from the row uses the same number, so
+ * what the finger is over is always what is highlighted.
+ */
+private fun alternatesOffset(bounds: KeyBounds, itemWidth: Float, count: Int, screenWidth: Float): Float {
+    val total = itemWidth * count
+    val centred = bounds.left + (bounds.width - total) / 2f
+    val clamped = centred.coerceIn(0f, (screenWidth - total).coerceAtLeast(0f))
+    return clamped - bounds.left
 }
 
 /** True while the finger is still over the key it went down on. */

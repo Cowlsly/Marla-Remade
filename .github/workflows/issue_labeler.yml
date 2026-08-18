@@ -21,7 +21,7 @@ jobs:
 
             if (match && match[1]) {
               const selectedApp = match[1].trim().toLowerCase();
-              const validApps = ['alchemist', 'appstore', 'astronomy', 'calculator', 'calendar', 'camera', 'chess', 'clock', 'code', 'contacts', 'education', 'email', 'everysync', 'files', 'findfamily', 'fooddelivery', 'health', 'hub', 'keyboard', 'logicgate', 'maps', 'measure', 'messages', 'music', 'musicbrainz', 'notes', 'office', 'openassistant', 'passwords', 'pdf', 'photos', 'pipes', 'solitaire', 'speech', 'things', 'translate', 'travel', 'unblockjam', 'vpn', 'voxels', 'weather', 'web', 'wordmaker', 'youpipe'];
+              const validApps = ['alchemist', 'appstore', 'astronomy', 'calculator', 'calendar', 'camera', 'chess', 'clock', 'code', 'contacts', 'education', 'email', 'everysync', 'files', 'findfamily', 'fooddelivery', 'health', 'hub', 'keyboard', 'launcher', 'logicgate', 'maps', 'measure', 'messages', 'music', 'musicbrainz', 'notes', 'office', 'openassistant', 'passwords', 'pdf', 'photos', 'pipes', 'solitaire', 'speech', 'things', 'translate', 'travel', 'unblockjam', 'vpn', 'voxels', 'weather', 'web', 'wordmaker', 'youpipe'];
 
               if (validApps.includes(selectedApp)) {
                 await github.rest.issues.addLabels({

@@ -22,11 +22,13 @@ class Dictionary private constructor(
     private val words: List<String>,
     private val freqs: IntArray,
     /**
-     * Indices into [words] bucketed by word length, so [autocorrect] can look at just the
-     * three lengths that can be within one edit instead of scanning the whole list. Index
-     * `n` holds every word of length `n`; short trailing lengths may be empty.
+     * Indices into [words] bucketed by (word length, first character), and the same by
+     * second character — the two indexes [autocorrect] intersects its candidates from.
+     * Only offerable words (frequency > 0) are indexed, since the others can never be
+     * produced as a correction anyway. Keyed by [bucketKey].
      */
-    private val byLength: Array<IntArray>,
+    private val byFirst: Map<Int, IntArray>,
+    private val bySecond: Map<Int, IntArray>,
 ) {
     /** True if [word] (any case) is a known dictionary word. */
     fun contains(word: String): Boolean {
@@ -62,21 +64,54 @@ class Dictionary private constructor(
     fun autocorrect(word: String): String? {
         if (word.length < 2) return null
         val lower = word.lowercase()
-        if (contains(lower)) return null
+        if (indexOf(lower) >= 0) return null
+
+        val len = lower.length
+        val first = lower[0]
+        val second = lower[1]
 
         var best = -1
         var bestFreq = 0 // 0 also excludes never-offered words without a second check.
-        // Edit distance 1 can only change the length by one, so these are the only three
-        // buckets worth looking at — roughly 5% of the list rather than all of it.
-        for (len in (lower.length - 1)..(lower.length + 1)) {
-            if (len < 1 || len >= byLength.size) continue
-            for (idx in byLength[len]) {
+        fun scan(bucket: IntArray?) {
+            if (bucket == null) return
+            for (idx in bucket) {
                 if (freqs[idx] <= bestFreq) continue // includes the freq == 0 exclusion
                 if (!withinEditDistance1(lower, words[idx])) continue
                 bestFreq = freqs[idx]
                 best = idx
             }
         }
+
+        // Bucketing by length alone meant reading the three fattest buckets in the list —
+        // for a 7-letter word that is 17k of the 42k words, on the main thread, while the
+        // user waits for the space they just pressed. Pinning a character position as well
+        // cuts that by six to nine times (2.7k candidates for a 7-letter word, 300 for a
+        // 3-letter one), and these seven buckets provably still contain every word within
+        // one edit of `lower` (call it `w`, and note `len` >= 2 here):
+        //
+        //  - Same length: one substitution, or one transposition of adjacent characters.
+        //    Either it leaves position 0 alone, so w[0] == first; or it is at position 0,
+        //    where a substitution leaves w[1] == second and a transposition puts `second`
+        //    itself at w[0].
+        //  - One shorter (the typed word has the extra character): dropping that character
+        //    leaves w[0] == first, unless what was dropped *was* the first, which leaves
+        //    w[0] == second.
+        //  - One longer (the candidate has the extra character): removing it leaves
+        //    w[0] == first, unless it was the candidate's own first character, which
+        //    leaves w[1] == first.
+        //
+        // Buckets overlap when first == second; re-scanning one is harmless (picking the
+        // best is idempotent) but pointless, so those lookups are skipped.
+        scan(byFirst[bucketKey(len, first)])
+        scan(bySecond[bucketKey(len, second)])
+        scan(byFirst[bucketKey(len - 1, first)])
+        if (second != first) {
+            scan(byFirst[bucketKey(len, second)])
+            scan(byFirst[bucketKey(len - 1, second)])
+        }
+        scan(byFirst[bucketKey(len + 1, first)])
+        scan(bySecond[bucketKey(len + 1, first)])
+
         return if (best >= 0) capitalizeLike(word, words[best]) else null
     }
 
@@ -128,7 +163,13 @@ class Dictionary private constructor(
 
     companion object {
         /** An empty dictionary used before loading completes. */
-        val EMPTY = Dictionary(emptyList(), IntArray(0), emptyArray())
+        val EMPTY = Dictionary(emptyList(), IntArray(0), emptyMap(), emptyMap())
+
+        /**
+         * Key for the [byFirst]/[bySecond] buckets: a word length paired with the
+         * character at the position that index pins.
+         */
+        private fun bucketKey(length: Int, c: Char): Int = (length shl 16) or c.code
 
         /** Load and index the bundled word list off the main thread. */
         suspend fun load(context: Context): Dictionary = withContext(Dispatchers.IO) {
@@ -175,19 +216,26 @@ class Dictionary private constructor(
             val words = sorted.map { it.key }
             val freqs = IntArray(sorted.size) { sorted[it].value }
 
-            // Bucket indices by length in one pass: count, allocate exactly, then fill.
-            val maxLen = words.maxOfOrNull { it.length } ?: 0
-            val counts = IntArray(maxLen + 1)
-            for (w in words) counts[w.length]++
-            val byLength = Array(maxLen + 1) { IntArray(counts[it]) }
-            val fill = IntArray(maxLen + 1)
+            // Correction candidates, indexed on the two character positions autocorrect
+            // pins. Words at frequency 0 are left out: they are never offered, so they can
+            // never be the answer, and skipping them shrinks every bucket.
+            val byFirst = HashMap<Int, MutableList<Int>>()
+            val bySecond = HashMap<Int, MutableList<Int>>()
             for (i in words.indices) {
-                val len = words[i].length
-                byLength[len][fill[len]++] = i
+                if (freqs[i] <= 0) continue
+                val w = words[i]
+                byFirst.getOrPut(bucketKey(w.length, w[0])) { ArrayList() }.add(i)
+                if (w.length > 1) {
+                    bySecond.getOrPut(bucketKey(w.length, w[1])) { ArrayList() }.add(i)
+                }
             }
 
-            return Dictionary(words, freqs, byLength)
+            return Dictionary(words, freqs, byFirst.packed(), bySecond.packed())
         }
+
+        /** Collapse the index's per-bucket lists into arrays, which is how they are read. */
+        private fun Map<Int, MutableList<Int>>.packed(): Map<Int, IntArray> =
+            mapValues { (_, indices) -> indices.toIntArray() }
 
         /** Apply [sample]'s leading capitalization to [word]. */
         private fun capitalizeLike(sample: String, word: String): String = when {
