@@ -90,7 +90,7 @@
     <string name="summary_winds_noticeable">Сегодня будет ветренно.</string>
     <string name="weather_no_data">—</string>
     <string name="weather_blob_widget_description">Виджет в форме капли с температурой и иконкой погоды</string>
-    <string name="max_min">Макс <xliff:g id="max" example="28°C">%1$s</xliff:g> Мин <xliff:g id="min" example="14°C">%2$s</xliff:g></string>
+    <string name="max_min">Max <xliff:g id="max" example="28°C">%1$s</xliff:g> Min <xliff:g id="min" example="14°C">%2$s</xliff:g></string>
     <string name="feels_like">Ощущается <xliff:g id="temp" example="26°C">%1$s</xliff:g></string>
     <string name="from_gusts">Напр <xliff:g id="direction" example="NW">%1$s</xliff:g> · Порывы <xliff:g id="gusts" example="18 km/h">%2$s</xliff:g></string>
     <string name="map_attribution">© OpenStreetMap · © CARTO</string>
@@ -105,4 +105,5 @@
     <string name="summary_high_low">Выс <xliff:g id="high" example="24°C">%1$s</xliff:g>, низ <xliff:g id="low" example="12°C">%2$s</xliff:g>.</string>
     <string name="weather_temp_format"><xliff:g id="temp" example="22">%1$d</xliff:g>°</string>
     <string name="set_units">Единицы измерения</string>
+    <string name="gusts">Порывы <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
 </resources>
