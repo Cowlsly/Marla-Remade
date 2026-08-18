@@ -419,6 +419,7 @@ truth) and the app. Precedence when several keys are present:
 | 47 | toys | `shop=toys` |
 | 48 | gift | `shop=gift` |
 | 49 | marketplace | `amenity=marketplace` |
+| 50 | station | `railway=station`/`halt`/`tram_stop`, `public_transport=station`, `amenity=bus_station` (train/tram/metro/bus; has live departures) |
 | 255 | other | any recognised POI key with an unmapped value |
 
 ### `poi_names.bin` — deduped name table
