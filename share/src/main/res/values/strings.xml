@@ -9,4 +9,27 @@
     <string name="share_notification_text">Transfer in progress</string>
     <string name="share_notification_action_stop">Stop</string>
     <string name="share_permission_rationale">Nearby Share needs Bluetooth, Wi-Fi, and notification permissions to discover devices and transfer files.</string>
+    <string name="share_incoming_title">Incoming requests</string>
+    <string name="share_visibility_title">Device visible to nearby devices</string>
+    <string name="share_visibility_on">Visible as \"%1$s\"</string>
+    <string name="share_visibility_on_port">Visible as \"%1$s\" · port %2$d</string>
+    <string name="share_visibility_off">Turn on to appear in Quick Share nearby lists.</string>
+    <string name="share_waiting_for_devices">Waiting for nearby devices…</string>
+    <string name="share_turn_on_visibility">Turn on visibility to receive files.</string>
+    <string name="share_connecting">Connecting…</string>
+    <string name="share_wants_to_send">Wants to send %1$d file(s)</string>
+    <string name="share_accept">Accept</string>
+    <string name="share_decline">Decline</string>
+    <string name="share_receiving">Receiving…</string>
+    <string name="share_progress_kb">%1$d KB / %2$d KB</string>
+    <string name="share_received_count">Received %1$d file(s)</string>
+    <string name="share_dismiss">Dismiss</string>
+    <string name="share_transfer_failed">Transfer failed</string>
+    <string name="share_unknown_state">Unknown state</string>
+    <string name="share_file_summary">%1$s · %2$s</string>
+    <string name="share_action_share">Share</string>
+    <string name="share_action_save">Save</string>
+    <string name="share_received_chooser">Share received file</string>
+    <string name="share_save_succeeded">Saved %1$s</string>
+    <string name="share_save_failed">Could not save %1$s</string>
 </resources>

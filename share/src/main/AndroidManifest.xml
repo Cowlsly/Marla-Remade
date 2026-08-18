@@ -6,6 +6,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- Local Network Protections (Android 16+): without this, NsdManager.registerService
+         throws SecurityException("Missing local network permission") and every LAN socket is
+         blocked. WIFI_LAN is the only medium :share can accept a transfer on, so discovery
+         and transfer both depend on it. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
     <!-- BLE discovery (Nearby Connections uses BLE for advertisement + scan) -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
@@ -71,5 +76,15 @@
             android:name=".platform.transfer.ShareTransferService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <!-- Grants read access to a received file when the user taps Share. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

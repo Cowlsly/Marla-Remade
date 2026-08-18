@@ -18,6 +18,15 @@ object SharePermissions {
     /** Wi-Fi Direct / Hotspot transport (Android 13+ shows a dedicated dialog). */
     val NEARBY_WIFI = Manifest.permission.NEARBY_WIFI_DEVICES
 
+    /**
+     * Local Network Protections (Android 16+). Gates mDNS *and* every LAN socket, so
+     * without it `NsdManager.registerService` throws
+     * `SecurityException("Missing local network permission")` and `:share` is invisible
+     * over WIFI_LAN — the only medium it can accept a transfer on.
+     */
+    val LOCAL_NETWORK =
+        if (Build.VERSION.SDK_INT >= 36) Manifest.permission.ACCESS_LOCAL_NETWORK else null
+
     /** Foreground-service notification (Android 13+). */
     val POST_NOTIFICATIONS = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null
 
@@ -31,6 +40,7 @@ object SharePermissions {
         add(NEARBY_WIFI)
         add(FINE_LOCATION)
         add(COARSE_LOCATION)
+        LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()
 
@@ -41,6 +51,7 @@ object SharePermissions {
         add(NEARBY_WIFI)
         add(FINE_LOCATION)
         add(COARSE_LOCATION)
+        LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()
 
@@ -51,6 +62,7 @@ object SharePermissions {
         add(NEARBY_WIFI)
         add(FINE_LOCATION)
         add(COARSE_LOCATION)
+        LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()
 }

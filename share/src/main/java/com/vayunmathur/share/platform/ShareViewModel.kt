@@ -5,12 +5,17 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.provider.DocumentsContract
 import android.provider.OpenableColumns
 import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.library.ui.ExternalIntents
+import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.share.BuildConfig
+import com.vayunmathur.share.R
 import com.vayunmathur.share.platform.discovery.BleDiscoveryManager
 import com.vayunmathur.share.platform.discovery.DiscoverySource
 import com.vayunmathur.share.platform.discovery.NearbyDevice
@@ -18,6 +23,7 @@ import com.vayunmathur.share.platform.discovery.NsdDiscoveryManager
 import com.vayunmathur.share.domain.protocol.PendingFile
 import com.vayunmathur.share.domain.protocol.ShareState
 import com.vayunmathur.share.platform.transfer.ShareTransferService
+import com.vayunmathur.share.protocol.ShareNative
 import com.vayunmathur.share.network.transport.Connection
 import com.vayunmathur.share.network.transport.TcpTransport
 import java.io.File
@@ -37,12 +43,17 @@ private const val TAG = "ShareVM"
 /**
  * Single ViewModel for the Share app (Receive + Send).
  *
- * BetoCore model (Everyone / public identity only):
- *  - Visibility: ServerSocket(0) on WiFi-LAN -> register _up._tcp with random 16-byte ServiceId
- *    and the ephemeral port, + BLE Nearby Presence advert under GATT 0xFCF1 whose bytes come from
- *    the Rust np_adv JNI (presence-derived device name, no plaintext endpoint_info on mDNS).
- *  - Discovery: browse _up._tcp (resolves host/port) + scan 0xFCF1 (presence name), then merge
- *    by endpointId; connect requires host/port from the _up._tcp leg.
+ * Everyone-mode only (no Google account, so no contact certificates):
+ *  - Visibility: `ServerSocket(0)` on WIFI_LAN, its port registered under
+ *    `_FC9F5ED42C8A._tcp` (the service type derived from `SHA-256("NearbySharing")`),
+ *    plus a Nearby Connections `BleAdvertisement` under GATT `0xFEF3`.
+ *  - Discovery: browse `_FC9F5ED42C8A._tcp` (resolves host/port) and scan `0xFEF3`, then
+ *    merge by endpointId. Connecting needs host/port, which only the mDNS leg supplies.
+ *
+ * One endpoint id and one endpoint-info blob are shared by the BLE advertisement, the mDNS
+ * record and `CONNECTION_REQUEST`. A peer matches the request against what it discovered,
+ * so a device that advertises one identity and dials out under another is hung up on
+ * (`p000\each.java:2092-2097`).
  */
 class ShareViewModel(
     application: Application,
@@ -58,7 +69,11 @@ class ShareViewModel(
     val localName: StateFlow<String> = _localName.asStateFlow()
 
     fun setLocalName(name: String) {
-        _localName.value = name.trim().ifBlank { _localName.value }
+        val trimmed = name.trim().ifBlank { return }
+        if (trimmed == _localName.value) return
+        _localName.value = trimmed
+        // The name is inside the endpoint-info blob, so renaming means re-advertising.
+        if (_isVisible.value) setVisible(true)
     }
 
     // --- Subsystems (lazy so the VM can be constructed in previews / tests
@@ -66,8 +81,37 @@ class ShareViewModel(
 
     private val nsd by lazy { NsdDiscoveryManager(appContext) }
     private val ble by lazy { BleDiscoveryManager(appContext) }
-    // TcpTransport owns ServerSocket(0) on WiFi-LAN; NsdDiscoveryManager publishes its port under _up._tcp.
-    private val transport by lazy { TcpTransport(localName = _localName.value) }
+    private val receivedStore by lazy { ReceivedFileStore(appContext) }
+    // TcpTransport owns ServerSocket(0) on WIFI_LAN; NsdDiscoveryManager publishes its port.
+    private val transport by lazy {
+        TcpTransport(
+            localName = _localName.value,
+            receivedStore = receivedStore,
+            localEndpointInfo = endpointInfo() ?: ByteArray(0),
+            localEndpointId = localEndpointId,
+        )
+    }
+
+    /**
+     * Endpoint id advertised as the mDNS instance name. Nearby endpoint ids are four
+     * characters; a stable random one per process keeps re-advertising idempotent.
+     */
+    private val localEndpointId: String by lazy {
+        val alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        (1..4).map { alphabet.random() }.joinToString("")
+    }
+
+    /**
+     * The endpoint-info blob for the current device name, or null if it cannot be built.
+     *
+     * PHONE is cosmetic — it picks the icon the peer renders next to our name.
+     */
+    private fun endpointInfo(): ByteArray? = try {
+        ShareNative.nativeBuildEndpointInfo(_localName.value, ShareNative.DEVICE_TYPE_PHONE)
+    } catch (e: UnsatisfiedLinkError) {
+        Log.e(TAG, "libshare_nearby unavailable — cannot build endpoint info", e)
+        null
+    }
 
     // --- Receive: visibility toggle -------------------------------------
 
@@ -99,15 +143,26 @@ class ShareViewModel(
     }
 
     override fun setVisible(visible: Boolean) {
-        _isVisible.value = visible
         if (visible) {
+            val endpointInfo = endpointInfo()
+            if (endpointInfo == null) {
+                Log.w(TAG, "cannot advertise without an endpoint info blob")
+                _isVisible.value = false
+                return
+            }
+            _isVisible.value = true
+            // Before listen(), so a socket accepted immediately announces the identity we
+            // are about to advertise rather than the transport's construction-time one.
+            transport.setLocalIdentity(localName.value, endpointInfo, localEndpointId)
             val port = transport.listen()
-            // Register _up._tcp with a random 16-byte ServiceId, publishing the WiFi-LAN port.
-            nsd.advertise(localName.value, port)
-            // BLE Nearby Presence advert under 0xFCF1 (bytes from Rust np_adv JNI, public mode).
-            ble.startAdvertising(localName.value)
+            // Publish the WIFI_LAN port under _FC9F5ED42C8A._tcp, with the endpoint info in
+            // the `n` TXT attribute — the record a Quick Share device lists us from.
+            nsd.advertise(localEndpointId, endpointInfo, port)
+            // The same blob inside a Nearby Connections BleAdvertisement under 0xFEF3.
+            ble.startAdvertising(localEndpointId, endpointInfo)
             ShareTransferService.startReceiveMode(appContext, port)
         } else {
+            _isVisible.value = false
             nsd.unadvertise()
             ble.stopAdvertising()
             transport.stopListening()
@@ -117,12 +172,59 @@ class ShareViewModel(
 
     override fun acceptIncoming(connection: Connection, accept: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
-            val destDir = File(appContext.getExternalFilesDir(null), "Share/Received").also { it.mkdirs() }
-            val rc = transport.acceptIncoming(connection, destDir, accept)
+            val rc = transport.acceptIncoming(connection, accept)
             if (rc < 0) {
                 Log.w(TAG, "acceptIncoming failed rc=$rc")
             }
         }
+    }
+
+    override fun shareReceivedFile(context: Context, file: ReceivedFile) {
+        ExternalIntents.shareFile(
+            context = context,
+            uri = file.uri,
+            mimeType = file.mimeType,
+            chooserTitle = context.getString(R.string.share_received_chooser),
+        )
+    }
+
+    override fun saveReceivedFile(file: ReceivedFile, treeUri: Uri) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val saved = copyIntoTree(file, treeUri)
+            AppMessages.show(
+                appContext.getString(
+                    if (saved) R.string.share_save_succeeded else R.string.share_save_failed,
+                    file.name,
+                )
+            )
+        }
+    }
+
+    /**
+     * Copy [file] into the SAF tree [treeUri] the user picked.
+     *
+     * Uses the platform [DocumentsContract] rather than `androidx.documentfile`, which
+     * is not a dependency of this repo. `createDocument` may hand back a different
+     * display name than requested if one is taken; that is the provider's call, not
+     * ours, so nothing here second-guesses it.
+     */
+    private fun copyIntoTree(file: ReceivedFile, treeUri: Uri): Boolean = try {
+        val resolver = appContext.contentResolver
+        val parent = DocumentsContract.buildDocumentUriUsingTree(
+            treeUri,
+            DocumentsContract.getTreeDocumentId(treeUri),
+        )
+        val target = DocumentsContract.createDocument(resolver, parent, file.mimeType, file.name)
+        if (target == null) {
+            false
+        } else {
+            resolver.openInputStream(file.uri)?.use { input ->
+                resolver.openOutputStream(target)?.use { output -> input.copyTo(output) }
+            } != null
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "saveReceivedFile failed for ${file.name}", e)
+        false
     }
 
     // --- Send: discovery + outgoing URIs --------------------------------
@@ -171,7 +273,7 @@ class ShareViewModel(
         nsd.clearDiscoveredDevices()
         scanNsdJob = viewModelScope.launch {
             try {
-                // Browse _up._tcp for WiFi-LAN TCP endpoints (host/port + ServiceId).
+                // Browse _FC9F5ED42C8A._tcp for WIFI_LAN endpoints (host/port + name).
                 nsd.discover().collect { dev ->
                     val current = _discoveredDevices.value
                     val merged = mergeDevice(current, dev)
@@ -183,7 +285,7 @@ class ShareViewModel(
         }
         scanBleJob = viewModelScope.launch {
             try {
-                // Scan GATT 0xFCF1 and parse presence advert for the display name.
+                // Scan GATT 0xFEF3 for Nearby Connections BleAdvertisements.
                 ble.scan().collect { dev ->
                     val current = _discoveredDevices.value
                     val merged = mergeDevice(current, dev)
@@ -199,10 +301,11 @@ class ShareViewModel(
         val idx = current.indexOfFirst { it.endpointId == incoming.endpointId }
         return if (idx >= 0) {
             val existing = current[idx]
-            // BLE presence name takes precedence over the raw ServiceId hex from _up._tcp.
+            // Both legs now carry the peer's advertised name, but the mDNS record is the
+            // one that also supplies host/port, so prefer it and treat BLE as a tiebreak.
             val bestName = when {
-                incoming.source == DiscoverySource.Ble && incoming.endpointName.isNotBlank() -> incoming.endpointName
-                existing.source == DiscoverySource.Ble && existing.endpointName.isNotBlank() -> existing.endpointName
+                incoming.source == DiscoverySource.Nsd && incoming.endpointName.isNotBlank() -> incoming.endpointName
+                existing.source == DiscoverySource.Nsd && existing.endpointName.isNotBlank() -> existing.endpointName
                 else -> incoming.endpointName.ifBlank { existing.endpointName }
             }
             val merged = existing.copy(
@@ -234,21 +337,46 @@ class ShareViewModel(
         val host = device.host
         val port = device.port
         if (host == null || port == null) {
-            Log.w(TAG, "cannot connect to ${device.endpointName}: no host/port (requires _up._tcp browse)")
+            Log.w(TAG, "cannot connect to ${device.endpointName}: no host/port (needs the mDNS browse)")
             return
         }
         viewModelScope.launch {
             try {
+                // A rename while hidden never re-advertised, so refresh the identity the
+                // CONNECTION_REQUEST will carry before dialling.
+                endpointInfo()?.let {
+                    transport.setLocalIdentity(localName.value, it, localEndpointId)
+                }
                 val conn = transport.connect(host, port)
                 _activeConnection.value = conn
                 ShareTransferService.startSendMode(appContext, host, port)
-                val uris = _outgoingUris.value
+                val uris = _outgoingUris.value.ifEmpty { devTestFileUri()?.let(::listOf).orEmpty() }
                 if (uris.isNotEmpty()) {
                     sendUrisOver(conn, uris)
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "connect to ${device.endpointName} failed", e)
             }
+        }
+    }
+
+    /**
+     * A throwaway file to send when nothing is selected, so a transfer can be exercised
+     * without going through the file picker. Dev builds only.
+     */
+    private fun devTestFileUri(): Uri? {
+        if (!BuildConfig.DEV_BUILD) return null
+        return try {
+            // Not under cache/share_send: that is where uriToTempFile copies *into*, and
+            // copying a file onto itself deletes it.
+            val f = File(appContext.cacheDir, "dev_test/share-test.txt")
+            f.parentFile?.mkdirs()
+            f.writeText(":share test payload ${System.currentTimeMillis()}\n")
+            Log.i(TAG, "no files selected — sending ${f.name} (dev build only)")
+            Uri.fromFile(f)
+        } catch (e: Exception) {
+            Log.w(TAG, "could not stage the dev test file", e)
+            null
         }
     }
 

@@ -3,17 +3,20 @@ package com.vayunmathur.share.platform.discovery
 import kotlinx.serialization.Serializable
 
 /**
- * A nearby device discovered via NSD (mDNS _up._tcp) or BLE (GATT 0xFCF1 Nearby Presence).
+ * A nearby device discovered via mDNS (`_FC9F5ED42C8A._tcp`) or BLE (GATT `0xFEF3`).
  *
  * Produced by [NsdDiscoveryManager] + [BleDiscoveryManager] and consumed by
  * [com.vayunmathur.share.platform.ShareViewModel] for the Send flow's nearby-device list.
  *
- * BetoCore model (Everyone / public-identity only):
- *  - TCP endpoint is the resolved host/port from the _up._tcp browse (ServerSocket(0) on WiFi-LAN).
- *  - Human-readable identity (endpointName) comes from the BLE Presence advert (Nearby Presence
- *    V0 unencrypted, DeviceInfo DE), not from any plaintext TXT/endpoint_info on mDNS.
- *  - Each mDNS advertisement carries a random 16-byte ServiceId; the instance name published under
- *    _up._tcp is the hex of that ServiceId.
+ * Everyone-mode only:
+ *  - The TCP endpoint is the resolved host/port from the mDNS browse (`ServerSocket(0)` on
+ *    WIFI_LAN). Only the mDNS leg can supply it, so a BLE-only entry is not connectable.
+ *  - [endpointId] is the peer's 4-character Nearby endpoint id from the mDNS
+ *    `WifiLanServiceInfo`, or the MAC address for a BLE-only entry.
+ *  - [endpointName] is the name inside the peer's endpoint-info blob. A device advertising
+ *    in contact-only mode publishes none, so those fall back to the endpoint id or the
+ *    Bluetooth name.
+ *  - [extra] carries the BLE advertisement's `data` field as hex, when scanned.
  */
 @Serializable
 data class NearbyDevice(

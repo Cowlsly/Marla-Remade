@@ -1,9 +1,23 @@
 //! Nearby Presence advertisement build/parse for public/Everyone mode (unencrypted V0).
 //!
-//! Wraps `np_adv`'s `AdvBuilder<UnencryptedEncoder>` for building the BLE service-data
-//! that Kotlin advertises under GATT 0xFCF1, and `deserialize_advertisement` for parsing
-//! scanned bytes back into a display name / JSON view. Full-encrypted identities (LDT etc.)
-//! are out of scope — BetoCore migration is Everyone/public only.
+//! # Not on the Quick Share path
+//!
+//! Presence is a **separate subsystem** from the Nearby Connections BLE bootstrap
+//! Quick Share actually uses. It advertises under `0xFCF1` with `np_adv` framing,
+//! whereas Quick Share advertises a Nearby Connections `BleAdvertisement` under
+//! `0000FEF3-0000-1000-8000-00805F9B34FB` (`p000\dses.java:21`) — see
+//! [`crate::ble_adv`].
+//!
+//! This module is retained and unit-tested but is **not called from discovery**.
+//! BetoCore's credential / D2D / payload FFI has no Java callers anywhere in GMS
+//! 26.24.34 (writeup §11.1), and whether betocore is live for Quick Share at all
+//! could not be determined (writeup §10.1). Treating `np_adv` as the Quick Share
+//! advertisement format was the original mistake this module documents; see
+//! `share/QUICK_SHARE_VERIFICATION.md`.
+//!
+//! Wraps `np_adv`'s `AdvBuilder<UnencryptedEncoder>` for building service-data and
+//! `deserialize_advertisement` for parsing scanned bytes back into a display name
+//! or JSON view. Fully-encrypted identities (LDT etc.) are out of scope.
 
 use np_adv::{
     credential::book::CredentialBookBuilder,
