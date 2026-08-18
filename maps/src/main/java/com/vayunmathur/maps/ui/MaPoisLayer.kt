@@ -70,9 +70,9 @@ fun MaPoisLayer(source: VectorSource) {
         ),
         iconSize = interpolate(
             linear(), zoom(),
-            12 to const(0.35f),
-            15 to const(0.5f),
-            18 to const(0.7f),
+            12 to const(0.55f),
+            15 to const(0.8f),
+            18 to const(1.1f),
         ),
     )
 }
