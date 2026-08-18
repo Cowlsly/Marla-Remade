@@ -291,7 +291,7 @@
     <!-- MainActivity: App description subtitle: ODF Viewer & Editor -->
     <string name="open_document_format_viewer_editor">Przeglądarka i edytor formatu Open Document Format</string>
     <!-- MainActivity: Filter All. Adjective. -->
-    <string name="all">Wszystkie</string>
+    <string name="all">Wszystko</string>
     <!-- MainActivity: Button make user owner. Verb phrase. -->
     <string name="make_owner">Ustaw jako właściciela</string>
     <!-- MainActivity: Export format Rich Text RTF with ellipsis -->
