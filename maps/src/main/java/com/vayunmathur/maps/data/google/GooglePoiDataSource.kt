@@ -57,8 +57,6 @@ object GooglePoiDataSource {
         "Referer" to "https://www.google.com/maps/",
     )
 
-    /** Match radius:
-
     /** Match radius: a scraped result must be within this of the OSM point to be
      *  treated as the same place, else the enrichment is discarded (wrong match). */
     private const val MATCH_RADIUS_M = 250.0
@@ -101,8 +99,6 @@ object GooglePoiDataSource {
             // progressively once it has [GooglePoiInfo.featureId].
             parsePlace(entry)
         }
-
-    // --- HTTP plumbing
 
     // --- HTTP plumbing ------------------------------------------------------
 
