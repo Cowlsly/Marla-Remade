@@ -2,6 +2,7 @@ package com.vayunmathur.youpipe.ui
 
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.res.Configuration
 import android.text.format.Formatter
 import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.background
@@ -59,6 +60,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import androidx.compose.ui.platform.LocalView
@@ -78,6 +80,7 @@ import com.vayunmathur.youpipe.util.DownloadManager
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.findActivity
+import com.vayunmathur.youpipe.rememberIsInPipMode
 import com.vayunmathur.youpipe.util.VideoDetailActions
 import com.vayunmathur.youpipe.util.VideoDetailUiState
 import com.vayunmathur.youpipe.util.VideoRowState
@@ -191,6 +194,38 @@ fun VideoPage(
     }
 
     var isFullscreen by remember { mutableStateOf(false) }
+    // Whether fullscreen was entered by rotating rather than by the button. Rotation-entered
+    // fullscreen must leave the orientation unlocked, otherwise rotating back to portrait is
+    // impossible and the only way out is the exit button.
+    var fullscreenFromRotation by remember { mutableStateOf(false) }
+    // Set when the user leaves fullscreen while still holding the device in landscape, so that
+    // auto-fullscreen doesn't immediately put them back. Cleared on the next portrait.
+    var autoFullscreenSuppressed by remember { mutableStateOf(false) }
+
+    val configuration = LocalConfiguration.current
+    // smallestScreenWidthDp is the shorter edge, so unlike a window size class it gives the same
+    // answer in both orientations. 600dp is the sw600dp bucket Android itself calls a tablet.
+    val isPhone = configuration.smallestScreenWidthDp < 600
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
+    val isInPipMode = rememberIsInPipMode()
+
+    // A phone in landscape has no room for the description and comments, so fill the screen with
+    // the video. Tablets are wide enough to keep the whole page, so they stay opt-in via the button.
+    LaunchedEffect(isPhone, isLandscape, isInPipMode) {
+        if (!isPhone || isInPipMode) return@LaunchedEffect
+        if (isLandscape) {
+            if (!isFullscreen && !autoFullscreenSuppressed) {
+                isFullscreen = true
+                fullscreenFromRotation = true
+            }
+        } else {
+            autoFullscreenSuppressed = false
+            if (fullscreenFromRotation) {
+                isFullscreen = false
+                fullscreenFromRotation = false
+            }
+        }
+    }
 
     val view = LocalView.current
     LaunchedEffect(isFullscreen) {
@@ -207,7 +242,7 @@ fun VideoPage(
         }
     }
 
-    if(isFullscreen) {
+    if (isFullscreen && !fullscreenFromRotation) {
         LockScreenOrientation(ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE)
     }
 
@@ -291,8 +326,10 @@ fun VideoPage(
     ) {
         videoData?.let { data ->
             if (videoStreams.isNotEmpty()) {
-                VideoPlayer(ypvm, VideoInfo(data.title, videoID, data.duration, data.views, data.uploadDate, data.thumbnailURL, data.author), videoStreams, audioStreams, subtitles, segments, isFullscreen) {
-                    isFullscreen = it
+                VideoPlayer(ypvm, VideoInfo(data.title, videoID, data.duration, data.views, data.uploadDate, data.thumbnailURL, data.author), videoStreams, audioStreams, subtitles, segments, isFullscreen) { fullscreen ->
+                    isFullscreen = fullscreen
+                    fullscreenFromRotation = false
+                    autoFullscreenSuppressed = !fullscreen && isLandscape
                 }
             }
         }
