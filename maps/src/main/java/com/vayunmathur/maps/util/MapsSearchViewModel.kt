@@ -96,11 +96,15 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
             delay(250)
             // Try the offline OSM POI index first (P27): resolving a POI name
             // locally avoids a Google call. Google stays the fallback (and
-            // handles addresses, which the POI index doesn't carry).
+            // handles addresses, which the POI index doesn't carry). Any offline
+            // failure (unmapped/poisoned index, decode error) is swallowed so the
+            // query still falls through to Google.
             val app = getApplication<Application>()
             val offline = withContext(Dispatchers.IO) {
-                PoiIndex.initialize(app)
-                PoiIndex.searchByName(query, nearLat, nearLon, limit = 20)
+                runCatching {
+                    PoiIndex.initialize(app)
+                    PoiIndex.searchByName(query, nearLat, nearLon, limit = 20)
+                }.getOrDefault(emptyList())
             }
             if (offline.isNotEmpty()) {
                 _results.value = offline.map { it.toSearchResult() }

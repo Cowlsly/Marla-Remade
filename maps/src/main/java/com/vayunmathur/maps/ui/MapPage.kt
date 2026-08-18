@@ -76,6 +76,7 @@ import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
+import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -146,9 +147,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val selectedTransitStop by transitViewModel.selected.collectAsState()
     val departuresState by transitViewModel.departures.collectAsState()
 
-    // Retired ambient Google POI pins (P27): the overlay no longer renders these
-    // (MyMapLayers draws the baked `ma_pois` layer instead) and no viewport is
-    // fed, so this stays empty. Kept for the positional MyMapLayers call.
+    // Ambient POI pins (P29): now sourced from the OFFLINE POI index
+    // (poi_index.bin) via GooglePoiMapViewModel.onViewportOffline as the camera
+    // moves, and rendered by GooglePoiLayer (the proven GeoJSON pin renderer).
+    // This replaces the P27 baked `ma_pois` PMTiles layer, which failed to render.
     val googlePins by poiViewModel.pins.collectAsState()
 
     // Search-result pins (from the Google search page) drawn on the map.
@@ -167,6 +169,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
             val projection = camera.projection
             if (projection != null) {
                 val bbox = projection.queryVisibleBoundingBox()
+                // Ambient POI pins (P29): query the OFFLINE index for the visible
+                // box and publish pins for GooglePoiLayer. Only at zoom >= 11.
+                poiViewModel.onViewportOffline(bbox.north, bbox.east, bbox.south, bbox.west)
                 // Refresh nearby transit stops (P10) only while the layer is on
                 // (VM debounces + caches; wide views clear the overlay).
                 if (transitEnabled) {
@@ -176,11 +181,16 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }
 
-    // P27: ambient POIs now come from OUR baked `ma_pois` layer (the v5 PMTiles
-    // source-layer), so the Google viewport scrape that used to discover pins as
-    // the camera moved is RETIRED — Google is hit only on tap for rich details.
-    // The GooglePoiMapViewModel is left wired but never fed a viewport, so no
-    // ambient scrape happens.
+    // P29: ambient POIs now come from the OFFLINE POI index (poi_index.bin),
+    // queried per-viewport and rendered via the proven GooglePoiLayer, replacing
+    // the P27 baked `ma_pois` PMTiles layer (which failed to parse/render).
+    // Re-map the side files once the map is ready so a first-run download that
+    // landed AFTER PoiIndex.initialize first ran (and no-op'd because the files
+    // were absent) is picked up instead of staying poisoned. reload() is a cheap
+    // idempotent re-mmap. Google is still hit only on tap for rich details.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { PoiIndex.reload(context) }
+    }
 
     // Online-tiles-only: the basemap always streams live (offline zone tile
     // packs were removed). Offline ROUTING still works via the downloaded graph.
@@ -492,7 +502,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
 
                                 // Hit-test the search-result pins first, then the
-                                // baked ma_pois layer — a POI tap selects the
+                                // ambient offline POI pins — a POI tap selects the
                                 // place (name + coord) as a GenericPlace so
                                 // SelectedFeatureViewModel.currentPoiInfo fetches
                                 // the Google rich details and GooglePoiEnrichment
@@ -511,8 +521,8 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                     )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
                                     ?: projection?.queryRenderedFeatures(
                                         offset,
-                                        setOf(MA_POIS_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
+                                        setOf(GOOGLE_POI_LAYER_ID)
+                                    )?.firstNotNullOfOrNull { it.toSelectedGooglePoi() }
                                 if (pinHit != null) {
                                     if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
                                         selectedFeature as SpecificFeature.Route

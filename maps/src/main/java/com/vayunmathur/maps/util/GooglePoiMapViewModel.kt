@@ -7,6 +7,7 @@ import com.vayunmathur.maps.data.google.GooglePoiDiscovery
 import com.vayunmathur.maps.data.google.GooglePoiPin
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -83,6 +84,36 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         start()
     }
 
+    // Offline ambient-pin refresh (P29), separate from the retired Google-scrape
+    // pipeline above. Cancelled on each new viewport so a fast pan debounces.
+    private var offlineJob: Job? = null
+
+    /**
+     * Publish ambient pins from the OFFLINE POI index (P29) for the
+     * [north]..[south] × [west]..[east] box, feeding [GooglePoiLayer] (the proven
+     * GeoJSON pin renderer). Debounced; views wider than [MAX_LAT_SPAN] and empty
+     * results KEEP the previous pins so a fast pan / wide zoom never blinks the
+     * overlay to nothing (P23 no-clear). The index query + name decode run on
+     * [Dispatchers.IO]; [PoiIndex.initialize] is idempotent so calling it here is
+     * cheap after the first map.
+     */
+    fun onViewportOffline(north: Double, east: Double, south: Double, west: Double) {
+        if (abs(north - south) > MAX_LAT_SPAN) return
+        val app = getApplication<Application>()
+        offlineJob?.cancel()
+        offlineJob = viewModelScope.launch {
+            delay(DEBOUNCE_MS)
+            val pins = withContext(Dispatchers.IO) {
+                runCatching {
+                    PoiIndex.initialize(app)
+                    PoiIndex.inViewport(west, south, east, north, cap = OFFLINE_CAP)
+                        .map { it.toPin() }
+                }.getOrDefault(emptyList())
+            }
+            if (pins.isNotEmpty()) _pins.value = pins
+        }
+    }
+
     /**
      * Feed a viewport (from `queryVisibleBoundingBox()`). Views wider than
      * [MAX_LAT_SPAN] suppress fetching but KEEP the last pins (no clear);
@@ -149,6 +180,16 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
+    /** Map an offline index record to the pin model [GooglePoiLayer] renders; the
+     *  category label drives its data-driven pin colour (P29). */
+    private fun PoiIndex.PoiRecord.toPin(): GooglePoiPin = GooglePoiPin(
+        id = "poi:$latE7:$lonE7",
+        name = name,
+        lat = lat,
+        lng = lon,
+        category = PoiCategories.label(type),
+    )
+
     /** Rough planar metres between two lat/lon points — enough for a move
      *  threshold; no need for full haversine at these small spans. */
     private fun metersBetween(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {
@@ -194,6 +235,10 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
 
         // ~16 km of latitude — roughly city-zoom; wider views skip the scrape.
         const val MAX_LAT_SPAN = 0.15
+
+        // Cap on ambient offline pins per viewport (P29) so a dense city box
+        // stays bounded; matches GooglePoiLayer's close-zoom feel.
+        const val OFFLINE_CAP = 300
 
         // Degrees of latitude → metres, for turning the viewport's lat span into
         // the ground span the discovery fetch tightens its `!1d` window to.

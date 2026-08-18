@@ -240,6 +240,39 @@ object PoiIndex {
         }
     }
 
+    /**
+     * All POIs whose coordinate falls inside the [west]..[east] × [south]..[north]
+     * bounding box, capped at [cap] (a linear scan over the flat record array —
+     * cheap even at ~283k records for a per-idle viewport refresh). Names are
+     * decoded for each returned record. Empty when the index isn't loaded; used
+     * to drive the ambient offline pin overlay (P29).
+     */
+    @Synchronized
+    fun inViewport(
+        west: Double,
+        south: Double,
+        east: Double,
+        north: Double,
+        cap: Int = 300,
+    ): List<PoiRecord> {
+        if (!loaded || cap <= 0) return emptyList()
+        val minLatE7 = (south * 1e7).toInt()
+        val maxLatE7 = (north * 1e7).toInt()
+        val minLonE7 = (west * 1e7).toInt()
+        val maxLonE7 = (east * 1e7).toInt()
+        val out = ArrayList<PoiRecord>(minOf(cap, count))
+        var i = 0
+        while (i < count && out.size < cap) {
+            val latE7 = recLatE7(i)
+            val lonE7 = recLonE7(i)
+            if (latE7 in minLatE7..maxLatE7 && lonE7 in minLonE7..maxLonE7) {
+                out.add(PoiRecord(latE7, lonE7, recType(i), nameAt(recNameOff(i)) ?: ""))
+            }
+            i++
+        }
+        return out
+    }
+
     private class Ranked(val record: PoiRecord, val rank: Int, val distSq: Double)
     private class Hit(val idx: Int, val distSq: Double)
 

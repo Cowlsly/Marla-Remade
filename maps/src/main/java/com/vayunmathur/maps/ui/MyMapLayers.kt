@@ -145,12 +145,14 @@ fun MyMapLayers(
             TransitLinesLayer(adminSource)
         }
 
-        // OUR baked OSM POI overlay (P27): placement/name/type come from the
-        // `ma_pois` source-layer in the v5 basemap PMTiles, replacing the Google
-        // viewport scrape for ambient pins. Google is hit only on tap for rich
-        // details (see MapPage.onMapClick -> toSelectedMaPoi). Reuses the shared
-        // vector source; harmless no-op until v5 ships the `ma_pois` layer.
-        MaPoisLayer(adminSource)
+        // Ambient POI overlay (P29): pins now come from the OFFLINE POI index
+        // (poi_index.bin, queried per-viewport by GooglePoiMapViewModel) and are
+        // drawn through GooglePoiLayer — the proven GeoJSON pin renderer. This
+        // replaces the P27 baked `ma_pois` PMTiles SymbolLayer, which failed to
+        // render (PMTiles directory parse error on the overlay source). Google is
+        // still hit only on tap for rich details (see MapPage.onMapClick ->
+        // toSelectedGooglePoi).
+        GooglePoiLayer(googlePins)
 
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).
