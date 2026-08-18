@@ -97,4 +97,13 @@
     <string name="repos_syncing">Sünkroonimisel…</string>
     <string name="repos_sync_sources">Sünkrooni tarkvarahoidlad</string>
     <string name="source_fdroid">F-Droid</string>
+    <string name="source_chip_accrescent">Accrescent</string>
+    <plurals name="updates_installed">
+        <item quantity="one">%1$d uuendus on paigaldatud</item>
+        <item quantity="other">%1$d uuendust on paigaldatud</item>
+    </plurals>
+    <plurals name="updates_installing">
+        <item quantity="one">%1$d uuendus on paigaldamisel…</item>
+        <item quantity="other">%1$d uuendust on paigaldamisel…</item>
+    </plurals>
 </resources>
