@@ -2,19 +2,22 @@
 <!--
   Unblock Jam. Audited state: two SharedPreferences files, "level_stats" and
   "daily_stats" (per LevelStatsRepository / AppBackupAgent.prefNames), holding
-  level completion, stars and daily-challenge streaks. No Room database and no
-  files written to filesDir or external storage — original_pack.json and
-  achievements.json are read-only APK assets.
+  level completion, stars and daily-challenge streaks, plus
+  filesDir/datastore_default.preferences_pb, the shared DataStoreUtils file
+  holding the DailyChallengeStore("unblockjam_daily") streak and the
+  AchievementsManager unlocks. No Room database and nothing written to external
+  storage - original_pack.json and achievements.json are read-only APK assets.
 
   Back everything up: level progress and streaks are precisely what a user
   expects to survive a new phone, and the whole payload is a few KB.
 
-  SCOPE: unblockjam declares android:backupAgent=".util.AppBackupAgent" and does
-  NOT set android:fullBackupOnly, so Android uses key/value backup and the
+  SCOPE: unblockjam declares android:backupAgent=".platform.AppBackupAgent" and
+  does NOT set android:fullBackupOnly, so Android uses key/value backup and the
   <cloud-backup> section below is NOT consulted. Cloud content is exactly
-  AppBackupAgent's prefNames = ["level_stats", "daily_stats"], which is the same
-  data this file would have sent. <device-transfer> IS governed here, and these
-  rules become the cloud control too if the backupAgent is ever removed.
+  AppBackupAgent's prefNames = ["level_stats", "daily_stats"] plus
+  datastoreNames = ["datastore_default"], which is the same data this file would
+  have sent. <device-transfer> IS governed here, and these rules become the
+  cloud control too if the backupAgent is ever removed.
 -->
 <data-extraction-rules>
     <cloud-backup>

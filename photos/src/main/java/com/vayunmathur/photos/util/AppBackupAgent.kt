@@ -14,6 +14,12 @@ class AppBackupAgent : BaseBackupAgent() {
             return listOf("vault-db" to pass)
         }
 
+    // The shared DataStoreUtils file, holding the grid column count and model-version markers.
+    // res/xml/data_extraction_rules.xml already lists it; the agent has to repeat it because it,
+    // not the XML, drives cloud backup.
+    override val datastoreNames: List<String>
+        get() = listOf("datastore_default")
+
     override val extraFiles: List<File>
         get() = listOf(File(filesDir, "secure_vault"))
 }

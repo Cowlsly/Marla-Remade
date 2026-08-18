@@ -1,20 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  Word Maker. Audited state: a single Preferences DataStore declared as
-  preferencesDataStore(name = "settings") in LevelDataStore.kt, which lands at
-  filesDir/datastore/settings.preferences_pb and holds level progress and
-  settings. No Room database, nothing written to external storage; the word
+  Word Maker. Audited state:
+    * filesDir/datastore/settings.preferences_pb - the Preferences DataStore
+      declared as preferencesDataStore(name = "settings") in LevelDataStore.kt,
+      holding level progress and settings.
+    * filesDir/datastore_default.preferences_pb - the shared DataStoreUtils file,
+      holding the DailyChallengeStore("wordmaker_daily") streak and the
+      AchievementsManager unlocks.
+  No Room database, nothing written to external storage; the word
   lists (wordgen/common_words_list.txt, wordgen/bad-words.txt) and
   achievements.json are read-only APK assets.
-
-  Back everything up — it is a small preferences blob and it is the user's
+  Back everything up - it is a small preferences blob and it is the user's
   progress.
-
-  SCOPE: wordmaker declares android:backupAgent=".util.AppBackupAgent" and does
-  NOT set android:fullBackupOnly, so Android uses key/value backup and the
+  SCOPE: wordmaker declares android:backupAgent=".platform.AppBackupAgent" and
+  does NOT set android:fullBackupOnly, so Android uses key/value backup and the
   <cloud-backup> section below is NOT consulted. Cloud content is exactly
-  AppBackupAgent's datastoreNames = ["settings"], matching the DataStore named
-  in LevelDataStore.kt — the same data this file would have sent.
+  AppBackupAgent's datastoreNames = ["settings", "datastore_default"], matching
+  the two files listed above - the same data this file would have sent.
   <device-transfer> IS governed here, and these rules become the cloud control
   too if the backupAgent is ever removed.
 -->

@@ -1,8 +1,11 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
   Voxels. Audited state:
-    * "voxels_prefs" SharedPreferences (AppBackupAgent.prefNames) — settings.
-    * filesDir/worlds/<world-id>/ — one directory per world, containing
+    * "voxels_prefs" SharedPreferences (AppBackupAgent.prefNames) - settings.
+    * filesDir/datastore_default.preferences_pb (AppBackupAgent.datastoreNames) -
+      the shared DataStoreUtils file, holding AchievementsManager unlocks and
+      VoxelsSync state.
+    * filesDir/worlds/<world-id>/ - one directory per world, containing
       world.json (name, seed, timestamps), player.json (position/inventory) and
       regions/c_<x>_<z>.dat, the saved chunks written by the Rust save layer
       (src/main/rust/src/world/save.rs).
@@ -26,13 +29,14 @@
   Device transfer has no quota and runs over a direct local link, so worlds go
   across intact — that is the path that actually preserves builds.
 
-  SCOPE: voxels declares android:backupAgent=".util.AppBackupAgent" and does NOT
-  set android:fullBackupOnly, so Android uses key/value backup here and the
+  SCOPE: voxels declares android:backupAgent=".platform.AppBackupAgent" and does
+  NOT set android:fullBackupOnly, so Android uses key/value backup here and the
   <cloud-backup> section below is NOT consulted today. In practice the outcome
-  matches the intent anyway: AppBackupAgent lists only prefNames =
-  ["voxels_prefs"], so settings reach the cloud and saved worlds do not. The
-  exclusion below is kept so that stays true if the backupAgent is ever removed
-  and Auto Backup takes over. <device-transfer> IS governed by this file.
+  matches the intent anyway: AppBackupAgent lists prefNames = ["voxels_prefs"]
+  and datastoreNames = ["datastore_default"], so settings and achievements reach
+  the cloud and saved worlds do not. The exclusion below is kept so that stays
+  true if the backupAgent is ever removed and Auto Backup takes over.
+  <device-transfer> IS governed by this file.
 -->
 <data-extraction-rules>
     <!-- Not consulted while android:backupAgent is declared; see SCOPE above. -->
