@@ -3,10 +3,14 @@ package com.vayunmathur.calculator.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -30,17 +34,17 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.CompactTouchTargets
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.FilledTonalIconButton
+import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconSwapLanguages
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
-import com.vayunmathur.library.ui.PrimaryScrollableTabRow
 import com.vayunmathur.library.ui.Spacing
-import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 
 /** Binds [CalculatorViewModel] to the stateless [UnitConverterScreen]. */
@@ -50,9 +54,12 @@ fun UnitConverterPage(viewModel: CalculatorViewModel) {
 }
 
 /**
- * The units tab: a plain from/to converter with no equations, one category per tab. Stateless
- * so it can be rendered from a `@Preview` — see `src/screenshotTest`.
+ * The units tab: a plain from/to converter with no equations. Every category is on screen at once
+ * as a grid of chips, since the converter itself leaves plenty of room and a scrolling tab row hid
+ * most of the twenty-odd categories. Stateless so it can be rendered from a `@Preview` — see
+ * `src/screenshotTest`.
  */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActions) {
     AppScaffold(
@@ -60,14 +67,24 @@ fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActio
         alignment = AppBarAlignment.Center,
     ) { padding ->
         val category = state.categories.getOrNull(state.selectedCategoryIndex)
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            PrimaryScrollableTabRow(selectedTabIndex = state.selectedCategoryIndex) {
-                state.categories.forEachIndexed { index, cat ->
-                    Tab(
-                        selected = index == state.selectedCategoryIndex,
-                        onClick = { actions.selectCategory(index) },
-                        text = { Text(cat.name) },
-                    )
+        Column(
+            Modifier
+                .fillMaxSize()
+                .padding(padding)
+                .verticalScroll(rememberScrollState()),
+        ) {
+            CompactTouchTargets {
+                FlowRow(
+                    Modifier.fillMaxWidth().padding(horizontal = Spacing.lg, vertical = Spacing.xs),
+                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
+                ) {
+                    state.categories.forEachIndexed { index, cat ->
+                        FilterChip(
+                            selected = index == state.selectedCategoryIndex,
+                            onClick = { actions.selectCategory(index) },
+                            label = { Text(cat.name) },
+                        )
+                    }
                 }
             }
             if (category != null) {

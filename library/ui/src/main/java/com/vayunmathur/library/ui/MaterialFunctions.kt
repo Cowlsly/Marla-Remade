@@ -9,9 +9,12 @@ package com.vayunmathur.library.ui
 import android.content.Context
 import androidx.compose.material3.toShape as m3ToShape
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.graphics.shapes.RoundedPolygon
 
 /**
@@ -117,3 +120,19 @@ fun rememberSwipeToDismissBoxState(
 ) = androidx.compose.material3.rememberSwipeToDismissBoxState(
     initialValue = initialValue, confirmValueChange = confirmValueChange,
 )
+
+// --- Density ---
+/**
+ * Relaxes Material's minimum touch target, which it enforces by padding a control out to 48dp
+ * without drawing anything there. A 32dp chip therefore reserves 48dp, and in a wrapping layout
+ * that reads as ~16dp of stray space between rows that no spacing setting can remove.
+ *
+ * Only worth reaching for in a dense grid of small controls, and do not go far below [size]'s
+ * default — the padding exists so controls stay hittable.
+ */
+@Composable
+fun CompactTouchTargets(size: Dp = 40.dp, content: @Composable () -> Unit) =
+    CompositionLocalProvider(
+        androidx.compose.material3.LocalMinimumInteractiveComponentSize provides size,
+        content = content,
+    )
