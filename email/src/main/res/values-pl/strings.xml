@@ -29,4 +29,65 @@
     <string name="drafts">Wersje robocze</string>
     <string name="email_widget_description">Ostatnie wiadomości z Twojej ujednoliconej skrzynki odbiorczej — dotknij, aby otworzyć pocztę e-mail</string>
     <string name="open">Otwórz</string>
+    <string name="account_added">Konto dodane</string>
+    <string name="added">Dodano <xliff:g id="email" example="user@example.com">%1$s</xliff:g></string>
+    <string name="oauth_sign_in">Logowanie OAuth</string>
+    <string name="sign_in_with">Zaloguj się za pomocą <xliff:g id="provider" example="Microsoft">%1$s</xliff:g></string>
+    <string name="email_address_optional">Adres e-mail (opcjonalnie)</string>
+    <string name="use_app_password_instead">Użyj zamiast tego hasła aplikacji</string>
+    <string name="username">Nazwa użytkownika</string>
+    <string name="username_is_not_my_email">Nazwa użytkownika nie jest moim adresem e-mail</string>
+    <string name="smtp_outgoing">SMTP (wychodzące)</string>
+    <string name="imap_incoming">IMAP (przychodzące)</string>
+    <string name="how_to_get_your_app_password">Jak uzyskać hasło do aplikacji</string>
+    <string name="no_recent_emails">Brak ostatnich wiadomości e-mail</string>
+    <string name="retry">Ponów</string>
+    <string name="couldn_t_open_this_eml_file">Nie można otworzyć tego pliku .eml</string>
+    <string name="to">Do: <xliff:g id="recipient" example="bob@example.com">%1$s</xliff:g></string>
+    <string name="cc_1">DW: <xliff:g id="recipient" example="bob@example.com">%1$s</xliff:g></string>
+    <string name="signature_saved">Podpis zapisany</string>
+    <string name="couldn_t_open_unsubscribe_page">Nie można otworzyć strony anulowania subskrypcji</string>
+    <string name="unread">Nieprzeczytane</string>
+    <string name="in_1_hour">Za 1 godzinę</string>
+    <string name="later_today_6_pm">Później dzisiaj (18:00)</string>
+    <string name="sender_blocked">Nadawca zablokowany</string>
+    <string name="save_as_eml">Zapisz jako .eml</string>
+    <string name="none">Brak</string>
+    <string name="unblock">Odblokuj</string>
+    <string name="tomorrow_8_am">Jutro (8 rano)</string>
+    <string name="folders">Foldery</string>
+    <string name="unsubscribe">Odsubskrybuj</string>
+    <string name="this_evening_6_pm">Dziś wieczorem (18:00)</string>
+    <string name="in_1_week">Za 1 tydzień</string>
+    <string name="no_app_can_open_this_file">Brak aplikacji do otwarcia tego pliku</string>
+    <string name="signatures">Podpisy</string>
+    <string name="later">Później</string>
+    <string name="unsubscribing">Anulowanie subskrypcji…</string>
+    <string name="accounts">Konta</string>
+    <string name="remote_images_blocked">Blokada obrazów zewnętrznych</string>
+    <string name="reading">Odczytywanie</string>
+    <string name="load_remote_images">Pobierz obrazy zewnętrzne</string>
+    <string name="load_remote_images_summary">Wyświetlaj obrazy hostowane w sieci bez pytania. Nadawcy mogą dzięki temu dowiedzieć się, kiedy otworzyłeś wiadomość.</string>
+    <string name="cc_bcc">Dw/Udw</string>
+    <string name="blocked_senders">Zablokowani nadawcy</string>
+    <string name="inline_images">Obrazy w tekście (<xliff:g id="count" example="2">%1$s</xliff:g> - <xliff:g id="size" example="1.2 MB">%2$s</xliff:g>)</string>
+    <string name="download_failed">Pobieranie nie powiodło się: <xliff:g id="error" example="Błąd sieci">%1$s</xliff:g></string>
+    <string name="your_signature">Twój podpis</string>
+    <string name="all">Wszystko</string>
+    <string name="attachments">Załączniki</string>
+    <string name="cc">Dw</string>
+    <string name="scheduled">Zaplanowany</string>
+    <string name="no_drafts">Brak szkiców</string>
+    <string name="message_sent">Wiadomość wysłana</string>
+    <string name="load_images">Wczytaj obrazy</string>
+    <string name="ai_summary">Podsumowanie SI</string>
+    <string name="deleted_from_outbox">Usunięto ze skrzynki nadawczej</string>
+    <string name="bcc">UDW</string>
+    <string name="attachments_1">Załączniki (<xliff:g id="size" example="2.3 MB">%1$s</xliff:g>)</string>
+    <string name="attachments_2">Załączniki:</string>
+    <string name="unified_inbox">Zintegrowana skrzynka odbiorcza</string>
+    <string name="saved_to_downloads">Zapisano w Pobranych</string>
+    <string name="saved_to_outbox">Zapisano w Skrzynce nadawczej: <xliff:g id="reason" example="No network">%1$s</xliff:g></string>
+    <string name="generating_summary">Generowanie podsumowania…</string>
+    <string name="block_sender">Zablokuj nadawcę</string>
 </resources>
