@@ -568,6 +568,111 @@ pub fn plan(
     Some(legs)
 }
 
+/// A single upcoming scheduled departure from a stop (offline board).
+pub struct StopDeparture {
+    pub route_name: String,
+    pub headsign: String,
+    pub feed: String,
+    pub stop_code: String,
+    pub route_color: u32,
+    pub route_type: u32,
+    /// Departure time in seconds since service-day midnight (may exceed 86400 for
+    /// trips running past midnight).
+    pub dep_secs: u32,
+}
+
+/// Build an offline departure board for the stop(s) nearest to `(lat,lon)`.
+///
+/// Gathers every route serving the nearest stop (and its co-located platforms
+/// within [`STATION_RADIUS_M`]) and returns upcoming scheduled departures at or
+/// after `dep_secs` (seconds since local midnight) on the query service day,
+/// sorted by time and capped at `max`. Empty when no stop is near or nothing
+/// departs — the caller then keeps whatever the online board returned.
+pub fn stop_departures(
+    idx: &TransitIndex,
+    lat: f64,
+    lon: f64,
+    dep_secs: u32,
+    weekday: u32,
+    date: u32,
+    max: usize,
+) -> Vec<StopDeparture> {
+    const STATION_RADIUS_M: f64 = 150.0;
+    const NEAREST_MAX_M: f64 = 400.0;
+
+    let n = idx.stop_count;
+    if n == 0 {
+        return Vec::new();
+    }
+    // Nearest stop to the tapped point (stops are matched by lat/lon — there is
+    // no MOTIS<->baked stop id join).
+    let mut nearest = u32::MAX;
+    let mut nearest_d = f64::MAX;
+    for s in 0..n {
+        let (slat, slon) = idx.stop_ll(s);
+        let d = dist_m(lat, lon, slat, slon);
+        if d < nearest_d {
+            nearest_d = d;
+            nearest = s;
+        }
+    }
+    if nearest == u32::MAX || nearest_d > NEAREST_MAX_M {
+        return Vec::new();
+    }
+    let (blat, blon) = idx.stop_ll(nearest);
+    let feed = idx.feed_name();
+
+    let mut out: Vec<StopDeparture> = Vec::new();
+    for s in 0..n {
+        let (slat, slon) = idx.stop_ll(s);
+        if dist_m(blat, blon, slat, slon) > STATION_RADIUS_M {
+            continue;
+        }
+        let code = idx.read_str(idx.stop(s).code_off);
+        let (rs, re) = idx.stop_routes_range(s);
+        for i in rs..re {
+            let r = idx.stop_route(i);
+            let route = idx.route(r);
+            // Position of this stop within the route's ordered stop list.
+            let mut pos = u32::MAX;
+            for p in 0..route.n_stops {
+                if idx.route_stop(route.first_route_stop + p) == s {
+                    pos = p;
+                    break;
+                }
+            }
+            // Skip if not on the route, or it's the terminus (no onward departure).
+            if pos == u32::MAX || pos + 1 >= route.n_stops {
+                continue;
+            }
+            let rname = idx.read_str(route.name_off);
+            for t in 0..route.n_trips {
+                let ti = route.first_trip + t;
+                let trip = idx.trip(ti);
+                if !idx.service_runs(trip.service_idx, weekday, date) {
+                    continue;
+                }
+                let dep = idx.stoptime(trip.first_stoptime + pos).dep_s;
+                if dep < dep_secs {
+                    continue;
+                }
+                out.push(StopDeparture {
+                    route_name: rname.clone(),
+                    headsign: idx.read_str(trip.headsign_off),
+                    feed: feed.clone(),
+                    stop_code: code.clone(),
+                    route_color: route.color,
+                    route_type: route.route_type,
+                    dep_secs: dep,
+                });
+            }
+        }
+    }
+    out.sort_by_key(|d| d.dep_secs);
+    out.truncate(max);
+    out
+}
+
 fn stop_of_leg_start(idx: &TransitIndex, leg: &TransitLeg) -> u32 {
     // Recover the leg's first stop index by matching its start coordinate.
     if leg.coords.len() < 2 {

@@ -88,7 +88,19 @@ class TransitStopsViewModel(application: Application) : AndroidViewModel(applica
                     flow {
                         emit(DeparturesState.Loading(stop))
                         val force = tick > 0
-                        val deps = TransitousDataSource.departures(stop.id, force = force)
+                        val online = TransitousDataSource.departures(stop.id, force = force)
+                        // Offline scheduled fallback (no internet / feed gap): the
+                        // online board already carries GTFS-RT delays, so only fall
+                        // back to the baked .transit schedule when it's empty.
+                        val deps = if (online.isNotEmpty()) {
+                            online
+                        } else {
+                            runCatching {
+                                OfflineRouter.getStopDeparturesOffline(
+                                    getApplication(), stop.lat, stop.lon,
+                                )
+                            }.getOrDefault(emptyList())
+                        }
                         emit(DeparturesState.Loaded(stop, deps))
                     }.flowOn(Dispatchers.IO)
                 }

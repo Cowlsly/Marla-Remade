@@ -6,6 +6,7 @@ import androidx.annotation.Keep
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.transit.Departure
 import java.io.File
 import java.io.OutputStream
 import java.net.InetAddress
@@ -117,6 +118,22 @@ object OfflineRouter {
             weekday: Int,
             date: Int
     ): Array<RawStep>?
+    /**
+     * Offline scheduled departure board (no internet): upcoming departures from
+     * the stop nearest `(lat,lon)` in `<basePath>/<feed>.transit`. `depSecs` is
+     * seconds since local midnight, `weekday` 0=Mon..6=Sun, `date` yyyymmdd.
+     * Returns null when the feed is missing or doesn't cover the point.
+     */
+    private external fun getStopDeparturesNative(
+            basePath: String,
+            feed: String,
+            lat: Double,
+            lon: Double,
+            depSecs: Int,
+            weekday: Int,
+            date: Int,
+            max: Int
+    ): Array<RawDeparture>?
     private external fun updateTrafficNative(
             edgeIds: LongArray,
             speeds: ByteArray,
@@ -220,6 +237,22 @@ object OfflineRouter {
             /** Packed turn lanes: one int per lane, `dirMask * 2 + valid`, where
              * `dirMask` is a bitmask of Maneuver ordinals the lane offers. */
             val lanePacked: IntArray
+    )
+
+    /** One offline scheduled departure from the baked `.transit` index. */
+    class RawDeparture
+    @Keep
+    constructor(
+            val routeName: String,
+            val headsign: String,
+            val feed: String,
+            val stopCode: String,
+            /** GTFS route colour as packed 0xRRGGBB, or 0 when absent. */
+            val routeColor: Int,
+            /** GTFS route_type. */
+            val routeType: Int,
+            /** Seconds since local (service-day) midnight. */
+            val depSecs: Int
     )
 
     private var isInitialized = false
@@ -347,6 +380,86 @@ object OfflineRouter {
             }
         }
         null
+    }
+
+    /**
+     * Offline scheduled departure board: upcoming departures for the stop nearest
+     * `(lat,lon)` from any downloaded `*.transit` index covering it. Scheduled
+     * times only (`realTime=false`); the online Transitous board (which already
+     * carries GTFS-RT delays) is preferred when the device is online — this is
+     * the no-internet fallback. Returns an empty list when nothing is available.
+     */
+    suspend fun getStopDeparturesOffline(
+            context: Context,
+            lat: Double,
+            lon: Double,
+            max: Int = 30
+    ): List<Departure> = withContext(Dispatchers.Default) {
+        if (!isInitialized) initialize(context)
+        val base = basePath ?: return@withContext emptyList()
+        val feeds = File(base)
+                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
+                ?.map { it.name.removeSuffix(".transit") }
+                ?: emptyList()
+        if (feeds.isEmpty()) return@withContext emptyList()
+
+        val now = java.util.Calendar.getInstance()
+        val depSecs = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
+                now.get(java.util.Calendar.MINUTE) * 60 +
+                now.get(java.util.Calendar.SECOND)
+        val weekday = (now.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
+        val date = now.get(java.util.Calendar.YEAR) * 10000 +
+                (now.get(java.util.Calendar.MONTH) + 1) * 100 +
+                now.get(java.util.Calendar.DAY_OF_MONTH)
+        // Epoch millis of local midnight, so depSecs -> absolute scheduled time.
+        now.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        now.set(java.util.Calendar.MINUTE, 0)
+        now.set(java.util.Calendar.SECOND, 0)
+        now.set(java.util.Calendar.MILLISECOND, 0)
+        val midnightMillis = now.timeInMillis
+
+        val all = mutableListOf<Departure>()
+        for (feed in feeds) {
+            val raw = try {
+                getStopDeparturesNative(base, feed, lat, lon, depSecs, weekday, date, max)
+            } catch (_: Exception) {
+                null
+            } ?: continue
+            for (d in raw) {
+                val scheduled = midnightMillis + d.depSecs.toLong() * 1000L
+                all.add(
+                        Departure(
+                                line = d.routeName,
+                                headsign = d.headsign,
+                                scheduledMillis = scheduled,
+                                realtimeMillis = scheduled,
+                                delayMinutes = 0,
+                                realTime = false,
+                                platform = null,
+                                mode = gtfsRouteTypeToMode(d.routeType),
+                                routeColor = if (d.routeColor == 0) null
+                                             else String.format("%06X", d.routeColor and 0xFFFFFF),
+                                cancelled = false,
+                        )
+                )
+            }
+        }
+        all.sortBy { it.scheduledMillis }
+        all.take(max)
+    }
+
+    /** Map a GTFS `route_type` (base + extended ranges) to a coarse mode label. */
+    private fun gtfsRouteTypeToMode(t: Int): String = when (t) {
+        0, 5, 900 -> "TRAM"
+        1, in 400..499 -> "SUBWAY"
+        2, in 100..199 -> "RAIL"
+        3, in 200..299, in 700..799, 800 -> "BUS"
+        4, 1000, 1200 -> "FERRY"
+        6, 1300 -> "AERIAL"
+        7, 1400 -> "FUNICULAR"
+        11 -> "TROLLEYBUS"
+        12 -> "MONORAIL"
+        else -> "TRANSIT"
     }
 
     suspend fun getRoute(
