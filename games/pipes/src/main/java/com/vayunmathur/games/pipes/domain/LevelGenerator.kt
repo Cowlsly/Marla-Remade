@@ -8,6 +8,16 @@ import kotlin.math.roundToInt
 import kotlin.random.Random
 import java.util.Locale
 
+/**
+ * Builds levels by carving a board into pipe paths and keeping only their endpoints.
+ *
+ * Nothing at runtime uses this: the daily pack draws from the shipped assets instead, because
+ * boards this produces only rarely force a full solution and proving that they do is far too slow
+ * on a phone (a 9x9 candidate costs seconds). It stays as the tool that produced the replacement
+ * 5x5 and 6x6 levels, and every board it returns is checked by [NumberlinkSolver] first, so it is
+ * safe to point at an asset. For bulk pack generation use `scripts/pipes/generate_levels.py`, whose
+ * meet-in-the-middle construction has a far better hit rate.
+ */
 object LevelGenerator {
 
     fun rectangularCells(rows: Int, cols: Int): Set<CellPos> {
@@ -18,7 +28,8 @@ object LevelGenerator {
 
     /**
      * Carves [cells] into pipe paths seeded by [seed], returning null if no attempt produced a
-     * board with at most [maxFlows] flows that survives [shortPairViolation].
+     * board with at most [maxFlows] flows that survives [shortPairViolation] and has the carve as
+     * its only solution.
      *
      * [earlyStopProb] controls flow length: higher means more, shorter flows.
      */
@@ -34,9 +45,8 @@ object LevelGenerator {
         val cols = cells.maxOf { it.col } + 1
 
         for (attempt in 0 until 50) {
-            val paths = carveCover(cells, adjacency, Random(seed + attempt), earlyStopProb) ?: continue
-            if (paths.size > maxFlows) continue
-            if (shortPairViolation(paths)) continue
+            val carved = carveCover(cells, adjacency, Random(seed + attempt), earlyStopProb) ?: continue
+            val paths = splitUntilUniquelySolvable(carved, cells, maxFlows) ?: continue
             val endpoints = paths.mapIndexed { index, path ->
                 EndpointPair(index, listOf(path.first(), path.last()))
             }
@@ -53,6 +63,53 @@ object LevelGenerator {
             )
         }
         return null
+    }
+
+    /**
+     * A carve covers every cell, but only its endpoints survive into the level, and a long flow's
+     * endpoints usually admit a shorter route. That leaves the board joinable without filling it,
+     * which [com.vayunmathur.games.pipes.platform.PipesViewModel] refuses to score as a win — the
+     * player connects everything and nothing happens. Bug #552.
+     *
+     * Cutting a flow in two pins down the middle of its route without disturbing the cover, so keep
+     * cutting the longest flow until the endpoints admit only the carve. Returns null once the board
+     * is out of room for more pairs, which means this carve cannot be salvaged.
+     */
+    private fun splitUntilUniquelySolvable(
+        carved: List<List<CellPos>>,
+        cells: Set<CellPos>,
+        maxFlows: Int,
+    ): List<List<CellPos>>? {
+        var paths = carved
+        while (paths.size <= maxFlows) {
+            if (!shortPairViolation(paths)) {
+                val endpoints = paths.mapIndexed { index, path ->
+                    EndpointPair(index, listOf(path.first(), path.last()))
+                }
+                val verdict = NumberlinkSolver.classify(cells, endpoints)
+                if (verdict == NumberlinkSolver.Verdict.UNIQUE) return paths
+                // NONE is impossible (the carve is a solution) and UNDECIDED means the search gave
+                // up, so in both cases splitting further is the only way forward.
+            }
+            paths = splitLongestFlow(paths) ?: return null
+        }
+        return null
+    }
+
+    /**
+     * Halves the longest flow, or null if none is long enough to leave both halves above the
+     * [shortPairViolation] floor.
+     */
+    private fun splitLongestFlow(paths: List<List<CellPos>>): List<List<CellPos>>? {
+        val index = paths.indices
+            .filter { paths[it].size >= 2 * MIN_SPLIT_LENGTH }
+            .maxByOrNull { paths[it].size }
+            ?: return null
+        val path = paths[index]
+        val half = path.size / 2
+        return paths.subList(0, index) +
+            listOf(path.subList(0, half), path.subList(half, path.size)) +
+            paths.subList(index + 1, paths.size)
     }
 
     /**
@@ -149,6 +206,9 @@ object LevelGenerator {
 
     /** Max flows for a board of this size, keeping puzzles sparse with longer flows. */
     fun flowCeiling(cells: Set<CellPos>): Int = maxOf(4, (cells.size / 5f).roundToInt())
+
+    /** Shortest flow [splitLongestFlow] will produce, so its output always clears length 4. */
+    private const val MIN_SPLIT_LENGTH = 5
 
     fun generatePack(
         name: String,

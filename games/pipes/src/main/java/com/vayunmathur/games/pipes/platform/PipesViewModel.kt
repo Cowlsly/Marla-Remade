@@ -104,9 +104,9 @@ class PipesViewModel(application: Application) : AndroidViewModel(application), 
     }
 
     /**
-     * Generates the day's pack off the main thread — deliberately not in `LevelPack.init()`, which
-     * runs synchronously in `onCreate`. Only runs when the player opens the daily; the pack-list
-     * card derives its progress from the level IDs alone.
+     * Picks the day's pack off the main thread — deliberately not in `LevelPack.init()`, which runs
+     * synchronously in `onCreate`. Only runs when the player opens the daily; the pack-list card
+     * derives its progress from the level IDs alone.
      */
     fun refreshDaily() {
         viewModelScope.launch(Dispatchers.Default) {

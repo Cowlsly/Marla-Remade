@@ -1,58 +1,41 @@
 package com.vayunmathur.games.pipes.domain
 
+import com.vayunmathur.games.pipes.data.LevelData
 import com.vayunmathur.games.pipes.data.LevelPack
-import com.vayunmathur.games.pipes.data.computeAdjacency
+import kotlin.random.Random
 
 /**
- * The five levels of a given day, generated from a seed derived purely from the epoch day, so
- * every player on that date gets exactly the same pack without any server or shipped asset.
+ * The five levels of a given day, drawn from the shipped packs by a seed derived purely from the
+ * epoch day, so every player on that date gets exactly the same pack without any server call.
  *
- * Unlike the shipped packs these are not verified to have a unique solution — the ZDD solver the
- * asset pipeline uses has no Kotlin equivalent — so some dailies admit more than one layout.
+ * The levels are shipped rather than generated on the fly because the win condition needs every
+ * cell owned, so a level whose pairs can be joined without filling the board is a dead end for the
+ * player (issue #552). Ruling that out means proving the board has exactly one solution, which
+ * [NumberlinkSolver] can do but which nothing can cheaply *generate* — the offline asset pipeline
+ * throws away hundreds of candidates per keeper. The shipped packs already went through that, and
+ * `ShippedPacksTest` holds them to it.
  */
 object DailyLevels {
 
     const val LEVELS_PER_DAY = 5
 
-    /**
-     * Board size and early-stop probability per level. A lower early stop yields fewer, longer
-     * flows, which is the harder puzzle — so difficulty ramps on board size and flow length
-     * together. The flow count itself falls out of the carve.
-     */
-    private val RAMP = listOf(
-        6 to 0.10f,
-        7 to 0.05f,
-        8 to 0.0f,
-        9 to 0.0f,
-        10 to 0.0f,
-    )
-
     fun levelId(day: Long, index: Int) = "daily_${day}_$index"
 
-    /** Null only if generation somehow fails for a level, in which case the day has no daily. */
-    fun packFor(day: Long): LevelPack? {
-        val levels = RAMP.mapIndexedNotNull { index, (size, earlyStop) ->
-            val cells = LevelGenerator.rectangularCells(size, size)
-            val adjacency = computeAdjacency(cells)
-            val baseSeed = SEED_OFFSET + day * 100 + index
-            // generateLevel can fail outright for a given seed; bump it until a board comes back.
-            (0 until MAX_SEED_BUMPS).firstNotNullOfOrNull { bump ->
-                LevelGenerator.generateLevel(
-                    cells = cells,
-                    adjacency = adjacency,
-                    maxFlows = LevelGenerator.flowCeiling(cells),
-                    seed = baseSeed + bump * SEED_BUMP,
-                    id = levelId(day, index),
-                    earlyStopProb = earlyStop
-                )
-            }
-        }
-        return if (levels.size == RAMP.size) {
-            LevelPack(name = "daily_$day", shape = "square", levels = levels)
-        } else null
+    /**
+     * Null only when the shipped packs have not been loaded yet, or hold too few levels to fill a
+     * day. Levels come back smallest first, so the day ramps up in difficulty.
+     */
+    fun packFor(day: Long, pool: List<LevelData> = defaultPool()): LevelPack? {
+        if (pool.size < LEVELS_PER_DAY) return null
+        val chosen = pool
+            .shuffled(Random(SEED_OFFSET + day))
+            .take(LEVELS_PER_DAY)
+            .sortedBy { it.cells.size }
+            .mapIndexed { index, level -> level.copy(id = levelId(day, index)) }
+        return LevelPack(name = "daily_$day", shape = "square", levels = chosen)
     }
 
+    private fun defaultPool(): List<LevelData> = LevelPack.PACKS.flatMap { it.levels }
+
     private const val SEED_OFFSET = 500_000_000L
-    private const val SEED_BUMP = 1_000_000L
-    private const val MAX_SEED_BUMPS = 40
 }
