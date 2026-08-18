@@ -6,7 +6,6 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
-import java.math.BigInteger
 import java.net.URLEncoder
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -44,13 +43,12 @@ object GooglePoiDataSource {
     // English status keywords line up with the response text.
     private const val SEARCH_ENDPOINT =
         "https://www.google.com/search?tbm=map&authuser=0&hl=en&gl=us"
-    private const val REVIEWS_ENDPOINT =
-        "https://www.google.com/maps/preview/review/listentitiesreviews?authuser=0&hl=en&gl=us"
     private const val SESSION_WARM_URL = "https://www.google.com/maps?hl=en&gl=us"
 
     // Browser-like identity. The endpoints authorise by referer + a normal
     // desktop UA rather than a key, so these headers ARE the credential.
-    private const val USER_AGENT =
+    // `internal` so [WebReviewsFetcher] reuses the same desktop UA for its hidden WebView.
+    internal const val USER_AGENT =
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
             "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     private val REQUEST_HEADERS = mapOf(
@@ -59,9 +57,7 @@ object GooglePoiDataSource {
         "Referer" to "https://www.google.com/maps/",
     )
 
-    // Reviews pb: feature id split into two unsigned-64 decimals (1y/2y); 2i/3i
-    // page, 3e1 = most-relevant, 1s = any session token string.
-    private const val REVIEWS_PB = "!1m2!1y{HIGH}!2y{LOW}!2m2!2i0!3i20!3e1!5m2!1smaps!7e81"
+    /** Match radius:
 
     /** Match radius: a scraped result must be within this of the OSM point to be
      *  treated as the same place, else the enrichment is discarded (wrong match). */
@@ -99,31 +95,14 @@ object GooglePoiDataSource {
             val body = get(url) ?: return@withContext null
             val root = GoogleResponse.parseOrNull(body) ?: return@withContext null
             val entry = pickEntry(root, lat, lon) ?: return@withContext null
-            val base = parsePlace(entry) ?: return@withContext null
-            // Reviews live behind a second RPC keyed on the feature id — fetch a
-            // page best-effort once we have the id. No feature id → skip.
-            val reviews = base.featureId?.let { fid ->
-                runCatching { fetchReviews(fid) }.getOrDefault(emptyList())
-            }.orEmpty()
-            base.copy(reviews = reviews)
+            // Reviews are no longer fetched here: the dead `listentitiesreviews` RPC 404s, and the
+            // WebView scrape ([WebReviewsFetcher]) is async/slow, so it must NOT block base
+            // enrichment. The base info carries reviews = emptyList(); the caller fills them in
+            // progressively once it has [GooglePoiInfo.featureId].
+            parsePlace(entry)
         }
 
-    /**
-     * Fetch a page of reviews for a Google feature id ("0xHIGH:0xLOW").
-     * Best-effort: any failure or drift yields an empty list.
-     */
-    suspend fun fetchReviews(featureId: String): List<GoogleReview> = withContext(Dispatchers.IO) {
-        val parts = featureId.split(":")
-        if (parts.size != 2) return@withContext emptyList()
-        val high = runCatching { BigInteger(parts[0].removePrefix("0x"), 16) }.getOrNull()
-            ?: return@withContext emptyList()
-        val low = runCatching { BigInteger(parts[1].removePrefix("0x"), 16) }.getOrNull()
-            ?: return@withContext emptyList()
-        val pb = REVIEWS_PB.replace("{HIGH}", high.toString()).replace("{LOW}", low.toString())
-        val body = get("$REVIEWS_ENDPOINT&pb=${pb.enc()}") ?: return@withContext emptyList()
-        val root = GoogleResponse.parseOrNull(body) ?: return@withContext emptyList()
-        parseReviews(root)
-    }
+    // --- HTTP plumbing
 
     // --- HTTP plumbing ------------------------------------------------------
 
@@ -265,46 +244,7 @@ object GooglePoiDataSource {
         return if (parsed.isEmpty()) null else PoiPopularTimes(parsed)
     }
 
-    private fun parseReviews(root: JsonElement): List<GoogleReview> {
-        val arr = root.at(2).arr() ?: return emptyList()
-        return arr.mapNotNull { rv ->
-            val author = rv.at(0, 1).str() ?: return@mapNotNull null
-            GoogleReview(
-                author = author,
-                authorPhoto = rv.at(0, 2).str(),
-                rating = rv.at(4).int() ?: 0,
-                relativeTime = rv.at(1).str(),
-                text = rv.at(3).str()?.ifBlank { null },
-                photos = reviewPhotos(rv),
-            )
-        }
-    }
-
-    private fun reviewPhotos(review: JsonElement?): List<String> {
-        review ?: return emptyList()
-        val urls = LinkedHashSet<String>()
-        fun walk(x: JsonElement?) {
-            when (x) {
-                is JsonArray -> x.forEach(::walk)
-                else -> x.str()?.let { s -> if (isUploadedPhoto(s)) urls.add(resizeReviewPhoto(s)) }
-            }
-        }
-        walk(review)
-        return urls.toList().take(10)
-    }
-
-    private fun isUploadedPhoto(u: String): Boolean {
-        if (!u.startsWith("http")) return false
-        if (!u.contains("googleusercontent.com/") && !u.contains("ggpht.com/")) return false
-        if (AVATAR_PATH.containsMatchIn(u) || u.contains("ACg8oc") || u.contains("ALV-")) return false
-        return u.contains("/gps-cs") || u.contains("/geougc") ||
-            u.contains("/p/AF1Qip") || u.contains("googleusercontent.com/p/")
-    }
-
-    private fun resizeReviewPhoto(u: String): String =
-        u.replace(Regex("=[swh]\\d[\\w-]*$"), "") + "=w400-h400"
-
-    private val AVATAR_PATH = Regex("/a-?/")
+    // --- small helpers
 
     // --- small helpers ------------------------------------------------------
 

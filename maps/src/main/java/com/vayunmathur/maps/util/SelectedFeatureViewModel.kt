@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiDataSource
 import com.vayunmathur.maps.data.google.GooglePoiInfo
+import com.vayunmathur.maps.data.google.WebReviewsFetcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
@@ -39,6 +40,10 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     val userHeadingAccuracy = _userHeadingAccuracy.asStateFlow()
 
     val locationManager = FrameworkLocationManager(application)
+
+    // Hidden-WebView reviews scraper (keyless; Google 404'd the old reviews RPC). Holds a single
+    // WebView built from the application Context, serialized + idle-reaped internally.
+    private val webReviews = WebReviewsFetcher(application)
 
     init {
         locationManager.startUpdates(
@@ -100,9 +105,27 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
                 else -> return@flatMapLatest flowOf(null)
             }
             if (name.isBlank()) return@flatMapLatest flowOf(null)
-            flow {
-                emit(null)
-                emit(GooglePoiDataSource.fetch(name, pos.latitude, pos.longitude))
+            // channelFlow so the WebView scrape's onPartial callback (arriving on a JavaBridge
+            // thread) can push progressive review updates into the same stream via trySend.
+            channelFlow {
+                send(null)
+                val base = GooglePoiDataSource.fetch(name, pos.latitude, pos.longitude)
+                send(base)
+                // Base sheet is up. Reviews load lazily via the hidden WebView: no feature id
+                // (e.g. no confident Google match) → nothing more to fetch. Best-effort; any
+                // failure/timeout just leaves reviews empty and the sheet as-is.
+                val fid = base?.featureId
+                if (base != null && !fid.isNullOrBlank()) {
+                    val reviews = runCatching {
+                        webReviews.fetch(
+                            featureId = fid,
+                            onPartial = { list ->
+                                if (list.isNotEmpty()) trySend(base.copy(reviews = list))
+                            },
+                        )
+                    }.getOrDefault(emptyList())
+                    if (reviews.isNotEmpty()) send(base.copy(reviews = reviews))
+                }
             }.flowOn(Dispatchers.IO)
         }
         .stateIn(
