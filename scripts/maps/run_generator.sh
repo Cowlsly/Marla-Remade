@@ -88,6 +88,11 @@ echo "[6/6] Uploading files to Cloudflare R2..."
 # directory. The offline TILE packs (zone_*.pmtiles) and the P11 transit index
 # (zone_*.transit) are published separately (extract_pmtiles.sh / gtfs_ingest)
 # and are intentionally NOT part of this graph upload.
+#
+# poi_names.bin / poi_index.bin are the P27 POI side files emitted by
+# build_v5_pmtiles.sh (build_pois_layer.sh) beside v5.pmtiles. Copy them into
+# "$DATA_DIR" before this sync (or point --workdir/--out there) so the app can
+# fetch them from the same data.vayunmathur.com host as the graph.
 echo "Syncing single global graph to R2..."
 
 aws s3 sync "$DATA_DIR" "s3://$BUCKET_NAME/" \
@@ -101,7 +106,9 @@ aws s3 sync "$DATA_DIR" "s3://$BUCKET_NAME/" \
     --include "edges.bin" \
     --include "transit_voyages.bin" \
     --include "transit_attributes.bin" \
-    --include "lanes.bin"
+    --include "lanes.bin" \
+    --include "poi_names.bin" \
+    --include "poi_index.bin"
 
 echo "---------------------------------------------------------"
 echo "Pipeline Finished Successfully."

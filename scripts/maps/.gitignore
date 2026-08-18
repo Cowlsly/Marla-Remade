@@ -2,4 +2,8 @@
 *.pmtiles
 map_data/
 generator
+poi_extract
+poi_names.bin
+poi_index.bin
+*.geojsonseq
 ne/

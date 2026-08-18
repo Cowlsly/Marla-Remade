@@ -66,6 +66,7 @@ earth  landcover  landuse  water  roads  buildings  boundaries  pois  places
 | `safety` | Point | `kind` ∈ {`speed_camera`,`alpr`,`surveillance`,`stop_sign`,`traffic_signals`}, `name?`, `direction?`, `operator?`, `ref?`, `osm_id` |
 | `maxspeed` | LineString/MultiLineString | **`maxspeed`** (raw OSM value, e.g. `"35 mph"`, `"50"`, `"50 km/h"`), `highway?`, `name?`, `osm_id` |
 | `transit_lines` | LineString/MultiLineString | **`kind`** ∈ {`rail`,`subway`,`light_rail`,`tram`,`monorail`,`train`}, `name?`, `ref?`, `colour?` (route colour, e.g. `"#DA291C"`), `osm_id` |
+| `ma_pois` | Point | **`name`** (string), **`type`** (number, see POI type map), `osm_id` (number). OUR baked OSM POI layer — NOT the base `pois` layer. |
 | `admin_country` | Polygon/MultiPolygon | `admin_level=2`, `name`, `name_en`, **`ISO_A2`**, `iso_a3` |
 | `admin_region` | Polygon/MultiPolygon | `admin_level=4`, `name`, `name_en`, **`iso_3166_2`**, `country_iso` |
 | `admin_city` | Polygon/MultiPolygon | `admin_level=8`, `name`, `name_en` |
@@ -89,6 +90,17 @@ from both railway ways (complete geometry, kind from `railway=*`) and route
 relations (named/coloured lines, kind from `route=*`), so a given corridor may be
 covered by both a way feature and a relation feature — filter on `colour`/`ref`
 presence if the app wants only the named route features.
+
+The **`ma_pois`** layer is OUR own baked OSM POI layer — the P27 feature that
+lets POI **placement / name / type** come from OpenStreetMap instead of a
+runtime Google viewport scrape (Google is then hit only for rich details on
+tap). It deliberately does **not** reuse the base Protomaps `pois` layer (which
+the app suppresses). It is built by [`build_pois_layer.sh`](build_pois_layer.sh)
+(→ [`poi_extract.cpp`](poi_extract.cpp)) at zooms **z12–z16**. The same pass also
+emits two compact side files (`poi_names.bin` + `poi_index.bin`, formats below)
+so the app can mmap + binary-scan POIs; the layer and the side files are
+mutually consistent (same POI set, same coordinates). See
+[POI layer & side files (P27)](#poi-layer--side-files-p27) below.
 
 ---
 
@@ -121,6 +133,19 @@ presence if the app wants only the named route features.
     `multilinestrings` layer (`ogr2ogr`), whose `other_tags` HSTORE is parsed by
     the normalizer to recover `route`/`colour`/`ref`. If `ogr2ogr` is not
     installed the layer is still built from railway ways alone (colour omitted).
+* **POIs (`ma_pois`)** — OpenStreetMap. Any node OR way/relation-area that has
+  BOTH a `name` tag AND one of the recognised POI keys
+  (`amenity`/`shop`/`tourism`/`leisure`/`office`/`healthcare`) becomes a POI. The
+  tag value maps to a stable **type number** (see the [POI type map](#poi-type-map));
+  a recognised key with an unmapped value falls into the `255` = "other" bucket.
+  Way/relation geometry is reduced to a representative centroid (average of
+  outer-ring node locations) so every POI renders as a point. Requiring a `name`
+  naturally filters out unnamed street furniture (`amenity=bench`, etc.).
+  Extraction is a single **libosmium** pass (`poi_extract.cpp`, matching the
+  `generator.cpp` toolchain) — nodes are read directly and closed ways +
+  multipolygon relations are assembled into areas via osmium's
+  `MultipolygonManager`. The same pass emits the tile layer's geojsonseq AND the
+  two side files, so all three are mutually consistent.
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
     `ne_10m_admin_1_states_provinces`). Chosen because the current `.fgb` are
@@ -141,6 +166,8 @@ presence if the app wants only the named route features.
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
+| `build_pois_layer.sh` | g++ `poi_extract.cpp` → geojsonseq + `poi_names.bin` + `poi_index.bin` → tippecanoe → `ma_pois.pmtiles` |
+| `poi_extract.cpp` | libosmium POI extractor: nodes + way/relation centroids → `ma_pois` geojsonseq + the two side files (full TYPE MAP + on-disk layouts in the file header) |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
@@ -159,6 +186,8 @@ Full build needs (all are existing off-the-shelf tools — no C++ authored here)
 * **tippecanoe** ≥ 2.x (provides `tippecanoe` + `tile-join`, both write `.pmtiles`)
 * **osmium-tool** (`osmium`)
 * **GDAL** (`ogr2ogr`)
+* **g++** (C++17) + **libosmium** headers — for the `ma_pois` extractor
+  (`poi_extract.cpp`) and the routing-graph `generator.cpp`
 * **python3** (stdlib only)
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
@@ -220,6 +249,8 @@ Individual layers can also be built standalone — see each script's `--help`.
 | `safety.pmtiles` | planet | ~0.3–1 GB (point features only) |
 | `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
 | `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
+| `ma_pois.pmtiles` | planet | ~0.5–2 GB (named POI points) |
+| `poi_names.bin` + `poi_index.bin` | planet | ~0.2–1 GB combined (side files) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
 | **`v5.pmtiles`** | planet | ≈ **137 GB** (dominated by the base; overlays add < 3%) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
@@ -297,6 +328,145 @@ to the `admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /
 > polygons as whole as possible for mask reassembly, but for a pixel-perfect
 > full-country mask the app may still prefer querying the layer at a low zoom
 > level. Evaluate during P13.
+
+---
+
+## POI layer & side files (P27)
+
+`ma_pois` is the app's **own OSM POI layer**: POI placement, name and type come
+from OpenStreetMap (baked here), so the app never scrapes a Google map viewport
+to discover POIs — Google is queried only for rich details when the user taps a
+POI. It is built by [`build_pois_layer.sh`](build_pois_layer.sh) →
+[`poi_extract.cpp`](poi_extract.cpp) and merged into `v5.pmtiles` by
+`build_v5_pmtiles.sh` (skip with `--skip-pois`). The **same** `poi_extract` pass
+emits two compact side files **next to `--out`** so the app can `mmap` +
+binary-scan POIs without opening the tileset:
+
+```
+poi_names.bin
+poi_index.bin
+```
+
+Both are added to `run_generator.sh`'s R2 upload list so they ship from the same
+`data.vayunmathur.com` host as the routing graph.
+
+### `ma_pois` source-layer
+
+| source-layer | geometry | attributes |
+|---|---|---|
+| `ma_pois` | Point (z12–z16) | **`name`** (string), **`type`** (number, see below), **`osm_id`** (number; negative for relation-sourced POIs) |
+
+A POI = any node / closed-way area / multipolygon-relation area with a `name`
+AND a recognised POI key (`amenity`/`shop`/`tourism`/`leisure`/`office`/
+`healthcare`). Areas are reduced to a centroid point.
+
+### POI type map
+
+Stable POI type-number enum — **never renumber an existing value, only append**;
+`255` is the catch-all "other". Kept in sync with `poi_extract.cpp` (source of
+truth) and the app. Precedence when several keys are present:
+`amenity` → `shop` → `tourism` → `leisure` → `office` → `healthcare`.
+
+| # | type | example OSM tags |
+|---|---|---|
+| 0 | restaurant | `amenity=restaurant`/`food_court` |
+| 1 | cafe | `amenity=cafe`/`ice_cream` |
+| 2 | fast_food | `amenity=fast_food` |
+| 3 | bar | `amenity=bar`/`pub`/`biergarten`/`nightclub` |
+| 4 | shop (generic) | `shop=yes` and other unmapped `shop=*` |
+| 5 | grocery | `shop=supermarket`/`convenience`/`greengrocer`/`grocery` |
+| 6 | gas_station | `amenity=fuel` |
+| 7 | pharmacy | `amenity=pharmacy`, `shop=chemist`, `healthcare=pharmacy` |
+| 8 | hotel | `tourism=hotel`/`motel`/`hostel`/`guest_house`/`apartment` |
+| 9 | bank | `amenity=bank`/`atm`/`bureau_de_change` |
+| 10 | hospital | `amenity=hospital`/`clinic`, `healthcare=hospital`/`clinic` |
+| 11 | school | `amenity=school`/`college`/`university`/`kindergarten`/`language_school`/`driving_school` |
+| 12 | park | `leisure=park`/`garden`/`nature_reserve` |
+| 13 | gym | `leisure=fitness_centre`/`sports_centre` |
+| 14 | place_of_worship | `amenity=place_of_worship` |
+| 15 | attraction | `tourism=attraction`/`theme_park`/`zoo`/`viewpoint`/`artwork`/`gallery`/`aquarium` |
+| 16 | parking | `amenity=parking`/`parking_entrance`/`bicycle_parking` |
+| 17 | cinema | `amenity=cinema` |
+| 18 | theatre | `amenity=theatre`/`arts_centre` |
+| 19 | library | `amenity=library` |
+| 20 | post_office | `amenity=post_office` |
+| 21 | police | `amenity=police` |
+| 22 | fire_station | `amenity=fire_station` |
+| 23 | townhall | `amenity=townhall`/`courthouse`, `office=government` |
+| 24 | clothing | `shop=clothes`/`shoes`/`boutique`/`fashion`/`tailor` |
+| 25 | electronics | `shop=electronics`/`mobile_phone`/`computer`/`hifi` |
+| 26 | hardware | `shop=hardware`/`doityourself`/`trade`/`paint` |
+| 27 | beauty | `shop=hairdresser`/`beauty` |
+| 28 | car | `shop=car`/`car_repair`/`car_parts`/`tyres`, `amenity=car_rental`/`car_wash`/`car_sharing` |
+| 29 | bakery | `shop=bakery` |
+| 30 | books | `shop=books`/`stationery` |
+| 31 | furniture | `shop=furniture`/`interior_decoration`/`houseware` |
+| 32 | sports_shop | `shop=sports`/`outdoor`/`bicycle` |
+| 33 | department_store | `shop=department_store`/`mall` |
+| 34 | dentist | `amenity=dentist`, `healthcare=dentist` |
+| 35 | doctor | `amenity=doctors`, `healthcare=doctor`/`centre` |
+| 36 | veterinary | `amenity=veterinary`, `healthcare=veterinary` |
+| 37 | charging_station | `amenity=charging_station` |
+| 38 | museum | `tourism=museum` |
+| 39 | office (generic) | other unmapped `office=*` |
+| 40 | tourism_info | `tourism=information` |
+| 41 | florist | `shop=florist` |
+| 42 | jewelry | `shop=jewelry`/`jewellery` |
+| 43 | optician | `shop=optician`, `healthcare=optometrist` |
+| 44 | laundry | `shop=laundry`/`dry_cleaning` |
+| 45 | pet | `shop=pet` |
+| 46 | liquor | `shop=alcohol`/`wine`/`beverages` |
+| 47 | toys | `shop=toys` |
+| 48 | gift | `shop=gift` |
+| 49 | marketplace | `amenity=marketplace` |
+| 255 | other | any recognised POI key with an unmapped value |
+
+### `poi_names.bin` — deduped name table
+
+Each **unique** name is stored **once**, UTF-8, **NUL-terminated**, concatenated
+in first-seen order:
+
+```
+"Blue Bottle Coffee\0Philz Coffee\0Dolores Park\0…"
+```
+
+A **"name start index"** (the `name_off` field in `poi_index.bin`) is the **byte
+offset** of the name's first byte. To read a name: seek to `name_off` and read
+bytes up to (not including) the next `0x00`. Multiple POIs with an identical name
+share the same offset (that is the dedup win). Offsets are `uint32` byte offsets
+(the table is well under 4 GB for a planet build).
+
+### `poi_index.bin` — flat fixed-size records
+
+A flat array of fixed **14-byte**, **little-endian**, packed records — one per
+POI, in the SAME order as the `ma_pois` features:
+
+| field | type | bytes | meaning |
+|---|---|---|---|
+| `lat_e7` | `int32` | 0–3 | latitude × 1e7 |
+| `lon_e7` | `int32` | 4–7 | longitude × 1e7 |
+| `name_off` | `uint32` | 8–11 | byte offset into `poi_names.bin` |
+| `type` | `uint16` | 12–13 | POI type number (see the type map) |
+
+`record_count = filesize(poi_index.bin) / 14`. Records are **sorted ascending by
+the 64-bit Z-order (Morton) key of (lat, lon)** — computed exactly as
+`generator.cpp`'s `latlng_to_spatial` (interleave the 32-bit normalized
+`x=(lon+180)/360`, `y=(lat+90)/180`) — giving spatial locality for range scans.
+The Morton key itself is **not** stored; the app recomputes it from `lat_e7`/
+`lon_e7` when needed. Both files are byte-for-byte reproducible for a given input.
+
+C/Rust view of a record:
+
+```c
+#pragma pack(push, 1)
+struct PoiRecord {   // 14 bytes, little-endian
+    int32_t  lat_e7;
+    int32_t  lon_e7;
+    uint32_t name_off;   // offset into poi_names.bin
+    uint16_t type;
+};
+#pragma pack(pop)
+```
 
 ---
 
@@ -391,3 +561,27 @@ features dropped, `admin_level` mapping (2/4/8), `ISO_A2` / `iso_3166_2`
 preservation, county-vs-city `admin_level` filtering, and that every emitted line
 is valid GeoJSON (tippecanoe input). Run the metro dry run above on a box with
 the toolchain installed for a full end-to-end check.
+
+### P27 `ma_pois` dry run (toolchain box)
+
+The POI layer + side files were validated end-to-end on a box with the full
+toolchain (libosmium 2.20, osmium, tippecanoe, pmtiles) against the California
+extract clipped to a small SF bbox (`-122.44,37.76,-122.40,37.80`):
+
+```
+$ ./build_pois_layer.sh --pbf california-latest.osm.pbf \
+      --bbox -122.44,37.76,-122.40,37.80 \
+      --out ma_pois.pmtiles --names-out poi_names.bin --index-out poi_index.bin
+[poi] extracted 5918 POI(s)
+[poi] wrote 5392 unique name(s), 5918 record(s)
+[poi]   poi_names.bin (96408 bytes)
+[poi]   poi_index.bin (82852 bytes)   # 5918 × 14
+[ma_pois] tiling -> ma_pois.pmtiles (z12-16)
+```
+
+Verified: `poi_extract.cpp` compiles clean; `ma_pois` appears in the tileset at
+**z12–16** (and coexists with other layers after `tile-join` — a merge with
+`safety.pmtiles` lists both `ma_pois` and `safety`); each tiled feature carries
+`name`/`type`/`osm_id`; `poi_index.bin` records decode back to the exact
+`ma_pois` features (Morton-sorted); and POIs sharing a name resolve to the same
+`poi_names.bin` offset (212 shared offsets in the sample), confirming dedup.
