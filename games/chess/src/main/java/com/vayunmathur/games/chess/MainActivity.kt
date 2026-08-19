@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SegmentedButtonDefaults
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
@@ -385,8 +386,10 @@ fun ChessGameScreen(
         PawnPromotionDialog(state.turn, onPromote = actions::onPromote)
     }
 
+    // No title: the tab is already identified by the bottom bar, so the app bar exists only to
+    // hold the achievements button.
     AppScaffold(
-        title = stringResource(R.string.app_name),
+        title = {},
         actions = {
             IconButton(onClick = onOpenGameCenter) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
@@ -689,29 +692,32 @@ fun LearnHomeScreen(onOpenStage: (String, String) -> Unit) {
             com.vayunmathur.games.chess.data.LearnRepository.categories
         }
     }
-    AppScaffold(title = stringResource(R.string.tab_learn)) { pad ->
+    // No app bar: the tab has no title worth showing and no actions, so the content gets the space.
+    Scaffold { pad ->
         val cats = categories
         if (cats == null) {
             Box(Modifier.fillMaxSize().padding(pad), Alignment.Center) { CircularProgressIndicator() }
-            return@AppScaffold
+            return@Scaffold
         }
         LazyColumn(
             Modifier.fillMaxSize(),
             contentPadding = PaddingValues(
                 start = 16.dp,
                 end = 16.dp,
-                top = pad.calculateTopPadding() + 8.dp,
+                top = pad.calculateTopPadding(),
                 bottom = pad.calculateBottomPadding() + 8.dp
             ),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            cats.forEach { cat ->
+            cats.forEachIndexed { index, cat ->
                 item(key = "cat_${cat.key}") {
                     Text(
                         cat.name,
                         style = MaterialTheme.typography.titleMedium,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(top = 12.dp)
+                        // Separates one category from the previous one; the first has nothing above
+                        // it now that the app bar is gone.
+                        modifier = Modifier.padding(top = if (index == 0) 0.dp else 12.dp)
                     )
                 }
                 items(cat.stages, key = { "stage_${it.key}" }) { stage ->
@@ -1098,7 +1104,8 @@ fun PuzzleBoardScreen(state: PuzzleUiState, actions: PuzzleActions) {
         PawnPromotionDialog(state.playerColor, onPromote = actions::onPromote)
     }
 
-    AppScaffold(title = stringResource(R.string.tab_puzzles)) { innerPadding ->
+    // No app bar: the tab has no title worth showing and no actions, so the content gets the space.
+    Scaffold { innerPadding ->
         Column(
             Modifier
                 .fillMaxSize()
