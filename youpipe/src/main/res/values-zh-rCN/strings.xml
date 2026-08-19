@@ -133,4 +133,7 @@
     <string name="video_stat_paid_format">付费 | <xliff:g id="time" example="3 days ago">%1$s</xliff:g></string>
     <string name="video_info_paid_format"><xliff:g id="channel" example="Linus Tech Tips">%1$s</xliff:g> | 付费 | <xliff:g id="time" example="2 days ago">%2$s</xliff:g></string>
     <string name="label_hide_paid">隐藏付费视频</string>
+    <string name="label_player">播放器</string>
+    <string name="label_keep_controls_visible">保持播放器控制按钮可见</string>
+    <string name="label_keep_controls_visible_description">控制按钮将始终显示在屏幕上，而不是在 2 秒后隐藏。这对无障碍功能很有用。</string>
 </resources>
