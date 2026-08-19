@@ -30,7 +30,7 @@
     <string name="reset">重置</string>
     <string name="unsaved_changes">未保存的更改</string>
     <string name="unsaved_changes_message">您有未保存的更改。要在离开前保存吗？</string>
-    <string name="discard">舍弃</string>
+    <string name="discard">丢弃</string>
     <string name="replace_hint">替换为…</string>
     <string name="print_doc">打印</string>
     <string name="slide_number_1">幻灯片编号（1-<xliff:g id="total" example="10">%1$s</xliff:g>）</string>
@@ -171,7 +171,7 @@
     <string name="table">表格</string>
     <string name="unmerge_cell">拆分单元格</string>
     <string name="normal_1">● 普通</string>
-    <string name="line">线条</string>
+    <string name="line">行</string>
     <string name="integer">整数</string>
     <string name="date">日期</string>
     <string name="unknown">未知</string>
