@@ -48,4 +48,5 @@
     <string name="lines_art">显示星座线和艺术形象</string>
     <string name="trajectory_24h_15m_steps_yellow_line_on">24小时轨迹（15分钟步长）- 地图上的黄线</string>
     <string name="app_name">天文</string>
+    <string name="settings">设置</string>
 </resources>
