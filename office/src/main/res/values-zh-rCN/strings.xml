@@ -286,4 +286,8 @@
     <string name="join_request_failed">无法发送请求 — 请检查您的连接并重试。</string>
     <string name="document_dark_mode">✓ 文档深色模式</string>
     <string name="document_dark_mode_1">文档深色模式</string>
+    <string name="document_theme">文档主题</string>
+    <string name="document_theme_summary">控制文档的显示方式。不会更改文件内容。</string>
+    <string name="document_theme_unchanged">不更改</string>
+    <string name="document_theme_follow_system">遵循系统主题</string>
 </resources>
