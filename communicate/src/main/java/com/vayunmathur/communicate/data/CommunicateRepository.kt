@@ -761,7 +761,10 @@ object CommunicateRepository {
         when (thread.line) {
             CommunicateLine.Sim -> deleteSimThread(context, thread.threadId)
             CommunicateLine.GoogleVoice -> thread.remoteId?.let {
-                runCatching { GoogleVoiceClient.get(context).updateThreadAttributes(it, com.vayunmathur.communicate.data.googlevoice.GoogleVoiceParser.ThreadAction.Archive) }.getOrDefault(false)
+                runCatching {
+                    GoogleVoiceClient.get(context).updateThreadAttributes(it, com.vayunmathur.communicate.data.googlevoice.GoogleVoiceParser.ThreadAction.Archive)
+                    true
+                }.getOrDefault(false)
             } ?: false
             CommunicateLine.WhatsApp -> thread.remoteId?.let { jid ->
                 runCatching { WhatsAppClient.deleteChat(jid, leaveGroup = true) }.getOrDefault(false)

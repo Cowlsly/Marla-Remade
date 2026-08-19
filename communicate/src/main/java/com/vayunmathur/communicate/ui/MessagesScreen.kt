@@ -260,7 +260,7 @@ fun MessagesScreen(onOpenThread: (SmsThread) -> Unit, onOpenAccounts: () -> Unit
                             com.vayunmathur.library.ui.ConfirmDialog(
                                 title = stringResource(R.string.delete_conversation_title),
                                 message = stringResource(R.string.delete_conversation_message),
-                                confirmLabel = stringResource(R.string.delete),
+                                confirmLabel = stringResource(com.vayunmathur.library.ui.R.string.delete),
                                 dismissLabel = stringResource(com.vayunmathur.library.ui.R.string.cancel),
                                 destructive = true,
                                 onConfirm = {

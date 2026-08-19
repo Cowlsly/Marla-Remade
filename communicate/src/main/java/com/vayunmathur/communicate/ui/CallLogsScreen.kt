@@ -10,7 +10,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.produceState
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
@@ -82,7 +84,7 @@ fun CallLogsScreen() {
                     com.vayunmathur.library.ui.ConfirmDialog(
                         title = stringResource(R.string.delete_call_log_title),
                         message = stringResource(R.string.delete_call_log_message),
-                        confirmLabel = stringResource(R.string.delete),
+                        confirmLabel = stringResource(com.vayunmathur.library.ui.R.string.delete),
                         dismissLabel = stringResource(com.vayunmathur.library.ui.R.string.cancel),
                         destructive = true,
                         onConfirm = {
