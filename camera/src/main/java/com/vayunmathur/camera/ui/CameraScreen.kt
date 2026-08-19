@@ -59,11 +59,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.FilledTonalButton
-import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconBedtime
 import com.vayunmathur.library.ui.IconBlur
 import com.vayunmathur.library.ui.IconCamera
@@ -124,8 +124,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -963,6 +964,9 @@ private fun TopBar(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 8.dp, vertical = 8.dp),
+        // Centred rather than packed left: the control count changes with the mode (level in photo,
+        // mic in video), so a left-aligned row shifts its contents around as you switch modes.
+        horizontalArrangement = Arrangement.spacedBy(4.dp, Alignment.CenterHorizontally),
         verticalAlignment = Alignment.CenterVertically
     ) {
         val flashBg = if (torchEnabled || flashMode != FlashMode.OFF) Color(0xFF3C3C3C) else Color.Transparent
@@ -989,8 +993,6 @@ private fun TopBar(
             }
         }
 
-        Spacer(Modifier.width(4.dp))
-
         val gridBg = if (gridEnabled) Color(0xFF3C3C3C) else Color.Transparent
         IconButton(
             onClick = onGridToggle,
@@ -1001,28 +1003,25 @@ private fun TopBar(
             IconGrid(Modifier.size(22.dp).rotate(iconRotation), Color.White)
         }
 
-        Spacer(Modifier.width(4.dp))
-
-        val aspectIcon = when (aspectRatio) {
-            AspectRatioOption.RATIO_1_1 -> R.drawable.ratio_1_1
-            AspectRatioOption.RATIO_4_3 -> R.drawable.ratio_4_3
-            AspectRatioOption.RATIO_16_9 -> R.drawable.ratio_16_9
-        }
+        // The ratio as text: an icon of three nested rectangles does not tell you which one is
+        // active, and the enum already carries "16:9" / "4:3" / "1:1".
+        val aspectLabel = stringResource(R.string.settings_aspect_ratio)
         IconButton(
             onClick = onAspectCycle,
-            modifier = Modifier.size(40.dp)
+            modifier = Modifier.height(40.dp).widthIn(min = 40.dp)
         ) {
-            Icon(
-                painterResource(aspectIcon),
-                contentDescription = stringResource(R.string.settings_aspect_ratio),
-                tint = Color.White,
-                modifier = Modifier.size(22.dp).rotate(iconRotation)
+            Text(
+                aspectRatio.label,
+                color = Color.White,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier
+                    .rotate(iconRotation)
+                    .semantics { contentDescription = aspectLabel },
             )
         }
 
         if (isPhotoType) {
-            Spacer(Modifier.width(4.dp))
-
             val levelBg = if (levelEnabled) Color(0xFF3C3C3C) else Color.Transparent
             IconButton(
                 onClick = onLevelToggle,
@@ -1036,8 +1035,6 @@ private fun TopBar(
                 )
             }
         }
-
-        Spacer(Modifier.width(4.dp))
 
         val timerBg = if (timerDuration != TimerDuration.NONE) Color(0xFF3C3C3C) else Color.Transparent
         IconButton(
@@ -1063,8 +1060,6 @@ private fun TopBar(
         }
 
         if (isVideoType) {
-            Spacer(Modifier.width(4.dp))
-
             val micBg = if (micMuted) Color(0xFF3C3C3C) else Color.Transparent
             IconButton(
                 onClick = onMicToggle,
