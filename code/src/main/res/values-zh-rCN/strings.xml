@@ -11,4 +11,5 @@
     <string name="open_a_folder_to_browse_your_project_or">打开一个文件夹以浏览您的项目，或打开单个文件。</string>
     <string name="new_folder">新建文件夹</string>
     <string name="create">创建</string>
+    <string name="settings">设置</string>
 </resources>
