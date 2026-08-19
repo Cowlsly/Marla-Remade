@@ -56,4 +56,5 @@
     <string name="vibrate">振动</string>
     <string name="snooze_length">暂停时长</string>
     <string name="gradually_increase_volume">音量逐渐增大</string>
+    <string name="alarm_label_hint">闹钟名称（可选）</string>
 </resources>
