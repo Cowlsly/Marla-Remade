@@ -166,4 +166,15 @@
     <string name="reminder_notification_text">Rozpoczyna się o <xliff:g id="start_time" example="3:00 PM">%1$s</xliff:g></string>
     <string name="today">Dzisiaj</string>
     <string name="tomorrow">Jutro</string>
+    <string name="repeat_mode_pattern">Reguła</string>
+    <string name="repeat_mode_dates">Niestandardowe daty</string>
+    <string name="repeat_on_dates">Powtarza się w te dni</string>
+    <string name="repeat_date_first"><xliff:g id="date" example="Mon, Dec 1">%1$s</xliff:g> (data wydarzenia)</string>
+    <string name="repeat_add_date">Dodaj datę</string>
+    <plurals name="repeat_dates_summary">
+        <item quantity="one">W <xliff:g id="count" example="1">%1$d</xliff:g> terminie</item>
+        <item quantity="few">W <xliff:g id="count" example="4">%1$d</xliff:g> terminach</item>
+        <item quantity="many">W <xliff:g id="count" example="4">%1$d</xliff:g> terminach</item>
+        <item quantity="other">W <xliff:g id="count" example="4">%1$d</xliff:g> terminach</item>
+    </plurals>
 </resources>
