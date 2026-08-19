@@ -9,6 +9,7 @@ import android.os.FileObserver
 import android.os.StatFs
 import android.provider.MediaStore
 import android.provider.OpenableColumns
+import android.text.format.Formatter
 import android.webkit.MimeTypeMap
 import androidx.core.content.FileProvider
 import androidx.core.content.edit
@@ -750,12 +751,43 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
     fun unzip(zipItem: FileBrowserItem, destPath: File) {
         val zipFile = zipItem.realFile ?: return
         val ctx = getApplication<Application>()
-        val unzipWork = OneTimeWorkRequestBuilder<UnzipWorker>().setInputData(
-            workDataOf("zip_path" to zipFile.absolutePath, "dest_path" to destPath.absolutePath)
-        ).build()
-        WorkManager.getInstance(ctx).enqueue(unzipWork)
-        clearSelection()
-        emit(ctx.getString(R.string.unzipping_started_to, destPath.name))
+        viewModelScope.launch(Dispatchers.IO) {
+            val freeBytes = runCatching { StatFs(destPath.absolutePath).availableBytes }.getOrDefault(0L)
+            val budget = ArchiveLimits.extractionBudget(freeBytes)
+
+            // What the archive says it expands to. Turning an oversized one away here means the user
+            // finds out before anything is written; UnzipWorker still enforces the budget itself,
+            // because these figures come from the archive and a crafted one can under-report.
+            val declared = runCatching {
+                ZipFile(zipFile).use { zf ->
+                    val entries = zf.entries().asSequence().toList()
+                    if (entries.size > ArchiveLimits.MAX_ENTRIES) return@runCatching Long.MAX_VALUE
+                    ArchiveLimits.declaredUncompressedSize(entries.asSequence().map { it.size })
+                }
+            }.getOrNull()
+
+            if (declared != null && declared > budget) {
+                emit(
+                    ctx.getString(
+                        R.string.zip_too_large_to_extract,
+                        Formatter.formatShortFileSize(ctx, declared),
+                        Formatter.formatShortFileSize(ctx, budget),
+                    )
+                )
+                return@launch
+            }
+
+            val unzipWork = OneTimeWorkRequestBuilder<UnzipWorker>().setInputData(
+                workDataOf(
+                    "zip_path" to zipFile.absolutePath,
+                    "dest_path" to destPath.absolutePath,
+                    "size_budget" to budget,
+                )
+            ).build()
+            WorkManager.getInstance(ctx).enqueue(unzipWork)
+            clearSelection()
+            emit(ctx.getString(R.string.unzipping_started_to, destPath.name))
+        }
     }
 
     override fun saveIncomingUris() {
@@ -890,7 +922,9 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
             ZipFile(zipFile).use { zf ->
                 val prefix = if (internalDir.isEmpty()) "" else "$internalDir/"
                 val dirMap = mutableMapOf<String, FileBrowserItem>()
-                val fileList = mutableListOf<FileBrowserItem>()
+                // Keyed, not a list: ZIP allows two entries with the same name, and the key ends up as
+                // a Compose item key, where a duplicate crashes the browser.
+                val fileMap = mutableMapOf<String, FileBrowserItem>()
                 for (entry in zf.entries()) {
                     val rawName = entry.name
                     val normalized = rawName.trimEnd('/')
@@ -932,20 +966,18 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
                             }
                         } else {
                             val fullInner = if (internalDir.isEmpty()) remainder else "$internalDir/$remainder"
-                            fileList.add(
-                                FileBrowserItem(
-                                    name = remainder,
-                                    isDirectory = false,
-                                    size = entry.size.takeIf { it >= 0 },
-                                    realFile = null,
-                                    zipInnerPath = fullInner,
-                                    key = "zip:$fullInner"
-                                )
+                            fileMap[remainder] = FileBrowserItem(
+                                name = remainder,
+                                isDirectory = false,
+                                size = entry.size.takeIf { it >= 0 },
+                                realFile = null,
+                                zipInnerPath = fullInner,
+                                key = "zip:$fullInner"
                             )
                         }
                     }
                 }
-                dirMap.values.toList() to fileList
+                dirMap.values.toList() to fileMap.values.toList()
             }
         } catch (_: Exception) {
             emptyList<FileBrowserItem>() to emptyList()

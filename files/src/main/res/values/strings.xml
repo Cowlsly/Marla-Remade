@@ -25,6 +25,8 @@
     <string name="move_failed">Move failed: <xliff:g id="error" example="Permission denied">%1$s</xliff:g></string>
     <!-- Snackbar error when zip file cannot be opened. %1$s = error details -->
     <string name="could_not_open_zip">Could not open zip: <xliff:g id="error" example="Invalid format">%1$s</xliff:g></string>
+    <!-- Snackbar when an archive would not fit. %1$s = expanded size, %2$s = space available for it -->
+    <string name="zip_too_large_to_extract">Too large to extract: needs <xliff:g id="needed" example="4.2 GB">%1$s</xliff:g>, only <xliff:g id="available" example="1.1 GB">%2$s</xliff:g> usable</string>
     <!-- Snackbar when no app can handle ACTION_VIEW intent for a file -->
     <string name="no_app_found_to_open_file">No app found to open this file</string>
     <!-- Snackbar/info when user tries to open file while browsing inside zip (read-only mode) -->
