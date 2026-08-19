@@ -10,4 +10,20 @@
     <string name="feature_maximum">最大值</string>
     <string name="feature_intersection">交点</string>
     <string name="toggle_curve_visibility">显示或隐藏此曲线</string>
+    <string name="units">单位</string>
+    <string name="insert_unit">插入单位</string>
+    <string name="convert_to">转换为</string>
+    <string name="converter_value">值</string>
+    <string name="converter_from">源单位</string>
+    <string name="converter_to">目标单位</string>
+    <string name="converter_result">结果</string>
+    <string name="converter_swap">交换单位</string>
+    <string name="key_date">日期</string>
+    <string name="key_time">时间</string>
+    <string name="key_datetime">日期和时间</string>
+    <string name="select_time">选择时间</string>
+    <string name="ok">确定</string>
+    <string name="currency_loading">正在获取汇率…</string>
+    <string name="currency_unavailable">汇率不可用</string>
+    <string name="currency_retry">重试</string>
 </resources>
