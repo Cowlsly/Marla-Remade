@@ -95,4 +95,11 @@
     <string name="import_contacts_from_vcf_files">从 .vcf 文件导入联系人</string>
     <string name="custom_label">自定义标签</string>
     <string name="enter_custom_label">输入自定义标签</string>
+    <string name="rename_account">重命名账号</string>
+    <string name="delete_account">删除账号</string>
+    <string name="delete_local_account_confirm">删除此账号及其所有联系人？此操作无法撤销。</string>
+    <string name="account_name_exists">已存在同名账号</string>
+    <string name="sim_limited_fields_hint">SIM 卡联系人仅存储名称、电话号码和电子邮件地址。</string>
+    <string name="save_failed">保存失败</string>
+    <string name="importing">正在导入…</string>
 </resources>
