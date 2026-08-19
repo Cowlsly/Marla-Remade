@@ -2,4 +2,5 @@
 <resources>
     <string name="recent">الأحدث</string>
     <string name="apply">تطبيق</string>
+    <string name="reset">إعادة تعيين</string>
 </resources>
