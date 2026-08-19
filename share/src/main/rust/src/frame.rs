@@ -845,6 +845,17 @@ pub enum PayloadPacketType {
 }
 
 /// `PayloadHeader` — `p000\ivln.java`, fields 1..7.
+///
+/// Every field carries a hasbit. The protobuf-lite info string at `p000\ivln.java:82` types
+/// them `ဂ`/`᠌`/`ဂ`/`ဇ`/`ဈ`/`ဈ`/`ဂ` = `0x1002, 0x180C, 0x1002, 0x1007, 0x1008, 0x1008,
+/// 0x1002`; the `0x1000` bit is explicit presence. So `is_sensitive = false` is meant to be
+/// *present and false*, which is not the same wire image as absent.
+///
+/// This matters: `is_sensitive` is modelled as `Option<bool>` and always written, because a
+/// `PayloadHeader` without field 4 is not one GMS acts on. `rquickshare`, an independent
+/// non-GMS implementation that interoperates with real Quick Share, likewise sets
+/// `is_sensitive: Some(false)` on every header it builds
+/// (`core_lib/src/hdl/inbound.rs::send_encrypted_frame`).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PayloadHeader {
     /// p000\ivln.java field 1, INT64
@@ -856,9 +867,9 @@ pub struct PayloadHeader {
     /// p000\ivln.java field 3, INT64
     #[prost(int64, tag = "3")]
     pub total_size: i64,
-    /// p000\ivln.java field 4, BOOL
-    #[prost(bool, tag = "4")]
-    pub is_sensitive: bool,
+    /// p000\ivln.java field 4, BOOL with a hasbit — presence is load-bearing, see above.
+    #[prost(bool, optional, tag = "4")]
+    pub is_sensitive: Option<bool>,
     /// p000\ivln.java field 5, STRING
     #[prost(string, tag = "5")]
     pub file_name: String,
@@ -883,17 +894,40 @@ pub enum PayloadType {
 
 /// `PayloadChunk` — `p000\ivlk.java`: `1 flags:int32`, `2 offset:int64`,
 /// `3 body:bytes`, `4 index:int32`.
+///
+/// Every field has a hasbit, and here presence is **load-bearing**. The info string at
+/// `p000\ivlk.java:73` types them `င`/`ဂ`/`ည`/`င` = `0x1004, 0x1002, 0x100A, 0x1004`; the
+/// `0x1000` bit is explicit presence. A first chunk carries `flags = 0`, so emitting it as a
+/// bare `int32` drops it from the wire and GMS rejects the whole frame:
+///
+/// ```text
+/// iuun: OfflineFrame PAYLOAD_TRANSFER(DATA) missing flags field.
+/// PayloadManager failed to retrieve Payload 219401524532613 for chunk at offset 90, discarding.
+/// ```
+///
+/// The data chunk is discarded, so when the `FLAG_LAST` terminator arrives there is no
+/// payload to attach it to and it is discarded too — the Sharing layer never sees the frame
+/// and the peer eventually times out with `AUTH_FAILURE`. Measured against a Pixel 7 Pro on
+/// GMS 26.24.34. `rquickshare` likewise sets `flags: Some(0)` and `offset: Some(0)`
+/// (`core_lib/src/hdl/inbound.rs::send_encrypted_frame`).
 #[derive(Clone, PartialEq, ::prost::Message)]
 pub struct PayloadChunk {
-    /// p000\ivlk.java field 1, INT32. Bit 0 is the last-chunk flag.
-    #[prost(int32, tag = "1")]
-    pub flags: i32,
-    /// p000\ivlk.java field 2, INT64
-    #[prost(int64, tag = "2")]
-    pub offset: i64,
-    /// p000\ivlk.java field 3, BYTES
-    #[prost(bytes = "vec", tag = "3")]
-    pub body: Vec<u8>,
+    /// p000\ivlk.java field 1, INT32 with a hasbit. Bit 0 is the last-chunk flag.
+    #[prost(int32, optional, tag = "1")]
+    pub flags: Option<i32>,
+    /// p000\ivlk.java field 2, INT64 with a hasbit.
+    #[prost(int64, optional, tag = "2")]
+    pub offset: Option<i64>,
+    /// p000\ivlk.java field 3, BYTES with a hasbit.
+    #[prost(bytes = "vec", optional, tag = "3")]
+    pub body: Option<Vec<u8>>,
+}
+
+impl PayloadChunk {
+    /// True when this chunk closes the payload.
+    pub fn is_last(&self) -> bool {
+        self.flags() & 1 != 0
+    }
 }
 
 /// `PayloadTransferFrame.ControlMessage`.
@@ -1090,9 +1124,9 @@ mod tests {
                         ..Default::default()
                     }),
                     payload_chunk: Some(PayloadChunk {
-                        flags: 1,
-                        offset: 0,
-                        body: b"hello".to_vec(),
+                        flags: Some(1),
+                        offset: Some(0),
+                        body: Some(b"hello".to_vec()),
                     }),
                     ..Default::default()
                 }),

@@ -366,6 +366,9 @@ pub fn parse_offline_frame(bytes: &[u8]) -> Result<OfflineFrame, prost::DecodeEr
 // ---------------------------------------------------------------------------
 
 /// Build a `PayloadHeader` for `id`.
+///
+/// `is_sensitive` is written explicitly — see [`PayloadHeader`] for why absence is not the
+/// same as false.
 pub fn payload_header(
     id: i64,
     payload_type: PayloadType,
@@ -376,6 +379,7 @@ pub fn payload_header(
         id,
         r#type: payload_type as i32,
         total_size,
+        is_sensitive: Some(false),
         file_name: file_name.to_string(),
         ..Default::default()
     }
@@ -399,9 +403,9 @@ pub fn bytes_payload(id: i64, body: &[u8]) -> Vec<Vec<u8>> {
         packet_type: PayloadPacketType::Data as i32,
         payload_header: Some(header.clone()),
         payload_chunk: Some(PayloadChunk {
-            flags: 0,
-            offset: 0,
-            body: body.to_vec(),
+            flags: Some(0),
+            offset: Some(0),
+            body: Some(body.to_vec()),
         }),
         control_message: None,
     });
@@ -409,9 +413,9 @@ pub fn bytes_payload(id: i64, body: &[u8]) -> Vec<Vec<u8>> {
         packet_type: PayloadPacketType::Data as i32,
         payload_header: Some(header),
         payload_chunk: Some(PayloadChunk {
-            flags: FLAG_LAST,
-            offset: body.len() as i64,
-            body: Vec::new(),
+            flags: Some(FLAG_LAST),
+            offset: Some(body.len() as i64),
+            body: Some(Vec::new()),
         }),
         control_message: None,
     });
@@ -438,9 +442,9 @@ pub fn chunk_payload(
             packet_type: PayloadPacketType::Data as i32,
             payload_header: Some(header.clone()),
             payload_chunk: Some(PayloadChunk {
-                flags: if is_last { FLAG_LAST } else { 0 },
-                offset,
-                body: body.to_vec(),
+                flags: Some(if is_last { FLAG_LAST } else { 0 }),
+                offset: Some(offset),
+                body: Some(body.to_vec()),
             }),
             control_message: None,
         }
@@ -561,17 +565,20 @@ mod tests {
         let chunk = pt.payload_chunk.expect("chunk");
         // The body travels on a chunk that is NOT flagged last: a real device ignores a
         // flagged chunk's body, so carrying both drops the frame silently.
-        assert_eq!(chunk.flags & FLAG_LAST, 0);
-        assert_eq!(chunk.offset, 0);
-        assert_eq!(chunk.body, inner);
+        assert_eq!(chunk.flags() & FLAG_LAST, 0);
+        // Present, not merely zero: GMS rejects a DATA frame whose chunk omits `flags`
+        // outright — see `frame::PayloadChunk`.
+        assert_eq!(chunk.flags, Some(0), "flags must be on the wire even when zero");
+        assert_eq!(chunk.offset, Some(0), "offset must be on the wire even when zero");
+        assert_eq!(chunk.body(), inner);
 
         let term = parse_offline_frame(&frames[1]).expect("decode terminator");
         let term_pt = term.v1.expect("v1").payload_transfer.expect("payload_transfer");
         assert_eq!(term_pt.payload_header.expect("header").id, 3);
         let term_chunk = term_pt.payload_chunk.expect("chunk");
-        assert_eq!(term_chunk.flags & FLAG_LAST, FLAG_LAST);
-        assert_eq!(term_chunk.offset, inner.len() as i64);
-        assert!(term_chunk.body.is_empty());
+        assert_eq!(term_chunk.flags() & FLAG_LAST, FLAG_LAST);
+        assert_eq!(term_chunk.offset(), inner.len() as i64);
+        assert!(term_chunk.body().is_empty());
     }
 
     #[test]
@@ -668,12 +675,12 @@ mod tests {
             assert_eq!(f.packet_type, PayloadPacketType::Data as i32);
             let ch = f.payload_chunk.as_ref().expect("chunk");
             assert!(f.payload_header.is_some(), "every DATA frame repeats the header");
-            assert_eq!(ch.offset as usize, reassembled.len());
-            reassembled.extend_from_slice(&ch.body);
+            assert_eq!(ch.offset() as usize, reassembled.len());
+            reassembled.extend_from_slice(ch.body());
         }
         assert_eq!(reassembled, data);
         let last = frames.last().expect("last").payload_chunk.as_ref().expect("chunk");
-        assert_eq!(last.flags & FLAG_LAST, FLAG_LAST);
+        assert_eq!(last.flags() & FLAG_LAST, FLAG_LAST);
     }
 
     #[test]
@@ -681,7 +688,7 @@ mod tests {
         let frames = chunk_payload(7, &[], "empty.bin", 0, 0);
         assert_eq!(frames.len(), 1);
         let chunk = frames[0].payload_chunk.as_ref().expect("chunk");
-        assert_eq!(chunk.flags, FLAG_LAST);
+        assert_eq!(chunk.flags, Some(FLAG_LAST));
         assert_eq!(
             frames[0].payload_header.as_ref().expect("header").r#type,
             PayloadType::File as i32

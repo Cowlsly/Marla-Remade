@@ -319,6 +319,25 @@ pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeQue
     }
 }
 
+/// String nativeQueryPeerName(long handle) -> the peer's advertised device name, or null.
+///
+/// Null until the peer's `CONNECTION_REQUEST` has been read, and for an unknown handle.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_share_protocol_ShareNative_nativeQueryPeerName<'l>(
+    env: JNIEnv<'l>,
+    _cls: JClass<'l>,
+    handle: jlong,
+) -> jni::sys::jobject {
+    let name = with_session(handle, None, |s| s.peer_name().map(str::to_owned));
+    match name {
+        Some(n) => match env.new_string(n) {
+            Ok(s) => s.into_raw(),
+            Err(_) => std::ptr::null_mut(),
+        },
+        None => std::ptr::null_mut(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // File-list JSON (PROTOCOL_CONTRACT.md §6)
 // ---------------------------------------------------------------------------

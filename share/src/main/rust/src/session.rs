@@ -195,6 +195,11 @@ pub struct Session {
     pending_files: Vec<FileMeta>,
     files_to_send: Vec<FileMeta>,
     introduction_pending: bool,
+    /// True once we have sent an `INTRODUCTION`, i.e. we are the sharing *sender*.
+    ///
+    /// A Sharing `RESPONSE` only answers an `INTRODUCTION`, so only the side that sent one
+    /// may act on it — see [`Session::handle_response_status`].
+    introduction_sent: bool,
     next_payload_id: i64,
     keep_alive_seq: u32,
     paired_key_encryption_sent: bool,
@@ -209,6 +214,8 @@ pub struct Session {
     received_queue: VecDeque<ReceivedChunk>,
     last_data_payload_id: Option<i64>,
     accepted: Option<bool>,
+    /// The peer's advertised device name, learned from its `CONNECTION_REQUEST`.
+    peer_name: Option<String>,
     failed_reason: Option<String>,
 }
 
@@ -241,6 +248,24 @@ pub(crate) fn fill_random(buf: &mut [u8]) {
         // callers must treat this as fatal — see `Session::enter_paired_key`.
         buf.fill(0);
     }
+}
+
+/// A random starting point for the payload-id counter.
+///
+/// GMS picks a fresh random `int64` per payload — the two `PAIRED_KEY_ENCRYPTION` payloads
+/// captured from a Pixel 7 Pro were `-8810033913771563443` and `-4647218023940673867` — and
+/// `rquickshare` does the same (`core_lib/src/hdl/inbound.rs::send_encrypted_frame`). Ours
+/// stays a counter so a multi-file `INTRODUCTION` can reserve a consecutive run, but it
+/// starts somewhere unpredictable instead of at 1.
+///
+/// Masked to 48 bits: positive, and with enough headroom that reserving one id per file
+/// cannot overflow.
+fn random_payload_id_seed() -> i64 {
+    let mut raw = [0u8; 8];
+    fill_random(&mut raw);
+    let id = i64::from_be_bytes(raw) & 0x0000_ffff_ffff_ffff;
+    // 0 is not a usable payload id.
+    id.max(1)
 }
 
 fn random_endpoint_id() -> String {
@@ -296,7 +321,8 @@ impl Session {
             pending_files: Vec::new(),
             files_to_send: Vec::new(),
             introduction_pending: false,
-            next_payload_id: 1,
+            introduction_sent: false,
+            next_payload_id: random_payload_id_seed(),
             keep_alive_seq: 0,
             paired_key_encryption_sent: false,
             paired_key_result_sent: false,
@@ -308,6 +334,7 @@ impl Session {
             received_queue: VecDeque::new(),
             last_data_payload_id: None,
             accepted: None,
+            peer_name: None,
             failed_reason: None,
         };
         if role == Role::Initiator {
@@ -396,6 +423,10 @@ impl Session {
         0
     }
 
+    /// Hand out the next payload id.
+    ///
+    /// The counter is seeded randomly (see [`Session::new`]) so ids look like GMS's, but it
+    /// stays monotonic because a multi-file `INTRODUCTION` reserves a consecutive run.
     fn alloc_payload_id(&mut self) -> i64 {
         let id = self.next_payload_id;
         self.next_payload_id = self.next_payload_id.saturating_add(1);
@@ -479,9 +510,28 @@ impl Session {
             self.fail("expected a CONNECTION_REQUEST OfflineFrame");
             return -2;
         }
+        // The request carries the peer's identity. Prefer the name inside `endpoint_info`,
+        // which is the human-readable one a Quick Share device advertises (GMS 26.24.34 sends
+        // e.g. `[0x22 … "Vayun's Pixel 7 Pro"]`); `endpoint_name` is a bare fallback.
+        if let Some(req) = v1.connection_request {
+            let from_info = crate::endpoint_info::parse(&req.endpoint_info)
+                .and_then(|info| info.device_name)
+                .filter(|n| !n.is_empty());
+            let name = from_info
+                .or_else(|| Some(req.endpoint_name.clone()).filter(|n| !n.is_empty()));
+            if let Some(name) = name {
+                self.note(format!("peer is \"{name}\""));
+                self.peer_name = Some(name);
+            }
+        }
         self.handshake = HandshakeState::Server(Box::new(new_server_handshake()));
         self.phase = Phase::Ukey2;
         0
+    }
+
+    /// The peer's advertised device name, once the handshake has revealed it.
+    pub fn peer_name(&self) -> Option<&str> {
+        self.peer_name.as_deref()
     }
 
     /// Read the peer's plaintext `CONNECTION_RESPONSE`.
@@ -594,22 +644,22 @@ impl Session {
         0
     }
 
-    /// Move to [`Phase::PairedKey`], and send `PAIRED_KEY_ENCRYPTION` only as the
-    /// responder.
+    /// Move to [`Phase::PairedKey`], and send `PAIRED_KEY_ENCRYPTION` only as the responder.
     ///
-    /// The frame pair is mandatory — a GMS peer waits for it and gives up after roughly
-    /// five seconds — but **the responder speaks first**, and an initiator that sends it
-    /// proactively is disconnected.
+    /// The responder — which is always the receiver — speaks first, immediately after its
+    /// `CONNECTION_RESPONSE`. An initiator that sends it proactively is disconnected instead:
+    /// measured against a Pixel 7 Pro on GMS 26.24.34, sending as soon as the
+    /// `CONNECTION_RESPONSE` arrived drew a `DISCONNECTION` 250 ms later.
     ///
-    /// Measured against a Pixel 7 Pro on GMS 26.24.34, `:share` initiating: sending our
-    /// `PAIRED_KEY_ENCRYPTION` as soon as the `CONNECTION_RESPONSE` arrived drew a
-    /// `DISCONNECTION` frame 250 ms later, while staying silent had the receiver send its
-    /// own frame first and accept our reply. The receiver's Sharing layer is still
-    /// validating the incoming connection (`p000\each.java:2092-2112`) when the response
-    /// lands, so it is not yet ready to be spoken to.
+    /// Cross-checked against `rquickshare`, an independent non-GMS implementation that
+    /// interoperates with real Quick Share: `core_lib/src/hdl/inbound.rs`
+    /// (`process_connection_response`) sends its `CONNECTION_RESPONSE` and then its
+    /// `PAIRED_KEY_ENCRYPTION` back to back, with the same 6-byte/72-byte random decoys, and
+    /// only replies with `PAIRED_KEY_RESULT` once the peer's encryption frame arrives.
     ///
-    /// `:share` responds to `:share` under the same rule, since the responder there is
-    /// also the receiver.
+    /// A previous revision made this reactive for both roles on the theory that GMS drops
+    /// frames arriving before it has sent its own. That was wrong — waiting produced the
+    /// identical 15 s `AUTH_FAILURE`, so the ordering was never the problem.
     fn enter_paired_key(&mut self) -> i32 {
         self.phase = Phase::PairedKey;
         if self.role == Role::Initiator {
@@ -730,9 +780,9 @@ impl Session {
         // arrive as one body+FLAG_LAST chunk or as a body chunk closed by an empty one.
         self.note(format!(
             "in PAYLOAD id {payload_id} type {payload_type} off {} len {} flags {}",
-            chunk.offset,
-            chunk.body.len(),
-            chunk.flags,
+            chunk.offset(),
+            chunk.body().len(),
+            chunk.flags(),
         ));
 
         if payload_type == PayloadType::Bytes as i32 {
@@ -740,12 +790,12 @@ impl Session {
             // the body may arrive on a chunk with no flags and be closed by a later,
             // empty chunk carrying FLAG_LAST. Reassemble by offset and dispatch on the
             // flag, which handles both that form and a single body+FLAG_LAST chunk.
-            let last = (chunk.flags & payload::FLAG_LAST) != 0;
-            let offset = usize::try_from(chunk.offset).unwrap_or(usize::MAX);
+            let last = chunk.is_last();
+            let offset = usize::try_from(chunk.offset()).unwrap_or(usize::MAX);
             let have = self.bytes_recvs.entry(payload_id).or_default();
             let gap = offset > have.len();
             if offset == have.len() {
-                have.extend_from_slice(&chunk.body);
+                have.extend_from_slice(chunk.body());
             }
             if gap {
                 let have_len = have.len();
@@ -766,14 +816,14 @@ impl Session {
             next_offset: 0,
             completed: false,
         });
-        let last = (chunk.flags & payload::FLAG_LAST) != 0;
+        let last = chunk.is_last();
         let record = ReceivedChunk {
             payload_id,
-            offset: chunk.offset,
+            offset: chunk.offset(),
             total_size: entry.expected_size,
             last,
             name: entry.name.clone(),
-            body: chunk.body,
+            body: chunk.body.unwrap_or_default(),
         };
         entry.next_offset = entry.next_offset.saturating_add(record.body.len() as i64);
         if last {
@@ -854,7 +904,21 @@ impl Session {
         0
     }
 
+    /// Act on a Sharing `RESPONSE`.
+    ///
+    /// Only the side that sent the `INTRODUCTION` may act on this. GMS sends a
+    /// `RESPONSE(ACCEPT)` of its own straight after its `INTRODUCTION` — it is the *sender*
+    /// reporting that it skipped its local confirmation, logged as
+    /// `[NS_TRANSFER] OutgoingPayloadTracker (…) emitted SkipLocalAcceptance(token=0016)`.
+    /// Treating that as the receiver's own acceptance moved us out of
+    /// [`State::AwaitingAccept`] before the user ever saw the prompt, so no accept was ever
+    /// sent and GMS hung up after exactly 60 s. Measured against a Pixel 7 Pro on
+    /// GMS 26.24.34.
     fn handle_response_status(&mut self, status: i32) -> i32 {
+        if !self.introduction_sent {
+            self.note(format!("ignoring peer RESPONSE status {status}: we did not introduce"));
+            return 0;
+        }
         if status == SharingResponseStatus::Accept as i32 {
             if self.state == State::Handshaking || self.state == State::AwaitingAccept {
                 self.state = State::Transferring;
@@ -941,6 +1005,7 @@ impl Session {
     }
 
     fn emit_introduction(&mut self) -> i32 {
+        self.introduction_sent = true;
         let first_id = self.alloc_payload_id();
         // Reserve one id per file so `alloc_payload_id` cannot hand the same id to
         // a later BYTES payload.
@@ -1013,11 +1078,11 @@ impl Session {
             let body_len = frame
                 .payload_chunk
                 .as_ref()
-                .map_or(0, |c| c.body.len() as i64);
+                .map_or(0, |c| c.body().len() as i64);
             let is_last = frame
                 .payload_chunk
                 .as_ref()
-                .is_some_and(|c| (c.flags & payload::FLAG_LAST) != 0);
+                .is_some_and(frame::PayloadChunk::is_last);
             let offline = payload::wrap_payload_transfer(frame.clone());
             let rc = self.send_encrypted(&offline);
             if rc < 0 {
@@ -1179,6 +1244,32 @@ mod tests {
         let mut responder = test_session(Role::Responder, "Bob", b"bob-info".to_vec());
         settle(&mut initiator, &mut responder);
         (initiator, responder)
+    }
+
+    #[test]
+    fn only_the_responder_opens_the_paired_key_exchange() {
+        // The responder is the receiver and speaks first; an initiator that sends
+        // PAIRED_KEY_ENCRYPTION proactively is disconnected by GMS within 250 ms.
+        // See `Session::enter_paired_key`.
+        let (initiator, responder) = connected_pair();
+        assert!(
+            responder.paired_key_encryption_sent,
+            "responder never opened the paired-key exchange",
+        );
+        assert!(
+            initiator.paired_key_encryption_sent,
+            "initiator never answered the paired-key exchange",
+        );
+
+        // In isolation, with no peer traffic at all, the initiator must stay silent.
+        let mut lone = test_session(Role::Initiator, "Solo", b"solo-info".to_vec());
+        let _ = lone.outbound_drain();
+        lone.phase = Phase::PairedKey;
+        assert!(
+            !lone.paired_key_encryption_sent,
+            "initiator spoke first in the paired-key exchange",
+        );
+        assert!(lone.outbound_drain().is_none(), "initiator sent an unprompted frame");
     }
 
     #[test]
@@ -1364,6 +1455,37 @@ mod tests {
         assert!(responder.feed_inbound(&[0xFF, 0xFF, 0xFF, 0xFF]) < 0);
         assert_eq!(responder.state, State::Failed);
         assert!(responder.failed_reason.as_deref().unwrap_or_default().contains("oversized"));
+    }
+
+    #[test]
+    fn a_senders_own_acceptance_does_not_accept_for_the_receiver() {
+        // GMS emits a Sharing RESPONSE(ACCEPT) right after its INTRODUCTION to report that
+        // *it* skipped local confirmation. Acting on it skips the user's prompt entirely and
+        // GMS then hangs up after 60 s waiting for an accept that never comes.
+        // See `Session::handle_response_status`.
+        let (mut sender, mut receiver) = connected_pair();
+        sender.set_pending_files_for_send(vec![FileMeta {
+            name: "photo.jpg".to_string(),
+            size_bytes: 1234,
+            mime_type: "image/jpeg".to_string(),
+            payload_id: 0,
+        }]);
+        assert_eq!(sender.queue_introduction(), 0);
+        settle(&mut sender, &mut receiver);
+        assert_eq!(receiver.state, State::AwaitingAccept);
+
+        // The sender's own RESPONSE(ACCEPT), replayed at the receiver.
+        let response = payload::build_connection_response(true);
+        assert_eq!(receiver.handle_sharing_frame(&response), 0);
+        assert_eq!(
+            receiver.state,
+            State::AwaitingAccept,
+            "receiver accepted on the sender's behalf",
+        );
+
+        // The user's own accept still works and is what moves us on.
+        assert_eq!(receiver.accept(true, ""), 0);
+        assert_eq!(receiver.state, State::Transferring);
     }
 
     #[test]
