@@ -30,8 +30,8 @@
     <string name="metric_temperature">温度</string>
     <string name="from_gusts">来自 <xliff:g id="direction" example="NW">%1$s</xliff:g> · 阵风 <xliff:g id="gusts" example="18 km/h">%2$s</xliff:g></string>
     <string name="condition_clear">晴</string>
-    <string name="metric_feels_like">体感温度</string>
-    <string name="feels_like">体感温度 <xliff:g id="temp" example="26°C">%1$s</xliff:g></string>
+    <string name="metric_feels_like">体感</string>
+    <string name="feels_like">体感 <xliff:g id="temp" example="26°C">%1$s</xliff:g></string>
     <string name="use_current_location">使用当前位置</string>
     <string name="condition_partly_cloudy">多云</string>
     <string name="condition_rain">雨</string>
@@ -89,7 +89,7 @@
     <string name="aqi_very_unhealthy">非常不健康</string>
     <string name="aqi_hazardous">有害</string>
     <string name="precip_raining_now">正在下雨</string>
-    <string name="precip_no_rain_next_2h">未来 2 小时无雨</string>
+    <string name="precip_no_rain_next_2h">2 小时内无雨</string>
     <string name="precip_rain_starting_now">即将开始下雨</string>
     <string name="no_data_yet">尚无数据</string>
     <string name="just_now">刚刚</string>
@@ -105,4 +105,5 @@
     <string name="moon_phase_waning_crescent">残月</string>
     <string name="weather_blob_widget_description">天气以有机图形显示 - 大温度配图标，深青色背景</string>
     <string name="set_units">单位</string>
+    <string name="gusts">阵风 <xliff:g id="gusts" example="18 km/h">%1$s</xliff:g></string>
 </resources>
