@@ -32,30 +32,52 @@ class DateFormatsTest {
     @Test
     fun writtenOccurrencesParseBackToTheirLocalDate() {
         // The provider round-trip the RDATE column relies on: what toIcalUtcDateTime writes has to
-        // come back out of parseIcalBasicDate as the same calendar day it was written for.
-        val date = LocalDate(2025, 7, 4)
-        val written = date.toIcalUtcDateTime(LocalTime(9, 0), TimeZone.of("America/New_York"))
-        assertEquals(date, parseIcalBasicDate(written))
-        assertEquals(date, parseIcalBasicDate(date.toIcalBasic()))
+        // come back out as the same calendar day it was written for, including when the UTC value
+        // lands on the following day.
+        val zone = TimeZone.of("America/New_York")
+        for (time in listOf(LocalTime(9, 0), LocalTime(22, 0), LocalTime(23, 59))) {
+            val date = LocalDate(2025, 7, 4)
+            val written = date.toIcalUtcDateTime(time, zone)
+            assertEquals(date, parseIcalOccurrenceDate(written, zone), "round trip at $time")
+        }
+        val allDay = LocalDate(2025, 7, 4)
+        assertEquals(allDay, parseIcalOccurrenceDate(allDay.toIcalBasic(), TimeZone.UTC))
+    }
+
+    @Test
+    fun readingAUtcOccurrenceInTheWrongZoneWouldMoveIt() {
+        // Guards the reason parseIcalOccurrenceDate takes a zone at all: the same value is July 4 in
+        // New York and July 5 in UTC.
+        val written = LocalDate(2025, 7, 4).toIcalUtcDateTime(LocalTime(22, 0), TimeZone.of("America/New_York"))
+        assertEquals(LocalDate(2025, 7, 4), parseIcalOccurrenceDate(written, TimeZone.of("America/New_York")))
+        assertEquals(LocalDate(2025, 7, 5), parseIcalOccurrenceDate(written, TimeZone.UTC))
+    }
+
+    @Test
+    fun aFloatingDateTimeFallsBackToItsLeadingDate() {
+        // No 'Z' and no offset, so there is nothing to resolve against.
+        assertEquals(LocalDate(2025, 7, 4), parseIcalOccurrenceDate("20250704T090000", TimeZone.UTC))
     }
 
     @Test
     fun occurrencesWrittenByOtherClientsStillParse() {
         // Google Calendar and friends prefix RDATE values with parameters; Event.getAllEvents strips
         // everything up to the last colon before handing the value over.
+        val zone = TimeZone.of("America/New_York")
         assertEquals(
             LocalDate(2025, 7, 4),
-            parseIcalBasicDate("TZID=America/New_York:20250704T090000".substringAfterLast(':')),
+            parseIcalOccurrenceDate("TZID=America/New_York:20250704T090000".substringAfterLast(':'), zone),
         )
         assertEquals(
             LocalDate(2025, 7, 4),
-            parseIcalBasicDate("VALUE=DATE:20250704".substringAfterLast(':')),
+            parseIcalOccurrenceDate("VALUE=DATE:20250704".substringAfterLast(':'), zone),
         )
     }
 
     @Test
     fun garbageIsNotADate() {
+        assertNull(parseIcalOccurrenceDate("", TimeZone.UTC))
+        assertNull(parseIcalOccurrenceDate("not-a-date", TimeZone.UTC))
         assertNull(parseIcalBasicDate(""))
-        assertNull(parseIcalBasicDate("not-a-date"))
     }
 }

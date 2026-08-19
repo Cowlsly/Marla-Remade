@@ -56,3 +56,14 @@ fun parseIcalUntil(value: String, timeZone: TimeZone): LocalDate? = runCatching 
         AllDayFormat.parse(value)
     }
 }.getOrNull()
+
+/**
+ * The calendar day one EXDATE/RDATE value falls on, resolved in [timeZone].
+ *
+ * A date-only value already is that day. A datetime is an instant, so it has to be converted before
+ * the day is taken: 22:00 in New York is written as the following day in UTC, and reading the day
+ * straight off the string would move the occurrence. Falls back to the leading date for a datetime
+ * that carries no offset, which is all a floating value can mean without its TZID.
+ */
+fun parseIcalOccurrenceDate(value: String, timeZone: TimeZone): LocalDate? =
+    parseIcalUntil(value, timeZone) ?: parseIcalBasicDate(value)

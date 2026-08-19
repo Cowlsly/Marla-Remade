@@ -14,15 +14,18 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.glance.LocalContext
+import com.vayunmathur.calendar.R
 import com.vayunmathur.calendar.data.Event
 import com.vayunmathur.calendar.util.AllDayFormat
 import com.vayunmathur.calendar.util.BasicIsoInstantFormat
 import com.vayunmathur.calendar.util.RRule
+import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.atStartOfDayIn
 import kotlinx.datetime.format.char
 import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import java.io.BufferedInputStream
 import java.io.InputStream
 import kotlin.time.Duration
@@ -46,6 +49,15 @@ fun EventCard(event: Event) {
                 Text(dateRangeString(context, event.startDateTimeDisplay.date, event.endDateTimeDisplay.date, event.startDateTimeDisplay.time, event.endDateTimeDisplay.time, event.allDay))
                 // RRULE text
                 event.rrule?.let { Text(it.describe(context)) }
+                if (event.rdate.isNotEmpty()) {
+                    Text(
+                        context.resources.getQuantityString(
+                            R.plurals.repeat_dates_summary,
+                            event.rdate.size + 1,
+                            event.rdate.size + 1,
+                        )
+                    )
+                }
 
                 if (event.description.isNotBlank()) {
                     Text(event.description)
@@ -79,6 +91,11 @@ fun parseICSFile(iS: InputStream): List<Event> {
     }
 
     var current = mutableMapOf<String, String>()
+    // RDATE and EXDATE legitimately appear on several lines in one VEVENT, so unlike every other
+    // property they have to accumulate instead of overwriting. The params half is kept per line
+    // because each line carries its own TZID.
+    var rdateProps = mutableListOf<Pair<String, String>>()
+    var exdateProps = mutableListOf<Pair<String, String>>()
     var inEvent = false
 
     for (raw in lines) {
@@ -86,6 +103,8 @@ fun parseICSFile(iS: InputStream): List<Event> {
         if (line.equals("BEGIN:VEVENT", ignoreCase = true)) {
             inEvent = true
             current = mutableMapOf()
+            rdateProps = mutableListOf()
+            exdateProps = mutableListOf()
             continue
         }
         if (line.equals("END:VEVENT", ignoreCase = true)) {
@@ -123,14 +142,25 @@ fun parseICSFile(iS: InputStream): List<Event> {
                     endMillis = startMillis + 1.days.inWholeMilliseconds
                 }
 
+                val zone = TimeZone.of(timezone)
+                val startDate = startMillis?.let {
+                    Instant.fromEpochMilliseconds(it).toLocalDateTime(zone).date
+                }
+                // DTSTART is an occurrence in its own right, so the model keeps RDATE as the extra
+                // days only; a file that lists the start date again would otherwise double it up.
+                val rdate = parseIcsDates(rdateProps, zone).filter { it != startDate }
+                val exdate = parseIcsDates(exdateProps, zone)
+
                 val evt = Event(id, -1, title, description, location, null, startMillis ?: 0L, endMillis ?: (startMillis ?: 0L), timezone,
-                    startAllDay, rrule)
+                    startAllDay, rrule, exdate = exdate, rdate = rdate)
                 events.add(evt)
             } catch (e: Exception) {
                 Log.e("IcsImport", "Error parsing VEVENT", e)
             }
             inEvent = false
             current = mutableMapOf()
+            rdateProps = mutableListOf()
+            exdateProps = mutableListOf()
             continue
         }
 
@@ -156,6 +186,8 @@ fun parseICSFile(iS: InputStream): List<Event> {
                 current["DTEND"] = value
                 current["DTEND_PROP"] = left
             }
+            "RDATE" -> rdateProps.add(left to value)
+            "EXDATE" -> exdateProps.add(left to value)
             else -> current[propName] = value
         }
     }
@@ -163,8 +195,27 @@ fun parseICSFile(iS: InputStream): List<Event> {
     return events
 }
 
+/**
+ * The days a set of RDATE or EXDATE lines names, in [zone]. Each line's value is itself a
+ * comma-separated list, and a value is either a bare day or a datetime that has to be resolved to
+ * one.
+ */
+private fun parseIcsDates(props: List<Pair<String, String>>, zone: TimeZone): List<LocalDate> =
+    props.flatMap { (left, values) -> values.split(",").map { left to it.trim() } }
+        .mapNotNull { (left, value) ->
+            if (value.length == 8 && value.all { it.isDigit() }) {
+                runCatching { AllDayFormat.parse(value) }.getOrNull()
+            } else {
+                // Reuse the DTSTART/DTEND parser so TZID, 'Z' and floating values behave the same.
+                parseICSTime(left, value).first?.let {
+                    Instant.fromEpochMilliseconds(it).toLocalDateTime(zone).date
+                }
+            }
+        }
+        .distinct()
+        .sorted()
+
 // Parse ICS time value with optional params-left (like DTSTART;TZID=America/Los_Angeles)
-// Returns Triple(startMillisOrNull, isAllDay, timezoneOrNull)
 private fun parseICSTime(propLeft: String?, value: String?): Triple<Long?, Boolean, String?> {
     if (value == null) return Triple(null, false, null)
 

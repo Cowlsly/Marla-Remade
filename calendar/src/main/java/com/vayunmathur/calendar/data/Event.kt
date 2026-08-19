@@ -13,6 +13,7 @@ import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
 import com.vayunmathur.calendar.util.RRule
 import com.vayunmathur.calendar.util.parseIcalBasicDate
+import com.vayunmathur.calendar.util.parseIcalOccurrenceDate
 import com.vayunmathur.calendar.util.toIcalBasic
 import com.vayunmathur.calendar.util.toIcalUtcDateTime
 import kotlinx.serialization.Serializable
@@ -166,14 +167,17 @@ data class Event(
                                 end = start + durationMillis
                             }
 
-                            // Parse EXDATE field - comma-separated RFC 5545 dates (YYYYMMDD or YYYYMMDDTHHMMSSZ)
-                            val exdate = exdateStr?.split(",")?.mapNotNull { parseIcalBasicDate(it.trim()) }
-                                ?: emptyList()
+                            // EXDATE/RDATE are comma-separated RFC 5545 dates, either YYYYMMDD or a
+                            // datetime. A datetime is resolved in the event's own zone, because a
+                            // late-evening occurrence written as UTC lands on the next UTC day and
+                            // taking the date off the raw string would move it.
+                            val exdate = exdateStr?.split(",")?.mapNotNull {
+                                parseIcalOccurrenceDate(it.trim(), tz)
+                            } ?: emptyList()
 
-                            // RDATE is the same shape, and may carry a leading "TZID=...:" or
-                            // "VALUE=DATE:" parameter when another client wrote it.
+                            // Another client may prefix the value with "TZID=...:" or "VALUE=DATE:".
                             val rdate = rdateStr?.split(",")?.mapNotNull {
-                                parseIcalBasicDate(it.trim().substringAfterLast(':'))
+                                parseIcalOccurrenceDate(it.trim().substringAfterLast(':'), tz)
                             } ?: emptyList()
 
                             if (deleted) continue
