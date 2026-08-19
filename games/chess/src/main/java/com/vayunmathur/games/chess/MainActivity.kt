@@ -398,9 +398,10 @@ fun ChessGameScreen(
                 .fillMaxSize()
                 .padding(innerPadding)
         ) {
-            val boardSide = minOf(maxWidth, maxHeight)
-            val boardComposable = @Composable {
-                Box(Modifier.size(boardSide)) {
+            // Sized by the caller: the space left for the board differs per orientation, and in
+            // portrait it is whatever the surrounding chrome does not take.
+            val boardComposable = @Composable { side: Dp ->
+                Box(Modifier.size(side)) {
                     BoardGrid(
                         board = state.board,
                         selectedPiece = state.selectedPiece,
@@ -410,13 +411,16 @@ fun ChessGameScreen(
                     )
                 }
             }
+            // Read in this scope: BoxWithConstraintsScope members are not reachable by implicit
+            // receiver from inside the Row/Column lambdas below.
+            val fullSide = minOf(maxWidth, maxHeight)
             if (maxWidth > maxHeight) {
                 Row(
                     Modifier.fillMaxSize(),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    boardComposable()
+                    boardComposable(fullSide)
                     Column(
                         Modifier
                             .weight(1f)
@@ -439,24 +443,31 @@ fun ChessGameScreen(
                     }
                 }
             } else {
+                // Everything except the board is laid out at its own height, so the New Game button
+                // is always on screen; the board takes what is left over and shrinks instead. A
+                // fixed full-width board plus this much chrome overflows the screen at large
+                // display or font sizes, which used to push the button out of reach entirely.
                 Column(
                     Modifier.fillMaxSize(),
-                    Arrangement.Center,
-                    Alignment.CenterHorizontally
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     CapturedPiecesRow(state.board.capturedByBlack)
-                    Spacer(modifier = Modifier.height(16.dp))
                     MovesList(moves = state.board.moves, turn = state.turn)
-                    boardComposable()
-                    Spacer(modifier = Modifier.height(16.dp))
+                    BoxWithConstraints(
+                        Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        boardComposable(minOf(maxWidth, maxHeight))
+                    }
                     CapturedPiecesRow(state.board.capturedByWhite)
-                    Spacer(modifier = Modifier.height(16.dp))
                     Button(onClick = onNewGame) {
                         Text(stringResource(R.string.new_game))
                     }
 
                     state.gameStatus?.let {
-                        Spacer(modifier = Modifier.height(16.dp))
                         Text(it, fontSize = 24.sp, fontWeight = FontWeight.Bold)
                     }
                 }
