@@ -3,7 +3,9 @@ package com.vayunmathur.library.ui
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
@@ -82,10 +84,16 @@ fun TabbedPagerScaffold(
         ) { padding ->
             // Inner pages own their top bar and consume the top inset, so only
             // the bottom space this scaffold's bars take is forwarded - adding
-            // the full padding here would inset the status bar twice.
+            // the full padding here would inset the status bar twice. The
+            // forwarded space has to be consumed too: the bars already cover
+            // the navigation bar, so a page's own scaffold would otherwise
+            // inset for it again and leave a gap above the tab bar.
+            val bottom = padding.calculateBottomPadding()
             HorizontalPager(
                 state = pagerState,
-                modifier = Modifier.padding(bottom = padding.calculateBottomPadding()),
+                modifier = Modifier
+                    .padding(bottom = bottom)
+                    .consumeWindowInsets(PaddingValues(bottom = bottom)),
             ) { page -> tabs[page].content() }
         }
 
