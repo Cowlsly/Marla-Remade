@@ -148,4 +148,13 @@
     <string name="reminder_notification_text">Algab kell <xliff:g id="start_time" example="15:00">%1$s</xliff:g></string>
     <string name="today">Täna</string>
     <string name="tomorrow">Homme</string>
+    <string name="repeat_mode_pattern">Kordamise muster</string>
+    <string name="repeat_mode_dates">Kindlatel päevadel</string>
+    <string name="repeat_on_dates">Kordub nendel päevadel</string>
+    <string name="repeat_date_first"><xliff:g id="date" example="Esmasp, 1. dets">%1$s</xliff:g> (sündmuse kuupäev)</string>
+    <string name="repeat_add_date">Lisa kuupäev</string>
+    <plurals name="repeat_dates_summary">
+        <item quantity="one">Kordub <xliff:g id="count" example="1">%1$d</xliff:g>-l päeval</item>
+        <item quantity="other">Kordub <xliff:g id="count" example="1">%1$d</xliff:g>-l päeval</item>
+    </plurals>
 </resources>
