@@ -111,4 +111,7 @@
     <string name="shields_reset_site">重置为默认</string>
     <string name="shields_clear_exceptions">清除所有网站例外</string>
     <string name="shields_engine_loading">正在加载过滤列表…</string>
+    <string name="copy_link">复制链接</string>
+    <string name="open_in_new_tab">在新标签页中打开</string>
+    <string name="link_copied">链接已复制</string>
 </resources>
