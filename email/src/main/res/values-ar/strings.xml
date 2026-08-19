@@ -40,7 +40,7 @@
     <string name="unread">غير مقروء</string>
     <string name="sender_blocked">تم حظر المرسل</string>
     <string name="save_as_eml">حفظ كـ .eml</string>
-    <string name="none">لا يوجد</string>
+    <string name="none">لا شئ</string>
     <string name="unblock">إلغاء الحظر</string>
     <string name="tomorrow_8_am">غدًا (٨ صباحًا)</string>
     <string name="folders">المجلدات</string>
@@ -81,7 +81,7 @@
     <string name="conversation">المحادثة</string>
     <string name="hide_quoted_text">إخفاء النص المقتبس</string>
     <string name="show_quoted_text">إظهار النص المقتبس</string>
-    <string name="total_attachment_size_exceeds_25_mb_many">إجمالي حجم المرفق يتجاوز ٢٥ ميجابايت؛ سيرفضه العديد من مقدمي الخدمة.</string>
+    <string name="total_attachment_size_exceeds_25_mb_many">حجم المرفق الإجمالي يتجاوز ٢٥ ميجابايت؛ سيرفضه العديد من المزوّدين.</string>
     <string name="outbox_is_empty">صندوق الصادر فارغ</string>
     <string name="cd_insert_image">إدراج صورة</string>
     <string name="normal">عادي</string>
@@ -94,7 +94,7 @@
     <string name="font_default">افتراضي</string>
     <string name="monospace">خط أحادي المسافة</string>
     <string name="alignment">المحاذاة</string>
-    <string name="blockquote">اقتباس كبير</string>
+    <string name="blockquote">اقتباس كتلي</string>
     <string name="text_color">لون النص</string>
     <string name="highlight">تمييز</string>
     <string name="font_size">حجم الخط</string>
