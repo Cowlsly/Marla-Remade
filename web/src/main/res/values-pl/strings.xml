@@ -2,4 +2,5 @@
 <resources>
     <string name="history">Historia</string>
     <string name="all">Wszystko</string>
+    <string name="create">Utwórz</string>
 </resources>
