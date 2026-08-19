@@ -1,3 +1,50 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <string name="search_placeholder">Otsi muusikat</string>
+    <string name="tab_releases">Albumid</string>
+    <string name="tab_artists">Esitajad</string>
+    <string name="tab_recordings">Lood</string>
+    <string name="search_prompt_title">Otsi MusicBrainzist</string>
+    <string name="search_prompt_message">Otsi sirvimiseks ja allalaadimiseks albumit, esitajat või lugu.</string>
+    <string name="no_results">Tulemusi pole</string>
+    <string name="no_results_message">Proovi muuta kirjaviisi või kasuta lühemat otsingut.</string>
+    <string name="search_failed">Otsimine ei õnnestunud</string>
+    <string name="load_failed">Lehe laadimine ei õnnestunud</string>
+    <string name="retry">Proovi uuesti</string>
+    <string name="artist">Esitaja</string>
+    <string name="album">Album</string>
+    <string name="no_releases">Ühtegi albumit ei leidu</string>
+    <plurals name="editions_count">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> variant</item>
+        <item quantity="other"><xliff:g id="count" example="7">%1$d</xliff:g> varianti</item>
+    </plurals>
+    <string name="owned_count">Seadmes on juba olemas <xliff:g id="owned" example="4">%1$d</xliff:g> lugu <xliff:g id="total" example="12">%2$d</xliff:g>-st</string>
+    <plurals name="download_missing">
+        <item quantity="one">Laadi <xliff:g id="count" example="1">%1$d</xliff:g> puuduolev alla</item>
+        <item quantity="other">Laadi <xliff:g id="count" example="8">%1$d</xliff:g> puuduolevat alla</item>
+    </plurals>
+    <string name="duration_format"><xliff:g id="minutes" example="3">%1$d</xliff:g>:<xliff:g id="seconds" example="45">%2$s</xliff:g></string>
+    <string name="downloads">Allalaadimised</string>
+    <string name="no_downloads">Mitte midagi pole allalaadimisel</string>
+    <string name="no_downloads_message">Sinu allalaaditavate lugude edenemine saab olema nähtav siin.</string>
+    <string name="state_queued">Ootel</string>
+    <string name="state_searching">Otsin helifaili</string>
+    <string name="state_downloading">Allalaadimisel</string>
+    <string name="state_tagging">Lisan üksikasju</string>
+    <string name="state_done">Salvestatud</string>
+    <string name="state_failed">Ebaõnnestunud</string>
+    <string name="settings">Seadistused</string>
+    <string name="music_folder">Muusikafailide kaust</string>
+    <string name="choose_folder">Vali kaust</string>
+    <string name="no_folder_selected">Määratlemata. Allalaadimine eeldab, et kaust on teada.</string>
+    <string name="rescan_library">Skaneeri muusikakogu uuesti üle</string>
+    <string name="scanning">Skaneerin…</string>
+    <plurals name="indexed_tracks">
+        <item quantity="one">Leidsin <xliff:g id="count" example="1">%1$d</xliff:g> loo</item>
+        <item quantity="other">Leidsin <xliff:g id="count" example="428">%1$d</xliff:g> lugu</item>
+    </plurals>
+    <string name="embed_cover_art">Kaanepildid</string>
+    <string name="embed_cover_art_description">Salvesta kaanepildid allalaaditud failide sisse.</string>
+    <string name="fetch_lyrics">Laulusõnad</string>
+    <string name="fetch_lyrics_description">Otsi veebist sünkroonitud laulusõnad ka salvesta muusikafailidesse.</string>
 </resources>
