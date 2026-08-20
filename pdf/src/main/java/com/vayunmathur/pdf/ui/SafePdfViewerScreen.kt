@@ -89,6 +89,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.lerp
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.Path
@@ -1466,8 +1467,36 @@ private fun NonEditOverlay(
     }
 }
 
-/** A single selectable glyph in reading order, with its on-screen rect - stores String for ligatures fi etc. */
-private data class SelGlyph(val ch: String, val left: Float, val top: Float, val right: Float, val bottom: Float)
+/**
+ * A single selectable glyph in reading order - stores String for ligatures fi etc.
+ *
+ * The corners are on-screen (canvas px) in reading order: [p0] -> [p1] runs along
+ * the text and [p0] -> [p3] spans its height, so a glyph lifted off a skewed
+ * scan keeps its slant. Embedded text and upright scans give an axis-aligned
+ * quad, for which the derived [left]/[top]/[right]/[bottom] are exact.
+ */
+private data class SelGlyph(
+    val ch: String,
+    val p0: Offset,
+    val p1: Offset,
+    val p2: Offset,
+    val p3: Offset,
+) {
+    val left: Float get() = minOf(p0.x, p1.x, p2.x, p3.x)
+    val top: Float get() = minOf(p0.y, p1.y, p2.y, p3.y)
+    val right: Float get() = maxOf(p0.x, p1.x, p2.x, p3.x)
+    val bottom: Float get() = maxOf(p0.y, p1.y, p2.y, p3.y)
+    val center: Offset get() = Offset((p0.x + p2.x) / 2f, (p0.y + p2.y) / 2f)
+}
+
+/** An axis-aligned [SelGlyph], for embedded text and upright scans. */
+private fun selGlyph(ch: String, left: Float, top: Float, right: Float, bottom: Float) = SelGlyph(
+    ch,
+    Offset(left, top),
+    Offset(right, top),
+    Offset(right, bottom),
+    Offset(left, bottom),
+)
 
 /**
  * Build the substitute [android.graphics.Typeface] for a text primitive. The
@@ -1532,7 +1561,7 @@ private fun buildEmbeddedGlyphs(page: SafePdfPage, ch: Float, scale: Float): Lis
             val right = left + cw
             val baseline = ch - prim.origin.y * scale
             val top = baseline - prim.size * scale
-            list.add(OrderedGlyph(-prim.origin.y, px, SelGlyph(c.toString(), left, top, right, baseline)))
+            list.add(OrderedGlyph(-prim.origin.y, px, selGlyph(c.toString(), left, top, right, baseline)))
             curPxPage += stepPage
         }
     }
@@ -1541,8 +1570,8 @@ private fun buildEmbeddedGlyphs(page: SafePdfPage, ch: Float, scale: Float): Lis
 
 /**
  * Run OCR on the page's largest raster image and synthesize selectable glyphs
- * from the recognized line boxes, so scanned PDFs with no embedded text layer
- * become selectable. Characters are distributed evenly across each line box
+ * from the recognized line quads, so scanned PDFs with no embedded text layer
+ * become selectable. Characters are distributed evenly along each line
  * (monospace approximation) which is enough for word-level and range selection.
  * Returns empty if OCR is unavailable or the page has no decodable image.
  */
@@ -1556,38 +1585,71 @@ private suspend fun ocrPageGlyphs(page: SafePdfPage, ch: Float, scale: Float, oc
     val result = ocr.recognizeDetailed(bmp)
     if (result.boxes.isEmpty()) return emptyList()
 
-    val a = prim.ctm[0]; val b = prim.ctm[1]; val c = prim.ctm[2]
-    val d = prim.ctm[3]; val e = prim.ctm[4]; val f = prim.ctm[5]
+    val m = prim.ctm
     val bw = bmp.width.toFloat().coerceAtLeast(1f)
     val bh = bmp.height.toFloat().coerceAtLeast(1f)
-    // Bitmap pixel (px,py) → page space via the image CTM on the unit square.
+    // Bitmap px -> canvas px in one matrix, built exactly like the renderer does
+    // for this same image, so the text lands wherever the image was actually
+    // drawn - including rotated, flipped or sheared image CTMs, which the old
+    // per-axis arithmetic laid out backwards.
+    fun unitToCanvas(u: Float, v: Float): Offset {
+        val pageX = m[0] * u + m[2] * v + m[4]
+        val pageY = m[1] * u + m[3] * v + m[5]
+        return Offset(pageX * scale, ch - pageY * scale)
+    }
     // Image row 0 is the top, so v (unit-square, bottom-up) = 1 - py/bh.
-    fun pageX(px: Float, py: Float): Float { val u = px / bw; val v = 1f - py / bh; return a * u + c * v + e }
-    fun pageY(px: Float, py: Float): Float { val u = px / bw; val v = 1f - py / bh; return b * u + d * v + f }
+    val c00 = unitToCanvas(0f, 1f)
+    val c10 = unitToCanvas(1f, 1f)
+    val c11 = unitToCanvas(1f, 0f)
+    val c01 = unitToCanvas(0f, 0f)
+    val toCanvas = android.graphics.Matrix()
+    if (!toCanvas.setPolyToPoly(
+            floatArrayOf(0f, 0f, bw, 0f, bw, bh, 0f, bh), 0,
+            floatArrayOf(c00.x, c00.y, c10.x, c10.y, c11.x, c11.y, c01.x, c01.y), 0,
+            4,
+        )
+    ) {
+        return emptyList()
+    }
 
     val out = ArrayList<OrderedGlyph>()
+    val pts = FloatArray(8)
     for (box in result.boxes) {
         val text = box.text
         if (text.isEmpty()) continue
         val n = text.length
-        val pxL = box.left.toFloat(); val pxR = box.right.toFloat()
-        val pyT = box.top.toFloat(); val pyB = box.bottom.toFloat()
-        val sxA = pageX(pxL, pyB) * scale; val sxB = pageX(pxR, pyB) * scale
-        val yA = ch - pageY(pxL, pyT) * scale; val yB = ch - pageY(pxL, pyB) * scale
-        val left = minOf(sxA, sxB); val right = maxOf(sxA, sxB)
-        val top = minOf(yA, yB); val bottom = maxOf(yA, yB)
-        if (right <= left || bottom <= top) continue
-        val stepX = (right - left) / n
-        val orderY = -pageY(pxL, pyB)
+        for (i in 0 until 4) {
+            pts[i * 2] = box.corners[i].x
+            pts[i * 2 + 1] = box.corners[i].y
+        }
+        toCanvas.mapPoints(pts)
+        val q0 = Offset(pts[0], pts[1])
+        val q1 = Offset(pts[2], pts[3])
+        val q2 = Offset(pts[4], pts[5])
+        val q3 = Offset(pts[6], pts[7])
+        val runLen = kotlin.math.hypot(q1.x - q0.x, q1.y - q0.y)
+        if (runLen <= 0f || kotlin.math.hypot(q3.x - q0.x, q3.y - q0.y) <= 0f) continue
+        val ux = (q1.x - q0.x) / runLen
+        val uy = (q1.y - q0.y) / runLen
+        // The ordering keys have to stay in page space to interleave with the
+        // embedded glyphs' keys. Banding on the quad centre keeps a slanted
+        // line's characters in one line, and projecting onto the line's own
+        // advance direction keeps them in reading order even when that direction
+        // runs right-to-left on screen (an upside-down or X-flipped image CTM).
+        // For upright text the projection is just the centre's x.
+        val orderY = ((q0.y + q2.y) / 2f - ch) / scale
         for (k in 0 until n) {
-            val gl = left + k * stepX
-            out.add(
-                OrderedGlyph(
-                    orderY,
-                    pageX(pxL + (pxR - pxL) * (k.toFloat() / n), pyB),
-                    SelGlyph(text[k].toString(), gl, top, gl + stepX, bottom),
-                )
+            val t0 = k.toFloat() / n
+            val t1 = (k + 1).toFloat() / n
+            val glyph = SelGlyph(
+                text[k].toString(),
+                lerp(q0, q1, t0),
+                lerp(q0, q1, t1),
+                lerp(q3, q2, t1),
+                lerp(q3, q2, t0),
             )
+            val c = glyph.center
+            out.add(OrderedGlyph(orderY, (c.x * ux + c.y * uy) / scale, glyph))
         }
     }
     return out
@@ -1598,22 +1660,39 @@ private fun nearestGlyph(g: List<SelGlyph>, p: Offset, maxDist: Float = Float.MA
     var best = -1
     var bestD = Float.MAX_VALUE
     for (i in g.indices) {
-        val gg = g[i]
-        val cx = (gg.left + gg.right) / 2f
-        val cy = (gg.top + gg.bottom) / 2f
-        val dd = (cx - p.x) * (cx - p.x) + (cy - p.y) * (cy - p.y)
+        val c = g[i].center
+        val dd = (c.x - p.x) * (c.x - p.x) + (c.y - p.y) * (c.y - p.y)
         if (dd < bestD) { bestD = dd; best = i }
     }
     return if (best >= 0 && bestD <= maxDist * maxDist) best else null
 }
 
-/** True when [a] and [b] belong to the same word (same line, no gap between them). */
+/**
+ * True when [a] and [b] belong to the same word (same line, no gap between them).
+ *
+ * Measured along the line's own advance direction rather than along the screen
+ * axes, so a skewed scan's words don't split on the vertical drift between
+ * neighbouring characters. For upright text the projections collapse to the
+ * plain "same row, small horizontal gap" test this replaced.
+ */
 private fun sameWord(a: SelGlyph, b: SelGlyph): Boolean {
-    val h = maxOf(a.bottom - a.top, b.bottom - b.top, 1f)
-    val vA = (a.top + a.bottom) / 2f
-    val vB = (b.top + b.bottom) / 2f
-    if (kotlin.math.abs(vA - vB) > 0.6f * h) return false // different line
-    val gap = b.left - a.right
+    val advance = a.p1 - a.p0
+    val len = kotlin.math.hypot(advance.x, advance.y)
+    if (len < 1e-3f) return false
+    val ux = advance.x / len
+    val uy = advance.y / len
+    val h = maxOf(
+        kotlin.math.hypot(a.p3.x - a.p0.x, a.p3.y - a.p0.y),
+        kotlin.math.hypot(b.p3.x - b.p0.x, b.p3.y - b.p0.y),
+        1f,
+    )
+    // offset across the line, between baseline corners: glyphs sharing a baseline
+    // line up there whatever their size, so a font-size jump mid-word doesn't
+    // read as a row change
+    val across = (b.p3.x - a.p3.x) * -uy + (b.p3.y - a.p3.y) * ux
+    if (kotlin.math.abs(across) > 0.6f * h) return false
+    // gap along the line, from the end of `a` to the start of `b`
+    val gap = (b.p0.x - a.p1.x) * ux + (b.p0.y - a.p1.y) * uy
     return gap <= 0.4f * h
 }
 
@@ -1631,10 +1710,12 @@ private fun wordRangeAt(g: List<SelGlyph>, i: Int): IntRange {
 /** Which selection handle (0 = start, 1 = end) is within grab range of [p], else null. */
 private fun handleAt(g: List<SelGlyph>, p: Offset, r: IntRange): Int? {
     if (r.first !in g.indices || r.last !in g.indices) return null
-    val s = g[r.first]
-    val e = g[r.last]
-    val dStart = kotlin.math.hypot(s.left - p.x, s.bottom - p.y)
-    val dEnd = kotlin.math.hypot(e.right - p.x, e.bottom - p.y)
+    // The handles sit on the selection's own baseline corners, so they stay glued
+    // to the glyphs on a skewed page instead of floating off to a bounding box.
+    val s = g[r.first].p3
+    val e = g[r.last].p2
+    val dStart = kotlin.math.hypot(s.x - p.x, s.y - p.y)
+    val dEnd = kotlin.math.hypot(e.x - p.x, e.y - p.y)
     val grab = 48f
     return when {
         dStart <= grab && dStart <= dEnd -> 0
@@ -1829,20 +1910,21 @@ private fun TextSelectionLayer(page: SafePdfPage, ch: Float, scale: Float, ocr: 
     ) {
         val r = range ?: return@Canvas
         val g = latestGlyphs
+        val quad = Path()
         for (i in r) {
             if (i !in g.indices) continue
             val gg = g[i]
-            drawRect(
-                color = Color(0x553F51B5),
-                topLeft = Offset(gg.left, gg.top),
-                size = Size(gg.right - gg.left, gg.bottom - gg.top),
-            )
+            quad.reset()
+            quad.moveTo(gg.p0.x, gg.p0.y)
+            quad.lineTo(gg.p1.x, gg.p1.y)
+            quad.lineTo(gg.p2.x, gg.p2.y)
+            quad.lineTo(gg.p3.x, gg.p3.y)
+            quad.close()
+            drawPath(path = quad, color = Color(0x553F51B5))
         }
         if (r.first in g.indices && r.last in g.indices) {
-            val s = g[r.first]
-            val e = g[r.last]
-            drawCircle(Color(0xFF3F51B5), radius = 16f, center = Offset(s.left, s.bottom))
-            drawCircle(Color(0xFF3F51B5), radius = 16f, center = Offset(e.right, e.bottom))
+            drawCircle(Color(0xFF3F51B5), radius = 16f, center = g[r.first].p3)
+            drawCircle(Color(0xFF3F51B5), radius = 16f, center = g[r.last].p2)
         }
     }
 }

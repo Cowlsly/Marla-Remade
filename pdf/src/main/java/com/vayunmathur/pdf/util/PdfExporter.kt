@@ -19,6 +19,8 @@ import com.vayunmathur.pdf.model.Quadrilateral
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.FileOutputStream
+import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /** Post-processing filter applied to each scanned page before export. */
@@ -151,15 +153,26 @@ private fun applyScanFilter(bmp: Bitmap, filter: ScanFilter) {
 /** Draw an invisible (transparent) OCR text layer so scans are selectable/searchable. */
 private fun drawOcrTextLayer(canvas: Canvas, result: OcrEngine.OcrResult) {
     val paint = Paint().apply { color = Color.argb(0, 0, 0, 0) }
+    val matrix = Matrix()
     for (b in result.boxes) {
-        val bw = (b.right - b.left).toFloat()
-        val bh = (b.bottom - b.top).toFloat()
-        if (bw <= 1f || bh <= 1f || b.text.isBlank()) continue
+        if (b.text.isBlank()) continue
+        val c = b.corners
+        // The run's own width and height, so a skewed scan's text layer follows
+        // the text rather than its bounding box.
+        val bw = hypot(c[1].x - c[0].x, c[1].y - c[0].y)
+        val bh = hypot(c[3].x - c[0].x, c[3].y - c[0].y)
+        if (bw <= 1f || bh <= 1f) continue
         paint.textScaleX = 1f
         paint.textSize = bh * 0.8f
         val measured = paint.measureText(b.text)
         if (measured > 0f) paint.textScaleX = bw / measured
-        canvas.drawText(b.text, b.left.toFloat(), b.bottom.toFloat() - bh * 0.15f, paint)
+        val degrees = Math.toDegrees(atan2(c[1].y - c[0].y, c[1].x - c[0].x).toDouble()).toFloat()
+        matrix.setRotate(degrees)
+        matrix.postTranslate(c[0].x, c[0].y)
+        canvas.save()
+        canvas.concat(matrix)
+        canvas.drawText(b.text, 0f, bh - bh * 0.15f, paint)
+        canvas.restore()
     }
 }
 
