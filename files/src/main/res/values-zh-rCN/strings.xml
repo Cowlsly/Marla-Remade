@@ -15,4 +15,16 @@
     <string name="install_permission_needed">允许文件应用安装未知应用，然后再次点击安装包</string>
     <string name="file_fallback">文件</string>
     <string name="unzipping">解压缩…</string>
+    <string name="archive">压缩</string>
+    <string name="sort_ascending">升序排列</string>
+    <string name="sort_descending">降序排列</string>
+    <string name="cat_images">图像</string>
+    <string name="cat_videos">视频</string>
+    <string name="cat_audio">音频</string>
+    <string name="cat_documents">文档</string>
+    <string name="cat_downloads">下载</string>
+    <string name="internal_storage">内部存储</string>
+    <string name="categories">类别</string>
+    <string name="new_file">新建文件</string>
+    <string name="rename">重命名</string>
 </resources>
