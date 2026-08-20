@@ -1,0 +1,35 @@
+# Host-side MusicBrainz ingest tool for the offline MusicBrainz pack ("MBP1").
+#
+# Deliberately DETACHED from the repo-root Rust workspace (the empty [workspace]
+# table below), exactly as scripts/maps/gtfs_ingest is: it is a std-only host
+# crate with zero external dependencies, so `cargo build` here resolves offline
+# and never pulls the aarch64-android toolchain or the app crates' lints.
+#
+# It is a LIBRARY plus a thin CLI. The library half is consumed two ways:
+#   * `mb_ingest::build` turns an mbdump full export into a `.pack`;
+#   * `mb_ingest::reader` reads a `.pack` back, and is what the server calls
+#     in-process (see src/reader.rs -- it takes a &[u8], so the caller owns the
+#     mmap and this crate needs no memmap dependency).
+[package]
+name = "mb_ingest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "MusicBrainz mbdump -> compact offline pack for the musicbrainz app"
+
+[lib]
+name = "mb_ingest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mb_ingest"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = 3
+
+# Detach from the repo-root workspace so this host tool builds standalone/offline.
+[workspace]

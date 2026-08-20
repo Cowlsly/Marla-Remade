@@ -1,0 +1,449 @@
+//! End-to-end round trip: synthetic mbdump -> pack -> reader, asserting the
+//! reader hands back exactly what went in.
+//!
+//! This is the `scripts/maps/gtfs_ingest/src/index.rs:853-1237` pattern. One
+//! deliberate difference: that test embeds a *minimal* reader, because the real
+//! one lives on the device in another language's build. Here the real reader is
+//! in the same crate and is the artefact the server consumes, so testing against
+//! a second implementation would test the wrong thing. The format constants are
+//! asserted independently below instead, so a layout change cannot pass unnoticed.
+
+use std::io::Cursor;
+
+use mb_ingest::build::{build, BuildOptions};
+use mb_ingest::copy::Input;
+use mb_ingest::fixture::{self, write_fixture};
+use mb_ingest::pack::{self, format_mbid, parse_mbid};
+use mb_ingest::reader::MbPack;
+
+struct Built {
+    bytes: Vec<u8>,
+    report: String,
+}
+
+fn build_fixture(opts: BuildOptions) -> Built {
+    let dir = std::env::temp_dir().join(format!(
+        "mb_ingest_fixture_{}_{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    write_fixture(&dir).expect("write fixture");
+    let mut cursor = Cursor::new(Vec::new());
+    let stats = build(&Input::Dir(dir.clone()), &mut cursor, &opts, &mut std::io::sink())
+        .expect("build pack");
+    let _ = std::fs::remove_dir_all(&dir);
+    Built { bytes: cursor.into_inner(), report: stats.report() }
+}
+
+fn mb(s: &str) -> [u8; 16] {
+    parse_mbid(s).expect("fixture MBID parses")
+}
+
+#[test]
+fn record_widths_are_pinned() {
+    // If one of these changes, the reader and the writer have to change together;
+    // this test exists so that never happens silently.
+    assert_eq!(pack::ARTIST_REC_LEN, 20);
+    assert_eq!(pack::RG_REC_LEN, 16);
+    assert_eq!(pack::RELEASE_REC_LEN, 24);
+    assert_eq!(pack::MEDIUM_REC_LEN, 4);
+    assert_eq!(pack::RECORDING_REC_LEN, 9);
+    assert_eq!(pack::MBID_TRUNC_LEN, 14);
+    assert_eq!(pack::ISRC_REC_LEN, 11);
+    assert_eq!(pack::TERM_IDX_REC_LEN, 8);
+    assert_eq!(pack::SECTION_COUNT, 32);
+    assert_eq!(pack::HEADER_LEN, 64);
+    assert_eq!(pack::MAGIC.to_le_bytes(), *b"MBP1");
+}
+
+#[test]
+fn header_and_capabilities() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+    let c = pack.counts();
+    assert_eq!(c.artists, 3);
+    assert_eq!(c.release_groups, 4);
+    assert_eq!(c.releases, 5);
+    assert_eq!(c.media, 6);
+    assert_eq!(c.tracks, 12);
+    assert_eq!(c.recordings, 7, "6 on tracklists plus 1 standalone");
+    assert_eq!(c.isrcs, 3, "the malformed fourth ISRC must be rejected, not stored");
+    assert_eq!(pack.dump_date(), 20260819);
+
+    // Tier B: everything except track MBIDs.
+    assert!(!pack.has_track_mbids());
+    assert!(pack.has_recording_mbids());
+    assert!(pack.has_isrcs());
+    assert!(pack.has_recording_search());
+    assert!(!pack.official_only());
+    assert_eq!(pack.track_mbid(0), None, "a tier B pack must not invent a track MBID");
+}
+
+#[test]
+fn artists_round_trip() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let idx = pack.artist_by_mbid(&mb(fixture::ARTIST_PINK_FLOYD)).expect("pink floyd");
+    let a = pack.artist(idx).expect("artist row");
+    assert_eq!(&*a.name, "Pink Floyd");
+    assert_eq!(&*a.disambiguation, "British rock band");
+    assert_eq!(&*a.kind, "Group");
+    assert_eq!(&*a.area, "United Kingdom");
+    assert_eq!(&*a.country, "GB", "country comes from the area's iso_3166_1 row");
+    assert_eq!(a.begin_date.to_ws2(), "1965-01-01");
+    assert_eq!(format_mbid(&pack.artist_mbid(idx).unwrap()), fixture::ARTIST_PINK_FLOYD);
+
+    // Accents survive, and a NULL area is empty rather than wrong.
+    let idx = pack.artist_by_mbid(&mb(fixture::ARTIST_BJORK)).expect("bjork");
+    let a = pack.artist(idx).expect("artist row");
+    assert_eq!(&*a.name, "Björk");
+    assert_eq!(&*a.kind, "Person");
+    assert_eq!(&*a.area, "");
+    assert_eq!(&*a.country, "");
+    assert_eq!(&*a.disambiguation, "");
+    assert_eq!(a.begin_date.to_ws2(), "1965-11-21");
+
+    // A NULL type must read as absent, not as the first enum value.
+    let idx = pack.artist_by_mbid(&mb(fixture::ARTIST_VARIOUS)).expect("various");
+    let a = pack.artist(idx).expect("artist row");
+    assert_eq!(&*a.kind, "");
+    assert!(a.begin_date.is_none());
+
+    assert_eq!(pack.artist_by_mbid(&mb("00000000-0000-0000-0000-000000000000")), None);
+    assert!(pack.artist(9999).is_none());
+}
+
+#[test]
+fn release_groups_and_discography() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let rg = pack.release_group_by_mbid(&mb(fixture::RG_DARK_SIDE)).expect("dark side");
+    let g = pack.release_group(rg).expect("rg row");
+    assert_eq!(&*g.title, "The Dark Side of the Moon");
+    assert_eq!(&*g.primary_type, "Album");
+    assert_eq!(&*g.secondary_type, "");
+    assert_eq!(&*g.credit, "Pink Floyd");
+    assert_eq!(g.first_release_date.to_ws2(), "1973-03-01");
+
+    let rg = pack.release_group_by_mbid(&mb(fixture::RG_ECHOES)).expect("echoes");
+    let g = pack.release_group(rg).expect("rg row");
+    assert_eq!(
+        &*g.secondary_type, "Compilation",
+        "only secondaryTypes[0] is stored, and the choice must be deterministic"
+    );
+
+    // Escaped control characters in the dump come back as real characters.
+    let rg = pack.release_group_by_mbid(&mb(fixture::RG_WEIRD)).expect("weird");
+    let g = pack.release_group(rg).expect("rg row");
+    assert_eq!(&*g.title, fixture::WEIRD_TITLE);
+    assert_eq!(&*g.primary_type, "");
+    assert_eq!(&*g.credit, "Pink Floyd feat. Björk");
+    assert!(g.first_release_date.is_none());
+
+    // Discography, newest first, and via the credit so a featured artist counts.
+    let artist = pack.artist_by_mbid(&mb(fixture::ARTIST_PINK_FLOYD)).unwrap();
+    let titles: Vec<String> = pack
+        .artist_release_groups(artist)
+        .iter()
+        .map(|&i| pack.release_group(i).unwrap().title.into_owned())
+        .collect();
+    assert_eq!(
+        titles,
+        [
+            "Echoes: The Best of Pink Floyd",
+            "The Dark Side of the Moon",
+            fixture::WEIRD_TITLE,
+        ],
+        "sorted by first-release-date descending, undated last"
+    );
+    let bjork = pack.artist_by_mbid(&mb(fixture::ARTIST_BJORK)).unwrap();
+    let mut titles: Vec<String> = pack
+        .artist_release_groups(bjork)
+        .iter()
+        .map(|&i| pack.release_group(i).unwrap().title.into_owned())
+        .collect();
+    titles.sort();
+    assert_eq!(titles, ["Homogenic", fixture::WEIRD_TITLE]);
+    assert!(pack.artist_release_groups(9999).is_empty());
+}
+
+#[test]
+fn releases_and_editions() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let r = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE)).expect("dark side release");
+    let rel = pack.release(r).expect("release row");
+    assert_eq!(&*rel.title, "The Dark Side of the Moon");
+    assert_eq!(&*rel.status, "Official");
+    assert_eq!(&*rel.country, "GB");
+    assert_eq!(rel.date.to_ws2(), "1973-03-01");
+    assert_eq!(&*rel.credit, "Pink Floyd");
+    assert_eq!(
+        pack.release_group(rel.rg_idx).unwrap().title,
+        "The Dark Side of the Moon"
+    );
+
+    // A year-only date from release_unknown_country, and no country at all.
+    let r2 = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE_BOOT)).expect("bootleg");
+    let boot = pack.release(r2).expect("release row");
+    assert_eq!(&*boot.status, "Bootleg");
+    assert_eq!(boot.date.to_ws2(), "2011");
+    assert_eq!(&*boot.country, "");
+    assert_eq!(&*boot.disambiguation, "vinyl bootleg");
+
+    // A release with no status at all must not borrow one.
+    let r5 = pack.release_by_mbid(&mb(fixture::REL_WEIRD)).expect("weird release");
+    assert_eq!(&*pack.release(r5).unwrap().status, "");
+
+    // Edition list: Official before Bootleg, per the app's sort.
+    let rg = pack.release_group_by_mbid(&mb(fixture::RG_DARK_SIDE)).unwrap();
+    let editions = pack.release_group_releases(rg);
+    assert_eq!(editions.len(), 2);
+    assert_eq!(&*pack.release(editions[0]).unwrap().status, "Official");
+    assert_eq!(&*pack.release(editions[1]).unwrap().status, "Bootleg");
+
+    // Media: format, dense position, and the *decodable* track count rather than
+    // the dump's claim of 10.
+    let media = pack.release_media(r);
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].position, 1);
+    assert_eq!(&*media[0].format, "CD");
+    assert_eq!(media[0].track_count, 3);
+    assert_eq!(pack.release_track_count(r), 3);
+
+    // Multi-medium release, with positions renumbered densely.
+    let echoes = pack.release_by_mbid(&mb(fixture::REL_ECHOES)).unwrap();
+    let media = pack.release_media(echoes);
+    assert_eq!(media.len(), 2);
+    assert_eq!((media[0].position, media[1].position), (1, 2));
+    assert_eq!(pack.release_track_count(echoes), 3);
+
+    // A NULL medium format reads as empty.
+    let media = pack.release_media(r5);
+    assert_eq!(&*media[0].format, "");
+}
+
+#[test]
+fn tracklists_round_trip_including_every_override() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let r = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE)).unwrap();
+    let list = pack.release_tracklist(r);
+    assert_eq!(list.len(), 1);
+    let (_, tracks) = &list[0];
+    assert_eq!(tracks.len(), 3);
+
+    // Inherited title, credit and length.
+    assert_eq!(tracks[0].position, 1);
+    assert_eq!(&*tracks[0].title, "Speak to Me");
+    assert_eq!(&*tracks[0].credit, "Pink Floyd");
+    assert_eq!(tracks[0].length_secs, 67);
+    assert_eq!(
+        format_mbid(&pack.recording_mbid(tracks[0].recording_idx).unwrap()),
+        fixture::REC_SPEAK_TO_ME
+    );
+
+    // Title override: the release spells it differently from the recording.
+    assert_eq!(&*tracks[1].title, "Breathe (In the Air)");
+    assert_eq!(
+        &*pack.recording(tracks[1].recording_idx).unwrap().title,
+        "Breathe",
+        "the recording keeps its own title"
+    );
+
+    // Length override.
+    assert_eq!(&*tracks[2].title, "Time");
+    assert_eq!(tracks[2].length_secs, 425);
+    assert_eq!(pack.recording(tracks[2].recording_idx).unwrap().length_secs, 421);
+
+    // Pregap track at position 0 survives, and a NULL track length falls back.
+    let boot = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE_BOOT)).unwrap();
+    let (_, tracks) = &pack.release_tracklist(boot)[0];
+    assert_eq!(tracks[0].position, 0, "a pregap track must keep position 0");
+    assert_eq!(tracks[1].position, 1);
+    assert_eq!(tracks[0].length_secs, 67, "NULL track length falls back to the recording's");
+
+    // Credit override on a compilation, and a second medium.
+    let echoes = pack.release_by_mbid(&mb(fixture::REL_ECHOES)).unwrap();
+    let list = pack.release_tracklist(echoes);
+    assert_eq!(list.len(), 2);
+    assert_eq!(&*list[0].1[1].credit, "Pink Floyd feat. Björk");
+    assert_eq!(
+        &*pack.recording(list[0].1[1].recording_idx).unwrap().credit,
+        "Pink Floyd",
+        "the recording keeps its own credit"
+    );
+    assert_eq!(list[1].1.len(), 1);
+    assert_eq!(&*list[1].1[0].title, "Speak to Me");
+
+    // A backwards jump in recording index (negative d_recording) decodes.
+    let weird = pack.release_by_mbid(&mb(fixture::REL_WEIRD)).unwrap();
+    let (_, tracks) = &pack.release_tracklist(weird)[0];
+    assert_eq!(&*tracks[0].title, "Wish You Were Here");
+    assert_eq!(&*tracks[1].title, "Breathe");
+    assert!(
+        tracks[0].recording_idx > tracks[1].recording_idx,
+        "this medium is the one that exercises a negative delta"
+    );
+
+    // The same recording reached from three different releases is one row.
+    let speak = tracks_of(&pack, fixture::REL_DARK_SIDE)[0].recording_idx;
+    let same = tracks_of(&pack, fixture::REL_DARK_SIDE_BOOT)[0].recording_idx;
+    assert_eq!(speak, same, "recordings are shared, not duplicated per release");
+
+    assert!(pack.medium_tracks(r, 99).is_empty());
+    assert!(pack.release_tracklist(9999).is_empty());
+}
+
+fn tracks_of<'a>(pack: &'a MbPack<'a>, release: &str) -> Vec<mb_ingest::reader::Track<'a>> {
+    let r = pack.release_by_mbid(&mb(release)).unwrap();
+    pack.release_tracklist(r).into_iter().next().map(|(_, t)| t).unwrap_or_default()
+}
+
+#[test]
+fn isrcs_and_recordings() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let r = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE)).unwrap();
+    let (_, tracks) = &pack.release_tracklist(r)[0];
+    let isrcs: Vec<String> = pack
+        .recording_isrcs(tracks[0].recording_idx)
+        .iter()
+        .map(|i| String::from_utf8_lossy(i).into_owned())
+        .collect();
+    assert_eq!(isrcs, ["GBAYE0601498"], "ISRCs survive the 12 ASCII -> 7 byte packing");
+    let isrcs = pack.recording_isrcs(tracks[1].recording_idx);
+    assert_eq!(isrcs.len(), 1, "the malformed ISRC on this recording was dropped");
+    assert_eq!(&isrcs[0], b"GBAYE0601499");
+    // A recording with no ISRC returns empty, not the neighbour's.
+    assert!(pack.recording_isrcs(tracks[2].recording_idx).is_empty());
+
+    // The standalone recording is reachable and has no first release.
+    let mut standalone = None;
+    for i in 0..pack.counts().recordings {
+        if format_mbid(&pack.recording_mbid(i).unwrap()) == fixture::REC_STANDALONE {
+            standalone = Some(i);
+        }
+    }
+    let s = standalone.expect("standalone recording is in the pack");
+    let rec = pack.recording(s).unwrap();
+    assert_eq!(&*rec.title, "Untitled Demo");
+    assert_eq!(rec.length_secs, 0, "a NULL length is 0, not garbage");
+    assert_eq!(pack.recording_first_release(s), None);
+
+    // A tracked recording does have one.
+    let first = pack.recording_first_release(tracks[0].recording_idx).expect("first release");
+    assert!(pack.release(first).is_some());
+}
+
+#[test]
+fn search_finds_things_by_word_prefix() {
+    let built = build_fixture(BuildOptions::default());
+    let pack = MbPack::open(&built.bytes).expect("open");
+
+    let hits = pack.search_artists("pink", 25);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(&*pack.artist(hits[0].idx).unwrap().name, "Pink Floyd");
+
+    // Accent folding both ways.
+    assert_eq!(pack.search_artists("björk", 25).len(), 1);
+    assert_eq!(pack.search_artists("bjork", 25).len(), 1);
+    assert_eq!(pack.search_artists("BJORK", 25).len(), 1);
+
+    // Mid-title word prefix, which is the case the design doc cares about.
+    let hits = pack.search_release_groups("dark side", 25);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(
+        &*pack.release_group(hits[0].idx).unwrap().title,
+        "The Dark Side of the Moon"
+    );
+    assert_eq!(pack.search_release_groups("dar sid", 25).len(), 1, "prefixes match");
+
+    // AND across words: "dark homogenic" matches nothing.
+    assert!(pack.search_release_groups("dark homogenic", 25).is_empty());
+    // Mid-word substrings do not match. Documented limitation, not a bug.
+    assert!(pack.search_artists("loyd", 25).is_empty());
+
+    let hits = pack.search_recordings("breathe", 25);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(&*pack.recording(hits[0].idx).unwrap().title, "Breathe");
+
+    // A search term shared by several release groups ranks, dedups and truncates.
+    let hits = pack.search_release_groups("pink floyd", 25);
+    assert_eq!(hits.len(), 1, "only the compilation has both words in its title");
+    let hits = pack.search_artists("pink", 0);
+    assert!(hits.is_empty(), "limit 0 returns nothing rather than everything");
+    assert!(pack.search_artists("", 25).is_empty());
+    assert!(pack.search_artists("!!!", 25).is_empty());
+    assert!(pack.search_artists("zzzznotathing", 25).is_empty());
+}
+
+#[test]
+fn tier_a_adds_track_mbids_and_nothing_else_changes() {
+    let b = build_fixture(BuildOptions::default());
+    let a = build_fixture(BuildOptions::tier_a());
+    let pb = MbPack::open(&b.bytes).expect("open tier B");
+    let pa = MbPack::open(&a.bytes).expect("open tier A");
+    assert!(pa.has_track_mbids());
+    assert!(!pb.has_track_mbids());
+    assert_eq!(pa.counts().tracks, pb.counts().tracks);
+    assert!(pa.track_mbid(0).is_some());
+    assert!(
+        a.bytes.len() > b.bytes.len(),
+        "tier A must be larger by exactly the track MBID table"
+    );
+    let delta = a.bytes.len() - b.bytes.len();
+    assert!(
+        (16 * 12..16 * 12 + 16).contains(&delta),
+        "12 tracks x 16 B plus alignment, got {delta}"
+    );
+}
+
+#[test]
+fn official_only_drops_the_bootleg() {
+    let built = build_fixture(BuildOptions { official_only: true, ..BuildOptions::default() });
+    let pack = MbPack::open(&built.bytes).expect("open");
+    assert!(pack.official_only());
+    assert_eq!(pack.counts().releases, 3, "the bootleg and the status-less release go");
+    assert_eq!(pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE_BOOT)), None);
+    let rg = pack.release_group_by_mbid(&mb(fixture::RG_DARK_SIDE)).unwrap();
+    assert_eq!(pack.release_group_releases(rg).len(), 1);
+}
+
+#[test]
+fn build_is_byte_for_byte_reproducible() {
+    let a = build_fixture(BuildOptions::default());
+    let b = build_fixture(BuildOptions::default());
+    assert_eq!(a.bytes, b.bytes, "no hash-map iteration order may reach the output");
+}
+
+#[test]
+fn report_measures_the_ratios_the_design_doc_only_estimated() {
+    let built = build_fixture(BuildOptions::default());
+    // These are the four numbers the design doc's R2 flagged as the largest
+    // remaining uncertainty; a build has to print them.
+    for needle in [
+        "distinct recording titles",
+        "tracks whose title == recording's",
+        "tracks whose credit == recording's",
+        "recordings with no track (standalone)",
+        "malformed ISRCs dropped",
+    ] {
+        assert!(built.report.contains(needle), "report is missing {needle}:\n{}", built.report);
+    }
+}
+
+#[test]
+fn truncated_pack_is_rejected_not_read() {
+    let built = build_fixture(BuildOptions::default());
+    for cut in [1usize, 64, 128, built.bytes.len() / 2, built.bytes.len() - 1] {
+        let err = MbPack::open(&built.bytes[..cut]);
+        assert!(err.is_err(), "a pack truncated to {cut} bytes must be refused");
+    }
+}
