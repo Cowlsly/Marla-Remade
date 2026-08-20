@@ -10,6 +10,11 @@
 //! releases (so `d_recording` is not always 1), a standalone recording with no
 //! track, a release with no status, a release group with a secondary type, and a
 //! malformed ISRC that must be rejected rather than stored.
+//!
+//! There is deliberately **no `release_group_meta`**: that table is not in the
+//! core dump, so first-release dates are derived from release dates. The fixture
+//! therefore also exercises that derivation, including a release group whose only
+//! release has no date at all.
 
 use std::fs;
 use std::io::{self, Write};
@@ -151,17 +156,6 @@ pub fn write_fixture(dir: &Path) -> io::Result<()> {
             &["2", RG_HOMOGENIC, "Homogenic", "2", "1", "", "0", TS],
             &["3", RG_ECHOES, "Echoes: The Best of Pink Floyd", "1", "1", "", "0", TS],
             &["4", RG_WEIRD, "Untitled\\tWeird\\nTitle", "3", N, "", "0", TS],
-        ],
-    )?;
-    // release_group_meta: id, release_count, first y/m/d, rating, rating_count
-    table(
-        dir,
-        "release_group_meta",
-        &[
-            &["1", "2", "1973", "3", "1", N, N],
-            &["2", "1", "1997", "9", "22", N, N],
-            &["3", "1", "2001", "11", "5", N, N],
-            &["4", "1", N, N, N, N, N],
         ],
     )?;
     // release_group_secondary_type_join: release_group, secondary_type, created

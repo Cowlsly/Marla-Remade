@@ -48,9 +48,15 @@ use crate::reader::encode_recording_credit;
 /// an absurd primary key.
 const MAX_ID: u32 = 400_000_000;
 
-/// Every table this crate reads. All of these live in the core `mbdump.tar.bz2`
-/// (each is marked `-- replicate` in `admin/sql/CreateTables.sql`, which is what
-/// puts a table in that dump); none needs `mbdump-derived.tar.bz2`.
+/// Every table this crate reads.
+///
+/// All of these are present in the core `mbdump.tar.bz2` — **verified by actually
+/// extracting them**, which is not the same as what the schema suggests. Note the
+/// absence of `release_group_meta`: it is marked `-- replicate` in
+/// `admin/sql/CreateTables.sql`, but that marker controls replication packets, not
+/// the dump split, and the table is NOT in the core dump. Its
+/// `first_release_date_*` is derived here instead (see `derive_first_release_dates`),
+/// which is what keeps this crate off `mbdump-derived.tar.bz2`.
 pub const TABLES: &[&str] = &[
     "area",
     "iso_3166_1",
@@ -63,7 +69,6 @@ pub const TABLES: &[&str] = &[
     "artist_credit_name",
     "artist",
     "release_group",
-    "release_group_meta",
     "release_group_secondary_type_join",
     "release",
     "release_country",
@@ -381,6 +386,112 @@ impl Drop for TrackSpill {
     }
 }
 
+/// Bucket-sorts search postings by term rank through files on disk.
+///
+/// 157 M postings held as `Vec<(u32, u32)>` is 1.26 GB, which was the single
+/// largest contributor to a measured 6.14 GB peak. Bucketing by rank means only
+/// one bucket (~20 MB) is resident while it is sorted and emitted, and the ranks
+/// are known before this runs so the buckets come out in output order.
+struct PostingSpill {
+    dir: PathBuf,
+    writers: Vec<BufWriter<File>>,
+    buckets: usize,
+    terms: u32,
+    written: u64,
+}
+
+impl PostingSpill {
+    fn new(work_dir: Option<&Path>, terms: u32) -> io::Result<PostingSpill> {
+        let buckets = if terms < 100_000 { 1 } else { 64 };
+        let base = match work_dir {
+            Some(p) => p.to_path_buf(),
+            None => std::env::temp_dir(),
+        };
+        let seq = SPILL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = base.join(format!("mb_ingest_postings_{}_{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let mut writers = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            writers.push(BufWriter::with_capacity(
+                1 << 16,
+                File::create(dir.join(format!("p{b:03}")))?,
+            ));
+        }
+        Ok(PostingSpill { dir, writers, buckets, terms, written: 0 })
+    }
+
+    fn bucket_of(&self, rank: u32) -> usize {
+        if self.buckets == 1 || self.terms == 0 {
+            return 0;
+        }
+        ((rank as u64 * self.buckets as u64) / self.terms as u64).min(self.buckets as u64 - 1)
+            as usize
+    }
+
+    /// First rank NOT in bucket `b`. Must be the exact inverse of `bucket_of`.
+    fn bucket_end(&self, b: usize) -> u32 {
+        if self.buckets == 1 {
+            return self.terms;
+        }
+        if b + 1 >= self.buckets {
+            return self.terms;
+        }
+        let t = self.terms as u64;
+        let n = self.buckets as u64;
+        (((b as u64 + 1) * t).div_ceil(n)).min(t) as u32
+    }
+
+    fn push(&mut self, rank: u32, refv: u32) -> io::Result<()> {
+        let b = self.bucket_of(rank);
+        let mut rec = [0u8; 8];
+        rec[0..4].copy_from_slice(&rank.to_le_bytes());
+        rec[4..8].copy_from_slice(&refv.to_le_bytes());
+        self.writers[b].write_all(&rec)?;
+        self.written += 8;
+        Ok(())
+    }
+
+    fn finish(&mut self) -> io::Result<Vec<PathBuf>> {
+        for w in self.writers.iter_mut() {
+            w.flush()?;
+        }
+        self.writers.clear();
+        Ok((0..self.buckets).map(|b| self.dir.join(format!("p{b:03}"))).collect())
+    }
+}
+
+impl Drop for PostingSpill {
+    fn drop(&mut self) {
+        self.writers.clear();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Tokenise `text` and spill one posting per term. The term must already be in
+/// `terms` from the dictionary pass.
+fn emit_postings(
+    text: &str,
+    refv: u32,
+    terms: &StringPool,
+    ranks: &[u32],
+    buf: &mut Vec<String>,
+    spill: &mut PostingSpill,
+) -> io::Result<()> {
+    buf.clear();
+    search_terms(text, buf);
+    for t in buf.iter() {
+        let Some(sym) = terms.lookup(t) else {
+            return Err(other_err(format!(
+                "search term {t:?} was not interned in the dictionary pass; the two search \
+                 passes disagree, which would silently corrupt the index"
+            )));
+        };
+        spill.push(ranks[sym as usize], refv)?;
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
 struct TrackRow {
     medium_idx: u32,
@@ -640,18 +751,6 @@ pub fn build<W: Write + Seek>(
     }
     let n = require(
         source,
-        "release_group_meta",
-        Shape { table: "release_group_meta", min_fields: 7, ints: &[0], uuids: &[] },
-        |row| {
-            if let Some(slot) = row.u32(0).and_then(|id| rg_slot.get(id)) {
-                rgs[slot as usize].first_date = pack_date(row.i64(2), row.i64(3), row.i64(4));
-            }
-            Ok(())
-        },
-    )?;
-    st.rows.push(("release_group_meta", n));
-    let n = require(
-        source,
         "release_group_secondary_type_join",
         Shape {
             table: "release_group_secondary_type_join",
@@ -683,27 +782,6 @@ pub fn build<W: Write + Seek>(
     for (i, r) in rgs.iter().enumerate() {
         rg_idx.set(r.id, i as u32)?;
     }
-
-    // ARTIST_RGS: artist -> release groups, via the release group's credit.
-    let mut artist_rg_pairs: Vec<(u32, u32)> = Vec::new();
-    for (i, r) in rgs.iter().enumerate() {
-        let Some(artists_of) = credit_artists.get(r.credit_id as usize) else { continue };
-        for a in artists_of {
-            if let Some(ai) = artist_idx.get(*a) {
-                artist_rg_pairs.push((ai, i as u32));
-            }
-        }
-    }
-    // Newest first: the discography order MusicBrainzViewModel.kt:207 sorts into.
-    artist_rg_pairs.sort_unstable_by(|x, y| {
-        x.0.cmp(&y.0)
-            .then(rgs[y.1 as usize].first_date.cmp(&rgs[x.1 as usize].first_date))
-            .then(x.1.cmp(&y.1))
-    });
-    artist_rg_pairs.dedup();
-    let (artist_rgs, artist_rgs_idx) = to_csr(&artist_rg_pairs, artists.len());
-    drop(artist_rg_pairs);
-    drop(credit_artists);
 
     // --- releases -------------------------------------------------------------
     step!("pass 5: releases");
@@ -808,6 +886,46 @@ pub fn build<W: Write + Seek>(
     if dangling_rg > 0 {
         st.skipped.push(("releases whose release group is missing", dangling_rg));
     }
+
+    // A release group's first release date. MusicBrainz materialises this in
+    // `release_group_meta`, which is NOT in the core dump, so it is derived here as
+    // the earliest known date across the group's releases -- which is how upstream
+    // computes it in the first place, so this is equivalent rather than approximate.
+    // It is load-bearing: the RG screen header, the discography sort
+    // (MusicBrainzViewModel.kt:207) and the release-date fallback (:475-476).
+    for &(g, ri) in &rg_release_pairs {
+        let d = releases[ri as usize].date;
+        if d == 0 {
+            continue;
+        }
+        let cur = &mut rgs[g as usize].first_date;
+        if *cur == 0 || d < *cur {
+            *cur = d;
+        }
+    }
+
+    // ARTIST_RGS: artist -> release groups, via the release group's credit. Built
+    // after the dates are derived, because it is sorted on them.
+    let mut artist_rg_pairs: Vec<(u32, u32)> = Vec::new();
+    for (i, r) in rgs.iter().enumerate() {
+        let Some(artists_of) = credit_artists.get(r.credit_id as usize) else { continue };
+        for a in artists_of {
+            if let Some(ai) = artist_idx.get(*a) {
+                artist_rg_pairs.push((ai, i as u32));
+            }
+        }
+    }
+    // Newest first: the discography order MusicBrainzViewModel.kt:207 sorts into.
+    artist_rg_pairs.sort_unstable_by(|x, y| {
+        x.0.cmp(&y.0)
+            .then(rgs[y.1 as usize].first_date.cmp(&rgs[x.1 as usize].first_date))
+            .then(x.1.cmp(&y.1))
+    });
+    artist_rg_pairs.dedup();
+    let (artist_rgs, artist_rgs_idx) = to_csr(&artist_rg_pairs, artists.len());
+    drop(artist_rg_pairs);
+    drop(credit_artists);
+
     rg_release_pairs.sort_unstable_by(|x, y| {
         let (a, b) = (&releases[x.1 as usize], &releases[y.1 as usize]);
         x.0.cmp(&y.0)
@@ -994,7 +1112,14 @@ pub fn build<W: Write + Seek>(
             }
         }
         let mut order: Vec<u32> = (0..rows.len() as u32).collect();
-        order.sort_unstable_by_key(|&i| (rows[i as usize].medium_idx, rows[i as usize].position));
+        // The trailing `i` matters: MusicBrainz does contain more than one track at
+        // the same position on the same medium, and without a total order
+        // `sort_unstable_by_key` may order those two arbitrarily between runs. That
+        // produced two same-sized but byte-different packs from identical input, and
+        // the fixture never caught it because it has no tied positions.
+        order.sort_unstable_by_key(|&i| {
+            (rows[i as usize].medium_idx, rows[i as usize].position, i)
+        });
         let mut cursor = 0usize;
         // Every medium up to the last one in this bucket gets its offset written,
         // including the ones with no tracks at all.
@@ -1100,30 +1225,6 @@ pub fn build<W: Write + Seek>(
     }
     st.standalone_recordings = rec_order.len() as u64 - tracked;
 
-    // --- recording MBIDs, scattered in clustered order ------------------------
-    let mut recording_mbids: Vec<u8> = Vec::new();
-    if opts.include_recording_mbids {
-        step!("pass 11: recording MBIDs");
-        recording_mbids = vec![0u8; rec_order.len() * 16];
-        require(
-            source,
-            "recording",
-            Shape { table: "recording", min_fields: 9, ints: &[0, 3], uuids: &[1] },
-            |row| {
-                let Some(id) = row.u32(0) else { return Ok(()) };
-                let Some(&new) = rec_new.get(id as usize) else { return Ok(()) };
-                if new == pack::NONE {
-                    return Ok(());
-                }
-                if let Some(gid) = parse_mbid(&row.str(1)) {
-                    let at = new as usize * 16;
-                    recording_mbids[at..at + 16].copy_from_slice(&gid);
-                }
-                Ok(())
-            },
-        )?;
-    }
-
     // --- ISRCs ----------------------------------------------------------------
     let mut isrcs: Vec<(u32, [u8; 7])> = Vec::new();
     if opts.include_isrcs {
@@ -1153,105 +1254,203 @@ pub fn build<W: Write + Seek>(
     }
 
     // --- search index ---------------------------------------------------------
-    step!("pass 13: search index");
-    let mut term_dict: HashMap<String, u32> = HashMap::new();
-    let mut postings: Vec<(u32, u32)> = Vec::new();
+    // Two passes over the in-memory entity texts rather than one, because the
+    // one-pass version was the peak of the whole build: a `HashMap<String, u32>`
+    // dictionary plus the `Vec<(String, u32)>` it is drained into cost ~1.5 GB of
+    // duplicated allocations, and 157 M postings held as `Vec<(u32, u32)>` cost
+    // another 1.26 GB. Pass A interns terms into a symbol pool (the same
+    // open-addressed structure the string pool uses); pass B emits postings with
+    // their final sorted term ranks straight into rank-keyed spill buckets. The
+    // texts are already in memory, so the second pass costs CPU and no I/O.
+    step!("pass 13a: search dictionary");
+    let mut terms = StringPool::new();
     let mut terms_buf: Vec<String> = Vec::new();
-    {
-        let mut add = |text: &str,
-                       refv: u32,
-                       dict: &mut HashMap<String, u32>,
-                       post: &mut Vec<(u32, u32)>| {
+    for a in artists.iter() {
+        let text = String::from_utf8_lossy(pool.get(a.name)).into_owned();
+        terms_buf.clear();
+        search_terms(&text, &mut terms_buf);
+        for t in terms_buf.iter() {
+            terms.intern(t);
+        }
+    }
+    for r in rgs.iter() {
+        let text = String::from_utf8_lossy(pool.get(r.title)).into_owned();
+        terms_buf.clear();
+        search_terms(&text, &mut terms_buf);
+        for t in terms_buf.iter() {
+            terms.intern(t);
+        }
+    }
+    if opts.include_recording_search {
+        for id in rec_order.iter() {
+            let text = String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
             terms_buf.clear();
-            search_terms(text, &mut terms_buf);
+            search_terms(&text, &mut terms_buf);
             for t in terms_buf.iter() {
-                let next = dict.len() as u32;
-                let id = *dict.entry(t.clone()).or_insert(next);
-                post.push((id, refv));
+                terms.intern(t);
             }
-        };
+        }
+    }
+    // `finalize` would consume the pool, and pass B still needs to look terms up,
+    // so the sorted order is taken without consuming it. Alphabetical order is
+    // exactly what SEARCH_TERMS needs for the reader's binary search.
+    let term_count = terms.distinct();
+    let term_order = terms.sorted_order();
+    let mut term_ranks = vec![0u32; term_count];
+    for (rank, &sym) in term_order.iter().enumerate() {
+        term_ranks[sym as usize] = rank as u32;
+    }
+
+    step!("pass 13b: search postings ({term_count} terms)");
+    let mut post_spill = PostingSpill::new(opts.work_dir.as_deref(), term_count as u32)?;
+    {
         for (i, a) in artists.iter().enumerate() {
             check_searchable(i as u32)?;
             let text = String::from_utf8_lossy(pool.get(a.name)).into_owned();
-            add(
+            emit_postings(
                 &text,
                 (pack::KIND_ARTIST << pack::KIND_SHIFT) | i as u32,
-                &mut term_dict,
-                &mut postings,
-            );
+                &terms,
+                &term_ranks,
+                &mut terms_buf,
+                &mut post_spill,
+            )?;
         }
         for (i, r) in rgs.iter().enumerate() {
             check_searchable(i as u32)?;
             let text = String::from_utf8_lossy(pool.get(r.title)).into_owned();
-            add(
+            emit_postings(
                 &text,
                 (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32,
-                &mut term_dict,
-                &mut postings,
-            );
+                &terms,
+                &term_ranks,
+                &mut terms_buf,
+                &mut post_spill,
+            )?;
         }
         if opts.include_recording_search {
             for (i, id) in rec_order.iter().enumerate() {
                 check_searchable(i as u32)?;
                 let text =
                     String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
-                add(
+                emit_postings(
                     &text,
                     (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32,
-                    &mut term_dict,
-                    &mut postings,
-                );
+                    &terms,
+                    &term_ranks,
+                    &mut terms_buf,
+                    &mut post_spill,
+                )?;
             }
         }
     }
-    st.search_postings = postings.len() as u64;
-    // Sort the dictionary so the reader can binary search it, then renumber.
-    let mut sorted_terms: Vec<(String, u32)> = term_dict.into_iter().collect();
-    sorted_terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    {
-        let mut remap = vec![0u32; sorted_terms.len()];
-        for (new, (_, old)) in sorted_terms.iter().enumerate() {
-            remap[*old as usize] = new as u32;
-        }
-        for p in postings.iter_mut() {
-            p.0 = remap[p.0 as usize];
+    drop(term_ranks);
+    st.search_postings = post_spill.written / 8;
+    let post_buckets = post_spill.finish()?;
+
+    // The pack writer opens here rather than after the search index, so
+    // SEARCH_POSTINGS can be STREAMED bucket by bucket instead of accumulating a
+    // ~300 MB buffer while the string pool is still resident. Section order in the
+    // file is irrelevant -- the directory carries absolute offsets.
+    step!("pass 14: writing");
+    // Captured before the sources are dropped further down.
+    let rec_max_id = rec_present.len().saturating_sub(1) as u64;
+    let rec_live = rec_present.iter().filter(|&&p| p).count() as u64;
+    let credit_live = credit_syms.iter().filter(|&&s| s != SYM_EMPTY).count() as u64;
+    let mut w = PackWriter::new(out)?;
+
+    // SEARCH_TERMS, streamed straight out of the term pool in rank order.
+    w.begin(pack::S_SEARCH_TERMS)?;
+    let mut chunk: Vec<u8> = Vec::with_capacity(1 << 16);
+    for &sym in &term_order {
+        chunk.extend_from_slice(terms.get(sym));
+        chunk.push(0);
+        if chunk.len() >= (1 << 16) {
+            w.write(&chunk)?;
+            chunk.clear();
         }
     }
-    postings.sort_unstable();
-    postings.dedup();
-    let term_count = sorted_terms.len();
-    let mut search_terms_bytes: Vec<u8> = Vec::new();
-    let mut postings_bytes: Vec<u8> = Vec::new();
+    w.write(&chunk)?;
+    w.end()?;
+
+    // SEARCH_POSTINGS, streamed; SEARCH_TERM_IDX accumulates the two offsets per
+    // term as we go, which is only 8 bytes a term.
     let mut term_index: Vec<u8> = Vec::with_capacity((term_count + 1) * 8);
-    let mut p = 0usize;
-    for (new_id, (t, _)) in sorted_terms.iter().enumerate() {
-        term_index.extend_from_slice(&(search_terms_bytes.len() as u32).to_le_bytes());
-        term_index.extend_from_slice(&(postings_bytes.len() as u32).to_le_bytes());
-        search_terms_bytes.extend_from_slice(t.as_bytes());
-        search_terms_bytes.push(0);
-        let start = p;
-        while p < postings.len() && postings[p].0 == new_id as u32 {
-            p += 1;
+    let mut term_off = 0u32;
+    let mut post_off = 0u32;
+    let mut rank = 0u32;
+    let mut spill_buf: Vec<u8> = Vec::new();
+    w.begin(pack::S_SEARCH_POSTINGS)?;
+    for (b, bucket) in post_buckets.iter().enumerate() {
+        spill_buf.clear();
+        File::open(bucket)?.read_to_end(&mut spill_buf)?;
+        let mut pairs: Vec<(u32, u32)> = spill_buf
+            .chunks_exact(8)
+            .map(|c| {
+                (
+                    u32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                    u32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                )
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        let bucket_end = post_spill.bucket_end(b);
+        let mut out_bytes: Vec<u8> = Vec::new();
+        let mut p = 0usize;
+        while rank < bucket_end {
+            term_index.extend_from_slice(&term_off.to_le_bytes());
+            term_index.extend_from_slice(&post_off.to_le_bytes());
+            term_off += terms.get(term_order[rank as usize]).len() as u32 + 1;
+            let start = p;
+            while p < pairs.len() && pairs[p].0 == rank {
+                p += 1;
+            }
+            let before = out_bytes.len();
+            pack::write_uvarint(&mut out_bytes, (p - start) as u64);
+            let mut prev = 0u32;
+            for &(_, refv) in &pairs[start..p] {
+                pack::write_uvarint(&mut out_bytes, (refv - prev) as u64);
+                prev = refv;
+            }
+            post_off += (out_bytes.len() - before) as u32;
+            rank += 1;
         }
-        pack::write_uvarint(&mut postings_bytes, (p - start) as u64);
-        let mut prev = 0u32;
-        for &(_, refv) in &postings[start..p] {
-            pack::write_uvarint(&mut postings_bytes, (refv - prev) as u64);
-            prev = refv;
-        }
+        w.write(&out_bytes)?;
     }
-    term_index.extend_from_slice(&(search_terms_bytes.len() as u32).to_le_bytes());
-    term_index.extend_from_slice(&(postings_bytes.len() as u32).to_le_bytes());
-    drop(postings);
-    drop(sorted_terms);
+    w.end()?;
+    term_index.extend_from_slice(&term_off.to_le_bytes());
+    term_index.extend_from_slice(&post_off.to_le_bytes());
+    w.section(pack::S_SEARCH_TERM_IDX, &term_index)?;
+    drop(term_index);
+    drop(post_spill);
+    drop(spill_buf);
+    drop(term_order);
+    drop(terms);
 
     // --- assemble -------------------------------------------------------------
-    step!("pass 14: writing");
-    let mut w = PackWriter::new(out)?;
+    // Every buffer is dropped the moment its section is on disk. That is not
+    // tidiness: holding them all to the end is what put the measured peak at
+    // 4.24 GB against a 4 GB budget, and the entity vectors plus the recording
+    // arrays are ~1.1 GB of it. Counts are captured before the sources go.
+    let counts = HeaderCounts {
+        artists: artists.len() as u32,
+        credits: credit_count,
+        release_groups: rgs.len() as u32,
+        releases: releases.len() as u32,
+        media: media.len() as u32,
+        tracks: track_count,
+        recordings: rec_order.len() as u32,
+        isrcs: isrcs.len() as u32,
+        search_terms: term_count as u32,
+        enums: enums.syms().len() as u32,
+    };
     let enum_offsets: Vec<u32> = enums.syms().iter().map(|&s| pool.offset(s)).collect();
     w.section_u32(pack::S_ENUM_POOL, &enum_offsets)?;
+    drop(enum_offsets);
     let credit_offsets: Vec<u32> = credit_syms.iter().map(|&s| pool.offset(s)).collect();
     w.section_u32(pack::S_CREDITS, &credit_offsets)?;
+    drop(credit_offsets);
     drop(credit_syms);
 
     buf.clear();
@@ -1269,6 +1468,7 @@ pub fn build<W: Write + Seek>(
     w.section(pack::S_ARTIST_MBID, &recs)?;
     w.section_u32(pack::S_ARTIST_MBID_HI, &hi)?;
     drop(gids);
+    drop(artists);
 
     buf.clear();
     for r in &rgs {
@@ -1284,8 +1484,11 @@ pub fn build<W: Write + Seek>(
     w.section(pack::S_RG_MBID, &recs)?;
     w.section_u32(pack::S_RG_MBID_HI, &hi)?;
     drop(gids);
+    drop(rgs);
     w.section_u32(pack::S_ARTIST_RGS, &artist_rgs)?;
+    drop(artist_rgs);
     w.section_u32(pack::S_ARTIST_RGS_IDX, &artist_rgs_idx)?;
+    drop(artist_rgs_idx);
 
     buf.clear();
     for r in &releases {
@@ -1303,17 +1506,23 @@ pub fn build<W: Write + Seek>(
     w.section(pack::S_RELEASE_MBID, &recs)?;
     w.section_u32(pack::S_RELEASE_MBID_HI, &hi)?;
     drop(gids);
+    drop(releases);
     w.section_u32(pack::S_RG_RELEASES, &rg_releases)?;
+    drop(rg_releases);
     w.section_u32(pack::S_RG_RELEASES_IDX, &rg_releases_idx)?;
+    drop(rg_releases_idx);
 
     w.section_u32(pack::S_MEDIA_IDX, &media_idx_csr)?;
+    drop(media_idx_csr);
     buf.clear();
     for m in &media {
         buf.extend_from_slice(&m.format.to_le_bytes());
         buf.extend_from_slice(&(m.track_count.min(u16::MAX as u32) as u16).to_le_bytes());
     }
     w.section(pack::S_MEDIA, &buf)?;
+    drop(media);
     w.section_u32(pack::S_TRACK_IDX, &track_idx)?;
+    drop(track_idx);
     assert!(
         tracks_stream.len() <= u32::MAX as usize,
         "TRACKS is {} bytes, past the u32 ceiling TRACK_IDX addresses it with",
@@ -1336,11 +1545,47 @@ pub fn build<W: Write + Seek>(
         buf.push(hi);
     }
     w.section(pack::S_RECORDINGS, &buf)?;
+    buf.clear();
+    buf.shrink_to_fit();
+    // Dead from here: RECORDINGS was their only remaining consumer, and the search
+    // index is already written.
+    drop(rec_title);
+    drop(rec_credit);
+    drop(rec_dur);
+    drop(rec_present);
+    let recording_count = rec_order.len();
+    drop(rec_order);
     if opts.include_recording_mbids {
+        // Deliberately built HERE rather than earlier: this is a 638 MB buffer, and
+        // running the pass at its natural place in the order would have kept it
+        // resident alongside the search index. A second scan of `recording` is far
+        // cheaper than that overlap -- and cheaper still than holding 16 B per
+        // recording id (~760 MB) through the whole build, which is what scattering
+        // into this buffer avoids.
+        step!("pass 14b: recording MBIDs");
+        let mut recording_mbids = vec![0u8; recording_count * 16];
+        require(
+            source,
+            "recording",
+            Shape { table: "recording", min_fields: 9, ints: &[0, 3], uuids: &[1] },
+            |row| {
+                let Some(id) = row.u32(0) else { return Ok(()) };
+                let Some(&new) = rec_new.get(id as usize) else { return Ok(()) };
+                if new == pack::NONE {
+                    return Ok(());
+                }
+                if let Some(gid) = parse_mbid(&row.str(1)) {
+                    let at = new as usize * 16;
+                    recording_mbids[at..at + 16].copy_from_slice(&gid);
+                }
+                Ok(())
+            },
+        )?;
         w.section(pack::S_RECORDING_MBID, &recording_mbids)?;
     }
-    drop(recording_mbids);
     w.section_u32(pack::S_REC_FIRST_RELEASE, &rec_first_release)?;
+    drop(rec_first_release);
+    drop(rec_new);
 
     if opts.include_isrcs {
         buf.clear();
@@ -1350,10 +1595,11 @@ pub fn build<W: Write + Seek>(
         }
         w.section(pack::S_ISRCS, &buf)?;
     }
-
-    w.section(pack::S_SEARCH_TERMS, &search_terms_bytes)?;
-    w.section(pack::S_SEARCH_POSTINGS, &postings_bytes)?;
-    w.section(pack::S_SEARCH_TERM_IDX, &term_index)?;
+    let isrc_count = isrcs.len();
+    let _ = isrc_count;
+    drop(isrcs);
+    buf.clear();
+    buf.shrink_to_fit();
 
     // STRINGS goes last: it is only complete now, and streaming it here means the
     // sorted pool is never materialised as a second buffer.
@@ -1383,18 +1629,6 @@ pub fn build<W: Write + Seek>(
         st.string_pool_stored = w.end()?;
     }
 
-    let counts = HeaderCounts {
-        artists: artists.len() as u32,
-        credits: credit_count,
-        release_groups: rgs.len() as u32,
-        releases: releases.len() as u32,
-        media: media.len() as u32,
-        tracks: track_count,
-        recordings: rec_order.len() as u32,
-        isrcs: isrcs.len() as u32,
-        search_terms: term_count as u32,
-        enums: enum_offsets.len() as u32,
-    };
     w.set_header(&counts, opts.flags(), source.dump_date(), string_blocks);
     st.string_blocks = string_blocks;
     st.sections = w
@@ -1406,15 +1640,11 @@ pub fn build<W: Write + Seek>(
         artist_idx.bytes() + rg_idx.bytes() + release_idx.bytes() + medium_idx.bytes();
     st.max_ids = vec![
         ("artist", artist_idx.max_id(), artist_idx.live()),
-        ("artist_credit", credit_count.saturating_sub(1) as u64, credit_count as u64),
+        ("artist_credit", credit_count.saturating_sub(1) as u64, credit_live),
         ("release_group", rg_idx.max_id(), rg_idx.live()),
         ("release", release_idx.max_id(), release_idx.live()),
         ("medium", medium_idx.max_id(), medium_idx.live()),
-        (
-            "recording",
-            rec_present.len().saturating_sub(1) as u64,
-            rec_present.iter().filter(|&&p| p).count() as u64,
-        ),
+        ("recording", rec_max_id, rec_live),
     ];
     st.total_bytes = w.finish()?;
     Ok(st)
@@ -1590,6 +1820,29 @@ mod tests {
             assert!(b >= prev, "buckets must not go backwards: medium {m} -> {b}");
             assert!(b < s.buckets);
             prev = b;
+        }
+    }
+
+    #[test]
+    fn posting_buckets_and_ends_are_exact_inverses() {
+        // If `bucket_of` and `bucket_end` disagree by even one rank, the emit loop
+        // either skips a term's postings or attributes them to the wrong term.
+        for terms in [1u32, 2, 63, 64, 65, 100_000, 4_332_477] {
+            let s = PostingSpill::new(None, terms).unwrap();
+            let mut expected = 0u32;
+            for b in 0..s.buckets {
+                let end = s.bucket_end(b);
+                assert!(end >= expected, "bucket ends must not go backwards");
+                for rank in expected..end {
+                    assert_eq!(
+                        s.bucket_of(rank),
+                        b,
+                        "terms={terms} rank={rank} belongs in bucket {b}"
+                    );
+                }
+                expected = end;
+            }
+            assert_eq!(expected, terms, "buckets must cover every rank exactly once");
         }
     }
 

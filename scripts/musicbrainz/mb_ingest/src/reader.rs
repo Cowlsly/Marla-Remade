@@ -1017,20 +1017,33 @@ impl<'a> MbPack<'a> {
         (lower, hi)
     }
 
-    /// Terms scanned per query token. A one-letter query can match hundreds of
-    /// thousands of terms; the cap keeps a pathological query bounded instead of
-    /// walking the whole dictionary. Hits are still ranked, and exact matches sort
-    /// first, so the truncation is invisible for any realistic query.
+    /// Terms scanned when expanding one query token's prefix. A token like "s"
+    /// matches a great many dictionary terms; this bounds the expansion.
     const MAX_TERMS_PER_TOKEN: usize = 4096;
-    /// Postings decoded per query token, same reasoning.
-    const MAX_POSTINGS_PER_TOKEN: usize = 400_000;
+    /// Candidates materialised from the most selective token. Only reached by a
+    /// query made entirely of very common words, where any answer is arbitrary.
+    const MAX_CANDIDATES: usize = 50_000;
 
-    fn matches_for_token(&self, token: &[u8], kind: u32) -> HashMap<u32, u32> {
-        let mut out: HashMap<u32, u32> = HashMap::new();
-        let (lo, hi) = self.prefix_range(token);
+    /// How many postings a term has, without decoding them: the count is the first
+    /// uvarint of its block.
+    fn postings_len(&self, term: usize) -> u64 {
         let postings = self.sec(pack::S_SEARCH_POSTINGS);
-        let mut budget = Self::MAX_POSTINGS_PER_TOKEN;
-        for t in lo..hi.min(lo + Self::MAX_TERMS_PER_TOKEN) {
+        let Some((_, start)) = self.term_idx(term) else { return 0 };
+        let mut pos = start as usize;
+        read_uvarint(postings, &mut pos).unwrap_or(0)
+    }
+
+    /// Total postings across a token's prefix expansion. Used to order tokens by
+    /// selectivity, which is what makes the intersection both correct and cheap.
+    fn token_cost(&self, lo: usize, hi: usize) -> u64 {
+        (lo..hi).map(|t| self.postings_len(t)).sum()
+    }
+
+    /// Materialise the entities matching one token, from its postings.
+    fn candidates_for_token(&self, lo: usize, hi: usize, token: &[u8], kind: u32) -> HashMap<u32, u32> {
+        let mut out: HashMap<u32, u32> = HashMap::new();
+        let postings = self.sec(pack::S_SEARCH_POSTINGS);
+        for t in lo..hi {
             let exact = self.term_bytes(t) == Some(token);
             let weight = if exact { 2 } else { 1 };
             let (Some((_, start)), Some((_, end))) = (self.term_idx(t), self.term_idx(t + 1)) else {
@@ -1043,25 +1056,34 @@ impl<'a> MbPack<'a> {
             let Some(n) = read_uvarint(postings, &mut pos) else { continue };
             let mut prev: u64 = 0;
             for _ in 0..n {
-                if budget == 0 {
-                    break;
-                }
-                budget -= 1;
                 let Some(d) = read_uvarint(postings, &mut pos) else { break };
                 prev += d;
                 let refv = prev as u32;
                 if refv >> KIND_SHIFT == kind {
-                    let idx = refv & IDX_MASK;
-                    let e = out.entry(idx).or_insert(0);
+                    let e = out.entry(refv & IDX_MASK).or_insert(0);
                     *e = (*e).max(weight);
                 }
             }
-            if budget == 0 {
+            if out.len() >= Self::MAX_CANDIDATES {
                 break;
             }
         }
         out
     }
+
+    /// The text a given entity is searched by.
+    fn searchable_text(&self, kind: u32, idx: u32) -> Cow<'a, str> {
+        match kind {
+            KIND_ARTIST => self.artist(idx).map(|a| a.name),
+            KIND_RELEASE_GROUP => self.release_group(idx).map(|g| g.title),
+            _ => self.recording(idx).map(|r| r.title),
+        }
+        .unwrap_or(Cow::Borrowed(""))
+    }
+
+    /// Above this many postings, a token is verified against candidates' text
+    /// instead of by decoding its list. Below it, decoding is cheaper and exact.
+    const POSTING_INTERSECT_MAX: u64 = 2_000_000;
 
     fn search(&self, q: &str, limit: usize, kind: u32, count: u32) -> Vec<SearchHit> {
         if limit == 0 || count == 0 || self.term_count() == 0 {
@@ -1072,30 +1094,86 @@ impl<'a> MbPack<'a> {
         if tokens.is_empty() {
             return Vec::new();
         }
-        // AND across tokens: "dark side" should not return everything matching
-        // "side". Intersecting the smallest set first keeps the work down.
-        let mut acc: Option<HashMap<u32, u32>> = None;
-        for token in &tokens {
-            let m = self.matches_for_token(token.as_bytes(), kind);
-            if m.is_empty() {
+        tokens.sort();
+        tokens.dedup();
+
+        // Expand each token's prefix and cost it. A token matching no term at all
+        // means the AND can never be satisfied.
+        let mut expanded: Vec<(String, usize, usize, u64)> = Vec::with_capacity(tokens.len());
+        for t in &tokens {
+            let (lo, hi) = self.prefix_range(t.as_bytes());
+            if lo >= hi {
                 return Vec::new();
             }
-            acc = Some(match acc {
-                None => m,
-                Some(prev) => {
-                    let (small, large) = if prev.len() <= m.len() { (prev, m) } else { (m, prev) };
-                    small
-                        .into_iter()
-                        .filter_map(|(k, v)| large.get(&k).map(|w| (k, v + w)))
-                        .collect()
+            let cost = self.token_cost(lo, hi);
+            expanded.push((t.clone(), lo, hi, cost));
+        }
+        // Most selective first. This is the whole trick, and it is what makes a
+        // query containing a common word ("of", "the") work at all: capping those
+        // posting lists silently broke the intersection before.
+        expanded.sort_by_key(|e| e.3);
+
+        let (ref rarest, lo, hi, _) = expanded[0];
+        let mut cands = self.candidates_for_token(lo, hi, rarest.as_bytes(), kind);
+        if cands.is_empty() {
+            return Vec::new();
+        }
+
+        // Cheap tokens narrow the set by intersecting posting lists. Expensive ones
+        // are deferred to a single text-verification pass, so a high-frequency token
+        // costs O(candidates) rather than O(its posting list) -- and the candidate
+        // set is already small by the time we get there.
+        let mut deferred: Vec<&str> = Vec::new();
+        for (token, tlo, thi, cost) in expanded.iter().skip(1) {
+            if *cost > Self::POSTING_INTERSECT_MAX {
+                deferred.push(token);
+                continue;
+            }
+            let other = self.candidates_for_token(*tlo, *thi, token.as_bytes(), kind);
+            cands.retain(|idx, w| match other.get(idx) {
+                Some(ow) => {
+                    *w += *ow;
+                    true
                 }
+                None => false,
             });
-            if acc.as_ref().is_some_and(|a| a.is_empty()) {
+            if cands.is_empty() {
                 return Vec::new();
             }
         }
-        let acc = acc.unwrap_or_default();
-        let mut hits: Vec<SearchHit> = acc
+
+        if !deferred.is_empty() {
+            // One text fetch per surviving candidate, checking every deferred token
+            // against its terms at once. Fetching the text is what costs (a zstd
+            // block decompression), so it must not happen per token.
+            let mut buf: Vec<String> = Vec::new();
+            let mut next: HashMap<u32, u32> = HashMap::with_capacity(cands.len());
+            for (&idx, &w) in cands.iter() {
+                let text = self.searchable_text(kind, idx);
+                buf.clear();
+                pack::search_terms(&text, &mut buf);
+                let mut total = w;
+                let mut all = true;
+                for token in &deferred {
+                    match Self::weight_in_terms(&buf, token) {
+                        Some(tw) => total += tw,
+                        None => {
+                            all = false;
+                            break;
+                        }
+                    }
+                }
+                if all {
+                    next.insert(idx, total);
+                }
+            }
+            cands = next;
+            if cands.is_empty() {
+                return Vec::new();
+            }
+        }
+
+        let mut hits: Vec<SearchHit> = cands
             .into_iter()
             .filter(|&(idx, _)| idx < count)
             .map(|(idx, exactness)| SearchHit {
@@ -1107,6 +1185,21 @@ impl<'a> MbPack<'a> {
         hits.sort_by(|a, b| b.score.cmp(&a.score).then(a.idx.cmp(&b.idx)));
         hits.truncate(limit);
         hits
+    }
+
+    /// Weight of `token` against an already-tokenised text: 2 for an exact term,
+    /// 1 for a word-prefix, `None` for no match.
+    fn weight_in_terms(terms: &[String], token: &str) -> Option<u32> {
+        let mut best = None;
+        for term in terms {
+            if term == token {
+                return Some(2);
+            }
+            if term.starts_with(token) {
+                best = Some(1);
+            }
+        }
+        best
     }
 
     /// A free popularity proxy: how many children the entity has, which is a CSR

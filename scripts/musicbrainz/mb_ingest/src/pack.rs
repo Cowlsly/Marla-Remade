@@ -540,6 +540,40 @@ impl StringPool {
         }
     }
 
+    /// Look a string up without interning it.
+    pub fn lookup(&self, s: &str) -> Option<Sym> {
+        if s.is_empty() {
+            return Some(SYM_EMPTY);
+        }
+        let mask = self.slots.len() - 1;
+        let mut j = (Self::hash(s.as_bytes()) as usize) & mask;
+        loop {
+            let v = self.slots[j];
+            if v == 0 {
+                return None;
+            }
+            if self.get(v - 1) == s.as_bytes() {
+                return Some(v - 1);
+            }
+            j = (j + 1) & mask;
+        }
+    }
+
+    /// Symbols in alphabetical order, without consuming the pool. Index into the
+    /// result is a symbol's rank.
+    pub fn sorted_order(&self) -> Vec<Sym> {
+        let mut order: Vec<Sym> = (0..self.starts.len() as u32).collect();
+        let bytes = &self.bytes;
+        let starts = &self.starts;
+        let key = |sym: &u32| -> &[u8] {
+            let start = starts[*sym as usize] as usize;
+            let end = bytes[start..].iter().position(|&b| b == 0).unwrap() + start;
+            &bytes[start..end]
+        };
+        order.sort_unstable_by(|a, b| key(a).cmp(key(b)));
+        order
+    }
+
     /// Sort the distinct strings alphabetically and assign final byte offsets.
     ///
     /// The sorted bytes are deliberately **not** materialised — that would need a

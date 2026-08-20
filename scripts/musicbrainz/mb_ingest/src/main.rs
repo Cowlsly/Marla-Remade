@@ -8,6 +8,7 @@
 //!                                                   [--work-dir <dir>] [-q]
 //! mb_ingest fixture <dir>          write the synthetic test dump
 //! mb_ingest inspect <out.pack>     header, section sizes and a smoke query
+//! mb_ingest query <out.pack> <text> run all three searches and dump one result each
 //! ```
 
 use std::io::{self, Write};
@@ -37,7 +38,8 @@ fn usage() -> io::Error {
          [--no-isrcs] [--no-recording-search] [--no-recording-mbids] [--raw-strings] \
          [--work-dir <dir>] [-q]\n  \
          mb_ingest fixture <dir>\n  \
-         mb_ingest inspect <pack>",
+         mb_ingest inspect <pack>\n  \
+         mb_ingest query <pack> <text>",
     )
 }
 
@@ -52,6 +54,10 @@ fn run() -> io::Result<()> {
             Ok(())
         }
         Some("inspect") => cmd_inspect(args.get(1).ok_or_else(usage)?),
+        Some("query") => cmd_query(
+            args.get(1).ok_or_else(usage)?,
+            args.get(2).ok_or_else(usage)?,
+        ),
         _ => Err(usage()),
     }
 }
@@ -114,6 +120,100 @@ fn cmd_build(args: &[String]) -> io::Result<()> {
         stats.total_bytes as f64 / 1e9,
         started.elapsed().as_secs_f64()
     );
+    Ok(())
+}
+
+fn cmd_query(path: &str, text: &str) -> io::Result<()> {
+    let bytes = std::fs::read(path)?;
+    let pack = MbPack::open(&bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let t0 = std::time::Instant::now();
+    let artists = pack.search_artists(text, 5);
+    let artist_ms = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("search_artists({text:?}) -> {} hits in {artist_ms:.1} ms", artists.len());
+    for h in &artists {
+        let a = pack.artist(h.idx).expect("artist row");
+        println!(
+            "  [{}] {} ({}) {} {} — {} release groups",
+            h.score,
+            a.name,
+            a.kind,
+            a.country,
+            a.begin_date.to_ws2(),
+            pack.artist_release_groups(h.idx).len()
+        );
+    }
+    let t0 = std::time::Instant::now();
+    let rgs = pack.search_release_groups(text, 5);
+    println!(
+        "search_release_groups({text:?}) -> {} hits in {:.1} ms",
+        rgs.len(),
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+    for h in &rgs {
+        let g = pack.release_group(h.idx).expect("rg row");
+        println!(
+            "  [{}] {} — {} ({} {}) {} releases",
+            h.score,
+            g.title,
+            g.credit,
+            g.primary_type,
+            g.first_release_date.to_ws2(),
+            pack.release_group_releases(h.idx).len()
+        );
+    }
+    let t0 = std::time::Instant::now();
+    let recs = pack.search_recordings(text, 5);
+    println!(
+        "search_recordings({text:?}) -> {} hits in {:.1} ms",
+        recs.len(),
+        t0.elapsed().as_secs_f64() * 1000.0
+    );
+    for h in &recs {
+        let r = pack.recording(h.idx).expect("recording row");
+        let isrcs: Vec<String> = pack
+            .recording_isrcs(h.idx)
+            .iter()
+            .map(|i| String::from_utf8_lossy(i).into_owned())
+            .collect();
+        println!(
+            "  [{}] {} — {} ({}s) {} {}",
+            h.score,
+            r.title,
+            r.credit,
+            r.length_secs,
+            pack.recording_mbid(h.idx).map(|m| format_mbid(&m)).unwrap_or_default(),
+            isrcs.join(",")
+        );
+    }
+    // Walk the top release-group hit end to end: the exact path
+    // GET /api/mb/release-group/:mbid then /api/mb/release/:mbid takes.
+    if let Some(h) = rgs.first() {
+        let t0 = std::time::Instant::now();
+        let editions = pack.release_group_releases(h.idx);
+        println!("\ntop release group has {} editions:", editions.len());
+        for &r in editions.iter().take(3) {
+            let rel = pack.release(r).expect("release");
+            println!(
+                "  {} [{}] {} {} — {} tracks across {} media",
+                rel.title,
+                rel.status,
+                rel.date.to_ws2(),
+                rel.country,
+                pack.release_track_count(r),
+                pack.release_media(r).len()
+            );
+        }
+        if let Some(&r) = editions.first() {
+            let list = pack.release_tracklist(r);
+            for (medium, tracks) in list.iter().take(1) {
+                println!("  medium {} {}:", medium.position, medium.format);
+                for t in tracks.iter().take(3) {
+                    println!("    {:>3}. {} — {} ({}s)", t.position, t.title, t.credit, t.length_secs);
+                }
+            }
+        }
+        println!("  walked in {:.1} ms", t0.elapsed().as_secs_f64() * 1000.0);
+    }
     Ok(())
 }
 
