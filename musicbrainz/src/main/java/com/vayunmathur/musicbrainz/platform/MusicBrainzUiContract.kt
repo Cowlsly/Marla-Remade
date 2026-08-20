@@ -90,6 +90,8 @@ data class SearchUiState(
     val error: String? = null,
     /** The catalogue is still importing, so this is a wait rather than a fault. */
     val notReady: Boolean = false,
+    /** The server's reason, when a missing catalogue is not simply on its way. */
+    val notReadyReason: String? = null,
     val hasSearched: Boolean = false,
     val artists: List<ArtistRow> = emptyList(),
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -101,6 +103,8 @@ data class ArtistUiState(
     val error: String? = null,
     /** The catalogue is still importing, so this is a wait rather than a fault. */
     val notReady: Boolean = false,
+    /** The server's reason, when a missing catalogue is not simply on its way. */
+    val notReadyReason: String? = null,
     val name: String = "",
     val subtitle: String? = null,
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -111,6 +115,8 @@ data class ReleaseGroupUiState(
     val error: String? = null,
     /** The catalogue is still importing, so this is a wait rather than a fault. */
     val notReady: Boolean = false,
+    /** The server's reason, when a missing catalogue is not simply on its way. */
+    val notReadyReason: String? = null,
     val title: String = "",
     val artist: String = "",
     val coverUrl: String? = null,
@@ -122,6 +128,8 @@ data class ReleaseUiState(
     val error: String? = null,
     /** The catalogue is still importing, so this is a wait rather than a fault. */
     val notReady: Boolean = false,
+    /** The server's reason, when a missing catalogue is not simply on its way. */
+    val notReadyReason: String? = null,
     val id: String = "",
     val title: String = "",
     val artist: String = "",

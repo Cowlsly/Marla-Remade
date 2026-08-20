@@ -144,6 +144,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 loading = true,
                 error = null,
                 notReady = false,
+                notReadyReason = null,
                 hasSearched = true,
             )
             try {
@@ -185,6 +186,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     loading = false,
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
+                    notReadyReason = e.notReadyReason(),
                 )
             }
         }
@@ -237,6 +239,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     loading = false,
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
+                    notReadyReason = e.notReadyReason(),
                 )
             }
         }
@@ -294,6 +297,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     loading = false,
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
+                    notReadyReason = e.notReadyReason(),
                 )
             }
         }
@@ -316,6 +320,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     loading = false,
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
+                    notReadyReason = e.notReadyReason(),
                 )
             }
         }
@@ -584,6 +589,13 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         album = row.album,
         title = row.title,
     )
+
+    /**
+     * The server's explanation for a catalogue that is not merely on its way, so the screen can
+     * say why instead of promising it will be along shortly.
+     */
+    private fun Exception.notReadyReason(): String? =
+        (this as? CatalogueNotReadyException)?.reason
 
     private fun Exception.readableMessage(): String =
         message?.takeIf { it.isNotBlank() }?.take(200) ?: "Something went wrong"

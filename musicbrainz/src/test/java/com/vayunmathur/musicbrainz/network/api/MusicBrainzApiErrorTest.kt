@@ -29,6 +29,50 @@ class MusicBrainzApiErrorTest {
         )
     }
 
+    /**
+     * An absent catalogue is not always on its way - the host may not be able to build one at
+     * all - so the server's explanation is carried through to replace copy that would otherwise
+     * promise it is coming shortly.
+     */
+    @Test
+    fun `carries the reason an absent catalogue is not coming`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","detail":"cannot build the catalogue here: 5.2 GB RAM free, a build needs 8.0 GB"}""",
+        ) as CatalogueNotReadyException
+        assertEquals(CatalogueNotReadyException.ABSENT, failure.state)
+        assertEquals(
+            "cannot build the catalogue here: 5.2 GB RAM free, a build needs 8.0 GB",
+            failure.reason,
+        )
+    }
+
+    /**
+     * A build in progress genuinely does resolve on its own, so it carries NO reason - the
+     * screen keeps its own "still being prepared, try again shortly" copy, which is true here
+     * and would be a false promise for an absent catalogue. `detail` is build-stage jargon
+     * ("spilling tables") and is not shown to anyone.
+     */
+    @Test
+    fun `does not carry a reason while building`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"building","progress":0.42,"detail":"spilling tables"}""",
+        ) as CatalogueNotReadyException
+        assertEquals(CatalogueNotReadyException.BUILDING, failure.state)
+        assertNull(failure.reason, "a build in progress must not present itself as a dead end")
+    }
+
+    /** A 503 whose body is not the documented JSON still has to read as not-ready. */
+    @Test
+    fun `survives a 503 body that is not the documented json`() {
+        for (body in listOf("", "Service Unavailable", "<html>502 upstream</html>", "{")) {
+            val failure = MusicBrainzApi.failureFor(503, body)
+            assertTrue(failure is CatalogueNotReadyException, "body ${'"'}$body${'"'} should be not-ready")
+            assertNull(failure.reason, "an unparseable body cannot supply a reason")
+        }
+    }
+
     /** Mid-build answers 503 too, and reads the same to the user: come back shortly. */
     @Test
     fun `503 while building is also a wait`() {

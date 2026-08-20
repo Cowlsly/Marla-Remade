@@ -1,20 +1,44 @@
 package com.vayunmathur.musicbrainz.network.api
 
 import com.vayunmathur.library.network.NetworkClient
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import java.io.IOException
 import java.net.HttpURLConnection
 import java.net.URLEncoder
+
+/** The 503 body the server sends when it has no catalogue to answer from. */
+@Serializable
+internal data class NotReadyBody(
+    val error: String = "",
+    val state: String = "",
+    val progress: Float? = null,
+    val detail: String? = null,
+)
 
 /**
  * The server has a catalogue to serve, but not yet: either the data pack was never
  * imported or an import is still running. The server signals both as HTTP 503 with an
  * `{"error":"not_ready"}` body, and reserves other statuses for genuine faults.
  *
- * Kept apart from an ordinary failure because it resolves on its own, so the UI can tell
- * the user to come back shortly instead of reporting a fault they cannot act on.
+ * Kept apart from an ordinary failure because the user can do nothing about it and it is not
+ * a fault at their end.
+ *
+ * [reason] is the server's own explanation, carried only for [ABSENT] - a catalogue that is
+ * absent is not always coming. The host may be unable to build one at all, in which case
+ * telling the user to try again shortly would be a promise nothing is going to keep.
+ * [BUILDING] needs no explanation because it genuinely does resolve on its own.
  */
-class CatalogueNotReadyException(message: String) : IOException(message)
+class CatalogueNotReadyException(
+    message: String,
+    val state: String? = null,
+    val reason: String? = null,
+) : IOException(message) {
+    companion object {
+        const val ABSENT = "absent"
+        const val BUILDING = "building"
+    }
+}
 
 /**
  * Client for the self-hosted MusicBrainz mirror.
@@ -62,15 +86,23 @@ object MusicBrainzApi {
      *
      * 503 is the server saying it has no catalogue loaded yet, which is a wait rather than a
      * fault. The server uses 503 EXCLUSIVELY for that and 500 exclusively for a real failure,
-     * with no overlap, so the status alone is enough to tell them apart - the body is carried
-     * for the log, not parsed to make the decision.
+     * with no overlap, so the STATUS alone decides which kind of failure this is. The body is
+     * parsed only to carry the server's explanation through to the screen, and a body that does
+     * not parse costs nothing but that explanation.
      *
      * Split out from [get] so `MusicBrainzApiErrorTest` can pin the mapping without a server;
      * it is the one place the contract with the server is encoded.
      */
     internal fun failureFor(status: Int, body: String): IOException? = when {
-        status == HttpURLConnection.HTTP_UNAVAILABLE ->
-            CatalogueNotReadyException("HTTP 503: ${body.take(200)}")
+        status == HttpURLConnection.HTTP_UNAVAILABLE -> {
+            val parsed = runCatching { json.decodeFromString<NotReadyBody>(body) }.getOrNull()
+            CatalogueNotReadyException(
+                message = "HTTP 503: ${body.take(200)}",
+                state = parsed?.state?.ifBlank { null },
+                reason = parsed?.detail?.ifBlank { null }
+                    ?.takeIf { parsed.state == CatalogueNotReadyException.ABSENT },
+            )
+        }
         status in 200..299 -> null
         else -> IOException("HTTP $status: ${body.take(500)}")
     }

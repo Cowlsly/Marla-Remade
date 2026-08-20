@@ -101,6 +101,7 @@ fun SearchScreen(
                 state.error != null -> LoadFailureState(
                     error = state.error,
                     notReady = state.notReady,
+                notReadyReason = state.notReadyReason,
                     modifier = Modifier.fillMaxSize(),
                     title = stringResource(R.string.search_failed),
                     retryLabel = stringResource(R.string.retry),
