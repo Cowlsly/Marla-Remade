@@ -23,7 +23,9 @@ import com.vayunmathur.musicbrainz.platform.SafTree
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 
@@ -66,14 +68,16 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
             // Every download is filed as a tagged `.opus`. A stream that is already 48 kHz
             // Opus is only rewrapped into Ogg; everything else is re-encoded. A failure here
             // fails the download rather than writing one of the formats being replaced.
-            val ogg = if (audio.isOpusPassthrough) {
-                OpusRemuxer.remux(applicationContext, raw)
-            } else {
-                // Re-encoding is the slowest step in the download by a wide margin, so it
-                // reports progress of its own; without it the row sits still long enough to
-                // look like a hang and invite the user to cancel a working download.
-                OpusTranscoder.transcode(raw, { isStopped }) { progress ->
-                    DownloadQueue.update(DownloadState.Tagging, key, progress)
+            val ogg = ConvertLimit.withPermit {
+                if (audio.isOpusPassthrough) {
+                    OpusRemuxer.remux(applicationContext, raw)
+                } else {
+                    // Re-encoding is the slowest step in the download by a wide margin, so it
+                    // reports progress of its own; without it the row sits still long enough
+                    // to look like a hang and invite the user to cancel a working download.
+                    OpusTranscoder.transcode(raw, { isStopped }) { progress ->
+                        DownloadQueue.update(DownloadState.Tagging, key, progress)
+                    }
                 }
             } ?: return@withContext fail(key, "Could not convert the download to Opus")
 
@@ -269,6 +273,22 @@ private fun DownloadRequest.toVorbisTags(cover: ByteArray?, lyrics: String?) = V
 /** PNG files start with an 8-byte signature whose second byte is `P`. */
 private fun ByteArray?.isPng(): Boolean =
     this != null && size > 8 && this[1] == 'P'.code.toByte()
+
+/**
+ * Bounds how many tracks convert to Opus at once.
+ *
+ * An album is one worker per track and they all reach the convert step within a second of
+ * each other, so without this a twelve-track album runs twelve AAC decoders and twelve Opus
+ * encoders together. All of those are software, so they contend for the same cores and every
+ * track lands later than it would have done taking turns. Downloading is deliberately left
+ * parallel: that part is network-bound, and overlapping it is what makes an album quick.
+ */
+private object ConvertLimit {
+    /** Two, so one track's decode can overlap another's encode without a stampede. */
+    private val permits = Semaphore(2)
+
+    suspend fun <T> withPermit(block: () -> T): T = permits.withPermit(block)
+}
 
 /**
  * Holds the last few covers fetched from the Cover Art Archive.

@@ -62,7 +62,7 @@
     <!-- Download status: transferring the song. -->
     <string name="state_downloading">Downloading</string>
     <!-- Download status: writing song details into the file. -->
-    <string name="state_tagging">Adding details</string>
+    <string name="state_tagging">Converting audio</string>
     <!-- Download status: finished successfully. -->
     <string name="state_done">Saved</string>
     <!-- Download status: did not finish. -->
