@@ -58,17 +58,26 @@ object MusicBrainzApi {
     }
 
     /**
-     * A 503 is the mirror saying it has no catalogue loaded yet, which is a wait rather
-     * than a fault; every other non-2xx is a real failure.
+     * The failure for a non-2xx status, or null when the response is fine.
+     *
+     * 503 is the server saying it has no catalogue loaded yet, which is a wait rather than a
+     * fault. The server uses 503 EXCLUSIVELY for that and 500 exclusively for a real failure,
+     * with no overlap, so the status alone is enough to tell them apart - the body is carried
+     * for the log, not parsed to make the decision.
+     *
+     * Split out from [get] so `MusicBrainzApiErrorTest` can pin the mapping without a server;
+     * it is the one place the contract with the server is encoded.
      */
+    internal fun failureFor(status: Int, body: String): IOException? = when {
+        status == HttpURLConnection.HTTP_UNAVAILABLE ->
+            CatalogueNotReadyException("HTTP 503: ${body.take(200)}")
+        status in 200..299 -> null
+        else -> IOException("HTTP $status: ${body.take(500)}")
+    }
+
     private suspend inline fun <reified T> get(path: String): T {
         val response = NetworkClient.performRequest("$BASE/$path", headers = headers)
-        if (response.status == HttpURLConnection.HTTP_UNAVAILABLE) {
-            throw CatalogueNotReadyException("HTTP 503: ${response.body.take(200)}")
-        }
-        if (!response.isSuccess) {
-            throw IOException("HTTP ${response.status}: ${response.body.take(500)}")
-        }
+        failureFor(response.status, response.body)?.let { throw it }
         return json.decodeFromString<T>(response.body)
     }
 

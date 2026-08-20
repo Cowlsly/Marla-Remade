@@ -1,0 +1,97 @@
+package com.vayunmathur.musicbrainz.network.api
+
+import java.io.IOException
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertNull
+import kotlin.test.assertTrue
+
+/**
+ * Pins how HTTP statuses from the self-hosted catalogue map onto failures.
+ *
+ * This is the contract with the server written down as assertions: 503 means "no catalogue
+ * loaded yet", which is a wait, and 500 means a genuine fault. The two never overlap, which is
+ * what lets the app say "catalogue not ready" instead of "something went wrong". If the server
+ * ever starts answering 503 for real faults, or 500 while it is still importing, the screens
+ * quietly start lying to the user - so the split is asserted here rather than trusted.
+ */
+class MusicBrainzApiErrorTest {
+
+    @Test
+    fun `503 is a wait rather than a fault`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","detail":"no catalogue pack on this server"}""",
+        )
+        assertTrue(
+            failure is CatalogueNotReadyException,
+            "503 must surface as not-ready, got ${failure?.javaClass?.simpleName}",
+        )
+    }
+
+    /** Mid-build answers 503 too, and reads the same to the user: come back shortly. */
+    @Test
+    fun `503 while building is also a wait`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"building","progress":0.42,"detail":"spilling tables"}""",
+        )
+        assertTrue(failure is CatalogueNotReadyException)
+    }
+
+    /**
+     * 500 is the server's signal for a real fault and must NOT be dressed up as a wait -
+     * telling the user to try again in a few minutes would hide a genuine server bug.
+     */
+    @Test
+    fun `500 is a genuine failure`() {
+        val failure = MusicBrainzApi.failureFor(500, """{"error":"internal"}""")
+        assertTrue(failure is IOException)
+        assertTrue(
+            failure !is CatalogueNotReadyException,
+            "500 must not be reported to the user as a catalogue that is still importing",
+        )
+    }
+
+    /**
+     * A 404 means the route is not there at all, which is a deployment fault rather than a
+     * catalogue still importing. Reporting it as not-ready would reassure the user while
+     * hiding that the server was never rolled out.
+     */
+    @Test
+    fun `404 is a genuine failure, not a missing catalogue`() {
+        val failure = MusicBrainzApi.failureFor(404, "Not Found")
+        assertTrue(failure is IOException)
+        assertTrue(failure !is CatalogueNotReadyException)
+    }
+
+    @Test
+    fun `other error statuses are genuine failures`() {
+        for (status in listOf(400, 401, 403, 429, 502, 504)) {
+            val failure = MusicBrainzApi.failureFor(status, "boom")
+            assertTrue(failure is IOException, "$status should fail")
+            assertTrue(failure !is CatalogueNotReadyException, "$status must not read as not-ready")
+        }
+    }
+
+    @Test
+    fun `success statuses are not failures`() {
+        for (status in listOf(200, 201, 204, 299)) {
+            assertNull(MusicBrainzApi.failureFor(status, "{}"), "$status should not fail")
+        }
+    }
+
+    /** The status is kept in the message so a report names the code that caused it. */
+    @Test
+    fun `carries the status into the message`() {
+        assertEquals("HTTP 500: boom", MusicBrainzApi.failureFor(500, "boom")?.message)
+        assertTrue(MusicBrainzApi.failureFor(503, "waiting")?.message?.contains("503") == true)
+    }
+
+    /** A long error body must not be pasted wholesale into a message the UI may show. */
+    @Test
+    fun `truncates a long body`() {
+        val message = MusicBrainzApi.failureFor(500, "x".repeat(5_000))?.message.orEmpty()
+        assertTrue(message.length < 600, "message was ${message.length} chars")
+    }
+}
