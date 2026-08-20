@@ -39,14 +39,36 @@ import kotlinx.coroutines.withContext
  */
 class OcrEngine(private val context: Context) {
 
-    /** One recognised, axis-aligned text region in source-bitmap pixel coordinates. */
+    /** A corner of a [TextBox] quad, in source-bitmap pixel coordinates. */
+    data class Corner(val x: Float, val y: Float)
+
+    /**
+     * One recognised text region in source-bitmap pixel coordinates.
+     *
+     * [corners] are the four corners of the region's oriented quad in reading
+     * order: corner 0 -> 1 runs along the text and corner 0 -> 3 spans its
+     * height. [left]/[top]/[right]/[bottom] are the axis-aligned bounds of that
+     * quad, so they stay meaningful for consumers that only need a rect.
+     * [vertical] marks a region read as vertical script (stacked glyphs).
+     */
     data class TextBox(
         val text: String,
         val left: Int,
         val top: Int,
         val right: Int,
         val bottom: Int,
-    )
+        val corners: List<Corner> = listOf(
+            Corner(left.toFloat(), top.toFloat()),
+            Corner(right.toFloat(), top.toFloat()),
+            Corner(right.toFloat(), bottom.toFloat()),
+            Corner(left.toFloat(), bottom.toFloat()),
+        ),
+        val vertical: Boolean = false,
+    ) {
+        /** Centre of the quad. Bands reading order without skewing on tilt. */
+        val centerY: Float get() = corners.sumOf { it.y.toDouble() }.toFloat() / corners.size
+        val centerX: Float get() = corners.sumOf { it.x.toDouble() }.toFloat() / corners.size
+    }
 
     /** Full result: the joined [text] plus the individual [boxes] it came from. */
     data class OcrResult(val text: String, val boxes: List<TextBox>)
@@ -74,9 +96,21 @@ class OcrEngine(private val context: Context) {
                 val boxes = engine.recognize(bitmap)
                     .asSequence()
                     .filter { it.text.isNotBlank() && it.right > it.left && it.bottom > it.top }
-                    // Reading order: top-to-bottom, then left-to-right within a row band.
-                    .sortedWith(compareBy({ it.top / READING_ROW_BAND }, { it.left }))
-                    .map { TextBox(it.text.trim(), it.left, it.top, it.right, it.bottom) }
+                    .map { line ->
+                        TextBox(
+                            text = line.text.trim(),
+                            left = line.left,
+                            top = line.top,
+                            right = line.right,
+                            bottom = line.bottom,
+                            corners = List(4) { Corner(line.quad[it * 2], line.quad[it * 2 + 1]) },
+                            vertical = line.vertical,
+                        )
+                    }
+                    // Reading order: top-to-bottom, then left-to-right within a
+                    // row band. Banding on the quad centre rather than its top
+                    // edge keeps a tilted line's regions in one band.
+                    .sortedWith(compareBy({ it.centerY.toInt() / READING_ROW_BAND }, { it.centerX }))
                     .toList()
                 OcrResult(boxes.joinToString("\n") { it.text }.trim(), boxes)
             } catch (e: Exception) {
