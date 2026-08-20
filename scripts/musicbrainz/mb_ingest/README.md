@@ -54,7 +54,8 @@ tar -xf mbdump.tar.bz2 -C /scratch/mbdump TIMESTAMP mbdump/artist mbdump/track .
 ./target/release/mb_ingest inspect /tmp/musicbrainz.pack
 ./target/release/mb_ingest query  /tmp/musicbrainz.pack "dark side"
 
-cargo test          # 43 tests, including a full round trip through the reader
+cargo test          # 48 tests, including a full round trip through the reader
+                    # and three that prove the reader cannot panic on corrupt input
 ```
 
 Flags: `--tier-a` adds track MBIDs, `--official-only` drops the 9.4% of releases
@@ -80,8 +81,14 @@ Verified against the live export by extracting it, not by reading the schema:
 **`release_group_meta` is NOT in the core dump**, despite being marked
 `-- replicate` in `admin/sql/CreateTables.sql` — that marker governs replication
 packets, not the dump split. Its `first_release_date_*` is therefore derived as
-the earliest date across a group's releases, which is how upstream materialises it
-in the first place. This is what keeps the crate off `mbdump-derived.tar.bz2`.
+the earliest date across a group's releases, which is how upstream materialises it.
+This is what keeps the crate off `mbdump-derived.tar.bz2`.
+
+The comparison uses `pack::date_rank`, not the raw packed date: a year-only date
+packs with month and day zero, so a raw `<` makes `1973` beat `1973-03-24` and the
+group loses the precise date. Spot-checked against musicbrainz.org after the fix —
+*The Dark Side of the Moon* `1973-03-24`, *Homogenic* `1997-09-20`, *Nevermind*
+`1991-09-24`, all three exact matches.
 
 Tables read (19), and `build::TABLES` is the authoritative list — import it rather
 than duplicating it: `area`, `iso_3166_1`, `artist_type`,
@@ -91,12 +98,17 @@ than duplicating it: `area`, `iso_3166_1`, `artist_type`,
 `release_country`, `release_unknown_country`, `medium`, `recording`, `track`,
 `isrc`.
 
-Measured uncompressed sizes of the 19 tables read (total ~15.2 GB):
+Measured uncompressed sizes of the 19 tables read (total ~14.8 GB):
 `track` 7409 MB, `recording` 4319, `release` 739, `medium` 560,
 `release_group` 459, `artist` 416, `artist_credit` 396, `isrc` 368,
 `release_country` 273, `artist_credit_name` 227,
 `release_group_secondary_type_join` 35, `area` 13,
 `release_unknown_country` 8, and six enum tables under 1 MB each.
+
+Deflate-compressed, measured rather than assumed, the same 19 tables are
+**6.24 GB — an overall ratio of 2.37x, not 3x**. `isrc` (5.12x) and
+`release_country` (3.48x) beat it because they are nearly pure digits; `track`
+(2.52x) and `recording` (2.13x) are ordinary text and are 79% of the volume.
 
 **`mbdump-derived.tar.bz2` is not needed** — it holds annotations, ratings, user
 tags and search indexes, none of which the app requests, and depending on it
@@ -139,9 +151,29 @@ numbers from a completed run, not projections. `MB` means 10⁶ bytes.
 | CSR indexes, `MEDIA`, `CREDITS`, buckets | 168.0 |
 | **total, tier B** | **2 655.0** |
 
-**2,655,030,016 bytes = 2.655 GB**, built in **7.7 minutes** with a peak RSS of
-**3.51 GB**. Byte-for-byte reproducible: two consecutive runs over the full
+**2,655,030,016 bytes = 2.655 GB**, built in **6.9 minutes** with a peak RSS of
+**2.64 GB**. Byte-for-byte reproducible: two consecutive runs over the full
 catalogue produce the identical SHA256.
+
+### Where the +145 MB over projection went
+
+| section | projected | measured | delta |
+|---|---|---|---|
+| `SEARCH_POSTINGS` | 173 | **299.0** | **+126** |
+| `STRINGS` | 181 | **227.8** | **+47** |
+| `CREDITS` | 12.4 | **20.3** | +8 |
+| `SEARCH_TERMS` | 44 | **51.5** | +8 |
+| `SEARCH_TERM_IDX` | 44 | **34.7** | −9 |
+| `TRACKS` | 235 | **196.4** | **−39** |
+| everything else | — | — | ~0 |
+
+Two misses and one win. The postings miss dominates: the design doc estimated
+78.8 M postings and there are **157,118,254**, exactly 2x. `STRINGS` missed
+because the raw pool is 805 MB rather than the estimated 635 MB — the
+distinct-recording-title fraction is 49.9%, not 40%. `TRACKS` came in 39 MB
+*under* projection, so the inline-override design paid off more than claimed.
+`CREDITS` is sized to max `artist_credit` id (5,083,674) rather than live rows
+(3,830,114), a 1.33x id gap.
 
 Row counts in the pack: 2,962,348 artists / 4,468,998 release groups /
 5,714,674 releases / 6,274,550 media / 57,404,909 tracks / 39,881,298 recordings
@@ -192,29 +224,44 @@ Tier A (add track MBIDs) would be ~3.57 GB.
 ## Where the memory goes
 
 Peak RSS is the binding constraint, not wall time: the ingest runs in-process
-alongside the live server on an 11 GB box, so the budget is 4 GB. **Measured peak
-is 3.51 GB**, down from 6.14 GB on the first real run. Five rules the code
-follows, each one worth a measured amount:
+alongside the live server on a box with 5-7 GB free. **Measured peak is 2.64 GB**,
+down from 6.14 GB on the first real run. Measured per phase, by timestamping every
+phase and sampling RSS from outside the process:
 
-* **`TRACKS` is never a `Vec<TrackRec>`.** It is built as a varint byte stream as
-  the tracks are visited. This is the failure recorded at
-  `scripts/maps/gtfs_ingest/src/index.rs:15-27`, where a fixed-size record per
-  stop per trip made a world transit pack 10-20 GB and overflowed a u32.
+| phase | peak RSS | delta |
+|---|---|---|
+| pass 2-6 artists, credits, RGs, releases, media | 1.23 GB | |
+| pass 7 recordings | 2.56 GB | **+1.33** |
+| pass 8-9 track spill, pool sort | 2.44 GB | −0.12 |
+| pass 10 TRACKS | 3.05 GB | +0.61 |
+| pass 13 search index | 3.33 GB | +0.21 |
+| pass 14 writing | **3.49 GB** | +0.16 |
+
+That was the 3.49 GB profile. The two changes that took it to 2.64 GB came
+straight off it: emitting the artist/release-group/release sections **before** the
+track pass and dropping those vectors (−571 MB, keeping only their 30 MB of
+name/title symbols for the search index), and streaming `TRACKS` into the pack
+rather than buffering the whole varint stream (−196 MB).
+
+The peak is accumulation, not one allocation — nothing was freed between pass 2
+and the write. Six rules the code follows, each worth a measured amount:
+
+* **`TRACKS` is never a `Vec<TrackRec>`** and is now streamed. This is the failure
+  recorded at `scripts/maps/gtfs_ingest/src/index.rs:15-27`, where a fixed-size
+  record per stop per trip made a world transit pack 10-20 GB and overflowed a u32.
 * **id maps are dense `Vec<u32>` keyed by the dump's integer primary key.**
   mbdump foreign keys are integer row ids (`track.recording INTEGER`), not gids.
   Measured: **83 MB** for all six, against ~1.4 GB for a `HashMap<[u8;16], u32>`
-  over recording gids alone.
-* **track rows are bucket-sorted through spill files.** 24-byte records go to 64
-  medium-keyed buckets (1.38 GB on disk, measured) and each ~25 MB bucket is
-  sorted in memory. Buffering all 57.4 M rows to sort would be ~1.4 GB resident.
+  over recording gids alone. Measured id gaps are 1.03-1.19x, not the 1.6x assumed.
+* **track rows are bucket-sorted through spill files** — 64 medium-keyed buckets,
+  1.38 GB on disk, ~25 MB resident.
 * **the search dictionary is a symbol pool, not `HashMap<String,u32>`**, and
-  postings are spilled to 64 rank-keyed buckets and streamed into the pack.
-  Together **~3 GB**: 157 M postings as `Vec<(u32,u32)>` is 1.26 GB, and the map
-  plus the `Vec<(String,u32)>` it was drained into held ~4.3 M duplicated `String`
-  allocations at once.
-* **every buffer is dropped as soon as its section is on disk**, and the 638 MB
-  recording-MBID pass runs immediately before its own write so it never overlaps
-  the search index. ~1.1 GB at the peak moment.
+  postings are spilled to 64 rank-keyed buckets and streamed. Together ~3 GB: the
+  map plus the `Vec<(String,u32)>` it was drained into held ~4.3 M duplicated
+  `String` allocations at once, and 157 M postings as `Vec<(u32,u32)>` is 1.26 GB.
+* **entity vectors go to disk before the track pass** and are dropped.
+* **every remaining buffer is dropped as soon as its section is on disk**, and the
+  638 MB recording-MBID pass runs immediately before its own write.
 
 Disk: 1.38 GB of scratch for the track spill plus ~1.26 GB for the postings spill
 (`--work-dir`), and the pack itself.
