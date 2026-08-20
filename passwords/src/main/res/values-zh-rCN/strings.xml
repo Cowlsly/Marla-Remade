@@ -43,4 +43,13 @@
     <string name="cable_prompt_title">在您的其他设备上登录？</string>
     <string name="cable_prompt_subtitle">验证以批准此通行密钥登录</string>
     <string name="name_required">名称不能为空</string>
+    <string name="sync_file_none">（未选择文件）</string>
+    <string name="sync_choose_file">选择现有文件</string>
+    <string name="sync_create_file">创建新文件</string>
+    <string name="sync_save">保存</string>
+    <string name="sync_cancel">取消</string>
+    <string name="sync_last">上次更新</string>
+    <string name="sync_never">从未同步</string>
+    <string name="sync_now">现在同步</string>
+    <string name="label_note">注释</string>
 </resources>
