@@ -105,6 +105,12 @@ internal object ShareNative {
     /** Why the session failed, or null while it is healthy. */
     external fun nativeQueryFailureReason(handle: Long): String?
 
+    /**
+     * The peer's advertised device name, or null before its `CONNECTION_REQUEST` has been
+     * read. Prefers the human-readable name inside `endpoint_info` over `endpoint_name`.
+     */
+    external fun nativeQueryPeerName(handle: Long): String?
+
     /** Recent protocol events, one per line — which frames each side actually exchanged. */
     external fun nativeQueryTrace(handle: Long): String?
 

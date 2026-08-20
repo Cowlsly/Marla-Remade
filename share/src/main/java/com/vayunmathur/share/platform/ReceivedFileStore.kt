@@ -93,6 +93,25 @@ class ReceivedFileStore(private val context: Context) {
     }
 
     /**
+     * Delete staged files older than [maxAgeMillis].
+     *
+     * Cold-start recovery: nothing else survives process death — sockets, native handles and
+     * the open-stream map all go — but the half-written files do, and no [ReceivedFile] was
+     * ever published for them, so nothing can reach them again. Age-based rather than
+     * delete-everything because a completed file the user has not saved yet is still theirs.
+     *
+     * Returns how many files were removed.
+     */
+    fun gcOrphans(maxAgeMillis: Long): Int {
+        val cutoff = System.currentTimeMillis() - maxAgeMillis
+        val stillOpen = synchronized(lock) { open.values.map { it.file.absolutePath }.toSet() }
+        return dir.listFiles()
+            ?.filter { it.isFile && it.lastModified() < cutoff && it.absolutePath !in stillOpen }
+            ?.count { it.delete() }
+            ?: 0
+    }
+
+    /**
      * A content URI another app can read, granted per-intent.
      *
      * The authority is derived from the package name so it stays correct across build
@@ -110,9 +129,20 @@ class ReceivedFileStore(private val context: Context) {
 
     companion object {
         /** MIME type for [file] from its extension, for the share chooser. */
-        fun mimeTypeOf(file: File): String =
-            MimeTypeMap.getSingleton().getMimeTypeFromExtension(file.extension.lowercase())
+        fun mimeTypeOf(file: File): String = mimeTypeOf(file.name)
+
+        /**
+         * MIME type for a file [name] from its extension.
+         *
+         * The name overload is what the send path needs: it announces types for files it has
+         * only staged a copy of, and `""` made every image and video arrive at the peer as a
+         * generic document.
+         */
+        fun mimeTypeOf(name: String): String {
+            val ext = name.substringAfterLast('.', "").lowercase()
+            return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
                 ?: "application/octet-stream"
+        }
 
         /** `report.pdf` -> `report_1.pdf` when the name is taken. */
         fun uniqueFile(dir: File, name: String): File {

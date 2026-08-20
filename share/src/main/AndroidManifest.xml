@@ -12,29 +12,36 @@
          and transfer both depend on it. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
-    <!-- BLE discovery (Nearby Connections uses BLE for advertisement + scan) -->
-    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
-    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <!-- BLE discovery (Nearby Connections uses BLE for advertisement + scan).
+         No BLUETOOTH_CONNECT: the peer's name comes from the endpoint-info blob inside the
+         advertisement, falling back to ScanRecord.getDeviceName(), and both are parsed from
+         bytes we already have. BluetoothDevice.getName() is the only API here that would need
+         CONNECT, and it reports the same advertised local name.
+         No location permission either: minSdk is 31, so neverForLocation on BLUETOOTH_SCAN is
+         the whole story — the pre-Android-12 classic-scan fallback that used to require
+         ACCESS_FINE_LOCATION cannot be reached. -->
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
-    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
-    <!-- BLE scan is location-free (neverForLocation above), but ACCESS_FINE_LOCATION
-         is still needed on Android < 12 when the BLE stack falls back to classic scan. -->
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
-    <!-- Stay discoverable/receivable in background -->
+    <!-- Stay discoverable/receivable in background. NOT dataSync: Android 15 caps
+         dataSync foreground services at 6 cumulative hours per 24h and then calls
+         onTimeout() and stops the service, which for an always-on receiver means it
+         silently stops being receivable part-way through the day (see :vpn's manifest for
+         the same reasoning). connectedDevice is semantically accurate — BLE advertising
+         plus a local peer link — is not capped, and is not on Android 13/14's list of
+         types a BOOT_COMPLETED receiver may not start. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- Nearby Share over Wi-Fi Direct / Hotspot uses nearby-devices on Android 13+ -->
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
 
-    <!-- Reading files chosen in the send flow -->
-    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
-    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <!-- Deliberately NO storage or media permissions. Files to send are picked with
+         ACTION_OPEN_DOCUMENT and files are saved with ACTION_CREATE_DOCUMENT, both of which
+         grant access to exactly the URI the user chose. Received files are staged in
+         app-private storage and handed out through the FileProvider below. -->
 
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
@@ -71,11 +78,51 @@
             </intent-filter>
         </activity>
 
+        <!-- Transparent trampoline for the Save action's SAF directory picker: an
+             ActivityResultLauncher needs an Activity and there is no receive screen left.
+             Deliberately NOT noHistory: that finishes the activity as soon as it stops being
+             visible, which is exactly what launching the picker does, so the result callback
+             would be dropped. excludeFromRecents gives the invisibility without the hazard. -->
+        <activity
+            android:name=".platform.receive.ShareSaveActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
         <!-- Keep receiving / transferring while backgrounded. -->
         <service
             android:name=".platform.transfer.ShareTransferService"
             android:exported="false"
-            android:foregroundServiceType="dataSync" />
+            android:foregroundServiceType="connectedDevice" />
+
+        <!-- The only on/off control for receiving. -->
+        <service
+            android:name=".platform.receive.ShareReceiveTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_share"
+            android:label="@string/share_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVITY"
+                android:value=".MainActivity" />
+        </service>
+
+        <!-- Accept / Reject / Cancel from a notification. Explicit component only. -->
+        <receiver
+            android:name=".platform.receive.ShareNotificationReceiver"
+            android:exported="false" />
+
+        <receiver
+            android:name=".platform.receive.ShareBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
         <!-- Grants read access to a received file when the user taps Share. -->
         <provider
             android:name="androidx.core.content.FileProvider"

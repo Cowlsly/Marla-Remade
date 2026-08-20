@@ -43,7 +43,7 @@
 //! `"Incorrect next protocol"` / alert 103 (`p000\jgzt.java:550-551`). Offering
 //! `Aes256GcmSiv`, as this module previously did, is rejected outright.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crypto_provider_default::CryptoProviderImpl;
 use ukey2_connections::{
@@ -177,9 +177,6 @@ enum HandshakeState {
 
 /// One peer connection's protocol state.
 pub struct Session {
-    /// Which side of the socket this is. Decides who sends `CONNECTION_REQUEST` and who
-    /// opens the paired-key exchange.
-    role: Role,
     /// Human-readable local device name, sent as `ConnectionRequestFrame.endpoint_name`.
     pub local_name: String,
     /// Opaque Nearby Sharing endpoint blob, sent as `ConnectionRequestFrame.endpoint_info`.
@@ -206,6 +203,11 @@ pub struct Session {
     paired_key_result_sent: bool,
     peer_paired_key_result_seen: bool,
     active_send: Option<ActiveSend>,
+    /// Announced payload ids whose `FLAG_LAST` chunk has been written.
+    ///
+    /// The sender's completion condition, and the only one it has: nothing comes back from
+    /// the peer to confirm a payload landed.
+    sent_payloads: HashSet<i64>,
     recvs: HashMap<i64, ActiveRecv>,
     /// Partially received BYTES payloads, keyed by payload id.
     bytes_recvs: HashMap<i64, Vec<u8>>,
@@ -308,7 +310,6 @@ impl Session {
             local_endpoint_id
         };
         let mut session = Self {
-            role,
             local_name,
             local_endpoint_info,
             state: State::Handshaking,
@@ -328,6 +329,7 @@ impl Session {
             paired_key_result_sent: false,
             peer_paired_key_result_seen: false,
             active_send: None,
+            sent_payloads: HashSet::new(),
             recvs: HashMap::new(),
             bytes_recvs: HashMap::new(),
             trace: VecDeque::new(),
@@ -644,27 +646,21 @@ impl Session {
         0
     }
 
-    /// Move to [`Phase::PairedKey`], and send `PAIRED_KEY_ENCRYPTION` only as the responder.
+    /// Move to [`Phase::PairedKey`] and send `PAIRED_KEY_ENCRYPTION`, whichever role this is.
     ///
-    /// The responder — which is always the receiver — speaks first, immediately after its
-    /// `CONNECTION_RESPONSE`. An initiator that sends it proactively is disconnected instead:
-    /// measured against a Pixel 7 Pro on GMS 26.24.34, sending as soon as the
-    /// `CONNECTION_RESPONSE` arrived drew a `DISCONNECTION` 250 ms later.
+    /// Both sides speak first, immediately after the mutual `CONNECTION_RESPONSE`. That is
+    /// what `rquickshare` does — an independent non-GMS implementation that interoperates
+    /// with real Quick Share: `core_lib/src/hdl/inbound.rs` (`process_connection_response`)
+    /// sends its `CONNECTION_RESPONSE` and then its `PAIRED_KEY_ENCRYPTION` back to back,
+    /// with the same 6-byte/72-byte random decoys, from either role.
     ///
-    /// Cross-checked against `rquickshare`, an independent non-GMS implementation that
-    /// interoperates with real Quick Share: `core_lib/src/hdl/inbound.rs`
-    /// (`process_connection_response`) sends its `CONNECTION_RESPONSE` and then its
-    /// `PAIRED_KEY_ENCRYPTION` back to back, with the same 6-byte/72-byte random decoys, and
-    /// only replies with `PAIRED_KEY_RESULT` once the peer's encryption frame arrives.
-    ///
-    /// A previous revision made this reactive for both roles on the theory that GMS drops
-    /// frames arriving before it has sent its own. That was wrong — waiting produced the
-    /// identical 15 s `AUTH_FAILURE`, so the ordering was never the problem.
+    /// An earlier revision restricted this to the responder because an initiator that sent it
+    /// proactively appeared to draw a `DISCONNECTION` 250 ms later. That was an artefact of
+    /// the `PayloadChunk.flags` bug: GMS discarded the chunk carrying the frame outright
+    /// (`OfflineFrame PAYLOAD_TRANSFER(DATA) missing flags field`), so what looked like a
+    /// rejected frame was a frame it never received.
     fn enter_paired_key(&mut self) -> i32 {
         self.phase = Phase::PairedKey;
-        if self.role == Role::Initiator {
-            return 0;
-        }
         self.send_paired_key_encryption()
     }
 
@@ -853,8 +849,8 @@ impl Session {
         };
         self.note(format!("in Sharing type {}", v1.r#type));
         if v1.r#type == SharingFrameType::PairedKeyEncryption as i32 {
-            // The peer spoke first, which is the responder's job; ours goes out now that it
-            // is demonstrably ready to be spoken to.
+            // Ours has normally gone out already, from `enter_paired_key`; this covers a peer
+            // that somehow beat our own `CONNECTION_RESPONSE` handling.
             let rc = self.send_paired_key_encryption();
             if rc < 0 {
                 return rc;
@@ -940,20 +936,22 @@ impl Session {
         0
     }
 
-    /// Move to [`Phase::Ready`] once our half of the paired-key exchange is done.
+    /// Move to [`Phase::Ready`] once **both** halves of the paired-key exchange are done.
     ///
-    /// Deliberately **not** gated on the peer's `PAIRED_KEY_RESULT`. Measured against a
-    /// Pixel 7 Pro on GMS 26.24.34: it sends `PAIRED_KEY_ENCRYPTION`, accepts our
-    /// encryption + `UNABLE` result, and then sends no result of its own — it is waiting
-    /// for the `INTRODUCTION`. Waiting for a result it never sends deadlocks both sides
-    /// until the peer gives up (~15 s) and sends `DISCONNECTION`.
+    /// Gated on the peer's `PAIRED_KEY_RESULT` as well as our own, matching `rquickshare`,
+    /// which sends the `INTRODUCTION` only after the peer's result arrives. GMS demonstrably
+    /// does send Sharing type 4 — `in Sharing type 4` appears in the verified receive trace —
+    /// so an earlier revision that relaxed this gate was working around the
+    /// `PayloadChunk.flags` bug, which had GMS silently drop the frames that would have
+    /// prompted it.
     ///
-    /// `peer_paired_key_result_seen` is still tracked, for the failure reason.
+    /// Introducing before the peer's result risks the same drop-on-arrival behaviour, since
+    /// the peer's Sharing layer is not listening for an introduction yet.
     fn maybe_enter_ready(&mut self) {
         if self.phase != Phase::PairedKey {
             return;
         }
-        if !self.paired_key_result_sent {
+        if !self.paired_key_result_sent || !self.peer_paired_key_result_seen {
             return;
         }
         self.phase = Phase::Ready;
@@ -1095,10 +1093,34 @@ impl Session {
         }
         if finished {
             self.active_send = None;
+            self.sent_payloads.insert(payload_id);
+            self.maybe_complete_send();
         } else if let Some(active) = self.active_send.as_mut() {
             active.sent_offset = cursor;
         }
         0
+    }
+
+    /// Flip to [`State::Completed`] once every payload our `INTRODUCTION` announced has had
+    /// its `FLAG_LAST` chunk written.
+    ///
+    /// Without this a successful send never completes: `Completed` used to be assigned only on
+    /// the receive path, so after `close_file()` the pump span until the peer hung up and the
+    /// `DISCONNECTION` handler then converted a finished send into a failure. Reaching
+    /// `Completed` here also makes that handler a no-op, because [`Session::feed_inbound`]
+    /// stops reading once the session is terminal.
+    fn maybe_complete_send(&mut self) {
+        if self.state != State::Transferring || self.files_to_send.is_empty() {
+            return;
+        }
+        let all_sent = self
+            .files_to_send
+            .iter()
+            .all(|f| f.payload_id > 0 && self.sent_payloads.contains(&f.payload_id));
+        if all_sent {
+            self.note(format!("all {} announced payload(s) written", self.files_to_send.len()));
+            self.state = State::Completed;
+        }
     }
 
     /// Finish the open FILE payload.
@@ -1247,10 +1269,10 @@ mod tests {
     }
 
     #[test]
-    fn only_the_responder_opens_the_paired_key_exchange() {
-        // The responder is the receiver and speaks first; an initiator that sends
-        // PAIRED_KEY_ENCRYPTION proactively is disconnected by GMS within 250 ms.
-        // See `Session::enter_paired_key`.
+    fn both_roles_open_the_paired_key_exchange() {
+        // Both sides send PAIRED_KEY_ENCRYPTION as soon as the mutual CONNECTION_RESPONSE
+        // lands, which is what rquickshare does from either role. See
+        // `Session::enter_paired_key`.
         let (initiator, responder) = connected_pair();
         assert!(
             responder.paired_key_encryption_sent,
@@ -1258,18 +1280,55 @@ mod tests {
         );
         assert!(
             initiator.paired_key_encryption_sent,
-            "initiator never answered the paired-key exchange",
+            "initiator never opened the paired-key exchange",
         );
 
-        // In isolation, with no peer traffic at all, the initiator must stay silent.
+        // Unprompted, with no peer traffic at all: entering the phase is itself the trigger.
         let mut lone = test_session(Role::Initiator, "Solo", b"solo-info".to_vec());
         let _ = lone.outbound_drain();
-        lone.phase = Phase::PairedKey;
-        assert!(
-            !lone.paired_key_encryption_sent,
-            "initiator spoke first in the paired-key exchange",
+        lone.secure = None;
+        assert_eq!(
+            lone.enter_paired_key(),
+            -2,
+            "there is no secure channel yet, so the frame cannot be encrypted",
         );
-        assert!(lone.outbound_drain().is_none(), "initiator sent an unprompted frame");
+        assert!(lone.paired_key_encryption_sent, "initiator waited to be spoken to");
+    }
+
+    #[test]
+    fn the_introduction_waits_for_the_peers_paired_key_result() {
+        // rquickshare sends the INTRODUCTION only after the peer's PAIRED_KEY_RESULT, and GMS
+        // demonstrably does send one (`in Sharing type 4` in the verified receive trace).
+        // Introducing earlier risks the peer's Sharing layer dropping it on arrival.
+        let mut sender = test_session(Role::Initiator, "Alice", vec![]);
+        let mut receiver = test_session(Role::Responder, "Bob", vec![]);
+        sender.set_pending_files_for_send(vec![FileMeta {
+            name: "photo.jpg".to_string(),
+            size_bytes: 1,
+            mime_type: String::new(),
+            payload_id: 0,
+        }]);
+        assert_eq!(sender.queue_introduction(), 0);
+        settle(&mut sender, &mut receiver);
+        assert!(sender.peer_paired_key_result_seen, "peer result never arrived");
+        assert!(sender.is_ready(), "sender never became Ready");
+        assert_eq!(receiver.state, State::AwaitingAccept);
+
+        // Without the peer's result the introduction stays queued rather than going out.
+        let (mut lone, _) = connected_pair();
+        lone.phase = Phase::PairedKey;
+        lone.peer_paired_key_result_seen = false;
+        lone.introduction_sent = false;
+        lone.set_pending_files_for_send(vec![FileMeta {
+            name: "early.txt".to_string(),
+            size_bytes: 1,
+            mime_type: String::new(),
+            payload_id: 0,
+        }]);
+        assert_eq!(lone.queue_introduction(), 0);
+        let _ = lone.outbound_drain();
+        lone.maybe_enter_ready();
+        assert!(!lone.introduction_sent, "introduced before the peer's result");
     }
 
     #[test]
@@ -1508,6 +1567,77 @@ mod tests {
         assert_eq!(receiver.accept(true, "/tmp"), 0);
         assert_eq!(receiver.state, State::Transferring);
         settle(&mut sender, &mut receiver);
+        assert_eq!(sender.state, State::Transferring);
+    }
+
+    #[test]
+    fn the_sender_completes_once_every_announced_payload_is_written() {
+        // The send-side P0: Completed used to be assigned only on the receive path, so a
+        // finished send span until the peer hung up and the DISCONNECTION handler then
+        // reported the successful transfer as a failure.
+        let (mut sender, mut receiver) = connected_pair();
+        let a: Vec<u8> = (0..3000u32).map(|i| (i % 251) as u8).collect();
+        let b: Vec<u8> = (0..1500u32).map(|i| (i % 249) as u8).collect();
+        sender.set_pending_files_for_send(vec![
+            FileMeta {
+                name: "a.bin".to_string(),
+                size_bytes: a.len() as u64,
+                mime_type: String::new(),
+                payload_id: 0,
+            },
+            FileMeta {
+                name: "b.bin".to_string(),
+                size_bytes: b.len() as u64,
+                mime_type: String::new(),
+                payload_id: 0,
+            },
+        ]);
+        sender.queue_introduction();
+        settle(&mut sender, &mut receiver);
+        receiver.accept(true, "");
+        settle(&mut sender, &mut receiver);
+        assert_eq!(sender.state, State::Transferring);
+
+        assert_eq!(sender.open_file("a.bin", a.len() as i64), 0);
+        assert_eq!(sender.write_chunk(&a), 0);
+        sender.close_file();
+        assert_eq!(
+            sender.state,
+            State::Transferring,
+            "one of two announced payloads is not a completed send",
+        );
+
+        assert_eq!(sender.open_file("b.bin", b.len() as i64), 0);
+        assert_eq!(sender.write_chunk(&b), 0);
+        sender.close_file();
+        assert_eq!(sender.state, State::Completed);
+
+        // A peer hanging up on a completed send is normal, not a failure: a terminal session
+        // reads nothing more, so the DISCONNECTION handler cannot fire.
+        assert_eq!(sender.feed_inbound(&frame::frame_with_length(b"anything at all")), 0);
+        assert_eq!(sender.state, State::Completed);
+        assert_eq!(sender.failure_reason(), None);
+    }
+
+    #[test]
+    fn a_truncated_send_does_not_complete() {
+        // Fewer bytes than announced means no FLAG_LAST went out, so the peer is still
+        // waiting: reporting success here would be a lie the UI cannot walk back.
+        let (mut sender, mut receiver) = connected_pair();
+        sender.set_pending_files_for_send(vec![FileMeta {
+            name: "short.bin".to_string(),
+            size_bytes: 4000,
+            mime_type: String::new(),
+            payload_id: 0,
+        }]);
+        sender.queue_introduction();
+        settle(&mut sender, &mut receiver);
+        receiver.accept(true, "");
+        settle(&mut sender, &mut receiver);
+
+        assert_eq!(sender.open_file("short.bin", 4000), 0);
+        assert_eq!(sender.write_chunk(&[7u8; 100]), 0);
+        sender.close_file();
         assert_eq!(sender.state, State::Transferring);
     }
 

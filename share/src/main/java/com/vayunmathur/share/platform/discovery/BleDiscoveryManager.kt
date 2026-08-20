@@ -439,8 +439,11 @@ class BleDiscoveryManager(private val context: Context) {
                 val endpointId = ShareNative.nativeParseBleEndpointId(data) ?: addr
                 val dev = NearbyDevice(
                     endpointId = endpointId,
+                    // Both names come from bytes already in hand: the endpoint-info blob, then
+                    // the advertisement's own local name. `BluetoothDevice.getName()` would
+                    // report the same thing but needs BLUETOOTH_CONNECT, which this app does
+                    // not hold.
                     endpointName = fields.deviceName
-                        ?: result.device.name
                         ?: record.deviceName
                         ?: addr,
                     host = null,

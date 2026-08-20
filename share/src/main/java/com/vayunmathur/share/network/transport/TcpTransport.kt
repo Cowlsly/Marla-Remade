@@ -17,10 +17,18 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -75,6 +83,10 @@ private const val KEEP_ALIVE_EVERY_MS = 5_000L
  *
  * Each peer gets its own [ShareSession] (handle lifetime owns the Rust session). The
  * session's role follows the socket: the side that dialled is the initiator.
+ *
+ * Connections are keyed by [Connection.sessionHandle], the only identity that survives a
+ * `PendingIntent`: a notification action cannot carry a [Connection], which wraps a live
+ * socket and a native handle.
  */
 class TcpTransport(
     localName: String,
@@ -106,18 +118,34 @@ class TcpTransport(
     private val _listenPort = MutableStateFlow<Int?>(null)
     val listenPort: StateFlow<Int?> = _listenPort.asStateFlow()
 
-    private val _incomingConnections = MutableStateFlow<List<Connection>>(emptyList())
-    val incomingConnections: StateFlow<List<Connection>> = _incomingConnections.asStateFlow()
+    private val _connections = MutableStateFlow<List<Connection>>(emptyList())
 
-    /** Active session pumps, keyed by handle for teardown tracking. */
-    private val connections = mutableListOf<Connection>()
+    /** Every live session, inbound and outbound. */
+    val connections: StateFlow<List<Connection>> = _connections.asStateFlow()
+
+    /**
+     * Only the sessions a peer dialled *us* on.
+     *
+     * An outgoing transfer used to appear here too, so sending a file to someone raised an
+     * "incoming request" against ourselves.
+     */
+    val incomingConnections: StateFlow<List<Connection>> = _connections
+        .map { conns -> conns.filter { it.incoming } }
+        .stateIn(scope, SharingStarted.Eagerly, emptyList())
+
+    /** Active session pumps, keyed by native session handle. */
+    private val byHandle = mutableMapOf<Long, Connection>()
     private val connectionsLock = Any()
 
     private fun publishConnections() {
         synchronized(connectionsLock) {
-            _incomingConnections.value = connections.toList()
+            _connections.value = byHandle.values.toList()
         }
     }
+
+    /** The live connection for [handle], or null once its session is gone. */
+    fun connectionFor(handle: Long): Connection? =
+        synchronized(connectionsLock) { byHandle[handle] }
 
     // ------------------------------------------------------------------
     // Server (Receive)
@@ -195,7 +223,7 @@ class TcpTransport(
             incoming = incoming,
             remoteEndpoint = "${socket.inetAddress.hostAddress}:${socket.port}",
         )
-        synchronized(connectionsLock) { connections += conn }
+        synchronized(connectionsLock) { byHandle[session.handle] = conn }
         publishConnections()
         conn.pumpJob = scope.launch {
             pump(conn)
@@ -212,9 +240,8 @@ class TcpTransport(
         val socket = conn.socket
         try {
             // Flush any initial outbound (e.g. UKEY2 ClientInit) before the first read.
-            drainAll(session, socket.getOutputStream())
+            drainAll(conn)
             val input = socket.getInputStream()
-            val output = socket.getOutputStream()
             val buf = ByteArray(8192)
             socket.soTimeout = PUMP_READ_TIMEOUT_MS
             var lastKeepAlive = System.currentTimeMillis()
@@ -222,8 +249,10 @@ class TcpTransport(
                 val now = System.currentTimeMillis()
                 if (now - lastKeepAlive < KEEP_ALIVE_EVERY_MS) return
                 lastKeepAlive = now
-                session.sendKeepAlive()
-                drainAll(session, output)
+                synchronized(conn.writeLock) {
+                    session.sendKeepAlive()
+                    drainAll(conn)
+                }
             }
             while (isActive && !socket.isClosed) {
                 val n: Int = try {
@@ -232,9 +261,9 @@ class TcpTransport(
                     // Periodic keep-alive: drain outbound even on read timeout so
                     // handshake retries / accept responses still flush.
                     keepAliveIfDue()
-                    drainAll(session, output)
+                    drainAll(conn)
                     conn.updateStateFromSession()
-                    if (conn.state.value == ShareState.Failed || conn.state.value == ShareState.Completed) break
+                    if (conn.state.value.isTerminal) break
                     continue
                 }
                 if (n == -1) {
@@ -243,8 +272,6 @@ class TcpTransport(
                 }
                 if (n == 0) continue
                 val inbound = buf.copyOf(n)
-                Log.d(TAG, "IN  ${hexPrefix(inbound)}")
-                conn.bytesReceived.value += n
                 val rc = session.feedInbound(inbound)
                 if (rc < 0) {
                     Log.w(TAG, "feedInbound failed rc=$rc")
@@ -253,10 +280,10 @@ class TcpTransport(
                     break
                 }
                 drainReceived(conn)
-                drainAll(session, output)
+                drainAll(conn)
                 keepAliveIfDue()
                 conn.updateStateFromSession()
-                if (conn.state.value == ShareState.Completed || conn.state.value == ShareState.Failed) break
+                if (conn.state.value.isTerminal) break
             }
         } catch (e: Exception) {
             if (isActive) Log.w(TAG, "pump error for ${conn.remoteEndpoint}", e)
@@ -269,7 +296,7 @@ class TcpTransport(
             // Graceful shutdown: one last drain in each direction.
             drainReceived(conn)
             try {
-                drainAll(session, socket.getOutputStream())
+                drainAll(conn)
             } catch (_: Exception) {
             }
             try {
@@ -292,6 +319,10 @@ class TcpTransport(
         val session = conn.session
         while (true) {
             val chunk = session.drainReceived() ?: return
+            // Decrypted payload bytes, which is the only count comparable to the file sizes the
+            // peer announced. Raw socket bytes include the UKEY2 handshake, frame prefixes,
+            // encryption overhead and keep-alives, so a percentage built on them overshoots.
+            conn.bytesReceived.value += chunk.body.size
             val finished = receivedStore.append(session.handle, chunk) ?: continue
             val announcedMime = conn.pendingFiles.value
                 .firstOrNull { it.name == chunk.name }
@@ -307,28 +338,41 @@ class TcpTransport(
         }
     }
 
-    /** TEMP DIAGNOSTIC: hex of a frame prefix, for comparing our SecureMessage headers to the peer's. */
-    private fun hexPrefix(bytes: ByteArray, n: Int = 96): String =
-        bytes.take(n).joinToString("") { "%02x".format(it) } +
-            if (bytes.size > n) "…(${bytes.size}B)" else "(${bytes.size}B)"
-
-    private fun drainAll(session: ShareSession, out: OutputStream) {
-        while (true) {
-            val bytes = session.drainOutbound() ?: break
-            Log.d(TAG, "OUT ${hexPrefix(bytes)}")
-            // Rust already applied the 4-byte big-endian length prefix to each frame and
-            // concatenated them; write verbatim per PROTOCOL_CONTRACT.md §6.
-            out.write(bytes)
-            out.flush()
+    /**
+     * Write everything Rust has queued, holding [Connection.writeLock] for the whole batch.
+     *
+     * The lock is the fix for two threads writing one socket: `sendFiles` runs on the
+     * caller's coroutine while [pump] runs on this transport's scope, and both drain. Rust's
+     * own state is mutex-protected, but two interleaved `OutputStream.write` calls put half
+     * of one frame batch inside another, which the peer reads as a corrupt frame.
+     *
+     * A JVM monitor rather than a `kotlinx` `Mutex` because every caller is already doing
+     * blocking socket I/O, and because this must also be callable from [pump]'s `finally`,
+     * where suspending after cancellation is not allowed. It is reentrant, so a caller that
+     * already holds it (see `keepAliveIfDue`) is safe.
+     */
+    private fun drainAll(conn: Connection) {
+        synchronized(conn.writeLock) {
+            val out: OutputStream = conn.socket.getOutputStream()
+            while (true) {
+                val bytes = conn.session.drainOutbound() ?: break
+                // Rust already applied the 4-byte big-endian length prefix to each frame and
+                // concatenated them; write verbatim per PROTOCOL_CONTRACT.md §6.
+                out.write(bytes)
+                out.flush()
+            }
         }
     }
 
     private fun Connection.updateStateFromSession() {
         val polled = session.state
         state.value = polled
+        if (peerName.value == null) session.peerName?.let { peerName.value = it }
         // Pending files may become available asynchronously once Introduction decodes.
         if (polled == ShareState.AwaitingAccept || polled == ShareState.Transferring) {
-            pendingFiles.value = session.pendingFiles
+            val files = session.pendingFiles
+            pendingFiles.value = files
+            if (incoming) expectedTotalBytes.value = files.sumOf { it.sizeBytes }
         }
         if (polled == ShareState.Failed) {
             if (error.value == null) error.value = session.failureReason ?: "Transfer failed"
@@ -337,7 +381,22 @@ class TcpTransport(
     }
 
     suspend fun disconnect(conn: Connection) {
-        conn.pumpJob?.cancel()
+        // Joined, not just cancelled: the pump's `finally` still drains and polls the session,
+        // so destroying it from under a pump that has not finished unwinding would have those
+        // calls operate on a handle that no longer exists.
+        conn.pumpJob?.cancelAndJoin()
+        retire(conn)
+    }
+
+    /**
+     * Release everything behind [conn] and drop it from [connections].
+     *
+     * Safe to call once the pump has stopped. Incoming sessions are retired by
+     * `ShareReceiveNotifier` after it posts their terminal notification, because nothing else
+     * ever disconnects them and both the `Connection` and its native session would otherwise
+     * accumulate for the life of the process.
+     */
+    fun retire(conn: Connection) {
         try {
             conn.socket.close()
         } catch (_: Exception) {
@@ -347,14 +406,49 @@ class TcpTransport(
             conn.session.destroy()
         } catch (_: Exception) {
         }
-        synchronized(connectionsLock) { connections.remove(conn) }
+        synchronized(connectionsLock) { byHandle.remove(conn.session.handle) }
         publishConnections()
+    }
+
+    fun retire(handle: Long) {
+        connectionFor(handle)?.let { retire(it) }
+    }
+
+    /**
+     * Suspend until no session is still moving bytes.
+     *
+     * `connections` alone is not enough: it re-emits when a session appears or is retired, not
+     * when one goes terminal, so the per-connection `state` flows have to be folded in.
+     */
+    @Suppress("OPT_IN_USAGE")
+    suspend fun awaitIdle() {
+        connections
+            .flatMapLatest { conns ->
+                if (conns.isEmpty()) flowOf(true)
+                else combine(conns.map { it.state }) { states -> states.all { it.isTerminal } }
+            }
+            .first { it }
+    }
+
+    /**
+     * Tear down the session [handle] identifies, if it is still alive.
+     *
+     * The handle-keyed entry point for a notification's Cancel action, which cannot carry a
+     * [Connection].
+     */
+    suspend fun cancel(handle: Long) {
+        val conn = connectionFor(handle) ?: return
+        if (!conn.state.value.isTerminal) {
+            conn.error.value = "cancelled"
+            conn.state.value = ShareState.Failed
+        }
+        disconnect(conn)
     }
 
     fun release() {
         stopListening()
         synchronized(connectionsLock) {
-            connections.forEach { c ->
+            byHandle.values.forEach { c ->
                 try {
                     c.socket.close()
                 } catch (_: Exception) {
@@ -365,10 +459,10 @@ class TcpTransport(
                 }
                 c.pumpJob?.cancel()
             }
-            connections.clear()
+            byHandle.clear()
         }
         receivedStore.closeAll()
-        _incomingConnections.value = emptyList()
+        _connections.value = emptyList()
         scope.cancel()
     }
 
@@ -383,18 +477,33 @@ class TcpTransport(
      * paired-key exchange finishes), waits for the peer to accept, then streams each
      * file. The payload ids the peer sees come from the introduction, so the bytes match
      * the metadata it showed the user.
+     *
+     * At most one `INTRODUCTION` per session: picking more files after connecting used to
+     * announce a second one on the same session, which the peer has no way to reconcile
+     * with the payload ids it already showed its user.
      */
     suspend fun sendFiles(conn: Connection, files: List<File>) = withContext(Dispatchers.IO) {
+        if (files.isEmpty()) return@withContext
+        if (!conn.introductionSent.compareAndSet(false, true)) {
+            Log.w(TAG, "already announced files on session ${conn.sessionHandle}; ignoring ${files.size} more")
+            return@withContext
+        }
         val session = conn.session
         val staged = files.map {
-            PendingFile(name = it.name, sizeBytes = it.length(), mimeType = "")
+            PendingFile(
+                name = it.name,
+                sizeBytes = it.length(),
+                // A real type, so the peer shows an image as an image rather than a document.
+                mimeType = ReceivedFileStore.mimeTypeOf(it),
+            )
         }
+        conn.expectedTotalBytes.value = staged.sumOf { it.sizeBytes }
         if (session.setFilesToSend(staged) < 0 || session.queueIntroduction() < 0) {
             conn.error.value = "Failed to announce files"
             conn.state.value = ShareState.Failed
             return@withContext
         }
-        drainAll(session, conn.socket.getOutputStream())
+        drainAll(conn)
         // Wait for the peer to accept before streaming a single chunk. Rust flips to
         // Transferring when the Sharing ConnectionResponse arrives; a real device hangs up
         // if payload chunks show up for a transfer its user has not accepted yet, and
@@ -432,23 +541,29 @@ class TcpTransport(
                     }
                     conn.bytesSent.value += n
                     // Flush after each chunk so the pump's next drain picks it up.
-                    drainAll(session, conn.socket.getOutputStream())
+                    drainAll(conn)
                     conn.updateStateFromSession()
                     if (conn.state.value == ShareState.Failed) break
                 }
             }
             session.closeFile()
+            drainAll(conn)
+            conn.updateStateFromSession()
             if (conn.state.value == ShareState.Failed) break
         }
     }
 
     /**
-     * Answer the peer's `INTRODUCTION`.
+     * Answer the peer's `INTRODUCTION` on the session [handle] identifies.
      *
      * Received bytes go to app-private staging via [ReceivedFileStore], so there is no
      * destination to choose here; the user picks one later, per file, with Save.
+     *
+     * Returns -1 when no such session exists, which is the normal outcome for a
+     * notification action tapped after the process was killed.
      */
-    fun acceptIncoming(conn: Connection, accept: Boolean): Int {
+    fun acceptIncoming(handle: Long, accept: Boolean): Int {
+        val conn = connectionFor(handle) ?: return -1
         val rc = conn.session.accept(accept)
         if (rc < 0) {
             conn.error.value = "accept failed ($rc)"
@@ -457,7 +572,7 @@ class TcpTransport(
         conn.updateStateFromSession()
         // Flush the ACCEPT outbound immediately.
         try {
-            drainAll(conn.session, conn.socket.getOutputStream())
+            drainAll(conn)
         } catch (e: Exception) {
             Log.w(TAG, "drain after accept failed", e)
         }
@@ -467,6 +582,10 @@ class TcpTransport(
 
 /**
  * A single peer connection + its Rust session pump.
+ *
+ * [sessionHandle] is the public identity: it is a plain `Long`, so unlike a `Connection` it
+ * fits in a `PendingIntent` extra, and it is already the key [ReceivedFileStore] files
+ * chunks under.
  */
 class Connection(
     val socket: Socket,
@@ -474,13 +593,41 @@ class Connection(
     val incoming: Boolean,
     val remoteEndpoint: String,
 ) {
+    val sessionHandle: Long get() = session.handle
+
+    /** Serialises every write to [socket]; see `TcpTransport.drainAll`. */
+    internal val writeLock = Any()
+
+    /** Guards against announcing a second `INTRODUCTION` on one session. */
+    internal val introductionSent = java.util.concurrent.atomic.AtomicBoolean(false)
+
     var pumpJob: Job? = null
     val state: MutableStateFlow<ShareState> = MutableStateFlow(ShareState.Handshaking)
     val pendingFiles: MutableStateFlow<List<PendingFile>> = MutableStateFlow(emptyList())
 
+    /** The peer's advertised device name, once its `CONNECTION_REQUEST` has been read. */
+    val peerName: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /**
+     * Total bytes this transfer is expected to move, or 0 while unknown.
+     *
+     * Announced by the peer's `INTRODUCTION` when receiving and by our own when sending, so
+     * a percentage is computable without the caller summing file sizes itself.
+     */
+    val expectedTotalBytes: MutableStateFlow<Long> = MutableStateFlow(0L)
+
     /** Files that finished arriving, each staged in app-private storage. */
     val receivedFiles: MutableStateFlow<List<ReceivedFile>> = MutableStateFlow(emptyList())
     val bytesSent: MutableStateFlow<Long> = MutableStateFlow(0L)
+
+    /** Decrypted payload bytes received, comparable to [expectedTotalBytes]. */
     val bytesReceived: MutableStateFlow<Long> = MutableStateFlow(0L)
     val error: MutableStateFlow<String?> = MutableStateFlow(null)
+
+    /** A name to show a human: the peer's own, falling back to its address. */
+    val displayName: String get() = peerName.value ?: remoteEndpoint
 }
+
+/** No further frames will flow: the pump can stop and a terminal notification is due. */
+val ShareState.isTerminal: Boolean
+    get() = this == ShareState.Completed || this == ShareState.Failed

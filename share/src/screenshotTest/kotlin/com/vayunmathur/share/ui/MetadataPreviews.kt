@@ -13,58 +13,53 @@ import androidx.core.net.toUri
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.MaterialTheme
-import com.vayunmathur.share.domain.protocol.PendingFile
 import com.vayunmathur.share.domain.protocol.ShareState
-import com.vayunmathur.share.platform.ReceiveUiState
-import com.vayunmathur.share.platform.ReceivedFile
+import com.vayunmathur.share.platform.SendUiState
 import com.vayunmathur.share.platform.ShareActions
-import com.vayunmathur.share.platform.TransferProgress
+import com.vayunmathur.share.platform.discovery.DiscoverySource
+import com.vayunmathur.share.platform.discovery.NearbyDevice
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi - comfortably above the F-Droid minimum. */
 private const val PHONE = "spec:width=411dp,height=891dp,dpi=420"
 
-private val AnnouncedFiles = listOf(
-    PendingFile(name = "holiday.jpg", sizeBytes = 2_411_724, mimeType = "image/jpeg"),
-    PendingFile(name = "itinerary.pdf", sizeBytes = 184_320, mimeType = "application/pdf"),
+private val Peers = listOf(
+    NearbyDevice(
+        endpointId = "K7QP",
+        endpointName = "Vayun's Pixel 7 Pro",
+        host = "192.168.1.24",
+        port = 39184,
+        source = DiscoverySource.Both,
+    ),
+    NearbyDevice(
+        endpointId = "3ZLM",
+        endpointName = "Galaxy S24",
+        host = "192.168.1.31",
+        port = 41022,
+        source = DiscoverySource.Nsd,
+    ),
+    NearbyDevice(
+        endpointId = "A1C9",
+        endpointName = "ThinkPad X1",
+        source = DiscoverySource.Ble,
+        extra = "0c00fc9f5ea1c9",
+    ),
 )
 
-private val StagedFiles = listOf(
-    ReceivedFile(
-        name = "holiday.jpg",
-        sizeBytes = 2_411_724,
-        mimeType = "image/jpeg",
-        uri = "content://com.vayunmathur.share.fileprovider/my_docs/received/holiday.jpg".toUri(),
-    ),
-    ReceivedFile(
-        name = "itinerary.pdf",
-        sizeBytes = 184_320,
-        mimeType = "application/pdf",
-        uri = "content://com.vayunmathur.share.fileprovider/my_docs/received/itinerary.pdf".toUri(),
-    ),
+private val PickedFiles = listOf(
+    "content://media/external/images/media/1041".toUri(),
+    "content://media/external/images/media/1042".toUri(),
 )
 
-private fun progress(
-    state: ShareState,
-    pendingFiles: List<PendingFile> = emptyList(),
-    receivedFiles: List<ReceivedFile> = emptyList(),
-    bytesReceived: Long = 0,
-    error: String? = null,
-) = TransferProgress(
-    state = state,
-    pendingFiles = pendingFiles,
-    receivedFiles = receivedFiles,
-    bytesSent = 0,
-    bytesReceived = bytesReceived,
-    error = error,
-)
+private val PickedNames = listOf("holiday.jpg", "itinerary.pdf")
 
 /**
- * Store-listing screenshots for `:share`'s receive flow.
+ * Store-listing screenshots for `:share`'s send flow.
  *
- * These drive the stateless halves of the screen. `ShareReceiveScreen` itself needs a
- * `ShareViewModel`, and an incoming transfer is normally a `Connection` holding a TCP
- * socket and a native session handle - Layoutlib can load neither - so
- * [IncomingRequestContent] takes a plain [TransferProgress] and is fed literal data here.
+ * The app is send-only in-app: receiving is notification-driven, and a notification cannot be
+ * rendered by Layoutlib. So these drive the stateless halves of the send screen instead.
+ * [ShareSendContent] takes a plain [SendUiState] with `activeConnection = null`, and the
+ * in-flight states go through [TransferCard], because a live `Connection` owns a TCP socket and
+ * a native session handle that Layoutlib cannot load.
  *
  * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but
  * is not collected as a screenshot test. Previews must also be class members, not top-level
@@ -73,95 +68,86 @@ private fun progress(
 class MetadataPreviews {
 
     @PreviewTest
-    @Preview(name = "1-visible", device = PHONE, showSystemUi = true)
+    @Preview(name = "1-pick", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview1Visible() {
-        DynamicTheme(darkTheme = true) {
-            Surface {
-                ShareReceiveContent(
-                    uiState = ReceiveUiState(
-                        isVisible = true,
-                        localName = "Pixel 8",
-                        listenPort = 43117,
-                    ),
-                    actions = ShareActions.Noop,
-                )
-            }
+    fun Preview1Pick() {
+        Screen {
+            ShareSendContent(
+                uiState = SendUiState(
+                    outgoingUris = PickedFiles,
+                    outgoingDisplayNames = PickedNames,
+                ),
+                actions = ShareActions.Noop,
+            )
         }
     }
 
     @PreviewTest
-    @Preview(name = "2-incoming", device = PHONE, showSystemUi = true)
+    @Preview(name = "2-devices", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview2Incoming() {
-        Cards {
-            IncomingRequestContent(
-                remoteEndpoint = "192.168.1.24:39184",
-                progress = progress(ShareState.AwaitingAccept, pendingFiles = AnnouncedFiles),
+    fun Preview2Devices() {
+        Screen {
+            ShareSendContent(
+                uiState = SendUiState(
+                    discoveredDevices = Peers,
+                    isScanning = true,
+                    outgoingUris = PickedFiles,
+                    outgoingDisplayNames = PickedNames,
+                ),
                 actions = ShareActions.Noop,
-                onAccept = {},
-                onReject = {},
+            )
+        }
+    }
+
+    @PreviewTest
+    @Preview(name = "3-waiting", device = PHONE, showSystemUi = true)
+    @Composable
+    fun Preview3Waiting() {
+        Cards {
+            TransferCard(
+                endpoint = "Vayun's Pixel 7 Pro",
+                state = ShareState.AwaitingAccept,
+                bytesSent = 0,
+                error = null,
                 onDisconnect = {},
             )
         }
     }
 
     @PreviewTest
-    @Preview(name = "3-receiving", device = PHONE, showSystemUi = true)
+    @Preview(name = "4-sending", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview3Receiving() {
+    fun Preview4Sending() {
         Cards {
-            IncomingRequestContent(
-                remoteEndpoint = "192.168.1.24:39184",
-                progress = progress(
-                    ShareState.Transferring,
-                    pendingFiles = AnnouncedFiles,
-                    bytesReceived = 1_260_000,
-                ),
-                actions = ShareActions.Noop,
-                onAccept = {},
-                onReject = {},
+            TransferCard(
+                endpoint = "Vayun's Pixel 7 Pro",
+                state = ShareState.Transferring,
+                bytesSent = 1_260_000,
+                error = null,
                 onDisconnect = {},
             )
         }
     }
 
     @PreviewTest
-    @Preview(name = "4-received", device = PHONE, showSystemUi = true)
+    @Preview(name = "5-sent", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview4Received() {
+    fun Preview5Sent() {
         Cards {
-            IncomingRequestContent(
-                remoteEndpoint = "192.168.1.24:39184",
-                progress = progress(
-                    ShareState.Completed,
-                    pendingFiles = AnnouncedFiles,
-                    receivedFiles = StagedFiles,
-                ),
-                actions = ShareActions.Noop,
-                onAccept = {},
-                onReject = {},
+            TransferCard(
+                endpoint = "Vayun's Pixel 7 Pro",
+                state = ShareState.Completed,
+                bytesSent = 2_596_044,
+                error = null,
                 onDisconnect = {},
             )
-        }
-    }
-
-    @PreviewTest
-    @Preview(name = "5-failed", device = PHONE, showSystemUi = true)
-    @Composable
-    fun Preview5Failed() {
-        Cards {
-            IncomingRequestContent(
-                remoteEndpoint = "192.168.1.24:39184",
-                // The reason comes from the native session, so the UI can name the phase
-                // that broke instead of showing a return code.
-                progress = progress(
-                    ShareState.Failed,
-                    error = "peer rejected the connection (status 8004)",
-                ),
-                actions = ShareActions.Noop,
-                onAccept = {},
-                onReject = {},
+            // The reason comes from the native session, so the UI can name the phase that
+            // broke instead of showing a return code.
+            TransferCard(
+                endpoint = "Galaxy S24",
+                state = ShareState.Failed,
+                bytesSent = 0,
+                error = "peer rejected the connection (status 8004)",
                 onDisconnect = {},
             )
         }
@@ -169,22 +155,22 @@ class MetadataPreviews {
 
     @Composable
     private fun Cards(content: @Composable () -> Unit) {
-        DynamicTheme(darkTheme = true) {
-            Surface {
-                Column(
-                    Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    content()
-                }
+        Screen {
+            Column(
+                Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                content()
             }
         }
     }
 
     @Composable
-    private fun Surface(content: @Composable () -> Unit) {
-        Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
-            content()
+    private fun Screen(content: @Composable () -> Unit) {
+        DynamicTheme(darkTheme = true) {
+            Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surface)) {
+                content()
+            }
         }
     }
 }

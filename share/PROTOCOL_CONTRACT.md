@@ -144,7 +144,7 @@ Errors are returned as negative `int` codes from the `native* -> int` methods; a
 | 0 | `Handshaking`     | `CONNECTION_REQUEST`/`RESPONSE`, UKEY2, and the paired-key exchange are in progress; keep pumping bytes. |
 | 1 | `AwaitingAccept`  | An `INTRODUCTION` decoded; the UI should surface `queryPendingFiles` and prompt Accept/Reject. |
 | 2 | `Transferring`    | Accepted; payload bytes are flowing (`openFile`/`writeChunk`/`closeFile`). |
-| 3 | `Completed`       | Every announced payload arrived. |
+| 3 | `Completed`       | Receiving: every announced payload arrived. Sending: every payload the `INTRODUCTION` announced has had its `FLAG_LAST` chunk written. |
 | 4 | `Failed`          | Protocol failure, peer rejection, or local rejection. |
 
 ## 5. JNI surface (exact signatures)
@@ -168,6 +168,8 @@ internal object ShareNative {
   external fun nativeCloseFile(handle: Long): Int
   external fun nativeDrainReceived(handle: Long): ByteArray?    // one §6 record, null = none
   external fun nativeQueryFailureReason(handle: Long): String?  // null = healthy
+  external fun nativeQueryPeerName(handle: Long): String?       // null until CONNECTION_REQUEST is read
+  external fun nativeQueryTrace(handle: Long): String?          // recent protocol events, one per line
   external fun nativeDestroy(handle: Long)                           // void
 
   // Discovery — derived in ble_adv.rs from SHA-256("NearbySharing"). Pure functions.

@@ -6,14 +6,24 @@ import android.os.Build
 /**
  * Runtime permissions for the Share module (mirrors AndroidManifest.xml).
  *
- * Grouped so the UI can request just what it needs per flow and so
- * [ShareViewModel.requestPermissionsIfNeeded] can reason about grants.
+ * Deliberately short. `:share` asks for nothing it can avoid:
+ *  - **no storage or media permissions** — files to send are picked with `ACTION_OPEN_DOCUMENT`
+ *    and saved with `ACTION_CREATE_DOCUMENT`, each of which grants access to exactly the URI the
+ *    user chose; received files live in app-private storage and leave through a `FileProvider`.
+ *  - **no location** — `minSdk` is 31, so `neverForLocation` on `BLUETOOTH_SCAN` covers scanning
+ *    outright; the pre-Android-12 classic-scan fallback that needed `ACCESS_FINE_LOCATION`
+ *    cannot be reached.
+ *  - **no `BLUETOOTH_CONNECT`** — the peer's name comes from its advertisement, never from
+ *    `BluetoothDevice.getName()`.
+ *
+ * `POST_NOTIFICATIONS` is not optional for receiving: notifications *are* the receive UI, so
+ * [com.vayunmathur.share.platform.receive.ShareReceiveTileService] refuses to turn receiving on
+ * without it.
  */
 object SharePermissions {
-    /** Needed to advertise/scan for discovery on Android 12+ (and for Quick Share visibility). */
+    /** Needed to advertise for discovery (and so for Quick Share visibility). */
     val BLE_ADVERTISE = Manifest.permission.BLUETOOTH_ADVERTISE
     val BLE_SCAN = Manifest.permission.BLUETOOTH_SCAN
-    val BLE_CONNECT = Manifest.permission.BLUETOOTH_CONNECT
 
     /** Wi-Fi Direct / Hotspot transport (Android 13+ shows a dedicated dialog). */
     val NEARBY_WIFI = Manifest.permission.NEARBY_WIFI_DEVICES
@@ -27,30 +37,21 @@ object SharePermissions {
     val LOCAL_NETWORK =
         if (Build.VERSION.SDK_INT >= 36) Manifest.permission.ACCESS_LOCAL_NETWORK else null
 
-    /** Foreground-service notification (Android 13+). */
+    /** Foreground-service and transfer notifications (Android 13+). */
     val POST_NOTIFICATIONS = if (Build.VERSION.SDK_INT >= 33) Manifest.permission.POST_NOTIFICATIONS else null
 
-    /** BLE scan may still imply location on < S without neverForLocation flag. */
-    val FINE_LOCATION = Manifest.permission.ACCESS_FINE_LOCATION
-    val COARSE_LOCATION = Manifest.permission.ACCESS_COARSE_LOCATION
-
+    /** Scanning for peers to send to. Advertising is not needed to send. */
     fun sendFlowPermissions(): Array<String> = buildList {
         add(BLE_SCAN)
-        add(BLE_CONNECT)
         add(NEARBY_WIFI)
-        add(FINE_LOCATION)
-        add(COARSE_LOCATION)
         LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()
 
+    /** Advertising so peers can find us, plus the notifications that are the receive UI. */
     fun receiveFlowPermissions(): Array<String> = buildList {
         add(BLE_ADVERTISE)
-        add(BLE_SCAN)
-        add(BLE_CONNECT)
         add(NEARBY_WIFI)
-        add(FINE_LOCATION)
-        add(COARSE_LOCATION)
         LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()
@@ -58,10 +59,7 @@ object SharePermissions {
     fun allSharePermissions(): Array<String> = buildList {
         add(BLE_ADVERTISE)
         add(BLE_SCAN)
-        add(BLE_CONNECT)
         add(NEARBY_WIFI)
-        add(FINE_LOCATION)
-        add(COARSE_LOCATION)
         LOCAL_NETWORK?.let { add(it) }
         POST_NOTIFICATIONS?.let { add(it) }
     }.toTypedArray()

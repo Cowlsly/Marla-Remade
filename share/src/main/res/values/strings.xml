@@ -1,35 +1,66 @@
 <resources>
     <string name="app_name">Share</string>
-    <string name="tab_receive">Receive</string>
-    <string name="tab_send">Send</string>
-    <string name="share_notification_channel_name">Share transfers</string>
-    <string name="share_notification_channel_desc">Ongoing Nearby Share file transfers</string>
-    <string name="share_notification_title_receiving">Share — receiving files</string>
-    <string name="share_notification_title_sending">Share — sending files</string>
-    <string name="share_notification_text">Transfer in progress</string>
-    <string name="share_notification_action_stop">Stop</string>
-    <string name="share_permission_rationale">Nearby Share needs Bluetooth, Wi-Fi, and notification permissions to discover devices and transfer files.</string>
-    <string name="share_incoming_title">Incoming requests</string>
-    <string name="share_visibility_title">Device visible to nearby devices</string>
-    <string name="share_visibility_on">Visible as \"%1$s\"</string>
-    <string name="share_visibility_on_port">Visible as \"%1$s\" · port %2$d</string>
-    <string name="share_visibility_off">Turn on to appear in Quick Share nearby lists.</string>
-    <string name="share_waiting_for_devices">Waiting for nearby devices…</string>
-    <string name="share_turn_on_visibility">Turn on visibility to receive files.</string>
-    <string name="share_connecting">Connecting…</string>
+
+    <!-- Foreground service -->
+    <string name="share_notification_channel_name">Receiving</string>
+    <string name="share_notification_channel_desc">Shown while this device can accept nearby transfers</string>
+    <string name="share_notification_title_receiving">Ready to receive</string>
+    <string name="share_notification_title_sending">Sending files</string>
+    <string name="share_notification_text">Visible to nearby devices</string>
+    <string name="share_notification_text_sending">Transfer in progress</string>
+    <string name="share_notification_action_stop">Turn off</string>
+
+    <!-- Transfer notifications -->
+    <string name="share_channel_requests_name">Transfer requests</string>
+    <string name="share_channel_requests_desc">A nearby device wants to send you files</string>
+    <string name="share_channel_transfers_name">Transfers</string>
+    <string name="share_channel_transfers_desc">Progress and results of nearby file transfers</string>
     <string name="share_wants_to_send">Wants to send %1$d file(s)</string>
     <string name="share_accept">Accept</string>
     <string name="share_decline">Decline</string>
     <string name="share_receiving">Receiving…</string>
     <string name="share_progress_kb">%1$d KB / %2$d KB</string>
     <string name="share_received_count">Received %1$d file(s)</string>
-    <string name="share_dismiss">Dismiss</string>
     <string name="share_transfer_failed">Transfer failed</string>
-    <string name="share_unknown_state">Unknown state</string>
-    <string name="share_file_summary">%1$s · %2$s</string>
     <string name="share_action_share">Share</string>
     <string name="share_action_save">Save</string>
+    <string name="share_action_cancel">Cancel</string>
     <string name="share_received_chooser">Share received file</string>
-    <string name="share_save_succeeded">Saved %1$s</string>
-    <string name="share_save_failed">Could not save %1$s</string>
+    <string name="share_save_succeeded">Saved %1$d file(s)</string>
+    <string name="share_save_failed">Could not save %1$d file(s)</string>
+
+    <!-- Quick Settings tile -->
+    <string name="share_tile_label">Nearby Share</string>
+    <string name="share_tile_off">Off</string>
+    <string name="share_tile_no_permission">Needs notification permission</string>
+
+    <!-- Send screen -->
+    <string name="share_permission_rationale">Nearby Share needs Bluetooth, Wi-Fi, and notification permissions to discover devices and transfer files.</string>
+    <string name="share_nearby_devices">Nearby devices</string>
+    <string name="share_scan">Scan</string>
+    <string name="share_stop">Stop</string>
+    <string name="share_scanning">Scanning for nearby devices…</string>
+    <string name="share_no_devices">No devices found. Tap Scan while the other device is visible.</string>
+    <string name="share_no_files_selected">No files selected</string>
+    <string name="share_files_selected">%1$d file(s) selected</string>
+    <string name="share_pick_files">Pick files</string>
+    <string name="share_add_files">Add files</string>
+    <string name="share_clear">Clear</string>
+    <string name="share_select_device">Select a device above to send %1$d file(s).</string>
+    <string name="share_send_tip">Tip: share from any app via the system share sheet — Share will appear as a target. Or pick files here and then Scan.</string>
+    <string name="share_source_wifi">Wi-Fi</string>
+    <string name="share_source_bluetooth">Bluetooth</string>
+    <string name="share_source_both">Wi-Fi • Bluetooth</string>
+    <string name="share_ble_only">BLE peer — TCP endpoint via mDNS once visible</string>
+    <string name="share_waiting_for_address">Waiting for network address — keep the peer visible and scanning.</string>
+    <string name="share_sending_to">Sending to %1$s</string>
+    <string name="share_connecting">Connecting…</string>
+    <string name="share_waiting_for_accept">Waiting for recipient to accept…</string>
+    <string name="share_sending_kb">Sending… %1$d KB</string>
+    <string name="share_sent">Sent!</string>
+    <string name="share_send_failed">Send failed</string>
+    <string name="share_done">Done</string>
+    <string name="share_dismiss">Dismiss</string>
+    <string name="share_unknown_state">Unknown state</string>
+    <string name="share_nothing_selected">Pick files before choosing a device.</string>
 </resources>

@@ -145,6 +145,14 @@ class ShareSession @JvmOverloads constructor(
     val failureReason: String? get() = ShareNative.nativeQueryFailureReason(handle)
 
     /**
+     * The peer's advertised device name, or null until its `CONNECTION_REQUEST` has been read.
+     *
+     * This is what a notification should be titled with: `host:port` means nothing to
+     * someone deciding whether to accept a transfer.
+     */
+    val peerName: String? get() = ShareNative.nativeQueryPeerName(handle)
+
+    /**
      * Recent protocol events, one per line, for diagnosing a peer that stops responding.
      */
     val trace: String? get() = ShareNative.nativeQueryTrace(handle)

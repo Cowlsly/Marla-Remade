@@ -17,6 +17,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
@@ -25,6 +26,8 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.share.R
+import com.vayunmathur.share.network.transport.Connection
 import com.vayunmathur.share.platform.discovery.DiscoverySource
 import com.vayunmathur.share.platform.discovery.NearbyDevice
 import com.vayunmathur.share.domain.protocol.ShareState
@@ -74,16 +77,7 @@ fun ShareSendContent(
         if (uiState.activeConnection != null) {
             item {
                 val conn = uiState.activeConnection
-                val state by conn.state.collectAsState()
-                val error by conn.error.collectAsState()
-                val sent by conn.bytesSent.collectAsState()
-                TransferCard(
-                    endpoint = conn.remoteEndpoint,
-                    state = state,
-                    bytesSent = sent,
-                    error = error,
-                    onDisconnect = { actions.disconnect(conn) },
-                )
+                TransferCardHost(conn = conn, onDisconnect = { actions.disconnect(conn) })
             }
         }
         item {
@@ -93,13 +87,13 @@ fun ShareSendContent(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    "Nearby devices",
+                    stringResource(R.string.share_nearby_devices),
                     style = MaterialTheme.typography.titleMedium,
                 )
                 if (uiState.isScanning) {
-                    Button(onClick = actions::stopScan) { Text("Stop") }
+                    Button(onClick = actions::stopScan) { Text(stringResource(R.string.share_stop)) }
                 } else {
-                    OutlinedButton(onClick = actions::startScan) { Text("Scan") }
+                    OutlinedButton(onClick = actions::startScan) { Text(stringResource(R.string.share_scan)) }
                 }
             }
         }
@@ -111,7 +105,7 @@ fun ShareSendContent(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         CircularProgressIndicator(modifier = Modifier.padding(end = 12.dp))
-                        Text("Scanning for nearby devices…", modifier = Modifier.weight(1f))
+                        Text(stringResource(R.string.share_scanning), modifier = Modifier.weight(1f))
                     }
                 }
             }
@@ -119,7 +113,7 @@ fun ShareSendContent(
             item {
                 Card(modifier = Modifier.fillMaxWidth()) {
                     Text(
-                        "No devices found. Tap Scan while the other device is visible.",
+                        stringResource(R.string.share_no_devices),
                         modifier = Modifier.padding(16.dp),
                         color = MaterialTheme.colorScheme.outline,
                     )
@@ -136,7 +130,7 @@ fun ShareSendContent(
         if (uiState.activeConnection == null && uiState.outgoingUris.isNotEmpty() && uiState.discoveredDevices.isNotEmpty()) {
             item {
                 Text(
-                    "Select a device above to send ${uiState.outgoingUris.size} file(s).",
+                    stringResource(R.string.share_select_device, uiState.outgoingUris.size),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -145,8 +139,7 @@ fun ShareSendContent(
         if (uiState.activeConnection == null && uiState.outgoingUris.isEmpty() && uiState.discoveredDevices.isEmpty()) {
             item {
                 Text(
-                    "Tip: share from any app via the system share sheet — Share will appear as a target. " +
-                        "Or pick files here and then Scan.",
+                    stringResource(R.string.share_send_tip),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -156,7 +149,7 @@ fun ShareSendContent(
 }
 
 @Composable
-private fun OutgoingFilesCard(
+fun OutgoingFilesCard(
     uris: List<Uri>,
     displayNames: List<String>,
     onPickFiles: () -> Unit,
@@ -170,14 +163,20 @@ private fun OutgoingFilesCard(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Text(
-                    if (uris.isEmpty()) "No files selected"
-                    else "${uris.size} file(s) selected",
+                    if (uris.isEmpty()) stringResource(R.string.share_no_files_selected)
+                    else stringResource(R.string.share_files_selected, uris.size),
                     style = MaterialTheme.typography.titleSmall,
                 )
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedButton(onClick = onPickFiles) { Text(if (uris.isEmpty()) "Pick files" else "Add files") }
+                    OutlinedButton(onClick = onPickFiles) {
+                        Text(
+                            stringResource(
+                                if (uris.isEmpty()) R.string.share_pick_files else R.string.share_add_files
+                            )
+                        )
+                    }
                     if (uris.isNotEmpty()) {
-                        OutlinedButton(onClick = onClear) { Text("Clear") }
+                        OutlinedButton(onClick = onClear) { Text(stringResource(R.string.share_clear)) }
                     }
                 }
             }
@@ -195,18 +194,20 @@ private fun OutgoingFilesCard(
 }
 
 @Composable
-private fun DeviceRow(device: NearbyDevice, onTap: () -> Unit) {
+fun DeviceRow(device: NearbyDevice, onTap: () -> Unit) {
     val canConnect = device.host != null && device.port != null
     val subtitle = when {
         canConnect -> "${device.host}:${device.port}"
-        device.source == DiscoverySource.Ble -> "BLE peer — TCP endpoint via mDNS once visible"
+        device.source == DiscoverySource.Ble -> stringResource(R.string.share_ble_only)
         else -> device.extra ?: device.serviceName ?: ""
     }.ifBlank { device.endpointId }
-    val sourceLabel = when (device.source) {
-        DiscoverySource.Nsd -> "Wi-Fi"
-        DiscoverySource.Ble -> "Bluetooth"
-        DiscoverySource.Both -> "Wi-Fi • Bluetooth"
-    }
+    val sourceLabel = stringResource(
+        when (device.source) {
+            DiscoverySource.Nsd -> R.string.share_source_wifi
+            DiscoverySource.Ble -> R.string.share_source_bluetooth
+            DiscoverySource.Both -> R.string.share_source_both
+        }
+    )
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -220,7 +221,7 @@ private fun DeviceRow(device: NearbyDevice, onTap: () -> Unit) {
             Text(sourceLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
             if (!canConnect) {
                 Text(
-                    "Waiting for network address — keep the peer visible and scanning.",
+                    stringResource(R.string.share_waiting_for_address),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.outline,
                 )
@@ -229,8 +230,29 @@ private fun DeviceRow(device: NearbyDevice, onTap: () -> Unit) {
     }
 }
 
+/**
+ * Collects a live [Connection]'s flows and hands them to [TransferCard].
+ *
+ * Split so the rendering half is drivable from literal data: a `Connection` owns a TCP socket
+ * and a native session handle, and Layoutlib can load neither.
+ */
 @Composable
-private fun TransferCard(
+private fun TransferCardHost(conn: Connection, onDisconnect: () -> Unit) {
+    val state by conn.state.collectAsState()
+    val error by conn.error.collectAsState()
+    val sent by conn.bytesSent.collectAsState()
+    val peerName by conn.peerName.collectAsState()
+    TransferCard(
+        endpoint = peerName ?: conn.remoteEndpoint,
+        state = state,
+        bytesSent = sent,
+        error = error,
+        onDisconnect = onDisconnect,
+    )
+}
+
+@Composable
+fun TransferCard(
     endpoint: String,
     state: ShareState,
     bytesSent: Long,
@@ -239,32 +261,40 @@ private fun TransferCard(
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("Sending to $endpoint", style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.share_sending_to, endpoint),
+                style = MaterialTheme.typography.titleSmall,
+            )
             when (state) {
                 ShareState.Handshaking -> {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(Modifier.padding(end = 8.dp))
-                        Text("Connecting…")
+                        Text(stringResource(R.string.share_connecting))
                     }
                 }
                 ShareState.AwaitingAccept -> {
-                    Text("Waiting for recipient to accept…")
+                    Text(stringResource(R.string.share_waiting_for_accept))
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
                 ShareState.Transferring -> {
-                    Text("Sending… ${bytesSent / 1024} KB")
+                    Text(stringResource(R.string.share_sending_kb, bytesSent / 1024))
                     LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
                 }
                 ShareState.Completed -> {
-                    Text("Sent!", color = MaterialTheme.colorScheme.primary)
-                    Button(onClick = onDisconnect) { Text("Done") }
+                    Text(stringResource(R.string.share_sent), color = MaterialTheme.colorScheme.primary)
+                    Button(onClick = onDisconnect) { Text(stringResource(R.string.share_done)) }
                 }
                 ShareState.Failed -> {
-                    Text(error ?: "Send failed", color = MaterialTheme.colorScheme.error)
-                    Button(onClick = onDisconnect) { Text("Dismiss") }
+                    Text(
+                        // The native failure reason, which names the phase that broke, rather
+                        // than a bare return code.
+                        error ?: stringResource(R.string.share_send_failed),
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Button(onClick = onDisconnect) { Text(stringResource(R.string.share_dismiss)) }
                 }
                 ShareState.Unknown -> {
-                    Text("Unknown state")
+                    Text(stringResource(R.string.share_unknown_state))
                 }
             }
             if (error != null && state != ShareState.Failed) {
