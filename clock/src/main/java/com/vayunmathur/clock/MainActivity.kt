@@ -35,13 +35,16 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val alarmManager = getSystemService(AlarmManager::class.java)
-        if (!alarmManager.canScheduleExactAlarms()) {
-            // Redirect user to system settings to allow exact alarms
-            val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                data = Uri.fromParts("package", packageName, null)
+        // USE_EXACT_ALARM is granted at install on Android 13+, so only older
+        // releases can have exact-alarm access revoked in system settings.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            val alarmManager = getSystemService(AlarmManager::class.java)
+            if (!alarmManager.canScheduleExactAlarms()) {
+                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
+                    data = Uri.fromParts("package", packageName, null)
+                }
+                startActivity(intent)
             }
-            startActivity(intent)
         }
         createNotificationChannels(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
