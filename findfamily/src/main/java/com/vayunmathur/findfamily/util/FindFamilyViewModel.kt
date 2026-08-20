@@ -416,8 +416,8 @@ class FindFamilyViewModel(
     // ------------------------------------------------------------------
 
     /**
-     * Generate an RSA key pair AND a PQC bundle (ML-KEM+ML-DSA) and persist a [TemporaryLink] for sharing.
-     * Uses the same Pqc key generation as Office (same library, same DER compatibility).
+     * Generate an ML-KEM link key and persist a [TemporaryLink] for sharing. The link's whole
+     * secret is a 32-byte seed; the public bundle is what locations get encrypted to.
      * Calls [onDone] on the main thread once the upsert completes.
      */
     fun createTemporaryLink(name: String, expiry: Duration, onDone: (success: Boolean) -> Unit = {}) {
@@ -425,18 +425,18 @@ class FindFamilyViewModel(
             // Links are post-quantum only: if the PQC keygen fails (native lib unavailable)
             // there is nothing to fall back to, so report failure instead of minting a link
             // that can never publish.
-            val pqcPair = runCatching { Networking.generatePqcKeyPair() }
+            val linkKey = runCatching { Networking.generatePqcLinkKey() }
                 .onFailure { Log.w("FindFamilyViewModel", "createTemporaryLink: PQC keygen failed", it) }
                 .getOrNull()
-            if (pqcPair == null) {
+            if (linkKey == null) {
                 withContext(Dispatchers.Main) { onDone(false) }
                 return@launch
             }
             val newLink = TemporaryLink(
                 name = name,
                 deleteAt = Clock.System.now() + expiry,
-                pqcPublicKey = pqcPair.publicBundleB64,
-                pqcKey = pqcPair.privateBundleB64,
+                pqcPublicKey = linkKey.publicBundleB64,
+                pqcSeed = linkKey.seedB64Url,
             )
             repository.upsertTemporaryLink(newLink)
             withContext(Dispatchers.Main) { onDone(true) }

@@ -149,7 +149,7 @@ interface TemporaryLinkDao {
     suspend fun delete(value: TemporaryLink): Int
 }
 
-@Database(entities = [User::class, Waypoint::class, LocationValue::class, TemporaryLink::class], version = 10, exportSchema = false)
+@Database(entities = [User::class, Waypoint::class, LocationValue::class, TemporaryLink::class], version = 11, exportSchema = false)
 @TypeConverters(DefaultConverters::class)
 abstract class FFDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
@@ -216,6 +216,26 @@ abstract class FFDatabase : RoomDatabase() {
             // tracker. Room stores the enum as its name; existing rows default to PERSON.
             androidx.room.migration.Migration(9, 10) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `kind` TEXT NOT NULL DEFAULT 'PERSON'")
+            },
+            // Share links carry a 32-byte ML-KEM seed (`pqcSeed`) instead of a full private
+            // bundle, so `pqcKey` becomes nullable and only legacy rows keep it. SQLite cannot
+            // drop NOT NULL in place, so rebuild the table as in Migration(7, 8). Rows keep
+            // their ids — those URLs are already shared.
+            androidx.room.migration.Migration(10, 11) {
+                it.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `TemporaryLink_new` (" +
+                        "`name` TEXT NOT NULL, `deleteAt` INTEGER NOT NULL, " +
+                        "`pqcPublicKey` TEXT NOT NULL, `pqcKey` TEXT, `pqcSeed` TEXT, " +
+                        "`id` INTEGER NOT NULL, PRIMARY KEY(`id`))"
+                )
+                it.execSQL(
+                    "INSERT INTO `TemporaryLink_new` " +
+                        "(`name`, `deleteAt`, `pqcPublicKey`, `pqcKey`, `pqcSeed`, `id`) " +
+                        "SELECT `name`, `deleteAt`, `pqcPublicKey`, `pqcKey`, NULL, `id` " +
+                        "FROM `TemporaryLink`"
+                )
+                it.execSQL("DROP TABLE `TemporaryLink`")
+                it.execSQL("ALTER TABLE `TemporaryLink_new` RENAME TO `TemporaryLink`")
             }
         )
     }

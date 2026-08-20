@@ -118,7 +118,7 @@ class MetadataPreviews {
                 name = "Dog walker",
                 deleteAt = now + 45.minutes,
                 pqcPublicKey = "",
-                pqcKey = "",
+                pqcSeed = "",
                 id = 91,
             ),
         ),

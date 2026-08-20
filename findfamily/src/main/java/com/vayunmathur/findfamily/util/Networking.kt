@@ -590,22 +590,40 @@ object Networking {
     }
 
     /**
-     * Generates a fresh PQC key bundle for an ephemeral temporary link.
-     * Returns (publicBundleBase64, privateBundleBase64) where the private bundle is
-     * [4B kemPrivLen][kemPrivDer][dsaPrivDer] — DERs, BC-compatible, same KDF as Office.
+     * Generates a fresh share-link key. The link is ML-KEM only and derived from a
+     * 32-byte seed, which is the whole secret handed to the recipient in the URL
+     * fragment — short enough to fit in an SMS. The private key is never stored:
+     * the sender only ever encrypts, and the recipient re-derives it from the seed.
      */
-    fun generatePqcKeyPair(): PqcLinkKeyPair {
+    fun generatePqcLinkKey(): PqcLinkKey {
+        val key = Pqc.generateLinkKey()
+        return PqcLinkKey(
+            seedB64Url = Base64.UrlSafe.encode(key.seed).trimEnd('='),
+            publicBundleB64 = Base64.encode(key.publicBundle)
+        )
+    }
+
+    data class PqcLinkKey(val seedB64Url: String, val publicBundleB64: String)
+
+    /**
+     * Generates a full PQC identity (ML-KEM + ML-DSA) for a device we own but that cannot
+     * run keygen itself — currently only UWB trackers, whose private bundle we hold on
+     * their behalf. Returns (publicBundleBase64, privateBundleBase64) where the private
+     * bundle is [4B kemPrivLen][kemPrivDer][dsaPrivDer] — DERs, BC-compatible, same KDF
+     * as Office. Share links use [generatePqcLinkKey] instead.
+     */
+    fun generatePqcIdentityKeyPair(): PqcIdentityKeyPair {
         val (kemPub, kemPriv) = Pqc.generateKem()
         val (dsaPub, dsaPriv) = Pqc.generateDsa()
         val pubBundle = Pqc.bundle(kemPub, dsaPub)
         val privBundle = buildPrivBundle(kemPriv, dsaPriv)
-        return PqcLinkKeyPair(
+        return PqcIdentityKeyPair(
             publicBundleB64 = Base64.encode(pubBundle),
             privateBundleB64 = Base64.encode(privBundle)
         )
     }
 
-    data class PqcLinkKeyPair(val publicBundleB64: String, val privateBundleB64: String)
+    data class PqcIdentityKeyPair(val publicBundleB64: String, val privateBundleB64: String)
 
     /** Private bundle layout: [4B kemPrivLen BE][kemPriv][dsaPriv] — mirrors public bundle. */
     private fun buildPrivBundle(kemPriv: ByteArray, dsaPriv: ByteArray): ByteArray {

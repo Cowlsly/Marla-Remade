@@ -8,6 +8,8 @@ package com.vayunmathur.e2ee
  */
 internal object PqcNative {
     external fun nativeMlkemKeygen(): Array<ByteArray>?
+    external fun nativeMlkemLinkKeygen(): Array<ByteArray>?
+    external fun nativeMlkemLinkPubFromSeed(seed: ByteArray): ByteArray?
     external fun nativeMldsaKeygen(): Array<ByteArray>?
     external fun nativeMlkemEncaps(pubDer: ByteArray): Array<ByteArray>?
     external fun nativeMlkemDecaps(privDer: ByteArray, ct: ByteArray): ByteArray?

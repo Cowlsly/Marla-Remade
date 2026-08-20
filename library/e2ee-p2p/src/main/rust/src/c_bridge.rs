@@ -188,6 +188,64 @@ pub unsafe extern "C" fn pqc_identity_keygen(
 }
 
 // ---------------------------------------------------------------------------
+// FindFamily link keys — ML-KEM only, derived from a 32-byte seed.
+// The public bundle keeps the [4B kemLen][kem][dsa] layout with an empty DSA
+// half, so pqc_bundle_split / encryptTo need no special casing.
+// ---------------------------------------------------------------------------
+
+/// Generates a fresh link seed and its ML-KEM-only public bundle.
+/// Out params filled on success (caller must free via pqc_free; zero the seed first).
+#[no_mangle]
+pub unsafe extern "C" fn pqc_link_keygen(
+    seed_out: *mut *mut u8,
+    seed_len_out: *mut usize,
+    pub_bundle_out: *mut *mut u8,
+    pub_bundle_len_out: *mut usize,
+) -> i32 {
+    if seed_out.is_null()
+        || seed_len_out.is_null()
+        || pub_bundle_out.is_null()
+        || pub_bundle_len_out.is_null()
+    {
+        return 0;
+    }
+    let seed = crate::mlkem_link_seed_new();
+    let (kem_pub, _) = match crate::mlkem_link_keygen_from_seed(&seed) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let (seed_ptr, seed_len) = alloc_bytes(seed.to_vec());
+    let (bundle_ptr, bundle_len) = alloc_bytes(len_prefix(&kem_pub, &[]));
+    ptr::write(seed_out, seed_ptr);
+    ptr::write(seed_len_out, seed_len);
+    ptr::write(pub_bundle_out, bundle_ptr);
+    ptr::write(pub_bundle_len_out, bundle_len);
+    1
+}
+
+/// Re-derives the ML-KEM-only public bundle from a stored link seed.
+#[no_mangle]
+pub unsafe extern "C" fn pqc_link_pub_from_seed(
+    seed: *const u8,
+    seed_len: usize,
+    pub_bundle_out: *mut *mut u8,
+    pub_bundle_len_out: *mut usize,
+) -> i32 {
+    if seed.is_null() || pub_bundle_out.is_null() || pub_bundle_len_out.is_null() {
+        return 0;
+    }
+    let s = slice::from_raw_parts(seed, seed_len);
+    let (kem_pub, _) = match crate::mlkem_link_keygen_from_seed(s) {
+        Some(p) => p,
+        None => return 0,
+    };
+    let (bundle_ptr, bundle_len) = alloc_bytes(len_prefix(&kem_pub, &[]));
+    ptr::write(pub_bundle_out, bundle_ptr);
+    ptr::write(pub_bundle_len_out, bundle_len);
+    1
+}
+
+// ---------------------------------------------------------------------------
 // Bundle helper (iOS builds bundle same way as Pqc.kt)
 // ---------------------------------------------------------------------------
 

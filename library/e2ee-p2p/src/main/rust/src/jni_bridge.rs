@@ -52,6 +52,34 @@ pub extern "system" fn Java_com_vayunmathur_e2ee_PqcNative_nativeMlkemKeygen<'l>
 }
 
 #[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_e2ee_PqcNative_nativeMlkemLinkKeygen<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+) -> jobjectArray {
+    let seed = mlkem_link_seed_new();
+    match mlkem_link_keygen_from_seed(&seed) {
+        Some((pub_der, _)) => pair_out(&mut env, &seed, &pub_der),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_e2ee_PqcNative_nativeMlkemLinkPubFromSeed<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    seed: JByteArray<'l>,
+) -> jbyteArray {
+    let s = match bytes_in(&mut env, &seed) {
+        Some(s) => s,
+        None => return std::ptr::null_mut(),
+    };
+    match mlkem_link_keygen_from_seed(&s) {
+        Some((pub_der, _)) => bytes_out(&env, &pub_der),
+        None => std::ptr::null_mut(),
+    }
+}
+
+#[no_mangle]
 pub extern "system" fn Java_com_vayunmathur_e2ee_PqcNative_nativeMldsaKeygen<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,

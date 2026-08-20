@@ -23,8 +23,7 @@ fun newTemporaryLinkId(): Long = Random.nextLong(from = 1, until = Long.MAX_VALU
 
 /**
  * An anonymous location-sharing link. Post-quantum only: there is no RSA keypair and no
- * classic fallback, so a link either has a usable ML-KEM/ML-DSA bundle or it is not created
- * at all. Both key fields are non-null for that reason.
+ * classic fallback, so a link either has a usable ML-KEM bundle or it is not created at all.
  */
 @Serializable
 @Entity
@@ -35,11 +34,18 @@ data class TemporaryLink(
     /** PQC ephemeral public bundle (base64 [4B kemLen][kemPub][dsaPub]) — what we encrypt to. */
     val pqcPublicKey: String,
     /**
-     * PQC ephemeral private bundle (base64 [4B kemLen][kemPriv][dsaPriv] — kemPriv =
-     * seed+expanded via BC compat). Handed to the recipient in the URL fragment; never sent
-     * to the server.
+     * Legacy: the full PQC private bundle (base64 [4B kemLen][kemPriv][dsaPriv]) that older
+     * builds put in the URL fragment as `#pqc_key=`. Only set on links created before links
+     * moved to [pqcSeed]; those URLs are already in the wild, so it is kept so they can still
+     * be re-copied. Null on every new link.
      */
-    val pqcKey: String,
+    val pqcKey: String? = null,
+    /**
+     * The 32-byte ML-KEM link seed, base64url without padding — what goes in the URL fragment
+     * as `#s=`. This is the link's entire secret: the recipient's browser expands it to an
+     * ML-KEM keypair, so nothing else needs storing or transmitting. Null on legacy links.
+     */
+    val pqcSeed: String? = null,
 
     @PrimaryKey override val id: Long = newTemporaryLinkId(),
 ): DatabaseItem

@@ -110,6 +110,9 @@ flate2 = "1.1.4"
 
 # Crypto / PQC (features preserved – no feature loss)
 sha2 = { version = "0.10.9", features = ["oid"] }
+# SHAKE256 for FindFamily link-seed expansion. Already in the lock file transitively
+# via fips203/fips204, so this only promotes it to a direct dependency.
+sha3 = "0.10"
 aes = "0.8.4"
 md-5 = "0.10.6"
 keepass = { version = "0.13.17", default-features = false, features = ["save_kdbx4"] }

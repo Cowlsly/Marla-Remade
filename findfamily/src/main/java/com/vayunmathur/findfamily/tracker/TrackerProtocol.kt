@@ -87,7 +87,7 @@ object TrackerProtocol {
     /**
      * Owner side: decrypt a crowd report [ciphertext] with the tracker's private
      * bundle ([privateBundle], layout `[4B kemPrivLen][kemPriv][dsaPriv]`, as
-     * produced by `Networking.generatePqcKeyPair`) and stamp it with the tracker's
+     * produced by `Networking.generatePqcIdentityKeyPair`) and stamp it with the tracker's
      * [trackerUserId] so it flows through the normal incoming-location pipeline.
      */
     fun openReport(privateBundle: ByteArray, ciphertext: ByteArray, trackerUserId: Long): LocationValue {

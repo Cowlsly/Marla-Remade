@@ -20,6 +20,8 @@ const KEM_EK: usize = 1184; // encapsulation (public) key
 const KEM_DK: usize = 2400; // decapsulation (private, expanded) key
 const KEM_CT: usize = 1088; // ciphertext
 const KEM_SEED: usize = 64; // d || z
+/// FindFamily share-link seed: the 32 bytes that travel in the URL fragment.
+pub const LINK_SEED: usize = 32;
 
 // ---- ML-DSA-65 sizes ----
 const DSA_PK: usize = 1952;
@@ -149,6 +151,46 @@ pub fn mlkem_decaps_der(priv_der: &[u8], ct: &[u8]) -> Option<Vec<u8>> {
     let ct = ml_kem_768::CipherText::try_from_bytes(to_arr::<KEM_CT>(ct)?).ok()?;
     let ssk = dk.try_decaps(&ct).ok()?;
     Some(concat_kdf_sha256(&ssk.into_bytes(), 32))
+}
+
+// ---------- FindFamily link keys (ML-KEM only, seed-derived) ----------
+
+/// Domain-separation string for link-seed expansion. **Wire format**: the browser
+/// share page derives the same key from the same seed, so this string cannot change
+/// without breaking every link already handed out.
+const LINK_SEED_DOMAIN: &[u8] = b"ff-link-v1";
+
+/// SHAKE256(LINK_SEED_DOMAIN || seed) -> 64 bytes, used as ML-KEM's `d || z`.
+fn link_seed_expand(seed: &[u8]) -> [u8; KEM_SEED] {
+    use sha3::digest::{ExtendableOutput, Update, XofReader};
+    let mut h = sha3::Shake256::default();
+    h.update(LINK_SEED_DOMAIN);
+    h.update(seed);
+    let mut out = [0u8; KEM_SEED];
+    h.finalize_xof().read(&mut out);
+    out
+}
+
+/// Fresh random link seed.
+pub fn mlkem_link_seed_new() -> [u8; LINK_SEED] {
+    let mut seed = [0u8; LINK_SEED];
+    OsRng.fill_bytes(&mut seed);
+    seed
+}
+
+/// Deterministically derive an ML-KEM keypair from a 32-byte link seed.
+/// Returns (spkiPubDer, pkcs8PrivDer) in the same encoding as `mlkem_keygen_der`.
+pub fn mlkem_link_keygen_from_seed(seed: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    if seed.len() != LINK_SEED {
+        return None;
+    }
+    let dz = link_seed_expand(seed);
+    let d: [u8; 32] = to_arr(&dz[..32])?;
+    let z: [u8; 32] = to_arr(&dz[32..])?;
+    let (ek, dk) = ml_kem_768::KG::keygen_from_seed(d, z);
+    let pub_der = spki_wrap(&KEM_PUB_PREFIX, &ek.into_bytes());
+    let priv_der = kem_priv_der(&dz, &dk.into_bytes());
+    Some((pub_der, priv_der))
 }
 
 // ---------- ML-DSA-65 ----------

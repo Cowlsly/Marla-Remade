@@ -10,14 +10,35 @@ package com.vayunmathur.e2ee
  * with the previously-deployed Bouncy Castle encoding — including BC's SHA-256
  * single-step KDF over the ML-KEM shared secret — so existing identities and
  * ciphertexts keep working. A device's public identity is a [bundle] of its
- * ML-KEM and ML-DSA public keys. FindFamily keeps using RSA (see [E2ee]); only
- * Office uses this.
+ * ML-KEM and ML-DSA public keys.
+ *
+ * FindFamily additionally uses [generateLinkKey] for share links: ML-KEM only,
+ * derived from a 32-byte seed small enough to fit in a URL fragment.
  */
 object Pqc {
     /** Generate an ML-KEM keypair. Returns (kemPubDer, kemPrivDer). */
     fun generateKem(): Pair<ByteArray, ByteArray> {
         val kp = PqcNative.nativeMlkemKeygen() ?: error("ML-KEM keygen failed")
         return kp[0] to kp[1]
+    }
+
+    /**
+     * A FindFamily share-link key. [seed] is the only secret — the ML-KEM keypair is
+     * derived from it, so the seed alone is what travels in the link and what needs
+     * storing. [publicBundle] has an empty ML-DSA half; nothing signs link data.
+     */
+    class LinkKey(val seed: ByteArray, val publicBundle: ByteArray)
+
+    /** Generate a fresh share-link key. */
+    fun generateLinkKey(): LinkKey {
+        val kp = PqcNative.nativeMlkemLinkKeygen() ?: error("ML-KEM link keygen failed")
+        return LinkKey(kp[0], bundle(kp[1], ByteArray(0)))
+    }
+
+    /** Re-derive a share-link public bundle from a stored 32-byte seed. */
+    fun linkPublicFromSeed(seed: ByteArray): ByteArray {
+        val kemPub = PqcNative.nativeMlkemLinkPubFromSeed(seed) ?: error("ML-KEM link derive failed")
+        return bundle(kemPub, ByteArray(0))
     }
 
     /** Generate an ML-DSA keypair. Returns (dsaPubDer, dsaPrivDer). */

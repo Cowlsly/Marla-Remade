@@ -39,7 +39,7 @@ object TrackerBinder {
                 val repository = FindFamilyRepository.get(context)
                 val store = TrackerStore(DataStoreUtils.getInstance(context))
 
-                val keys = Networking.generatePqcKeyPair()
+                val keys = Networking.generatePqcIdentityKeyPair()
                 val publicBundle = decodeB64(keys.publicBundleB64)
                 val privateBundle = decodeB64(keys.privateBundleB64)
                 val secret = ByteArray(TrackerProtocol.SECRET_LEN).also { SecureRandom().nextBytes(it) }

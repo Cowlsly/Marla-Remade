@@ -216,9 +216,14 @@ fun MainPage(
             }
 
             override fun copyLink(link: TemporaryLink) {
-                // Links are post-quantum only, so the fragment carries just the PQC
-                // private bundle — no classic `#key=`. The fragment never hits the server.
-                platform.copy("https://findfamily.cc/view/${link.id}#pqc_key=${link.pqcKey}")
+                // The fragment carries the link's secret and never hits the server. New links
+                // send just the 32-byte ML-KEM seed (`#s=`) with a Base26 id, which fits in an
+                // SMS; links minted before that still carry their full private bundle.
+                val seed = link.pqcSeed
+                platform.copy(
+                    if (seed != null) "https://findfamily.cc/view/${link.id.encodeBase26()}#s=$seed"
+                    else "https://findfamily.cc/view/${link.id}#pqc_key=${link.pqcKey}"
+                )
             }
         }
     }
