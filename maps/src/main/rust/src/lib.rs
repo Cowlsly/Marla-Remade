@@ -14,17 +14,17 @@ mod routing;
 mod state;
 mod transit;
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock, RwLock};
 
 use jni::objects::{
-    JByteArray, JLongArray, JObject, JObjectArray, JString, JValue,
+    JByteArray, JDoubleArray, JIntArray, JLongArray, JObject, JObjectArray, JString, JValue,
 };
-use jni::sys::{jboolean, jbyteArray, jdouble, jdoubleArray, jint, jlong, jobjectArray};
+use jni::sys::{jboolean, jbyteArray, jdouble, jdoubleArray, jint, jobjectArray, jstring};
 use jni::JNIEnv;
 
 use crate::geometry::TrafficSpeeds;
-use crate::graph::Graph;
+use crate::graph::{Graph, WALK};
 use crate::routing::{perform_search_loop, prepare_routing, reconstruct_path};
 use crate::state::{RadixHeap, RoutingScratchpad};
 
@@ -127,30 +127,13 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_init<'local>
     mut env: JNIEnv<'local>,
     _thiz: JObject<'local>,
     base_path: JString<'local>,
-    present_feeds: JObjectArray<'local>,
 ) -> jboolean {
     let base: String = match env.get_string(&base_path) {
         Ok(s) => s.into(),
         Err(_) => return 0,
     };
 
-    let mut feeds: HashSet<String> = HashSet::new();
-    if !present_feeds.is_null() {
-        let len = env.get_array_length(&present_feeds).unwrap_or(0);
-        for i in 0..len {
-            if let Ok(obj) = env.get_object_array_element(&present_feeds, i) {
-                let s = JString::from(obj);
-                // Convert to an owned String within this statement so the
-                // borrowing `JavaStr` is dropped before `s`.
-                let val: Option<String> = env.get_string(&s).ok().map(|js| js.into());
-                if let Some(v) = val {
-                    feeds.insert(v);
-                }
-            }
-        }
-    }
-
-    match Graph::load(&base, feeds) {
+    match Graph::load(&base) {
         Some(g) => {
             if let Ok(mut w) = GRAPH.write() {
                 *w = Some(Arc::new(g));
@@ -176,7 +159,6 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
     e_lat: jdouble,
     e_lon: jdouble,
     mode: jint,
-    start_time: jlong,
 ) -> jobjectArray {
     let null = std::ptr::null_mut();
     let g = match graph() {
@@ -199,8 +181,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         };
 
         let mut ctx = match prepare_routing(
-            &g, &speeds, &mut ensure, s_lat, s_lon, e_lat, e_lon, mode, start_time as u32, scratch,
-            heap,
+            &g, &speeds, &mut ensure, s_lat, s_lon, e_lat, e_lon, mode, scratch, heap,
         ) {
             Some(c) => c,
             None => return null,
@@ -220,7 +201,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[I)V";
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;III)V";
 
     let array = match env.new_object_array(steps.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
@@ -241,19 +222,6 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
             return null;
         }
         let jgeom_obj: JObject = jgeom.into();
-
-        let make_opt_string = |env: &mut JNIEnv<'local>, off: u32| -> JObject<'local> {
-            match g.road_name(off) {
-                Some(s) => match env.new_string(&s) {
-                    Ok(js) => js.into(),
-                    Err(_) => JObject::null(),
-                },
-                None => JObject::null(),
-            }
-        };
-        let jfeed = make_opt_string(&mut env, step.feed_off);
-        let jcode = make_opt_string(&mut env, step.code_off);
-        let jend = make_opt_string(&mut env, step.end_code_off);
 
         // Packed turn-lane guidance: one int per lane (dir * 2 + valid).
         let jlanes = match env.new_int_array(step.lanes.len() as i32) {
@@ -277,12 +245,19 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
                 JValue::Long(step.time_10ms as i64),
                 JValue::Object(&jgeom_obj),
                 JValue::Double(step.speed_ratio),
-                JValue::Bool(step.is_transit as u8),
-                JValue::Object(&jfeed),
-                JValue::Object(&jcode),
-                JValue::Object(&jend),
-                JValue::Int(step.stop_count),
+                // Transit-only tail. The ctor descriptor is shared with the
+                // RAPTOR path; the road graph has no timetable, so it fills the
+                // transit fields with nulls/zeros.
+                JValue::Bool(0),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
+                JValue::Int(0),
                 JValue::Object(&jlanes_obj),
+                JValue::Object(&JObject::null()),
+                JValue::Int(0),
+                JValue::Int(0),
+                JValue::Int(0),
             ],
         ) {
             Ok(o) => o,
@@ -300,11 +275,195 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
 // JNI: findTransitRouteNative (offline RAPTOR over a per-region transit index)
 // ---------------------------------------------------------------------------
 
+/// How far apart a walk leg's endpoints may be before we stop trying to route it
+/// on the road graph. RAPTOR caps access/egress at 1 km and transfers at 400 m,
+/// so this only excludes pathological legs.
+const WALK_SNAP_MAX_M: f64 = 2_000.0;
+/// Per-request budget of road searches. A plan can hold several itineraries with
+/// two to four walk legs each, and every search serialises behind the same
+/// `route_state()` mutex, on top of RAPTOR.
+const WALK_SNAP_MAX_SEARCHES: usize = 8;
+/// A road path this many times longer than the straight line is a bad snap (the
+/// far side of a motorway, a ferry terminal). Keep the straight line rather than
+/// pair a wildly longer polyline with RAPTOR's original duration.
+const WALK_SNAP_MAX_RATIO: f64 = 2.5;
+
+/// Approximate ground distance in metres (equirectangular).
+fn crow_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat2 - lat1) * 111_320.0;
+    let dlon = (lon2 - lon1) * 111_320.0 * ((lat1 + lat2) * 0.5).to_radians().cos();
+    (dlat * dlat + dlon * dlon).sqrt()
+}
+
+/// The straight line a walk leg was drawn as, when it is worth a road search.
+/// A `TransitLeg` carries no endpoints of its own, only that line — which works
+/// uniformly for access (user → stop), egress (stop → user) and transfer
+/// (stop → stop) legs. Returns `(s_lat, s_lon, e_lat, e_lon)`.
+fn walk_snap_endpoints(leg: &transit::TransitLeg) -> Option<(f64, f64, f64, f64)> {
+    if leg.kind != transit::LegKind::Walk || leg.dist_m > WALK_SNAP_MAX_M {
+        return None;
+    }
+    let n = leg.coords.len();
+    if n < 4 {
+        return None;
+    }
+    Some((leg.coords[1], leg.coords[0], leg.coords[n - 1], leg.coords[n - 2]))
+}
+
+/// Whether a `road_m` road path is a plausible redraw of a `crow`-metre straight
+/// line. Rejecting the implausible ones keeps the straight line, which reads far
+/// better than a wildly longer polyline paired with RAPTOR's original duration.
+fn walk_snap_plausible(crow: f64, road_m: f64) -> bool {
+    crow <= 1.0 || road_m <= crow * WALK_SNAP_MAX_RATIO
+}
+
+/// Redraw each walk leg along the road graph, in place.
+///
+/// Only `coords` and `dist_m` change. `dep_secs`/`arr_secs` are what RAPTOR
+/// planned the journey around, and re-timing them would desynchronise it from
+/// the departure it was built for — so a road-routed walk, being longer than the
+/// crow-flies estimate RAPTOR used, leaves a shown ETA slightly optimistic. That
+/// is the same heuristic the pack's TRANSFERS table is already built on, and the
+/// ratio guard bounds how wrong the drawn line can get.
+fn snap_walk_legs(legs: &mut [transit::TransitLeg]) {
+    let g = match graph() {
+        Some(g) => g,
+        None => return,
+    };
+    let speeds: TrafficSpeeds = traffic_speeds().read().map(|m| m.clone()).unwrap_or_default();
+    let mut state = match route_state().lock() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let RouteState { scratch, heap } = &mut *state;
+    // WALK, not PUBLIC_TRANSIT: `is_mode_allowed` grants them the same road types
+    // today, but WALK states the intent and cannot drift.
+    let mut no_traffic = |_: i32, _: i32| {};
+    let mut budget = WALK_SNAP_MAX_SEARCHES;
+
+    for leg in legs.iter_mut() {
+        if budget == 0 {
+            break;
+        }
+        let (s_lat, s_lon, e_lat, e_lon) = match walk_snap_endpoints(leg) {
+            Some(p) => p,
+            None => continue,
+        };
+        budget -= 1;
+
+        let mut ctx = match prepare_routing(
+            &g, &speeds, &mut no_traffic, s_lat, s_lon, e_lat, e_lon, WALK, scratch, heap,
+        ) {
+            Some(c) => c,
+            None => continue,
+        };
+        perform_search_loop(&g, &speeds, &mut no_traffic, WALK, &mut ctx, scratch, heap);
+        if ctx.target_node == 0xFFFF_FFFF {
+            continue;
+        }
+
+        // Consecutive steps repeat their joint vertex, so drop each step's first
+        // point after the first step.
+        let steps = reconstruct_path(&g, &speeds, WALK, &ctx, scratch);
+        let mut coords: Vec<f64> = Vec::new();
+        let mut dist_mm = 0u64;
+        for step in &steps {
+            dist_mm += step.dist_mm;
+            let skip = if coords.is_empty() { 0 } else { 2 };
+            if step.coords.len() > skip {
+                coords.extend_from_slice(&step.coords[skip..]);
+            }
+        }
+        if coords.len() < 4 {
+            continue;
+        }
+        // The search starts and ends at a projection onto the nearest road, not
+        // at the stop itself. Stitch the true endpoints back on so the drawn walk
+        // meets its stop marker, and count those stubs.
+        let mut road_m = dist_mm as f64 / 1000.0;
+        road_m += crow_m(s_lat, s_lon, coords[1], coords[0]);
+        road_m += crow_m(coords[coords.len() - 1], coords[coords.len() - 2], e_lat, e_lon);
+        if !walk_snap_plausible(leg.dist_m, road_m) {
+            continue;
+        }
+        let mut stitched = Vec::with_capacity(coords.len() + 4);
+        stitched.push(s_lon);
+        stitched.push(s_lat);
+        stitched.extend_from_slice(&coords);
+        stitched.push(e_lon);
+        stitched.push(e_lat);
+        leg.coords = stitched;
+        leg.dist_m = road_m;
+    }
+}
+
+/// Decode the realtime overlay's parallel arrays. `coords` is interleaved
+/// `[lat, lon, ...]` and `times` is interleaved
+/// `[sched_secs, delay_secs, cancelled, ...]`, so one entry spans 2 doubles,
+/// 1 string and 3 ints. Any length mismatch yields no overlay rather than a
+/// partial one — a wrong fingerprint would silently mis-delay a trip.
+fn read_delay_entries<'local>(
+    env: &mut JNIEnv<'local>,
+    coords: &JDoubleArray<'local>,
+    routes: &JObjectArray<'local>,
+    times: &JIntArray<'local>,
+) -> Vec<transit::DelayEntry> {
+    let n = match env.get_array_length(routes) {
+        Ok(n) if n > 0 => n as usize,
+        _ => return Vec::new(),
+    };
+    if env.get_array_length(coords).unwrap_or(0) as usize != n * 2
+        || env.get_array_length(times).unwrap_or(0) as usize != n * 3
+    {
+        return Vec::new();
+    }
+    let mut ll = vec![0f64; n * 2];
+    if env.get_double_array_region(coords, 0, &mut ll).is_err() {
+        return Vec::new();
+    }
+    let mut tv = vec![0i32; n * 3];
+    if env.get_int_array_region(times, 0, &mut tv).is_err() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let name: Option<String> = match env.get_object_array_element(routes, i as i32) {
+            Ok(obj) => {
+                let s = JString::from(obj);
+                // Convert to an owned String within this statement so the
+                // borrowing `JavaStr` is dropped before `s`.
+                let owned: Option<String> = env.get_string(&s).ok().map(|js| js.into());
+                owned
+            }
+            Err(_) => None,
+        };
+        let name = match name {
+            Some(n) => n,
+            None => continue,
+        };
+        out.push(transit::DelayEntry {
+            lat: ll[i * 2],
+            lon: ll[i * 2 + 1],
+            route_name: name,
+            sched_secs: tv[i * 3].max(0) as u32,
+            delay_secs: tv[i * 3 + 1],
+            cancelled: tv[i * 3 + 2] != 0,
+        });
+    }
+    out
+}
+
 /// Plan an offline transit journey using the compact `.transit` index at
 /// `<base_path>/<feed>.transit` (produced by `scripts/maps/gtfs_ingest`).
-/// Returns `OfflineRouter.RawStep[]` (walk + ride legs) or `null` when the feed
-/// is absent, does not cover the endpoints, or no journey exists — in which case
-/// the Kotlin side falls back to the P10 online Transitous planner.
+/// Returns `OfflineRouter.RawStep[]` (walk + wait + ride legs) or `null` when
+/// the feed is absent, does not cover the endpoints, or no journey exists — in
+/// which case the Kotlin side falls back to the P10 online Transitous planner.
+///
+/// The `overlay_*` arrays carry MOTIS realtime board entries so RAPTOR avoids
+/// cancelled trips and plans against live times; pass empty arrays for a
+/// schedule-only plan. See `transit::DelayOverlay` for why the join is a
+/// fingerprint rather than a trip id.
 #[no_mangle]
 pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitRouteNative<
     'local,
@@ -320,6 +479,11 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
     dep_secs: jint,
     weekday: jint,
     date: jint,
+    prev_weekday: jint,
+    prev_date: jint,
+    overlay_coords: JDoubleArray<'local>,
+    overlay_routes: JObjectArray<'local>,
+    overlay_times: JIntArray<'local>,
 ) -> jobjectArray {
     let null = std::ptr::null_mut();
     let base: String = match env.get_string(&base_path) {
@@ -339,26 +503,41 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         return null;
     }
 
-    let legs = match transit::plan(
+    let entries =
+        read_delay_entries(&mut env, &overlay_coords, &overlay_routes, &overlay_times);
+    let overlay = if entries.is_empty() {
+        None
+    } else {
+        Some(transit::DelayOverlay::build(&index, &entries))
+    };
+
+    let mut legs = match transit::plan(
         &index,
         s_lat,
         s_lon,
         e_lat,
         e_lon,
         dep_secs.max(0) as u32,
-        weekday.max(0) as u32,
-        date.max(0) as u32,
+        transit::Schedule {
+            day: transit::QueryDay {
+                weekday: weekday.max(0) as u32,
+                date: date.max(0) as u32,
+                prev_weekday: prev_weekday.max(0) as u32,
+                prev_date: prev_date.max(0) as u32,
+            },
+            overlay: overlay.as_ref(),
+        },
     ) {
         Some(l) if !l.is_empty() => l,
         _ => return null,
     };
+    snap_walk_legs(&mut legs);
 
     let class = match env.find_class("com/vayunmathur/maps/util/OfflineRouter$RawStep") {
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor =
-        "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[I)V";
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;III)V";
     let array = match env.new_object_array(legs.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
         Err(_) => return null,
@@ -390,29 +569,31 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
                 }
             }
         };
-        let jfeed = if leg.is_transit {
-            opt_str(&mut env, &leg.feed)
-        } else {
-            JObject::null()
-        };
-        let jcode = if leg.is_transit {
-            opt_str(&mut env, &leg.from_code)
-        } else {
-            JObject::null()
-        };
-        let jend = if leg.is_transit {
-            opt_str(&mut env, &leg.to_code)
+        let is_transit = leg.kind.is_transit();
+        // A WAIT leg needs its stop name for the "wait at X" instruction, but
+        // must not carry a feed or it would render as a ride in the UI.
+        let has_stops = leg.kind != transit::LegKind::Walk;
+        let jfeed = if is_transit { opt_str(&mut env, &leg.feed) } else { JObject::null() };
+        let jcode = if has_stops { opt_str(&mut env, &leg.from_stop) } else { JObject::null() };
+        let jend = if has_stops { opt_str(&mut env, &leg.to_stop) } else { JObject::null() };
+        let jheadsign = if is_transit {
+            opt_str(&mut env, &leg.headsign)
         } else {
             JObject::null()
         };
 
-        let duration_10ms: i64 = if leg.is_transit {
-            (leg.arr_secs.saturating_sub(leg.dep_secs) as i64) * 100
-        } else {
-            (leg.dist_m / crate::graph::WALK_SPEED_M_S * 100.0) as i64
-        };
+        // Every leg's duration comes from RAPTOR's own times. A walk leg's
+        // `dist_m` may have been redrawn along the road graph, which is longer
+        // than the estimate the journey was planned on, so deriving the duration
+        // from it would contradict the departure the plan was built around.
+        let duration_10ms: i64 = (leg.arr_secs.saturating_sub(leg.dep_secs) as i64) * 100;
         let dist_mm: i64 = (leg.dist_m * 1000.0) as i64;
-        let maneuver: i32 = if leg.is_transit { 23 } else { 0 };
+        // Ordinals mirror RouteService.API.Maneuver.
+        let maneuver: i32 = match leg.kind {
+            transit::LegKind::Walk => 0,  // MANEUVER_UNSPECIFIED
+            transit::LegKind::Wait => 21, // WAIT
+            transit::LegKind::Ride => 22, // RIDE
+        };
 
         let jlanes = match env.new_int_array(0) {
             Ok(a) => a,
@@ -430,12 +611,16 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
                 JValue::Long(duration_10ms),
                 JValue::Object(&jgeom_obj),
                 JValue::Double(1.0),
-                JValue::Bool(leg.is_transit as u8),
+                JValue::Bool(is_transit as u8),
                 JValue::Object(&jfeed),
                 JValue::Object(&jcode),
                 JValue::Object(&jend),
                 JValue::Int(leg.stop_count),
                 JValue::Object(&jlanes_obj),
+                JValue::Object(&jheadsign),
+                JValue::Int(leg.route_color as i32),
+                JValue::Int(leg.dep_secs as i32),
+                JValue::Int(leg.arr_secs as i32),
             ],
         ) {
             Ok(o) => o,
@@ -472,6 +657,11 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
     dep_secs: jint,
     weekday: jint,
     date: jint,
+    prev_weekday: jint,
+    prev_date: jint,
+    overlay_coords: JDoubleArray<'local>,
+    overlay_routes: JObjectArray<'local>,
+    overlay_times: JIntArray<'local>,
     max: jint,
 ) -> jobjectArray {
     let null = std::ptr::null_mut();
@@ -492,13 +682,28 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
         return null;
     }
 
+    let entries =
+        read_delay_entries(&mut env, &overlay_coords, &overlay_routes, &overlay_times);
+    let overlay = if entries.is_empty() {
+        None
+    } else {
+        Some(transit::DelayOverlay::build(&index, &entries))
+    };
+
     let deps = transit::stop_departures(
         &index,
         lat,
         lon,
         dep_secs.max(0) as u32,
-        weekday.max(0) as u32,
-        date.max(0) as u32,
+        transit::Schedule {
+            day: transit::QueryDay {
+                weekday: weekday.max(0) as u32,
+                date: date.max(0) as u32,
+                prev_weekday: prev_weekday.max(0) as u32,
+                prev_date: prev_date.max(0) as u32,
+            },
+            overlay: overlay.as_ref(),
+        },
         max.max(0) as usize,
     );
 
@@ -506,7 +711,8 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor = "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;III)V";
+    let ctor =
+        "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;IIIIZZ)V";
     let array = match env.new_object_array(deps.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
         Err(_) => return null,
@@ -540,6 +746,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
                 JValue::Int(d.route_color as i32),
                 JValue::Int(d.route_type as i32),
                 JValue::Int(d.dep_secs as i32),
+                JValue::Int(d.delay_secs),
+                JValue::Bool(d.cancelled as u8),
+                JValue::Bool(d.real_time as u8),
             ],
         ) {
             Ok(o) => o,
@@ -551,6 +760,53 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
     }
 
     array.into_raw()
+}
+
+// ---------------------------------------------------------------------------
+// JNI: getFeedTimezoneNative (IANA tz of the feed covering a coordinate)
+// ---------------------------------------------------------------------------
+
+/// IANA timezone (e.g. `America/Los_Angeles`) of the feed covering
+/// `(lat, lon)` in `<base_path>/<feed>.transit`, from the v3 `FEED_TZ` section.
+/// Returns null when the pack is absent/stale, doesn't cover the point, or its
+/// feed had no `agency.txt` — the caller then falls back to the device zone.
+/// Callers need this because the index is world-merged: every query time must be
+/// expressed in the feed's local frame, not the device's.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getFeedTimezoneNative<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _thiz: JObject<'local>,
+    base_path: JString<'local>,
+    feed: JString<'local>,
+    lat: jdouble,
+    lon: jdouble,
+) -> jstring {
+    let null = std::ptr::null_mut();
+    let base: String = match env.get_string(&base_path) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let feed_name: String = match env.get_string(&feed) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let index = match transit::TransitIndex::load(&base, &feed_name) {
+        Some(i) => i,
+        None => return null,
+    };
+    if !index.covers(lat, lon) {
+        return null;
+    }
+    let tz = index.timezone_at(lat, lon);
+    if tz.is_empty() {
+        return null;
+    }
+    match env.new_string(&tz) {
+        Ok(s) => s.into_raw(),
+        Err(_) => null,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -729,4 +985,74 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_ensureTraffi
         (lon * 1e7) as i32,
         force_async != 0,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn walk_leg(dist_m: f64, coords: Vec<f64>) -> transit::TransitLeg {
+        transit::TransitLeg {
+            kind: transit::LegKind::Walk,
+            name: "Walk".to_string(),
+            feed: String::new(),
+            from_stop: String::new(),
+            to_stop: String::new(),
+            headsign: String::new(),
+            route_color: 0,
+            dep_secs: 28_800,
+            arr_secs: 29_100,
+            stop_count: 0,
+            dist_m,
+            coords,
+        }
+    }
+
+    #[test]
+    fn walk_snapping_reads_its_endpoints_off_the_straight_line() {
+        let leg = walk_leg(300.0, vec![-122.400, 37.700, -122.400, 37.703]);
+        assert_eq!(
+            walk_snap_endpoints(&leg),
+            Some((37.700, -122.400, 37.703, -122.400)),
+            "coords are [lon, lat] pairs; endpoints come back as (lat, lon)"
+        );
+    }
+
+    #[test]
+    fn walk_snapping_skips_a_leg_beyond_the_distance_cap() {
+        let leg = walk_leg(
+            WALK_SNAP_MAX_M + 1.0,
+            vec![-122.400, 37.700, -122.400, 37.730],
+        );
+        assert!(walk_snap_endpoints(&leg).is_none());
+    }
+
+    #[test]
+    fn walk_snapping_skips_non_walk_legs_and_degenerate_geometry() {
+        let mut ride = walk_leg(300.0, vec![-122.400, 37.700, -122.400, 37.703]);
+        ride.kind = transit::LegKind::Ride;
+        assert!(walk_snap_endpoints(&ride).is_none(), "a ride leg keeps its shape geometry");
+        let stub = walk_leg(300.0, vec![-122.400, 37.700]);
+        assert!(walk_snap_endpoints(&stub).is_none(), "a single point has no line to route");
+    }
+
+    #[test]
+    fn a_road_path_far_longer_than_the_straight_line_is_rejected() {
+        assert!(walk_snap_plausible(100.0, 240.0));
+        assert!(!walk_snap_plausible(100.0, 260.0));
+        // A zero-length line has no ratio to test against.
+        assert!(walk_snap_plausible(0.0, 500.0));
+    }
+
+    #[test]
+    fn walk_snapping_is_a_no_op_without_a_graph() {
+        // No `init` has run in this test binary, so GRAPH is None and every leg
+        // must come back exactly as RAPTOR drew it.
+        assert!(graph().is_none(), "no graph is loaded in unit tests");
+        let coords = vec![-122.400, 37.700, -122.400, 37.703];
+        let mut legs = vec![walk_leg(300.0, coords.clone())];
+        snap_walk_legs(&mut legs);
+        assert_eq!(legs[0].coords, coords);
+        assert_eq!(legs[0].dist_m, 300.0);
+    }
 }
