@@ -3,6 +3,7 @@ package com.vayunmathur.musicbrainz.network.api
 import java.io.IOException
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
@@ -70,7 +71,55 @@ class MusicBrainzApiErrorTest {
             val failure = MusicBrainzApi.failureFor(503, body)
             assertTrue(failure is CatalogueNotReadyException, "body ${'"'}$body${'"'} should be not-ready")
             assertNull(failure.reason, "an unparseable body cannot supply a reason")
+            assertTrue(failure.retryable, "with nothing to go on, retrying is worth offering")
         }
+    }
+
+    /**
+     * `absent` is NOT the same as "never". A build that failed and is queued for the next check,
+     * and a first boot before the scheduler has run, are both absent yet worth retrying - so the
+     * server reports retryability and the app must not infer it from the state or from the
+     * presence of a reason.
+     */
+    @Test
+    fun `an absent catalogue that is still coming stays retryable`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","retryable":true,"detail":"a build failed and is queued for the next check"}""",
+        ) as CatalogueNotReadyException
+        assertTrue(failure.retryable, "a queued rebuild must keep the retry button")
+        assertEquals("a build failed and is queued for the next check", failure.reason)
+    }
+
+    /** The case where a retry can never work, so the button must not be offered. */
+    @Test
+    fun `a host that cannot build is not retryable`() {
+        val failure = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","retryable":false,"detail":"cannot build the catalogue here"}""",
+        ) as CatalogueNotReadyException
+        assertFalse(failure.retryable)
+        assertEquals("cannot build the catalogue here", failure.reason)
+    }
+
+    /**
+     * If the server ever stops sending `retryable`, fall back to inferring it from the reason
+     * rather than offering a retry that cannot work: a body with a reason behaves as it did
+     * before the field existed, and one without stays retryable.
+     */
+    @Test
+    fun `infers retryability when the server does not report it`() {
+        val withReason = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","detail":"cannot build the catalogue here"}""",
+        ) as CatalogueNotReadyException
+        assertFalse(withReason.retryable, "a reason with no retryable field must not offer a retry")
+
+        val building = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"building","progress":0.1}""",
+        ) as CatalogueNotReadyException
+        assertTrue(building.retryable)
     }
 
     /** Mid-build answers 503 too, and reads the same to the user: come back shortly. */

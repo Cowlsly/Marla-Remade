@@ -145,6 +145,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 error = null,
                 notReady = false,
                 notReadyReason = null,
+                notReadyRetryable = true,
                 hasSearched = true,
             )
             try {
@@ -187,6 +188,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
                     notReadyReason = e.notReadyReason(),
+                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -240,6 +242,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
                     notReadyReason = e.notReadyReason(),
+                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -298,6 +301,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
                     notReadyReason = e.notReadyReason(),
+                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -321,6 +325,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     error = e.readableMessage(),
                     notReady = e is CatalogueNotReadyException,
                     notReadyReason = e.notReadyReason(),
+                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -596,6 +601,10 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
      */
     private fun Exception.notReadyReason(): String? =
         (this as? CatalogueNotReadyException)?.reason
+
+    /** The server's word on whether retrying can help; assume it can when it did not say. */
+    private fun Exception.notReadyRetryable(): Boolean =
+        (this as? CatalogueNotReadyException)?.retryable ?: true
 
     private fun Exception.readableMessage(): String =
         message?.takeIf { it.isNotBlank() }?.take(200) ?: "Something went wrong"

@@ -75,6 +75,7 @@ fun ReleaseScreen(
                 error = state.error,
                 notReady = state.notReady,
                 notReadyReason = state.notReadyReason,
+                notReadyRetryable = state.notReadyRetryable,
                 modifier = Modifier.fillMaxSize().padding(padding),
             )
             else -> LazyColumn(

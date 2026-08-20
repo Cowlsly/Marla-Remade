@@ -92,6 +92,8 @@ data class SearchUiState(
     val notReady: Boolean = false,
     /** The server's reason, when a missing catalogue is not simply on its way. */
     val notReadyReason: String? = null,
+    /** Whether asking again could ever produce a catalogue. The server decides this. */
+    val notReadyRetryable: Boolean = true,
     val hasSearched: Boolean = false,
     val artists: List<ArtistRow> = emptyList(),
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -105,6 +107,8 @@ data class ArtistUiState(
     val notReady: Boolean = false,
     /** The server's reason, when a missing catalogue is not simply on its way. */
     val notReadyReason: String? = null,
+    /** Whether asking again could ever produce a catalogue. The server decides this. */
+    val notReadyRetryable: Boolean = true,
     val name: String = "",
     val subtitle: String? = null,
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -117,6 +121,8 @@ data class ReleaseGroupUiState(
     val notReady: Boolean = false,
     /** The server's reason, when a missing catalogue is not simply on its way. */
     val notReadyReason: String? = null,
+    /** Whether asking again could ever produce a catalogue. The server decides this. */
+    val notReadyRetryable: Boolean = true,
     val title: String = "",
     val artist: String = "",
     val coverUrl: String? = null,
@@ -130,6 +136,8 @@ data class ReleaseUiState(
     val notReady: Boolean = false,
     /** The server's reason, when a missing catalogue is not simply on its way. */
     val notReadyReason: String? = null,
+    /** Whether asking again could ever produce a catalogue. The server decides this. */
+    val notReadyRetryable: Boolean = true,
     val id: String = "",
     val title: String = "",
     val artist: String = "",

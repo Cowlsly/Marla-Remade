@@ -14,6 +14,8 @@ internal data class NotReadyBody(
     val state: String = "",
     val progress: Float? = null,
     val detail: String? = null,
+    /** Whether waiting and asking again will ever produce a catalogue. */
+    val retryable: Boolean? = null,
 )
 
 /**
@@ -25,14 +27,19 @@ internal data class NotReadyBody(
  * a fault at their end.
  *
  * [reason] is the server's own explanation, carried only for [ABSENT] - a catalogue that is
- * absent is not always coming. The host may be unable to build one at all, in which case
- * telling the user to try again shortly would be a promise nothing is going to keep.
- * [BUILDING] needs no explanation because it genuinely does resolve on its own.
+ * absent may never arrive, and [BUILDING] needs no explanation because it resolves on its own.
+ *
+ * [retryable] is the server's word on whether asking again will ever help, and it is NOT the
+ * same question as whether a catalogue is absent: a first boot before the scheduler has run,
+ * and a failed build queued for the next check, are both absent yet worth retrying, while a
+ * host that cannot fit a build never will be. It is reported rather than inferred because only
+ * the server knows which of those it is.
  */
 class CatalogueNotReadyException(
     message: String,
     val state: String? = null,
     val reason: String? = null,
+    val retryable: Boolean = true,
 ) : IOException(message) {
     companion object {
         const val ABSENT = "absent"
@@ -96,11 +103,16 @@ object MusicBrainzApi {
     internal fun failureFor(status: Int, body: String): IOException? = when {
         status == HttpURLConnection.HTTP_UNAVAILABLE -> {
             val parsed = runCatching { json.decodeFromString<NotReadyBody>(body) }.getOrNull()
+            val reason = parsed?.detail?.ifBlank { null }
+                ?.takeIf { parsed.state == CatalogueNotReadyException.ABSENT }
             CatalogueNotReadyException(
                 message = "HTTP 503: ${body.take(200)}",
                 state = parsed?.state?.ifBlank { null },
-                reason = parsed?.detail?.ifBlank { null }
-                    ?.takeIf { parsed.state == CatalogueNotReadyException.ABSENT },
+                reason = reason,
+                // Falls back to inferring it from the reason when the server does not say, so a
+                // body without the field behaves as it did before the field existed rather than
+                // offering a retry that cannot work.
+                retryable = parsed?.retryable ?: (reason == null),
             )
         }
         status in 200..299 -> null

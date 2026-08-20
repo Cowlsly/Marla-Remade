@@ -54,6 +54,7 @@ fun ArtistScreen(
                 error = state.error,
                 notReady = state.notReady,
                 notReadyReason = state.notReadyReason,
+                notReadyRetryable = state.notReadyRetryable,
                 modifier = Modifier.fillMaxSize().padding(padding),
             )
             state.releaseGroups.isEmpty() -> EmptyState(
