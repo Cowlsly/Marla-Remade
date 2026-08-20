@@ -163,6 +163,48 @@ class MusicBrainzApiErrorTest {
         )
     }
 
+    /**
+     * The server's own pinned wire format, pasted verbatim.
+     *
+     * These three strings are asserted byte-for-byte on the server side (`9993b08`), so copying
+     * them here rather than paraphrasing puts both ends of the contract on the same literals: if
+     * the server's format drifts its test fails, and if this client's parsing drifts this one
+     * does. That matters more than usual because production still answers 404, so no integration
+     * test can catch a mismatch between us yet.
+     */
+    @Test
+    fun `parses the server's pinned bodies verbatim`() {
+        val builderDisabled = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"absent","retryable":false,"detail":"the offline catalogue builder is not enabled on this server yet"}""",
+        ) as CatalogueNotReadyException
+        assertEquals(CatalogueNotReadyException.ABSENT, builderDisabled.state)
+        assertFalse(builderDisabled.retryable, "a disabled builder cannot be waited out")
+        assertEquals(
+            "the offline catalogue builder is not enabled on this server yet",
+            builderDisabled.reason,
+        )
+
+        val building = MusicBrainzApi.failureFor(
+            503,
+            """{"error":"not_ready","state":"building","retryable":true,"progress":0.42,"detail":"spilling tables"}""",
+        ) as CatalogueNotReadyException
+        assertEquals(CatalogueNotReadyException.BUILDING, building.state)
+        assertTrue(building.retryable)
+        // Build-stage jargon is never shown, so it is deliberately not carried as a reason.
+        assertNull(building.reason)
+
+        // The COMPLETE status body: no `error`, no `detail`. It has to decode all the same.
+        val status = MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+            """{"state":"absent","retryable":true}""",
+        )
+        assertEquals("absent", status.state)
+        assertEquals(true, status.retryable)
+        assertNull(status.detail)
+        assertNull(status.progress)
+        assertEquals("", status.error)
+    }
+
     /** Mid-build answers 503 too, and reads the same to the user: come back shortly. */
     @Test
     fun `503 while building is also a wait`() {
