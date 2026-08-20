@@ -165,6 +165,36 @@ The bytes are a captured artefact, not a reproducible one — trips are grouped 
 of a `HashMap`, so route order varies between runs. The device-side assertions are
 semantic for that reason.
 
+## Building a regional pack
+
+`build_ca_transit.ps1` (repo root: `scripts/maps/`) builds a state-wide pack
+natively on Windows, the way `build_graph.ps1` does for the road graph:
+
+```powershell
+.\build_ca_transit.ps1                 # -> california.transit
+.\build_ca_transit.ps1 -Resolve        # report feed resolution only
+.\build_ca_transit.ps1 -Region us-ny -PackName newyork
+```
+
+It exists because `build_world_transit.sh` scrapes `url` fields out of the
+Transitous registry, and most US sources have none: 38 of California's 49 are
+`transitland-atlas` references carrying only a feed id. Scraping URLs yields a
+third of the state. This script resolves those ids through the transitland-atlas
+DMFR files, prefers a key-free `static_historic` zip when `static_current` sits
+behind an API key, and rejects GTFS-realtime endpoints — an agency is often listed
+twice, once static and once realtime, and only the atlas entry's `spec`
+distinguishes them.
+
+A California run in 2026 resolved 27 static feeds (58,566 stops, 4,441 routes,
+267,929 trips) into an 18 MB pack, 95% of routes carrying `shapes.txt` geometry
+and `SHAPE_COORDS` taking 2.6 MB of it. Everything it skips is either a realtime
+duplicate of a feed already included, or documented upstream as broken.
+
+**The app enumerates every `*.transit` file in its external files dir and
+concatenates their departure boards without deduplicating**, so ship exactly one
+pack. Replace `world.transit` rather than adding a second file beside it; a backup
+must not end in `.transit` or it will be loaded too.
+
 ## Known limitations
 
 - Transfers use a straight-line ≤400 m footpath heuristic (not the road graph);

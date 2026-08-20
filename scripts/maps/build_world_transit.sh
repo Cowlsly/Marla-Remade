@@ -46,6 +46,12 @@ set -euo pipefail
 #   # Whole world, then publish:
 #   export R2_ENDPOINT=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
 #   ./build_world_transit.sh --work /data/transit --publish
+#
+# LIMITATION: this scrapes `url` fields out of the registry, but most US state
+# files reference feeds by `transitland-atlas-id` with no URL at all (38 of
+# California's 49 sources), so those agencies are silently dropped. Use
+# `build_ca_transit.ps1`, which resolves those ids through transitland-atlas, for
+# any region where that matters.
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 INGEST_DIR="$HERE/gtfs_ingest"
