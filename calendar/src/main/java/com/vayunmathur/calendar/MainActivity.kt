@@ -1,14 +1,11 @@
 package com.vayunmathur.calendar
 
 import android.Manifest
-import android.app.AlarmManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.CalendarContract
-import android.provider.Settings
 import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -36,6 +33,7 @@ import com.vayunmathur.calendar.ui.dialogs.*
 import com.vayunmathur.calendar.util.CalendarViewModel
 import com.vayunmathur.calendar.util.RecurrenceParams
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.SpecialAccess
 import com.vayunmathur.library.ui.dialog.DatePickerDialog
 import com.vayunmathur.library.ui.dialog.TimePickerDialogContent
 import com.vayunmathur.library.util.openSettingsIfRequested
@@ -57,17 +55,9 @@ class MainActivity : ComponentActivity() {
         updateWidgetPreviews(CalendarGlanceWidgetReceiver::class)
         enableEdgeToEdge()
 
-        // Reminder notifications rely on exact alarms. USE_EXACT_ALARM is granted
-        // at install on Android 13+, so only older releases need the settings trip.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            val alarmManager = getSystemService(AlarmManager::class.java)
-            if (alarmManager != null && !alarmManager.canScheduleExactAlarms()) {
-                runCatching {
-                    startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                        data = Uri.fromParts("package", packageName, null)
-                    })
-                }
-            }
+        // Reminder notifications rely on exact alarms.
+        if (!SpecialAccess.hasExactAlarms(this)) {
+            runCatching { SpecialAccess.requestExactAlarms(this) }
         }
 
         handleIntent(intent)
