@@ -40,8 +40,15 @@ object SpecialAccess {
         )
     }
 
-    /** Exact alarms, required for anything that must fire at a precise time. */
+    /**
+     * Exact alarms, required for anything that must fire at a precise time.
+     *
+     * From Android 13 on, an app that declares `USE_EXACT_ALARM` is granted this
+     * at install and the user cannot revoke it, so only older releases need the
+     * revocable `SCHEDULE_EXACT_ALARM` access checked.
+     */
     fun hasExactAlarms(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) return true
         val manager = context.getSystemService(android.app.AlarmManager::class.java)
         return manager?.canScheduleExactAlarms() ?: false
     }
