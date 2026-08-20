@@ -234,4 +234,5 @@
     <string name="edit_with_label">使用我的应用编辑</string>
     <string name="editor_desc_none">" "</string>
     <string name="gif_badge">GIF</string>
+    <string name="title_edit_video">编辑视频</string>
 </resources>
