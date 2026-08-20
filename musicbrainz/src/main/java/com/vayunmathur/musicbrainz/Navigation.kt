@@ -10,6 +10,7 @@ import com.vayunmathur.musicbrainz.ui.ReleaseGroupPage
 import com.vayunmathur.musicbrainz.ui.ReleasePage
 import com.vayunmathur.musicbrainz.ui.SearchPage
 import com.vayunmathur.musicbrainz.ui.SettingsPage
+import com.vayunmathur.musicbrainz.ui.TidalLoginPage
 
 @Composable
 fun Navigation(viewModel: MusicBrainzViewModel) {
@@ -21,5 +22,6 @@ fun Navigation(viewModel: MusicBrainzViewModel) {
         entry<Route.Release> { ReleasePage(backStack, viewModel, it.releaseId) }
         entry<Route.Downloads> { DownloadsPage(backStack, viewModel) }
         entry<Route.Settings> { SettingsPage(backStack, viewModel) }
+        entry<Route.TidalLogin> { TidalLoginPage(backStack, viewModel) }
     }
 }

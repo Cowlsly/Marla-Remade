@@ -19,13 +19,18 @@ import com.vayunmathur.library.ui.IconFolder
 import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
+import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.SettingsSwitchRow
+import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
+import com.vayunmathur.musicbrainz.platform.DownloadSource
 import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
 import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
 import com.vayunmathur.musicbrainz.platform.SettingsUiState
+import com.vayunmathur.musicbrainz.platform.TidalQuality
 
 /**
  * Binds the settings screen to the ViewModel.
@@ -56,6 +61,9 @@ fun SettingsScreen(
     onPickFolder: () -> Unit,
 ) {
     AppScaffold(title = stringResource(R.string.settings), backStack = backStack) { padding ->
+        // Resolved up front: SettingsSelectRow's label is a plain lambda, not composable.
+        val sourceLabels = DownloadSource.entries.associateWith { stringResource(it.labelRes) }
+        val qualityLabels = TidalQuality.entries.associateWith { stringResource(it.labelRes) }
         Column(
             Modifier
                 .fillMaxSize()
@@ -92,6 +100,13 @@ fun SettingsScreen(
                 )
             }
             SettingsSection(title = stringResource(R.string.downloads)) {
+                SettingsSelectRow(
+                    title = stringResource(R.string.download_source),
+                    selected = state.downloadSource,
+                    options = DownloadSource.entries,
+                    label = { sourceLabels.getValue(it) },
+                    onSelect = actions::setDownloadSource,
+                )
                 SettingsSwitchRow(
                     title = stringResource(R.string.embed_cover_art),
                     checked = state.embedCoverArt,
@@ -104,6 +119,35 @@ fun SettingsScreen(
                     onCheckedChange = actions::setFetchLyrics,
                     supportingText = stringResource(R.string.fetch_lyrics_description),
                 )
+            }
+            SettingsSection(title = stringResource(R.string.download_source_tidal)) {
+                if (state.tidalUsername != null) {
+                    SettingsRow(
+                        title = stringResource(R.string.tidal_account),
+                        supportingText = state.tidalUsername,
+                        trailingContent = {
+                            TextButton(onClick = actions::signOutOfTidal) {
+                                Text(stringResource(R.string.tidal_sign_out))
+                            }
+                        },
+                    )
+                } else {
+                    SettingsRow(
+                        title = stringResource(R.string.tidal_sign_in),
+                        supportingText = stringResource(R.string.tidal_signed_out),
+                        onClick = { backStack.add(Route.TidalLogin) },
+                    )
+                }
+                // Quality only means anything once Tidal is the source audio comes from.
+                if (state.downloadSource == DownloadSource.Tidal) {
+                    SettingsSelectRow(
+                        title = stringResource(R.string.tidal_quality),
+                        selected = state.tidalQuality,
+                        options = TidalQuality.entries,
+                        label = { qualityLabels.getValue(it) },
+                        onSelect = actions::setTidalQuality,
+                    )
+                }
             }
         }
     }

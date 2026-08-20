@@ -37,6 +37,8 @@ data class DownloadRequest(
     val trackTotal: Int?,
     val discNumber: Int?,
     val durationMs: Int?,
+    /** The recording's ISRCs, for sources that match on identity rather than a search. */
+    val isrcs: List<String> = emptyList(),
 ) {
     /**
      * Stable identity for the queue and for WorkManager's unique work name.
@@ -121,6 +123,7 @@ internal fun DownloadRequest.toData(): Data = Data.Builder()
     .putInt("trackTotal", trackTotal ?: 0)
     .putInt("discNumber", discNumber ?: 0)
     .putInt("durationMs", durationMs ?: 0)
+    .putStringArray("isrcs", isrcs.toTypedArray())
     .build()
 
 internal fun Data.toDownloadRequest(): DownloadRequest? {
@@ -140,5 +143,6 @@ internal fun Data.toDownloadRequest(): DownloadRequest? {
         trackTotal = getInt("trackTotal", 0).takeIf { it > 0 },
         discNumber = getInt("discNumber", 0).takeIf { it > 0 },
         durationMs = getInt("durationMs", 0).takeIf { it > 0 },
+        isrcs = getStringArray("isrcs")?.toList().orEmpty(),
     )
 }

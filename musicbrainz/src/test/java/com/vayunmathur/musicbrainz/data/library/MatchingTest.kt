@@ -1,6 +1,7 @@
 package com.vayunmathur.musicbrainz.data.library
 
 import com.vayunmathur.musicbrainz.data.LocalTrack
+import com.vayunmathur.musicbrainz.domain.library.MatchKeys
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse

@@ -58,6 +58,8 @@ data class TrackRow(
     val artist: String,
     val durationMs: Int? = null,
     val discNumber: Int = 1,
+    /** The recording's ISRCs, which let a catalogue source match on identity. */
+    val isrcs: List<String> = emptyList(),
     val onDevice: Boolean = false,
     val download: DownloadItem? = null,
 )
@@ -111,6 +113,20 @@ data class SettingsUiState(
     val indexedTracks: Int = 0,
     val fetchLyrics: Boolean = true,
     val embedCoverArt: Boolean = true,
+    val downloadSource: DownloadSource = DownloadSource.YouTube,
+    val tidalQuality: TidalQuality = TidalQuality.High,
+    /** The signed-in Tidal user, or null when signed out. */
+    val tidalUsername: String? = null,
+)
+
+/** How far along the Tidal device-code sign-in is. */
+enum class TidalLoginStatus { Starting, AwaitingUser, Success, Failed }
+
+data class TidalLoginUiState(
+    val status: TidalLoginStatus = TidalLoginStatus.Starting,
+    val userCode: String? = null,
+    val verificationUri: String? = null,
+    val error: String? = null,
 )
 
 interface MusicBrainzActions {
@@ -132,6 +148,9 @@ interface MusicBrainzActions {
     fun rescanLibrary() {}
     fun setFetchLyrics(value: Boolean) {}
     fun setEmbedCoverArt(value: Boolean) {}
+    fun setDownloadSource(source: DownloadSource) {}
+    fun setTidalQuality(quality: TidalQuality) {}
+    fun signOutOfTidal() {}
 
     companion object {
         val Noop: MusicBrainzActions = object : MusicBrainzActions {}

@@ -8,6 +8,8 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.musicbrainz.data.library.LibraryIndex
 import com.vayunmathur.musicbrainz.data.library.LibraryScanner
 import com.vayunmathur.musicbrainz.data.library.LibrarySnapshot
+import com.vayunmathur.musicbrainz.data.tidal.TidalAuth
+import com.vayunmathur.musicbrainz.data.tidal.TidalPollResult
 import com.vayunmathur.musicbrainz.network.api.CoverArt
 import com.vayunmathur.musicbrainz.network.api.MbRecording
 import com.vayunmathur.musicbrainz.network.api.MbRelease
@@ -18,10 +20,12 @@ import com.vayunmathur.musicbrainz.platform.download.DownloadQueue
 import com.vayunmathur.musicbrainz.platform.download.DownloadRequest
 import com.vayunmathur.musicbrainz.platform.SafTree
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.launch
@@ -41,12 +45,14 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
     private val _artist = MutableStateFlow(ArtistUiState())
     private val _releaseGroup = MutableStateFlow(ReleaseGroupUiState())
     private val _release = MutableStateFlow(ReleaseUiState())
+    private val _tidalLogin = MutableStateFlow(TidalLoginUiState())
 
     private val artistCache = HashMap<String, ArtistUiState>()
     private val releaseGroupCache = HashMap<String, ReleaseGroupUiState>()
     private val releaseCache = HashMap<String, MbRelease>()
 
     private var searchJob: Job? = null
+    private var tidalLoginJob: Job? = null
     private var loadedReleaseId: String? = null
 
     /**
@@ -61,6 +67,8 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SearchUiState())
 
     val artist: StateFlow<ArtistUiState> = _artist.asStateFlow()
+
+    val tidalLogin: StateFlow<TidalLoginUiState> = _tidalLogin.asStateFlow()
 
     val releaseGroup: StateFlow<ReleaseGroupUiState> =
         combine(_releaseGroup, LibraryIndex.snapshot) { state, library ->
@@ -90,6 +98,20 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
     val downloads: StateFlow<Map<String, com.vayunmathur.musicbrainz.platform.download.DownloadItem>> =
         DownloadQueue.items
 
+    /**
+     * The Tidal prefs, folded into one flow first: [combine]'s largest typed overload takes
+     * five sources and the folder/library group already fills it.
+     */
+    private val tidalSettings = combine(
+        prefs.downloadSource,
+        prefs.tidalQuality,
+        prefs.tidalAccount,
+    ) { source, quality, account ->
+        // Falls back to the user id so an account whose payload carried no username still
+        // reads as signed in, and so its sign-out row stays reachable.
+        Triple(source, quality, account?.let { it.username.ifBlank { it.userId } })
+    }
+
     val settings: StateFlow<SettingsUiState> = combine(
         prefs.musicFolder,
         prefs.fetchLyrics,
@@ -104,6 +126,8 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
             fetchLyrics = lyrics,
             embedCoverArt = cover,
         )
+    }.combine(tidalSettings) { state, (source, quality, username) ->
+        state.copy(downloadSource = source, tidalQuality = quality, tidalUsername = username)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
     init {
@@ -333,6 +357,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
             trackTotal = medium.trackCount.takeIf { it > 0 },
             discNumber = track.discNumber.takeIf { release.media.size > 1 },
             durationMs = track.durationMs,
+            isrcs = track.isrcs,
         )
     }
 
@@ -362,6 +387,108 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
 
     override fun setEmbedCoverArt(value: Boolean) {
         viewModelScope.launch { prefs.setEmbedCoverArt(value) }
+    }
+
+    override fun setDownloadSource(source: DownloadSource) {
+        viewModelScope.launch { prefs.setDownloadSource(source) }
+    }
+
+    override fun setTidalQuality(quality: TidalQuality) {
+        viewModelScope.launch { prefs.setTidalQuality(quality) }
+    }
+
+    override fun signOutOfTidal() {
+        viewModelScope.launch {
+            prefs.tidalAccount.first()?.accessToken?.takeIf { it.isNotBlank() }?.let {
+                TidalAuth.logout(it)
+            }
+            prefs.clearTidalAccount()
+            // The login screen pops itself on Success, so a stale Success left here would
+            // pop the next sign-in before the user ever sees a code.
+            _tidalLogin.value = TidalLoginUiState()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Tidal sign-in
+    // ------------------------------------------------------------------
+
+    /**
+     * Runs the device-code flow: ask for a code, show it, then poll until the user has
+     * entered it elsewhere or the code's own deadline passes.
+     */
+    fun startTidalLogin() {
+        tidalLoginJob?.cancel()
+        _tidalLogin.value = TidalLoginUiState()
+        tidalLoginJob = viewModelScope.launch {
+            val code = try {
+                TidalAuth.requestDeviceCode()
+            } catch (e: Exception) {
+                _tidalLogin.value = TidalLoginUiState(
+                    status = TidalLoginStatus.Failed,
+                    error = e.readableMessage(),
+                )
+                return@launch
+            }
+            _tidalLogin.value = TidalLoginUiState(
+                status = TidalLoginStatus.AwaitingUser,
+                userCode = code.userCode,
+                verificationUri = code.verificationUri,
+            )
+
+            val deadline = System.currentTimeMillis() + code.expiresInSeconds * 1000L
+            var intervalMs = code.intervalSeconds.coerceAtLeast(1) * 1000L
+            while (System.currentTimeMillis() < deadline) {
+                delay(intervalMs)
+                when (val result = TidalAuth.poll(code.deviceCode)) {
+                    TidalPollResult.Pending -> Unit
+                    TidalPollResult.SlowDown -> intervalMs += SLOW_DOWN_STEP_MS
+                    TidalPollResult.Expired -> {
+                        failTidalLogin(null)
+                        return@launch
+                    }
+                    is TidalPollResult.Error -> {
+                        failTidalLogin(result.message)
+                        return@launch
+                    }
+                    is TidalPollResult.Success -> {
+                        val tokens = result.tokens
+                        // A blank token would store an account that reports as signed in but
+                        // silently resolves nothing, so treat it as a failed sign-in.
+                        if (tokens.accessToken.isBlank()) {
+                            failTidalLogin(null)
+                            return@launch
+                        }
+                        prefs.setTidalAccount(
+                            TidalAccount(
+                                accessToken = tokens.accessToken,
+                                refreshToken = tokens.refreshToken,
+                                expiresAtMs = tokens.expiresAtMs,
+                                countryCode = tokens.countryCode,
+                                userId = tokens.userId,
+                                username = tokens.username,
+                            ),
+                        )
+                        _tidalLogin.value = TidalLoginUiState(status = TidalLoginStatus.Success)
+                        return@launch
+                    }
+                }
+            }
+            failTidalLogin(null)
+        }
+    }
+
+    fun cancelTidalLogin() {
+        tidalLoginJob?.cancel()
+        tidalLoginJob = null
+        _tidalLogin.value = TidalLoginUiState()
+    }
+
+    private fun failTidalLogin(message: String?) {
+        _tidalLogin.value = TidalLoginUiState(
+            status = TidalLoginStatus.Failed,
+            error = message?.takeIf { it.isNotBlank() },
+        )
     }
 
     // ------------------------------------------------------------------
@@ -401,6 +528,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                         ?: artistCredit.display().orEmpty(),
                     durationMs = track.length ?: track.recording?.length,
                     discNumber = medium.position,
+                    isrcs = track.recording?.isrcs.orEmpty(),
                 )
             }
         },
@@ -449,5 +577,10 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
     private fun readableFolderName(uri: String): String = runCatching {
         SafTree.rootDocumentId(uri.toUri()).substringAfterLast(':').ifEmpty { uri }
     }.getOrDefault(uri)
+
+    private companion object {
+        // Tidal answers `slow_down` when polled too eagerly; back off by a second each time.
+        const val SLOW_DOWN_STEP_MS = 1_000L
+    }
 }
 

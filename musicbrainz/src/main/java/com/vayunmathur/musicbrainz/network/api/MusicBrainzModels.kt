@@ -93,6 +93,8 @@ data class MbRecordingRef(
     val id: String = "",
     val title: String = "",
     val length: Int? = null,
+    /** Present only when the release was fetched with `inc=isrcs`. */
+    val isrcs: List<String> = emptyList(),
     @SerialName("artist-credit") val artistCredit: List<MbArtistCredit> = emptyList(),
 )
 

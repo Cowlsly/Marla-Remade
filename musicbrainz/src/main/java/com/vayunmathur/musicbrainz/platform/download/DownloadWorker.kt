@@ -7,12 +7,13 @@ import androidx.work.WorkerParameters
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.musicbrainz.data.LocalTrack
 import com.vayunmathur.musicbrainz.data.MusicBrainzRepository
-import com.vayunmathur.musicbrainz.data.download.AudioResolver
+import com.vayunmathur.musicbrainz.data.download.AudioQuery
+import com.vayunmathur.musicbrainz.data.download.AudioSources
 import com.vayunmathur.musicbrainz.data.download.Lyrics
-import com.vayunmathur.musicbrainz.data.download.Mp4Tagger
-import com.vayunmathur.musicbrainz.data.download.Mp4Tags
 import com.vayunmathur.musicbrainz.data.download.OggOpusTagger
 import com.vayunmathur.musicbrainz.data.download.OpusRemuxer
+import com.vayunmathur.musicbrainz.data.download.OpusTranscoder
+import com.vayunmathur.musicbrainz.data.download.ResolvedAudio
 import com.vayunmathur.musicbrainz.data.download.VorbisTags
 import com.vayunmathur.musicbrainz.data.library.LibraryScanner
 import com.vayunmathur.musicbrainz.domain.library.MatchKeys
@@ -44,79 +45,40 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                 ?: return@withContext fail(key, "No music folder selected")
 
             DownloadQueue.update(DownloadState.Searching, key)
-            val audio = AudioResolver.resolve(
-                artist = request.artist,
-                title = request.title,
-                album = request.album,
-                durationMs = request.durationMs,
-            ) ?: return@withContext fail(key, "No audio source found")
+            val audio = resolveAudio(request, prefs)
+                ?: return@withContext fail(key, "No audio source found")
 
             DownloadQueue.update(DownloadState.Downloading, key)
-            val raw = download(audio.url) { progress ->
+            val raw = download(audio.urls) { progress ->
                 DownloadQueue.update(DownloadState.Downloading, key, progress)
             } ?: return@withContext fail(key, "Download failed")
 
             DownloadQueue.update(DownloadState.Tagging, key, 1f)
-            val cover = if (prefs.embedCoverArt.first()) {
-                CoverArtCache.get(request.releaseId, request.releaseGroupId)
-            } else {
-                null
-            }
-            val lyrics = if (prefs.fetchLyrics.first()) {
-                Lyrics.fetch(request.artist, request.title, request.album, request.durationMs)
-            } else {
-                null
-            }
+            val cover = CoverArtCache.get(request.releaseId, request.releaseGroupId)
+            val lyrics = Lyrics.fetch(request.artist, request.title, request.album, request.durationMs)
             android.util.Log.i(
                 "MBDownload",
-                "tagging '${request.title}': needsRemux=${audio.needsRemux} suffix=${audio.suffix} " +
-                    "bitrate=${audio.bitrate} raw=${raw.size} cover=${cover?.size ?: 0} " +
-                    "lyrics=${lyrics?.length ?: 0}",
+                "tagging '${request.title}': passthrough=${audio.isOpusPassthrough} " +
+                    "source=${audio.suffix} bitrate=${audio.bitrate} raw=${raw.size} " +
+                    "cover=${cover?.size ?: 0} lyrics=${lyrics?.length ?: 0}",
             )
 
-            val tagged: ByteArray
-            val suffix: String
-            val mimeType: String
-            when {
-                audio.needsRemux -> {
-                    val ogg = OpusRemuxer.remux(applicationContext, raw)
-                    if (ogg != null) {
-                        val startsOggS = ogg.size >= 4 &&
-                            String(ogg, 0, 4, Charsets.ISO_8859_1) == "OggS"
-                        val out = OggOpusTagger.tag(ogg, request.toVorbisTags(cover, lyrics))
-                        android.util.Log.i(
-                            "MBDownload",
-                            "opus tag: oggStartsOggS=$startsOggS ogg=${ogg.size} " +
-                                "taggedNull=${out == null} tagged=${out?.size ?: 0}",
-                        )
-                        tagged = out ?: ogg
-                        suffix = "opus"
-                        mimeType = "audio/ogg"
-                    } else {
-                        // Remuxing a valid Opus stream should not fail, but if the platform
-                        // muxer refuses it the download is kept as the WebM it arrived as
-                        // rather than lost. It carries no tags, but the scan finds it by name.
-                        tagged = raw
-                        suffix = "webm"
-                        mimeType = "audio/webm"
-                    }
-                }
-                audio.suffix == "m4a" -> {
-                    tagged = Mp4Tagger.tag(raw, request.toMp4Tags(cover, lyrics)) ?: raw
-                    suffix = "m4a"
-                    mimeType = "audio/mp4"
-                }
-                else -> {
-                    // Only MP4 and Ogg/Opus can be annotated here, so anything else is stored
-                    // as fetched. It still gets found by the library scan, just on name and path.
-                    tagged = raw
-                    suffix = audio.suffix
-                    mimeType = audio.mimeType
-                }
-            }
-            android.util.Log.i("MBDownload", "writing '${request.title}' as .$suffix ($mimeType)")
+            // Every download is filed as a tagged `.opus`. A stream that is already 48 kHz
+            // Opus is only rewrapped into Ogg; everything else is re-encoded. A failure here
+            // fails the download rather than writing one of the formats being replaced.
+            val ogg = if (audio.isOpusPassthrough) {
+                OpusRemuxer.remux(applicationContext, raw)
+            } else {
+                OpusTranscoder.transcode(raw) { isStopped }
+            } ?: return@withContext fail(key, "Could not convert the download to Opus")
 
-            val written = writeToLibrary(treeUri, request, suffix, mimeType, tagged)
+            val tagged = OggOpusTagger.tag(ogg, request.toVorbisTags(cover, lyrics)) ?: ogg
+            android.util.Log.i(
+                "MBDownload",
+                "writing '${request.title}' as .opus: ogg=${ogg.size} tagged=${tagged.size}",
+            )
+
+            val written = writeToLibrary(treeUri, request, "opus", "audio/ogg", tagged)
                 ?: return@withContext fail(key, "Could not write to music folder")
 
             recordInIndex(written, request, tagged.size)
@@ -133,35 +95,73 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
     }
 
     /**
+     * Asks each source in the user's order until one has a match.
+     *
+     * A source that throws is treated as no match: the point of the fallback order is that
+     * a lapsed Tidal subscription degrades the download to YouTube rather than losing it.
+     */
+    private suspend fun resolveAudio(
+        request: DownloadRequest,
+        prefs: MusicBrainzPrefs,
+    ): ResolvedAudio? {
+        val query = AudioQuery(
+            artist = request.artist,
+            title = request.title,
+            album = request.album,
+            durationMs = request.durationMs,
+            isrcs = request.isrcs,
+        )
+        for (source in AudioSources.ordered(applicationContext, prefs.downloadSource.first())) {
+            val audio = runCatching { source.resolve(query) }.getOrNull()
+            if (audio != null && audio.urls.isNotEmpty()) return audio
+        }
+        return null
+    }
+
+    /**
      * Streams the audio into memory, reporting progress as it goes.
      *
      * Buffered rather than written straight to the destination because the tagger has to
      * rewrite the container before the file is filed away, and a partially written track
      * appearing in the user's music folder would be picked up by every other player on
      * the device.
+     *
+     * [urls] is a single progressive stream for YouTube and one entry per DASH segment for
+     * Tidal, so the parts are concatenated in order into the one buffer. A segmented stream
+     * reports progress by segments finished: asking each of a few hundred segments for its
+     * length first would double the requests and stall the download before it started.
      */
-    private suspend fun download(url: String, onProgress: (Float) -> Unit): ByteArray? {
-        val expected = NetworkClient.getContentLength(url) ?: 0L
+    private suspend fun download(urls: List<String>, onProgress: (Float) -> Unit): ByteArray? {
+        val expected = if (urls.size == 1) NetworkClient.getContentLength(urls[0]) ?: 0L else 0L
         val buffer = ByteArrayOutputStream(if (expected > 0) expected.toInt() else DEFAULT_BUFFER)
         var lastReported = 0L
-        val response = NetworkClient.stream(url) { stream, resp ->
-            if (stream == null || !resp.isSuccess) return@stream
-            val chunk = ByteArray(READ_BUFFER)
-            while (!stream.isClosedForRead) {
-                if (isStopped) return@stream
-                val read = stream.read(chunk)
-                if (read <= 0) break
-                buffer.write(chunk, 0, read)
-                if (expected > 0) {
-                    val now = System.currentTimeMillis()
-                    if (now - lastReported > PROGRESS_INTERVAL_MS) {
-                        lastReported = now
-                        onProgress((buffer.size().toFloat() / expected).coerceIn(0f, 1f))
+        for ((index, url) in urls.withIndex()) {
+            if (isStopped) return null
+            val response = NetworkClient.stream(url) { stream, resp ->
+                if (stream == null || !resp.isSuccess) return@stream
+                val chunk = ByteArray(READ_BUFFER)
+                while (!stream.isClosedForRead) {
+                    if (isStopped) return@stream
+                    val read = stream.read(chunk)
+                    if (read <= 0) break
+                    buffer.write(chunk, 0, read)
+                    if (expected > 0) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastReported > PROGRESS_INTERVAL_MS) {
+                            lastReported = now
+                            onProgress((buffer.size().toFloat() / expected).coerceIn(0f, 1f))
+                        }
                     }
                 }
             }
+            // A missing segment would leave a file that stops playing part-way through, so
+            // a segmented stream fails outright rather than being written incomplete.
+            if (!response.isSuccess && urls.size > 1) return null
+            if (urls.size > 1) onProgress((index + 1).toFloat() / urls.size)
         }
-        if (!response.isSuccess && buffer.size() == 0) return null
+        // Being stopped abandons the read mid-segment, so what is buffered is a truncated
+        // file; writing it would leave the library holding a track that never plays through.
+        if (isStopped) return null
         return buffer.toByteArray().takeIf { it.isNotEmpty() }
     }
 
@@ -234,25 +234,6 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
         const val PROGRESS_INTERVAL_MS = 250L
     }
 }
-
-private fun DownloadRequest.toMp4Tags(cover: ByteArray?, lyrics: String?) = Mp4Tags(
-    title = title,
-    artist = artist,
-    album = album,
-    albumArtist = albumArtist,
-    date = date,
-    lyrics = lyrics,
-    trackNumber = trackNumber,
-    trackTotal = trackTotal,
-    discNumber = discNumber,
-    coverArt = cover,
-    coverIsPng = cover.isPng(),
-    freeform = buildMap {
-        recordingId?.let { put("MusicBrainz Track Id", it) }
-        releaseId?.let { put("MusicBrainz Album Id", it) }
-        releaseTrackId?.let { put("MusicBrainz Release Track Id", it) }
-    },
-)
 
 private fun DownloadRequest.toVorbisTags(cover: ByteArray?, lyrics: String?) = VorbisTags(
     title = title,

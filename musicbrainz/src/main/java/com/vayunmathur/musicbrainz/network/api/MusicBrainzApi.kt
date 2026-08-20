@@ -80,7 +80,7 @@ object MusicBrainzApi {
      * just "Various Artists".
      */
     suspend fun release(id: String): MbRelease =
-        get("release/$id?fmt=json&inc=recordings+artists+artist-credits+release-groups")
+        get("release/$id?fmt=json&inc=recordings+artists+artist-credits+release-groups+isrcs")
 
     suspend fun recording(id: String): MbRecording =
         get("recording/$id?fmt=json&inc=artists+artist-credits+releases")

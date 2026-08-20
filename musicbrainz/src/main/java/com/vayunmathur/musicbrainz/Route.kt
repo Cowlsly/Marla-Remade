@@ -15,6 +15,9 @@ sealed interface Route : NavKey {
     data object Settings : Route
 
     @Serializable
+    data object TidalLogin : Route
+
+    @Serializable
     data class Artist(val artistId: String) : Route
 
     @Serializable

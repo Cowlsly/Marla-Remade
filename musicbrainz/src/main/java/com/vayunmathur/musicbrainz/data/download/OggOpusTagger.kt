@@ -97,8 +97,7 @@ object OggOpusTagger {
 
     /** An Opus comment packet: the `OpusTags` magic followed by the shared comment list. */
     fun buildOpusTagsPacket(tags: VorbisTags): ByteArray =
-        "OpusTags".toByteArray(Charsets.ISO_8859_1) +
-            VorbisComments.buildCommentList(tags, includePicture = true)
+        "OpusTags".toByteArray(Charsets.ISO_8859_1) + VorbisComments.buildCommentList(tags)
 
     // ------------------------------------------------------------------
     // Ogg pages
