@@ -48,4 +48,14 @@
     <string name="currency_unavailable">Exchange rates are unavailable</string>
     <!-- Converter: button to retry fetching exchange rates after a failure. -->
     <string name="currency_retry">Retry</string>
+    <!-- Home-screen widget name shown in the widget picker for the keypad widget. Noun phrase. -->
+    <string name="calculator_widget_label">Calculator</string>
+    <!-- Widget picker description for the keypad widget. Full sentence. -->
+    <string name="calculator_widget_description">A working keypad on your home screen - tap the display to open Calculator</string>
+    <!-- Home-screen widget name shown in the widget picker for the unit converter widget. Noun phrase. -->
+    <string name="units_widget_label">Unit Converter</string>
+    <!-- Widget picker description for the unit converter widget. Full sentence. -->
+    <string name="units_widget_description">Convert between units at a glance - tap to open the converter</string>
+    <!-- Unit converter widget: accessibility label for the chevron that expands a unit category. -->
+    <string name="units_widget_choose_category">Choose a unit category</string>
 </resources>

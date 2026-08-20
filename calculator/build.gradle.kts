@@ -19,4 +19,5 @@ dependencies {
     implementation(libs.androidx.datastore.preferences)
     // Live currency exchange rates fetched from api.vayunmathur.com via the shared client.
     implementation(project(":library:network"))
+    implementation(project(":library:widgets"))
 }

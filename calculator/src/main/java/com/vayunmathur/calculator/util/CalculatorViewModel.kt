@@ -8,7 +8,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.calculator.widget.UnitsGlanceWidget
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.library.widgets.updateWidget
 import kotlinx.coroutines.launch
 import kotlin.math.hypot
 
@@ -324,6 +326,7 @@ class CalculatorViewModel(application: Application) :
         converterCategoryIndex = index
         applyRememberedUnits(categories[index])
         persist(KEY_UNITS_CATEGORY, categories[index].name)
+        refreshUnitsWidget()
     }
 
     /**
@@ -355,10 +358,16 @@ class CalculatorViewModel(application: Application) :
         lastUnits[name] = converterFromToken to converterToToken
         persist(unitsFromKey(name), converterFromToken)
         persist(unitsToKey(name), converterToToken)
+        refreshUnitsWidget()
     }
 
     private fun persist(key: String, value: String) {
         viewModelScope.launch { dataStore.setString(key, value) }
+    }
+
+    /** The widget reads the same preferences, so it has to be told they moved. */
+    private fun refreshUnitsWidget() {
+        getApplication<Application>().updateWidget(UnitsGlanceWidget::class)
     }
 
     override fun setFrom(token: String) {
@@ -478,10 +487,12 @@ class CalculatorViewModel(application: Application) :
         private val EMPTY_CURRENCY_CATEGORY =
             UnitCategory("Currency", emptyList(), inEquations = false)
 
-        private const val KEY_UNITS_CATEGORY = "calculator_units_category"
+        // Not private: the units widget reads these same preferences, and a second copy of the
+        // key names is a copy that can drift.
+        internal const val KEY_UNITS_CATEGORY = "calculator_units_category"
 
-        private fun unitsFromKey(categoryName: String) = "calculator_units_from_$categoryName"
+        internal fun unitsFromKey(categoryName: String) = "calculator_units_from_$categoryName"
 
-        private fun unitsToKey(categoryName: String) = "calculator_units_to_$categoryName"
+        internal fun unitsToKey(categoryName: String) = "calculator_units_to_$categoryName"
     }
 }
