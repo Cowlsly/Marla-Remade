@@ -4,7 +4,15 @@ import android.util.Log
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-/** One recognised text line, in the pixel coordinates of the OCR bitmap. */
+/**
+ * One recognised text line, in the pixel coordinates of the OCR bitmap.
+ *
+ * [quad] holds the line's oriented corners as `x0,y0,x1,y1,x2,y2,x3,y3` in
+ * reading order (corner 0 -> 1 runs along the text, 0 -> 3 spans its height);
+ * [left]/[top]/[right]/[bottom] are its axis-aligned bounds. Rows written before
+ * the quad existed are cleared by the migration that introduced it, so a null
+ * [quad] only ever means "not re-indexed yet".
+ */
 @Serializable
 data class OcrBox(
     val text: String,
@@ -12,6 +20,8 @@ data class OcrBox(
     val top: Int,
     val right: Int,
     val bottom: Int,
+    val quad: List<Float>? = null,
+    val vertical: Boolean = false,
 )
 
 /**

@@ -117,13 +117,13 @@ data class PhotoEmbedding(
     val clipEmbedding: ByteArray,
 )
 
-@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 14, exportSchema = false)
+@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 15, exportSchema = false)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     abstract fun faceDao(): FaceDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
+        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
     }
 }
 
@@ -233,4 +233,16 @@ val MIGRATION_13_14 = Migration(13, 14) {
     // whole library is expensive, so already-scanned rows stay NULL and the
     // viewer fills them in one photo at a time as they're opened.
     it.execSQL("ALTER TABLE Photo ADD COLUMN ocrBoxes TEXT")
+}
+
+val MIGRATION_14_15 = Migration(14, 15) {
+    // The detector now returns oriented quads instead of axis-aligned boxes, and
+    // recognises rotated text it previously returned garbage for, so the stored
+    // geometry is stale and the text is incomplete. Clear the geometry and the
+    // scanned flag and let the background indexer rebuild the library; it is
+    // already throttled by OCR_INTER_ITEM_DELAY_MS / coolDownBetweenBatches.
+    // ocrText is deliberately left in place so search keeps working on whatever
+    // was already found while the re-index runs; each row's text is overwritten
+    // as it is rescanned.
+    it.execSQL("UPDATE Photo SET ocrScanned = 0, ocrBoxes = NULL")
 }

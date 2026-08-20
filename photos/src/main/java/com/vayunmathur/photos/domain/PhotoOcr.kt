@@ -138,7 +138,17 @@ object OcrBoxStore {
 internal fun OcrEngine.OcrResult.toLayout(width: Int, height: Int) = OcrLayout(
     w = width,
     h = height,
-    boxes = boxes.map { OcrBox(it.text, it.left, it.top, it.right, it.bottom) },
+    boxes = boxes.map { box ->
+        OcrBox(
+            text = box.text,
+            left = box.left,
+            top = box.top,
+            right = box.right,
+            bottom = box.bottom,
+            quad = box.corners.flatMap { listOf(it.x, it.y) },
+            vertical = box.vertical,
+        )
+    },
 )
 
 private const val TAG = "PhotoOcr"

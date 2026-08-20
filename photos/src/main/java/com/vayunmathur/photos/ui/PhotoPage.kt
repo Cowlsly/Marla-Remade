@@ -497,6 +497,7 @@ fun PhotoDetailView(
                         layout = layout,
                         containerSize = size,
                         showOutlines = isMetadataVisible,
+                        zoom = currentZoom.scale,
                         modifier = Modifier.fillMaxSize().then(zoomModifier)
                 )
             }
