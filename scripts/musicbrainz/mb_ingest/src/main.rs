@@ -5,6 +5,7 @@
 //! mb_ingest build <mbdump.tar.bz2 | dir> <out.pack> [--tier-a] [--official-only]
 //!                                                   [--no-isrcs] [--no-recording-search]
 //!                                                   [--no-recording-mbids] [-q]
+//! mb_ingest extract <mbdump.tar.bz2> <dir>   one-pass extract of just the tables needed
 //! mb_ingest fixture <dir>          write the synthetic test dump
 //! mb_ingest inspect <out.pack>     header, section sizes and a smoke query
 //! ```
@@ -13,7 +14,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use mb_ingest::build::{build, BuildOptions};
+use mb_ingest::build::{build, BuildOptions, TABLES};
 use mb_ingest::copy::Input;
 use mb_ingest::fixture::write_fixture;
 use mb_ingest::pack::format_mbid;
@@ -35,6 +36,7 @@ fn usage() -> io::Error {
         "usage:\n  \
          mb_ingest build <mbdump.tar.bz2|dir> <out.pack> [--tier-a] [--official-only] \
          [--no-isrcs] [--no-recording-search] [--no-recording-mbids] [-q]\n  \
+         mb_ingest extract <mbdump.tar.bz2> <dir>\n  \
          mb_ingest fixture <dir>\n  \
          mb_ingest inspect <pack>",
     )
@@ -44,6 +46,18 @@ fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
+        Some("extract") => {
+            let (archive, dir) = (args.get(1).ok_or_else(usage)?, args.get(2).ok_or_else(usage)?);
+            let input = Input::detect(Path::new(archive));
+            let started = std::time::Instant::now();
+            input.extract_to(Path::new(dir), TABLES)?;
+            println!(
+                "extracted {} tables to {dir} in {:.1}s",
+                TABLES.len(),
+                started.elapsed().as_secs_f64()
+            );
+            Ok(())
+        }
         Some("fixture") => {
             let dir = args.get(1).ok_or_else(usage)?;
             write_fixture(Path::new(dir))?;
@@ -79,6 +93,15 @@ fn cmd_build(args: &[String]) -> io::Result<()> {
         return Err(usage());
     }
     let input = Input::detect(Path::new(positional[0]));
+    if matches!(input, Input::Archive(_)) {
+        eprintln!(
+            "note: reading tables straight out of an archive costs one bz2 decompression \
+             pass per table ({} of them). For the 7 GB full export, run `mb_ingest extract \
+             {} <dir>` once (~13 GB of disk) and build from <dir> instead.",
+            TABLES.len(),
+            positional[0]
+        );
+    }
     // Write to a .tmp and rename, so a crashed build never leaves a half-written
     // pack where the server will mmap it (the sb_build.sh:90-92 convention).
     let final_path = PathBuf::from(positional[1]);

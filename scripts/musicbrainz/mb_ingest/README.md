@@ -17,8 +17,13 @@ convention as `scripts/maps/gtfs_ingest`.
 ```sh
 cargo build --release
 
-# Build from the real export. Either a .tar.bz2 (streamed through `tar`, nothing
-# is extracted to disk) or a directory of already-extracted tables.
+# Recommended for the real 7 GB export: extract only the 20 tables this crate
+# reads (one bz2 pass, ~13 GB of disk), then build from the directory.
+./target/release/mb_ingest extract mbdump.tar.bz2 /scratch/mbdump
+./target/release/mb_ingest build /scratch/mbdump musicbrainz.pack
+
+# Also works, and streams with nothing extracted -- but costs one bz2
+# decompression pass PER TABLE, so it is for small archives and fixtures.
 ./target/release/mb_ingest build mbdump.tar.bz2 musicbrainz.pack
 
 # Prove the whole pipeline on a synthetic dump in ~a second.
@@ -26,7 +31,7 @@ cargo build --release
 ./target/release/mb_ingest build /tmp/mb musicbrainz.pack
 ./target/release/mb_ingest inspect musicbrainz.pack
 
-cargo test          # 31 tests, including a full round trip through the reader
+cargo test          # 36 tests, including a full round trip through the reader
 ```
 
 Flags: `--tier-a` adds track MBIDs (+918 MB at full scale), `--official-only`
@@ -137,10 +142,14 @@ Projected peak for a full run, again a projection and not a measurement:
 
 An external merge sort for the track pass, and spilling the output sections to
 temporary files, are the two changes that would bring that down if a build has to
-run somewhere smaller. Wall time is dominated by bz2 decompression: `tar` is
-invoked once per table, so the archive is decompressed ~20 times. Extracting the
-20 tables once and building from the directory is much faster if the disk is
-available (~13 GB for the tables this crate reads, versus ~40 GB for everything).
+run somewhere smaller. Wall time is dominated by bz2 decompression, which is why
+`extract` exists: one pass over the archive rather than one per table. The build
+itself is a sort plus linear scans. Output is written to `<out>.pack.tmp` and
+renamed, so a crashed build never leaves a half-written pack where the server
+would mmap it.
+
+The same pack is produced byte for byte whether the input is the archive or an
+extracted directory; the round-trip test asserts reproducibility.
 
 ## What tier B gives up
 

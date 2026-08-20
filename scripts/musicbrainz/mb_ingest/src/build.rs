@@ -38,6 +38,31 @@ use crate::reader::encode_recording_credit;
 /// an absurd primary key.
 const MAX_ID: u32 = 400_000_000;
 
+/// Every table this crate reads, in the order the passes want them. All of these
+/// live in the core `mbdump.tar.bz2`; none needs `mbdump-derived.tar.bz2`.
+pub const TABLES: &[&str] = &[
+    "area",
+    "iso_3166_1",
+    "artist_type",
+    "release_group_primary_type",
+    "release_group_secondary_type",
+    "release_status",
+    "medium_format",
+    "artist_credit",
+    "artist_credit_name",
+    "artist",
+    "release_group",
+    "release_group_meta",
+    "release_group_secondary_type_join",
+    "release",
+    "release_country",
+    "release_unknown_country",
+    "medium",
+    "recording",
+    "track",
+    "isrc",
+];
+
 #[derive(Clone, Copy)]
 pub struct BuildOptions {
     pub include_track_mbids: bool,

@@ -177,6 +177,42 @@ impl Input {
         std::str::from_utf8(&d).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
     }
 
+    /// Extract just `tables` (plus `TIMESTAMP`) into `dir` in ONE pass.
+    ///
+    /// Reading tables straight out of the archive costs one full bz2 decompression
+    /// per table, because `tar` has to stream to the member it wants. That is fine
+    /// for a fixture and badly wrong for the real 7 GB dump: ~20 tables means ~20
+    /// passes over ~40 GB of decompressed output. Extracting the tables this crate
+    /// actually reads costs one pass and ~13 GB of disk, versus ~40 GB for the
+    /// whole archive.
+    pub fn extract_to(&self, dir: &Path, tables: &[&str]) -> io::Result<()> {
+        let Input::Archive(path) = self else {
+            return Err(other_err(format!(
+                "{} is already a directory; nothing to extract",
+                self.describe()
+            )));
+        };
+        std::fs::create_dir_all(dir)?;
+        let mut cmd = Command::new("tar");
+        cmd.arg("-xf").arg(path).arg("-C").arg(dir).arg("TIMESTAMP");
+        for t in tables {
+            cmd.arg(format!("mbdump/{t}"));
+        }
+        let status = cmd.status().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("could not run `tar` to extract {}: {e}", path.display()),
+            )
+        })?;
+        if !status.success() {
+            return Err(other_err(format!(
+                "tar failed extracting {}; is it the core mbdump.tar.bz2?",
+                path.display()
+            )));
+        }
+        Ok(())
+    }
+
     fn open_reader(&self, table: &str) -> io::Result<Option<TableStream>> {
         match self {
             Input::Dir(dir) => {
