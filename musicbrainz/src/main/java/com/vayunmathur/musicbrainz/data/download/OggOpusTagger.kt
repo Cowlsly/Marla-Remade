@@ -38,8 +38,6 @@ data class VorbisTags(
  */
 object OggOpusTagger {
 
-    private const val MAX_SEGMENTS_PER_PAGE = 255
-
     /**
      * Returns the retagged bytes, or null when the input is not an Ogg/Opus file this can
      * rewrite. Callers fall back to the original bytes: an untagged file is still worth
@@ -68,7 +66,13 @@ object OggOpusTagger {
 
         val serial = readIntLe(source, head.start + 14)
         val packet = buildOpusTagsPacket(tags)
-        val commentPages = buildPages(packet, serial, startSequence = 1)
+        val commentPages = OggPages.forPacket(
+            packet = packet,
+            serialNumber = serial,
+            startSequence = 1,
+            granulePosition = 0L,
+            firstHeaderType = 0,
+        )
 
         val out = ByteArrayOutputStream(source.size + packet.size)
         out.write(source, head.start, head.end - head.start)
@@ -79,8 +83,8 @@ object OggOpusTagger {
         var sequence = 1 + commentPages.size
         for (i in commentEnd + 1 until pages.size) {
             val page = source.copyOfRange(pages[i].start, pages[i].end)
-            writeIntLe(page, 18, sequence)
-            setChecksum(page)
+            OggPages.writeIntLe(page, 18, sequence)
+            OggPages.setChecksum(page)
             out.write(page)
             sequence++
         }
@@ -105,10 +109,10 @@ object OggOpusTagger {
     private fun parsePages(buf: ByteArray): List<Page>? {
         val pages = ArrayList<Page>()
         var offset = 0
-        while (offset + 27 <= buf.size) {
+        while (offset + OggPages.HEADER_SIZE <= buf.size) {
             if (String(buf, offset, 4, Charsets.ISO_8859_1) != "OggS") break
             val segmentCount = buf[offset + 26].toInt() and 0xff
-            val tableStart = offset + 27
+            val tableStart = offset + OggPages.HEADER_SIZE
             if (tableStart + segmentCount > buf.size) return null
             var payload = 0
             for (i in 0 until segmentCount) payload += buf[tableStart + i].toInt() and 0xff
@@ -120,115 +124,7 @@ object OggOpusTagger {
         return pages.takeIf { it.isNotEmpty() }
     }
 
-    /** Splits a single packet into as many pages as its length needs, up to 255 segments each. */
-    private fun buildPages(packet: ByteArray, serial: Int, startSequence: Int): List<ByteArray> {
-        val lacing = ArrayList<Int>()
-        var remaining = packet.size
-        while (remaining >= 255) {
-            lacing.add(255)
-            remaining -= 255
-        }
-        lacing.add(remaining) // final segment is always < 255, marking the packet's end.
-
-        val pages = ArrayList<ByteArray>()
-        var lacingIndex = 0
-        var payloadOffset = 0
-        var sequence = startSequence
-        var first = true
-        while (lacingIndex < lacing.size) {
-            val segmentCount = minOf(MAX_SEGMENTS_PER_PAGE, lacing.size - lacingIndex)
-            val segments = lacing.subList(lacingIndex, lacingIndex + segmentCount)
-            val payloadSize = segments.sum()
-            pages.add(
-                buildPage(
-                    headerType = if (first) 0x00 else 0x01, // 0x01 marks a continued packet
-                    serial = serial,
-                    sequence = sequence,
-                    segments = segments,
-                    payload = packet,
-                    payloadOffset = payloadOffset,
-                    payloadSize = payloadSize,
-                ),
-            )
-            lacingIndex += segmentCount
-            payloadOffset += payloadSize
-            sequence++
-            first = false
-        }
-        return pages
-    }
-
-    private fun buildPage(
-        headerType: Int,
-        serial: Int,
-        sequence: Int,
-        segments: List<Int>,
-        payload: ByteArray,
-        payloadOffset: Int,
-        payloadSize: Int,
-    ): ByteArray {
-        val out = ByteArrayOutputStream(27 + segments.size + payloadSize)
-        out.write("OggS".toByteArray(Charsets.ISO_8859_1))
-        out.write(0) // stream structure version
-        out.write(headerType)
-        out.write(ByteArray(8)) // granule position: 0 for a header page
-        out.write(VorbisComments.intLe(serial))
-        out.write(VorbisComments.intLe(sequence))
-        out.write(ByteArray(4)) // CRC placeholder, filled in below
-        out.write(segments.size)
-        segments.forEach { out.write(it) }
-        out.write(payload, payloadOffset, payloadSize)
-        val bytes = out.toByteArray()
-        setChecksum(bytes)
-        return bytes
-    }
-
-    /** Zeroes the checksum field, computes the Ogg CRC over the whole page, and writes it back. */
-    private fun setChecksum(page: ByteArray) {
-        page[22] = 0
-        page[23] = 0
-        page[24] = 0
-        page[25] = 0
-        writeIntLe(page, 22, oggCrc(page))
-    }
-
-    // ------------------------------------------------------------------
-    // Ogg CRC-32 (poly 0x04C11DB7, no reflection, no final xor)
-    // ------------------------------------------------------------------
-
-    private val crcTable = IntArray(256).also { table ->
-        for (i in 0 until 256) {
-            var crc = i shl 24
-            repeat(8) {
-                crc = if (crc and 0x80000000.toInt() != 0) {
-                    (crc shl 1) xor 0x04c11db7
-                } else {
-                    crc shl 1
-                }
-            }
-            table[i] = crc
-        }
-    }
-
-    private fun oggCrc(data: ByteArray): Int {
-        var crc = 0
-        for (b in data) {
-            val index = ((crc ushr 24) xor (b.toInt() and 0xff)) and 0xff
-            crc = (crc shl 8) xor crcTable[index]
-        }
-        return crc
-    }
-
-    // ------------------------------------------------------------------
-
     private fun readIntLe(buf: ByteArray, offset: Int): Int =
         ByteBuffer.wrap(buf, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
-
-    private fun writeIntLe(buf: ByteArray, offset: Int, value: Int) {
-        buf[offset] = value.toByte()
-        buf[offset + 1] = (value ushr 8).toByte()
-        buf[offset + 2] = (value ushr 16).toByte()
-        buf[offset + 3] = (value ushr 24).toByte()
-    }
 }
 
