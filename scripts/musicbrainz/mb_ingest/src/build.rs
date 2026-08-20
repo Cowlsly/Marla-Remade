@@ -581,8 +581,18 @@ pub fn build<W: Write + Seek>(
     let mut st = BuildStats::default();
     let mut pool = StringPool::new();
     let mut enums = EnumPool::new();
+    // Phase lines carry elapsed seconds so an external RSS sampler can be joined
+    // against them. Peak memory per phase is measured that way rather than
+    // modelled: the one time it was modelled, the estimate was wrong by 3x.
+    let started = std::time::Instant::now();
     macro_rules! step {
-        ($($arg:tt)*) => { if opts.verbose { writeln!(log, $($arg)*)?; } };
+        ($($arg:tt)*) => {
+            if opts.verbose {
+                write!(log, "[{:8.2}s] ", started.elapsed().as_secs_f64())?;
+                writeln!(log, $($arg)*)?;
+                log.flush()?;
+            }
+        };
     }
 
     // --- areas and the small enumerations -------------------------------------
@@ -1603,6 +1613,7 @@ pub fn build<W: Write + Seek>(
 
     // STRINGS goes last: it is only complete now, and streaming it here means the
     // sorted pool is never materialised as a second buffer.
+    step!("pass 15: STRINGS ({} MB raw)", pool.raw_len() / 1_000_000);
     let mut string_blocks = 0u32;
     if opts.compress_strings {
         let mut bw = StringBlockWriter::new();
