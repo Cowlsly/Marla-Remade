@@ -1,11 +1,9 @@
 package com.vayunmathur.clock
 
 import android.Manifest
-import android.app.AlarmManager
 import android.app.NotificationManager
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -25,6 +23,7 @@ import com.vayunmathur.clock.platform.ClockViewModelFactory
 import com.vayunmathur.clock.platform.createNotificationChannels
 import com.vayunmathur.clock.ui.InitialPermissionsScreen
 import com.vayunmathur.library.ui.DynamicTheme
+import com.vayunmathur.library.ui.SpecialAccess
 import com.vayunmathur.library.util.DataStoreUtils
 class MainActivity : ComponentActivity() {
     private val clockViewModel: ClockViewModel by viewModels {
@@ -35,16 +34,8 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        // USE_EXACT_ALARM is granted at install on Android 13+, so only older
-        // releases can have exact-alarm access revoked in system settings.
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
-            val alarmManager = getSystemService(AlarmManager::class.java)
-            if (!alarmManager.canScheduleExactAlarms()) {
-                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM).apply {
-                    data = Uri.fromParts("package", packageName, null)
-                }
-                startActivity(intent)
-            }
+        if (!SpecialAccess.hasExactAlarms(this)) {
+            runCatching { SpecialAccess.requestExactAlarms(this) }
         }
         createNotificationChannels(this)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
