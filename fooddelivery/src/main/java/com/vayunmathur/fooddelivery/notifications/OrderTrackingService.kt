@@ -11,6 +11,7 @@ import android.util.Log
 import androidx.core.app.NotificationManagerCompat
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.Order
+import com.vayunmathur.fooddelivery.platform.AppInit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -64,6 +65,8 @@ class OrderTrackingService : Service() {
     }
 
     private suspend fun pollLoop(orderId: Int) {
+        // The saved auth token is restored by the background warm-up.
+        AppInit.awaitReady()
         while (true) {
             val order = runCatching {
                 BitesApi.getOrders().firstOrNull { it.id == orderId }

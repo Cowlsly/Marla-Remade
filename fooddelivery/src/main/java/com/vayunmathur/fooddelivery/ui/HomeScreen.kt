@@ -45,6 +45,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.AddressStore
 import com.vayunmathur.fooddelivery.data.Merchant
+import com.vayunmathur.fooddelivery.platform.AppInit
 
 @Composable
 fun HomeScreen(onMerchantClick: (Int) -> Unit) {
@@ -54,6 +55,9 @@ fun HomeScreen(onMerchantClick: (Int) -> Unit) {
     var noAddress by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
+        // The saved token is restored by the background warm-up; wait for it so a signed-in
+        // session isn't asked for the catalog anonymously.
+        AppInit.awaitReady()
         val defaultAddr = AddressStore.getDefault(context)
         if (defaultAddr != null) {
             merchants = BitesApi.getMerchants(lat = defaultAddr.latitude, lng = defaultAddr.longitude)
@@ -121,6 +125,10 @@ fun HomeContent(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(padding)
             ) {
+                // Deliberately unkeyed: /merchants/all/stores can return several store rows
+                // per merchant and Merchant has no id-independent identity, so a key risks the
+                // duplicate-key crash. It would buy nothing anyway — `merchants` is assigned
+                // once and never replaced while the grid is on screen.
                 items(merchants) { merchant ->
                     MerchantCard(merchant) { onMerchantClick(merchant.id) }
                 }

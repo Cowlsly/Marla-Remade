@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -47,6 +48,7 @@ import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.fooddelivery.api.BitesApi
+import com.vayunmathur.fooddelivery.BuildConfig
 import com.vayunmathur.fooddelivery.data.AddressStore
 import com.vayunmathur.fooddelivery.data.CartItem
 import com.vayunmathur.fooddelivery.data.CheckoutAddress
@@ -55,8 +57,10 @@ import com.vayunmathur.fooddelivery.data.CheckoutRequest
 import com.vayunmathur.fooddelivery.data.Customer
 import com.vayunmathur.fooddelivery.data.Deal
 import com.vayunmathur.fooddelivery.data.OrderRewards
+import com.vayunmathur.fooddelivery.data.SavedAddress
 import com.vayunmathur.fooddelivery.data.CheckoutResponse
 import com.vayunmathur.fooddelivery.notifications.OrderTrackingService
+import com.vayunmathur.fooddelivery.platform.AppInit
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -72,7 +76,7 @@ fun CheckoutScreen(
 
     var isPickup by remember { mutableStateOf(false) }
     var tipCents by remember { mutableIntStateOf(300) }
-    var deliveryInstructions by remember { mutableStateOf(AddressStore.getDefault(context)?.deliveryInstructions ?: "") }
+    var deliveryInstructions by remember { mutableStateOf("") }
     var paying by remember { mutableStateOf(false) }
     var fetchingPrices by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -88,11 +92,29 @@ fun CheckoutScreen(
     var lastOrderUuid by remember { mutableStateOf<String?>(null) }
     var selectedDealId by remember { mutableStateOf<Int?>(null) }
 
-    val addresses = remember { AddressStore.getAll(context) }
-    var selectedAddress by remember { mutableStateOf(AddressStore.getDefault(context)) }
+    // One prefs read plus one JSON decode, off the main thread — the default address is
+    // picked out of the list already in hand rather than re-reading the store for it.
+    var addresses by remember { mutableStateOf<List<SavedAddress>>(emptyList()) }
+    var addressesLoaded by remember { mutableStateOf(false) }
+    var selectedAddress by remember { mutableStateOf<SavedAddress?>(null) }
+
+    LaunchedEffect(Unit) {
+        val all = AddressStore.getAll(context)
+        val default = all.firstOrNull { it.isDefault } ?: all.firstOrNull()
+        addresses = all
+        selectedAddress = default
+        // Don't overwrite anything typed while the read was in flight.
+        if (deliveryInstructions.isEmpty()) {
+            deliveryInstructions = default?.deliveryInstructions ?: ""
+        }
+        addressesLoaded = true
+    }
 
     // The reference sends the customer's identity with every checkout.
-    LaunchedEffect(Unit) { customer = BitesApi.getCustomer() }
+    LaunchedEffect(Unit) {
+        AppInit.awaitReady()
+        customer = BitesApi.getCustomer()
+    }
 
     val subtotalCents = items.sumOf {
         (it.menuItem.price + it.selectedModifiers.sumOf { m -> m.price * m.quantity }) * it.quantity
@@ -108,11 +130,13 @@ fun CheckoutScreen(
 
     // Deals the merchant currently has running; picking one sends its dealId with checkout.
     LaunchedEffect(merchantId) {
+        AppInit.awaitReady()
         deals = if (merchantId != 0) BitesApi.getActiveDealsByMerchant(merchantId) else emptyList()
     }
 
     LaunchedEffect(isPickup, tipCents, selectedAddress?.id, promoCode, customer?.uuid, selectedDealId) {
         if (!canFetch) return@LaunchedEffect
+        AppInit.awaitReady()
         checkoutResponse = null
         error = null
         fetchingPrices = true
@@ -154,12 +178,13 @@ fun CheckoutScreen(
             phone = customer?.phone?.ifBlank { null },
         )
         val response = BitesApi.checkout(merchantId, request)
-        Log.d("Checkout", "response.order=${response?.order}")
-        Log.d("Checkout", "response.clientSecret=${response?.clientSecret?.take(20)}")
-        Log.d("Checkout", "response.serviceable=${response?.serviceable}")
-        if (response?.order != null) {
-            val o = response.order
-            Log.d("Checkout", "order: foodTotal=${o.foodTotal} taxes=${o.taxes} deliveryFee=${o.deliveryFee} fees=${o.fees} tips=${o.tips} displayTotal=${o.displayTotal}")
+        if (BuildConfig.DEV_BUILD) {
+            Log.d("Checkout", "response.order=${response?.order}")
+            Log.d("Checkout", "response.clientSecret=${response?.clientSecret?.take(20)}")
+            Log.d("Checkout", "response.serviceable=${response?.serviceable}")
+            response?.order?.let { o ->
+                Log.d("Checkout", "order: foodTotal=${o.foodTotal} taxes=${o.taxes} deliveryFee=${o.deliveryFee} fees=${o.fees} tips=${o.tips} displayTotal=${o.displayTotal}")
+            }
         }
         // Reuse the draft order on the next re-price; drop it if this call failed so we
         // don't keep asking the server to update an order it can't find.
@@ -184,7 +209,9 @@ fun CheckoutScreen(
         val orderUuid = confirmedOrder?.uuid?.takeIf { it.isNotBlank() }
         rewards = if (customer == null || orderUuid == null) null
         else BitesApi.getOrderRewards(orderUuid)
-        Log.d("Checkout", "rewardsAvailable=${rewards?.rewardsAvailable} rate=${rewards?.rewardsRate}")
+        if (BuildConfig.DEV_BUILD) {
+            Log.d("Checkout", "rewardsAvailable=${rewards?.rewardsAvailable} rate=${rewards?.rewardsRate}")
+        }
     }
 
     // Cross-check against what Stripe will really charge; UI follows the reference formula,
@@ -198,7 +225,7 @@ fun CheckoutScreen(
             }.onFailure { Log.w("Checkout", "PaymentIntent lookup failed", it) }.getOrNull()
         } ?: return@LaunchedEffect
         val shown = payTotal ?: return@LaunchedEffect
-        if (kotlin.math.abs(amount / 100.0 - shown) > 0.005) {
+        if (kotlin.math.abs(amount / 100.0 - shown) > 0.005 && BuildConfig.DEV_BUILD) {
             Log.w("Checkout", "MISMATCH: stripe=${amount / 100.0} shown=$shown " +
                 "componentTotal=${confirmedOrder.componentTotal} rewards=${rewards?.rewardsAvailable}")
         }
@@ -256,8 +283,7 @@ fun CheckoutScreen(
                     Spacer(Modifier.height(8.dp))
                 }
 
-                items(items.size) { index ->
-                    val item = items[index]
+                itemsIndexed(items, key = { _, item -> item.lineId }) { _, item ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                         Column(Modifier.weight(1f)) {
                             Text("${item.quantity}x ${item.menuItem.name}",
@@ -304,9 +330,11 @@ fun CheckoutScreen(
                         Spacer(Modifier.height(8.dp))
 
                         if (addresses.isEmpty()) {
-                            Text(stringResource(R.string.no_saved_addresses_add_one_in_account_se),
-                                style = MaterialTheme.typography.bodyMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            if (addressesLoaded) {
+                                Text(stringResource(R.string.no_saved_addresses_add_one_in_account_se),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
                         } else {
                             addresses.forEach { addr ->
                                 val isSelected = selectedAddress?.id == addr.id

@@ -60,6 +60,7 @@ import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.Order
 import com.vayunmathur.fooddelivery.data.OrderStage
 import com.vayunmathur.fooddelivery.notifications.OrderTrackingService
+import com.vayunmathur.fooddelivery.platform.AppInit
 import kotlinx.coroutines.delay
 import kotlin.time.Instant
 import com.vayunmathur.library.ui.DateString
@@ -84,6 +85,7 @@ fun OrderTrackingScreen(orderId: Int, onBack: () -> Unit) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(orderId) {
+        AppInit.awaitReady()
         // Keep the background Live Update tracker running for this order too, so tracking
         // opened from the Orders tab (or a re-opened app) is covered. Idempotent.
         OrderTrackingService.start(context, orderId)

@@ -1,7 +1,6 @@
 package com.vayunmathur.fooddelivery
 
 import android.Manifest
-import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
@@ -33,7 +32,6 @@ import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 import com.vayunmathur.library.util.rememberNavBackStack
-import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.CartItem
 import com.vayunmathur.fooddelivery.data.CartStore
 import com.vayunmathur.fooddelivery.ipc.OrderLookupContract
@@ -47,8 +45,6 @@ import com.vayunmathur.fooddelivery.ui.OrderTrackingScreen
 import com.vayunmathur.fooddelivery.ui.OrdersScreen
 import com.vayunmathur.fooddelivery.ui.RestaurantScreen
 import kotlinx.serialization.Serializable
-import com.vayunmathur.library.network.NetworkClient
-import com.vayunmathur.library.network.TrustBundle
 
 sealed interface Route : NavKey {
     @Serializable data class Main(val initialTab: Int = 0) : Route
@@ -76,18 +72,9 @@ class MainActivity : ComponentActivity() {
         trackOrderId.value = intent.trackOrderIdOrNull()
         openRestaurantId.value = intent.restaurantIdOrNull()
         requestNotificationPermissionIfNeeded()
-        // api.deliverycollective.com is on AWS Elastic Beanstalk and serves an ACM cert
-        // chaining to Amazon Root CA 1, which FIRST_PARTY (ISRG + GTS only) doesn't carry —
-        // pinning to it fails the handshake before any request goes out. STANDARD adds the
-        // Amazon roots.
-        NetworkClient.init(this, TrustBundle.STANDARD)
+        // The TLS trust bundle and the saved auth token are warmed up off the main thread by
+        // FoodDeliveryApplication / AppInit, so nothing here touches the network or disk.
         enableEdgeToEdge()
-
-        val prefs = getSharedPreferences("fooddelivery_prefs", Context.MODE_PRIVATE)
-        val tokenJson = prefs.getString("token_json", null)
-        if (tokenJson != null) {
-            BitesApi.restoreToken(tokenJson)
-        }
 
         PaymentConfiguration.init(
             applicationContext,
@@ -145,7 +132,17 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>, openRestaurantId: 
         backStack.add(Route.Restaurant(id))
         openRestaurantId.value = null
     }
-    val cart = remember { mutableStateListOf<CartItem>().also { it.addAll(CartStore.getAll(context)) } }
+    // Restoring the cart is a prefs read plus a JSON decode, so it happens off the main
+    // thread rather than in the remember initialiser. Anything added while the read was in
+    // flight stays in the cart, and is re-persisted alongside the restored lines.
+    val cart = remember { mutableStateListOf<CartItem>() }
+    LaunchedEffect(Unit) {
+        val saved = CartStore.getAll(context)
+        if (saved.isEmpty()) return@LaunchedEffect
+        val addedMeanwhile = cart.isNotEmpty()
+        cart.addAll(0, saved)
+        if (addedMeanwhile) CartStore.save(context, cart)
+    }
 
     MainNavigation(backStack) {
         entry<Route.Main> { route ->
@@ -159,7 +156,10 @@ private fun FoodDeliveryApp(trackOrderId: MutableState<Int?>, openRestaurantId: 
             RestaurantScreen(
                 merchantId = route.id,
                 onBack = { backStack.pop() },
-                onAddToCart = { item -> cart.add(item); CartStore.save(context, cart) }
+                onAddToCart = { item ->
+                    cart.add(item)
+                    CartStore.save(context, cart)
+                }
             )
         }
         entry<Route.Checkout> {
@@ -191,30 +191,35 @@ private fun FoodDeliveryTabs(
 ) {
     val context = LocalContext.current
     val pagerState = rememberPagerState(initialPage = initialTab.coerceIn(0, 4), pageCount = { 5 })
-    val tabs = listOf(
-        PagerTab("Home", { IconHome() }) {
-            HomeScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
-        },
-        PagerTab("Cart", { IconShoppingCart() }) {
-            CartScreen(
-                items = cart,
-                onRemoveItem = { cart.removeAt(it); CartStore.save(context, cart) },
-                onCheckout = { backStack.add(Route.Checkout) },
-                onEditModifiers = { index, modifiers ->
-                    cart[index] = cart[index].copy(selectedModifiers = modifiers)
-                    CartStore.save(context, cart)
-                },
-            )
-        },
-        PagerTab("Deals", { IconLocalOffer() }) {
-            DealsScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
-        },
-        PagerTab("Orders", { IconPackage() }) {
-            OrdersScreen(onTrackOrder = { id -> backStack.add(Route.OrderTracking(id)) })
-        },
-        PagerTab("Account", { IconPerson() }) {
-            AccountScreen()
-        },
-    )
+    val tabs = remember(backStack, cart, context) {
+        listOf(
+            PagerTab("Home", { IconHome() }) {
+                HomeScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
+            },
+            PagerTab("Cart", { IconShoppingCart() }) {
+                CartScreen(
+                    items = cart,
+                    onRemoveItem = {
+                        cart.removeAt(it)
+                        CartStore.save(context, cart)
+                    },
+                    onCheckout = { backStack.add(Route.Checkout) },
+                    onEditModifiers = { index, modifiers ->
+                        cart[index] = cart[index].copy(selectedModifiers = modifiers)
+                        CartStore.save(context, cart)
+                    },
+                )
+            },
+            PagerTab("Deals", { IconLocalOffer() }) {
+                DealsScreen(onMerchantClick = { id -> backStack.add(Route.Restaurant(id)) })
+            },
+            PagerTab("Orders", { IconPackage() }) {
+                OrdersScreen(onTrackOrder = { id -> backStack.add(Route.OrderTracking(id)) })
+            },
+            PagerTab("Account", { IconPerson() }) {
+                AccountScreen()
+            },
+        )
+    }
     TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }

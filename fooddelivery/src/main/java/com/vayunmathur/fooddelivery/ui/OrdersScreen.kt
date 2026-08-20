@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -52,6 +52,7 @@ import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.FeedbackRequest
 import com.vayunmathur.fooddelivery.data.Order
+import com.vayunmathur.fooddelivery.platform.AppInit
 import java.util.Locale
 import kotlinx.coroutines.launch
 import kotlinx.datetime.LocalDateTime
@@ -63,10 +64,10 @@ import com.vayunmathur.library.ui.rememberIs24Hour
 
 @Composable
 fun OrdersScreen(onTrackOrder: (Int) -> Unit = {}) {
-    val isLoggedIn = remember { BitesApi.isLoggedIn() }
+    var isLoggedIn by remember { mutableStateOf(false) }
 
     var orders by remember { mutableStateOf<List<Order>>(emptyList()) }
-    var loading by remember { mutableStateOf(isLoggedIn) }
+    var loading by remember { mutableStateOf(true) }
     var ratingOrder by remember { mutableStateOf<Order?>(null) }
     val scope = rememberCoroutineScope()
 
@@ -94,14 +95,22 @@ fun OrdersScreen(onTrackOrder: (Int) -> Unit = {}) {
     }
 
     LaunchedEffect(Unit) {
+        // The saved token is restored by the background warm-up, so wait for it before
+        // deciding whether this is a signed-in session.
+        AppInit.awaitReady()
+        isLoggedIn = BitesApi.isLoggedIn()
         if (isLoggedIn) {
             orders = BitesApi.getOrders()
-            loading = false
         }
+        loading = false
     }
 
     Scaffold { padding ->
-        if (!isLoggedIn) {
+        if (loading) {
+            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (!isLoggedIn) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     IconPerson(modifier = Modifier.size(48.dp),
@@ -113,10 +122,6 @@ fun OrdersScreen(onTrackOrder: (Int) -> Unit = {}) {
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-            }
-        } else if (loading) {
-            Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
             }
         } else if (orders.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
@@ -132,12 +137,28 @@ fun OrdersScreen(onTrackOrder: (Int) -> Unit = {}) {
                 }
             }
         } else {
+            // uuid is the server's per-order key (every /orders/{uuid}/... endpoint is keyed by
+            // it) and the id is already load-bearing as a unique lookup elsewhere
+            // (OrderTrackingScreen/Service re-find an order by id in this very list), so the pair
+            // identifies a row. Rows that decode without either — both fields have lenient
+            // defaults — would still collide, and Compose throws on a duplicate key, so any
+            // repeat gets an ordinal. Keying is worth it here because marking a pickup collected
+            // replaces the whole list.
+            val orderKeys = remember(orders) {
+                val seen = mutableMapOf<String, Int>()
+                orders.map { order ->
+                    val base = "${order.uuid.orEmpty()}#${order.id}"
+                    val n = (seen[base] ?: 0) + 1
+                    seen[base] = n
+                    if (n == 1) base else "$base~$n"
+                }
+            }
             LazyColumn(
                 contentPadding = PaddingValues(16.dp),
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(padding)
             ) {
-                items(orders) { order ->
+                itemsIndexed(orders, key = { index, _ -> orderKeys[index] }) { _, order ->
                     OrderCard(
                         order = order,
                         // Only in-flight deliveries have anything to track.

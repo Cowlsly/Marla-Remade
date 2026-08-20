@@ -2,9 +2,16 @@ package com.vayunmathur.fooddelivery.data
 
 import android.content.Context
 import androidx.core.content.edit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+@OptIn(ExperimentalCoroutinesApi::class)
 object CartStore {
 
     private const val PREFS_NAME = "fooddelivery_cart"
@@ -20,21 +27,37 @@ object CartStore {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun getAll(context: Context): List<CartItem> {
+    /**
+     * Single writer, so back-to-back mutations commit in the order they were made — a save
+     * must not overtake the clear that follows a placed order.
+     */
+    private val io = Dispatchers.IO.limitedParallelism(1)
+
+    /** Outlives composition: a cart edit has to be persisted even if the screen goes away. */
+    private val scope = CoroutineScope(SupervisorJob() + io)
+
+    suspend fun getAll(context: Context): List<CartItem> = withContext(io) {
         val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY, null) ?: return emptyList()
-        return try {
+            .getString(KEY, null) ?: return@withContext emptyList()
+        try {
             json.decodeFromString<List<CartItem>>(raw)
         } catch (_: Exception) { emptyList() }
     }
 
     fun save(context: Context, items: List<CartItem>) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit { putString(KEY, json.encodeToString(items)) }
+        val appCtx = context.applicationContext
+        val snapshot = items.toList()
+        scope.launch {
+            appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit { putString(KEY, json.encodeToString(snapshot)) }
+        }
     }
 
     fun clear(context: Context) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit { remove(KEY) }
+        val appCtx = context.applicationContext
+        scope.launch {
+            appCtx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit { remove(KEY) }
+        }
     }
 }

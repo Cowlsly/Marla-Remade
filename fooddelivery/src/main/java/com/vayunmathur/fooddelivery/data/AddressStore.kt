@@ -2,9 +2,18 @@ package com.vayunmathur.fooddelivery.data
 
 import android.content.Context
 import androidx.core.content.edit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
+/**
+ * Saved delivery addresses. Every accessor is `suspend` and hops to [io]: each one is a
+ * SharedPreferences read plus a JSON decode, which must not run on the main thread (and so
+ * must not run inside a `remember { }` initialiser either).
+ */
+@OptIn(ExperimentalCoroutinesApi::class)
 object AddressStore {
 
     private const val PREFS_NAME = "fooddelivery_addresses"
@@ -12,16 +21,19 @@ object AddressStore {
 
     private val json = Json { ignoreUnknownKeys = true }
 
-    fun getAll(context: Context): List<SavedAddress> {
-        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getString(KEY, null) ?: return emptyList()
-        return try {
-            json.decodeFromString<List<SavedAddress>>(raw)
-        } catch (_: Exception) { emptyList() }
+    /**
+     * Single writer, so each accessor's read-modify-write runs to completion before the next
+     * one starts: two concurrent deletes would otherwise both start from the same list and
+     * the second write would put the first one's row back.
+     */
+    private val io = Dispatchers.IO.limitedParallelism(1)
+
+    suspend fun getAll(context: Context): List<SavedAddress> = withContext(io) {
+        read(context)
     }
 
-    fun save(context: Context, address: SavedAddress) {
-        val list = getAll(context).toMutableList()
+    suspend fun save(context: Context, address: SavedAddress) = withContext(io) {
+        val list = read(context).toMutableList()
         val idx = list.indexOfFirst { it.id == address.id }
         val toSave = if (address.isDefault) {
             list.map { it.copy(isDefault = false) }.toMutableList()
@@ -30,16 +42,25 @@ object AddressStore {
         write(context, toSave)
     }
 
-    fun delete(context: Context, id: String) {
-        write(context, getAll(context).filter { it.id != id })
+    suspend fun delete(context: Context, id: String) = withContext(io) {
+        write(context, read(context).filter { it.id != id })
     }
 
-    fun setDefault(context: Context, id: String) {
-        write(context, getAll(context).map { it.copy(isDefault = it.id == id) })
+    suspend fun setDefault(context: Context, id: String) = withContext(io) {
+        write(context, read(context).map { it.copy(isDefault = it.id == id) })
     }
 
-    fun getDefault(context: Context): SavedAddress? {
-        return getAll(context).firstOrNull { it.isDefault } ?: getAll(context).firstOrNull()
+    suspend fun getDefault(context: Context): SavedAddress? = withContext(io) {
+        val all = read(context)
+        all.firstOrNull { it.isDefault } ?: all.firstOrNull()
+    }
+
+    private fun read(context: Context): List<SavedAddress> {
+        val raw = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getString(KEY, null) ?: return emptyList()
+        return try {
+            json.decodeFromString<List<SavedAddress>>(raw)
+        } catch (_: Exception) { emptyList() }
     }
 
     private fun write(context: Context, list: List<SavedAddress>) {

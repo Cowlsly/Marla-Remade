@@ -42,6 +42,15 @@ import com.vayunmathur.fooddelivery.R
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.Deal
 import com.vayunmathur.fooddelivery.data.DealProgress
+import com.vayunmathur.fooddelivery.platform.AppInit
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+
+/** Concurrent per-deal progress requests in flight at once. */
+private const val MAX_PARALLEL_PROGRESS = 6
 
 /**
  * Browse every active deal on the platform. Tapping one opens its merchant so the deal
@@ -54,10 +63,17 @@ fun DealsScreen(onMerchantClick: (Int) -> Unit) {
     var loading by remember { mutableStateOf(true) }
 
     LaunchedEffect(Unit) {
+        AppInit.awaitReady()
         deals = BitesApi.getAllDeals().filter { it.isActive }
         loading = false
-        // Progress is per-deal; fetch after the list so the deals render immediately.
-        progress = deals.mapNotNull { d -> BitesApi.getDealProgress(d.id)?.let { d.id to it } }.toMap()
+        // Progress is per-deal; fetch after the list so the deals render immediately, and
+        // fan the round trips out rather than paying for them one after another.
+        val gate = Semaphore(MAX_PARALLEL_PROGRESS)
+        progress = coroutineScope {
+            deals.map { d ->
+                async { gate.withPermit { BitesApi.getDealProgress(d.id)?.let { d.id to it } } }
+            }.awaitAll().filterNotNull().toMap()
+        }
     }
 
     Scaffold { padding ->
@@ -79,6 +95,9 @@ fun DealsScreen(onMerchantClick: (Int) -> Unit) {
                 verticalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.padding(padding),
             ) {
+                // Deliberately unkeyed: Deal.id is its only identity and decodes to 0 for any
+                // row the server sends without one, so a key risks the duplicate-key crash. It
+                // would buy nothing anyway — `deals` is assigned once and never replaced.
                 items(deals) { deal ->
                     DealCard(
                         deal = deal,

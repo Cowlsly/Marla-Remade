@@ -206,12 +206,17 @@ object NetworkClient {
         sslSocketFactory: SSLSocketFactory? = null,
         useSystemTrust: Boolean = false,
     ): SimpleResponse {
-        val r = HttpUrlEngine.internalExecute(
-            url, method, headers, HttpUrlEngine.toBodyBytes(body),
-            followRedirects = true, connectTimeoutMs = null,
-            sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
-        )
-        return SimpleResponse(r.status, r.statusMessage, r.bodyBytes.toString(Charsets.UTF_8), r.headers, r.finalUrl)
+        // internalExecute suspends on Dispatchers.IO but returns to the caller's dispatcher,
+        // so decoding the body here would run the (potentially hundreds of MB) UTF-8
+        // conversion on whatever thread called us — the main thread, for Compose callers.
+        return withContext(Dispatchers.IO) {
+            val r = HttpUrlEngine.internalExecute(
+                url, method, headers, HttpUrlEngine.toBodyBytes(body),
+                followRedirects = true, connectTimeoutMs = null,
+                sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
+            )
+            SimpleResponse(r.status, r.statusMessage, r.bodyBytes.toString(Charsets.UTF_8), r.headers, r.finalUrl)
+        }
     }
 
     /**

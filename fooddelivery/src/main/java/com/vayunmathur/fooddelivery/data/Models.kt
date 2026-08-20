@@ -334,6 +334,16 @@ data class Order(
             return 3958.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
         }
 
+    /**
+     * The ISO timestamps this order's stage and ETA are derived from, parsed once. Parsing is
+     * the expensive part and it does not depend on the clock, so it is what gets memoised —
+     * [stage] and [etaMillis] stay recomputed so a wall-clock transition still surfaces on a
+     * list that isn't re-fetched. Delegated properties are not part of the serialized form.
+     */
+    private val pickupReadyAtMillis: Long? by lazy { parseIsoMillis(pickupReadyAt) }
+    private val dueAtMillis: Long? by lazy { parseIsoMillis(dueAt) }
+    private val liveDeliveryEtaMillis: Long? by lazy { parseIsoMillis(liveDeliveryEta) }
+
     /** Mirrors the reference's status ladder, including its ordering. */
     val stage: OrderStage
         get() {
@@ -348,9 +358,9 @@ data class Order(
             if (pickedupAt != null) return OrderStage.DRIVING
             if (driverReachedMerchantAt != null) return OrderStage.READY
             val now = System.currentTimeMillis()
-            val ready = parseIsoMillis(pickupReadyAt)
+            val ready = pickupReadyAtMillis
             if (ready != null && ready <= now) return OrderStage.READY
-            val due = parseIsoMillis(dueAt)
+            val due = dueAtMillis
             // More than 30 minutes out, the reference shows "Preparing Soon".
             if (due != null && due - now > 1_800_000L) return OrderStage.PREPARING_SOON
             return OrderStage.PREPARING
@@ -363,8 +373,8 @@ data class Order(
      */
     val etaMillis: Long?
         get() {
-            val live = parseIsoMillis(liveDeliveryEta)
-            val due = parseIsoMillis(dueAt)
+            val live = liveDeliveryEtaMillis
+            val due = dueAtMillis
             return when {
                 live != null && due != null -> max(live, due)
                 else -> live ?: due
@@ -434,6 +444,12 @@ data class CartItem(
     val merchantId: Int = 0,
     val merchantName: String = "",
     val specialInstructions: String? = null,
+    /**
+     * Per-line identity so a lazy list can key on it: two cart lines can otherwise be
+     * entirely equal, and keying on position makes a mid-list removal shift every later
+     * row's identity. Only has to be stable while the cart is on screen.
+     */
+    val lineId: String = java.util.UUID.randomUUID().toString(),
 ) {
     /** Modifier prices count per unit of the modifier, then the whole line by item quantity. */
     val totalPrice: Double
@@ -661,12 +677,61 @@ data class CheckoutResponse(
 /**
  * Parse an ISO-8601 timestamp to epoch millis, tolerating the `Z` suffix and fractional
  * seconds the API returns. Returns null for null/blank/malformed input.
+ *
+ * The common `yyyy-MM-ddTHH:mm:ss[.fff][Z]` shape is parsed by hand so a well-formed
+ * timestamp never goes through exception-driven control flow; anything else falls back to
+ * java.time.
  */
 internal fun parseIsoMillis(iso: String?): Long? {
     if (iso.isNullOrBlank()) return null
+    fastParseIsoMillis(iso)?.let { return it }
     return runCatching { java.time.Instant.parse(iso).toEpochMilli() }.getOrNull()
         ?: runCatching {
             java.time.LocalDateTime.parse(iso.substringBefore('Z'))
                 .toInstant(java.time.ZoneOffset.UTC).toEpochMilli()
         }.getOrNull()
+}
+
+/** `yyyy-MM-ddTHH:mm:ss[.fff][Z]`, UTC, with no exceptions on the way through. */
+private fun fastParseIsoMillis(iso: String): Long? {
+    if (iso.length < 19) return null
+    if (iso[4] != '-' || iso[7] != '-' || iso[10] != 'T' || iso[13] != ':' || iso[16] != ':') return null
+    val year = iso.digits(0, 4) ?: return null
+    val month = iso.digits(5, 7) ?: return null
+    val day = iso.digits(8, 10) ?: return null
+    val hour = iso.digits(11, 13) ?: return null
+    val minute = iso.digits(14, 16) ?: return null
+    val second = iso.digits(17, 19) ?: return null
+    if (month !in 1..12 || hour !in 0..23 || minute !in 0..59 || second !in 0..59) return null
+    val isLeap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)
+    val daysInMonth = when (month) {
+        1, 3, 5, 7, 8, 10, 12 -> 31
+        4, 6, 9, 11 -> 30
+        else -> if (isLeap) 29 else 28
+    }
+    if (day !in 1..daysInMonth) return null
+
+    var millis = 0
+    var rest = iso.substring(19)
+    if (rest.startsWith('.')) {
+        val fraction = rest.drop(1).takeWhile { it in '0'..'9' }
+        if (fraction.isEmpty()) return null
+        millis = fraction.take(3).padEnd(3, '0').toInt()
+        rest = rest.drop(1 + fraction.length)
+    }
+    // Only UTC (or an absent zone, which the API means as UTC) takes the fast path.
+    if (rest.isNotEmpty() && rest != "Z") return null
+
+    val epochDay = java.time.LocalDate.of(year, month, day).toEpochDay()
+    return (epochDay * 86_400L + hour * 3_600L + minute * 60L + second) * 1_000L + millis
+}
+
+private fun String.digits(from: Int, to: Int): Int? {
+    var value = 0
+    for (i in from until to) {
+        val c = this[i]
+        if (c < '0' || c > '9') return null
+        value = value * 10 + (c - '0')
+    }
+    return value
 }

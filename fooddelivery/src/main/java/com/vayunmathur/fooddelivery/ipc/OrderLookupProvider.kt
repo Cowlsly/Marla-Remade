@@ -2,15 +2,19 @@ package com.vayunmathur.fooddelivery.ipc
 
 import android.content.ContentProvider
 import android.content.ContentValues
-import android.content.Context
 import android.database.Cursor
 import android.database.MatrixCursor
 import android.net.Uri
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.data.Merchant
-import com.vayunmathur.library.network.NetworkClient
-import com.vayunmathur.library.network.TrustBundle
+import com.vayunmathur.fooddelivery.platform.AppInit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.sin
@@ -33,20 +37,15 @@ import kotlin.math.sqrt
  * row rather than throwing across the binder — the caller then simply shows no
  * Order button.
  */
+@OptIn(ExperimentalCoroutinesApi::class)
 class OrderLookupProvider : ContentProvider() {
 
     override fun onCreate(): Boolean {
-        // A provider can be created before any Activity runs, so make sure the
-        // network stack (TLS trust bundle) and any saved auth token are ready —
-        // MainActivity does the same on its own launch path.
+        // A provider is created on the main thread before Application.onCreate and before
+        // any Activity, so kick the network/token warm-up off to a background thread and
+        // return immediately rather than paying for it here. [findMatch] awaits it.
         val ctx = context ?: return false
-        try {
-            NetworkClient.init(ctx, TrustBundle.STANDARD)
-            val prefs = ctx.getSharedPreferences("fooddelivery_prefs", Context.MODE_PRIVATE)
-            prefs.getString("token_json", null)?.let { BitesApi.restoreToken(it) }
-        } catch (_: Exception) {
-            // Best-effort; a lookup that then fails just returns not-orderable.
-        }
+        AppInit.start(ctx)
         return true
     }
 
@@ -86,8 +85,21 @@ class OrderLookupProvider : ContentProvider() {
         val target = normalize(name)
         if (target.isEmpty()) return null
 
-        val merchants = runBlocking { BitesApi.getMerchants(lat, lng) }
-        if (merchants.isEmpty()) return null
+        // This runs on a binder thread out of a 16-strong pool, and the request underneath
+        // can take the engine's full 30s connect / 60s read budget (three times over, if the
+        // auth path retries). Bound the wait: query() degrades to orderable=0 on a null match,
+        // so giving up is strictly better than holding the transaction open. The fetch runs on
+        // a scope of its own — cancelling a coroutine parked in a blocking socket read does not
+        // unblock it, so the timeout has to sit on a separate, cancellable suspension point.
+        val fetch = lookupScope.async {
+            AppInit.awaitReady()
+            BitesApi.getMerchants(lat, lng)
+        }
+        val merchants = runBlocking {
+            withTimeoutOrNull(LOOKUP_TIMEOUT_MS) { fetch.await() }
+        }
+        if (merchants == null) fetch.cancel()
+        if (merchants.isNullOrEmpty()) return null
 
         // Keep only merchants that are plausibly the same place: close enough AND
         // whose normalised name matches (equal / prefix / containment). Pick the
@@ -128,5 +140,17 @@ class OrderLookupProvider : ContentProvider() {
     companion object {
         /** How close a merchant must be to the queried point to be the same place. */
         private const val MATCH_RADIUS_METERS = 800.0
+
+        /** Total budget for warm-up plus catalog fetch on the binder thread. */
+        private const val LOOKUP_TIMEOUT_MS = 3_000L
+
+        private val lookupScope =
+            CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(MAX_INFLIGHT_LOOKUPS))
+
+        /**
+         * A timed-out fetch keeps its thread until the engine's own timeouts fire, so cap how
+         * many can be in flight rather than letting a chatty caller drain [Dispatchers.IO].
+         */
+        private const val MAX_INFLIGHT_LOOKUPS = 4
     }
 }

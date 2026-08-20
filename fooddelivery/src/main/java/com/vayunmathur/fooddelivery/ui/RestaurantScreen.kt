@@ -27,6 +27,7 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,8 +62,14 @@ import com.vayunmathur.fooddelivery.data.MerchantDetail
 import com.vayunmathur.fooddelivery.data.MenuItem
 import com.vayunmathur.fooddelivery.data.MerchantRewards
 import com.vayunmathur.fooddelivery.data.SelectedModifier
+import com.vayunmathur.fooddelivery.platform.AppInit
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.launch
+
+/** How long typing has to settle before the menu is re-filtered. */
+private const val FILTER_DEBOUNCE_MS = 150L
 
 @Composable
 fun RestaurantScreen(
@@ -76,6 +83,7 @@ fun RestaurantScreen(
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(merchantId) {
+        AppInit.awaitReady()
         merchant = BitesApi.getMerchantDetail(merchantId)
         loading = false
         rewards = BitesApi.getCustomerMerchantRewards().firstOrNull { it.merchantId == merchantId }
@@ -115,6 +123,7 @@ fun RestaurantScreen(
  * The menu, with no API call of its own so it can be rendered from a `@Preview` — see
  * `src/screenshotTest`, which is where the store listing images come from.
  */
+@OptIn(FlowPreview::class)
 @Composable
 fun RestaurantContent(
     merchant: MerchantDetail?,
@@ -127,6 +136,12 @@ fun RestaurantContent(
 ) {
     var customizeItem by remember { mutableStateOf<MenuItem?>(null) }
     var query by remember { mutableStateOf("") }
+    // The field itself stays instant; the menu is only re-filtered once typing settles, so a
+    // keystroke no longer re-walks and re-sorts every category.
+    var appliedQuery by remember { mutableStateOf("") }
+    LaunchedEffect(Unit) {
+        snapshotFlow { query }.debounce(FILTER_DEBOUNCE_MS).collect { appliedQuery = it }
+    }
 
     customizeItem?.let { item ->
         ModifierDialog(
@@ -151,7 +166,24 @@ fun RestaurantContent(
             )
         } else {
             val m = merchant
-            val itemsById = m.items.associateBy { it.id }
+            val q = appliedQuery.trim()
+            // Rebuilding the id index and the filtered menu on every recomposition is what made
+            // typing in the search field lag, so both are kept until their inputs change.
+            val itemsById = remember(m.items) { m.items.associateBy { it.id } }
+            val activeCategories = remember(m.categories) {
+                m.categories.filter { it.isActive }.sortedBy { it.sortOrder }
+            }
+            val sections = remember(m.items, m.categories, q) {
+                activeCategories.mapNotNull { category ->
+                    val categoryItems = category.itemIds.mapNotNull { itemsById[it] }
+                        .filter {
+                            it.isAvailable && it.isInStock && (q.isEmpty() ||
+                                it.name.contains(q, ignoreCase = true) ||
+                                it.description.contains(q, ignoreCase = true))
+                        }
+                    if (categoryItems.isEmpty()) null else category to categoryItems
+                }
+            }
 
             LazyColumn(
                 contentPadding = PaddingValues(bottom = 16.dp),
@@ -238,21 +270,7 @@ fun RestaurantContent(
                     )
                 }
 
-                val q = query.trim()
-                // Match on name or description; an empty query leaves the menu untouched.
-                fun matches(mi: MenuItem) = q.isEmpty() ||
-                    mi.name.contains(q, ignoreCase = true) ||
-                    mi.description.contains(q, ignoreCase = true)
-
-                val activeCategories = m.categories
-                    .filter { it.isActive }
-                    .sortedBy { it.sortOrder }
-
-                val anyMatch = activeCategories.any { category ->
-                    category.itemIds.mapNotNull { itemsById[it] }
-                        .any { it.isAvailable && it.isInStock && matches(it) }
-                }
-                if (!anyMatch) {
+                if (sections.isEmpty()) {
                     item {
                         Text(
                             stringResource(R.string.no_menu_items_match, q),
@@ -263,26 +281,24 @@ fun RestaurantContent(
                     }
                 }
 
-                activeCategories.forEach { category ->
-                    val categoryItems = category.itemIds.mapNotNull { itemsById[it] }
-                        .filter { it.isAvailable && it.isInStock && matches(it) }
-                    if (categoryItems.isNotEmpty()) {
-                        item {
-                            HorizontalDivider(Modifier.padding(horizontal = 16.dp))
-                            Spacer(Modifier.height(12.dp))
-                            Text(category.name,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Bold,
-                                modifier = Modifier.padding(horizontal = 16.dp))
-                            Spacer(Modifier.height(8.dp))
-                        }
-                        items(categoryItems) { menuItem ->
-                            MenuItemRow(menuItem) {
-                                if (menuItem.modifierGroups.isNotEmpty()) {
-                                    customizeItem = menuItem
-                                } else {
-                                    onAddItem(menuItem, emptyList())
-                                }
+                sections.forEach { (category, categoryItems) ->
+                    item {
+                        HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                        Spacer(Modifier.height(12.dp))
+                        Text(category.name,
+                            style = MaterialTheme.typography.titleMedium,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.padding(horizontal = 16.dp))
+                        Spacer(Modifier.height(8.dp))
+                    }
+                    // An item can sit in more than one category, so the key has to include the
+                    // category to stay unique across the whole list.
+                    items(categoryItems, key = { "${category.id}-${it.id}" }) { menuItem ->
+                        MenuItemRow(menuItem) {
+                            if (menuItem.modifierGroups.isNotEmpty()) {
+                                customizeItem = menuItem
+                            } else {
+                                onAddItem(menuItem, emptyList())
                             }
                         }
                     }
@@ -309,12 +325,9 @@ fun ModifierDialog(
             initialSelection.forEach { sel ->
                 getOrPut(sel.modifierGroupId) { mutableSetOf() }.add(sel.modifierId)
             }
-        }
-    }
-
-    item.modifierGroups.forEach { group ->
-        if (group.id !in selections) {
-            selections[group.id] = mutableSetOf()
+            // Seeded here rather than written back during composition, which would dirty the
+            // map it had just been read from and force another pass.
+            item.modifierGroups.forEach { group -> getOrPut(group.id) { mutableSetOf() } }
         }
     }
 

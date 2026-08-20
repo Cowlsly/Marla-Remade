@@ -59,6 +59,7 @@ import com.vayunmathur.fooddelivery.data.CustomerSavings
 import com.vayunmathur.fooddelivery.data.PlatformSavings
 import com.vayunmathur.fooddelivery.data.Referral
 import com.vayunmathur.fooddelivery.data.SavedAddress
+import com.vayunmathur.fooddelivery.platform.AppInit
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -80,6 +81,9 @@ fun AccountScreen() {
     var editingProfile by remember { mutableStateOf(false) }
     var loading by remember { mutableStateOf(true) }
     var loggedIn by remember { mutableStateOf(BitesApi.isLoggedIn()) }
+    // The saved token is restored by the background warm-up, so "signed out" isn't known to
+    // be true until that has landed — don't offer the sign-in card before then.
+    var authResolved by remember { mutableStateOf(BitesApi.isLoggedIn()) }
 
     var stateId by remember { mutableStateOf<String?>(null) }
     var phone by remember { mutableStateOf("") }
@@ -87,7 +91,8 @@ fun AccountScreen() {
     var codeSent by remember { mutableStateOf(false) }
     var authLoading by remember { mutableStateOf(false) }
 
-    var addresses by remember { mutableStateOf(AddressStore.getAll(context)) }
+    var addresses by remember { mutableStateOf<List<SavedAddress>>(emptyList()) }
+    var addressesLoaded by remember { mutableStateOf(false) }
     var showAddAddress by remember { mutableStateOf(false) }
     var editingAddress by remember { mutableStateOf<SavedAddress?>(null) }
     var addrLabel by remember { mutableStateOf("") }
@@ -130,6 +135,19 @@ fun AccountScreen() {
         showAddAddress = true
     }
 
+    LaunchedEffect(Unit) {
+        addresses = AddressStore.getAll(context)
+        addressesLoaded = true
+    }
+
+    // The saved token is restored by the background warm-up, so re-read the login state once
+    // it has landed instead of assuming the initial (possibly pre-restore) answer.
+    LaunchedEffect(Unit) {
+        AppInit.awaitReady()
+        if (!loggedIn) loggedIn = BitesApi.isLoggedIn()
+        authResolved = true
+    }
+
     LaunchedEffect(loggedIn) {
         if (loggedIn) {
             customer = BitesApi.getCustomer()
@@ -140,18 +158,13 @@ fun AccountScreen() {
         loading = false
     }
 
-    BitesApi.onTokenUpdated = { tokenJson ->
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit { putString(KEY_TOKEN, tokenJson) }
-    }
-
     Scaffold { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding)
                 .verticalScroll(rememberScrollState()).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
-            if (!loggedIn) {
+            if (!loggedIn && authResolved) {
                 Card(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(16.dp),
                         horizontalAlignment = Alignment.CenterHorizontally) {
@@ -219,7 +232,7 @@ fun AccountScreen() {
                         }
                     }
                 }
-            } else {
+            } else if (loggedIn) {
                 if (editingProfile) {
                     customer?.let { c ->
                         EditProfileDialog(
@@ -426,7 +439,7 @@ fun AccountScreen() {
                 }
             }
 
-            if (addresses.isEmpty() && !showAddAddress) {
+            if (addressesLoaded && addresses.isEmpty() && !showAddAddress) {
                 Text(stringResource(R.string.no_saved_addresses_tap_to_add_one),
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -466,8 +479,10 @@ fun AccountScreen() {
                                 }
                             }
                             IconButton(onClick = {
-                                AddressStore.delete(context, addr.id)
-                                addresses = AddressStore.getAll(context)
+                                scope.launch {
+                                    AddressStore.delete(context, addr.id)
+                                    addresses = AddressStore.getAll(context)
+                                }
                             }) {
                                 IconDelete(modifier = Modifier.size(20.dp),
                                     tint = MaterialTheme.colorScheme.error)
@@ -476,8 +491,10 @@ fun AccountScreen() {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             if (!addr.isDefault) {
                                 TextButton(onClick = {
-                                    AddressStore.setDefault(context, addr.id)
-                                    addresses = AddressStore.getAll(context)
+                                    scope.launch {
+                                        AddressStore.setDefault(context, addr.id)
+                                        addresses = AddressStore.getAll(context)
+                                    }
                                 }) {
                                     Text(stringResource(R.string.set_default), style = MaterialTheme.typography.labelMedium)
                                 }

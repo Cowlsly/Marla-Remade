@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -85,8 +85,7 @@ fun CartScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                     modifier = Modifier.weight(1f)
                 ) {
-                    items(items.size) { index ->
-                        val item = items[index]
+                    itemsIndexed(items, key = { _, item -> item.lineId }) { index, item ->
                         CartItemRow(
                             item = item,
                             onRemove = { onRemoveItem(index) },
