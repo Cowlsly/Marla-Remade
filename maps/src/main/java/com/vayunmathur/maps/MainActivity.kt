@@ -91,7 +91,8 @@ class MainActivity : ComponentActivity() {
                     Triple("https://data.vayunmathur.com/transit_attributes.bin", "transit_attributes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/lanes.bin", "lanes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/poi_index.bin", "poi_index.bin", getString(R.string.downloading_poi_data)),
-                    Triple("https://data.vayunmathur.com/poi_names.bin", "poi_names.bin", getString(R.string.downloading_poi_data))
+                    Triple("https://data.vayunmathur.com/poi_names.bin", "poi_names.bin", getString(R.string.downloading_poi_data)),
+                    Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data))
                 )) {
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         // POST_NOTIFICATIONS is runtime-grantable on API 33+

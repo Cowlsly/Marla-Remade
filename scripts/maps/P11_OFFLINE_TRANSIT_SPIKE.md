@@ -3,6 +3,19 @@
 **Status:** spike / report for lead review. **No app behavior changed.** No large
 artifacts committed. This document is the deliverable.
 
+> **POST-BUILD UPDATE (2026-08-17, added after the spike).** P11 has since been
+> **built** by other teammates, adopting this spike's recommendations. For anyone
+> reviewing: the body below reflects the *pre-build* state; the following commits
+> supersede parts of it. This report is retained as the design rationale of record.
+>
+> - `d52a70e36` **P11b** — on-device **RAPTOR transit planner** `maps/src/main/rust/src/transit.rs` + JNI (matches §3a RAPTOR / §3b Rust). Its header cites "per the spike's recommendation" and decouples access/egress from the road graph "per spike §1d gap 1."
+> - `bb4c8ab98` **P11d** — wired offline transit routing + **online Transitous fallback** (matches §5 Phase 5).
+> - `a37b85be2` **P16** — generator now **emits a single global routing graph (drops zones)**, which **resolves the §1d gap 1** producer/consumer format mismatch. `c1c13302b` adds `OfflineRouter.reload()`; `734feb70e` fixes a graph-build race.
+> - **One deviation from the recommendation:** the GTFS ingest host tool was built as **`scripts/maps/gtfs_ingest` (Rust, P11a)** rather than the Python I suggested in §3c. This still honors the "NO hand-written C++" rule and the "Rust preferred" steer, so the deviation is benign; the §3c *decision* (don't extend `generator.cpp` in C++) was followed.
+>
+> Net: the spike verdict (VIABLE) held, and the build tracked the plan. Consequently
+> the §1d gaps and several "blockers" in §4 are now addressed in code.
+
 **Scope of the spike (from task #144 / `VELA_PORT_PLAN.md` P11):** investigate
 offline transit routing from the SAME Transitous/GTFS data as the P10 boards —
 ingest per-region GTFS into the downloadable offline packs + an on-device

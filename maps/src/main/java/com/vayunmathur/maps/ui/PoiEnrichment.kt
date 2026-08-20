@@ -9,13 +9,16 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,8 +62,8 @@ import kotlin.time.Clock
  * shows whatever came back and silently omits the rest. Nothing here can throw.
  *
  * Performance: photos are a horizontally-lazy [LazyRow] of async-loaded images;
- * reviews are capped to a handful (this sits inside the draggable bottom sheet,
- * which handles its own vertical scroll — no nested vertical LazyColumn).
+ * reviews live in a height-bounded, independently-scrollable [Column] (see the
+ * reviews section) so the full set is reachable without stretching the sheet.
  */
 @Composable
 fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle: Boolean = true) {
@@ -129,8 +132,19 @@ fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle:
 
         if (info.reviews.isNotEmpty()) {
             SectionHeader(stringResource(R.string.poi_reviews_header)) { IconStar() }
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                info.reviews.take(5).forEach { ReviewCard(it) }
+            // All reviews, in a height-bounded independently-scrollable region so
+            // the sheet doesn't grow without bound. A `verticalScroll` column (not
+            // a LazyColumn, which can't take infinite height inside the scrolling
+            // sheet) participates in nested scrolling: it scrolls the reviews, and
+            // hands off to the draggable sheet once it hits its top/bottom edge.
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                info.reviews.forEach { ReviewCard(it) }
             }
         } else info.featuredReview?.let {
             SectionHeader(stringResource(R.string.poi_reviews_header)) { IconStar() }

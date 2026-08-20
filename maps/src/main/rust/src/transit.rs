@@ -1,36 +1,53 @@
-//! On-device transit index loader + RAPTOR journey planner (P11b).
+//! On-device transit index loader + RAPTOR journey planner (P11b / world pack).
 //!
-//! Consumes the compact per-region `.transit` index produced by the host tool
-//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout is documented at the
-//! top of that tool's `src/index.rs` and MUST stay in sync with the section
-//! constants and record accessors here.
+//! Consumes the compact `.transit` index produced by the host tool
+//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout (format v2 "TRX2") is
+//! documented at the top of that tool's `src/index.rs` and MUST stay in sync
+//! with the section constants and record accessors here.
 //!
-//! The planner is transfer-aware RAPTOR (round-based, earliest-arrival with a
-//! fewest-transfers tiebreak per the spike's recommendation). Access/egress use
-//! a straight-line walk to nearby stops rather than the road graph, which keeps
-//! transit decoupled from the road-graph merge gap (spike §1d gap 1). The road
-//! A* still handles walking legs elsewhere.
+//! v2 exists to make a single global (world) pack feasible. Instead of an 8 B
+//! `(arr,dep)` stop-time per stop *per trip* (which blew a world pack past the
+//! u32 stop-time ceiling and ~10–20 GB), a trip is just `{ start_time,
+//! profile_id }`, where a **profile** is the varint-delta run-time *shape*
+//! (per-stop hop + dwell), deduplicated across every trip with that shape. Trips
+//! are varint-packed per route; a **spatial grid** (sparse CSR) makes
+//! nearest-stop / access / egress cell-local instead of O(all stops); and a
+//! **FEEDS** table + per-route `feed_idx` let many agencies merge into one pack.
+//!
+//! The planner is transfer-aware RAPTOR (round-based, earliest-arrival). Each
+//! round only processes freshly-marked stops (a marked-stop queue) rather than
+//! scanning all stops, and access/egress use the grid — both required so a
+//! world-sized stop set stays fast. Access/egress walk straight-line to nearby
+//! stops rather than the road graph, keeping transit decoupled from the
+//! road-graph merge gap. The road A* still handles walking legs elsewhere.
 
 use crate::graph::{read_at, MmapRegion};
+use std::collections::HashMap;
 
 // --- Format constants (mirror scripts/maps/gtfs_ingest/src/index.rs) ---
 const MAGIC: u32 = 0x5452_4958; // "TRIX"
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 pub const NONE: u32 = 0xFFFF_FFFF;
-const HEADER_LEN: usize = 48;
+const HEADER_LEN: usize = 80;
+const SECTION_COUNT: usize = 17;
 
 const SEC_STRINGS: usize = 0;
 const SEC_STOPS: usize = 1;
 const SEC_ROUTES: usize = 2;
 const SEC_ROUTE_STOPS: usize = 3;
-const SEC_TRIPS: usize = 4;
-const SEC_STOPTIMES: usize = 5;
-const SEC_STOP_ROUTES: usize = 6;
-const SEC_STOP_ROUTES_IDX: usize = 7;
-const SEC_TRANSFERS: usize = 8;
-const SEC_TRANSFERS_IDX: usize = 9;
-const SEC_SERVICES: usize = 10;
-const SEC_EXCEPTIONS: usize = 11;
+const SEC_ROUTE_TRIPS: usize = 4;
+const SEC_PROFILES: usize = 5;
+const SEC_PROFILES_IDX: usize = 6;
+const SEC_STOP_ROUTES: usize = 7;
+const SEC_STOP_ROUTES_IDX: usize = 8;
+const SEC_TRANSFERS: usize = 9;
+const SEC_TRANSFERS_IDX: usize = 10;
+const SEC_SERVICES: usize = 11;
+const SEC_EXCEPTIONS: usize = 12;
+const SEC_GRID_CELL_IDS: usize = 13;
+const SEC_GRID_CELL_OFF: usize = 14;
+const SEC_GRID_STOPS: usize = 15;
+const SEC_FEEDS: usize = 16;
 
 const WALK_SPEED_M_S: f64 = 1.33;
 /// Access/egress radius: how far we will walk to the first / from the last stop.
@@ -38,7 +55,8 @@ const ACCESS_RADIUS_M: f64 = 1000.0;
 const MAX_ROUNDS: usize = 6;
 const SECS_PER_DAY: u32 = 24 * 3600;
 
-// --- On-disk records (all `#[repr(C, packed)]`, read via `read_at`). ---
+// --- On-disk fixed records (`#[repr(C, packed)]`, read via `read_at`). ---
+// Variable-length sections (ROUTE_TRIPS, PROFILES) are decoded with `uvarint`.
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
@@ -55,27 +73,11 @@ struct RouteRec {
     name_off: u32,
     color: u32,
     route_type: u32,
+    feed_idx: u32,
     n_stops: u32,
     first_route_stop: u32,
     n_trips: u32,
-    first_trip: u32,
-    _pad: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct TripRec {
-    route_idx: u32,
-    service_idx: u32,
-    headsign_off: u32,
-    first_stoptime: u32,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-struct StopTimeRec {
-    arr_s: u32,
-    dep_s: u32,
+    trips_off: u32,
 }
 
 #[repr(C, packed)]
@@ -102,6 +104,22 @@ struct ExcRec {
     added: u32,
 }
 
+/// A trip decoded from a route's varint block.
+#[derive(Clone, Copy)]
+struct TripDec {
+    start_time: u32,
+    profile_id: u32,
+    service_idx: u32,
+    headsign_off: u32,
+}
+
+/// A decoded run-time profile: per-stop arrival/departure offsets relative to
+/// the trip's `start_time` (`dep_rel[0] == 0`, `arr_rel[0] <= 0`).
+struct ProfileDec {
+    arr_rel: Vec<i32>,
+    dep_rel: Vec<i32>,
+}
+
 /// A single leg of a planned journey, with owned strings ready for JNI.
 pub struct TransitLeg {
     pub is_transit: bool,
@@ -120,19 +138,26 @@ pub struct TransitLeg {
     pub coords: Vec<f64>,
 }
 
-/// mmap'd, read-only transit index for one region/feed.
+/// mmap'd, read-only transit index for one pack (may hold many merged feeds).
 pub struct TransitIndex {
     _region: MmapRegion,
     base: *const u8,
     stop_count: u32,
     service_count: u32,
+    feed_count: u32,
     feed_name_off: u32,
     min_lat_e7: i32,
     min_lon_e7: i32,
     max_lat_e7: i32,
     max_lon_e7: i32,
+    // Grid params.
+    grid_lat0_e7: i32,
+    grid_lon0_e7: i32,
+    grid_cell_e7: u32,
+    grid_cols: u32,
+    grid_cell_count: u32,
     // Section (offset, len) directory.
-    sec: [(usize, usize); 12],
+    sec: [(usize, usize); SECTION_COUNT],
 }
 
 // Read-only after load; the raw pointer is sound to share.
@@ -160,20 +185,26 @@ impl TransitIndex {
             return None;
         }
         let section_count: u32 = unsafe { read_at::<u32>(base, 2) };
-        if section_count as usize != 12 {
+        if section_count as usize != SECTION_COUNT {
             return None;
         }
         let stop_count: u32 = unsafe { read_at::<u32>(base, 3) };
         let service_count: u32 = unsafe { read_at::<u32>(base, 6) };
-        let feed_name_off: u32 = unsafe { read_at::<u32>(base, 7) };
-        let min_lat_e7: i32 = unsafe { read_at::<i32>(base, 8) };
-        let min_lon_e7: i32 = unsafe { read_at::<i32>(base, 9) };
-        let max_lat_e7: i32 = unsafe { read_at::<i32>(base, 10) };
-        let max_lon_e7: i32 = unsafe { read_at::<i32>(base, 11) };
+        let feed_count: u32 = unsafe { read_at::<u32>(base, 8) };
+        let grid_cell_count: u32 = unsafe { read_at::<u32>(base, 9) };
+        let feed_name_off: u32 = unsafe { read_at::<u32>(base, 10) };
+        let min_lat_e7: i32 = unsafe { read_at::<i32>(base, 11) };
+        let min_lon_e7: i32 = unsafe { read_at::<i32>(base, 12) };
+        let max_lat_e7: i32 = unsafe { read_at::<i32>(base, 13) };
+        let max_lon_e7: i32 = unsafe { read_at::<i32>(base, 14) };
+        let grid_lat0_e7: i32 = unsafe { read_at::<i32>(base, 15) };
+        let grid_lon0_e7: i32 = unsafe { read_at::<i32>(base, 16) };
+        let grid_cell_e7: u32 = unsafe { read_at::<u32>(base, 17) };
+        let grid_cols: u32 = unsafe { read_at::<u32>(base, 18) };
 
-        // Directory: 12 * (u64 offset, u64 len) starting at HEADER_LEN.
+        // Directory: SECTION_COUNT * (u64 offset, u64 len) starting at HEADER_LEN.
         let dir_base = unsafe { base.add(HEADER_LEN) };
-        let mut sec = [(0usize, 0usize); 12];
+        let mut sec = [(0usize, 0usize); SECTION_COUNT];
         for (i, s) in sec.iter_mut().enumerate() {
             let off: u64 = unsafe { read_at::<u64>(dir_base, i * 2) };
             let len: u64 = unsafe { read_at::<u64>(dir_base, i * 2 + 1) };
@@ -188,17 +219,44 @@ impl TransitIndex {
             base,
             stop_count,
             service_count,
+            feed_count,
             feed_name_off,
             min_lat_e7,
             min_lon_e7,
             max_lat_e7,
             max_lon_e7,
+            grid_lat0_e7,
+            grid_lon0_e7,
+            grid_cell_e7,
+            grid_cols,
+            grid_cell_count,
             sec,
         })
     }
 
     fn sec_ptr(&self, section: usize) -> *const u8 {
         unsafe { self.base.add(self.sec[section].0) }
+    }
+
+    /// Read an unsigned LEB128 varint from `section` at byte position `pos`,
+    /// advancing it. Mirrors `write_uvarint` in the producer.
+    fn uvarint(&self, section: usize, pos: &mut usize) -> u64 {
+        let (off, len) = self.sec[section];
+        let mut result = 0u64;
+        let mut shift = 0u32;
+        loop {
+            if *pos >= len {
+                break;
+            }
+            let b = unsafe { *self.base.add(off + *pos) };
+            *pos += 1;
+            result |= ((b & 0x7f) as u64) << shift;
+            if b & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+        }
+        result
     }
 
     fn read_str(&self, off: u32) -> String {
@@ -228,12 +286,6 @@ impl TransitIndex {
     fn route_stop(&self, i: u32) -> u32 {
         unsafe { read_at::<u32>(self.sec_ptr(SEC_ROUTE_STOPS), i as usize) }
     }
-    fn trip(&self, i: u32) -> TripRec {
-        unsafe { read_at::<TripRec>(self.sec_ptr(SEC_TRIPS), i as usize) }
-    }
-    fn stoptime(&self, i: u32) -> StopTimeRec {
-        unsafe { read_at::<StopTimeRec>(self.sec_ptr(SEC_STOPTIMES), i as usize) }
-    }
     fn stop_routes_range(&self, stop: u32) -> (u32, u32) {
         let idx = self.sec_ptr(SEC_STOP_ROUTES_IDX);
         let s = unsafe { read_at::<u32>(idx, stop as usize) };
@@ -262,12 +314,146 @@ impl TransitIndex {
         unsafe { read_at::<ExcRec>(self.sec_ptr(SEC_EXCEPTIONS), i as usize) }
     }
 
+    /// Decode a route's varint trip block into `TripDec`s (start-time order).
+    fn route_trips(&self, rec: &RouteRec) -> Vec<TripDec> {
+        let n = rec.n_trips;
+        let mut pos = rec.trips_off as usize;
+        let mut prev: u32 = 0;
+        let mut out = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let start = prev.wrapping_add(self.uvarint(SEC_ROUTE_TRIPS, &mut pos) as u32);
+            let profile_id = self.uvarint(SEC_ROUTE_TRIPS, &mut pos) as u32;
+            let service_idx = self.uvarint(SEC_ROUTE_TRIPS, &mut pos) as u32;
+            let headsign_off = self.uvarint(SEC_ROUTE_TRIPS, &mut pos) as u32;
+            out.push(TripDec { start_time: start, profile_id, service_idx, headsign_off });
+            prev = start;
+        }
+        out
+    }
+
+    /// Decode profile `pid` into per-stop offsets relative to `start_time`.
+    fn profile(&self, pid: u32) -> ProfileDec {
+        let off = unsafe { read_at::<u32>(self.sec_ptr(SEC_PROFILES_IDX), pid as usize) } as usize;
+        let mut pos = off;
+        let n = self.uvarint(SEC_PROFILES, &mut pos) as usize;
+        let mut arr_rel = vec![0i32; n.max(1)];
+        let mut dep_rel = vec![0i32; n.max(1)];
+        if n == 0 {
+            return ProfileDec { arr_rel, dep_rel };
+        }
+        let dwell0 = self.uvarint(SEC_PROFILES, &mut pos) as i64;
+        arr_rel[0] = -(dwell0 as i32);
+        dep_rel[0] = 0;
+        let mut prev_dep = 0i64;
+        for k in 1..n {
+            let hop = self.uvarint(SEC_PROFILES, &mut pos) as i64;
+            let dwell = self.uvarint(SEC_PROFILES, &mut pos) as i64;
+            let arr = prev_dep + hop;
+            let dep = arr + dwell;
+            arr_rel[k] = arr as i32;
+            dep_rel[k] = dep as i32;
+            prev_dep = dep;
+        }
+        ProfileDec { arr_rel, dep_rel }
+    }
+
     fn stop_ll(&self, i: u32) -> (f64, f64) {
         let s = self.stop(i);
         (s.lat_e7 as f64 * 1e-7, s.lon_e7 as f64 * 1e-7)
     }
 
-    /// True if `lat`/`lon` (degrees) lie within the feed's bounding box (with a
+    // --- Spatial grid (sparse CSR) ---
+
+    fn cell_row(&self, lat_e7: i32) -> i64 {
+        ((lat_e7 as i64 - self.grid_lat0_e7 as i64) / self.grid_cell_e7 as i64).max(0)
+    }
+    fn cell_col(&self, lon_e7: i32) -> i64 {
+        ((lon_e7 as i64 - self.grid_lon0_e7 as i64) / self.grid_cell_e7 as i64).max(0)
+    }
+
+    /// Binary-search a cell id in GRID_CELL_IDS -> its index, if present.
+    fn cell_index(&self, cell_id: u32) -> Option<usize> {
+        let ids = self.sec_ptr(SEC_GRID_CELL_IDS);
+        let (mut lo, mut hi) = (0usize, self.grid_cell_count as usize);
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let v = unsafe { read_at::<u32>(ids, mid) };
+            if v == cell_id {
+                return Some(mid);
+            } else if v < cell_id {
+                lo = mid + 1;
+            } else {
+                hi = mid;
+            }
+        }
+        None
+    }
+
+    fn cell_stops(&self, cell_index: usize) -> (u32, u32) {
+        let off = self.sec_ptr(SEC_GRID_CELL_OFF);
+        let s = unsafe { read_at::<u32>(off, cell_index) };
+        let e = unsafe { read_at::<u32>(off, cell_index + 1) };
+        (s, e)
+    }
+    fn grid_stop(&self, i: u32) -> u32 {
+        unsafe { read_at::<u32>(self.sec_ptr(SEC_GRID_STOPS), i as usize) }
+    }
+
+    /// Candidate stops within `radius_m` of `(lat,lon)` and their distances,
+    /// using the grid so the scan is cell-local rather than O(all stops).
+    fn stops_in_radius(&self, lat: f64, lon: f64, radius_m: f64) -> Vec<(u32, f64)> {
+        let mut out: Vec<(u32, f64)> = Vec::new();
+        if self.grid_cell_count == 0 || self.grid_cols == 0 || self.grid_cell_e7 == 0 {
+            return out;
+        }
+        let lat_e7 = (lat * 1e7) as i32;
+        let lon_e7 = (lon * 1e7) as i32;
+        let row0 = self.cell_row(lat_e7);
+        let col0 = self.cell_col(lon_e7);
+        let cell_deg = self.grid_cell_e7 as f64 * 1e-7;
+        let rad_deg = radius_m / 111_320.0;
+        let cos = lat.to_radians().cos().abs().max(1e-6);
+        // +1 cell of slack; longitude cells shrink with latitude (cos factor).
+        let dr = (rad_deg / cell_deg).ceil() as i64 + 1;
+        let dc = ((rad_deg / cos) / cell_deg).ceil() as i64 + 1;
+        let cols = self.grid_cols as i64;
+        for r in (row0 - dr)..=(row0 + dr) {
+            if r < 0 {
+                continue;
+            }
+            for c in (col0 - dc)..=(col0 + dc) {
+                if c < 0 || c >= cols {
+                    continue;
+                }
+                let cell_id = (r * cols + c) as u32;
+                if let Some(ci) = self.cell_index(cell_id) {
+                    let (s, e) = self.cell_stops(ci);
+                    for k in s..e {
+                        let sid = self.grid_stop(k);
+                        let (slat, slon) = self.stop_ll(sid);
+                        let d = dist_m(lat, lon, slat, slon);
+                        if d <= radius_m {
+                            out.push((sid, d));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Nearest stop to `(lat,lon)` within `max_m`, via the grid.
+    fn nearest_stop(&self, lat: f64, lon: f64, max_m: f64) -> Option<(u32, f64)> {
+        let mut best: Option<(u32, f64)> = None;
+        for (s, d) in self.stops_in_radius(lat, lon, max_m) {
+            if best.map(|(_, bd)| d < bd).unwrap_or(true) {
+                best = Some((s, d));
+            }
+        }
+        best
+    }
+
+    /// True if `lat`/`lon` (degrees) lie within the pack's bounding box (with a
     /// small margin so points just outside still route via a nearby stop).
     pub fn covers(&self, lat: f64, lon: f64) -> bool {
         let m = 0.05; // ~5.5 km margin
@@ -279,8 +465,18 @@ impl TransitIndex {
             && lon_e7 <= self.max_lon_e7 + (m * 1e7) as i32
     }
 
+    /// Pack-level name (fallback). Per-route feeds use [`Self::feed_name_of`].
     pub fn feed_name(&self) -> String {
         self.read_str(self.feed_name_off)
+    }
+
+    /// Name of feed `feed_idx` from the FEEDS table (per-route provenance).
+    fn feed_name_of(&self, feed_idx: u32) -> String {
+        if feed_idx >= self.feed_count {
+            return self.feed_name();
+        }
+        let off = unsafe { read_at::<u32>(self.sec_ptr(SEC_FEEDS), feed_idx as usize) };
+        self.read_str(off)
     }
 
     /// Whether `service_idx` runs on the query weekday/date.
@@ -313,11 +509,25 @@ fn dist_m(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
     (dlat * dlat + dlon * dlon).sqrt()
 }
 
+/// Absolute time = trip start_time + a profile offset (relative), clamped ≥ 0.
+fn abs_time(start_time: u32, rel: i32) -> u32 {
+    (start_time as i64 + rel as i64).max(0) as u32
+}
+
+/// Fetch (and cache) a decoded profile.
+fn get_profile<'a>(
+    cache: &'a mut HashMap<u32, ProfileDec>,
+    idx: &TransitIndex,
+    pid: u32,
+) -> &'a ProfileDec {
+    cache.entry(pid).or_insert_with(|| idx.profile(pid))
+}
+
 /// How a stop was first reached in a RAPTOR round, for journey reconstruction.
 #[derive(Clone, Copy)]
 enum Reached {
     Origin,
-    /// Boarded `route` at `board_stop` on `trip`, alighting here.
+    /// Boarded `route` on its local `trip` at `board_stop`, alighting here.
     Transit { route: u32, trip: u32, board_stop: u32 },
     /// Walked from `from_stop` (footpath transfer or egress precursor).
     Walk { from_stop: u32 },
@@ -336,68 +546,57 @@ pub fn plan(
     weekday: u32,
     date: u32,
 ) -> Option<Vec<TransitLeg>> {
-    let n = idx.stop_count;
+    let n = idx.stop_count as usize;
     if n == 0 {
         return None;
     }
 
     let inf = u32::MAX;
-    // Best arrival time per stop (across all rounds), and per-round arrival used
-    // for marking. `label` records how the best arrival was achieved.
-    let mut best = vec![inf; n as usize];
-    let mut label = vec![Reached::Origin; n as usize];
-    let mut marked = vec![false; n as usize];
+    let mut best = vec![inf; n];
+    let mut label = vec![Reached::Origin; n];
+    let mut prof_cache: HashMap<u32, ProfileDec> = HashMap::new();
 
-    // --- Access: walk from origin to nearby stops. ---
-    let mut any_access = false;
-    for s in 0..n {
-        let (slat, slon) = idx.stop_ll(s);
-        let d = dist_m(from_lat, from_lon, slat, slon);
-        if d <= ACCESS_RADIUS_M {
-            let t = dep_secs + (d / WALK_SPEED_M_S).ceil() as u32;
-            if t < best[s as usize] {
-                best[s as usize] = t;
-                label[s as usize] = Reached::Origin;
-                marked[s as usize] = true;
-                any_access = true;
-            }
-        }
-    }
-    if !any_access {
+    // --- Access: walk from origin to nearby stops (grid-restricted). ---
+    let access = idx.stops_in_radius(from_lat, from_lon, ACCESS_RADIUS_M);
+    if access.is_empty() {
         return None;
     }
-
-    // --- Egress: precompute walk time from each stop to the destination. ---
-    let mut egress: Vec<(u32, u32)> = Vec::new(); // (stop, walk_secs)
-    for s in 0..n {
-        let (slat, slon) = idx.stop_ll(s);
-        let d = dist_m(to_lat, to_lon, slat, slon);
-        if d <= ACCESS_RADIUS_M {
-            egress.push((s, (d / WALK_SPEED_M_S).ceil() as u32));
+    let mut seeds: Vec<u32> = Vec::new();
+    for (s, d) in access {
+        let t = dep_secs + (d / WALK_SPEED_M_S).ceil() as u32;
+        if t < best[s as usize] {
+            best[s as usize] = t;
+            label[s as usize] = Reached::Origin;
+            seeds.push(s);
         }
     }
+
+    // --- Egress: precompute walk time from nearby stops to the destination. ---
+    let egress: Vec<(u32, u32)> = idx
+        .stops_in_radius(to_lat, to_lon, ACCESS_RADIUS_M)
+        .into_iter()
+        .map(|(s, d)| (s, (d / WALK_SPEED_M_S).ceil() as u32))
+        .collect();
     if egress.is_empty() {
         return None;
     }
 
-    // Apply initial footpath transfers from the access stops (round 0 walk).
-    apply_transfers(idx, &mut best, &mut label, &mut marked);
+    // Round 0 queue = access stops + their footpath transfers.
+    let mut queue: Vec<u32> = seeds.clone();
+    relax_transfers(idx, &mut best, &mut label, &seeds, &mut queue);
 
     // --- RAPTOR rounds ---
     for _round in 0..MAX_ROUNDS {
-        // Collect the set of routes to scan and the earliest marked position on
-        // each: route -> earliest route-stop-position index.
-        let mut route_earliest: std::collections::HashMap<u32, u32> =
-            std::collections::HashMap::new();
-        for s in 0..n {
-            if !marked[s as usize] {
-                continue;
-            }
+        if queue.is_empty() {
+            break;
+        }
+        // Routes to scan, and the earliest marked stop-position on each.
+        let mut route_earliest: HashMap<u32, u32> = HashMap::new();
+        for &s in &queue {
             let (rs, re) = idx.stop_routes_range(s);
             for i in rs..re {
                 let r = idx.stop_route(i);
                 let route = idx.route(r);
-                // Find position of stop s in this route's stop list.
                 for pos in 0..route.n_stops {
                     if idx.route_stop(route.first_route_stop + pos) == s {
                         route_earliest
@@ -413,45 +612,48 @@ pub fn plan(
                 }
             }
         }
-        for m in marked.iter_mut() {
-            *m = false;
-        }
 
-        let mut improved = false;
+        let mut improved: Vec<u32> = Vec::new();
         for (&r, &start_pos) in &route_earliest {
             let route = idx.route(r);
-            // Current boarded trip while scanning this route forward.
-            let mut cur_trip: Option<u32> = None; // global trip index
+            let trips = idx.route_trips(&route);
+            if trips.is_empty() {
+                continue;
+            }
+            let mut cur_trip: Option<usize> = None; // local index into `trips`
             let mut board_stop: u32 = 0;
             for pos in start_pos..route.n_stops {
                 let stop = idx.route_stop(route.first_route_stop + pos);
 
                 // If riding, relax arrival at this stop.
                 if let Some(ti) = cur_trip {
-                    let st = idx.stoptime(idx.trip(ti).first_stoptime + pos);
-                    let arr = st.arr_s;
-                    if arr < best[stop as usize] {
-                        best[stop as usize] = arr;
-                        label[stop as usize] = Reached::Transit {
-                            route: r,
-                            trip: ti,
-                            board_stop,
-                        };
-                        marked[stop as usize] = true;
-                        improved = true;
+                    let td = trips[ti];
+                    let arr_rel = {
+                        let p = get_profile(&mut prof_cache, idx, td.profile_id);
+                        p.arr_rel.get(pos as usize).copied()
+                    };
+                    if let Some(arr_rel) = arr_rel {
+                        let arr = abs_time(td.start_time, arr_rel);
+                        if arr < best[stop as usize] {
+                            best[stop as usize] = arr;
+                            label[stop as usize] =
+                                Reached::Transit { route: r, trip: ti as u32, board_stop };
+                            improved.push(stop);
+                        }
                     }
                 }
 
-                // Can we (re)board an earlier trip here given our arrival at
-                // `stop` from a previous round?
+                // Can we (re)board an earlier trip here given our arrival?
                 let ready = best[stop as usize];
                 if ready != inf {
-                    if let Some(ti) = earliest_trip(idx, &route, r, pos, ready, weekday, date) {
+                    if let Some(ti) =
+                        earliest_trip(idx, &mut prof_cache, &trips, pos, ready, weekday, date)
+                    {
                         let board_here = match cur_trip {
                             None => true,
                             Some(cur) => {
-                                let cur_dep = idx.stoptime(idx.trip(cur).first_stoptime + pos).dep_s;
-                                let new_dep = idx.stoptime(idx.trip(ti).first_stoptime + pos).dep_s;
+                                let new_dep = trip_dep(idx, &mut prof_cache, &trips[ti], pos);
+                                let cur_dep = trip_dep(idx, &mut prof_cache, &trips[cur], pos);
                                 new_dep < cur_dep
                             }
                         };
@@ -464,10 +666,11 @@ pub fn plan(
             }
         }
 
-        // Footpath transfers from freshly improved stops.
-        apply_transfers(idx, &mut best, &mut label, &mut marked);
-
-        if !improved {
+        // Next queue = freshly improved stops + their footpath transfers.
+        let mut next: Vec<u32> = improved.clone();
+        relax_transfers(idx, &mut best, &mut label, &improved, &mut next);
+        queue = next;
+        if improved.is_empty() {
             break;
         }
     }
@@ -495,23 +698,24 @@ pub fn plan(
     let mut legs: Vec<TransitLeg> = Vec::new();
     let mut cur = best_stop;
     let mut guard = 0;
+    let origin_stop;
     loop {
         guard += 1;
-        if guard > (n as usize) * 4 + 16 {
+        if guard > MAX_ROUNDS * 4 + 16 {
+            origin_stop = cur;
             break;
         }
         match label[cur as usize] {
-            Reached::Origin => break,
+            Reached::Origin => {
+                origin_stop = cur;
+                break;
+            }
             Reached::Walk { from_stop } => {
                 legs.push(make_walk_leg(idx, from_stop, cur));
                 cur = from_stop;
             }
-            Reached::Transit {
-                route,
-                trip,
-                board_stop,
-            } => {
-                legs.push(make_transit_leg(idx, route, trip, board_stop, cur));
+            Reached::Transit { route, trip, board_stop } => {
+                legs.push(make_transit_leg(idx, &mut prof_cache, route, trip, board_stop, cur));
                 cur = board_stop;
             }
         }
@@ -519,11 +723,7 @@ pub fn plan(
     legs.reverse();
 
     // Prepend origin access walk and append destination egress walk.
-    let first_stop = if let Some(l) = legs.first() {
-        stop_of_leg_start(idx, l)
-    } else {
-        best_stop
-    };
+    let first_stop = origin_stop;
     let (flat, flon) = idx.stop_ll(first_stop);
     let access_d = dist_m(from_lat, from_lon, flat, flon);
     if access_d > 1.0 {
@@ -537,7 +737,8 @@ pub fn plan(
                 to_code: idx.read_str(idx.stop(first_stop).code_off),
                 headsign: String::new(),
                 dep_secs,
-                arr_secs: best[first_stop as usize].min(dep_secs + (access_d / WALK_SPEED_M_S) as u32),
+                arr_secs: best[first_stop as usize]
+                    .min(dep_secs + (access_d / WALK_SPEED_M_S) as u32),
                 stop_count: 0,
                 dist_m: access_d,
                 coords: vec![from_lon, from_lat, flon, flat],
@@ -584,10 +785,10 @@ pub struct StopDeparture {
 /// Build an offline departure board for the stop(s) nearest to `(lat,lon)`.
 ///
 /// Gathers every route serving the nearest stop (and its co-located platforms
-/// within [`STATION_RADIUS_M`]) and returns upcoming scheduled departures at or
-/// after `dep_secs` (seconds since local midnight) on the query service day,
-/// sorted by time and capped at `max`. Empty when no stop is near or nothing
-/// departs — the caller then keeps whatever the online board returned.
+/// within [`STATION_RADIUS_M`]) via the grid and returns upcoming scheduled
+/// departures at or after `dep_secs` (seconds since local midnight) on the query
+/// service day, sorted by time and capped at `max`. Empty when no stop is near
+/// or nothing departs — the caller then keeps whatever the online board returned.
 pub fn stop_departures(
     idx: &TransitIndex,
     lat: f64,
@@ -600,34 +801,20 @@ pub fn stop_departures(
     const STATION_RADIUS_M: f64 = 150.0;
     const NEAREST_MAX_M: f64 = 400.0;
 
-    let n = idx.stop_count;
-    if n == 0 {
+    if idx.stop_count == 0 {
         return Vec::new();
     }
-    // Nearest stop to the tapped point (stops are matched by lat/lon — there is
-    // no MOTIS<->baked stop id join).
-    let mut nearest = u32::MAX;
-    let mut nearest_d = f64::MAX;
-    for s in 0..n {
-        let (slat, slon) = idx.stop_ll(s);
-        let d = dist_m(lat, lon, slat, slon);
-        if d < nearest_d {
-            nearest_d = d;
-            nearest = s;
-        }
-    }
-    if nearest == u32::MAX || nearest_d > NEAREST_MAX_M {
-        return Vec::new();
-    }
+    // Nearest stop to the tapped point (matched by lat/lon — there is no
+    // MOTIS<->baked stop id join), via the grid.
+    let (nearest, _) = match idx.nearest_stop(lat, lon, NEAREST_MAX_M) {
+        Some(v) => v,
+        None => return Vec::new(),
+    };
     let (blat, blon) = idx.stop_ll(nearest);
-    let feed = idx.feed_name();
 
+    let mut prof_cache: HashMap<u32, ProfileDec> = HashMap::new();
     let mut out: Vec<StopDeparture> = Vec::new();
-    for s in 0..n {
-        let (slat, slon) = idx.stop_ll(s);
-        if dist_m(blat, blon, slat, slon) > STATION_RADIUS_M {
-            continue;
-        }
+    for (s, _) in idx.stops_in_radius(blat, blon, STATION_RADIUS_M) {
         let code = idx.read_str(idx.stop(s).code_off);
         let (rs, re) = idx.stop_routes_range(s);
         for i in rs..re {
@@ -646,19 +833,19 @@ pub fn stop_departures(
                 continue;
             }
             let rname = idx.read_str(route.name_off);
-            for t in 0..route.n_trips {
-                let ti = route.first_trip + t;
-                let trip = idx.trip(ti);
-                if !idx.service_runs(trip.service_idx, weekday, date) {
+            let feed = idx.feed_name_of(route.feed_idx);
+            let trips = idx.route_trips(&route);
+            for td in &trips {
+                if !idx.service_runs(td.service_idx, weekday, date) {
                     continue;
                 }
-                let dep = idx.stoptime(trip.first_stoptime + pos).dep_s;
+                let dep = trip_dep(idx, &mut prof_cache, td, pos);
                 if dep < dep_secs {
                     continue;
                 }
                 out.push(StopDeparture {
                     route_name: rname.clone(),
-                    headsign: idx.read_str(trip.headsign_off),
+                    headsign: idx.read_str(td.headsign_off),
                     feed: feed.clone(),
                     stop_code: code.clone(),
                     route_color: route.color,
@@ -673,36 +860,30 @@ pub fn stop_departures(
     out
 }
 
-fn stop_of_leg_start(idx: &TransitIndex, leg: &TransitLeg) -> u32 {
-    // Recover the leg's first stop index by matching its start coordinate.
-    if leg.coords.len() < 2 {
-        return 0;
-    }
-    let lon = leg.coords[0];
-    let lat = leg.coords[1];
-    let mut best = 0u32;
-    let mut bestd = f64::MAX;
-    for s in 0..idx.stop_count {
-        let (slat, slon) = idx.stop_ll(s);
-        let d = (slat - lat).abs() + (slon - lon).abs();
-        if d < bestd {
-            bestd = d;
-            best = s;
-        }
-    }
-    best
+/// Departure time (abs secs) of `trip` at stop-position `pos`.
+fn trip_dep(
+    idx: &TransitIndex,
+    cache: &mut HashMap<u32, ProfileDec>,
+    trip: &TripDec,
+    pos: u32,
+) -> u32 {
+    let dep_rel = {
+        let p = get_profile(cache, idx, trip.profile_id);
+        p.dep_rel.get(pos as usize).copied().unwrap_or(0)
+    };
+    abs_time(trip.start_time, dep_rel)
 }
 
-/// Relax one-hop footpath transfers from every currently-marked stop.
-fn apply_transfers(
+/// Relax one-hop footpath transfers from each `seed` stop, appending any stop
+/// whose best arrival improves into `out`.
+fn relax_transfers(
     idx: &TransitIndex,
     best: &mut [u32],
     label: &mut [Reached],
-    marked: &mut [bool],
+    seeds: &[u32],
+    out: &mut Vec<u32>,
 ) {
-    let n = idx.stop_count;
-    let snapshot: Vec<u32> = (0..n).filter(|&s| marked[s as usize]).collect();
-    for s in snapshot {
+    for &s in seeds {
         let base_t = best[s as usize];
         if base_t == u32::MAX {
             continue;
@@ -714,35 +895,33 @@ fn apply_transfers(
             if arr < best[tr.to_stop as usize] {
                 best[tr.to_stop as usize] = arr;
                 label[tr.to_stop as usize] = Reached::Walk { from_stop: s };
-                marked[tr.to_stop as usize] = true;
+                out.push(tr.to_stop);
             }
         }
     }
 }
 
-/// Earliest trip on `route` (global trip index) that departs stop-position `pos`
-/// no earlier than `ready` seconds and whose service runs on the query day.
+/// Earliest trip (local index) on this route departing stop-position `pos` no
+/// earlier than `ready` whose service runs on the query day.
 fn earliest_trip(
     idx: &TransitIndex,
-    route: &RouteRec,
-    _route_idx: u32,
+    cache: &mut HashMap<u32, ProfileDec>,
+    trips: &[TripDec],
     pos: u32,
     ready: u32,
     weekday: u32,
     date: u32,
-) -> Option<u32> {
-    let mut best_ti: Option<u32> = None;
+) -> Option<usize> {
+    let mut best_ti: Option<usize> = None;
     let mut best_dep = u32::MAX;
-    for t in 0..route.n_trips {
-        let ti = route.first_trip + t;
-        let trip = idx.trip(ti);
-        if !idx.service_runs(trip.service_idx, weekday, date) {
+    for (i, td) in trips.iter().enumerate() {
+        if !idx.service_runs(td.service_idx, weekday, date) {
             continue;
         }
-        let dep = idx.stoptime(trip.first_stoptime + pos).dep_s;
+        let dep = trip_dep(idx, cache, td, pos);
         if dep >= ready && dep < best_dep {
             best_dep = dep;
-            best_ti = Some(ti);
+            best_ti = Some(i);
         }
     }
     best_ti
@@ -750,13 +929,20 @@ fn earliest_trip(
 
 fn make_transit_leg(
     idx: &TransitIndex,
+    cache: &mut HashMap<u32, ProfileDec>,
     route_idx: u32,
-    trip_idx: u32,
+    trip_local: u32,
     board_stop: u32,
     alight_stop: u32,
 ) -> TransitLeg {
     let route = idx.route(route_idx);
-    let trip = idx.trip(trip_idx);
+    let trips = idx.route_trips(&route);
+    let td = trips.get(trip_local as usize).copied().unwrap_or(TripDec {
+        start_time: 0,
+        profile_id: 0,
+        service_idx: 0,
+        headsign_off: NONE,
+    });
     // Find board/alight positions along the route.
     let mut board_pos = 0u32;
     let mut alight_pos = 0u32;
@@ -769,8 +955,12 @@ fn make_transit_leg(
             alight_pos = pos;
         }
     }
-    let dep = idx.stoptime(trip.first_stoptime + board_pos).dep_s;
-    let arr = idx.stoptime(trip.first_stoptime + alight_pos).arr_s;
+    let (dep, arr) = {
+        let p = get_profile(cache, idx, td.profile_id);
+        let dep = abs_time(td.start_time, p.dep_rel.get(board_pos as usize).copied().unwrap_or(0));
+        let arr = abs_time(td.start_time, p.arr_rel.get(alight_pos as usize).copied().unwrap_or(0));
+        (dep, arr)
+    };
 
     let mut coords = Vec::new();
     let mut dist = 0.0;
@@ -793,10 +983,10 @@ fn make_transit_leg(
     TransitLeg {
         is_transit: true,
         name: idx.read_str(route.name_off),
-        feed: idx.feed_name(),
+        feed: idx.feed_name_of(route.feed_idx),
         from_code: idx.read_str(idx.stop(board_stop).code_off),
         to_code: idx.read_str(idx.stop(alight_stop).code_off),
-        headsign: idx.read_str(trip.headsign_off),
+        headsign: idx.read_str(td.headsign_off),
         dep_secs: dep,
         arr_secs: arr,
         stop_count: (count - 1).max(0),
@@ -824,11 +1014,9 @@ fn make_walk_leg(idx: &TransitIndex, from_stop: u32, to_stop: u32) -> TransitLeg
 }
 
 const _: () = {
-    // Compile-time assertions that on-disk record sizes match the writer.
+    // Compile-time assertions that fixed on-disk record sizes match the writer.
     assert!(std::mem::size_of::<StopRec>() == 16);
     assert!(std::mem::size_of::<RouteRec>() == 32);
-    assert!(std::mem::size_of::<TripRec>() == 16);
-    assert!(std::mem::size_of::<StopTimeRec>() == 8);
     assert!(std::mem::size_of::<TransferRec>() == 8);
     assert!(std::mem::size_of::<ServiceRec>() == 12);
     assert!(std::mem::size_of::<ExcRec>() == 12);

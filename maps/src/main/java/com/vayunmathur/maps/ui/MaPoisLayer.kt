@@ -20,17 +20,20 @@ import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.PoiCategories
+import org.maplibre.compose.expressions.dsl.all
 import org.maplibre.compose.expressions.dsl.any
 import org.maplibre.compose.expressions.dsl.case
 import org.maplibre.compose.expressions.dsl.const
 import org.maplibre.compose.expressions.dsl.eq
 import org.maplibre.compose.expressions.dsl.feature
+import org.maplibre.compose.expressions.dsl.gte
 import org.maplibre.compose.expressions.dsl.image
 import org.maplibre.compose.expressions.dsl.interpolate
 import org.maplibre.compose.expressions.dsl.linear
 import org.maplibre.compose.expressions.dsl.switch
 import org.maplibre.compose.expressions.dsl.zoom
 import org.maplibre.compose.expressions.value.IntValue
+import org.maplibre.compose.expressions.value.NumberValue
 import org.maplibre.compose.layers.SymbolLayer
 import org.maplibre.compose.sources.VectorSource
 import org.maplibre.compose.util.MaplibreComposable
@@ -78,13 +81,30 @@ fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
         ?.let { types -> any(*types.map { feature["type"].cast<IntValue>() eq const(it) }.toTypedArray()) }
         ?: const(true)
 
+    // Per-category min-zoom: a POI shows only once the map is zoomed to at least
+    // its category's tier (see PoiCategories.minZoom). This staggers POIs across
+    // zoom — landmarks early, long-tail retail later — so each urban zoom level
+    // stays similarly dense instead of the whole set decluttering (merging) away
+    // as you zoom out. Mirrors the protomaps `[">=",["zoom"],["get","min_zoom"]]`
+    // pattern, but keyed on the numeric `type` since the tile has no min_zoom.
+    val minZoomForType = switch(
+        feature["type"].cast<IntValue>(),
+        *PoiCategories.ALL_TYPES
+            .map { t -> case(t, const(PoiCategories.minZoom(t))) }
+            .toTypedArray(),
+        fallback = const(PoiCategories.DEFAULT_MIN_ZOOM),
+    )
+    // Compare against `zoom()` (a NumberValue); cast the Int threshold to the same
+    // value type so `gte` resolves to the numeric overload. Called infix like `eq`.
+    val poiFilter = all(typeFilter, zoom() gte minZoomForType.cast<NumberValue<Number>>())
+
     // Category icon, chosen by the numeric `type` (0..49, 255 = other).
     SymbolLayer(
         MA_POIS_LAYER_ID,
         source,
         sourceLayer = MaPoisSource.SOURCE_LAYER,
         minZoom = 12f,
-        filter = typeFilter,
+        filter = poiFilter,
         iconImage = switch(
             feature["type"].cast<IntValue>(),
             *PoiCategories.ALL_TYPES
@@ -92,11 +112,12 @@ fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
                 .toTypedArray(),
             fallback = image(icons.getValue(PoiCategories.TYPE_OTHER)),
         ),
+        // Half the previous marker size (was 0.75/1.05/1.4 across z12/15/18).
         iconSize = interpolate(
             linear(), zoom(),
-            12 to const(0.75f),
-            15 to const(1.05f),
-            18 to const(1.4f),
+            12 to const(0.375f),
+            15 to const(0.525f),
+            18 to const(0.7f),
         ),
     )
 }

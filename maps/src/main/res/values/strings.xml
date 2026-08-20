@@ -139,6 +139,8 @@
     <string name="downloading_road_data">Downloading Road Data…</string>
     <!-- MainActivity: Status text while offline POI index downloads -->
     <string name="downloading_poi_data">Downloading Points of Interest…</string>
+    <!-- MainActivity: Status text while the offline world transit index downloads -->
+    <string name="downloading_transit_data">Downloading Transit Schedules…</string>
     <!-- MainActivity: Button to request location permission -->
     <string name="grant_location_permission">Grant Location Permission</string>
 

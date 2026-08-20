@@ -17,6 +17,42 @@ object PoiCategories {
     /** Every type number the generator can emit, for building the icon switch. */
     val ALL_TYPES: List<Int> = (0..50).toList() + TYPE_OTHER
 
+    /** Default min-zoom for any type not explicitly tiered below (least
+     *  prominent — only shown once zoomed well in). */
+    const val DEFAULT_MIN_ZOOM: Int = 16
+
+    /**
+     * Zoom level at which a POI category first appears on the map. Prominent,
+     * navigation-worthy categories (hospitals, transit, parks, museums, hotels…)
+     * surface early (low zoom); everyday retail surfaces progressively later.
+     *
+     * This staggers POIs across zoom so each urban zoom level stays roughly
+     * equally dense: at z12 only landmarks show over a wide area, and as you zoom
+     * in — showing less ground but more screen space per area — lower-tier
+     * categories fill in, instead of the whole set popping in at one zoom and
+     * decluttering (merging) away as you zoom out. Tiles start at z12, so 12 is
+     * the earliest possible value.
+     */
+    fun minZoom(type: Int): Int = when (type) {
+        // z12 — landmarks / orientation anchors, visible city-wide.
+        10, 50, 12, 15, 38, 8, 23 -> 12
+        //   hospital, station, park, attraction, museum, hotel, town hall
+        // z13 — civic + culture + big destinations.
+        14, 17, 18, 21, 22, 40, 11, 19, 33, 49 -> 13
+        //   worship, cinema, theatre, police, fire, tourist info, school,
+        //   library, department store, marketplace
+        // z14 — high-utility everyday stops.
+        0, 3, 5, 6, 7, 9, 13, 16, 20, 39 -> 14
+        //   restaurant, bar, grocery, gas, pharmacy, bank, gym, parking,
+        //   post office, office
+        // z15 — common retail / food / clinics.
+        1, 2, 4, 24, 25, 26, 28, 29, 30, 31, 32, 34, 35 -> 15
+        //   cafe, fast food, shop, clothing, electronics, hardware, car,
+        //   bakery, books, furniture, sports, dentist, doctor
+        // z16 — long-tail specialty retail + everything else (DEFAULT_MIN_ZOOM).
+        else -> DEFAULT_MIN_ZOOM
+    }
+
     /** Human-readable category label (used as the search-result subtitle). */
     fun label(type: Int): String = when (type) {
         0 -> "Restaurant"
