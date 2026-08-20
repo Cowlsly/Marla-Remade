@@ -46,8 +46,17 @@ object OpusTranscoder {
      * Returns the Ogg/Opus bytes, or null when [source] has no decodable audio track or the
      * platform codecs refuse it. A null fails the download: writing one of the formats the
      * user asked to be rid of would be worse than reporting the failure.
+     *
+     * [onProgress] is called with the fraction of the track encoded so far. Re-encoding a
+     * track takes seconds rather than milliseconds, so a caller with a progress indicator
+     * has to be able to move it; without that a slow transcode is indistinguishable from a
+     * hang, which is what the user sees as a spinner that never finishes.
      */
-    fun transcode(source: ByteArray, isStopped: () -> Boolean = { false }): ByteArray? {
+    fun transcode(
+        source: ByteArray,
+        isStopped: () -> Boolean = { false },
+        onProgress: (Float) -> Unit = {},
+    ): ByteArray? {
         var extractor: MediaExtractor? = null
         var decoder: MediaCodec? = null
         var pump: OpusPump? = null
@@ -65,7 +74,7 @@ object OpusTranscoder {
             decoder.configure(format, null, null, 0)
             decoder.start()
 
-            pump = OpusPump(extractor, decoder, isStopped, ::createEncoder)
+            pump = OpusPump(extractor, decoder, isStopped, ::createEncoder, durationUs(format), onProgress)
             val output = pump.run()
             Log.i(TAG, "transcode $mime: in=${source.size} out=${output?.size ?: 0}")
             return output?.takeIf { it.isNotEmpty() }
@@ -80,6 +89,10 @@ object OpusTranscoder {
             }
         }
     }
+
+    /** The track's length, or zero when the container does not say, which disables progress. */
+    private fun durationUs(format: MediaFormat): Long =
+        if (format.containsKey(MediaFormat.KEY_DURATION)) format.getLong(MediaFormat.KEY_DURATION) else 0L
 
     private fun audioTrack(extractor: MediaExtractor): Int? {
         for (i in 0 until extractor.trackCount) {
@@ -118,12 +131,22 @@ object OpusTranscoder {
  * Both codecs are software and share this thread, so every pass of the loop touches every
  * stage. Servicing one stage until it blocks would leave the other holding buffers nothing
  * is coming to collect, and the whole transcode would stall.
+ *
+ * Each stage is nevertheless serviced until it stops making progress rather than exactly
+ * once per pass. Moving one buffer per stage per pass caps the whole transcode at whatever
+ * a single encoder input buffer holds - 20 ms of audio on the platform Opus encoder - and
+ * makes every pass wait out a dequeue timeout for whichever codec is momentarily busy,
+ * which is a ceiling of a small multiple of real time however fast the codecs themselves
+ * are. Polling with no timeout and blocking only once a whole pass has moved nothing puts
+ * the same wait behind seconds of buffered audio instead of one packet of it.
  */
 private class OpusPump(
     private val extractor: MediaExtractor,
     private val decoder: MediaCodec,
     private val isStopped: () -> Boolean,
     private val createEncoder: (Int) -> MediaCodec,
+    private val durationUs: Long,
+    private val onProgress: (Float) -> Unit,
 ) {
     /** Exposed only so the caller can release it; created once the decoder's format is known. */
     var encoder: MediaCodec? = null
@@ -159,29 +182,43 @@ private class OpusPump(
     private var extractorDone = false
     private var decoderDone = false
     private var encoderClosed = false
+    private var encoderDone = false
+
+    private var lastProgressAt = 0L
 
     fun run(): ByteArray? {
-        while (true) {
+        while (!encoderDone) {
             // A hi-res transcode runs for many seconds, so a cancelled download has to be
             // able to stop part-way rather than only between tracks.
             if (isStopped()) return null
 
-            if (!extractorDone) extractorDone = feedDecoder()
-            if (!decoderDone && queue.size < MAX_QUEUED_PCM) decoderDone = drainDecoder()
+            var moved = false
+            while (!extractorDone && feedDecoder(POLL_US)) moved = true
+            while (!decoderDone && queue.size < MAX_QUEUED_PCM && drainDecoder(POLL_US)) moved = true
 
             val active = encoder
             if (active == null) {
                 // The decoder finished without ever producing PCM, so there is nothing to
                 // encode and no format to configure an encoder from.
                 if (decoderDone) return null
+                if (!moved) drainDecoder(TIMEOUT_US)
                 continue
             }
-            if (!encoderClosed && decoderDone && queue.size < frameBytes) {
-                encoderClosed = signalEndOfStream(active)
-            } else {
-                feedEncoder(active)
+
+            while (!encoderClosed && queue.size >= frameBytes && feedEncoder(active, POLL_US)) {
+                moved = true
             }
-            if (drainEncoder(active)) break
+            if (!encoderClosed && decoderDone && queue.size < frameBytes) {
+                encoderClosed = signalEndOfStream(active, POLL_US)
+                if (encoderClosed) moved = true
+            }
+            while (drainEncoder(active, POLL_US)) moved = true
+
+            // Nothing could be moved anywhere, so wait for a codec rather than spinning on
+            // it. The encoder is the stage everything else queues up behind, so a packet
+            // coming back from it is what frees the chain.
+            if (!moved && !encoderDone) drainEncoder(active, TIMEOUT_US)
+            reportProgress()
         }
         // An encoder that reported end of stream without ever emitting a packet leaves a
         // container with no audio in it, which is a failure however valid the framing is.
@@ -189,13 +226,31 @@ private class OpusPump(
         return writer.finish(preSkip + frames)
     }
 
+    /**
+     * Reports how much of the track has been encoded, at the same cadence the download
+     * itself uses. Measured against the container's duration, since [frames] counts 48 kHz
+     * frames and the source rate is already resampled away by this point.
+     *
+     * Throttled on the monotonic clock: a wall clock that steps backwards mid-track would
+     * leave the last report in the future and silence progress for the rest of the
+     * transcode, which is the very thing this exists to prevent.
+     */
+    private fun reportProgress() {
+        if (durationUs <= 0L) return
+        val now = System.nanoTime()
+        if (lastProgressAt != 0L && now - lastProgressAt < PROGRESS_INTERVAL_NS) return
+        lastProgressAt = now
+        val total = durationUs * OpusHead.SAMPLE_RATE / 1_000_000L
+        if (total > 0L) onProgress((frames.toFloat() / total).coerceIn(0f, 1f))
+    }
+
     // ------------------------------------------------------------------
     // Decode and resample
     // ------------------------------------------------------------------
 
-    /** Returns true once the last compressed sample has been queued. */
-    private fun feedDecoder(): Boolean {
-        val index = decoder.dequeueInputBuffer(TIMEOUT_US)
+    /** Returns true while this stage is still worth servicing in the same pass. */
+    private fun feedDecoder(timeoutUs: Long): Boolean {
+        val index = decoder.dequeueInputBuffer(timeoutUs)
         if (index < 0) return false
         val buffer = decoder.getInputBuffer(index)
         if (buffer == null) {
@@ -208,19 +263,25 @@ private class OpusPump(
         val size = extractor.readSampleData(buffer, 0)
         if (size < 0) {
             decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
-            return true
+            extractorDone = true
+            return false
         }
         decoder.queueInputBuffer(index, 0, size, extractor.sampleTime, 0)
         extractor.advance()
-        return false
+        return true
     }
 
-    /** Drains one decoded buffer into the encoder's queue. Returns true at end of stream. */
-    private fun drainDecoder(): Boolean {
-        val index = decoder.dequeueOutputBuffer(decoderInfo, TIMEOUT_US)
+    /**
+     * Drains one decoded buffer into the encoder's queue. Returns true while this stage is
+     * still worth servicing in the same pass, which is not the same as "a buffer was
+     * drained": a format change drains nothing, and the end-of-stream buffer is drained but
+     * is the last one there will ever be.
+     */
+    private fun drainDecoder(timeoutUs: Long): Boolean {
+        val index = decoder.dequeueOutputBuffer(decoderInfo, timeoutUs)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             configure(decoder.outputFormat)
-            return false
+            return true
         }
         if (index < 0) return false
 
@@ -237,9 +298,10 @@ private class OpusPump(
 
         if (decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
             resampler?.flush()?.let { queuePcm(it, it.size) }
-            return true
+            decoderDone = true
+            return false
         }
-        return false
+        return true
     }
 
     /**
@@ -305,14 +367,14 @@ private class OpusPump(
     // Encode
     // ------------------------------------------------------------------
 
-    private fun feedEncoder(encoder: MediaCodec) {
-        if (queue.size < frameBytes) return
-        val index = encoder.dequeueInputBuffer(TIMEOUT_US)
-        if (index < 0) return
+    /** Hands one buffer of PCM to the encoder. Returns true when a buffer was queued. */
+    private fun feedEncoder(encoder: MediaCodec, timeoutUs: Long): Boolean {
+        val index = encoder.dequeueInputBuffer(timeoutUs)
+        if (index < 0) return false
         val buffer = encoder.getInputBuffer(index)
         if (buffer == null) {
             encoder.queueInputBuffer(index, 0, 0, presentationTimeUs(), 0)
-            return
+            return false
         }
         buffer.clear()
         // Only whole frames: half a frame queued would swap the channels of everything after
@@ -320,14 +382,15 @@ private class OpusPump(
         val moved = queue.drainTo(buffer, buffer.capacity(), frameBytes)
         if (moved == 0) {
             encoder.queueInputBuffer(index, 0, 0, presentationTimeUs(), 0)
-            return
+            return false
         }
         encoder.queueInputBuffer(index, 0, moved, presentationTimeUs(), 0)
         frames += moved / frameBytes
+        return true
     }
 
-    private fun signalEndOfStream(encoder: MediaCodec): Boolean {
-        val index = encoder.dequeueInputBuffer(TIMEOUT_US)
+    private fun signalEndOfStream(encoder: MediaCodec, timeoutUs: Long): Boolean {
+        val index = encoder.dequeueInputBuffer(timeoutUs)
         if (index < 0) return false
         encoder.queueInputBuffer(
             index,
@@ -345,14 +408,14 @@ private class OpusPump(
      */
     private fun presentationTimeUs(): Long = frames * 1_000_000L / OpusHead.SAMPLE_RATE
 
-    /** Returns true once the encoder has reported end of stream. */
-    private fun drainEncoder(encoder: MediaCodec): Boolean {
-        val index = encoder.dequeueOutputBuffer(encoderInfo, TIMEOUT_US)
+    /** Collects one encoded packet. Returns true while this stage is still worth servicing. */
+    private fun drainEncoder(encoder: MediaCodec, timeoutUs: Long): Boolean {
+        val index = encoder.dequeueOutputBuffer(encoderInfo, timeoutUs)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             // Only if the format actually carries the header. Writing the fallback here
             // would lock it in before the codec-config buffer arrives with the real one.
             encoder.outputFormat.opusHead()?.let { writeHeaders(it) }
-            return false
+            return true
         }
         if (index < 0) return false
 
@@ -374,7 +437,11 @@ private class OpusPump(
             }
         }
         encoder.releaseOutputBuffer(index, false)
-        return encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+        if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+            encoderDone = true
+            return false
+        }
+        return true
     }
 
     /**
@@ -402,7 +469,18 @@ private class OpusPump(
     }
 
     private companion object {
+        /**
+         * How long to wait for a codec once a whole pass has moved nothing. Only reached
+         * when both codecs are genuinely busy, so it is a wait for work to finish rather
+         * than a cost paid per buffer.
+         */
         const val TIMEOUT_US = 10_000L
+
+        /** Servicing a stage that has nothing ready must not cost anything. */
+        const val POLL_US = 0L
+
+        /** Matches the download's own reporting cadence, which is four times a second. */
+        const val PROGRESS_INTERVAL_NS = 250_000_000L
 
         /** The Opus encoder takes at most stereo. */
         const val MAX_ENCODER_CHANNELS = 2

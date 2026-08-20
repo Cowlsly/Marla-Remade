@@ -125,6 +125,25 @@ class OpusHeadTest {
         assertEquals(0, OpusHead.packetSamples(packet(31, 3), 1))
     }
 
+    @Test
+    fun `never reads a real packet as zero-length`() {
+        // The transcoder sums this into the granule position and treats a total of zero as
+        // "the encoder emitted nothing", so a config this cannot read would throw away a
+        // perfectly good encode. Every table-of-contents byte an encoder can emit has to
+        // come back non-zero, whichever of the three mode branches it lands in.
+        for (toc in 0..255) {
+            val declared = toc and 3
+            // Code 3 carries the frame count in the second byte; the rest ignore it.
+            val frameCount = if (declared == 3) 1 else 0
+            val samples = OpusHead.packetSamples(byteArrayOf(toc.toByte(), frameCount.toByte()), 2)
+            assertTrue(
+                samples > 0,
+                "TOC 0x${toc.toString(16)} (config ${toc ushr 3}, code $declared) read as $samples",
+            )
+            assertTrue(samples <= 5_760, "no Opus packet exceeds 120 ms, TOC 0x${toc.toString(16)}")
+        }
+    }
+
     private fun readIntLe(buf: ByteArray, offset: Int): Int =
         (buf[offset].toInt() and 0xff) or
             ((buf[offset + 1].toInt() and 0xff) shl 8) or

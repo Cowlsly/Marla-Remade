@@ -53,7 +53,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
                 DownloadQueue.update(DownloadState.Downloading, key, progress)
             } ?: return@withContext fail(key, "Download failed")
 
-            DownloadQueue.update(DownloadState.Tagging, key, 1f)
+            DownloadQueue.update(DownloadState.Tagging, key)
             val cover = CoverArtCache.get(request.releaseId, request.releaseGroupId)
             val lyrics = Lyrics.fetch(request.artist, request.title, request.album, request.durationMs)
             android.util.Log.i(
@@ -69,7 +69,12 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
             val ogg = if (audio.isOpusPassthrough) {
                 OpusRemuxer.remux(applicationContext, raw)
             } else {
-                OpusTranscoder.transcode(raw) { isStopped }
+                // Re-encoding is the slowest step in the download by a wide margin, so it
+                // reports progress of its own; without it the row sits still long enough to
+                // look like a hang and invite the user to cancel a working download.
+                OpusTranscoder.transcode(raw, { isStopped }) { progress ->
+                    DownloadQueue.update(DownloadState.Tagging, key, progress)
+                }
             } ?: return@withContext fail(key, "Could not convert the download to Opus")
 
             val tagged = OggOpusTagger.tag(ogg, request.toVorbisTags(cover, lyrics)) ?: ogg

@@ -32,7 +32,10 @@ fun TrackTrailing(
             IconButton(onDownload) { IconDownload() }
         download.state == DownloadState.Done -> IconCheckCircle(tint = MaterialTheme.colorScheme.primary)
         else -> Row(verticalAlignment = Alignment.CenterVertically) {
-            if (download.state == DownloadState.Downloading && download.progress > 0f) {
+            // Any state that reports real progress gets a determinate ring. Re-encoding is
+            // slow enough that an indeterminate spinner through it reads as a hang, which
+            // is what makes cancelling a working download look like the sensible move.
+            if (download.progress > 0f) {
                 CircularProgressIndicator({ download.progress }, modifier = Modifier.size(20.dp))
             } else {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp))
