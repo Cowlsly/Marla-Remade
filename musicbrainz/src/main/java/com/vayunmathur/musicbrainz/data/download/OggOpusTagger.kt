@@ -3,7 +3,6 @@ package com.vayunmathur.musicbrainz.data.download
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.util.Base64
 
 /** Everything the Ogg/Opus tagger will write. Null/blank fields are simply omitted. */
 data class VorbisTags(
@@ -39,7 +38,6 @@ data class VorbisTags(
  */
 object OggOpusTagger {
 
-    private const val VENDOR = "ModernApps musicbrainz"
     private const val MAX_SEGMENTS_PER_PAGE = 255
 
     /**
@@ -93,65 +91,10 @@ object OggOpusTagger {
     // Comment packet
     // ------------------------------------------------------------------
 
-    private fun buildOpusTagsPacket(tags: VorbisTags): ByteArray {
-        val out = ByteArrayOutputStream()
-        out.write("OpusTags".toByteArray(Charsets.ISO_8859_1))
-        val vendor = VENDOR.toByteArray(Charsets.UTF_8)
-        out.write(intLe(vendor.size))
-        out.write(vendor)
-
-        val comments = ArrayList<ByteArray>()
-        fun add(key: String, value: String?) {
-            if (!value.isNullOrBlank()) {
-                comments.add("$key=$value".toByteArray(Charsets.UTF_8))
-            }
-        }
-        // Text tags first, so a reader with a bounded scan window sees the identifying
-        // fields before the much larger cover-art comment.
-        add("TITLE", tags.title)
-        add("ARTIST", tags.artist)
-        add("ALBUM", tags.album)
-        add("ALBUMARTIST", tags.albumArtist)
-        add("DATE", tags.date)
-        tags.trackNumber?.let { add("TRACKNUMBER", it.toString()) }
-        tags.trackTotal?.let { add("TRACKTOTAL", it.toString()) }
-        tags.discNumber?.let { add("DISCNUMBER", it.toString()) }
-        add("MUSICBRAINZ_TRACKID", tags.recordingId)
-        add("MUSICBRAINZ_ALBUMID", tags.releaseId)
-        add("MUSICBRAINZ_RELEASETRACKID", tags.releaseTrackId)
-        add("LYRICS", tags.lyrics)
-        tags.coverArt?.takeIf { it.isNotEmpty() }?.let {
-            add("METADATA_BLOCK_PICTURE", encodePicture(it, tags.coverIsPng))
-        }
-
-        out.write(intLe(comments.size))
-        for (comment in comments) {
-            out.write(intLe(comment.size))
-            out.write(comment)
-        }
-        return out.toByteArray()
-    }
-
-    /**
-     * Wraps the image in a FLAC picture block and base64-encodes it, which is the form the
-     * `METADATA_BLOCK_PICTURE` comment expects. Every field in the block is big-endian; the
-     * dimensions are left at zero, which players read from the image itself.
-     */
-    private fun encodePicture(image: ByteArray, isPng: Boolean): String {
-        val mime = (if (isPng) "image/png" else "image/jpeg").toByteArray(Charsets.ISO_8859_1)
-        val block = ByteArrayOutputStream()
-        block.write(intBe(3)) // picture type: front cover
-        block.write(intBe(mime.size))
-        block.write(mime)
-        block.write(intBe(0)) // description length
-        block.write(intBe(0)) // width
-        block.write(intBe(0)) // height
-        block.write(intBe(0)) // colour depth
-        block.write(intBe(0)) // indexed colours
-        block.write(intBe(image.size))
-        block.write(image)
-        return Base64.getEncoder().encodeToString(block.toByteArray())
-    }
+    /** An Opus comment packet: the `OpusTags` magic followed by the shared comment list. */
+    fun buildOpusTagsPacket(tags: VorbisTags): ByteArray =
+        "OpusTags".toByteArray(Charsets.ISO_8859_1) +
+            VorbisComments.buildCommentList(tags, includePicture = true)
 
     // ------------------------------------------------------------------
     // Ogg pages
@@ -229,8 +172,8 @@ object OggOpusTagger {
         out.write(0) // stream structure version
         out.write(headerType)
         out.write(ByteArray(8)) // granule position: 0 for a header page
-        out.write(intLe(serial))
-        out.write(intLe(sequence))
+        out.write(VorbisComments.intLe(serial))
+        out.write(VorbisComments.intLe(sequence))
         out.write(ByteArray(4)) // CRC placeholder, filled in below
         out.write(segments.size)
         segments.forEach { out.write(it) }
@@ -277,20 +220,6 @@ object OggOpusTagger {
     }
 
     // ------------------------------------------------------------------
-
-    private fun intLe(value: Int): ByteArray = byteArrayOf(
-        value.toByte(),
-        (value ushr 8).toByte(),
-        (value ushr 16).toByte(),
-        (value ushr 24).toByte(),
-    )
-
-    private fun intBe(value: Int): ByteArray = byteArrayOf(
-        (value ushr 24).toByte(),
-        (value ushr 16).toByte(),
-        (value ushr 8).toByte(),
-        value.toByte(),
-    )
 
     private fun readIntLe(buf: ByteArray, offset: Int): Int =
         ByteBuffer.wrap(buf, offset, 4).order(ByteOrder.LITTLE_ENDIAN).int
