@@ -852,7 +852,7 @@ pub fn build<W: Write + Seek>(
             let Some(slot) = row.u32(0).and_then(|id| release_slot.get(id)) else { return Ok(()) };
             let d = pack_date(row.i64(2), row.i64(3), row.i64(4));
             let r = &mut releases[slot as usize];
-            if r.date == 0 || (d != 0 && d < r.date) {
+            if pack::date_rank(d) < pack::date_rank(r.date) {
                 r.date = d;
                 if let Some(&c) = row.u32(1).and_then(|a| area_country.get(&a)) {
                     r.country = c;
@@ -870,7 +870,7 @@ pub fn build<W: Write + Seek>(
             let Some(slot) = row.u32(0).and_then(|id| release_slot.get(id)) else { return Ok(()) };
             let d = pack_date(row.i64(1), row.i64(2), row.i64(3));
             let r = &mut releases[slot as usize];
-            if r.date == 0 || (d != 0 && d < r.date) {
+            if pack::date_rank(d) < pack::date_rank(r.date) {
                 r.date = d;
             }
             Ok(())
@@ -900,8 +900,15 @@ pub fn build<W: Write + Seek>(
     // A release group's first release date. MusicBrainz materialises this in
     // `release_group_meta`, which is NOT in the core dump, so it is derived here as
     // the earliest known date across the group's releases -- which is how upstream
-    // computes it in the first place, so this is equivalent rather than approximate.
-    // It is load-bearing: the RG screen header, the discography sort
+    // computes it in the first place.
+    //
+    // The comparison goes through `date_rank`, NOT the packed value: a year-only
+    // date packs with month and day zero, so a raw `<` would make `1973` beat
+    // `1973-03-24` and the group would lose the precise date. Spot-checked against
+    // musicbrainz.org: release group f5093c06-23e3-404f-aeaa-40f72885ee3a (The Dark
+    // Side of the Moon) is 1973-03-24 there, and a raw comparison derived `1973`.
+    //
+    // Load-bearing: the RG screen header, the discography sort
     // (MusicBrainzViewModel.kt:207) and the release-date fallback (:475-476).
     for &(g, ri) in &rg_release_pairs {
         let d = releases[ri as usize].date;
@@ -909,7 +916,7 @@ pub fn build<W: Write + Seek>(
             continue;
         }
         let cur = &mut rgs[g as usize].first_date;
-        if *cur == 0 || d < *cur {
+        if pack::date_rank(d) < pack::date_rank(*cur) {
             *cur = d;
         }
     }
@@ -940,7 +947,7 @@ pub fn build<W: Write + Seek>(
         let (a, b) = (&releases[x.1 as usize], &releases[y.1 as usize]);
         x.0.cmp(&y.0)
             .then(a.status_rank.cmp(&b.status_rank))
-            .then(a.date.cmp(&b.date))
+            .then(pack::date_rank(a.date).cmp(&pack::date_rank(b.date)))
             .then(x.1.cmp(&y.1))
     });
     let (rg_releases, rg_releases_idx) = to_csr(&rg_release_pairs, rgs.len());
@@ -1096,18 +1103,118 @@ pub fn build<W: Write + Seek>(
     let pool: FinalPool = pool.finalize();
     st.string_pool_raw = pool.raw_len() as u64;
 
+    // --- emit everything that is already final --------------------------------
+    // The pack writer opens HERE, before the track pass, so the artist,
+    // release-group and release vectors can go to disk and be dropped rather than
+    // sitting resident until the end. Measured: they are 571 MB of a 3.49 GB peak,
+    // and nothing after this point needs more than their name/title symbols.
+    // Section order in the file is irrelevant; the directory holds absolute offsets.
+    step!("pass 9b: artists, release groups, releases");
+    let artist_count = artists.len() as u32;
+    let rg_count = rgs.len() as u32;
+    let release_count = releases.len() as u32;
+    let credit_live = credit_syms.iter().filter(|&&s| s != SYM_EMPTY).count() as u64;
+    let mut w = PackWriter::new(out)?;
+
+    let enum_offsets: Vec<u32> = enums.syms().iter().map(|&s| pool.offset(s)).collect();
+    let enum_count = enum_offsets.len() as u32;
+    w.section_u32(pack::S_ENUM_POOL, &enum_offsets)?;
+    drop(enum_offsets);
+    let credit_offsets: Vec<u32> = credit_syms.iter().map(|&s| pool.offset(s)).collect();
+    w.section_u32(pack::S_CREDITS, &credit_offsets)?;
+    drop(credit_offsets);
+    drop(credit_syms);
+
+    let mut buf: Vec<u8> = Vec::new();
+    for a in &artists {
+        buf.extend_from_slice(&pool.offset(a.name).to_le_bytes());
+        buf.extend_from_slice(&pool.offset(a.disamb).to_le_bytes());
+        buf.extend_from_slice(&pool.offset(a.area).to_le_bytes());
+        buf.extend_from_slice(&a.begin_date.to_le_bytes());
+        buf.extend_from_slice(&a.kind.to_le_bytes());
+        buf.extend_from_slice(&a.country.to_le_bytes());
+    }
+    w.section(pack::S_ARTISTS, &buf)?;
+    let gids: Vec<Mbid> = artists.iter().map(|a| a.gid).collect();
+    let (recs, hi) = build_mbid_table(&gids);
+    w.section(pack::S_ARTIST_MBID, &recs)?;
+    w.section_u32(pack::S_ARTIST_MBID_HI, &hi)?;
+    drop(gids);
+    drop(recs);
+    drop(hi);
+    // Only the name symbols survive, for the search index: 12 MB instead of 118.
+    let artist_name_syms: Vec<Sym> = artists.iter().map(|a| a.name).collect();
+    drop(artists);
+
+    buf.clear();
+    for r in &rgs {
+        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
+        buf.extend_from_slice(&r.first_date.to_le_bytes());
+        buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
+        buf.extend_from_slice(&r.primary.to_le_bytes());
+        buf.extend_from_slice(&r.secondary.to_le_bytes());
+    }
+    w.section(pack::S_RELEASE_GROUPS, &buf)?;
+    let gids: Vec<Mbid> = rgs.iter().map(|r| r.gid).collect();
+    let (recs, hi) = build_mbid_table(&gids);
+    w.section(pack::S_RG_MBID, &recs)?;
+    w.section_u32(pack::S_RG_MBID_HI, &hi)?;
+    drop(gids);
+    drop(recs);
+    drop(hi);
+    let rg_title_syms: Vec<Sym> = rgs.iter().map(|r| r.title).collect();
+    drop(rgs);
+
+    w.section_u32(pack::S_ARTIST_RGS, &artist_rgs)?;
+    drop(artist_rgs);
+    w.section_u32(pack::S_ARTIST_RGS_IDX, &artist_rgs_idx)?;
+    drop(artist_rgs_idx);
+
+    buf.clear();
+    for r in &releases {
+        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
+        buf.extend_from_slice(&rg_idx.get(r.rg_id).unwrap_or(pack::NONE).to_le_bytes());
+        buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
+        buf.extend_from_slice(&r.date.to_le_bytes());
+        buf.extend_from_slice(&pool.offset(r.disamb).to_le_bytes());
+        buf.extend_from_slice(&r.status.to_le_bytes());
+        buf.extend_from_slice(&r.country.to_le_bytes());
+    }
+    w.section(pack::S_RELEASES, &buf)?;
+    let gids: Vec<Mbid> = releases.iter().map(|r| r.gid).collect();
+    let (recs, hi) = build_mbid_table(&gids);
+    w.section(pack::S_RELEASE_MBID, &recs)?;
+    w.section_u32(pack::S_RELEASE_MBID_HI, &hi)?;
+    drop(gids);
+    drop(recs);
+    drop(hi);
+    drop(releases);
+
+    w.section_u32(pack::S_RG_RELEASES, &rg_releases)?;
+    drop(rg_releases);
+    w.section_u32(pack::S_RG_RELEASES_IDX, &rg_releases_idx)?;
+    drop(rg_releases_idx);
+    w.section_u32(pack::S_MEDIA_IDX, &media_idx_csr)?;
+    drop(media_idx_csr);
+    buf.clear();
+    buf.shrink_to_fit();
+
     // --- tracks, phase 2: cluster recordings and emit TRACKS -------------------
     step!("pass 10: tracks -> TRACKS varint stream");
     let mut rec_new: Vec<u32> = vec![pack::NONE; rec_title.len()];
     let mut rec_order: Vec<u32> = Vec::new();
     let mut rec_first_release: Vec<u32> = Vec::new();
-    let mut tracks_stream: Vec<u8> = Vec::new();
+    // TRACKS is streamed straight into the pack rather than buffered: the full
+    // varint stream is 196 MB, and it would otherwise stay resident until the very
+    // end. `chunk` is flushed every 64 KB, so only that much is ever held.
+    let mut chunk: Vec<u8> = Vec::with_capacity(1 << 17);
+    let mut tracks_len: u64 = 0;
     let mut track_mbids: Vec<u8> = Vec::new();
     let mut track_idx: Vec<u32> = vec![0u32; media.len() + 1];
     let mut track_count = 0u32;
     let mut missing_recordings = 0u64;
     let mut next_medium = 0usize;
-    let mut buf: Vec<u8> = Vec::new();
+    w.begin(pack::S_TRACKS)?;
     for bucket in &buckets {
         let mut rows: Vec<TrackRow> = Vec::new();
         let mut gids: Vec<Mbid> = Vec::new();
@@ -1139,7 +1246,7 @@ pub fn build<W: Write + Seek>(
             .unwrap_or(next_medium.saturating_sub(1));
         while next_medium <= bucket_last && next_medium < media.len() {
             let m = next_medium;
-            track_idx[m] = tracks_stream.len() as u32;
+            track_idx[m] = (tracks_len + chunk.len() as u64) as u32;
             let mut ordinal = 0u32;
             let mut prev_rec: i64 = 0;
             while cursor < order.len() && rows[order[cursor] as usize].medium_idx as usize == m {
@@ -1177,27 +1284,27 @@ pub fn build<W: Write + Seek>(
                     | ((credit_differs as u64) << 1)
                     | ((pos_differs as u64) << 2)
                     | ((len_differs as u64) << 3);
-                pack::write_uvarint(&mut tracks_stream, flags);
+                pack::write_uvarint(&mut chunk, flags);
                 // The first track of a medium carries an ABSOLUTE recording index so
                 // the medium is decodable on its own; TRACK_IDX's byte offset would
                 // be useless otherwise.
                 if ordinal == 0 {
-                    pack::write_uvarint(&mut tracks_stream, new_idx as u64);
+                    pack::write_uvarint(&mut chunk, new_idx as u64);
                 } else {
-                    pack::write_zigzag(&mut tracks_stream, new_idx as i64 - prev_rec);
+                    pack::write_zigzag(&mut chunk, new_idx as i64 - prev_rec);
                 }
                 prev_rec = new_idx as i64;
                 if title_differs {
-                    pack::write_uvarint(&mut tracks_stream, pool.offset(t.title) as u64);
+                    pack::write_uvarint(&mut chunk, pool.offset(t.title) as u64);
                 }
                 if credit_differs {
-                    pack::write_uvarint(&mut tracks_stream, t.credit_id as u64);
+                    pack::write_uvarint(&mut chunk, t.credit_id as u64);
                 }
                 if pos_differs {
-                    pack::write_uvarint(&mut tracks_stream, t.position.max(0) as u64);
+                    pack::write_uvarint(&mut chunk, t.position.max(0) as u64);
                 }
                 if len_differs {
-                    pack::write_uvarint(&mut tracks_stream, t.length_s as u64);
+                    pack::write_uvarint(&mut chunk, t.length_s as u64);
                 }
                 if opts.include_track_mbids {
                     track_mbids.extend_from_slice(&gids[i]);
@@ -1209,15 +1316,32 @@ pub fn build<W: Write + Seek>(
             // TRACKTOTAL and the tracklist disagree.
             media[m].track_count = ordinal;
             next_medium += 1;
+            // Flushed at medium boundaries, so a medium's run is never split across
+            // the boundary bookkeeping and only ~64 KB is ever resident.
+            if chunk.len() >= (1 << 16) {
+                w.write(&chunk)?;
+                tracks_len += chunk.len() as u64;
+                chunk.clear();
+            }
         }
     }
     // Trailing media with no tracks.
     while next_medium < media.len() {
-        track_idx[next_medium] = tracks_stream.len() as u32;
+        track_idx[next_medium] = (tracks_len + chunk.len() as u64) as u32;
         media[next_medium].track_count = 0;
         next_medium += 1;
     }
-    track_idx[media.len()] = tracks_stream.len() as u32;
+    track_idx[media.len()] = (tracks_len + chunk.len() as u64) as u32;
+    w.write(&chunk)?;
+    tracks_len += chunk.len() as u64;
+    chunk.clear();
+    chunk.shrink_to_fit();
+    let tracks_section_len = w.end()?;
+    assert_eq!(tracks_section_len, tracks_len, "TRACKS length bookkeeping drifted");
+    assert!(
+        tracks_len <= u32::MAX as u64,
+        "TRACKS is {tracks_len} bytes, past the u32 ceiling TRACK_IDX addresses it with"
+    );
     if missing_recordings > 0 {
         st.skipped.push(("tracks whose recording is missing", missing_recordings));
     }
@@ -1275,16 +1399,16 @@ pub fn build<W: Write + Seek>(
     step!("pass 13a: search dictionary");
     let mut terms = StringPool::new();
     let mut terms_buf: Vec<String> = Vec::new();
-    for a in artists.iter() {
-        let text = String::from_utf8_lossy(pool.get(a.name)).into_owned();
+    for &sym in artist_name_syms.iter() {
+        let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
         terms_buf.clear();
         search_terms(&text, &mut terms_buf);
         for t in terms_buf.iter() {
             terms.intern(t);
         }
     }
-    for r in rgs.iter() {
-        let text = String::from_utf8_lossy(pool.get(r.title)).into_owned();
+    for &sym in rg_title_syms.iter() {
+        let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
         terms_buf.clear();
         search_terms(&text, &mut terms_buf);
         for t in terms_buf.iter() {
@@ -1314,9 +1438,9 @@ pub fn build<W: Write + Seek>(
     step!("pass 13b: search postings ({term_count} terms)");
     let mut post_spill = PostingSpill::new(opts.work_dir.as_deref(), term_count as u32)?;
     {
-        for (i, a) in artists.iter().enumerate() {
+        for (i, &sym) in artist_name_syms.iter().enumerate() {
             check_searchable(i as u32)?;
-            let text = String::from_utf8_lossy(pool.get(a.name)).into_owned();
+            let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
             emit_postings(
                 &text,
                 (pack::KIND_ARTIST << pack::KIND_SHIFT) | i as u32,
@@ -1326,9 +1450,9 @@ pub fn build<W: Write + Seek>(
                 &mut post_spill,
             )?;
         }
-        for (i, r) in rgs.iter().enumerate() {
+        for (i, &sym) in rg_title_syms.iter().enumerate() {
             check_searchable(i as u32)?;
-            let text = String::from_utf8_lossy(pool.get(r.title)).into_owned();
+            let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
             emit_postings(
                 &text,
                 (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32,
@@ -1355,6 +1479,8 @@ pub fn build<W: Write + Seek>(
         }
     }
     drop(term_ranks);
+    drop(artist_name_syms);
+    drop(rg_title_syms);
     st.search_postings = post_spill.written / 8;
     let post_buckets = post_spill.finish()?;
 
@@ -1366,8 +1492,6 @@ pub fn build<W: Write + Seek>(
     // Captured before the sources are dropped further down.
     let rec_max_id = rec_present.len().saturating_sub(1) as u64;
     let rec_live = rec_present.iter().filter(|&&p| p).count() as u64;
-    let credit_live = credit_syms.iter().filter(|&&s| s != SYM_EMPTY).count() as u64;
-    let mut w = PackWriter::new(out)?;
 
     // SEARCH_TERMS, streamed straight out of the term pool in rank order.
     w.begin(pack::S_SEARCH_TERMS)?;
@@ -1439,91 +1563,23 @@ pub fn build<W: Write + Seek>(
     drop(terms);
 
     // --- assemble -------------------------------------------------------------
-    // Every buffer is dropped the moment its section is on disk. That is not
-    // tidiness: holding them all to the end is what put the measured peak at
-    // 4.24 GB against a 4 GB budget, and the entity vectors plus the recording
-    // arrays are ~1.1 GB of it. Counts are captured before the sources go.
+    // Everything not already on disk. The entity vectors went out in pass 9b and
+    // are gone; what remains is keyed off the recording clustering, which only
+    // exists after the track pass.
+    let media_count = media.len() as u32;
     let counts = HeaderCounts {
-        artists: artists.len() as u32,
+        artists: artist_count,
         credits: credit_count,
-        release_groups: rgs.len() as u32,
-        releases: releases.len() as u32,
-        media: media.len() as u32,
+        release_groups: rg_count,
+        releases: release_count,
+        media: media_count,
         tracks: track_count,
         recordings: rec_order.len() as u32,
         isrcs: isrcs.len() as u32,
         search_terms: term_count as u32,
-        enums: enums.syms().len() as u32,
+        enums: enum_count,
     };
-    let enum_offsets: Vec<u32> = enums.syms().iter().map(|&s| pool.offset(s)).collect();
-    w.section_u32(pack::S_ENUM_POOL, &enum_offsets)?;
-    drop(enum_offsets);
-    let credit_offsets: Vec<u32> = credit_syms.iter().map(|&s| pool.offset(s)).collect();
-    w.section_u32(pack::S_CREDITS, &credit_offsets)?;
-    drop(credit_offsets);
-    drop(credit_syms);
-
-    buf.clear();
-    for a in &artists {
-        buf.extend_from_slice(&pool.offset(a.name).to_le_bytes());
-        buf.extend_from_slice(&pool.offset(a.disamb).to_le_bytes());
-        buf.extend_from_slice(&pool.offset(a.area).to_le_bytes());
-        buf.extend_from_slice(&a.begin_date.to_le_bytes());
-        buf.extend_from_slice(&a.kind.to_le_bytes());
-        buf.extend_from_slice(&a.country.to_le_bytes());
-    }
-    w.section(pack::S_ARTISTS, &buf)?;
-    let gids: Vec<Mbid> = artists.iter().map(|a| a.gid).collect();
-    let (recs, hi) = build_mbid_table(&gids);
-    w.section(pack::S_ARTIST_MBID, &recs)?;
-    w.section_u32(pack::S_ARTIST_MBID_HI, &hi)?;
-    drop(gids);
-    drop(artists);
-
-    buf.clear();
-    for r in &rgs {
-        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
-        buf.extend_from_slice(&r.first_date.to_le_bytes());
-        buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
-        buf.extend_from_slice(&r.primary.to_le_bytes());
-        buf.extend_from_slice(&r.secondary.to_le_bytes());
-    }
-    w.section(pack::S_RELEASE_GROUPS, &buf)?;
-    let gids: Vec<Mbid> = rgs.iter().map(|r| r.gid).collect();
-    let (recs, hi) = build_mbid_table(&gids);
-    w.section(pack::S_RG_MBID, &recs)?;
-    w.section_u32(pack::S_RG_MBID_HI, &hi)?;
-    drop(gids);
-    drop(rgs);
-    w.section_u32(pack::S_ARTIST_RGS, &artist_rgs)?;
-    drop(artist_rgs);
-    w.section_u32(pack::S_ARTIST_RGS_IDX, &artist_rgs_idx)?;
-    drop(artist_rgs_idx);
-
-    buf.clear();
-    for r in &releases {
-        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
-        buf.extend_from_slice(&rg_idx.get(r.rg_id).unwrap_or(pack::NONE).to_le_bytes());
-        buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
-        buf.extend_from_slice(&r.date.to_le_bytes());
-        buf.extend_from_slice(&pool.offset(r.disamb).to_le_bytes());
-        buf.extend_from_slice(&r.status.to_le_bytes());
-        buf.extend_from_slice(&r.country.to_le_bytes());
-    }
-    w.section(pack::S_RELEASES, &buf)?;
-    let gids: Vec<Mbid> = releases.iter().map(|r| r.gid).collect();
-    let (recs, hi) = build_mbid_table(&gids);
-    w.section(pack::S_RELEASE_MBID, &recs)?;
-    w.section_u32(pack::S_RELEASE_MBID_HI, &hi)?;
-    drop(gids);
-    drop(releases);
-    w.section_u32(pack::S_RG_RELEASES, &rg_releases)?;
-    drop(rg_releases);
-    w.section_u32(pack::S_RG_RELEASES_IDX, &rg_releases_idx)?;
-    drop(rg_releases_idx);
-
-    w.section_u32(pack::S_MEDIA_IDX, &media_idx_csr)?;
-    drop(media_idx_csr);
+    let mut buf: Vec<u8> = Vec::new();
     buf.clear();
     for m in &media {
         buf.extend_from_slice(&m.format.to_le_bytes());
@@ -1533,13 +1589,6 @@ pub fn build<W: Write + Seek>(
     drop(media);
     w.section_u32(pack::S_TRACK_IDX, &track_idx)?;
     drop(track_idx);
-    assert!(
-        tracks_stream.len() <= u32::MAX as usize,
-        "TRACKS is {} bytes, past the u32 ceiling TRACK_IDX addresses it with",
-        tracks_stream.len()
-    );
-    w.section(pack::S_TRACKS, &tracks_stream)?;
-    drop(tracks_stream);
     if opts.include_track_mbids {
         w.section(pack::S_TRACK_MBID, &track_mbids)?;
     }
