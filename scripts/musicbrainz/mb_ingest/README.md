@@ -42,27 +42,33 @@ pipeline; they are not the production path.
 ```sh
 cargo build --release
 
+# The real 7.45 GB export: extract the 19 tables this crate reads (one bz2 pass,
+# ~9 min, ~15 GB of scratch), then build from the directory. The server's
+# single-traversal spill is the production equivalent.
+tar -xf mbdump.tar.bz2 -C /scratch/mbdump TIMESTAMP mbdump/artist mbdump/track ...
+./target/release/mb_ingest build /scratch/mbdump musicbrainz.pack --work-dir /scratch/spill
+
 # Prove the whole pipeline on a synthetic dump in ~a second.
 ./target/release/mb_ingest fixture /tmp/mb/mbdump
 ./target/release/mb_ingest build /tmp/mb /tmp/musicbrainz.pack
 ./target/release/mb_ingest inspect /tmp/musicbrainz.pack
+./target/release/mb_ingest query  /tmp/musicbrainz.pack "dark side"
 
-cargo test          # 42 tests, including a full round trip through the reader
+cargo test          # 43 tests, including a full round trip through the reader
 ```
 
-Flags: `--tier-a` adds track MBIDs (+918 MB at full scale), `--official-only`
-drops the 9.4% of releases that are not Official, `--raw-strings` leaves the
-string pool uncompressed (+454 MB, but strings become zero-copy),
-`--work-dir <dir>` places the track spill buckets, `--no-isrcs`,
-`--no-recording-search`, `--no-recording-mbids`.
+Flags: `--tier-a` adds track MBIDs, `--official-only` drops the 9.4% of releases
+that are not Official, `--raw-strings` leaves the string pool uncompressed
+(+578 MB, but strings become zero-copy), `--work-dir <dir>` places the spill
+buckets, `--no-isrcs`, `--no-recording-search`, `--no-recording-mbids`.
 
 `build` writes `<out>.pack.tmp` and renames, so a crashed build never leaves a
 half-written pack where the server would mmap it.
 
 ## Input
 
-Only **`mbdump.tar.bz2`** is needed. Verified against the live export
-(`20260819-002541`), not assumed:
+Only **`mbdump.tar.bz2`** is needed (7,451,072,390 bytes for 20260819-002541).
+Verified against the live export by extracting it, not by reading the schema:
 
 * core-dump members are `mbdump/<table>`, unprefixed, in ASCII order, after
   `TIMESTAMP`, `COPYING`, `README`, `REPLICATION_SEQUENCE`, `SCHEMA_SEQUENCE`.
@@ -71,10 +77,26 @@ Only **`mbdump.tar.bz2`** is needed. Verified against the live export
   escapes for embedded tabs and newlines. Real titles contain both, so the
   unescaping in `src/copy.rs` is load-bearing.
 
-All 20 tables read are marked `-- replicate` in `admin/sql/CreateTables.sql`,
-which is what puts a table in the core dump — including `release_group_meta`, the
-source of `first_release_date_*`, which is a core table despite ratings being a
-derived-dump concern.
+**`release_group_meta` is NOT in the core dump**, despite being marked
+`-- replicate` in `admin/sql/CreateTables.sql` — that marker governs replication
+packets, not the dump split. Its `first_release_date_*` is therefore derived as
+the earliest date across a group's releases, which is how upstream materialises it
+in the first place. This is what keeps the crate off `mbdump-derived.tar.bz2`.
+
+Tables read (19), and `build::TABLES` is the authoritative list — import it rather
+than duplicating it: `area`, `iso_3166_1`, `artist_type`,
+`release_group_primary_type`, `release_group_secondary_type`, `release_status`,
+`medium_format`, `artist_credit`, `artist_credit_name`, `artist`,
+`release_group`, `release_group_secondary_type_join`, `release`,
+`release_country`, `release_unknown_country`, `medium`, `recording`, `track`,
+`isrc`.
+
+Measured uncompressed sizes of the 19 tables read (total ~15.2 GB):
+`track` 7409 MB, `recording` 4319, `release` 739, `medium` 560,
+`release_group` 459, `artist` 416, `artist_credit` 396, `isrc` 368,
+`release_country` 273, `artist_credit_name` 227,
+`release_group_secondary_type_join` 35, `area` 13,
+`release_unknown_country` 8, and six enum tables under 1 MB each.
 
 **`mbdump-derived.tar.bz2` is not needed** — it holds annotations, ratings, user
 tags and search indexes, none of which the app requests, and depending on it
@@ -96,96 +118,106 @@ a public dataset. The stronger option, if that ever changes, is verifying
 `SHA256SUMS.asc` against MusicBrainz's key `C777580F` (fingerprint
 `D5E6 3B4B DCCE 1956 4294 8684 B8FC 2375 C777 580F`).
 
-## What it costs at full scale
+## What it costs at full scale — MEASURED
 
-Row counts are pack-designer's measurements from `musicbrainz.org/statistics`
-(retrieved 2026-08-20, page dated 2026-08-19). `MB` means 10⁶ bytes. These are
-**projections from the measured row counts, not from a completed full run.**
+Built from the `20260819-002541` full export (SHA256 verified). These are real
+numbers from a completed run, not projections. `MB` means 10⁶ bytes.
 
 | section | MB |
 |---|---|
-| `RECORDING_MBID` | 638 |
-| `RECORDINGS` | 359 |
-| `TRACKS` (varint, overrides inline) | ~235 |
-| `STRINGS` (zstd, sorted, from 635 raw) | ~181 |
-| `SEARCH_POSTINGS` | ~173 |
-| `REC_FIRST_RELEASE` | 160 |
-| `RELEASES` + `RELEASE_MBID` | 217 |
-| `RELEASE_GROUPS` + `RG_MBID` | 134 |
-| `ARTISTS` + `ARTIST_MBID` | 101 |
-| `SEARCH_TERMS` + `SEARCH_TERM_IDX` | ~88 |
-| `ISRCS` | 69 |
-| CSR indexes, `MEDIA`, `CREDITS`, buckets | ~158 |
-| **total, tier B** | **~2 510** |
+| `RECORDING_MBID` | 638.1 |
+| `RECORDINGS` | 358.9 |
+| `SEARCH_POSTINGS` | 299.0 |
+| `STRINGS` (zstd, sorted, from 805.4 raw — **3.53x**) | 227.8 |
+| `TRACKS` (varint, overrides inline) | 196.4 |
+| `REC_FIRST_RELEASE` | 159.5 |
+| `RELEASES` + `RELEASE_MBID` | 217.2 |
+| `RELEASE_GROUPS` + `RG_MBID` | 134.1 |
+| `ARTISTS` + `ARTIST_MBID` | 100.7 |
+| `SEARCH_TERMS` + `SEARCH_TERM_IDX` | 86.2 |
+| `ISRCS` | 69.1 |
+| CSR indexes, `MEDIA`, `CREDITS`, buckets | 168.0 |
+| **total, tier B** | **2 655.0** |
 
-**~2.51 GB.** The design doc's 2,409.5 MB differs by ~100 MB of deliberate
-layout corrections, itemised here so the gap is not a mystery:
+**2,655,030,016 bytes = 2.655 GB**, built in **7.7 minutes** with a peak RSS of
+**3.51 GB**. Byte-for-byte reproducible: two consecutive runs over the full
+catalogue produce the identical SHA256.
 
-* `ReleaseRec` is 24 B, not 20 (+23 MB). The doc packs "status+country" into one
-  byte; a u8 cannot hold an ISO-3166-1 alpha-2 code.
-* `ReleaseGroupRec` 16 B not 14 (+9), `ArtistRec` 20 B not 18 (+6): the small
-  enumerations and the ~250 country codes share one table and need u16 indices.
-* `MEDIA` 4 B not 1 (+19). The doc's medium record holds only a format byte, so
-  per-medium track counts would have to be derived by decoding tracklists — on a
-  release-group page with up to 100 editions, thousands of varint runs per
-  request. Storing the count makes `TRACKTOTAL` O(1).
-* `ISRCS` 69 MB not 25 (+44). Plain 11 B records sorted for binary search rather
-  than delta-varint in compressed blocks. Recoverable later.
-* `SEARCH_TERM_IDX` 44 MB not 22 (+22). A term needs two offsets, one into the
-  dictionary and one into the postings; the doc budgeted one.
-* `TRACKS` −24 MB, *and* it keeps a field the doc dropped. Title and credit
-  overrides are inline in the varint stream rather than in `TRACK_TITLE_EXC` /
-  `TRACK_CREDIT_EXC` side arrays: inline only widens the ~12% of tracks that
-  differ, is 46 MB cheaper, and removes a binary search from the hot path. The
-  room that freed up now carries per-track length overrides, which doc L8
-  discarded — wrongly, because `track.length ?: recording.length`
-  (`MusicBrainzViewModel.kt:503`) makes the track's length the primary source.
+Row counts in the pack: 2,962,348 artists / 4,468,998 release groups /
+5,714,674 releases / 6,274,550 media / 57,404,909 tracks / 39,881,298 recordings
+/ 6,278,039 ISRCs / 4,332,477 search terms / 29,153,704 distinct strings.
+
+### The design doc's estimates against reality
+
+| ratio | doc estimate | measured |
+|---|---|---|
+| distinct recording titles | 40% | **49.9%** |
+| tracks whose title == recording's | 88% | **92.8%** |
+| tracks whose credit == recording's | 92% | **91.5%** |
+| tracks whose length == recording's | not estimated | **89.9%** |
+| standalone recordings | 5% | **0.4%** |
+| search postings | 78.8 M | **157,118,254** |
+| string pool, raw | 635 MB | **805.4 MB** |
+| id-map gap (max id / live rows) | 1.6x | **1.03-1.19x** |
+
+The standalone-recording figure being 12x over-estimated makes lever L5 worth
+~3 MB rather than 36 MB. The postings count being exactly 2x the estimate is the
+main reason the pack came in above projection.
+
+Deliberate layout differences from the doc's §2.3, each one because the doc's
+version does not fit or does not work:
+
+* `ReleaseRec` is 24 B, not 20. The doc packs "status+country" into one byte; a u8
+  cannot hold an ISO-3166-1 alpha-2 code.
+* `ReleaseGroupRec` 16 B not 14, `ArtistRec` 20 B not 18: the small enumerations
+  and the ~250 country codes share one table and need u16 indices.
+* `MEDIA` 4 B not 1, so per-medium track counts need no tracklist decode. A
+  release-group page renders up to 100 editions.
+* `ISRCS` 69 MB not 25: plain 11 B records sorted for binary search rather than
+  delta-varint in compressed blocks. Recoverable later.
+* `SEARCH_TERM_IDX` needs two offsets per term, one into the dictionary and one
+  into the postings; the doc budgeted one.
+* `TRACKS` carries title, credit, position **and length** overrides inline rather
+  than in `TRACK_TITLE_EXC` / `TRACK_CREDIT_EXC` side arrays. Inline only widens
+  the ~7% of tracks that differ, is cheaper than the two side tables, and removes
+  a binary search from the hot path. Doc L8 discarded per-track lengths, wrongly:
+  `track.length ?: recording.length` (`MusicBrainzViewModel.kt:503`) makes the
+  track's length the primary source.
 * the first track of each medium carries an **absolute** recording index rather
-  than a delta from the previous medium's last track (+22 MB, inside the ~235).
-  Without that a medium cannot be decoded on its own and `TRACK_IDX`'s byte
-  offset buys nothing.
+  than a delta from the previous medium's last track. Without that a medium
+  cannot be decoded on its own and `TRACK_IDX`'s byte offset buys nothing.
 
-Tier A (add track MBIDs) is ~3.43 GB.
+Tier A (add track MBIDs) would be ~3.57 GB.
 
 ## Where the memory goes
 
 Peak RSS is the binding constraint, not wall time: the ingest runs in-process
-alongside the live server on an 11 GB box, so the budget is 4 GB. Four rules the
-code follows:
+alongside the live server on an 11 GB box, so the budget is 4 GB. **Measured peak
+is 3.51 GB**, down from 6.14 GB on the first real run. Five rules the code
+follows, each one worth a measured amount:
 
 * **`TRACKS` is never a `Vec<TrackRec>`.** It is built as a varint byte stream as
   the tracks are visited. This is the failure recorded at
   `scripts/maps/gtfs_ingest/src/index.rs:15-27`, where a fixed-size record per
   stop per trip made a world transit pack 10-20 GB and overflowed a u32.
 * **id maps are dense `Vec<u32>` keyed by the dump's integer primary key.**
-  mbdump foreign keys are integer row ids (`track.recording INTEGER`), not gids,
-  so all six maps together are ~400 MB rather than the ~1.4 GB a
-  `HashMap<[u8;16], u32>` over recording gids alone would cost.
-* **track rows are bucket-sorted through spill files.** The dump is in track-id
-  order and `TRACKS` needs medium order; buffering all 57.4 M rows to sort would
-  be ~1.4 GB. Instead 24-byte records go out to 64 medium-keyed buckets and each
-  bucket (~25 MB) is sorted in memory. This needs the table to be re-openable.
-* **`RECORDING_MBID` is filled by a second pass over `recording`** that scatters
-  gids into the output buffer, rather than holding 16 B per recording id (~800 MB)
-  through the whole build.
+  mbdump foreign keys are integer row ids (`track.recording INTEGER`), not gids.
+  Measured: **83 MB** for all six, against ~1.4 GB for a `HashMap<[u8;16], u32>`
+  over recording gids alone.
+* **track rows are bucket-sorted through spill files.** 24-byte records go to 64
+  medium-keyed buckets (1.38 GB on disk, measured) and each ~25 MB bucket is
+  sorted in memory. Buffering all 57.4 M rows to sort would be ~1.4 GB resident.
+* **the search dictionary is a symbol pool, not `HashMap<String,u32>`**, and
+  postings are spilled to 64 rank-keyed buckets and streamed into the pack.
+  Together **~3 GB**: 157 M postings as `Vec<(u32,u32)>` is 1.26 GB, and the map
+  plus the `Vec<(String,u32)>` it was drained into held ~4.3 M duplicated `String`
+  allocations at once.
+* **every buffer is dropped as soon as its section is on disk**, and the 638 MB
+  recording-MBID pass runs immediately before its own write so it never overlaps
+  the search index. ~1.1 GB at the peak moment.
 
-Projected peak, largest phase governing — a projection, not a measurement:
-
-| structure | MB |
-|---|---|
-| string pool staging bytes | ~635 |
-| recording title/credit/duration arrays | ~500 |
-| dense id -> index maps | ~400 |
-| string pool interning index | ~130 |
-| `TRACKS` output buffer | ~235 |
-| one track bucket | ~25 |
-| **peak** | **~2 100** |
-
-The string pool's interning index is open-addressed over u32 symbol ids, not a
-`HashMap<String, u32>`: the latter is ~1.84 GB steady with a ~2.3 GB transient
-spike at its final resize, which does not fit.
-
-Disk: ~1.4 GB of scratch for the track spill (`--work-dir`), plus the pack.
+Disk: 1.38 GB of scratch for the track spill plus ~1.26 GB for the postings spill
+(`--work-dir`), and the pack itself.
 
 ## Why the string pool is sorted
 
@@ -218,7 +250,14 @@ Also given up, deliberately:
   that would have needed it is dead code with no callers.
 * **search is word-prefix, not substring and not Lucene.** "dark side" finds
   "The Dark Side of the Moon"; "loitude" does not find "Solitude". Query words
-  are ANDed. Results will differ from musicbrainz.org.
+  are ANDed. Measured latency on the full catalogue: 0.1-0.9 ms typical,
+  19 ms worst seen.
+* **each index covers only that entity's own title or name, not related fields.**
+  `search_release_groups("radiohead ok computer")` finds tribute albums whose
+  *titles* contain "radiohead", not Radiohead's *OK Computer* — the artist is a
+  separate field. MusicBrainz's Lucene searches across fields; this does not.
+  Folding artist-credit terms into the RG and recording indexes is a build-side
+  change costing roughly +40 MB of postings.
 * durations are **seconds, not milliseconds** — the UI renders m:ss, Tidal
   matching uses a ±3 s tolerance and LRCLIB takes seconds.
 * strings are `Cow<'a, str>`: owned when the pool is compressed, borrowed when
