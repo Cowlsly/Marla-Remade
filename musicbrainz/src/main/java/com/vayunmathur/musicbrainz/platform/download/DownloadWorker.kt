@@ -94,7 +94,16 @@ class DownloadWorker(context: Context, params: WorkerParameters) :
         }
     }
 
+    /**
+     * Records a failure against the queue entry and gives up on the track.
+     *
+     * Silent when the worker was stopped: a cancelled download is the user's own action, and
+     * telling them the conversion failed describes the app as broken when it did exactly
+     * what they asked. Every abandoned step routes through here, so the stop check belongs
+     * here rather than at each of them.
+     */
     private fun fail(key: String, message: String): Result {
+        if (isStopped) return Result.failure()
         DownloadQueue.update(DownloadState.Failed, key, error = message)
         return Result.failure()
     }

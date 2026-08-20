@@ -76,7 +76,14 @@ object OpusTranscoder {
 
             pump = OpusPump(extractor, decoder, isStopped, ::createEncoder, durationUs(format), onProgress)
             val output = pump.run()
-            Log.i(TAG, "transcode $mime: in=${source.size} out=${output?.size ?: 0}")
+            // A cancel and a codec failure both used to log the same `out=0`, which is
+            // indistinguishable in a bug report and reads as a broken encoder either way.
+            val outcome = when {
+                output != null -> "out=${output.size}"
+                isStopped() -> "cancelled"
+                else -> "failed"
+            }
+            Log.i(TAG, "transcode $mime: in=${source.size} $outcome")
             return output?.takeIf { it.isNotEmpty() }
         } catch (e: Exception) {
             Log.w(TAG, "transcode threw: ${e.javaClass.simpleName}: ${e.message}", e)
