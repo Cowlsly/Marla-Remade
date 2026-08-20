@@ -55,8 +55,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
@@ -87,6 +90,9 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
+import kotlin.math.PI
+import kotlin.math.atan2
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 
 /** Minimum gap between the *end* of one OCR pass and the start of the next (ms). */
@@ -107,12 +113,13 @@ private const val TRANSLATION_CACHE_MAX = 128
 /** Idle poll while every visible line already has a translation (ms). */
 private const val TRANSLATE_IDLE_POLL_MS = 100L
 
-/** One detected line, in the (upright) analysed-bitmap's pixel space. Holds the *source* text. */
+/**
+ * One detected line, as its oriented corners in the (upright) analysed-bitmap's
+ * pixel space, in reading order (corner 0 -> 1 runs along the text, 0 -> 3 spans
+ * its height). Holds the *source* text.
+ */
 private data class OverlayBox(
-    val left: Int,
-    val top: Int,
-    val right: Int,
-    val bottom: Int,
+    val corners: List<Offset>,
     val text: String,
 )
 
@@ -285,8 +292,8 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
                     val result = viewModel.ocr.recognizeDetailed(upright)
                     frameW = upright.width
                     frameH = upright.height
-                    overlays = result.boxes.map {
-                        OverlayBox(it.left, it.top, it.right, it.bottom, it.text)
+                    overlays = result.boxes.map { box ->
+                        OverlayBox(box.corners.map { Offset(it.x, it.y) }, box.text)
                     }
                     frozenFrame = upright
                 } catch (t: Throwable) {
@@ -395,14 +402,27 @@ private fun CameraContent(viewModel: TranslateViewModel, onBack: () -> Unit) {
                     // With no model installed none will ever land, so show what was read.
                     val label = translations[ob.text]
                         ?: if (translationAvailable) return@forEach else ob.text
-                    val l = ob.left * sx
-                    val t = ob.top * sy
-                    val w = (ob.right - ob.left) * sx
-                    val h = (ob.bottom - ob.top) * sy
+                    // sx and sy are independent, so the on-screen angle has to be
+                    // re-derived from the *mapped* top edge; a bitmap-space angle
+                    // would be wrong under an anisotropic stretch.
+                    val p = ob.corners.map { Offset(it.x * sx, it.y * sy) }
+                    val runX = p[1].x - p[0].x
+                    val runY = p[1].y - p[0].y
+                    val w = hypot(runX, runY)
+                    val h = hypot(p[3].x - p[0].x, p[3].y - p[0].y)
                     if (w <= 0f || h <= 0f) return@forEach
+                    val angle = (atan2(runY, runX) * 180f / PI).toFloat()
                     Box(
                         modifier = Modifier
-                            .offset { IntOffset(l.roundToInt(), t.roundToInt()) }
+                            // Anchored at the start of the run and turned onto it,
+                            // so a slanted line gets a slanted plate instead of an
+                            // opaque one the size of its bounding box covering its
+                            // neighbours.
+                            .offset { IntOffset(p[0].x.roundToInt(), p[0].y.roundToInt()) }
+                            .graphicsLayer {
+                                transformOrigin = TransformOrigin(0f, 0f)
+                                rotationZ = angle
+                            }
                             .size(
                                 width = with(density) { w.toDp() },
                                 height = with(density) { h.toDp() },
