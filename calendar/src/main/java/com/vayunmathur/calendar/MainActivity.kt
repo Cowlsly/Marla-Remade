@@ -57,9 +57,9 @@ class MainActivity : ComponentActivity() {
         updateWidgetPreviews(CalendarGlanceWidgetReceiver::class)
         enableEdgeToEdge()
 
-        // Reminder notifications rely on exact alarms; route the user to the
-        // system toggle if the app doesn't yet hold that special access.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        // Reminder notifications rely on exact alarms. USE_EXACT_ALARM is granted
+        // at install on Android 13+, so only older releases need the settings trip.
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
             val alarmManager = getSystemService(AlarmManager::class.java)
             if (alarmManager != null && !alarmManager.canScheduleExactAlarms()) {
                 runCatching {
