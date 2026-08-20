@@ -2554,4 +2554,60 @@ mod tests {
         };
         assert!(plan(&idx, 37.700, -122.400, 37.720, -122.400, 25_000, sched(sunday)).is_none());
     }
+
+    /// The hand-built harness above is an independent *reimplementation* of the
+    /// writer, which is what makes it a useful cross-check — but it also means both
+    /// sides could drift from the real producer together. This reads a pack
+    /// actually emitted by `scripts/maps/gtfs_ingest`, so the two crates are pinned
+    /// to each other rather than to a shared assumption.
+    ///
+    /// Regenerate after any format change (from the repo root):
+    ///
+    /// ```text
+    /// cargo run --release --manifest-path scripts/maps/gtfs_ingest/Cargo.toml -- \
+    ///     maps/src/main/rust/test_fixtures mini \
+    ///     mini=scripts/maps/gtfs_ingest/test_fixtures/mini_feed
+    /// ```
+    ///
+    /// then delete the `mini.transit.json` manifest it writes alongside. The bytes
+    /// are a captured artefact, not a reproducible one: the ingester groups trips
+    /// out of a `HashMap`, so route order varies between runs. The assertions are
+    /// therefore semantic, which is what catches drift anyway.
+    #[test]
+    fn reads_a_pack_written_by_the_real_ingester() {
+        let bytes = include_bytes!("../test_fixtures/mini.transit").to_vec();
+        let idx = TransitIndex::from_bytes(bytes).expect("the committed fixture parses");
+
+        // The fixture feed: 3 stops on one route, two trips, a shape detouring east
+        // between each pair of stops.
+        assert_eq!(idx.stop_count, 3);
+        assert_eq!(idx.route_count, 1);
+        assert_eq!(idx.timezone_at(37.700, -122.400), "America/Los_Angeles");
+
+        let legs = plan(&idx, 37.700, -122.400, 37.720, -122.400, 25_000, sched(wednesday()))
+            .expect("a journey exists");
+        let ride = legs.iter().find(|l| l.kind == LegKind::Ride).expect("a ride leg");
+        assert_eq!(ride.name, "N");
+        assert_eq!(ride.feed, "mini");
+        assert_eq!(ride.from_stop, "Alpha");
+        assert_eq!(ride.to_stop, "Gamma");
+        assert_eq!(ride.dep_secs, 28_800);
+        assert_eq!(ride.arr_secs, 29_400);
+        assert_eq!(ride.stop_count, 2);
+
+        // The v4 sections the ingester wrote must decode into real geometry: more
+        // vertices than the three stops, and a longer path than the straight line.
+        assert!(
+            ride.coords.len() > 6,
+            "expected shape geometry, got {} coords",
+            ride.coords.len()
+        );
+        let lons: Vec<f64> = ride.coords.chunks(2).map(|c| c[0]).collect();
+        assert!(
+            lons.iter().any(|&lon| lon > -122.395),
+            "the eastward detour is missing: {lons:?}"
+        );
+        let crow = dist_m(37.700, -122.400, 37.720, -122.400);
+        assert!(ride.dist_m > crow, "shape distance {} must exceed {crow}", ride.dist_m);
+    }
 }

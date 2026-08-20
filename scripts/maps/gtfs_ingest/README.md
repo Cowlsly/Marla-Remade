@@ -147,6 +147,24 @@ blobs and plans over them. The two crates cannot link to each other, so each
 codec is exercised by an independent counterpart — which is what catches drift in
 a format whose spec lives in a doc comment.
 
+Because both halves are *reimplementations*, they could also drift together. So
+`test_fixtures/mini_feed/` (a three-stop feed with a shape) is ingested into
+`maps/src/main/rust/test_fixtures/mini.transit`, committed, and read back by
+`transit.rs::reads_a_pack_written_by_the_real_ingester`. That pins the two crates
+to each other rather than to a shared assumption. Regenerate it after any format
+change, from the repo root:
+
+```sh
+cargo run --release --manifest-path scripts/maps/gtfs_ingest/Cargo.toml -- \
+    maps/src/main/rust/test_fixtures mini \
+    mini=scripts/maps/gtfs_ingest/test_fixtures/mini_feed
+rm maps/src/main/rust/test_fixtures/mini.transit.json
+```
+
+The bytes are a captured artefact, not a reproducible one — trips are grouped out
+of a `HashMap`, so route order varies between runs. The device-side assertions are
+semantic for that reason.
+
 ## Known limitations
 
 - Transfers use a straight-line ≤400 m footpath heuristic (not the road graph);

@@ -1,0 +1,4 @@
+stop_id,stop_name,stop_lat,stop_lon,stop_code
+S1,Alpha,37.700,-122.400,A1
+S2,Beta,37.710,-122.400,B2
+S3,Gamma,37.720,-122.400,C3
