@@ -16,7 +16,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.ErrorState
 import com.vayunmathur.library.ui.ExtendedFloatingActionButton
 import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.ListItem
@@ -27,6 +26,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
+import com.vayunmathur.musicbrainz.ui.components.LoadFailureState
 import com.vayunmathur.musicbrainz.ui.components.durationLabel
 import com.vayunmathur.musicbrainz.ui.components.TrackTrailing
 import com.vayunmathur.musicbrainz.ui.components.SecondaryText
@@ -71,10 +71,10 @@ fun ReleaseScreen(
     ) { padding ->
         when {
             state.loading -> LoadingState(Modifier.fillMaxSize().padding(padding))
-            state.error != null -> ErrorState(
-                title = stringResource(R.string.load_failed),
+            state.error != null -> LoadFailureState(
+                error = state.error,
+                notReady = state.notReady,
                 modifier = Modifier.fillMaxSize().padding(padding),
-                message = state.error,
             )
             else -> LazyColumn(
                 Modifier.fillMaxSize(),
@@ -99,7 +99,7 @@ fun ReleaseScreen(
                         )
                     }
                 }
-                items(state.tracks, key = { it.releaseTrackId }) { track ->
+                items(state.tracks, key = { it.rowKey }) { track ->
                     ListItem(
                         headlineContent = { Text(track.title) },
                         modifier = Modifier.fillMaxWidth(),
@@ -124,7 +124,7 @@ fun ReleaseScreen(
                                 onDevice = track.onDevice,
                                 download = track.download,
                                 onDownload = { actions.downloadTrack(track) },
-                                onCancel = { actions.cancelDownload(track.releaseTrackId) },
+                                onCancel = { actions.cancelDownload(track.downloadKey(state.title)) },
                             )
                         },
                     )

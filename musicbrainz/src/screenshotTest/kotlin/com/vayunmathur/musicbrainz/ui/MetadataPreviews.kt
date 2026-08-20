@@ -44,7 +44,9 @@ class MetadataPreviews {
         onDevice: Boolean = false,
         download: DownloadItem? = null,
     ) = TrackRow(
-        releaseTrackId = "track-$position",
+        rowKey = "0/$position",
+        mediumIndex = 0,
+        releaseTrackId = null,
         recordingId = "recording-$position",
         position = position,
         title = title,

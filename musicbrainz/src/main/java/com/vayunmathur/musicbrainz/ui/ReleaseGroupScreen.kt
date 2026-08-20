@@ -17,7 +17,6 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.ErrorState
 import com.vayunmathur.library.ui.IconCheckCircle
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.LoadingState
@@ -27,6 +26,7 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
+import com.vayunmathur.musicbrainz.ui.components.LoadFailureState
 import com.vayunmathur.musicbrainz.ui.components.SecondaryText
 import com.vayunmathur.musicbrainz.platform.MusicBrainzViewModel
 import com.vayunmathur.musicbrainz.platform.ReleaseGroupUiState
@@ -61,10 +61,10 @@ fun ReleaseGroupScreen(
     ) { padding ->
         when {
             state.loading -> LoadingState(Modifier.fillMaxSize().padding(padding))
-            state.error != null -> ErrorState(
-                title = stringResource(R.string.load_failed),
+            state.error != null -> LoadFailureState(
+                error = state.error,
+                notReady = state.notReady,
                 modifier = Modifier.fillMaxSize().padding(padding),
-                message = state.error,
             )
             else -> LazyColumn(
                 Modifier.fillMaxSize(),

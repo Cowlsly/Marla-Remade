@@ -258,6 +258,99 @@ class TagReaderTest {
     }
 
     // ------------------------------------------------------------------
+    // The legacy release-track id
+    // ------------------------------------------------------------------
+
+    /**
+     * Nothing writes `MUSICBRAINZ_RELEASETRACKID` any more - the catalogue carries no
+     * per-track MBID - but every file downloaded before that change still has it, and it is
+     * the strongest signal those files carry. Dropping the read would make a library that
+     * already matched exactly fall back to comparing text, so it stays.
+     */
+    @Test
+    fun `still reads the legacy release track id from vorbis comments`() {
+        val comments = vorbisComments(
+            "TITLE" to "Nude",
+            "ARTIST" to "Radiohead",
+            "MUSICBRAINZ_RELEASETRACKID" to "legacy-release-track-mbid",
+        )
+        val out = ByteArrayOutputStream()
+        out.write("fLaC".toByteArray(Charsets.ISO_8859_1))
+        out.write(0x80 or 4)
+        out.write(
+            byteArrayOf(
+                (comments.size shr 16).toByte(),
+                (comments.size shr 8).toByte(),
+                comments.size.toByte(),
+            ),
+        )
+        out.write(comments)
+
+        val tags = TagReader.readFlac(ByteArrayInputStream(out.toByteArray()))
+        assertEquals("legacy-release-track-mbid", tags.releaseTrackId)
+    }
+
+    /** The same for a `.opus` file, which is the format the app's own downloads are in. */
+    @Test
+    fun `still reads the legacy release track id from an opus file`() {
+        val identification = "OpusHead".toByteArray(Charsets.ISO_8859_1) + ByteArray(11)
+        val comments = "OpusTags".toByteArray(Charsets.ISO_8859_1) + vorbisComments(
+            "TITLE" to "Reckoner",
+            "ARTIST" to "Radiohead",
+            "MUSICBRAINZ_TRACKID" to "legacy-recording-mbid",
+            "MUSICBRAINZ_RELEASETRACKID" to "legacy-release-track-mbid",
+        )
+        val file = ByteArrayOutputStream()
+        file.write(oggPage(identification, 0))
+        file.write(oggPage(comments, 1))
+
+        val tags = TagReader.readOgg(ByteArrayInputStream(file.toByteArray()))
+        assertEquals("legacy-recording-mbid", tags.recordingId)
+        assertEquals("legacy-release-track-mbid", tags.releaseTrackId)
+    }
+
+    /** And from an MP3 tagged by Picard, where it is a `TXXX` frame. */
+    @Test
+    fun `still reads the legacy release track id from an id3 tag`() {
+        val frames = ByteArrayOutputStream()
+        frames.write(frame("TIT2", textBody("Nude"), 4))
+        frames.write(
+            frame("TXXX", txxxBody("MusicBrainz Release Track Id", "legacy-mbid"), 4),
+        )
+
+        val tags = TagReader.readId3(ByteArrayInputStream(id3(4, frames.toByteArray())))
+        assertEquals("legacy-mbid", tags.releaseTrackId)
+    }
+
+    /**
+     * The shape of a file the app writes now: no release-track id at all. Everything else
+     * still has to come through, because that is all the matching has left to work with.
+     */
+    @Test
+    fun `reads a file written without a release track id`() {
+        val identification = "OpusHead".toByteArray(Charsets.ISO_8859_1) + ByteArray(11)
+        val comments = "OpusTags".toByteArray(Charsets.ISO_8859_1) + vorbisComments(
+            "TITLE" to "Weird Fishes",
+            "ARTIST" to "Radiohead",
+            "ALBUM" to "In Rainbows",
+            "MUSICBRAINZ_TRACKID" to "recording-mbid",
+            "MUSICBRAINZ_ALBUMID" to "release-mbid",
+        )
+        val file = ByteArrayOutputStream()
+        file.write(oggPage(identification, 0))
+        file.write(oggPage(comments, 1))
+
+        val tags = TagReader.readOgg(ByteArrayInputStream(file.toByteArray()))
+        assertNull(tags.releaseTrackId)
+        assertEquals("Weird Fishes", tags.title)
+        assertEquals("Radiohead", tags.artist)
+        assertEquals("In Rainbows", tags.album)
+        assertEquals("recording-mbid", tags.recordingId)
+        assertEquals("release-mbid", tags.releaseId)
+        assertTrue(!tags.isEmpty)
+    }
+
+    // ------------------------------------------------------------------
 
     @Test
     fun `recognises audio files by extension`() {

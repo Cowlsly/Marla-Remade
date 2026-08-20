@@ -11,7 +11,7 @@ import java.util.Locale
 class MusicBrainzApplication : Application() {
     override fun onCreate() {
         super.onCreate()
-        // MUSICBRAINZ rather than STANDARD: musicbrainz.org and lrclib.net are ISRG,
+        // MUSICBRAINZ rather than STANDARD: api.vayunmathur.com and lrclib.net are ISRG,
         // coverartarchive.org redirects to archive.org / ia*.us.archive.org on GoDaddy certs,
         // and Tidal's Fastly-fronted audio CDN is GlobalSign - the last of which is the one
         // root STANDARD does not carry.

@@ -51,7 +51,16 @@ data class RecordingRow(
 
 /** A track on a release, plus whether it is already owned or currently downloading. */
 data class TrackRow(
-    val releaseTrackId: String,
+    /**
+     * Unique within the release and stable across reloads, which is what a lazy list needs
+     * as a key. Built from the track's place in the response rather than its MBID, because
+     * the catalogue does not carry one and a column of identical keys crashes the list.
+     */
+    val rowKey: String,
+    /** Which medium of the release this came from, as an index into `MbRelease.media`. */
+    val mediumIndex: Int,
+    /** The release-track MBID, absent unless the catalogue happens to carry one. */
+    val releaseTrackId: String?,
     val recordingId: String?,
     val position: Int,
     val title: String,
@@ -62,13 +71,23 @@ data class TrackRow(
     val isrcs: List<String> = emptyList(),
     val onDevice: Boolean = false,
     val download: DownloadItem? = null,
-)
+) {
+    /**
+     * The queue identity for this track, which has to agree with
+     * [com.vayunmathur.musicbrainz.platform.download.DownloadRequest.key] or a row cannot
+     * find the download it started. Covered by `DownloadKeyTest`.
+     */
+    fun downloadKey(album: String?): String =
+        releaseTrackId ?: recordingId ?: "$artist\u0000$album\u0000$title"
+}
 
 data class SearchUiState(
     val query: String = "",
     val tab: SearchTab = SearchTab.Releases,
     val loading: Boolean = false,
     val error: String? = null,
+    /** The catalogue is still importing, so this is a wait rather than a fault. */
+    val notReady: Boolean = false,
     val hasSearched: Boolean = false,
     val artists: List<ArtistRow> = emptyList(),
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -78,6 +97,8 @@ data class SearchUiState(
 data class ArtistUiState(
     val loading: Boolean = true,
     val error: String? = null,
+    /** The catalogue is still importing, so this is a wait rather than a fault. */
+    val notReady: Boolean = false,
     val name: String = "",
     val subtitle: String? = null,
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -86,6 +107,8 @@ data class ArtistUiState(
 data class ReleaseGroupUiState(
     val loading: Boolean = true,
     val error: String? = null,
+    /** The catalogue is still importing, so this is a wait rather than a fault. */
+    val notReady: Boolean = false,
     val title: String = "",
     val artist: String = "",
     val coverUrl: String? = null,
@@ -95,6 +118,8 @@ data class ReleaseGroupUiState(
 data class ReleaseUiState(
     val loading: Boolean = true,
     val error: String? = null,
+    /** The catalogue is still importing, so this is a wait rather than a fault. */
+    val notReady: Boolean = false,
     val id: String = "",
     val title: String = "",
     val artist: String = "",

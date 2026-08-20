@@ -10,6 +10,10 @@ import java.util.Base64
  * base64-encoded into a `METADATA_BLOCK_PICTURE` comment wrapping a FLAC-style picture
  * block. The keys match what [com.vayunmathur.musicbrainz.data.library.TagReader] reads back,
  * so a download is recognised as owned on the next library scan.
+ *
+ * `MUSICBRAINZ_RELEASETRACKID` is deliberately not among them: the catalogue carries no
+ * per-track MBID, so there is never a value to write. TagReader still reads it, because
+ * files downloaded before the switch carry it and must keep matching.
  */
 internal object VorbisComments {
 
@@ -44,7 +48,6 @@ internal object VorbisComments {
         tags.discNumber?.let { add("DISCNUMBER", it.toString()) }
         add("MUSICBRAINZ_TRACKID", tags.recordingId)
         add("MUSICBRAINZ_ALBUMID", tags.releaseId)
-        add("MUSICBRAINZ_RELEASETRACKID", tags.releaseTrackId)
         add("LYRICS", tags.lyrics)
         tags.coverArt?.takeIf { it.isNotEmpty() }?.let {
             add(

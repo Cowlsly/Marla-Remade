@@ -140,7 +140,10 @@ class OggOpusTaggerTest {
         assertEquals("The Neon Owls", tags.albumArtist)
         assertEquals("11111111-2222-3333-4444-555555555555", tags.recordingId)
         assertEquals("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", tags.releaseId)
-        assertEquals("99999999-8888-7777-6666-555555555555", tags.releaseTrackId)
+        // Not written any more: the catalogue has no per-track MBID, so the tagger drops the
+        // key even when handed a value. TagReader still parses it for files written earlier,
+        // which `TagReaderTest` covers.
+        assertNull(tags.releaseTrackId)
     }
 
     /**

@@ -1,46 +1,69 @@
 package com.vayunmathur.musicbrainz.network.api
 
 import com.vayunmathur.library.network.NetworkClient
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.Json
+import java.io.IOException
+import java.net.HttpURLConnection
 import java.net.URLEncoder
 
 /**
- * Client for the MusicBrainz WS/2 API.
+ * The server has a catalogue to serve, but not yet: either the data pack was never
+ * imported or an import is still running.
  *
- * MusicBrainz allows one request per second per client and blocks callers that ignore
- * that, so every request funnels through [gate]. It also rejects requests without an
- * identifying User-Agent, which is why [USER_AGENT] names the app and links the source.
+ * Kept apart from an ordinary failure because it resolves on its own, so the UI can tell
+ * the user to come back shortly instead of reporting a fault they cannot act on.
+ */
+class CatalogueNotReadyException(message: String) : IOException(message)
+
+/**
+ * Client for the self-hosted MusicBrainz mirror.
+ *
+ * The mirror speaks WS/2's URL grammar and JSON shapes, so the requests below are the same
+ * ones the public API takes. What it does not have is the public API's one-request-per-second
+ * limit, so requests go straight out and callers are free to run them concurrently.
  */
 object MusicBrainzApi {
 
-    private const val BASE = "https://musicbrainz.org/ws/2"
+    private const val BASE = "https://api.vayunmathur.com/api/mb/ws/2"
+
+    /** Named so the mirror's own logs can tell this client apart from anything else. */
     private const val USER_AGENT =
         "ModernAppsMusicBrainz/1.0 ( https://ma.vayunmathur.com/apps/musicbrainz )"
-    private const val MIN_REQUEST_SPACING_MS = 1_100L
-
-    private val rateLimit = Mutex()
-    private var lastRequestAt = 0L
 
     private val headers = mapOf(
         "User-Agent" to USER_AGENT,
         "Accept" to "application/json",
     )
 
-    /** Serialises requests and spaces them out so the shared rate limit is respected. */
-    private suspend fun <T> gate(block: suspend () -> T): T = rateLimit.withLock {
-        val since = System.currentTimeMillis() - lastRequestAt
-        if (since < MIN_REQUEST_SPACING_MS) delay(MIN_REQUEST_SPACING_MS - since)
-        try {
-            block()
-        } finally {
-            lastRequestAt = System.currentTimeMillis()
-        }
+    /**
+     * `coerceInputValues` is the load-bearing setting: every field in the wire models is
+     * declared with a default, but a default only applies to a key that is absent. An
+     * explicit `null` on one of the non-nullable fields would otherwise abort the whole
+     * decode, turning one unset field into a blank screen.
+     *
+     * Internal rather than private so `MusicBrainzModelsTest` decodes through the real
+     * configuration instead of a copy of it.
+     */
+    internal val json = Json {
+        ignoreUnknownKeys = true
+        isLenient = true
+        coerceInputValues = true
     }
 
-    private suspend inline fun <reified T> get(path: String): T =
-        gate { NetworkClient.getJson<T>("$BASE/$path", headers = headers) }
+    /**
+     * A 503 is the mirror saying it has no catalogue loaded yet, which is a wait rather
+     * than a fault; every other non-2xx is a real failure.
+     */
+    private suspend inline fun <reified T> get(path: String): T {
+        val response = NetworkClient.performRequest("$BASE/$path", headers = headers)
+        if (response.status == HttpURLConnection.HTTP_UNAVAILABLE) {
+            throw CatalogueNotReadyException("HTTP 503: ${response.body.take(200)}")
+        }
+        if (!response.isSuccess) {
+            throw IOException("HTTP ${response.status}: ${response.body.take(500)}")
+        }
+        return json.decodeFromString<T>(response.body)
+    }
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
 

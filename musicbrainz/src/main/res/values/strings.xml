@@ -24,6 +24,10 @@
     <string name="search_failed">Search failed</string>
     <!-- Error title shown when a page could not be loaded. -->
     <string name="load_failed">Could not load</string>
+    <!-- Title shown when the server has no music catalogue loaded yet. Not an error: it is still being prepared. -->
+    <string name="catalogue_not_ready">Catalogue not ready</string>
+    <!-- Body shown when the server has no music catalogue loaded yet, telling the user it is temporary. -->
+    <string name="catalogue_not_ready_message">The music catalogue is still being prepared on the server. Browsing will work once it is ready \u2014 try again in a few minutes.</string>
     <!-- Button: retries a failed request. Verb. -->
     <string name="retry">Retry</string>
 

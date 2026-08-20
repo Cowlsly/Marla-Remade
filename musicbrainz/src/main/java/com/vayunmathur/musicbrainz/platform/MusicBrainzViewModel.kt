@@ -10,6 +10,7 @@ import com.vayunmathur.musicbrainz.data.library.LibraryScanner
 import com.vayunmathur.musicbrainz.data.library.LibrarySnapshot
 import com.vayunmathur.musicbrainz.data.tidal.TidalAuth
 import com.vayunmathur.musicbrainz.data.tidal.TidalPollResult
+import com.vayunmathur.musicbrainz.network.api.CatalogueNotReadyException
 import com.vayunmathur.musicbrainz.network.api.CoverArt
 import com.vayunmathur.musicbrainz.network.api.MbRecording
 import com.vayunmathur.musicbrainz.network.api.MbRelease
@@ -20,6 +21,8 @@ import com.vayunmathur.musicbrainz.platform.download.DownloadQueue
 import com.vayunmathur.musicbrainz.platform.download.DownloadRequest
 import com.vayunmathur.musicbrainz.platform.SafTree
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -33,9 +36,8 @@ import kotlinx.coroutines.launch
 /**
  * Drives the browse, search and download screens.
  *
- * Fetched pages are cached by MusicBrainz id: the API allows one request per second, so
- * without a cache going back a screen would stall for a visible beat before redrawing
- * something the app already had.
+ * Fetched pages are cached by MusicBrainz id so going back a screen redraws immediately
+ * from what the app already had rather than making the round trip again.
  */
 class MusicBrainzViewModel(application: Application) : AndroidViewModel(application), MusicBrainzActions {
 
@@ -89,7 +91,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                             album = state.title,
                             title = track.title,
                         ),
-                        download = downloads[track.downloadKey()],
+                        download = downloads[track.downloadKey(state.title)],
                     )
                 },
             )
@@ -138,7 +140,12 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         if (query.isEmpty()) return
         searchJob?.cancel()
         searchJob = viewModelScope.launch {
-            _search.value = _search.value.copy(loading = true, error = null, hasSearched = true)
+            _search.value = _search.value.copy(
+                loading = true,
+                error = null,
+                notReady = false,
+                hasSearched = true,
+            )
             try {
                 when (_search.value.tab) {
                     SearchTab.Artists -> {
@@ -174,7 +181,11 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                     }
                 }
             } catch (e: Exception) {
-                _search.value = _search.value.copy(loading = false, error = e.readableMessage())
+                _search.value = _search.value.copy(
+                    loading = false,
+                    error = e.readableMessage(),
+                    notReady = e is CatalogueNotReadyException,
+                )
             }
         }
     }
@@ -188,29 +199,45 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
             _artist.value = it
             return
         }
-        _artist.value = ArtistUiState(loading = true)
+        // The user tapped a row that already told them the artist's name, so carry it over
+        // and let the title read straight away instead of sitting blank until the fetch lands.
+        val tapped = _search.value.artists.firstOrNull { it.id == id }
+        _artist.value = ArtistUiState(
+            loading = true,
+            name = tapped?.name.orEmpty(),
+            subtitle = tapped?.subtitle,
+        )
         viewModelScope.launch {
             try {
-                val artist = MusicBrainzApi.artist(id)
-                val groups = MusicBrainzApi.releaseGroupsOfArtist(id)
-                val state = ArtistUiState(
-                    loading = false,
-                    name = artist.name,
-                    subtitle = listOfNotNull(
-                        artist.disambiguation?.takeIf { it.isNotBlank() },
-                        artist.type,
-                        artist.area?.name,
-                        artist.lifeSpan?.begin,
-                    ).joinToString(" \u00B7 ").ifEmpty { null },
-                    // Newest first, which is how a discography is usually read.
-                    releaseGroups = groups
-                        .sortedByDescending { it.firstReleaseDate.orEmpty() }
-                        .map { it.toRow(includeArtist = false) },
-                )
+                // Two independent lookups against a mirror with no rate limit, so the page
+                // costs one round trip rather than two.
+                val state = coroutineScope {
+                    val artist = async { MusicBrainzApi.artist(id) }
+                    val groups = async { MusicBrainzApi.releaseGroupsOfArtist(id) }
+                    val details = artist.await()
+                    ArtistUiState(
+                        loading = false,
+                        name = details.name,
+                        subtitle = listOfNotNull(
+                            details.disambiguation?.takeIf { it.isNotBlank() },
+                            details.type,
+                            details.area?.name,
+                            details.lifeSpan?.begin,
+                        ).joinToString(" \u00B7 ").ifEmpty { null },
+                        // Newest first, which is how a discography is usually read.
+                        releaseGroups = groups.await()
+                            .sortedByDescending { it.firstReleaseDate.orEmpty() }
+                            .map { it.toRow(includeArtist = false) },
+                    )
+                }
                 artistCache[id] = state
                 _artist.value = state
             } catch (e: Exception) {
-                _artist.value = ArtistUiState(loading = false, error = e.readableMessage())
+                _artist.value = _artist.value.copy(
+                    loading = false,
+                    error = e.readableMessage(),
+                    notReady = e is CatalogueNotReadyException,
+                )
             }
         }
     }
@@ -223,43 +250,51 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         _releaseGroup.value = ReleaseGroupUiState(loading = true)
         viewModelScope.launch {
             try {
-                val group = MusicBrainzApi.releaseGroup(id)
-                val releases = MusicBrainzApi.releasesOfReleaseGroup(id)
-                val state = ReleaseGroupUiState(
-                    loading = false,
-                    title = group.title,
-                    artist = group.artistCredit.display().orEmpty(),
-                    coverUrl = CoverArt.releaseGroup(id),
-                    // Official pressings first: they are what a user normally wants, and a
-                    // release group can carry dozens of promos and bootlegs otherwise.
-                    releases = releases
-                        .sortedWith(
-                            compareByDescending<com.vayunmathur.musicbrainz.network.api.MbReleaseSummary> {
-                                it.status == "Official"
-                            }.thenBy { it.date.orEmpty() },
-                        )
-                        .map { summary ->
-                            ReleaseRow(
-                                id = summary.id,
-                                title = summary.title,
-                                subtitle = listOfNotNull(
-                                    summary.date?.takeIf { it.isNotBlank() },
-                                    summary.country,
-                                    summary.media.firstOrNull()?.format,
-                                    summary.media.sumOf { it.trackCount }
-                                        .takeIf { it > 0 }
-                                        ?.let { "$it tracks" },
-                                    summary.disambiguation?.takeIf { it.isNotBlank() },
-                                ).joinToString(" \u00B7 ").ifEmpty { null },
-                                coverUrl = CoverArt.release(summary.id),
-                                fallbackCoverUrl = CoverArt.releaseGroup(id),
+                // Same shape as loadArtist: two independent lookups, overlapped.
+                val state = coroutineScope {
+                    val group = async { MusicBrainzApi.releaseGroup(id) }
+                    val releases = async { MusicBrainzApi.releasesOfReleaseGroup(id) }
+                    val details = group.await()
+                    ReleaseGroupUiState(
+                        loading = false,
+                        title = details.title,
+                        artist = details.artistCredit.display().orEmpty(),
+                        coverUrl = CoverArt.releaseGroup(id),
+                        // Official pressings first: they are what a user normally wants, and a
+                        // release group can carry dozens of promos and bootlegs otherwise.
+                        releases = releases.await()
+                            .sortedWith(
+                                compareByDescending<com.vayunmathur.musicbrainz.network.api.MbReleaseSummary> {
+                                    it.status == "Official"
+                                }.thenBy { it.date.orEmpty() },
                             )
-                        },
-                )
+                            .map { summary ->
+                                ReleaseRow(
+                                    id = summary.id,
+                                    title = summary.title,
+                                    subtitle = listOfNotNull(
+                                        summary.date?.takeIf { it.isNotBlank() },
+                                        summary.country,
+                                        summary.media.firstOrNull()?.format,
+                                        summary.media.sumOf { it.trackCount }
+                                            .takeIf { it > 0 }
+                                            ?.let { "$it tracks" },
+                                        summary.disambiguation?.takeIf { it.isNotBlank() },
+                                    ).joinToString(" \u00B7 ").ifEmpty { null },
+                                    coverUrl = CoverArt.release(summary.id),
+                                    fallbackCoverUrl = CoverArt.releaseGroup(id),
+                                )
+                            },
+                    )
+                }
                 releaseGroupCache[id] = state
                 _releaseGroup.value = state
             } catch (e: Exception) {
-                _releaseGroup.value = ReleaseGroupUiState(loading = false, error = e.readableMessage())
+                _releaseGroup.value = ReleaseGroupUiState(
+                    loading = false,
+                    error = e.readableMessage(),
+                    notReady = e is CatalogueNotReadyException,
+                )
             }
         }
     }
@@ -277,7 +312,11 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 releaseCache[id] = release
                 _release.value = release.toUiState()
             } catch (e: Exception) {
-                _release.value = ReleaseUiState(loading = false, error = e.readableMessage())
+                _release.value = ReleaseUiState(
+                    loading = false,
+                    error = e.readableMessage(),
+                    notReady = e is CatalogueNotReadyException,
+                )
             }
         }
     }
@@ -326,9 +365,10 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
     override fun clearFinishedDownloads() = DownloadQueue.clearFinished()
 
     private fun requestFor(release: MbRelease, track: TrackRow): DownloadRequest? {
-        val medium = release.media.firstOrNull { medium ->
-            medium.tracks.any { it.id == track.releaseTrackId }
-        } ?: return null
+        // Indexed rather than matched: the track MBID is gone, and matching on disc position
+        // would fall back to disc one for every track whenever the catalogue omits `position`,
+        // stamping disc one's track total onto the whole of a multi-disc release.
+        val medium = release.media.getOrNull(track.mediumIndex) ?: return null
         return DownloadRequest(
             recordingId = track.recordingId,
             releaseTrackId = track.releaseTrackId,
@@ -488,11 +528,15 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         ).joinToString(" \u00B7 ").ifEmpty { null },
         coverUrl = CoverArt.release(id),
         fallbackCoverUrl = releaseGroup?.id?.let { CoverArt.releaseGroup(it) },
-        tracks = media.flatMap { medium ->
-            medium.tracks.map { track ->
+        tracks = media.flatMapIndexed { mediumIndex, medium ->
+            medium.tracks.mapIndexed { trackIndex, track ->
                 TrackRow(
-                    releaseTrackId = track.id,
-                    recordingId = track.recording?.id,
+                    // Positional, so it is unique whatever the catalogue sends: an id it
+                    // repeated - or omitted for every track - would crash the list.
+                    rowKey = "$mediumIndex/$trackIndex",
+                    mediumIndex = mediumIndex,
+                    releaseTrackId = track.id.ifBlank { null },
+                    recordingId = track.recording?.id?.ifBlank { null },
                     position = track.position,
                     title = track.title.ifBlank { track.recording?.title.orEmpty() },
                     // Track credits beat release credits: on a compilation the release is
@@ -540,9 +584,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         album = row.album,
         title = row.title,
     )
-
-    private fun TrackRow.downloadKey(): String =
-        releaseTrackId.ifEmpty { recordingId ?: title }
 
     private fun Exception.readableMessage(): String =
         message?.takeIf { it.isNotBlank() }?.take(200) ?: "Something went wrong"
