@@ -8,6 +8,9 @@ import org.maplibre.spatialk.geojson.Position
 import java.net.URLEncoder
 import java.time.Instant
 import java.time.OffsetDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
+import kotlin.math.pow
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -49,27 +52,43 @@ object TransitousDataSource {
     /** Departures are live — cache only very briefly to smooth refresh taps. */
     private const val DEPARTURES_TTL_MS = 20_000L
 
+    /**
+     * How long a *failed* fetch is remembered. Distinct from (and far shorter
+     * than) the success TTLs: one offline attempt used to poison the departures
+     * cache for the full 20 s and the stops cache indefinitely.
+     */
+    private const val FAILURE_TTL_MS = 3_000L
+
     private val REQUEST_HEADERS = mapOf(
         "Accept" to "application/json",
         "User-Agent" to "Modern-Apps-Maps/1.0",
     )
 
+    /**
+     * A cached fetch. [ok] separates "successfully fetched, genuinely empty"
+     * from "the fetch failed", so only the latter expires quickly.
+     */
+    private class Cached<T>(val value: T, val ok: Boolean) {
+        val at: Long = System.currentTimeMillis()
+        fun isFresh(okTtlMs: Long): Boolean =
+            System.currentTimeMillis() - at < if (ok) okTtlMs else FAILURE_TTL_MS
+    }
+
     // Stops LRU keyed on the rounded viewport box (stops are static-ish).
     private data class BboxKey(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
-    private val stopsCache = object : LinkedHashMap<BboxKey, List<TransitStop>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<BboxKey, List<TransitStop>>) = size > 32
+    private val stopsCache = object : LinkedHashMap<BboxKey, Cached<List<TransitStop>>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<BboxKey, Cached<List<TransitStop>>>) = size > 32
     }
 
     // Departures cache keyed on stop id, with a short TTL (live data).
-    private class Timed(val at: Long, val value: List<Departure>)
-    private val departuresCache = object : LinkedHashMap<String, Timed>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Timed>) = size > 32
+    private val departuresCache = object : LinkedHashMap<String, Cached<List<Departure>>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Cached<List<Departure>>>) = size > 32
     }
 
     /**
      * Stops within the viewport box. Never throws — returns an empty list on any
      * failure. LRU-cached on the box rounded to ~100 m so small pans reuse the
-     * previous fetch.
+     * previous fetch; a failed fetch is only remembered for [FAILURE_TTL_MS].
      */
     suspend fun stopsInBbox(
         minLat: Double,
@@ -78,27 +97,48 @@ object TransitousDataSource {
         maxLon: Double,
     ): List<TransitStop> {
         val key = BboxKey(round3(minLat), round3(minLon), round3(maxLat), round3(maxLon))
-        synchronized(stopsCache) { stopsCache[key]?.let { return it } }
-        val stops = runCatching { fetchStops(minLat, minLon, maxLat, maxLon) }.getOrDefault(emptyList())
-        synchronized(stopsCache) { stopsCache[key] = stops }
+        synchronized(stopsCache) {
+            stopsCache[key]?.let { if (it.isFresh(Long.MAX_VALUE)) return it.value }
+        }
+        val fetched = runCatching { fetchStops(minLat, minLon, maxLat, maxLon) }
+        val stops = fetched.getOrDefault(emptyList())
+        synchronized(stopsCache) { stopsCache[key] = Cached(stops, fetched.isSuccess) }
         return stops
     }
 
     /**
      * Live departures for [stopId]. Never throws — empty on failure. Cached for
-     * [DEPARTURES_TTL_MS]; pass [force] (a manual refresh) to bypass the cache.
+     * [DEPARTURES_TTL_MS] on success and only [FAILURE_TTL_MS] on failure; pass
+     * [force] (a manual refresh) to bypass the cache.
      */
     suspend fun departures(stopId: String, force: Boolean = false): List<Departure> {
         if (!force) {
             synchronized(departuresCache) {
-                departuresCache[stopId]?.let {
-                    if (System.currentTimeMillis() - it.at < DEPARTURES_TTL_MS) return it.value
-                }
+                departuresCache[stopId]?.let { if (it.isFresh(DEPARTURES_TTL_MS)) return it.value }
             }
         }
-        val deps = runCatching { fetchDepartures(stopId) }.getOrDefault(emptyList())
-        synchronized(departuresCache) { departuresCache[stopId] = Timed(System.currentTimeMillis(), deps) }
+        val fetched = runCatching { fetchDepartures(stopId) }
+        val deps = fetched.getOrDefault(emptyList())
+        synchronized(departuresCache) { departuresCache[stopId] = Cached(deps, fetched.isSuccess) }
         return deps
+    }
+
+    /**
+     * Live board for the MOTIS stop nearest `(lat, lon)`. MOTIS stop ids share no
+     * namespace with the baked `.transit` pack, so the offline planner locates a
+     * stop's realtime data by proximity — the same trick
+     * [com.vayunmathur.maps.util.TransitStopsViewModel.openNearestStop] uses.
+     * Empty when nothing is near or the fetch fails.
+     */
+    suspend fun departuresNear(lat: Double, lon: Double): List<Departure> {
+        // ~1.1 km search box, then the closest stop within it.
+        val d = 0.01
+        val nearest = stopsInBbox(lat - d, lon - d, lat + d, lon + d).minByOrNull { s ->
+            val dLat = s.lat - lat
+            val dLon = s.lon - lon
+            dLat * dLat + dLon * dLon
+        } ?: return emptyList()
+        return departures(nearest.id)
     }
 
     private suspend fun fetchStops(
@@ -128,13 +168,13 @@ object TransitousDataSource {
     /**
      * Online transit journey planning (P11d fallback) via MOTIS
      * `GET /api/v1/plan`. Used when no offline `*.transit` index covers the
-     * route. Never throws — returns null on any failure so the UI simply shows
+     * route. Never throws - returns null on any failure so the UI simply shows
      * no transit route. On-device only (needs the network); verified by shape.
      *
-     * NOTE: per-leg geometry uses the leg's from/to endpoints (a straight line)
-     * rather than decoding MOTIS's encoded `legGeometry` polyline — enough to
-     * draw the route in the directions UI; a polyline decoder is a future
-     * refinement.
+     * Per-leg geometry comes from MOTIS's encoded `legGeometry`, so an online
+     * journey follows the same real roads and rails the offline planner draws. A
+     * leg that carries no geometry falls back to a straight line between its
+     * endpoints.
      */
     suspend fun planRoute(
         from: Position,
@@ -158,8 +198,13 @@ object TransitousDataSource {
                 val t = leg.to ?: continue
                 val fp = Position(f.lon, f.lat)
                 val tp = Position(t.lon, t.lat)
-                if (polyline.isEmpty() || polyline.last() != fp) polyline.add(fp)
-                polyline.add(tp)
+                val geometry = leg.legGeometry
+                    ?.let { decodePolyline(it.points, it.precision) }
+                    ?.takeIf { it.size >= 2 }
+                    ?: listOf(fp, tp)
+                for (p in geometry) {
+                    if (polyline.isEmpty() || polyline.last() != p) polyline.add(p)
+                }
 
                 val isTransit = !"WALK".equals(leg.mode, ignoreCase = true)
                 totalDistance += leg.distance
@@ -169,7 +214,7 @@ object TransitousDataSource {
                     RouteService.Step(
                         distanceMeters = leg.distance,
                         staticDuration = leg.duration.seconds,
-                        polyline = listOf(fp, tp),
+                        polyline = geometry,
                         navInstruction = RouteService.API.NavInstruction(
                             if (isTransit) RouteService.API.Maneuver.RIDE
                             else RouteService.API.Maneuver.MANEUVER_UNSPECIFIED,
@@ -187,8 +232,8 @@ object TransitousDataSource {
                                     ?: "#FF0000"
                             ),
                             stopDetails = RouteService.API.StopDetails(
-                                arrivalTime = t.arrival ?: t.scheduledArrival ?: "",
-                                departureTime = f.departure ?: f.scheduledDeparture ?: "",
+                                arrivalTime = formatClock(t.arrival ?: t.scheduledArrival),
+                                departureTime = formatClock(f.departure ?: f.scheduledDeparture),
                                 arrivalStop = RouteService.API.Stop(t.name ?: ""),
                                 departureStop = RouteService.API.Stop(f.name ?: "")
                             ),
@@ -205,6 +250,48 @@ object TransitousDataSource {
                 step = steps,
             )
         }.getOrNull()
+    }
+
+    /**
+     * Decode an OTP/Google encoded polyline into positions.
+     *
+     * `precision` must come from the response: MOTIS uses 7 where Google's
+     * original format used 5, and decoding one as the other misplaces every point
+     * by a factor of 100. Values are zigzag-encoded deltas in chunks of five bits,
+     * offset by 63 into printable ASCII. A truncated tail is dropped rather than
+     * throwing — a half-decoded line still draws.
+     *
+     * The accumulator is a [Long] because at precision 7 a zigzagged longitude
+     * delta reaches ~2.4e9, which overflows a signed 32-bit int: a whole-degree
+     * first delta is routine, and wrapping it silently yields a plausible-looking
+     * coordinate on the wrong side of the planet.
+     */
+    internal fun decodePolyline(encoded: String, precision: Int): List<Position> {
+        if (encoded.isEmpty()) return emptyList()
+        val scale = 10.0.pow(precision)
+        val out = ArrayList<Position>()
+        var i = 0
+        var lat = 0L
+        var lon = 0L
+        fun nextDelta(): Long? {
+            var shift = 0
+            var result = 0L
+            while (true) {
+                if (i >= encoded.length) return null
+                val b = (encoded[i++].code - 63).toLong()
+                result = result or ((b and 0x1f) shl shift)
+                if (b < 0x20) break
+                shift += 5
+            }
+            // Zigzag: the low bit carries the sign.
+            return if (result and 1L != 0L) (result shr 1).inv() else result shr 1
+        }
+        while (i < encoded.length) {
+            lat += nextDelta() ?: break
+            lon += nextDelta() ?: break
+            out.add(Position(lon / scale, lat / scale))
+        }
+        return out
     }
 
     /** Map a MOTIS stoptime → app [Departure]; drop entries with no usable
@@ -225,6 +312,7 @@ object TransitousDataSource {
             mode = mode,
             routeColor = routeColor?.removePrefix("#")?.ifBlank { null },
             cancelled = cancelled,
+            tripId = tripId?.ifBlank { null },
         )
     }
 
@@ -235,6 +323,18 @@ object TransitousDataSource {
         return runCatching { OffsetDateTime.parse(iso).toInstant().toEpochMilli() }
             .recoverCatching { Instant.parse(iso).toEpochMilli() }
             .getOrNull()
+    }
+
+    /**
+     * A MOTIS ISO-8601 timestamp as a wall clock `HH:mm` in its own zone offset,
+     * matching what the offline planner puts in `StopDetails` so the directions
+     * UI can render either source without knowing which produced it.
+     */
+    private fun formatClock(iso: String?): String {
+        if (iso.isNullOrBlank()) return ""
+        return runCatching {
+            OffsetDateTime.parse(iso).format(DateTimeFormatter.ofPattern("HH:mm", Locale.ROOT))
+        }.getOrDefault("")
     }
 
     private fun round3(v: Double): Double = Math.round(v * 1000.0) / 1000.0

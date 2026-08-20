@@ -42,6 +42,13 @@ data class Departure(
     /** GTFS route colour as a 6-digit hex WITHOUT a leading `#`, or null. */
     val routeColor: String?,
     val cancelled: Boolean,
+    /**
+     * MOTIS's opaque trip handle, for diagnostics only. It is an internally
+     * encoded (feed prefix + trip + service day) string, not a bare GTFS
+     * `trip_id`, and the baked `.transit` pack stores no trip id at all, so it
+     * cannot be used to join realtime onto the offline schedule.
+     */
+    val tripId: String? = null,
 )
 
 // --- MOTIS v1 wire DTOs ----------------------------------------------------
@@ -122,6 +129,22 @@ data class MotisLeg(
     val routeColor: String? = null,
     val headsign: String? = null,
     val tripId: String? = null,
+    val legGeometry: MotisLegGeometry? = null,
+)
+
+/**
+ * A leg's real path, as an OTP/Google encoded polyline.
+ *
+ * `precision` is the number of decimal places the integer deltas are scaled by,
+ * and MOTIS sends **7** — not the 5 that Google's format popularised. It is read
+ * from the response rather than assumed because decoding precision-7 data as
+ * precision-5 puts every point 100x out. The default matches what
+ * `api.transitous.org` actually sends, for the case where the field is absent.
+ */
+@Serializable
+data class MotisLegGeometry(
+    val points: String = "",
+    val precision: Int = 7,
 )
 
 /** A leg endpoint in a plan response (position + name + ISO-8601 times). */
