@@ -23,8 +23,10 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconHome
@@ -210,13 +212,18 @@ fun RouteSheet(
                 // Taxi/ride option (P20): offer a ride for this route's origin→destination
                 // via the MA taxi app. Origin is the first waypoint (or the user's live
                 // position when the route starts "from here"); destination is the last.
+                // Drive only: a ride substitutes for driving, not for transit/walk/bicycle.
                 val taxiOrigin = selectedFeature.waypoints.firstOrNull()
                 val taxiDest = selectedFeature.waypoints.lastOrNull()
                 // Origin may be "from here" (a null waypoint) → the user's live position; the
                 // destination must be a real waypoint, so it never falls back to userPosition.
                 val taxiOriginPos = taxiOrigin?.position ?: userPosition
                 val taxiDestPos = taxiDest?.position
-                if (selectedFeature.waypoints.size >= 2 && taxiOriginPos != null && taxiDestPos != null) {
+                if (selectedRouteType == RouteService.TravelMode.DRIVE &&
+                    selectedFeature.waypoints.size >= 2 &&
+                    taxiOriginPos != null &&
+                    taxiDestPos != null
+                ) {
                     RouteTaxiOption(
                         originLat = taxiOriginPos.latitude,
                         originLng = taxiOriginPos.longitude,
@@ -233,13 +240,51 @@ fun RouteSheet(
                     is RouteService.Route -> {
                         itemsIndexed(routeForMode.step) { idx, it ->
                             Card(shape = verticalShape(idx, routeForMode.step.size)) {
+                                val transit = it.transitDetails
                                 ListItem({
                                     Text(it.navInstruction.instructions)
                                 }, leadingContent = {
                                     it.navInstruction.maneuver.iconContent()?.let { icon ->
                                         icon(Modifier, LocalContentColor.current)
                                     }
-                                })
+                                }, supportingContent = transit?.let { t ->
+                                    {
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        ) {
+                                            LineBadge(
+                                                t.transitLine.nameShort ?: t.transitLine.name,
+                                                t.transitLine.color,
+                                            )
+                                            Text(
+                                                transitSupportingText(t),
+                                                style = MaterialTheme.typography.bodySmall,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            )
+                                        }
+                                    }
+                                }, trailingContent = transit
+                                    ?.stopDetails
+                                    ?.takeIf { d -> d.departureTime.isNotBlank() }
+                                    ?.let { d ->
+                                        {
+                                            Column(horizontalAlignment = Alignment.End) {
+                                                Text(
+                                                    d.departureTime,
+                                                    style = MaterialTheme.typography.labelLarge,
+                                                )
+                                                if (d.arrivalTime.isNotBlank()) {
+                                                    Text(
+                                                        d.arrivalTime,
+                                                        style = MaterialTheme.typography.bodySmall,
+                                                        color = MaterialTheme.colorScheme
+                                                            .onSurfaceVariant,
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    })
                             }
                         }
                     }
@@ -258,6 +303,25 @@ fun RouteSheet(
                 Text(stringResource(R.string.generating_route))
             })
         }
+    }
+}
+
+/**
+ * "Towards X · 4 stops" for a transit step, dropping whichever half the feed
+ * doesn't provide (headsign is optional in GTFS; a single-hop ride has no
+ * intermediate stops).
+ */
+@Composable
+private fun transitSupportingText(details: RouteService.API.TransitDetails): String {
+    val headsign = details.headsign.takeIf { it.isNotBlank() }
+        ?.let { stringResource(R.string.transit_towards, it) }
+    val stops = details.stopCount.takeIf { it > 0 }?.let {
+        pluralStringResource(R.plurals.transit_stop_count, it, it)
+    }
+    return when {
+        headsign != null && stops != null ->
+            stringResource(R.string.transit_detail_separator, headsign, stops)
+        else -> headsign ?: stops ?: ""
     }
 }
 
