@@ -9,6 +9,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.FilterChipDefaults
+import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.util.PoiCategories
@@ -51,11 +53,19 @@ fun CategoryChips(
         modifier = modifier.horizontalScroll(rememberScrollState()),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // Material's unselected filter chip has a *transparent* container. On the
+        // browse screen these float directly over the map, where that leaves the
+        // label competing with POI pins and coloured roads showing through it, so
+        // the container is filled explicitly.
+        val colors = FilterChipDefaults.filterChipColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        )
         MAP_CATEGORIES.forEach { category ->
             FilterChip(
                 selected = category == selected,
                 onClick = { onCategory(category) },
                 label = { Text(stringResource(category.labelRes)) },
+                colors = colors,
             )
         }
     }
