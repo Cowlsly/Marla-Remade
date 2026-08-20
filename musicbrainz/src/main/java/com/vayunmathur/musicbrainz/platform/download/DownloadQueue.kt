@@ -43,11 +43,19 @@ data class DownloadRequest(
     /**
      * Stable identity for the queue and for WorkManager's unique work name.
      *
-     * Prefers the release track id so the same recording appearing on two albums is two
-     * separate downloads rather than one silently replacing the other.
+     * The same recording on two albums has to be two separate downloads rather than one
+     * silently replacing the other. The release-track id used to carry that on its own, but
+     * the catalogue no longer has one, so the release is folded in alongside the recording -
+     * without it a track queued from a second edition collides with the first, and the file
+     * that lands is tagged with the wrong album.
+     *
+     * Mirrored by [com.vayunmathur.musicbrainz.platform.TrackRow.downloadKey], which is how a
+     * row finds the download it started. `DownloadKeyTest` pins the two together.
      */
     val key: String
-        get() = releaseTrackId ?: recordingId ?: "$artist\u0000$album\u0000$title"
+        get() = releaseTrackId
+            ?: recordingId?.let { recording -> releaseId?.let { "$it\u0000$recording" } ?: recording }
+            ?: "$artist\u0000$album\u0000$title"
 }
 
 /**

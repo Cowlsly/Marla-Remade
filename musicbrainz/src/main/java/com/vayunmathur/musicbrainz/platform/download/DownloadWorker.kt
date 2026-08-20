@@ -265,7 +265,6 @@ private fun DownloadRequest.toVorbisTags(cover: ByteArray?, lyrics: String?) = V
     lyrics = lyrics,
     recordingId = recordingId,
     releaseId = releaseId,
-    releaseTrackId = releaseTrackId,
     coverArt = cover,
     coverIsPng = cover.isPng(),
 )

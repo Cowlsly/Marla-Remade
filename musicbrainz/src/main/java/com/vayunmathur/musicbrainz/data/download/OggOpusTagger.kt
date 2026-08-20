@@ -4,7 +4,13 @@ import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
-/** Everything the Ogg/Opus tagger will write. Null/blank fields are simply omitted. */
+/**
+ * Everything the Ogg/Opus tagger will write. Null/blank fields are simply omitted.
+ *
+ * No release-track id: the catalogue carries no per-track MBID, so there was never a value
+ * to write. [com.vayunmathur.musicbrainz.data.library.TagReader] still reads that tag, because
+ * files downloaded before the switch carry it and have to keep matching.
+ */
 data class VorbisTags(
     val title: String? = null,
     val artist: String? = null,
@@ -17,7 +23,6 @@ data class VorbisTags(
     val lyrics: String? = null,
     val recordingId: String? = null,
     val releaseId: String? = null,
-    val releaseTrackId: String? = null,
     val coverArt: ByteArray? = null,
     val coverIsPng: Boolean = false,
 )

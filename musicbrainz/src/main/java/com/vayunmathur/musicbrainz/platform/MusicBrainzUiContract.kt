@@ -77,8 +77,10 @@ data class TrackRow(
      * [com.vayunmathur.musicbrainz.platform.download.DownloadRequest.key] or a row cannot
      * find the download it started. Covered by `DownloadKeyTest`.
      */
-    fun downloadKey(album: String?): String =
-        releaseTrackId ?: recordingId ?: "$artist\u0000$album\u0000$title"
+    fun downloadKey(releaseId: String?, album: String?): String =
+        releaseTrackId
+            ?: recordingId?.let { recording -> releaseId?.let { "$it\u0000$recording" } ?: recording }
+            ?: "$artist\u0000$album\u0000$title"
 }
 
 data class SearchUiState(

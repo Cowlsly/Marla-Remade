@@ -124,7 +124,7 @@ fun ReleaseScreen(
                                 onDevice = track.onDevice,
                                 download = track.download,
                                 onDownload = { actions.downloadTrack(track) },
-                                onCancel = { actions.cancelDownload(track.downloadKey(state.title)) },
+                                onCancel = { actions.cancelDownload(track.downloadKey(state.id, state.title)) },
                             )
                         },
                     )

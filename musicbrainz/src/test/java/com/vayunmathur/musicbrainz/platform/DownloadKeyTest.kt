@@ -28,10 +28,14 @@ class DownloadKeyTest {
         artist = ARTIST,
     )
 
-    private fun request(releaseTrackId: String?, recordingId: String?) = DownloadRequest(
+    private fun request(
+        releaseTrackId: String?,
+        recordingId: String?,
+        releaseId: String? = RELEASE_ID,
+    ) = DownloadRequest(
         recordingId = recordingId,
         releaseTrackId = releaseTrackId,
-        releaseId = null,
+        releaseId = releaseId,
         releaseGroupId = null,
         title = TITLE,
         artist = ARTIST,
@@ -46,25 +50,54 @@ class DownloadKeyTest {
 
     @Test
     fun `agrees with the download request for every combination of ids`() {
-        val combinations = listOf(
-            "trk-1" to "rec-1",
-            null to "rec-1",
-            "trk-1" to null,
-            null to null,
-        )
-        for ((releaseTrackId, recordingId) in combinations) {
-            assertEquals(
-                request(releaseTrackId, recordingId).key,
-                trackRow(releaseTrackId, recordingId).downloadKey(ALBUM),
-                "key disagreed for releaseTrackId=$releaseTrackId recordingId=$recordingId",
-            )
+        val ids = listOf("trk-1" to "rec-1", null to "rec-1", "trk-1" to null, null to null)
+        for (releaseId in listOf(RELEASE_ID, null)) {
+            for ((releaseTrackId, recordingId) in ids) {
+                assertEquals(
+                    request(releaseTrackId, recordingId, releaseId).key,
+                    trackRow(releaseTrackId, recordingId).downloadKey(releaseId, ALBUM),
+                    "disagreed for releaseTrackId=$releaseTrackId " +
+                        "recordingId=$recordingId releaseId=$releaseId",
+                )
+            }
         }
     }
 
-    /** The case the catalogue now produces: no track MBID, so the recording id carries it. */
+    /**
+     * The case the catalogue now produces: no track MBID, so the release and the recording
+     * together carry the identity.
+     */
     @Test
-    fun `falls back to the recording id when there is no release track id`() {
-        assertEquals("rec-1", trackRow(null, "rec-1").downloadKey(ALBUM))
+    fun `combines the release and recording when there is no release track id`() {
+        assertEquals(
+            "$RELEASE_ID\u0000rec-1",
+            trackRow(null, "rec-1").downloadKey(RELEASE_ID, ALBUM),
+        )
+    }
+
+    /**
+     * The bug this formula exists to prevent. Before the release was folded in, the same
+     * recording queued from two editions collapsed to one queue entry and one WorkManager
+     * unique name, so the second download was dropped and the file that landed carried the
+     * first release's album and track numbers.
+     */
+    @Test
+    fun `keeps the same recording on two releases apart`() {
+        val row = trackRow(null, "rec-1")
+        assertNotEquals(
+            row.downloadKey("release-first", ALBUM),
+            row.downloadKey("release-second", ALBUM),
+        )
+        assertNotEquals(
+            request(null, "rec-1", "release-first").key,
+            request(null, "rec-1", "release-second").key,
+        )
+    }
+
+    /** With no release either, the recording id alone still identifies it. */
+    @Test
+    fun `falls back to the recording id alone without a release`() {
+        assertEquals("rec-1", trackRow(null, "rec-1").downloadKey(null, ALBUM))
     }
 
     /**
@@ -75,13 +108,17 @@ class DownloadKeyTest {
     @Test
     fun `distinguishes the same untagged song on two albums`() {
         val row = trackRow(null, null)
-        assertEquals("$ARTIST\u0000$ALBUM\u0000$TITLE", row.downloadKey(ALBUM))
-        assertNotEquals(row.downloadKey(ALBUM), row.downloadKey("A Different Album"))
+        assertEquals("$ARTIST\u0000$ALBUM\u0000$TITLE", row.downloadKey(RELEASE_ID, ALBUM))
+        assertNotEquals(
+            row.downloadKey(RELEASE_ID, ALBUM),
+            row.downloadKey(RELEASE_ID, "A Different Album"),
+        )
     }
 
     private companion object {
         const val TITLE = "Weird Fishes"
         const val ARTIST = "Radiohead"
         const val ALBUM = "In Rainbows"
+        const val RELEASE_ID = "rel-1"
     }
 }

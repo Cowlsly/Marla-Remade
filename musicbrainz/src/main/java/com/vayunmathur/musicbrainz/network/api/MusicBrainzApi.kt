@@ -8,7 +8,8 @@ import java.net.URLEncoder
 
 /**
  * The server has a catalogue to serve, but not yet: either the data pack was never
- * imported or an import is still running.
+ * imported or an import is still running. The server signals both as HTTP 503 with an
+ * `{"error":"not_ready"}` body, and reserves other statuses for genuine faults.
  *
  * Kept apart from an ordinary failure because it resolves on its own, so the UI can tell
  * the user to come back shortly instead of reporting a fault they cannot act on.
@@ -36,10 +37,16 @@ object MusicBrainzApi {
     )
 
     /**
-     * `coerceInputValues` is the load-bearing setting: every field in the wire models is
-     * declared with a default, but a default only applies to a key that is absent. An
-     * explicit `null` on one of the non-nullable fields would otherwise abort the whole
-     * decode, turning one unset field into a blank screen.
+     * `coerceInputValues` makes an explicit `null` fall back to the declared default instead
+     * of aborting the decode. Every field in the wire models has a default, but a default only
+     * applies to a key that is ABSENT - a `null` on one of the non-nullable fields would
+     * otherwise turn one unset value into a blank screen.
+     *
+     * The server guarantees it never emits `null` anywhere, enforced on its side by
+     * `skip_serializing_if` plus a test, so this is defence in depth rather than something the
+     * current contract relies on. It is here because the failure it prevents is invisible
+     * until it happens against the live server, and `MbTrack.id` - the field the catalogue
+     * stopped carrying - is the one most likely to arrive that way if the guarantee ever slips.
      *
      * Internal rather than private so `MusicBrainzModelsTest` decodes through the real
      * configuration instead of a copy of it.

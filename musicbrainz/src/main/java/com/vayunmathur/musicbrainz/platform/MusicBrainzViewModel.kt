@@ -91,7 +91,7 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                             album = state.title,
                             title = track.title,
                         ),
-                        download = downloads[track.downloadKey(state.title)],
+                        download = downloads[track.downloadKey(state.id, state.title)],
                     )
                 },
             )
