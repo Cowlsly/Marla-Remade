@@ -157,6 +157,11 @@ pub struct BuildStats {
     pub track_spill_bytes: u64,
     pub dense_map_bytes: u64,
     pub search_postings: u64,
+    /// Per table: (name, max row id seen, live row count). The flat `Vec<u32>` id
+    /// maps are sized to the MAX ID, not the live count, so the gap between them is
+    /// a direct multiplier on resident memory and the last unmeasured input to the
+    /// memory model.
+    pub max_ids: Vec<(&'static str, u64, u64)>,
 }
 
 impl BuildStats {
@@ -226,6 +231,13 @@ impl BuildStats {
                 self.string_pool_raw as f64 / self.string_pool_stored as f64
             }
         ));
+        s.push_str("id density (flat maps are sized to max id, not live count)\n");
+        for (name, max_id, live) in &self.max_ids {
+            let gap = if *live == 0 { 0.0 } else { (*max_id + 1) as f64 / *live as f64 };
+            s.push_str(&format!(
+                "  {name:<24} max id {max_id:>11}  live {live:>11}  gap {gap:>5.2}x\n"
+            ));
+        }
         s.push_str("build cost\n");
         s.push_str(&format!("  {:<38} {:>12}\n", "search postings", self.search_postings));
         s.push_str(&format!(
@@ -275,6 +287,15 @@ impl DenseMap {
 
     fn bytes(&self) -> u64 {
         (self.v.len() * 4) as u64
+    }
+
+    /// The largest primary key seen, which is what the allocation is sized to.
+    fn max_id(&self) -> u64 {
+        self.v.len().saturating_sub(1) as u64
+    }
+
+    fn live(&self) -> u64 {
+        self.v.iter().filter(|&&v| v != pack::NONE).count() as u64
     }
 }
 
@@ -1383,6 +1404,18 @@ pub fn build<W: Write + Seek>(
         .collect();
     st.dense_map_bytes =
         artist_idx.bytes() + rg_idx.bytes() + release_idx.bytes() + medium_idx.bytes();
+    st.max_ids = vec![
+        ("artist", artist_idx.max_id(), artist_idx.live()),
+        ("artist_credit", credit_count.saturating_sub(1) as u64, credit_count as u64),
+        ("release_group", rg_idx.max_id(), rg_idx.live()),
+        ("release", release_idx.max_id(), release_idx.live()),
+        ("medium", medium_idx.max_id(), medium_idx.live()),
+        (
+            "recording",
+            rec_present.len().saturating_sub(1) as u64,
+            rec_present.iter().filter(|&&p| p).count() as u64,
+        ),
+    ];
     st.total_bytes = w.finish()?;
     Ok(st)
 }

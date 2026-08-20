@@ -437,6 +437,18 @@ fn report_measures_the_ratios_the_design_doc_only_estimated() {
     ] {
         assert!(built.report.contains(needle), "report is missing {needle}:\n{}", built.report);
     }
+    // The flat id maps are sized to max row id, not live count, so the gap between
+    // them is a direct multiplier on resident memory and has to be reported.
+    assert!(built.report.contains("id density"), "report is missing id density:\n{}", built.report);
+    for table in ["artist", "artist_credit", "release_group", "release", "medium", "recording"] {
+        assert!(
+            built.report.contains(&format!("{table:<24} max id")),
+            "report is missing the max id for {table}:\n{}",
+            built.report
+        );
+    }
+    // And the pool ratio, which is the whole justification for the zstd dependency.
+    assert!(built.report.contains("string pool"), "report is missing the pool ratio");
 }
 
 #[test]
