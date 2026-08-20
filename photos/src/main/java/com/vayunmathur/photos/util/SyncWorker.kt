@@ -34,6 +34,10 @@ import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.data.PhotoFace
 import com.vayunmathur.photos.data.PhotosRepository
 import com.vayunmathur.photos.data.VideoData
+import com.vayunmathur.photos.data.toJson
+import com.vayunmathur.photos.domain.MIN_OCR_DIM
+import com.vayunmathur.photos.domain.decodeForOcr
+import com.vayunmathur.photos.domain.toLayout
 import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import kotlinx.coroutines.CancellationException
@@ -384,11 +388,15 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
                 continue
             }
 
-            val text = try {
+            val result = try {
                 val bitmap = decodeForOcr(context, photo.uri.toUri())
                 if (bitmap != null) {
+                    // Boxes are stored relative to this bitmap, so read its size
+                    // before recycling it.
+                    val width = bitmap.width
+                    val height = bitmap.height
                     try {
-                        ocrEngine.recognize(bitmap)
+                        ocrEngine.recognizeDetailed(bitmap).toLayout(width, height)
                     } finally {
                         bitmap.recycle()
                     }
@@ -401,7 +409,12 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
             }
 
             // Store result and mark scanned regardless of outcome (mirrors faces).
-            repository.upsertAll(listOf(photo.copy(ocrText = text, ocrScanned = true)))
+            val text = result?.text
+            repository.upsertAll(listOf(photo.copy(
+                ocrText = text,
+                ocrBoxes = result?.takeIf { it.boxes.isNotEmpty() }?.toJson(),
+                ocrScanned = true,
+            )))
             Log.i("OCRWorker", "OCR for ${photo.id}: ${text?.take(50)?.replace("\n", " ")}")
 
             // Short pause between images keeps sustained CPU/battery use low.
@@ -415,31 +428,7 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
     }
 }
 
-/** Decode a downscaled software bitmap for OCR (long side capped at [OCR_DECODE_MAX]). */
-private fun decodeForOcr(context: Context, uri: Uri): Bitmap? {
-    return try {
-        val source = ImageDecoder.createSource(context.contentResolver, uri)
-        ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
-            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
-            decoder.isMutableRequired = false
-            val maxDim = maxOf(info.size.width, info.size.height)
-            if (maxDim > OCR_DECODE_MAX) {
-                val scale = OCR_DECODE_MAX.toFloat() / maxDim
-                decoder.setTargetSize(
-                    (info.size.width * scale).toInt().coerceAtLeast(1),
-                    (info.size.height * scale).toInt().coerceAtLeast(1),
-                )
-            }
-        }
-    } catch (e: Exception) {
-        Log.e("OCRWorker", "Failed to decode $uri for OCR", e)
-        null
-    }
-}
-
 private const val OCR_INTER_ITEM_DELAY_MS = 250L
-private const val MIN_OCR_DIM = 64
-private const val OCR_DECODE_MAX = 1280
 
 class ClipWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
 

@@ -48,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
@@ -91,7 +92,9 @@ import com.vayunmathur.library.ui.IconWallpaper
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.photos.R
 import com.vayunmathur.photos.Route
+import com.vayunmathur.photos.data.OcrLayout
 import com.vayunmathur.photos.data.Photo
+import com.vayunmathur.photos.domain.OcrBoxStore
 import com.vayunmathur.photos.util.GalleryViewModel
 import com.vayunmathur.photos.util.LiveWallpaperLauncher
 import com.vayunmathur.photos.util.PhotoMapViewModel
@@ -332,11 +335,26 @@ fun PhotoDetailView(
 
     // Reset zoom only when the page is fully scrolled out of view (offset >= 1.0)
     // This allows the "fadeOut" to happen while the image is still zoomed.
+    // Re-keying the OCR overlay is also how a stale text selection gets cleared:
+    // selection state lives inside SelectionContainer and isn't reachable from here.
+    var ocrClearToken by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         snapshotFlow { pageOffset }.filter { it >= 0.99f }.distinctUntilChanged().collect {
             if (updatedZoomState.scale > 1f) {
                 updatedOnZoomUpdate(ZoomState())
             }
+            ocrClearToken++
+        }
+    }
+
+    // Recognised text laid over the image so it can be selected. Loaded only for
+    // the settled page: the pager keeps a neighbour composed either side, and an
+    // off-screen SelectionContainer would compete for the long press.
+    var ocrLayout by remember(photo.id) { mutableStateOf<OcrLayout?>(null) }
+    val canHaveOcrText = photo.videoData == null && !photo.isGif
+    LaunchedEffect(photo.id, isSettled, canHaveOcrText) {
+        if (isSettled && canHaveOcrText) {
+            ocrLayout = OcrBoxStore.layoutFor(context, photo)
         }
     }
 
@@ -427,18 +445,21 @@ fun PhotoDetailView(
                                 }
                             }
     ) {
+        // Shared by the image and the OCR text overlay so the two can't drift apart.
+        val zoomModifier =
+                Modifier.graphicsLayer {
+                    scaleX = currentZoom.scale
+                    scaleY = currentZoom.scale
+                    translationX = currentZoom.offset.x
+                    translationY = currentZoom.offset.y
+                }
         if (photo.videoData == null) {
             val imageModifier =
                     Modifier.fillMaxSize()
                             .onGloballyPositioned { layoutCoordinates ->
                                 size = layoutCoordinates.size
                             }
-                            .graphicsLayer {
-                                scaleX = currentZoom.scale
-                                scaleY = currentZoom.scale
-                                translationX = currentZoom.offset.x
-                                translationY = currentZoom.offset.y
-                            }
+                            .then(zoomModifier)
             if (photo.isGif) {
                 AnimatedImage(
                         uri = photo.uri.toUri(),
@@ -463,16 +484,22 @@ fun PhotoDetailView(
                     modifier =
                             Modifier.fillMaxSize()
                                     .onGloballyPositioned { size = it.size }
-                                    .graphicsLayer {
-                                        scaleX = currentZoom.scale
-                                        scaleY = currentZoom.scale
-                                        translationX = currentZoom.offset.x
-                                        translationY = currentZoom.offset.y
-                                    },
+                                    .then(zoomModifier),
                     uri = photo.uri.toUri(),
                     isMetadataVisible = isMetadataVisible,
                     isSettledPage = isSettled
             )
+        }
+
+        ocrLayout?.takeIf { isSettled && size != IntSize.Zero }?.let { layout ->
+            key(ocrClearToken) {
+                OcrTextLayer(
+                        layout = layout,
+                        containerSize = size,
+                        showOutlines = isMetadataVisible,
+                        modifier = Modifier.fillMaxSize().then(zoomModifier)
+                )
+            }
         }
 
         AnimatedVisibility(

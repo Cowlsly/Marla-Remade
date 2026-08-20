@@ -73,6 +73,11 @@ data class Photo(
     // MediaStore MIME_TYPE. Null only on rows written before the column existed,
     // which the next sync backfills.
     val mimeType: String? = null,
+    // The same OCR result as [ocrText] but with per-line geometry, serialised as
+    // an [OcrLayout] JSON blob, so the viewer can lay an invisible selectable
+    // text layer over the image. Null for videos, for photos with no text, and
+    // for rows OCR'd before this column existed (the viewer backfills those).
+    val ocrBoxes: String? = null,
 ) : DatabaseItem {
     /** True for an animated image, which plays rather than showing a single frame. */
     val isGif: Boolean get() = mimeType.equals("image/gif", ignoreCase = true)

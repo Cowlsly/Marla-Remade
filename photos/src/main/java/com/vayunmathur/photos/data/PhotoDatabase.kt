@@ -11,10 +11,12 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface PhotoDao {
-    // Excludes the heavy clipEmbedding BLOB and ocrText, which the gallery/photo
-    // UI never reads, so the first emission on cold start is fast (loading those
-    // for a large library is what left the grid blank). Semantic search reads
-    // embeddings via getClipEmbeddings(); OCR text is read via getAll().
+    // Excludes the heavy clipEmbedding BLOB, ocrText and ocrBoxes, which the
+    // gallery/photo UI never reads, so the first emission on cold start is fast
+    // (loading those for a large library is what left the grid blank). Semantic
+    // search reads embeddings via getClipEmbeddings(); OCR text is read via
+    // getAll(); the viewer's selectable-text overlay reads geometry by id via
+    // getOcrBoxes(), because Photos from this flow always have ocrBoxes == null.
     //
     // ORDER BY date DESC is served by index_Photo_date, so SQLite returns rows
     // newest-first on its own background executor. Every consumer (gallery grid,
@@ -100,6 +102,13 @@ interface PhotoDao {
      */
     @Query("SELECT count(*) FROM Photo WHERE mimeType IS NULL")
     suspend fun countMissingMimeType(): Int
+
+    /** A photo's serialised OCR geometry; NULL if never stored (see [Photo.ocrBoxes]). */
+    @Query("SELECT ocrBoxes FROM Photo WHERE id = :id")
+    suspend fun getOcrBoxes(id: Long): String?
+
+    @Query("UPDATE Photo SET ocrBoxes = :json WHERE id = :id")
+    suspend fun setOcrBoxes(id: Long, json: String?)
 }
 
 /** Lightweight projection of a photo's CLIP embedding for in-memory search. */
@@ -108,13 +117,13 @@ data class PhotoEmbedding(
     val clipEmbedding: ByteArray,
 )
 
-@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 13, exportSchema = false)
+@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 14, exportSchema = false)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     abstract fun faceDao(): FaceDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13)
+        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14)
     }
 }
 
@@ -216,4 +225,12 @@ val MIGRATION_12_13 = Migration(12, 13) {
     // Existing rows stay NULL until the next sync backfills them; see
     // PhotoDao.countMissingMimeType.
     it.execSQL("ALTER TABLE Photo ADD COLUMN mimeType TEXT")
+}
+
+val MIGRATION_13_14 = Migration(13, 14) {
+    // Add per-line OCR geometry so the viewer can overlay selectable text.
+    // Deliberately no `UPDATE Photo SET ocrScanned = 0`: re-running OCR over a
+    // whole library is expensive, so already-scanned rows stay NULL and the
+    // viewer fills them in one photo at a time as they're opened.
+    it.execSQL("ALTER TABLE Photo ADD COLUMN ocrBoxes TEXT")
 }

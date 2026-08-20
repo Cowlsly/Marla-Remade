@@ -48,6 +48,8 @@ class PhotosRepository private constructor(context: Context) :
     suspend fun resetClipScanned() = photoDao.resetClipScanned()
     suspend fun resetFaceScanned() = photoDao.resetFaceScanned()
     suspend fun countMissingMimeType(): Int = photoDao.countMissingMimeType()
+    suspend fun getOcrBoxes(id: Long): String? = photoDao.getOcrBoxes(id)
+    suspend fun setOcrBoxes(id: Long, json: String?) = photoDao.setOcrBoxes(id, json)
 
     // ------------------------------------------------------------------
     // FaceDao suspend wrappers
