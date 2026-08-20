@@ -1,3 +1,44 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="preview">Eelvaade</string>
+    <string name="note_type_standard">Standardne</string>
+    <string name="add">Lisa</string>
+    <string name="cancel">Katkesta</string>
+    <string name="save">Salvesta</string>
+    <string name="speak">Räägi</string>
+    <string name="nav_settings">Seadistused</string>
+    <string name="app_name">Sähvikud</string>
+    <string name="nav_decks">Pakid</string>
+    <string name="nav_stats">Statistika</string>
+    <string name="new_deck">Uus pakk</string>
+    <string name="deck_name">Paki nimi</string>
+    <string name="deck_summary">Tähtajaga %1$d · uusi %2$d · kokku %3$d</string>
+    <string name="no_decks">Sähvikute pakke veel pole</string>
+    <string name="no_decks_hint">Oma esimese paki lisamiseks klõpsa + ikooni</string>
+    <string name="delete">Kustuta</string>
+    <string name="delete_deck_message">Kas kustutad „%1$s“ paki koos tema kõikide sähvikutega?</string>
+    <string name="study">Alusta õppimist</string>
+    <string name="no_cards">Ühtegi sähvikut veel pole</string>
+    <string name="no_cards_hint">Sähviku lisamiseks klõpsa + ikooni või impordi CSV-failist</string>
+    <string name="search_cards">Otsi sähvikuid</string>
+    <string name="share_deck">Jaga sähvikupakki</string>
+    <string name="new_card">Uus sähvik</string>
+    <string name="edit_card">Muuda sähvikut</string>
+    <string name="front">Esikülg</string>
+    <string name="back">Tagakülg</string>
+    <string name="tags">Sildid</string>
+    <string name="note_type">Märkme tüüp</string>
+    <string name="deck">Sähvikupakk</string>
+    <string name="card_count_badge">%1$d sähvikut</string>
+    <string name="manage_note_types">Halda märkme tüüpe</string>
+    <string name="new_note_type">Uue märkme tüüp</string>
+    <string name="edit_note_type">Muuda märkme tüüpi</string>
+    <string name="name">Nimi</string>
+    <string name="fields">Väljad</string>
+    <string name="templates">Mallid</string>
+    <string name="add_field">Lisa väli</string>
+    <string name="add_template">Lisa mall</string>
+    <string name="template_name">Malli nimi</string>
+    <string name="template_front">Esikülje mall</string>
+    <string name="template_back">Tagakülje mall</string>
 </resources>
