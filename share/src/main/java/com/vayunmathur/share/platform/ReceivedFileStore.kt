@@ -128,6 +128,15 @@ class ReceivedFileStore(private val context: Context) {
     }
 
     companion object {
+        /**
+         * What an unrecognised extension resolves to, and what the protocol layer substitutes
+         * for a `FileMetadata.mime_type` the peer left empty.
+         *
+         * Callers deciding what a file *is* must treat it as "unknown" rather than as a type,
+         * because a GMS peer's attachments routinely arrive carrying nothing else.
+         */
+        const val GENERIC_MIME_TYPE = "application/octet-stream"
+
         /** MIME type for [file] from its extension, for the share chooser. */
         fun mimeTypeOf(file: File): String = mimeTypeOf(file.name)
 
@@ -141,7 +150,7 @@ class ReceivedFileStore(private val context: Context) {
         fun mimeTypeOf(name: String): String {
             val ext = name.substringAfterLast('.', "").lowercase()
             return MimeTypeMap.getSingleton().getMimeTypeFromExtension(ext)
-                ?: "application/octet-stream"
+                ?: GENERIC_MIME_TYPE
         }
 
         /** `report.pdf` -> `report_1.pdf` when the name is taken. */

@@ -4,6 +4,8 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.ImageDecoder
 import android.net.Uri
 import android.os.Build
 import android.util.Log
@@ -18,13 +20,16 @@ import com.vayunmathur.share.domain.protocol.ShareState
 import com.vayunmathur.share.network.transport.Connection
 import com.vayunmathur.share.network.transport.TcpTransport
 import com.vayunmathur.share.platform.ReceivedFile
+import com.vayunmathur.share.platform.ReceivedFileStore
 import com.vayunmathur.share.platform.transfer.ShareTransferService
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 private const val TAG = "ShareNotifier"
 
@@ -63,6 +68,15 @@ private const val REQUEST_TIMEOUT_MS = 60_000L
 
 /** Android 16 Live Updates; below this a plain determinate bar says the same thing. */
 private const val PROGRESS_STYLE_SDK = 36
+
+/**
+ * Longest edge of the preview bitmap in a received-image notification.
+ *
+ * A notification travels to the system by Binder, so the bitmap it carries has to stay small:
+ * a full-resolution photo is both a `TransactionTooLargeException` waiting to happen and a
+ * pointless allocation, since `BigPictureStyle` never renders more than a strip of it.
+ */
+private const val MAX_PREVIEW_PX = 1024
 
 /**
  * Request codes reserved per notification, so Share and Save cannot collide.
@@ -145,18 +159,18 @@ class ShareReceiveNotifier(
     /**
      * One notification lifecycle for one connection.
      *
-     * `peerName` and `expectedTotalBytes` are read at post time rather than combined: both are
-     * set once, before the state they matter for, so folding them into the `combine` would only
-     * add emissions that change nothing.
+     * `peerName`, `expectedTotalBytes` and `pendingFiles` are read at post time rather than
+     * combined: all three are set before the state they matter for, so folding them into the
+     * `combine` would only add emissions that change nothing — and an emission ordered ahead
+     * of the one that carries the file list reported an incoming transfer of no files at all.
      */
     private suspend fun observe(conn: Connection) {
         val gate = PostGate()
         combine(
             conn.state,
-            conn.pendingFiles,
             conn.receivedFiles,
             conn.bytesReceived,
-        ) { state, pending, received, bytes -> Snapshot(state, pending.size, received, bytes) }
+        ) { state, received, bytes -> Snapshot(state, received, bytes) }
             .conflate()
             .collect { snap ->
                 val kind = kindOf(snap.state)
@@ -170,7 +184,6 @@ class ShareReceiveNotifier(
 
     private class Snapshot(
         val state: ShareState,
-        val fileCount: Int,
         val received: List<ReceivedFile>,
         val bytes: Long,
     )
@@ -203,11 +216,11 @@ class ShareReceiveNotifier(
         ids.getOrPut(handle) { nextId++ }
     }
 
-    private fun post(conn: Connection, kind: Kind, snap: Snapshot, percent: Int) {
+    private suspend fun post(conn: Connection, kind: Kind, snap: Snapshot, percent: Int) {
         val handle = conn.sessionHandle
         val id = idFor(handle)
         val notification = when (kind) {
-            Kind.Request -> requestNotification(conn, id, snap.fileCount)
+            Kind.Request -> requestNotification(conn, id)
             Kind.Progress -> progressNotification(conn, id, snap, percent)
             Kind.Done -> doneNotification(conn, id, snap.received)
             Kind.Failed -> failedNotification(conn.error.value ?: appContext.getString(R.string.share_transfer_failed))
@@ -238,10 +251,18 @@ class ShareReceiveNotifier(
         .setSmallIcon(R.drawable.ic_tile_share)
         .setGroup(GROUP_KEY)
 
-    private fun requestNotification(conn: Connection, id: Int, fileCount: Int) =
-        base(CHANNEL_REQUESTS)
+    private fun requestNotification(conn: Connection, id: Int): android.app.Notification {
+        // A count of zero is a count we do not have: an announcement of text or a link carries
+        // no file metadata at all, so say something true instead of promising no files.
+        val fileCount = conn.pendingFiles.value.size
+        val text = if (fileCount > 0) {
+            appContext.getString(R.string.share_wants_to_send, fileCount)
+        } else {
+            appContext.getString(R.string.share_wants_to_send_unknown)
+        }
+        return base(CHANNEL_REQUESTS)
             .setContentTitle(conn.displayName)
-            .setContentText(appContext.getString(R.string.share_wants_to_send, fileCount))
+            .setContentText(text)
             .setCategory(NotificationCompat.CATEGORY_SOCIAL)
             .setOngoing(true)
             .setTimeoutAfter(REQUEST_TIMEOUT_MS)
@@ -256,6 +277,7 @@ class ShareReceiveNotifier(
                 sessionAction(ShareTransferService.ACTION_REJECT, conn.sessionHandle, id),
             )
             .build()
+    }
 
     private fun progressNotification(conn: Connection, id: Int, snap: Snapshot, percent: Int): android.app.Notification {
         val total = conn.expectedTotalBytes.value
@@ -288,11 +310,21 @@ class ShareReceiveNotifier(
         return builder.build()
     }
 
-    private fun doneNotification(conn: Connection, id: Int, received: List<ReceivedFile>): android.app.Notification {
+    private suspend fun doneNotification(conn: Connection, id: Int, received: List<ReceivedFile>): android.app.Notification {
         val builder = base(CHANNEL_TRANSFERS)
             .setContentTitle(conn.displayName)
             .setContentText(appContext.getString(R.string.share_received_count, received.size))
             .setAutoCancel(true)
+        previewBitmap(received)?.let { preview ->
+            // `bigLargeIcon(null)` so expanding drops the thumbnail instead of showing the same
+            // image twice; collapsed, the large icon is the only preview there is.
+            builder.setLargeIcon(preview)
+            builder.setStyle(
+                NotificationCompat.BigPictureStyle()
+                    .bigPicture(preview)
+                    .bigLargeIcon(null as Bitmap?)
+            )
+        }
         if (received.isNotEmpty()) {
             // URIs, not the handle: by the time this is tapped the session is gone.
             val uris = received.map { it.uri }
@@ -309,6 +341,56 @@ class ShareReceiveNotifier(
             )
         }
         return builder.build()
+    }
+
+    /**
+     * A downscaled preview of the first received image, or null if there is none to show.
+     *
+     * Decoded straight to [MAX_PREVIEW_PX] rather than loaded and then scaled, so a large photo
+     * never exists at full size in this process. Any failure — an unsupported codec, a truncated
+     * file, a type that only claims to be an image — falls back to the plain notification, which
+     * still names the file and offers Share and Save.
+     */
+    private suspend fun previewBitmap(received: List<ReceivedFile>): Bitmap? =
+        withContext(Dispatchers.IO) {
+            received.filter(::couldBeImage).firstNotNullOfOrNull(::decodePreview)
+        }
+
+    /**
+     * Whether [file] is worth handing to [ImageDecoder].
+     *
+     * Deliberately not `mimeType.startsWith("image/")`: a GMS peer announces no MIME type for
+     * its attachments and names their payloads without one either, so the file arrives as
+     * [ReceivedFileStore.GENERIC_MIME_TYPE] with no extension to correct it, and gating on the
+     * type alone meant a photo from Quick Share never showed a preview. An absence of evidence
+     * is treated as a maybe and settled by the decode; a type that positively says otherwise —
+     * a video, a PDF — is not decoded at all.
+     */
+    private fun couldBeImage(file: ReceivedFile): Boolean {
+        if (file.mimeType.startsWith("image/")) return true
+        val byExtension = ReceivedFileStore.mimeTypeOf(file.name)
+        if (byExtension.startsWith("image/")) return true
+        return file.mimeType == ReceivedFileStore.GENERIC_MIME_TYPE &&
+            byExtension == ReceivedFileStore.GENERIC_MIME_TYPE
+    }
+
+    private fun decodePreview(image: ReceivedFile): Bitmap? = try {
+        val source = ImageDecoder.createSource(appContext.contentResolver, image.uri)
+        ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
+            val longest = maxOf(info.size.width, info.size.height)
+            if (longest > MAX_PREVIEW_PX) {
+                val ratio = longest.toFloat() / MAX_PREVIEW_PX
+                decoder.setTargetSize(
+                    (info.size.width / ratio).toInt().coerceAtLeast(1),
+                    (info.size.height / ratio).toInt().coerceAtLeast(1),
+                )
+            }
+            // A hardware bitmap cannot be written into a Notification's parcel.
+            decoder.allocator = ImageDecoder.ALLOCATOR_SOFTWARE
+        }
+    } catch (e: Exception) {
+        Log.w(TAG, "cannot decode preview for ${image.name}", e)
+        null
     }
 
     private fun failedNotification(reason: String) = base(CHANNEL_TRANSFERS)

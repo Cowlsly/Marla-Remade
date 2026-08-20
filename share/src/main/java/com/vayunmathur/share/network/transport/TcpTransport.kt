@@ -324,10 +324,13 @@ class TcpTransport(
             // encryption overhead and keep-alives, so a percentage built on them overshoots.
             conn.bytesReceived.value += chunk.body.size
             val finished = receivedStore.append(session.handle, chunk) ?: continue
+            // The generic type counts as no answer: Rust substitutes it for an empty
+            // `FileMetadata.mime_type`, which is what a GMS peer announces, and taking it at
+            // face value left the extension fallback below unreachable.
             val announcedMime = conn.pendingFiles.value
                 .firstOrNull { it.name == chunk.name }
                 ?.mimeType
-                ?.takeIf { it.isNotBlank() }
+                ?.takeIf { it.isNotBlank() && it != ReceivedFileStore.GENERIC_MIME_TYPE }
             conn.receivedFiles.value += ReceivedFile(
                 name = finished.name,
                 sizeBytes = finished.length(),
@@ -366,14 +369,16 @@ class TcpTransport(
 
     private fun Connection.updateStateFromSession() {
         val polled = session.state
-        state.value = polled
         if (peerName.value == null) session.peerName?.let { peerName.value = it }
-        // Pending files may become available asynchronously once Introduction decodes.
+        // Announced before the state that makes them worth showing, deliberately: a collector
+        // watching `state` reacts to `AwaitingAccept` the moment it is published, and one that
+        // saw an empty file list at that instant reported a transfer of no files.
         if (polled == ShareState.AwaitingAccept || polled == ShareState.Transferring) {
             val files = session.pendingFiles
             pendingFiles.value = files
             if (incoming) expectedTotalBytes.value = files.sumOf { it.sizeBytes }
         }
+        state.value = polled
         if (polled == ShareState.Failed) {
             if (error.value == null) error.value = session.failureReason ?: "Transfer failed"
             Log.w(TAG, "session ${session.handle} failed: ${error.value}\n${session.trace}")

@@ -16,6 +16,7 @@
     <string name="share_channel_transfers_name">Transfers</string>
     <string name="share_channel_transfers_desc">Progress and results of nearby file transfers</string>
     <string name="share_wants_to_send">Wants to send %1$d file(s)</string>
+    <string name="share_wants_to_send_unknown">Wants to send you something</string>
     <string name="share_accept">Accept</string>
     <string name="share_decline">Decline</string>
     <string name="share_receiving">Receiving…</string>
