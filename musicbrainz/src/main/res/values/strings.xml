@@ -85,30 +85,12 @@
         <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> song found</item>
         <item quantity="other"><xliff:g id="count" example="428">%1$d</xliff:g> songs found</item>
     </plurals>
-    <!-- Settings row: saves album artwork inside downloaded files. Noun. -->
-    <string name="embed_cover_art">Album art</string>
-    <!-- Settings row: explanation of the album art setting. -->
-    <string name="embed_cover_art_description">Save cover art inside downloaded songs.</string>
-    <!-- Settings row: saves lyrics inside downloaded files. Noun, plural. -->
-    <string name="fetch_lyrics">Lyrics</string>
-    <!-- Settings row: explanation of the lyrics setting. -->
-    <string name="fetch_lyrics_description">Look up synced lyrics and save them with the song.</string>
     <!-- Settings row: picks where downloaded audio is fetched from. Noun. -->
     <string name="download_source">Download from</string>
     <!-- Download source: YouTube. Brand name, do not translate. -->
     <string name="download_source_youtube" translatable="false">YouTube</string>
     <!-- Download source: Tidal. Brand name, do not translate. -->
     <string name="download_source_tidal" translatable="false">Tidal</string>
-    <!-- Settings row: picks how good the audio Tidal is asked for should be. Noun. -->
-    <string name="tidal_quality">Audio quality</string>
-    <!-- Audio quality: smallest files. Adjective. -->
-    <string name="tidal_quality_low">Low</string>
-    <!-- Audio quality: everyday listening. Adjective. -->
-    <string name="tidal_quality_normal">Normal</string>
-    <!-- Audio quality: lossless CD quality. Adjective. -->
-    <string name="tidal_quality_high">High</string>
-    <!-- Audio quality: best Tidal offers. Adjective. -->
-    <string name="tidal_quality_max">Max</string>
     <!-- Settings section: the user's Tidal subscription. -->
     <string name="tidal_account">Tidal account</string>
     <!-- Settings row: shown when no Tidal account is connected. -->

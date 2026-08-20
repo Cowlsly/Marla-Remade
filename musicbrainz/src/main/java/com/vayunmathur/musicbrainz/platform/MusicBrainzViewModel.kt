@@ -98,36 +98,22 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
     val downloads: StateFlow<Map<String, com.vayunmathur.musicbrainz.platform.download.DownloadItem>> =
         DownloadQueue.items
 
-    /**
-     * The Tidal prefs, folded into one flow first: [combine]'s largest typed overload takes
-     * five sources and the folder/library group already fills it.
-     */
-    private val tidalSettings = combine(
-        prefs.downloadSource,
-        prefs.tidalQuality,
-        prefs.tidalAccount,
-    ) { source, quality, account ->
-        // Falls back to the user id so an account whose payload carried no username still
-        // reads as signed in, and so its sign-out row stays reachable.
-        Triple(source, quality, account?.let { it.username.ifBlank { it.userId } })
-    }
-
     val settings: StateFlow<SettingsUiState> = combine(
         prefs.musicFolder,
-        prefs.fetchLyrics,
-        prefs.embedCoverArt,
+        prefs.downloadSource,
+        prefs.tidalAccount,
         LibraryIndex.scanning,
         LibraryIndex.snapshot,
-    ) { folder, lyrics, cover, scanning, library ->
+    ) { folder, source, account, scanning, library ->
         SettingsUiState(
             folderName = folder?.let { readableFolderName(it) },
             scanning = scanning,
             indexedTracks = library.trackCount,
-            fetchLyrics = lyrics,
-            embedCoverArt = cover,
+            downloadSource = source,
+            // Falls back to the user id so an account whose payload carried no username still
+            // reads as signed in, and so its sign-out row stays reachable.
+            tidalUsername = account?.let { it.username.ifBlank { it.userId } },
         )
-    }.combine(tidalSettings) { state, (source, quality, username) ->
-        state.copy(downloadSource = source, tidalQuality = quality, tidalUsername = username)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), SettingsUiState())
 
     init {
@@ -381,20 +367,8 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         viewModelScope.launch { LibraryScanner.scan(getApplication()) }
     }
 
-    override fun setFetchLyrics(value: Boolean) {
-        viewModelScope.launch { prefs.setFetchLyrics(value) }
-    }
-
-    override fun setEmbedCoverArt(value: Boolean) {
-        viewModelScope.launch { prefs.setEmbedCoverArt(value) }
-    }
-
     override fun setDownloadSource(source: DownloadSource) {
         viewModelScope.launch { prefs.setDownloadSource(source) }
-    }
-
-    override fun setTidalQuality(quality: TidalQuality) {
-        viewModelScope.launch { prefs.setTidalQuality(quality) }
     }
 
     override fun signOutOfTidal() {

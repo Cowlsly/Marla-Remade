@@ -3,7 +3,6 @@ package com.vayunmathur.musicbrainz.platform
 import android.content.Context
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -32,15 +31,11 @@ data class TidalAccount(
     val username: String,
 )
 
-/** App settings: where downloads go, and whether lyrics are fetched alongside them. */
+/** App settings: where downloads go, and which source they come from. */
 class MusicBrainzPrefs(context: Context) {
     private val appContext = context.applicationContext
 
     val musicFolder: Flow<String?> = appContext.musicBrainzDataStore.data.map { it[FOLDER_URI] }
-    val fetchLyrics: Flow<Boolean> =
-        appContext.musicBrainzDataStore.data.map { it[FETCH_LYRICS] ?: true }
-    val embedCoverArt: Flow<Boolean> =
-        appContext.musicBrainzDataStore.data.map { it[EMBED_COVER] ?: true }
 
     /** The signed-in Tidal account, or null when signed out. */
     val tidalAccount: Flow<TidalAccount?> =
@@ -48,10 +43,6 @@ class MusicBrainzPrefs(context: Context) {
 
     val downloadSource: Flow<DownloadSource> = appContext.musicBrainzDataStore.data.map {
         it[DOWNLOAD_SOURCE].toEnum(DownloadSource.entries, DownloadSource.YouTube)
-    }
-
-    val tidalQuality: Flow<TidalQuality> = appContext.musicBrainzDataStore.data.map {
-        it[TIDAL_QUALITY].toEnum(TidalQuality.entries, TidalQuality.High)
     }
 
     suspend fun musicFolderUri(): String? = musicFolder.first()
@@ -62,14 +53,6 @@ class MusicBrainzPrefs(context: Context) {
 
     suspend fun clearMusicFolder() {
         appContext.musicBrainzDataStore.edit { it.remove(FOLDER_URI) }
-    }
-
-    suspend fun setFetchLyrics(value: Boolean) {
-        appContext.musicBrainzDataStore.edit { it[FETCH_LYRICS] = value }
-    }
-
-    suspend fun setEmbedCoverArt(value: Boolean) {
-        appContext.musicBrainzDataStore.edit { it[EMBED_COVER] = value }
     }
 
     suspend fun setTidalAccount(account: TidalAccount) {
@@ -103,17 +86,10 @@ class MusicBrainzPrefs(context: Context) {
         appContext.musicBrainzDataStore.edit { it[DOWNLOAD_SOURCE] = source.name }
     }
 
-    suspend fun setTidalQuality(quality: TidalQuality) {
-        appContext.musicBrainzDataStore.edit { it[TIDAL_QUALITY] = quality.name }
-    }
-
     private companion object {
         val FOLDER_URI = stringPreferencesKey("music_folder_uri")
-        val FETCH_LYRICS = booleanPreferencesKey("fetch_lyrics")
-        val EMBED_COVER = booleanPreferencesKey("embed_cover_art")
         val TIDAL_ACCOUNT = stringPreferencesKey("tidal_account")
         val DOWNLOAD_SOURCE = stringPreferencesKey("download_source")
-        val TIDAL_QUALITY = stringPreferencesKey("tidal_quality")
 
         val json = Json { ignoreUnknownKeys = true }
 

@@ -111,10 +111,7 @@ data class SettingsUiState(
     val folderName: String? = null,
     val scanning: Boolean = false,
     val indexedTracks: Int = 0,
-    val fetchLyrics: Boolean = true,
-    val embedCoverArt: Boolean = true,
     val downloadSource: DownloadSource = DownloadSource.YouTube,
-    val tidalQuality: TidalQuality = TidalQuality.High,
     /** The signed-in Tidal user, or null when signed out. */
     val tidalUsername: String? = null,
 )
@@ -146,10 +143,7 @@ interface MusicBrainzActions {
 
     fun setMusicFolder(uri: String) {}
     fun rescanLibrary() {}
-    fun setFetchLyrics(value: Boolean) {}
-    fun setEmbedCoverArt(value: Boolean) {}
     fun setDownloadSource(source: DownloadSource) {}
-    fun setTidalQuality(quality: TidalQuality) {}
     fun signOutOfTidal() {}
 
     companion object {

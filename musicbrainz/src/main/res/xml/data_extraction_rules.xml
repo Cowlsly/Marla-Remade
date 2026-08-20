@@ -4,7 +4,7 @@
 
      Storage audit:
        file      datastore/musicbrainz.preferences_pb   Settings: music_folder_uri,
-                                                        fetch_lyrics, embed_cover_art.
+                                                        download_source, tidal_account.
        database  musicbrainz-db                         Room, one LocalTrack table: the index
                                                         LibraryScanner builds by walking the
                                                         user's music folder. Rebuilt by a

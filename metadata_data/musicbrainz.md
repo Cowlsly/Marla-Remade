@@ -8,7 +8,8 @@ Features:
 - Browse an artist's full discography, every edition of an album, and its tracklist
 - See at a glance which songs you already have on your device
 - Download single songs or a whole album at once
-- Downloads are tagged with title, artist, album, track number, cover art and lyrics
+- Audio comes from YouTube, or from Tidal if you sign in to your account for better sources
+- Songs are saved as Opus, tagged with title, artist, album, track number, cover art and lyrics
 - Files are saved into a folder you choose, so any music player can see them
 
 Which songs you already own is worked out by reading the tags on the files in your music

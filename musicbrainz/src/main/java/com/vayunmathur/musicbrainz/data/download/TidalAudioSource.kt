@@ -5,9 +5,7 @@ import com.vayunmathur.musicbrainz.data.tidal.TidalSession
 import com.vayunmathur.musicbrainz.network.api.TidalApi
 import com.vayunmathur.musicbrainz.network.api.TidalTrack
 import com.vayunmathur.musicbrainz.platform.DownloadSource
-import com.vayunmathur.musicbrainz.platform.MusicBrainzPrefs
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
@@ -25,7 +23,6 @@ class TidalAudioSource(context: Context) : AudioSource {
 
     private val appContext = context.applicationContext
     private val session = TidalSession(appContext)
-    private val prefs = MusicBrainzPrefs(appContext)
 
     override suspend fun resolve(query: AudioQuery): ResolvedAudio? = withContext(Dispatchers.IO) {
         val token = session.accessToken() ?: return@withContext null
@@ -37,15 +34,7 @@ class TidalAudioSource(context: Context) : AudioSource {
         if (results.isEmpty()) return@withContext null
 
         val match = pick(results, query) ?: return@withContext null
-
-        val quality = prefs.tidalQuality.first()
-        val playback = runCatching {
-            TidalApi.playbackInfo(match.id, quality.apiValue, token, country)
-        }.getOrNull() ?: return@withContext null
-
-        val stream = runCatching {
-            TidalManifest.decode(playback.manifestMimeType, playback.manifest, playback.audioQuality)
-        }.getOrNull() ?: return@withContext null
+        val stream = bestStream(match.id, token, country) ?: return@withContext null
 
         ResolvedAudio(
             urls = stream.urls,
@@ -55,6 +44,34 @@ class TidalAudioSource(context: Context) : AudioSource {
             sourceTitle = match.title,
             source = id,
         )
+    }
+
+    /**
+     * Walks down the quality ladder until a stream comes back that can actually be decoded.
+     *
+     * There is no quality setting any more: everything is re-encoded to a fixed-bitrate Opus
+     * file, so the only thing worth asking for is the best stream available. Tidal already
+     * downgrades server-side when the subscription or the track cannot serve the ask and
+     * reports what it really returned, so the first rung usually succeeds. The ladder only
+     * matters when `playbackInfo` itself fails, or when the manifest that comes back is
+     * encrypted or DRM-protected and [TidalManifest] rejects it - a hi-res tier is the most
+     * likely to be protected, and dropping a rung is better than losing the download.
+     */
+    private suspend fun bestStream(trackId: Int, token: String, country: String): TidalStream? {
+        for (quality in QUALITY_LADDER) {
+            val playback = runCatching {
+                TidalApi.playbackInfo(trackId, quality, token, country)
+            }.getOrNull() ?: continue
+            val stream = runCatching {
+                TidalManifest.decode(
+                    playback.manifestMimeType,
+                    playback.manifest,
+                    playback.audioQuality,
+                )
+            }.getOrNull()
+            if (stream != null) return stream
+        }
+        return null
     }
 
     private fun searchQuery(query: AudioQuery): String = "${query.artist} ${query.title}".trim()
@@ -103,4 +120,9 @@ class TidalAudioSource(context: Context) : AudioSource {
         val albumMatch: Boolean,
         val index: Int,
     )
+
+    private companion object {
+        /** Tidal's own `audioquality` values, best first. */
+        val QUALITY_LADDER = listOf("HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW")
+    }
 }
