@@ -27,7 +27,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconDragHandle
-import com.vayunmathur.library.ui.BottomSheetScaffold
+import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
@@ -42,8 +42,7 @@ import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
-import com.vayunmathur.library.ui.rememberBottomSheetScaffoldState
-import com.vayunmathur.library.ui.rememberBottomSheetState
+import com.vayunmathur.library.ui.rememberFreeHeightSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -247,24 +246,17 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     val navProgress = (navState as? com.vayunmathur.maps.util.NavigationSessionManager.NavState.Navigating)?.progress
 
     // --- UI & BOTTOM SHEET STATE ---
-    var allowProgrammaticHide by retain { mutableStateOf(false) }
-
-    val scaffoldState = rememberBottomSheetScaffoldState(
-        rememberBottomSheetState(
-            initialValue = SheetValue.Hidden,
-            enabledValues = setOf(SheetValue.Hidden, SheetValue.PartiallyExpanded, SheetValue.Expanded),
-            confirmValueChange = {
-                it != SheetValue.Hidden || allowProgrammaticHide
-            }
-        )
-    )
+    // A free-height sheet: it rests wherever the user leaves it. `Hidden` is
+    // reachable only through `hide()` — the drag and fling paths floor at the peek —
+    // so no latch is needed to keep the user from dismissing it.
+    val sheetState = rememberFreeHeightSheetState(SheetValue.Hidden)
 
     LaunchedEffect(Unit) {
         // Restore-on-recompose: raise the sheet if something is already selected —
         // unless a deep link / auto-select is about to open the compact PANE instead
         // (handled by the pendingFocus effect below), so we don't full-expand first.
         if (selectedFeature != null && viewModel.pendingFocus.value == null) {
-            scaffoldState.bottomSheetState.expand()
+            sheetState.expand()
         }
     }
 
@@ -281,14 +273,12 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                 zoom = req.zoom ?: maxOf(camera.position.zoom, 14.0),
             )
         )
-        scaffoldState.bottomSheetState.partialExpand()
+        sheetState.partialExpand()
         viewModel.consumeFocus()
     }
 
     suspend fun hide() {
-        allowProgrammaticHide = true
-        scaffoldState.bottomSheetState.hide()
-        allowProgrammaticHide = false
+        sheetState.hide()
     }
 
     fun openSearch() {
@@ -384,11 +374,11 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         }
     }
 
-    BottomSheetScaffold({
-        Column(Modifier.padding(horizontal = 16.dp).padding(bottom = 48.dp, top = 8.dp)) {
+    FreeHeightBottomSheetScaffold({
+        Column(Modifier.padding(horizontal = 16.dp).padding(top = 8.dp)) {
             BottomSheetContent(viewModel, selectedFeature, { viewModel.set(it) }, route, selectedRouteType, { selectedRouteType = it }, inactiveNavigation, savedPlacesViewModel, transitViewModel, navState)
         }
-    }, Modifier, scaffoldState, 170.dp) { paddingValues ->
+    }, Modifier, sheetState, 170.dp) { paddingValues ->
         AppScaffold(
             title = {
                 // Search bar lives IN the top app bar (Google-Maps style).
@@ -537,7 +527,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         selectedFeature as SpecificFeature.Route
                                     )
                                     viewModel.set(pinHit)
-                                    scaffoldState.bottomSheetState.expand()
+                                    sheetState.expand()
                                     return@launch
                                 }
 
@@ -566,7 +556,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         selectedFeature as SpecificFeature.Route
                                     )
                                     viewModel.set(firstFeature)
-                                    scaffoldState.bottomSheetState.expand()
+                                    sheetState.expand()
                                     return@launch
                                 }
 
@@ -579,7 +569,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                             selectedFeature as SpecificFeature.Route
                                         )
                                         viewModel.set(place)
-                                        coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                        coroutineScope.launch { sheetState.expand() }
                                     }
                                 }
                             }
@@ -806,7 +796,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
                                 viewModel.set(SpecificFeature.Route(listOf(null, feature)))
                                 showParkingSheet = false
-                                coroutineScope.launch { scaffoldState.bottomSheetState.expand() }
+                                coroutineScope.launch { sheetState.expand() }
                             },
                             onNoteChange = { parkingViewModel.updateNote(it) },
                         )
