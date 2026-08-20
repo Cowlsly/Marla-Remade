@@ -63,4 +63,9 @@
     <string name="share_dismiss">Dismiss</string>
     <string name="share_unknown_state">Unknown state</string>
     <string name="share_nothing_selected">Pick files before choosing a device.</string>
+
+    <!-- Share-sheet popup -->
+    <string name="share_popup_title">Send to a nearby device</string>
+    <string name="share_popup_no_devices">No devices found yet. Keep the other device visible.</string>
+    <string name="share_popup_permission_needed">Nearby Share needs Bluetooth and Wi-Fi permissions to find nearby devices.</string>
 </resources>

@@ -237,7 +237,7 @@ fun DeviceRow(device: NearbyDevice, onTap: () -> Unit) {
  * and a native session handle, and Layoutlib can load neither.
  */
 @Composable
-private fun TransferCardHost(conn: Connection, onDisconnect: () -> Unit) {
+internal fun TransferCardHost(conn: Connection, onDisconnect: () -> Unit) {
     val state by conn.state.collectAsState()
     val error by conn.error.collectAsState()
     val sent by conn.bytesSent.collectAsState()

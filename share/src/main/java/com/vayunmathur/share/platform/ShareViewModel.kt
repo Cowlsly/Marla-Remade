@@ -202,7 +202,7 @@ class ShareViewModel(
         }
     }
 
-    /** Entry from MainActivity's share intent — handles ACTION_SEND / SEND_MULTIPLE. */
+    /** Entry from the share-sheet popup's intent — handles ACTION_SEND / SEND_MULTIPLE. */
     fun handleShareIntent(intent: Intent) {
         when (intent.action) {
             Intent.ACTION_SEND -> {

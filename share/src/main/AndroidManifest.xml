@@ -65,7 +65,23 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surface Share in the system share sheet (files, images, text). -->
+            <!-- Long-press on the Quick Settings tile. The tile's
+                 android.service.quicksettings.ACTIVITY meta-data names this activity, but the
+                 system only honours it if the target also declares this action. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+
+        <!-- The system share sheet's target. A bottom sheet over the sharing app rather than the
+             whole app: the files are already chosen, so only the device is left to pick.
+             configChanges matches MainActivity's so a rotation does not restart discovery. -->
+        <activity
+            android:name=".SharePopupActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="true"
+            android:theme="@style/Theme.SharePopup">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
