@@ -14,12 +14,19 @@ package com.vayunmathur.library.network
  *   ia*.us.archive.org, served on GoDaddy certs).
  * - EXTENDED: STANDARD + Microsoft RSA 2017, Apple Root G2/G3, Apple IST CA 2 G1 — for
  *   everysync (Google + Apple CalDAV) and messages non-Signal (Googleapis GTS + FB/DigiCert).
+ * - MUSICBRAINZ: STANDARD + GlobalSign Root R3. Tidal splits its audio CDN across two
+ *   roots — the `sp-*-cf.audio.tidal.com` hosts are Amazon (already in STANDARD) but the
+ *   `sp-*-fa.audio.tidal.com` hosts serve `*.audio.tidal.com` off GlobalSign, so which
+ *   CDN a playback manifest happens to name decides whether the download validates. Kept
+ *   as its own bundle rather than folded into STANDARD so the other STANDARD apps do not
+ *   silently gain a root only musicbrainz needs.
  * - SYSTEM: platform default; email/web/vpn dynamic hosts.
  */
 enum class TrustBundle {
     FIRST_PARTY,
     STANDARD,
     EXTENDED,
+    MUSICBRAINZ,
     SYSTEM,
     ;
 
@@ -52,6 +59,12 @@ enum class TrustBundle {
             "ca/apple-root-g2.der",
             "ca/apple-root-g3.der",
             "ca/apple-ist-ca2-g1.der",
+        )
+        // Tidal's api and its CloudFront audio hosts are Amazon-rooted and already covered by
+        // STANDARD, which is why sign-in and playback lookup work without this; only the
+        // Fastly-fronted `*.audio.tidal.com` certificate needs the GlobalSign root.
+        MUSICBRAINZ -> STANDARD.assetPaths() + listOf(
+            "ca/globalsign-root-r3.der",
         )
         SYSTEM -> emptyList()
     }
