@@ -95,18 +95,22 @@ class OggStreamWriterTest {
     private fun opusPacket(size: Int, fill: Int = 0x5A): ByteArray =
         ByteArray(size) { if (it == 0) 0xFC.toByte() else (fill + it).toByte() }
 
-    /** Builds a stream of [packets] 20 ms packets, as the transcoder does. */
+    /**
+     * Builds a stream of [packets] 20 ms packets, as the transcoder does.
+     *
+     * A granule position counts every sample a decoder produces, pre-skip included, because
+     * the pre-skip samples are the first ones it decodes and then discards.
+     */
     private fun stream(packets: Int, packetSize: Int = 640, channels: Int = 2): ByteArray {
         val writer = OggStreamWriter(serial)
-        val preSkip = OpusHead.DEFAULT_PRE_SKIP
-        writer.writeHeaderPacket(OpusHead.build(channels, preSkip, 48_000))
+        writer.writeHeaderPacket(OpusHead.build(channels, OpusHead.DEFAULT_PRE_SKIP, 48_000))
         writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
         var samples = 0L
         repeat(packets) {
             samples += 960
-            writer.writeAudioPacket(opusPacket(packetSize), preSkip + samples)
+            writer.writeAudioPacket(opusPacket(packetSize), samples)
         }
-        return writer.finish(preSkip + samples)
+        return writer.finish(samples)
     }
 
     // ------------------------------------------------------------------
@@ -162,13 +166,19 @@ class OggStreamWriterTest {
         val audio = pages.drop(2)
 
         var seen = 0
+        var previous = 0L
         for (page in audio) {
             seen += page.packets.size
             assertEquals(
-                OpusHead.DEFAULT_PRE_SKIP + seen * 960L,
+                seen * 960L,
                 page.granulePosition,
                 "granule position decides the duration a player reports",
             )
+            assertTrue(
+                page.granulePosition > previous,
+                "a granule position that goes backwards reads as a corrupt stream",
+            )
+            previous = page.granulePosition
         }
         assertEquals(packets, seen, "every packet must reach a page")
     }
@@ -215,6 +225,25 @@ class OggStreamWriterTest {
     }
 
     @Test
+    fun `lets the final position trim the encoder's padding`() {
+        // The encoder pads its last frame out to a whole 20 ms, so the last page reports the
+        // real length instead of the padded one and a decoder drops the difference. Reporting
+        // the padded length is how a track ends with a fraction of a second of silence.
+        val writer = OggStreamWriter(serial)
+        writer.writeHeaderPacket(OpusHead.build(2, OpusHead.DEFAULT_PRE_SKIP, 48_000))
+        writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
+        repeat(3) { writer.writeAudioPacket(opusPacket(640), (it + 1) * 960L) }
+        val trimmed = 2_400L
+        val pages = parse(writer.finish(trimmed))
+
+        assertEquals(trimmed, pages.last().granulePosition)
+        assertTrue(
+            pages.last().granulePosition < 3 * 960L,
+            "the reported length should be under what the packets decode to",
+        )
+    }
+
+    @Test
     fun `writes a stream the tagger can retag and the library can read`() {
         val tagged = assertNotNull(
             OggOpusTagger.tag(
@@ -243,7 +272,7 @@ class OggStreamWriterTest {
             assertTrue(page.checksumValid, "page $index has a bad CRC after retagging")
         }
         assertEquals(
-            50 * 960L + OpusHead.DEFAULT_PRE_SKIP,
+            50 * 960L,
             pages.last().granulePosition,
             "retagging must not change the stream's length",
         )

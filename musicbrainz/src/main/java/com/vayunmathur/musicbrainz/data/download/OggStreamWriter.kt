@@ -188,8 +188,9 @@ internal class OggStreamWriter(private val serialNumber: Int) {
     }
 
     /**
-     * Queues an audio packet. [granulePosition] is the stream position at the *end* of the
-     * packet, which is what Ogg records for the last packet finishing on a page.
+     * Queues an audio packet. [granulePosition] is the total number of samples a decoder gets
+     * out of the stream through the end of this packet, which is what Ogg records for the last
+     * packet finishing on a page.
      */
     fun writeAudioPacket(packet: ByteArray, granulePosition: Long) {
         val segments = OggPages.lacingFor(packet.size).size

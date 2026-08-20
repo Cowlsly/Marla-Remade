@@ -129,7 +129,10 @@ private class OpusPump(
     var encoder: MediaCodec? = null
         private set
 
-    private val info = MediaCodec.BufferInfo()
+    // One per codec: sharing a BufferInfo would work only because the loop happens to read
+    // each one before the other overwrites it, which is not a property worth relying on.
+    private val decoderInfo = MediaCodec.BufferInfo()
+    private val encoderInfo = MediaCodec.BufferInfo()
     private val queue = PcmQueue()
     private val writer = OggStreamWriter(Random.nextInt())
 
@@ -194,7 +197,14 @@ private class OpusPump(
     private fun feedDecoder(): Boolean {
         val index = decoder.dequeueInputBuffer(TIMEOUT_US)
         if (index < 0) return false
-        val buffer = decoder.getInputBuffer(index) ?: return false
+        val buffer = decoder.getInputBuffer(index)
+        if (buffer == null) {
+            // Hand the index straight back rather than dropping it: a buffer taken from the
+            // codec and never returned is gone for the rest of the run, and enough of them
+            // would leave the pump with nothing to queue into and no way to reach the end.
+            decoder.queueInputBuffer(index, 0, 0, 0, 0)
+            return false
+        }
         val size = extractor.readSampleData(buffer, 0)
         if (size < 0) {
             decoder.queueInputBuffer(index, 0, 0, 0, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
@@ -207,7 +217,7 @@ private class OpusPump(
 
     /** Drains one decoded buffer into the encoder's queue. Returns true at end of stream. */
     private fun drainDecoder(): Boolean {
-        val index = decoder.dequeueOutputBuffer(info, TIMEOUT_US)
+        val index = decoder.dequeueOutputBuffer(decoderInfo, TIMEOUT_US)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             configure(decoder.outputFormat)
             return false
@@ -215,17 +225,17 @@ private class OpusPump(
         if (index < 0) return false
 
         val buffer = decoder.getOutputBuffer(index)
-        if (buffer != null && info.size > 0) {
+        if (buffer != null && decoderInfo.size > 0) {
             // Some codecs deliver their first buffer before the format-changed event, so the
             // resampler is built on first use as well as on that event.
             if (resampler == null) configure(decoder.outputFormat)
-            buffer.position(info.offset)
-            buffer.limit(info.offset + info.size)
+            buffer.position(decoderInfo.offset)
+            buffer.limit(decoderInfo.offset + decoderInfo.size)
             resample(buffer)
         }
         decoder.releaseOutputBuffer(index, false)
 
-        if (info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
+        if (decoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0) {
             resampler?.flush()?.let { queuePcm(it, it.size) }
             return true
         }
@@ -299,7 +309,11 @@ private class OpusPump(
         if (queue.size < frameBytes) return
         val index = encoder.dequeueInputBuffer(TIMEOUT_US)
         if (index < 0) return
-        val buffer = encoder.getInputBuffer(index) ?: return
+        val buffer = encoder.getInputBuffer(index)
+        if (buffer == null) {
+            encoder.queueInputBuffer(index, 0, 0, presentationTimeUs(), 0)
+            return
+        }
         buffer.clear()
         // Only whole frames: half a frame queued would swap the channels of everything after
         // it, and the remainder is carried forward instead.
@@ -333,7 +347,7 @@ private class OpusPump(
 
     /** Returns true once the encoder has reported end of stream. */
     private fun drainEncoder(encoder: MediaCodec): Boolean {
-        val index = encoder.dequeueOutputBuffer(info, TIMEOUT_US)
+        val index = encoder.dequeueOutputBuffer(encoderInfo, TIMEOUT_US)
         if (index == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
             // Only if the format actually carries the header. Writing the fallback here
             // would lock it in before the codec-config buffer arrives with the real one.
@@ -343,21 +357,24 @@ private class OpusPump(
         if (index < 0) return false
 
         val buffer = encoder.getOutputBuffer(index)
-        if (buffer != null && info.size > 0) {
-            buffer.position(info.offset)
-            buffer.limit(info.offset + info.size)
-            val bytes = ByteArray(info.size)
+        if (buffer != null && encoderInfo.size > 0) {
+            buffer.position(encoderInfo.offset)
+            buffer.limit(encoderInfo.offset + encoderInfo.size)
+            val bytes = ByteArray(encoderInfo.size)
             buffer.get(bytes)
-            if (info.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
+            if (encoderInfo.flags and MediaCodec.BUFFER_FLAG_CODEC_CONFIG != 0) {
                 OpusHead.fromCodecConfig(bytes)?.let { writeHeaders(it) }
             } else {
                 writeHeaders(null)
+                // The granule position is the total samples a decoder gets out of the stream
+                // so far, which already counts the pre-skip: those are the first samples it
+                // decodes and then throws away, not extra ones on top.
                 encoded += OpusHead.packetSamples(bytes, bytes.size)
-                writer.writeAudioPacket(bytes, preSkip + encoded)
+                writer.writeAudioPacket(bytes, encoded)
             }
         }
         encoder.releaseOutputBuffer(index, false)
-        return info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
+        return encoderInfo.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
     }
 
     /**
