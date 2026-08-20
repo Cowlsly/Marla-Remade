@@ -315,10 +315,30 @@ pub fn pack_date(year: Option<i64>, month: Option<i64>, day: Option<i64>) -> u32
 
 // --- MBIDs ---
 
+/// Parse an MBID.
+///
+/// This is the ONE canonical parser — `location_share_server` should call it
+/// rather than writing a second one, because two parsers that disagree on case or
+/// on brace forms would return "not found" for a perfectly valid MBID.
+///
+/// Accepts: canonical hyphenated, bare 32-hex, any case, optional surrounding
+/// whitespace, and optional `{...}` or `urn:uuid:` wrappers, all of which appear
+/// in the wild. Rejects anything that is not exactly 32 hex digits once the
+/// permitted decoration is removed.
 pub fn parse_mbid(s: &str) -> Option<Mbid> {
+    let mut t = s.trim();
+    if let Some(rest) = t.strip_prefix('{') {
+        t = rest.strip_suffix('}')?;
+    }
+    for prefix in ["urn:uuid:", "URN:UUID:", "urn:UUID:"] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            t = rest;
+            break;
+        }
+    }
     let mut out = [0u8; 16];
     let mut nibble = 0usize;
-    for c in s.chars() {
+    for c in t.chars() {
         if c == '-' {
             continue;
         }
@@ -1050,6 +1070,31 @@ mod tests {
         assert_eq!(parse_mbid("not-a-mbid"), None);
         assert_eq!(parse_mbid(""), None);
         assert_eq!(parse_mbid("f27ec8db-af05-4f36-916e-3d57f91ecf5e-extra"), None);
+    }
+
+    #[test]
+    fn mbid_parses_the_forms_that_turn_up_in_the_wild() {
+        // One canonical parser, so the server cannot disagree with the pack about
+        // whether a valid MBID exists.
+        let m = parse_mbid("f27ec8db-af05-4f36-916e-3d57f91ecf5e").unwrap();
+        for variant in [
+            "  f27ec8db-af05-4f36-916e-3d57f91ecf5e  ",
+            "{f27ec8db-af05-4f36-916e-3d57f91ecf5e}",
+            "urn:uuid:f27ec8db-af05-4f36-916e-3d57f91ecf5e",
+            "URN:UUID:F27EC8DB-AF05-4F36-916E-3D57F91ECF5E",
+            "F27ec8Db-aF05-4f36-916E-3d57F91EcF5e",
+        ] {
+            assert_eq!(parse_mbid(variant), Some(m), "should accept {variant:?}");
+        }
+        for bad in [
+            "{f27ec8db-af05-4f36-916e-3d57f91ecf5e",
+            "f27ec8db-af05-4f36-916e-3d57f91ecf5",
+            "g27ec8db-af05-4f36-916e-3d57f91ecf5e",
+            "f27ec8db af05 4f36 916e 3d57f91ecf5e",
+            "urn:uuid:",
+        ] {
+            assert_eq!(parse_mbid(bad), None, "should reject {bad:?}");
+        }
     }
 
     #[test]

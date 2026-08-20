@@ -535,11 +535,159 @@ fn the_string_pool_is_sorted_so_compression_can_work() {
     );
 }
 
+/// Exercise every public query on a pack, ignoring results. The assertion is
+/// simply that nothing panics.
+fn hammer_every_query(pack: &MbPack<'_>) {
+    let c = pack.counts();
+    let _ = pack.section_sizes();
+    let _ = pack.dump_date();
+    let _ = pack.strings_compressed();
+    // Deliberately probe past the end as well as inside it.
+    for idx in [0u32, 1, c.artists / 2, c.artists, c.artists.wrapping_add(1), u32::MAX] {
+        let _ = pack.artist(idx);
+        let _ = pack.artist_mbid(idx);
+        let _ = pack.artist_release_groups(idx);
+    }
+    for idx in [0u32, 1, c.release_groups, u32::MAX] {
+        let _ = pack.release_group(idx);
+        let _ = pack.release_group_mbid(idx);
+        let _ = pack.release_group_releases(idx);
+    }
+    for idx in [0u32, 1, c.releases, u32::MAX] {
+        let _ = pack.release(idx);
+        let _ = pack.release_mbid(idx);
+        let _ = pack.release_media(idx);
+        let _ = pack.release_track_count(idx);
+        let _ = pack.release_tracklist(idx);
+        let _ = pack.medium_tracks(idx, 0);
+        let _ = pack.medium_tracks(idx, usize::MAX);
+    }
+    for idx in [0u32, 1, c.recordings, u32::MAX] {
+        let _ = pack.recording(idx);
+        let _ = pack.recording_mbid(idx);
+        let _ = pack.recording_isrcs(idx);
+        let _ = pack.recording_first_release(idx);
+        let _ = pack.track_mbid(idx);
+    }
+    for m in ["00000000-0000-0000-0000-000000000000", fixture::REL_DARK_SIDE] {
+        let key = mb(m);
+        let _ = pack.artist_by_mbid(&key);
+        let _ = pack.release_group_by_mbid(&key);
+        let _ = pack.release_by_mbid(&key);
+    }
+    for q in ["", "!!!", "a", "dark side of the moon", "zzzznotathing", "\u{fc}", "0"] {
+        let _ = pack.search_artists(q, 25);
+        let _ = pack.search_release_groups(q, 25);
+        let _ = pack.search_recordings(q, 25);
+    }
+}
+
 #[test]
 fn truncated_pack_is_rejected_not_read() {
     let built = build_fixture(BuildOptions::default());
     for cut in [1usize, 64, 128, built.bytes.len() / 2, built.bytes.len() - 1] {
         let err = MbPack::open(&built.bytes[..cut]);
         assert!(err.is_err(), "a pack truncated to {cut} bytes must be refused");
+    }
+}
+
+/// Truncate a valid pack and confirm `open` either refuses it or yields a reader
+/// on which every query is survivable.
+///
+/// The server asked whether the reader is panic-free on malformed input. Reading
+/// the code is not evidence; this is. Exhaustive over the header and directory
+/// (where the offsets and lengths live) and strided over the body.
+#[test]
+fn every_truncation_is_survivable() {
+    let built = build_fixture(BuildOptions::default());
+    let head = 64 + 32 * 16;
+    let offsets = (0..head.min(built.bytes.len()))
+        .chain((head..built.bytes.len()).step_by(1009))
+        .chain([built.bytes.len().saturating_sub(1), built.bytes.len()]);
+    for cut in offsets {
+        match MbPack::open(&built.bytes[..cut.min(built.bytes.len())]) {
+            Err(_) => {}
+            Ok(pack) => hammer_every_query(&pack),
+        }
+    }
+}
+
+/// Corrupt a valid pack in many single- and multi-byte ways and confirm the same.
+/// Deterministic PRNG so any failure is reproducible from the seed.
+#[test]
+fn corrupted_packs_never_panic() {
+    let built = build_fixture(BuildOptions::default());
+    let mut state: u64 = 0x2026_0820;
+    let mut next = |bound: usize| -> usize {
+        // xorshift64*, adequate and dependency-free.
+        state ^= state >> 12;
+        state ^= state << 25;
+        state ^= state >> 27;
+        (state.wrapping_mul(0x2545_F491_4F6C_DD1D) >> 33) as usize % bound.max(1)
+    };
+
+    // Every byte of the header and section directory set to adversarial values --
+    // this is where every length and offset the reader trusts comes from.
+    let head = 64 + 32 * 16;
+    for off in 0..head.min(built.bytes.len()) {
+        for v in [0x00u8, 0x01, 0x7f, 0x80, 0xff] {
+            let mut b = built.bytes.clone();
+            b[off] = v;
+            if let Ok(pack) = MbPack::open(&b) {
+                hammer_every_query(&pack);
+            }
+        }
+    }
+
+    // Scatter-shot corruption across the whole file.
+    for _ in 0..300 {
+        let mut b = built.bytes.clone();
+        let n = 1 + next(64);
+        for _ in 0..n {
+            let off = next(b.len());
+            b[off] = next(256) as u8;
+        }
+        if let Ok(pack) = MbPack::open(&b) {
+            hammer_every_query(&pack);
+        }
+    }
+
+    // Directory entries pointed at deliberately hostile extents.
+    for entry in 0..32usize {
+        for &(offset, len) in &[
+            (0u64, u64::MAX),
+            (u64::MAX, 0),
+            (u64::MAX, u64::MAX),
+            (built.bytes.len() as u64, 8),
+            (7u64, 8u64),
+            (8u64, built.bytes.len() as u64),
+        ] {
+            let mut b = built.bytes.clone();
+            let base = 64 + entry * 16;
+            b[base..base + 8].copy_from_slice(&offset.to_le_bytes());
+            b[base + 8..base + 16].copy_from_slice(&len.to_le_bytes());
+            if let Ok(pack) = MbPack::open(&b) {
+                hammer_every_query(&pack);
+            }
+        }
+    }
+}
+
+/// A VALID pack must never panic either. That would surface as intermittent 500s
+/// and be misdiagnosed as corruption.
+#[test]
+fn a_valid_pack_survives_every_query_including_out_of_range() {
+    for opts in [
+        BuildOptions::default(),
+        BuildOptions::tier_a(),
+        BuildOptions { compress_strings: false, ..BuildOptions::default() },
+        BuildOptions { official_only: true, ..BuildOptions::default() },
+        BuildOptions { include_recording_search: false, ..BuildOptions::default() },
+        BuildOptions { include_isrcs: false, ..BuildOptions::default() },
+        BuildOptions { include_recording_mbids: false, ..BuildOptions::default() },
+    ] {
+        let built = build_fixture(opts);
+        let pack = MbPack::open(&built.bytes).expect("valid pack must open");
+        hammer_every_query(&pack);
     }
 }
