@@ -122,6 +122,47 @@ class MusicBrainzApiErrorTest {
         assertTrue(building.retryable)
     }
 
+    /**
+     * `progress` is ABSENT until it is known, not `0.0`. Decoding it as zero would report a build
+     * that has not started as one that has started and made no headway - and if it were ever
+     * shown as a percentage, a build about to finish could read 0% on the first poll.
+     */
+    @Test
+    fun `absent progress is unknown rather than zero`() {
+        val unknown = MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+            """{"error":"not_ready","state":"building","retryable":true}""",
+        )
+        assertNull(unknown.progress, "a missing progress must not decode as 0.0")
+
+        val known = MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+            """{"error":"not_ready","state":"building","retryable":true,"progress":0.42}""",
+        )
+        assertEquals(0.42f, known.progress)
+
+        // Zero sent explicitly is a real zero, and must stay distinguishable from absent.
+        val zero = MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+            """{"error":"not_ready","state":"building","retryable":true,"progress":0.0}""",
+        )
+        assertEquals(0f, zero.progress)
+    }
+
+    /** `retryable` is always sent, so it decodes straight through in both directions. */
+    @Test
+    fun `retryable decodes from the status probe shape`() {
+        assertEquals(
+            true,
+            MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+                """{"state":"absent","retryable":true}""",
+            ).retryable,
+        )
+        assertEquals(
+            false,
+            MusicBrainzApi.json.decodeFromString<NotReadyBody>(
+                """{"state":"absent","retryable":false}""",
+            ).retryable,
+        )
+    }
+
     /** Mid-build answers 503 too, and reads the same to the user: come back shortly. */
     @Test
     fun `503 while building is also a wait`() {

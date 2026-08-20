@@ -28,6 +28,10 @@
     <string name="catalogue_not_ready">Catalogue not ready</string>
     <!-- Body shown when the server has no music catalogue loaded yet, telling the user it is temporary. -->
     <string name="catalogue_not_ready_message">The music catalogue is still being prepared on the server. Browsing will work once it is ready \u2014 try again in a few minutes.</string>
+    <!-- Title shown when the server cannot build the music catalogue at all, so waiting will not help. -->
+    <string name="catalogue_unavailable">Catalogue unavailable</string>
+    <!-- Body shown when the server cannot build the music catalogue. Waiting will not help; the server itself needs attention. -->
+    <string name="catalogue_unavailable_message">The server cannot build the music catalogue, so browsing is unavailable. Waiting will not help \u2014 this needs attention on the server.</string>
     <!-- Button: retries a failed request. Verb. -->
     <string name="retry">Retry</string>
 
