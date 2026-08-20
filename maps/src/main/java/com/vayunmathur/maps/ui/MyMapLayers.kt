@@ -230,7 +230,7 @@ fun MyMapLayers(
                         ) {
                             if (route is RouteService.Route) {
                                 val features: List<Feature1> = buildRouteFeatures(
-                                    route, context, navProgress
+                                    route, navProgress
                                 )
                                 routeSource.setData(
                                     GeoJsonData.Features(FeatureCollection(features))
@@ -335,29 +335,28 @@ private fun AdminHighlight(
     )
 }
 
+/** Fallback when a transit line reports no colour of its own. */
+private const val TRANSIT_FALLBACK = "#FF0000"
+
 /**
  * Compute the per-step `route-color` for the static (non-navigating) case.
- * Driving uses traffic-aware red/amber/green, transit uses the GTFS feed
- * color when available, walk/bike fall through to a single blue.
+ * Driving uses traffic-aware red/amber/green, transit uses the line's own colour,
+ * walk/bike fall through to a single blue.
  */
-private fun staticColorFor(
-    step: RouteService.Step,
-    context: android.content.Context,
-): String {
+private fun staticColorFor(step: RouteService.Step): String {
     return when (step.travelMode) {
         RouteService.TravelMode.DRIVE -> when {
             step.speedRatio < 0.5 -> "#F44336" // Red
             step.speedRatio < 0.9 -> "#FFC107" // Amber/Yellow
             else -> "#4CAF50"                  // Green
         }
-        RouteService.TravelMode.TRANSIT -> {
-            val feed = step.transitDetails?.feedName
-            if (feed != null) {
-                com.vayunmathur.maps.util.GTFSProvider.getRouteColor(
-                    context, feed, step.transitDetails.transitLine.name
-                ) ?: "#FF0000"
-            } else "#FF0000"
-        }
+        // The colour the pack (or MOTIS) reported for this route, which is what
+        // the step-list badge already shows. This used to re-derive the colour
+        // through GTFSProvider instead, and that only knows the one feed bundled
+        // in the APK — so every downloaded pack fell through to the fallback and
+        // the whole map drew red while the badges were correct.
+        RouteService.TravelMode.TRANSIT ->
+            step.transitDetails?.transitLine?.color?.ifBlank { null } ?: TRANSIT_FALLBACK
         else -> "#1710F1"
     }
 }
@@ -386,14 +385,13 @@ private const val TRAVELED_GRAY = "#9E9E9E"
  */
 private fun buildRouteFeatures(
     route: RouteService.Route,
-    context: android.content.Context,
     navProgress: com.vayunmathur.maps.util.NavigationProgress?,
 ): List<Feature1> {
     if (navProgress == null) {
         return route.step.filter { it.polyline.size >= 2 }.map { step ->
             Feature1(
                 LineString(step.polyline),
-                JsonObject(mapOf("route-color" to JsonPrimitive(staticColorFor(step, context))))
+                JsonObject(mapOf("route-color" to JsonPrimitive(staticColorFor(step))))
             )
         }
     }
@@ -416,7 +414,7 @@ private fun buildRouteFeatures(
         }
         val first = cursor
         val last = (first + stepLen - 1).coerceAtMost(route.polyline.size - 1)
-        val color = staticColorFor(step, context)
+        val color = staticColorFor(step)
 
         when {
             stepIdx < currentStepIdx -> {
