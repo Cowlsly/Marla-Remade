@@ -4,8 +4,8 @@
 //! ```text
 //! mb_ingest build <mbdump.tar.bz2 | dir> <out.pack> [--tier-a] [--official-only]
 //!                                                   [--no-isrcs] [--no-recording-search]
-//!                                                   [--no-recording-mbids] [-q]
-//! mb_ingest extract <mbdump.tar.bz2> <dir>   one-pass extract of just the tables needed
+//!                                                   [--no-recording-mbids] [--raw-strings]
+//!                                                   [--work-dir <dir>] [-q]
 //! mb_ingest fixture <dir>          write the synthetic test dump
 //! mb_ingest inspect <out.pack>     header, section sizes and a smoke query
 //! ```
@@ -16,7 +16,6 @@ use std::process::ExitCode;
 
 use mb_ingest::build::{build, BuildOptions, TABLES};
 use mb_ingest::copy::Input;
-use mb_ingest::fixture::write_fixture;
 use mb_ingest::pack::format_mbid;
 use mb_ingest::reader::MbPack;
 
@@ -35,8 +34,8 @@ fn usage() -> io::Error {
         io::ErrorKind::InvalidInput,
         "usage:\n  \
          mb_ingest build <mbdump.tar.bz2|dir> <out.pack> [--tier-a] [--official-only] \
-         [--no-isrcs] [--no-recording-search] [--no-recording-mbids] [-q]\n  \
-         mb_ingest extract <mbdump.tar.bz2> <dir>\n  \
+         [--no-isrcs] [--no-recording-search] [--no-recording-mbids] [--raw-strings] \
+         [--work-dir <dir>] [-q]\n  \
          mb_ingest fixture <dir>\n  \
          mb_ingest inspect <pack>",
     )
@@ -46,21 +45,9 @@ fn run() -> io::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("build") => cmd_build(&args[1..]),
-        Some("extract") => {
-            let (archive, dir) = (args.get(1).ok_or_else(usage)?, args.get(2).ok_or_else(usage)?);
-            let input = Input::detect(Path::new(archive));
-            let started = std::time::Instant::now();
-            input.extract_to(Path::new(dir), TABLES)?;
-            println!(
-                "extracted {} tables to {dir} in {:.1}s",
-                TABLES.len(),
-                started.elapsed().as_secs_f64()
-            );
-            Ok(())
-        }
         Some("fixture") => {
             let dir = args.get(1).ok_or_else(usage)?;
-            write_fixture(Path::new(dir))?;
+            mb_ingest::fixture::write_fixture(Path::new(dir))?;
             println!("wrote synthetic mbdump to {dir}");
             Ok(())
         }
@@ -72,13 +59,19 @@ fn run() -> io::Result<()> {
 fn cmd_build(args: &[String]) -> io::Result<()> {
     let mut positional: Vec<&String> = Vec::new();
     let mut opts = BuildOptions { verbose: true, ..BuildOptions::default() };
-    for a in args {
+    let mut args_iter = args.iter();
+    while let Some(a) = args_iter.next() {
         match a.as_str() {
             "--tier-a" => opts.include_track_mbids = true,
             "--official-only" => opts.official_only = true,
             "--no-isrcs" => opts.include_isrcs = false,
             "--no-recording-search" => opts.include_recording_search = false,
             "--no-recording-mbids" => opts.include_recording_mbids = false,
+            "--raw-strings" => opts.compress_strings = false,
+            "--work-dir" => {
+                let dir = args_iter.next().ok_or_else(usage)?;
+                opts.work_dir = Some(PathBuf::from(dir));
+            }
             "-q" | "--quiet" => opts.verbose = false,
             other if other.starts_with('-') => {
                 return Err(io::Error::new(
@@ -96,10 +89,10 @@ fn cmd_build(args: &[String]) -> io::Result<()> {
     if matches!(input, Input::Archive(_)) {
         eprintln!(
             "note: reading tables straight out of an archive costs one bz2 decompression \
-             pass per table ({} of them). For the 7 GB full export, run `mb_ingest extract \
-             {} <dir>` once (~13 GB of disk) and build from <dir> instead.",
-            TABLES.len(),
-            positional[0]
+             pass per table ({} of them), because bz2 is not seekable. That is fine for a \
+             fixture; for the 7 GB full export the server's single-traversal spill is the \
+             production path.",
+            TABLES.len()
         );
     }
     // Write to a .tmp and rename, so a crashed build never leaves a half-written
@@ -135,6 +128,7 @@ fn cmd_inspect(path: &str) -> io::Result<()> {
     println!("  ISRCs              {}", pack.has_isrcs());
     println!("  recording search   {}", pack.has_recording_search());
     println!("  official only      {}", pack.official_only());
+    println!("  strings compressed {}", pack.strings_compressed());
     println!(
         "counts               artists {} credits {} rgs {} releases {} media {} tracks {} \
          recordings {} isrcs {} terms {}",

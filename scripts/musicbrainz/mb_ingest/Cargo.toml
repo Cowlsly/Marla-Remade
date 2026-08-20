@@ -1,15 +1,23 @@
 # Host-side MusicBrainz ingest tool for the offline MusicBrainz pack ("MBP1").
 #
-# Deliberately DETACHED from the repo-root Rust workspace (the empty [workspace]
-# table below), exactly as scripts/maps/gtfs_ingest is: it is a std-only host
-# crate with zero external dependencies, so `cargo build` here resolves offline
-# and never pulls the aarch64-android toolchain or the app crates' lints.
+# Detached from the repo-root Rust workspace (the empty [workspace] table below),
+# as scripts/maps/gtfs_ingest is, so `cargo build` here never pulls the
+# aarch64-android toolchain or the app crates' lints.
+#
+# gtfs_ingest is deliberately dependency-free; this crate is not, and the reason
+# is worth recording. The server pipeline that feeds it already needs a C
+# compiler (bzip2-sys for the archive, and zstd-sys transitively through
+# `zip 8.6.0`), so zstd is not a new CLASS of dependency here -- and it buys
+# ~450 MB, about 15% of the pack, by block-compressing the string pool. See the
+# "Why the string pool is sorted" section of README.md.
 #
 # It is a LIBRARY plus a thin CLI. The library half is consumed two ways:
-#   * `mb_ingest::build` turns an mbdump full export into a `.pack`;
+#   * `mb_ingest::build` turns mbdump tables into a `.pack`, reading them through
+#     `mb_ingest::copy::TableSource` -- this crate never touches the archive,
+#     bzip2 or tar, which the server owns;
 #   * `mb_ingest::reader` reads a `.pack` back, and is what the server calls
-#     in-process (see src/reader.rs -- it takes a &[u8], so the caller owns the
-#     mmap and this crate needs no memmap dependency).
+#     in-process (it takes a &[u8], so the caller owns the mmap and this crate
+#     needs no memmap dependency).
 [package]
 name = "mb_ingest"
 version = "0.1.0"
@@ -27,9 +35,10 @@ name = "mb_ingest"
 path = "src/main.rs"
 
 [dependencies]
+zstd = "0.13"
 
 [profile.release]
 opt-level = 3
 
-# Detach from the repo-root workspace so this host tool builds standalone/offline.
+# Detach from the repo-root workspace so this host tool builds standalone.
 [workspace]

@@ -43,7 +43,7 @@
 //! 0x30 u32 enum_count
 //! 0x34 u32 flags
 //! 0x38 u32 dump_date    // YYYYMMDD of the source mbdump, 0 if unknown
-//! 0x3C u32 _reserved
+//! 0x3C u32 string_block_count
 //! ```
 //!
 //! Then the section directory: `section_count * { u64 offset, u64 len }`,
@@ -54,8 +54,7 @@
 //!
 //! `flags` bits: 0 track MBIDs present, 1 recording MBIDs present, 2 ISRCs
 //! present, 3 recording search present, 4 official-releases-only, 5 string pool
-//! block-compressed (**not implemented**; a reader that sees it must refuse the
-//! file rather than return garbage).
+//! block-compressed with zstd.
 //!
 //! String pool offset 0 is the empty string. Dates pack into a u32 as
 //! `year<<9 | month<<5 | day`, 0 meaning unknown.
@@ -63,8 +62,17 @@
 //! # Sections
 //!
 //! ```text
-//!  0 STRINGS          NUL-terminated UTF-8 pool; offsets are byte offsets into it.
-//!  1 STRINGS_BLKIDX   unused (len 0). Reserved for flags bit 5.
+//!  0 STRINGS          The string pool. Offsets are byte offsets into the
+//!                     UNCOMPRESSED pool. Strings are sorted alphabetically, which
+//!                     is worth ~0.5 MB per MB to zstd and is free because offsets
+//!                     are assigned after the sort. When flags bit 5 is set this
+//!                     section holds zstd blocks, each covering exactly
+//!                     STRING_BLOCK_SIZE (64 KiB) of uncompressed pool, so a pool
+//!                     offset names its block by division. A string may straddle a
+//!                     block boundary; a reader that does not find the terminating
+//!                     NUL continues into the next block.
+//!  1 STRINGS_BLKIDX   u32[string_block_count + 1] byte offsets into STRINGS of
+//!                     each compressed block. Empty when the pool is raw.
 //!  2 ARTISTS          ArtistRec[artist_count], 20 B, ordered by MBID ascending.
 //!  3 ARTIST_MBID      artist_count * 14 B: bytes 2..16 of the MBID. The top two
 //!                     bytes are implied by the bucket (see ARTIST_MBID_HI), so a
@@ -418,19 +426,33 @@ pub fn unpack_isrc(b: &[u8; 7]) -> [u8; 12] {
 
 // --- string pool ---
 
-/// Interning pool producing byte offsets into STRINGS.
+/// Interning pool.
 ///
-/// The index is open-addressed over u32 pool offsets rather than a
+/// `intern` returns a dense **symbol id**, not a byte offset. Byte offsets are
+/// only assigned by [`StringPool::finalize`], which first sorts every distinct
+/// string alphabetically. That deferral is what makes the compressed pool worth
+/// having: zstd over 64 KB blocks of *sorted* short text gets ~3.5x, where the
+/// same text in interning order gets ~2.5-3x, and the offsets cannot be reordered
+/// after the fact because they are baked into the inline overrides of the TRACKS
+/// varint stream, where changing an offset changes the varint's width.
+///
+/// The index is open-addressed over u32 symbol ids rather than a
 /// `HashMap<String, u32>`: at full scale there are ~23 M distinct strings, and a
-/// `HashMap<String, u32>` costs well over a gigabyte of resident memory on its
-/// own, while this costs 4 bytes per slot. That matters because peak RSS is the
-/// binding constraint on this whole tool.
+/// `HashMap<String, u32>` costs ~1.84 GB steady with a ~2.3 GB transient spike at
+/// its final resize, against a 4 GB budget for the whole build. This costs 4 bytes
+/// per slot.
 pub struct StringPool {
+    /// Staging bytes in interning order, each string NUL-terminated.
     bytes: Vec<u8>,
-    /// Slot values are `offset + 1`; 0 means empty.
+    /// Symbol id -> start offset in `bytes`.
+    starts: Vec<u32>,
+    /// Open-addressed index; slot values are `sym + 1`, 0 means empty.
     slots: Vec<u32>,
-    len: usize,
 }
+
+/// A dense string id handed out during the build. `SYM_EMPTY` is the empty string.
+pub type Sym = u32;
+pub const SYM_EMPTY: Sym = 0;
 
 impl Default for StringPool {
     fn default() -> Self {
@@ -440,16 +462,16 @@ impl Default for StringPool {
 
 impl StringPool {
     pub fn new() -> StringPool {
-        // Byte 0 is a lone NUL so offset 0 is a valid empty string.
-        StringPool { bytes: vec![0], slots: vec![0; 1024], len: 0 }
-    }
-
-    pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        // Symbol 0 is the empty string, so a missing value needs no sentinel.
+        StringPool { bytes: vec![0], starts: vec![0], slots: vec![0; 1024] }
     }
 
     pub fn distinct(&self) -> usize {
-        self.len
+        self.starts.len()
+    }
+
+    pub fn staging_bytes(&self) -> usize {
+        self.bytes.len()
     }
 
     fn hash(s: &[u8]) -> u64 {
@@ -462,8 +484,9 @@ impl StringPool {
         h
     }
 
-    fn at(&self, off: u32) -> &[u8] {
-        let start = off as usize;
+    /// The bytes of a symbol, without its NUL.
+    pub fn get(&self, sym: Sym) -> &[u8] {
+        let start = self.starts[sym as usize] as usize;
         let end = self.bytes[start..].iter().position(|&b| b == 0).unwrap() + start;
         &self.bytes[start..end]
     }
@@ -476,8 +499,7 @@ impl StringPool {
             if v == 0 {
                 continue;
             }
-            let off = v - 1;
-            let mut j = (Self::hash(self.at(off)) as usize) & mask;
+            let mut j = (Self::hash(self.get(v - 1)) as usize) & mask;
             while slots[j] != 0 {
                 j = (j + 1) & mask;
             }
@@ -486,12 +508,11 @@ impl StringPool {
         self.slots = slots;
     }
 
-    /// Intern `s`, returning its byte offset. The empty string is always 0.
-    pub fn intern(&mut self, s: &str) -> u32 {
+    pub fn intern(&mut self, s: &str) -> Sym {
         if s.is_empty() {
-            return 0;
+            return SYM_EMPTY;
         }
-        if self.len * 4 >= self.slots.len() * 3 {
+        if self.starts.len() * 4 >= self.slots.len() * 3 {
             self.grow();
         }
         let mask = self.slots.len() - 1;
@@ -502,28 +523,178 @@ impl StringPool {
                 let off = self.bytes.len();
                 assert!(
                     off + s.len() < u32::MAX as usize,
-                    "STRINGS exceeded the u32 offset ceiling at {off} bytes; the pool \
-                     is the first field in this format that would overflow (design doc §4.7)"
+                    "the string pool passed the u32 offset ceiling at {off} bytes; it is the \
+                     first field in this format that would overflow (design doc §4.7 / R8)"
                 );
                 self.bytes.extend_from_slice(s.as_bytes());
                 self.bytes.push(0);
-                self.slots[j] = off as u32 + 1;
-                self.len += 1;
-                return off as u32;
+                let sym = self.starts.len() as u32;
+                self.starts.push(off as u32);
+                self.slots[j] = sym + 1;
+                return sym;
             }
-            if self.at(v - 1) == s.as_bytes() {
+            if self.get(v - 1) == s.as_bytes() {
                 return v - 1;
             }
             j = (j + 1) & mask;
         }
     }
+
+    /// Sort the distinct strings alphabetically and assign final byte offsets.
+    ///
+    /// The sorted bytes are deliberately **not** materialised — that would need a
+    /// second 635 MB buffer. Offsets are computed from the sorted order, and
+    /// [`FinalPool::write_strings`] later streams the strings out of the staging
+    /// buffer in that order.
+    pub fn finalize(mut self) -> FinalPool {
+        // The index is dead weight from here on.
+        self.slots = Vec::new();
+        self.slots.shrink_to_fit();
+        let n = self.starts.len();
+        let mut order: Vec<u32> = (0..n as u32).collect();
+        {
+            let bytes = &self.bytes;
+            let starts = &self.starts;
+            let key = |sym: &u32| -> &[u8] {
+                let start = starts[*sym as usize] as usize;
+                let end = bytes[start..].iter().position(|&b| b == 0).unwrap() + start;
+                &bytes[start..end]
+            };
+            order.sort_unstable_by(|a, b| key(a).cmp(key(b)));
+        }
+        let mut offsets = vec![0u32; n];
+        let mut off: u64 = 0;
+        for &sym in &order {
+            offsets[sym as usize] = off as u32;
+            let len = {
+                let start = self.starts[sym as usize] as usize;
+                self.bytes[start..].iter().position(|&b| b == 0).unwrap()
+            };
+            off += len as u64 + 1;
+        }
+        assert!(
+            off <= u32::MAX as u64,
+            "the string pool is {off} bytes, past the u32 offset ceiling (design doc R8)"
+        );
+        FinalPool { bytes: self.bytes, starts: self.starts, order, offsets, total: off as u32 }
+    }
+}
+
+/// A finalised pool: symbols resolve to byte offsets into the alphabetically
+/// sorted pool that `write_strings` emits.
+pub struct FinalPool {
+    bytes: Vec<u8>,
+    starts: Vec<u32>,
+    order: Vec<u32>,
+    offsets: Vec<u32>,
+    total: u32,
+}
+
+impl FinalPool {
+    pub fn offset(&self, sym: Sym) -> u32 {
+        self.offsets[sym as usize]
+    }
+
+    pub fn get(&self, sym: Sym) -> &[u8] {
+        let start = self.starts[sym as usize] as usize;
+        let end = self.bytes[start..].iter().position(|&b| b == 0).unwrap() + start;
+        &self.bytes[start..end]
+    }
+
+    pub fn distinct(&self) -> usize {
+        self.offsets.len()
+    }
+
+    /// Uncompressed size of the pool.
+    pub fn raw_len(&self) -> u32 {
+        self.total
+    }
+
+    /// Stream the pool in sorted order through `sink`, one string (with its NUL)
+    /// at a time. Never builds a second copy of the pool.
+    pub fn write_strings<F: FnMut(&[u8]) -> io::Result<()>>(&self, mut sink: F) -> io::Result<()> {
+        for &sym in &self.order {
+            let start = self.starts[sym as usize] as usize;
+            let end = self.bytes[start..].iter().position(|&b| b == 0).unwrap() + start;
+            sink(&self.bytes[start..=end])?;
+        }
+        Ok(())
+    }
+}
+
+/// Uncompressed span covered by one block of the compressed string pool. A pool
+/// offset's block is `off / STRING_BLOCK_SIZE`, so the mapping needs no lookup.
+pub const STRING_BLOCK_SIZE: usize = 64 * 1024;
+
+/// zstd level for the pool. The pack is built once and read forever, and the
+/// user's stated goal is the smallest possible file, so this is deliberately at
+/// the expensive end.
+pub const STRING_ZSTD_LEVEL: i32 = 19;
+
+/// Compresses the string pool into `STRING_BLOCK_SIZE` blocks and records where
+/// each block landed.
+///
+/// Blocks break at exact multiples of `STRING_BLOCK_SIZE`, so a string may
+/// straddle two blocks; the reader continues into the next block when it does not
+/// find the terminating NUL. Keeping the boundaries exact is what lets a pool
+/// offset name its block by division instead of a binary search.
+pub struct StringBlockWriter {
+    pending: Vec<u8>,
+    out: Vec<u8>,
+    block_offsets: Vec<u32>,
+}
+
+impl Default for StringBlockWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StringBlockWriter {
+    pub fn new() -> StringBlockWriter {
+        StringBlockWriter {
+            pending: Vec::with_capacity(STRING_BLOCK_SIZE * 2),
+            out: Vec::new(),
+            block_offsets: vec![0],
+        }
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.pending.extend_from_slice(bytes);
+        while self.pending.len() >= STRING_BLOCK_SIZE {
+            self.flush_block(STRING_BLOCK_SIZE)?;
+        }
+        Ok(())
+    }
+
+    fn flush_block(&mut self, len: usize) -> io::Result<()> {
+        let block = zstd::bulk::compress(&self.pending[..len], STRING_ZSTD_LEVEL)?;
+        self.out.extend_from_slice(&block);
+        assert!(
+            self.out.len() <= u32::MAX as usize,
+            "the compressed string pool passed the u32 block-offset ceiling"
+        );
+        self.block_offsets.push(self.out.len() as u32);
+        self.pending.drain(..len);
+        Ok(())
+    }
+
+    /// Returns the compressed bytes and the block offset index.
+    pub fn finish(mut self) -> io::Result<(Vec<u8>, Vec<u32>)> {
+        if !self.pending.is_empty() {
+            let len = self.pending.len();
+            self.flush_block(len)?;
+        }
+        Ok((self.out, self.block_offsets))
+    }
 }
 
 /// The small enumerations (artist type, RG types, release status, medium format,
-/// country code) share one table of STRINGS offsets so records can hold a u16
-/// index instead of a 4 B pool offset.
+/// country code) share one table so records can hold a u16 index instead of a 4 B
+/// pool offset, which is worth ~56 MB across ARTISTS / RELEASE_GROUPS / RELEASES /
+/// MEDIA at full scale.
 pub struct EnumPool {
-    offsets: Vec<u32>,
+    syms: Vec<Sym>,
     map: HashMap<String, u16>,
 }
 
@@ -535,7 +706,7 @@ impl Default for EnumPool {
 
 impl EnumPool {
     pub fn new() -> EnumPool {
-        EnumPool { offsets: Vec::new(), map: HashMap::new() }
+        EnumPool { syms: Vec::new(), map: HashMap::new() }
     }
 
     /// `None` is represented by `NONE_ENUM`, which resolves to the empty string.
@@ -549,19 +720,19 @@ impl EnumPool {
             return i;
         }
         assert!(
-            self.offsets.len() < u16::MAX as usize,
+            self.syms.len() < u16::MAX as usize,
             "ENUM_POOL overflowed 65535 entries; a genuinely large vocabulary does not \
              belong in this table"
         );
-        let i = self.offsets.len() as u16;
-        let off = pool.intern(s);
-        self.offsets.push(off);
+        let i = self.syms.len() as u16;
+        let sym = pool.intern(s);
+        self.syms.push(sym);
         self.map.insert(s.to_string(), i);
         i
     }
 
-    pub fn offsets(&self) -> &[u32] {
-        &self.offsets
+    pub fn syms(&self) -> &[Sym] {
+        &self.syms
     }
 }
 
@@ -648,7 +819,13 @@ impl<W: Write + Seek> PackWriter<W> {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub fn set_header(&mut self, counts: &HeaderCounts, flags: u32, dump_date: u32) {
+    pub fn set_header(
+        &mut self,
+        counts: &HeaderCounts,
+        flags: u32,
+        dump_date: u32,
+        string_block_count: u32,
+    ) {
         let mut h = [0u8; HEADER_LEN as usize];
         let mut put = |off: usize, v: u32| h[off..off + 4].copy_from_slice(&v.to_le_bytes());
         put(0x00, MAGIC);
@@ -666,6 +843,7 @@ impl<W: Write + Seek> PackWriter<W> {
         put(0x30, counts.enums);
         put(0x34, flags);
         put(0x38, dump_date);
+        put(0x3C, string_block_count);
         self.header = h;
     }
 
@@ -852,20 +1030,103 @@ mod tests {
     }
 
     #[test]
-    fn string_pool_dedups_and_keeps_zero_empty() {
+    fn string_pool_dedups_and_sorts_at_finalize() {
         let mut p = StringPool::new();
-        assert_eq!(p.intern(""), 0);
+        assert_eq!(p.intern(""), SYM_EMPTY);
         let a = p.intern("Pink Floyd");
         let b = p.intern("Pink Floyd");
         assert_eq!(a, b);
         assert_ne!(a, p.intern("Pink Floyd "));
-        assert_eq!(p.distinct(), 2);
+        let zebra = p.intern("zebra");
+        let apple = p.intern("apple");
         // Force several table growths.
         for i in 0..5000 {
             p.intern(&format!("title {i}"));
         }
-        assert_eq!(p.intern("title 4999"), p.intern("title 4999"));
-        assert_eq!(p.distinct(), 5002);
+        let again = p.intern("title 4999");
+        assert_eq!(p.distinct(), 5005, "empty + 2 floyds + zebra + apple + 5000 titles");
+
+        let f = p.finalize();
+        assert_eq!(f.offset(SYM_EMPTY), 0, "the empty string must stay at offset 0");
+        assert_eq!(f.get(a), b"Pink Floyd");
+        assert_eq!(f.get(again), b"title 4999");
+        assert!(
+            f.offset(apple) < f.offset(zebra),
+            "finalize must sort alphabetically, or the compressed pool loses its ratio"
+        );
+
+        // The streamed pool is NUL-terminated, sorted, and exactly raw_len bytes.
+        let mut out = Vec::new();
+        f.write_strings(|s| {
+            out.extend_from_slice(s);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(out.len(), f.raw_len() as usize);
+        assert_eq!(out[0], 0, "offset 0 is the empty string's terminator");
+        let at = |off: u32| {
+            let s = off as usize;
+            let e = out[s..].iter().position(|&b| b == 0).unwrap() + s;
+            String::from_utf8(out[s..e].to_vec()).unwrap()
+        };
+        assert_eq!(at(f.offset(a)), "Pink Floyd");
+        assert_eq!(at(f.offset(zebra)), "zebra");
+        assert_eq!(at(f.offset(again)), "title 4999");
+    }
+
+    #[test]
+    fn string_blocks_round_trip_including_a_straddling_string() {
+        let mut p = StringPool::new();
+        // Enough text to cross several 64 KiB block boundaries, plus one string long
+        // enough that it cannot sit inside a single block.
+        let mut syms = Vec::new();
+        for i in 0..20_000 {
+            syms.push(p.intern(&format!("recording title number {i}")));
+        }
+        let huge = "x".repeat(STRING_BLOCK_SIZE + 1234);
+        let huge_sym = p.intern(&huge);
+        let f = p.finalize();
+        let mut w = StringBlockWriter::new();
+        f.write_strings(|s| w.push(s)).unwrap();
+        let (compressed, blocks) = w.finish().unwrap();
+        assert!(blocks.len() >= 3, "expected several blocks, got {}", blocks.len());
+        assert_eq!(*blocks.last().unwrap() as usize, compressed.len());
+        assert!(
+            compressed.len() < f.raw_len() as usize,
+            "compression must actually shrink the pool"
+        );
+
+        // Decode exactly as the reader does: locate the block by division, then
+        // continue into later blocks until the NUL is found.
+        let read = |off: u32| -> String {
+            let mut block = off as usize / STRING_BLOCK_SIZE;
+            let mut pos = off as usize % STRING_BLOCK_SIZE;
+            let mut out: Vec<u8> = Vec::new();
+            loop {
+                let (a, b) = (blocks[block] as usize, blocks[block + 1] as usize);
+                let raw =
+                    zstd::bulk::decompress(&compressed[a..b], STRING_BLOCK_SIZE).unwrap();
+                let slice = &raw[pos.min(raw.len())..];
+                match slice.iter().position(|&c| c == 0) {
+                    Some(n) => {
+                        out.extend_from_slice(&slice[..n]);
+                        break;
+                    }
+                    None => {
+                        out.extend_from_slice(slice);
+                        block += 1;
+                        pos = 0;
+                        if block + 1 >= blocks.len() {
+                            break;
+                        }
+                    }
+                }
+            }
+            String::from_utf8(out).unwrap()
+        };
+        assert_eq!(read(f.offset(syms[0])), "recording title number 0");
+        assert_eq!(read(f.offset(syms[19_999])), "recording title number 19999");
+        assert_eq!(read(f.offset(huge_sym)), huge, "a string spanning blocks must survive");
     }
 
     #[test]

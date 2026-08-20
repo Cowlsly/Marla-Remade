@@ -5,32 +5,42 @@
 //! are checked on the first row (see `copy::Shape`), because a silently shifted
 //! column would produce a plausible-looking but wrong pack.
 //!
+//! Tables arrive through [`crate::copy::TableSource`]. This crate never touches
+//! the archive, bzip2 or tar — `location_share_server` owns the download and does
+//! one traversal, spilling the 20 tables named in [`TABLES`]. It matters that the
+//! spilled tables are **re-openable**: the track pass reads `track` once to spill
+//! it into medium-keyed buckets and then reads the buckets back, which is what
+//! keeps 57.4 M track rows out of memory.
+//!
 //! # Memory
 //!
-//! Peak RSS is the binding constraint, not wall time. Two rules:
+//! Peak RSS, not wall time, is the binding constraint: the ingest runs in-process
+//! alongside the live server on an 11 GB box, so the budget is 4 GB. Four rules:
 //!
 //!   * per-row data is never accumulated for the output. `TRACKS` is built as a
 //!     varint byte stream as the tracks are visited, not as a `Vec<TrackRec>` —
 //!     that is the failure recorded in `scripts/maps/gtfs_ingest/src/index.rs:15-27`,
 //!     where a fixed-size record per stop per trip made a world pack 10-20 GB.
 //!   * id -> index maps are dense `Vec<u32>` keyed by the dump's integer primary
-//!     key, not `HashMap<[u8;16], u32>` keyed by MBID. The dumps use integer
-//!     foreign keys, so at full scale the recording map is ~180 MB instead of the
-//!     ~2 GB a gid hash map would cost.
-//!
-//! One buffer is genuinely large and unavoidable without an external sort: the
-//! `track` rows have to be grouped by medium, and the dump is in primary-key
-//! order, so 57.4 M x 24 B = ~1.4 GB is held while sorting. `BuildStats` reports
-//! it. An external merge sort would remove it if a full run ever needs to fit in
-//! less.
+//!     key, not `HashMap<[u8;16], u32>` keyed by MBID. mbdump foreign keys are
+//!     integer row ids (`track.recording INTEGER`), so the recording map is
+//!     ~180 MB rather than the ~1.4 GB a UUID-keyed hash map would cost.
+//!   * the track rows are **bucket-sorted through spill files**, not sorted in
+//!     memory. The dump is in track-id order and `TRACKS` needs medium order;
+//!     buffering all 57.4 M rows to sort would be ~1.4 GB.
+//!   * `RECORDING_MBID` is filled by a second pass over `recording` that scatters
+//!     gids into the output buffer, rather than holding 16 B per recording id
+//!     (~800 MB) through the whole build.
 
 use std::collections::HashMap;
-use std::io::{self, Seek, Write};
+use std::fs::File;
+use std::io::{self, BufWriter, Read, Seek, Write};
+use std::path::{Path, PathBuf};
 
-use crate::copy::{other_err, Input, Row, Shape};
+use crate::copy::{each_row, other_err, Row, Shape, TableSource};
 use crate::pack::{
-    self, build_mbid_table, pack_date, pack_isrc, parse_mbid, search_terms, EnumPool, HeaderCounts,
-    Mbid, PackWriter, StringPool,
+    self, build_mbid_table, pack_date, pack_isrc, parse_mbid, search_terms, EnumPool, FinalPool,
+    HeaderCounts, Mbid, PackWriter, StringBlockWriter, StringPool, Sym, SYM_EMPTY,
 };
 use crate::reader::encode_recording_credit;
 
@@ -38,8 +48,9 @@ use crate::reader::encode_recording_credit;
 /// an absurd primary key.
 const MAX_ID: u32 = 400_000_000;
 
-/// Every table this crate reads, in the order the passes want them. All of these
-/// live in the core `mbdump.tar.bz2`; none needs `mbdump-derived.tar.bz2`.
+/// Every table this crate reads. All of these live in the core `mbdump.tar.bz2`
+/// (each is marked `-- replicate` in `admin/sql/CreateTables.sql`, which is what
+/// puts a table in that dump); none needs `mbdump-derived.tar.bz2`.
 pub const TABLES: &[&str] = &[
     "area",
     "iso_3166_1",
@@ -63,13 +74,18 @@ pub const TABLES: &[&str] = &[
     "isrc",
 ];
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct BuildOptions {
     pub include_track_mbids: bool,
     pub include_recording_mbids: bool,
     pub include_isrcs: bool,
     pub include_recording_search: bool,
     pub official_only: bool,
+    /// Compress the string pool with zstd. Worth ~450 MB of the ~2.9 GB pack.
+    pub compress_strings: bool,
+    /// Where the track bucket files go. Defaults to the system temp directory.
+    /// Needs room for ~1.4 GB at full scale.
+    pub work_dir: Option<PathBuf>,
     pub verbose: bool,
 }
 
@@ -83,6 +99,8 @@ impl Default for BuildOptions {
             include_isrcs: true,
             include_recording_search: true,
             official_only: false,
+            compress_strings: true,
+            work_dir: None,
             verbose: false,
         }
     }
@@ -110,6 +128,9 @@ impl BuildOptions {
         if self.official_only {
             f |= pack::FLAG_OFFICIAL_ONLY;
         }
+        if self.compress_strings {
+            f |= pack::FLAG_STRINGS_COMPRESSED;
+        }
         f
     }
 }
@@ -122,7 +143,9 @@ pub struct BuildStats {
     pub sections: Vec<(&'static str, u64)>,
     pub total_bytes: u64,
     pub distinct_strings: usize,
-    pub string_pool_bytes: usize,
+    pub string_pool_raw: u64,
+    pub string_pool_stored: u64,
+    pub string_blocks: u32,
     pub recording_titles: u64,
     pub distinct_recording_titles: u64,
     pub tracks_title_same: u64,
@@ -131,7 +154,7 @@ pub struct BuildStats {
     pub standalone_recordings: u64,
     pub skipped: Vec<(&'static str, u64)>,
     pub isrc_rejects: u64,
-    pub track_sort_buffer_bytes: u64,
+    pub track_spill_bytes: u64,
     pub dense_map_bytes: u64,
     pub search_postings: u64,
 }
@@ -182,26 +205,33 @@ impl BuildStats {
             "tracks whose length == recording's",
             pct(self.tracks_length_same, tracks)
         ));
-        let recs =
-            self.rows.iter().find(|(n, _)| *n == "recording").map(|(_, n)| *n).unwrap_or(0);
+        let recs = self.rows.iter().find(|(n, _)| *n == "recording").map(|(_, n)| *n).unwrap_or(0);
         s.push_str(&format!(
             "  {:<38} {:>11.1}%  ({})\n",
             "recordings with no track (standalone)",
             pct(self.standalone_recordings, recs),
             self.standalone_recordings
         ));
-        s.push_str("build cost\n");
-        s.push_str(&format!(
-            "  {:<38} {:>12.1} MB\n",
-            "string pool (raw)",
-            mb(self.string_pool_bytes as u64)
-        ));
+        s.push_str("string pool\n");
         s.push_str(&format!("  {:<38} {:>12}\n", "distinct strings", self.distinct_strings));
+        s.push_str(&format!("  {:<38} {:>12.1} MB\n", "raw", mb(self.string_pool_raw)));
+        s.push_str(&format!(
+            "  {:<38} {:>12.1} MB  ({} blocks, {:.2}x)\n",
+            "stored",
+            mb(self.string_pool_stored),
+            self.string_blocks,
+            if self.string_pool_stored == 0 {
+                0.0
+            } else {
+                self.string_pool_raw as f64 / self.string_pool_stored as f64
+            }
+        ));
+        s.push_str("build cost\n");
         s.push_str(&format!("  {:<38} {:>12}\n", "search postings", self.search_postings));
         s.push_str(&format!(
             "  {:<38} {:>12.1} MB\n",
-            "track sort buffer (peak, transient)",
-            mb(self.track_sort_buffer_bytes)
+            "track spill (disk, not memory)",
+            mb(self.track_spill_bytes)
         ));
         s.push_str(&format!(
             "  {:<38} {:>12.1} MB\n",
@@ -248,13 +278,129 @@ impl DenseMap {
     }
 }
 
+// --- track bucket spill ---
+
+/// Fixed-width track record written to the bucket files. 24 bytes, or 40 with a
+/// track MBID appended for tier A.
+const TRACK_SPILL_LEN: usize = 24;
+const TRACK_SPILL_LEN_A: usize = 40;
+
+/// Bucket-sorts track rows by medium through files on disk.
+///
+/// The alternative is buffering all 57.4 M rows to sort, ~1.4 GB, which does not
+/// fit the memory budget. Trading wall time and ~1.4 GB of scratch disk for that
+/// is the explicit instruction.
+struct TrackSpill {
+    dir: PathBuf,
+    writers: Vec<BufWriter<File>>,
+    buckets: usize,
+    rec_len: usize,
+    media: u32,
+    written: u64,
+}
+
+/// Distinguishes concurrent builds inside one process. Without it two builds in
+/// the same process share a spill directory and delete each other's buckets --
+/// which is exactly what the parallel test runner does.
+static SPILL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+impl TrackSpill {
+    fn new(work_dir: Option<&Path>, media: u32, rec_len: usize) -> io::Result<TrackSpill> {
+        // One bucket is plenty for a fixture; a full run wants each bucket to be a
+        // few tens of MB so sorting one is cheap.
+        let buckets = if media < 100_000 { 1 } else { 64 };
+        let base = match work_dir {
+            Some(p) => p.to_path_buf(),
+            None => std::env::temp_dir(),
+        };
+        let seq = SPILL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = base.join(format!("mb_ingest_tracks_{}_{seq}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+        let mut writers = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            writers.push(BufWriter::with_capacity(
+                1 << 16,
+                File::create(dir.join(format!("b{b:03}")))?,
+            ));
+        }
+        Ok(TrackSpill { dir, writers, buckets, rec_len, media, written: 0 })
+    }
+
+    fn bucket_of(&self, medium_idx: u32) -> usize {
+        if self.buckets == 1 || self.media == 0 {
+            return 0;
+        }
+        ((medium_idx as u64 * self.buckets as u64) / self.media as u64)
+            .min(self.buckets as u64 - 1) as usize
+    }
+
+    fn push(&mut self, medium_idx: u32, rec: &[u8]) -> io::Result<()> {
+        debug_assert_eq!(rec.len(), self.rec_len);
+        let b = self.bucket_of(medium_idx);
+        self.writers[b].write_all(rec)?;
+        self.written += rec.len() as u64;
+        Ok(())
+    }
+
+    /// Flush and return the bucket paths, in medium order.
+    fn finish(&mut self) -> io::Result<Vec<PathBuf>> {
+        for w in self.writers.iter_mut() {
+            w.flush()?;
+        }
+        self.writers.clear();
+        Ok((0..self.buckets).map(|b| self.dir.join(format!("b{b:03}"))).collect())
+    }
+}
+
+impl Drop for TrackSpill {
+    fn drop(&mut self) {
+        self.writers.clear();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TrackRow {
+    medium_idx: u32,
+    position: i32,
+    recording_id: u32,
+    title: Sym,
+    credit_id: u32,
+    length_s: u16,
+}
+
+impl TrackRow {
+    fn encode(&self, out: &mut [u8]) {
+        out[0..4].copy_from_slice(&self.medium_idx.to_le_bytes());
+        out[4..8].copy_from_slice(&self.position.to_le_bytes());
+        out[8..12].copy_from_slice(&self.recording_id.to_le_bytes());
+        out[12..16].copy_from_slice(&self.title.to_le_bytes());
+        out[16..20].copy_from_slice(&self.credit_id.to_le_bytes());
+        out[20..22].copy_from_slice(&self.length_s.to_le_bytes());
+        out[22..24].copy_from_slice(&0u16.to_le_bytes());
+    }
+
+    fn decode(b: &[u8]) -> TrackRow {
+        let u32_at = |i: usize| u32::from_le_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+        TrackRow {
+            medium_idx: u32_at(0),
+            position: i32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+            recording_id: u32_at(8),
+            title: u32_at(12),
+            credit_id: u32_at(16),
+            length_s: u16::from_le_bytes([b[20], b[21]]),
+        }
+    }
+}
+
 // --- intermediate rows ---
 
 struct ArtistBuild {
     gid: Mbid,
-    name_off: u32,
-    disamb_off: u32,
-    area_off: u32,
+    name: Sym,
+    disamb: Sym,
+    area: Sym,
     begin_date: u32,
     kind: u16,
     country: u16,
@@ -263,7 +409,7 @@ struct ArtistBuild {
 
 struct RgBuild {
     gid: Mbid,
-    title_off: u32,
+    title: Sym,
     first_date: u32,
     credit_id: u32,
     primary: u16,
@@ -274,11 +420,11 @@ struct RgBuild {
 
 struct ReleaseBuild {
     gid: Mbid,
-    title_off: u32,
+    title: Sym,
     rg_id: u32,
     credit_id: u32,
     date: u32,
-    disamb_off: u32,
+    disamb: Sym,
     status: u16,
     status_rank: u8,
     country: u16,
@@ -293,33 +439,9 @@ struct MediumBuild {
     track_count: u32,
 }
 
-#[derive(Clone, Copy)]
-struct TrackBuild {
-    medium_idx: u32,
-    /// `i32`, not `i64`: `track.position` is a Postgres INTEGER, and the wider
-    /// field would push this record from 28 to 32 bytes, which is 240 MB of peak
-    /// RSS across 57.4 M rows.
-    position: i32,
-    recording_id: u32,
-    title_off: u32,
-    credit_id: u32,
-    length_s: u16,
-    /// Index into `track_gids`, which is only populated for tier A. Kept out of
-    /// this record so a tier B build does not carry 16 B x 57 M of MBIDs it is
-    /// never going to write.
-    gid_slot: u32,
-}
-
-#[derive(Clone, Copy, Default)]
-struct RecBuild {
-    title_off: u32,
-    credit_id: u32,
-    dur_s: u16,
-}
-
-/// Build a pack from `input` and write it to `out`.
+/// Build a pack from `source` and write it to `out`.
 pub fn build<W: Write + Seek>(
-    input: &Input,
+    source: &dyn TableSource,
     out: W,
     opts: &BuildOptions,
     log: &mut dyn Write,
@@ -333,15 +455,15 @@ pub fn build<W: Write + Seek>(
 
     // --- areas and the small enumerations -------------------------------------
     step!("pass 1: areas, country codes, enumerations");
-    let mut area_name: HashMap<u32, u32> = HashMap::new();
+    let mut area_name: HashMap<u32, Sym> = HashMap::new();
     let n = require(
-        input,
+        source,
         "area",
         Shape { table: "area", min_fields: 14, ints: &[0], uuids: &[1] },
         |row| {
             if let Some(id) = row.u32(0) {
-                let off = pool.intern(&row.str(2));
-                area_name.insert(id, off);
+                let sym = pool.intern(&row.str(2));
+                area_name.insert(id, sym);
             }
             Ok(())
         },
@@ -350,7 +472,7 @@ pub fn build<W: Write + Seek>(
 
     let mut area_country: HashMap<u32, u16> = HashMap::new();
     let n = require(
-        input,
+        source,
         "iso_3166_1",
         Shape { table: "iso_3166_1", min_fields: 2, ints: &[0], uuids: &[] },
         |row| {
@@ -367,12 +489,12 @@ pub fn build<W: Write + Seek>(
     )?;
     st.rows.push(("iso_3166_1", n));
 
-    let artist_types = read_enum_table(input, "artist_type", &mut pool, &mut enums)?;
-    let rg_primary = read_enum_table(input, "release_group_primary_type", &mut pool, &mut enums)?;
+    let artist_types = read_enum_table(source, "artist_type", &mut pool, &mut enums)?;
+    let rg_primary = read_enum_table(source, "release_group_primary_type", &mut pool, &mut enums)?;
     let rg_secondary =
-        read_enum_table(input, "release_group_secondary_type", &mut pool, &mut enums)?;
-    let statuses = read_enum_table(input, "release_status", &mut pool, &mut enums)?;
-    let formats = read_enum_table(input, "medium_format", &mut pool, &mut enums)?;
+        read_enum_table(source, "release_group_secondary_type", &mut pool, &mut enums)?;
+    let statuses = read_enum_table(source, "release_status", &mut pool, &mut enums)?;
+    let formats = read_enum_table(source, "medium_format", &mut pool, &mut enums)?;
 
     // --- artist credits -------------------------------------------------------
     // A credit is stored as one pre-rendered display string ("A feat. B"), because
@@ -383,9 +505,9 @@ pub fn build<W: Write + Seek>(
     // join order. artist_credit_name is still needed, for the artist -> release
     // group links.
     step!("pass 2: artist credits");
-    let mut credits_off: Vec<u32> = Vec::new();
+    let mut credit_syms: Vec<Sym> = Vec::new();
     let n = require(
-        input,
+        source,
         "artist_credit",
         Shape { table: "artist_credit", min_fields: 7, ints: &[0, 2], uuids: &[6] },
         |row| {
@@ -394,19 +516,19 @@ pub fn build<W: Write + Seek>(
                 return Err(other_err(format!("artist_credit id {id} exceeds {MAX_ID}")));
             }
             let i = id as usize;
-            if credits_off.len() <= i {
-                credits_off.resize(i + 1, 0);
+            if credit_syms.len() <= i {
+                credit_syms.resize(i + 1, SYM_EMPTY);
             }
-            credits_off[i] = pool.intern(&row.str(1));
+            credit_syms[i] = pool.intern(&row.str(1));
             Ok(())
         },
     )?;
     st.rows.push(("artist_credit", n));
-    let credit_count = credits_off.len() as u32;
+    let credit_count = credit_syms.len() as u32;
 
-    let mut credit_artists: Vec<Vec<u32>> = vec![Vec::new(); credits_off.len()];
+    let mut credit_artists: Vec<Vec<u32>> = vec![Vec::new(); credit_syms.len()];
     let n = require(
-        input,
+        source,
         "artist_credit_name",
         Shape { table: "artist_credit_name", min_fields: 5, ints: &[0, 1, 2], uuids: &[] },
         |row| {
@@ -424,7 +546,7 @@ pub fn build<W: Write + Seek>(
     let mut artists: Vec<ArtistBuild> = Vec::new();
     let mut bad_gids = 0u64;
     let n = require(
-        input,
+        source,
         "artist",
         Shape { table: "artist", min_fields: 19, ints: &[0], uuids: &[1] },
         |row| {
@@ -436,9 +558,9 @@ pub fn build<W: Write + Seek>(
             let area = row.u32(11);
             artists.push(ArtistBuild {
                 gid,
-                name_off: pool.intern(&row.str(2)),
-                disamb_off: pool.intern(&row.str(13)),
-                area_off: area.and_then(|a| area_name.get(&a).copied()).unwrap_or(0),
+                name: pool.intern(&row.str(2)),
+                disamb: pool.intern(&row.str(13)),
+                area: area.and_then(|a| area_name.get(&a).copied()).unwrap_or(SYM_EMPTY),
                 begin_date: pack_date(row.i64(4), row.i64(5), row.i64(6)),
                 kind: row
                     .u32(10)
@@ -468,7 +590,7 @@ pub fn build<W: Write + Seek>(
     step!("pass 4: release groups");
     let mut rgs: Vec<RgBuild> = Vec::new();
     let n = require(
-        input,
+        source,
         "release_group",
         Shape { table: "release_group", min_fields: 8, ints: &[0, 3], uuids: &[1] },
         |row| {
@@ -476,7 +598,7 @@ pub fn build<W: Write + Seek>(
             let Some(gid) = parse_mbid(&row.str(1)) else { return Ok(()) };
             rgs.push(RgBuild {
                 gid,
-                title_off: pool.intern(&row.str(2)),
+                title: pool.intern(&row.str(2)),
                 first_date: 0,
                 credit_id: row.u32(3).unwrap_or(pack::NONE),
                 primary: row
@@ -496,7 +618,7 @@ pub fn build<W: Write + Seek>(
         rg_slot.set(r.id, i as u32)?;
     }
     let n = require(
-        input,
+        source,
         "release_group_meta",
         Shape { table: "release_group_meta", min_fields: 7, ints: &[0], uuids: &[] },
         |row| {
@@ -508,7 +630,7 @@ pub fn build<W: Write + Seek>(
     )?;
     st.rows.push(("release_group_meta", n));
     let n = require(
-        input,
+        source,
         "release_group_secondary_type_join",
         Shape {
             table: "release_group_secondary_type_join",
@@ -567,7 +689,7 @@ pub fn build<W: Write + Seek>(
     let mut releases: Vec<ReleaseBuild> = Vec::new();
     let mut filtered_status = 0u64;
     let n = require(
-        input,
+        source,
         "release",
         Shape { table: "release", min_fields: 14, ints: &[0, 3, 4], uuids: &[1] },
         |row| {
@@ -581,11 +703,11 @@ pub fn build<W: Write + Seek>(
             }
             releases.push(ReleaseBuild {
                 gid,
-                title_off: pool.intern(&row.str(2)),
+                title: pool.intern(&row.str(2)),
                 rg_id: rg,
                 credit_id: row.u32(3).unwrap_or(pack::NONE),
                 date: 0,
-                disamb_off: pool.intern(&row.str(10)),
+                disamb: pool.intern(&row.str(10)),
                 status: status_id
                     .and_then(|s| statuses.get(&s).copied())
                     .unwrap_or(EnumPool::NONE_ENUM),
@@ -614,7 +736,7 @@ pub fn build<W: Write + Seek>(
     // through the same iso_3166_1 mapping the artists used; a release can carry
     // several countries, and we keep the earliest-dated one.
     let n = require(
-        input,
+        source,
         "release_country",
         Shape { table: "release_country", min_fields: 5, ints: &[0, 1], uuids: &[] },
         |row| {
@@ -632,7 +754,7 @@ pub fn build<W: Write + Seek>(
     )?;
     st.rows.push(("release_country", n));
     let n = require(
-        input,
+        source,
         "release_unknown_country",
         Shape { table: "release_unknown_country", min_fields: 4, ints: &[0], uuids: &[] },
         |row| {
@@ -680,7 +802,7 @@ pub fn build<W: Write + Seek>(
     let mut media: Vec<MediumBuild> = Vec::new();
     let mut dangling_media = 0u64;
     let n = require(
-        input,
+        source,
         "medium",
         Shape { table: "medium", min_fields: 9, ints: &[0, 1, 2], uuids: &[8] },
         |row| {
@@ -722,35 +844,38 @@ pub fn build<W: Write + Seek>(
     }
 
     // --- recordings -----------------------------------------------------------
+    // Struct-of-arrays keyed by recording id: no padding, and the gids are NOT
+    // held (that would be ~800 MB); RECORDING_MBID is filled by a second pass.
     step!("pass 7: recordings");
-    let mut rec_rows: Vec<RecBuild> = Vec::new();
-    let mut rec_gids: Vec<Mbid> = Vec::new();
+    let mut rec_title: Vec<Sym> = Vec::new();
+    let mut rec_credit: Vec<u32> = Vec::new();
+    let mut rec_dur: Vec<u16> = Vec::new();
     let mut rec_present: Vec<bool> = Vec::new();
-    let mut distinct_titles: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut distinct_titles: std::collections::HashSet<Sym> = std::collections::HashSet::new();
     let n = require(
-        input,
+        source,
         "recording",
         Shape { table: "recording", min_fields: 9, ints: &[0, 3], uuids: &[1] },
         |row| {
             let Some(id) = row.u32(0) else { return Ok(()) };
-            let Some(gid) = parse_mbid(&row.str(1)) else { return Ok(()) };
+            if !row.looks_like_uuid(1) {
+                return Ok(());
+            }
             if id > MAX_ID {
                 return Err(other_err(format!("recording id {id} exceeds {MAX_ID}")));
             }
             let i = id as usize;
-            if rec_rows.len() <= i {
-                rec_rows.resize(i + 1, RecBuild::default());
-                rec_gids.resize(i + 1, [0u8; 16]);
+            if rec_title.len() <= i {
+                rec_title.resize(i + 1, SYM_EMPTY);
+                rec_credit.resize(i + 1, pack::NONE);
+                rec_dur.resize(i + 1, 0);
                 rec_present.resize(i + 1, false);
             }
-            let title_off = pool.intern(&row.str(2));
-            distinct_titles.insert(title_off);
-            rec_rows[i] = RecBuild {
-                title_off,
-                credit_id: row.u32(3).unwrap_or(pack::NONE),
-                dur_s: ms_to_secs(row.i64(4)),
-            };
-            rec_gids[i] = gid;
+            let title = pool.intern(&row.str(2));
+            distinct_titles.insert(title);
+            rec_title[i] = title;
+            rec_credit[i] = row.u32(3).unwrap_or(pack::NONE);
+            rec_dur[i] = ms_to_secs(row.i64(4));
             rec_present[i] = true;
             Ok(())
         },
@@ -760,48 +885,48 @@ pub fn build<W: Write + Seek>(
     st.distinct_recording_titles = distinct_titles.len() as u64;
     drop(distinct_titles);
 
-    // --- tracks ---------------------------------------------------------------
-    // The dump is in track-id order but TRACKS must be grouped by medium, so the
-    // rows are buffered and sorted once. This is the only large transient buffer.
-    step!("pass 8: tracks");
-    let mut tracks: Vec<TrackBuild> = Vec::new();
-    let mut track_gids: Vec<Mbid> = Vec::new();
+    // --- tracks, phase 1: spill to medium-keyed buckets ------------------------
+    step!("pass 8: tracks -> spill buckets");
+    let spill_len =
+        if opts.include_track_mbids { TRACK_SPILL_LEN_A } else { TRACK_SPILL_LEN };
+    let mut spill = TrackSpill::new(opts.work_dir.as_deref(), media.len() as u32, spill_len)?;
     let mut dangling_tracks = 0u64;
     let mut bad_track_gids = 0u64;
+    let mut rec = vec![0u8; spill_len];
     let n = require(
-        input,
+        source,
         "track",
         Shape { table: "track", min_fields: 12, ints: &[0, 2, 3, 4, 7], uuids: &[1] },
         |row| {
-            let (Some(rec), Some(med)) = (row.u32(2), row.u32(3)) else { return Ok(()) };
+            let (Some(recording), Some(med)) = (row.u32(2), row.u32(3)) else { return Ok(()) };
             let Some(mi) = medium_idx.get(med) else {
                 dangling_tracks += 1;
                 return Ok(());
             };
-            let gid_slot = if opts.include_track_mbids {
+            let gid = if opts.include_track_mbids {
                 match parse_mbid(&row.str(1)) {
-                    Some(g) => {
-                        track_gids.push(g);
-                        track_gids.len() as u32 - 1
-                    }
+                    Some(g) => g,
                     None => {
                         bad_track_gids += 1;
                         return Ok(());
                     }
                 }
             } else {
-                0
+                [0u8; 16]
             };
-            tracks.push(TrackBuild {
+            TrackRow {
                 medium_idx: mi,
                 position: clamp_position(row.i64(4)),
-                recording_id: rec,
-                title_off: pool.intern(&row.str(6)),
+                recording_id: recording,
+                title: pool.intern(&row.str(6)),
                 credit_id: row.u32(7).unwrap_or(pack::NONE),
                 length_s: ms_to_secs(row.i64(8)),
-                gid_slot,
-            });
-            Ok(())
+            }
+            .encode(&mut rec);
+            if opts.include_track_mbids {
+                rec[TRACK_SPILL_LEN..TRACK_SPILL_LEN_A].copy_from_slice(&gid);
+            }
+            spill.push(mi, &rec)
         },
     )?;
     st.rows.push(("track", n));
@@ -811,102 +936,141 @@ pub fn build<W: Write + Seek>(
     if bad_track_gids > 0 {
         st.skipped.push(("tracks with an unparseable gid", bad_track_gids));
     }
-    st.track_sort_buffer_bytes = (tracks.len() * std::mem::size_of::<TrackBuild>()) as u64;
-    tracks.sort_unstable_by(|a, b| {
-        a.medium_idx.cmp(&b.medium_idx).then(a.position.cmp(&b.position))
-    });
+    st.track_spill_bytes = spill.written;
+    let buckets = spill.finish()?;
 
-    // Assign recording indices in first-appearance order (design doc §4.3): a
-    // tracklist then references consecutive recordings, so d_recording is mostly
-    // 1 and TRACKS stays around 2 B a track.
-    let mut rec_new: Vec<u32> = vec![pack::NONE; rec_rows.len()];
+    // --- finalise the string pool ---------------------------------------------
+    // Every table has now been read, so the pool is complete and can be sorted.
+    // Nothing before this point knows a byte offset; everything after uses one.
+    step!("pass 9: sorting the string pool ({} distinct)", pool.distinct());
+    st.distinct_strings = pool.distinct();
+    let pool: FinalPool = pool.finalize();
+    st.string_pool_raw = pool.raw_len() as u64;
+
+    // --- tracks, phase 2: cluster recordings and emit TRACKS -------------------
+    step!("pass 10: tracks -> TRACKS varint stream");
+    let mut rec_new: Vec<u32> = vec![pack::NONE; rec_title.len()];
     let mut rec_order: Vec<u32> = Vec::new();
     let mut rec_first_release: Vec<u32> = Vec::new();
     let mut tracks_stream: Vec<u8> = Vec::new();
     let mut track_mbids: Vec<u8> = Vec::new();
     let mut track_idx: Vec<u32> = vec![0u32; media.len() + 1];
     let mut track_count = 0u32;
-    let mut cursor = 0usize;
     let mut missing_recordings = 0u64;
-    for m in 0..media.len() {
-        track_idx[m] = tracks_stream.len() as u32;
-        let mut ordinal = 0u32;
-        let mut prev_rec: i64 = 0;
-        while cursor < tracks.len() && tracks[cursor].medium_idx as usize == m {
-            let t = tracks[cursor];
-            cursor += 1;
-            let rid = t.recording_id as usize;
-            if rid >= rec_rows.len() || !rec_present[rid] {
-                missing_recordings += 1;
-                continue;
-            }
-            let new_idx = if rec_new[rid] != pack::NONE {
-                rec_new[rid]
-            } else {
-                let i = rec_order.len() as u32;
-                rec_new[rid] = i;
-                rec_order.push(t.recording_id);
-                rec_first_release.push(media[m].release_idx);
-                i
-            };
-            let rec = rec_rows[rid];
-            let title_differs = t.title_off != rec.title_off;
-            let credit_differs = t.credit_id != rec.credit_id;
-            let pos_differs = t.position != (ordinal as i32 + 1);
-            let len_differs = t.length_s != 0 && t.length_s != rec.dur_s;
-            if !title_differs {
-                st.tracks_title_same += 1;
-            }
-            if !credit_differs {
-                st.tracks_credit_same += 1;
-            }
-            if !len_differs {
-                st.tracks_length_same += 1;
-            }
-            let flags = (title_differs as u64)
-                | ((credit_differs as u64) << 1)
-                | ((pos_differs as u64) << 2)
-                | ((len_differs as u64) << 3);
-            pack::write_uvarint(&mut tracks_stream, flags);
-            if ordinal == 0 {
-                pack::write_uvarint(&mut tracks_stream, new_idx as u64);
-            } else {
-                pack::write_zigzag(&mut tracks_stream, new_idx as i64 - prev_rec);
-            }
-            prev_rec = new_idx as i64;
-            if title_differs {
-                pack::write_uvarint(&mut tracks_stream, t.title_off as u64);
-            }
-            if credit_differs {
-                pack::write_uvarint(&mut tracks_stream, t.credit_id as u64);
-            }
-            if pos_differs {
-                pack::write_uvarint(&mut tracks_stream, t.position.max(0) as u64);
-            }
-            if len_differs {
-                pack::write_uvarint(&mut tracks_stream, t.length_s as u64);
-            }
+    let mut next_medium = 0usize;
+    let mut buf: Vec<u8> = Vec::new();
+    for bucket in &buckets {
+        let mut rows: Vec<TrackRow> = Vec::new();
+        let mut gids: Vec<Mbid> = Vec::new();
+        buf.clear();
+        File::open(bucket)?.read_to_end(&mut buf)?;
+        for chunk in buf.chunks_exact(spill_len) {
+            rows.push(TrackRow::decode(chunk));
             if opts.include_track_mbids {
-                track_mbids.extend_from_slice(&track_gids[t.gid_slot as usize]);
+                let mut g = [0u8; 16];
+                g.copy_from_slice(&chunk[TRACK_SPILL_LEN..TRACK_SPILL_LEN_A]);
+                gids.push(g);
             }
-            ordinal += 1;
-            track_count += 1;
         }
-        // The stored track_count must match what a decode of the run yields, or
-        // TRACKTOTAL and the tracklist disagree.
-        media[m].track_count = ordinal;
+        let mut order: Vec<u32> = (0..rows.len() as u32).collect();
+        order.sort_unstable_by_key(|&i| (rows[i as usize].medium_idx, rows[i as usize].position));
+        let mut cursor = 0usize;
+        // Every medium up to the last one in this bucket gets its offset written,
+        // including the ones with no tracks at all.
+        let bucket_last = order
+            .last()
+            .map(|&i| rows[i as usize].medium_idx as usize)
+            .unwrap_or(next_medium.saturating_sub(1));
+        while next_medium <= bucket_last && next_medium < media.len() {
+            let m = next_medium;
+            track_idx[m] = tracks_stream.len() as u32;
+            let mut ordinal = 0u32;
+            let mut prev_rec: i64 = 0;
+            while cursor < order.len() && rows[order[cursor] as usize].medium_idx as usize == m {
+                let i = order[cursor] as usize;
+                let t = rows[i];
+                cursor += 1;
+                let rid = t.recording_id as usize;
+                if rid >= rec_present.len() || !rec_present[rid] {
+                    missing_recordings += 1;
+                    continue;
+                }
+                let new_idx = if rec_new[rid] != pack::NONE {
+                    rec_new[rid]
+                } else {
+                    let idx = rec_order.len() as u32;
+                    rec_new[rid] = idx;
+                    rec_order.push(t.recording_id);
+                    rec_first_release.push(media[m].release_idx);
+                    idx
+                };
+                let title_differs = t.title != rec_title[rid];
+                let credit_differs = t.credit_id != rec_credit[rid];
+                let pos_differs = t.position != (ordinal as i32 + 1);
+                let len_differs = t.length_s != 0 && t.length_s != rec_dur[rid];
+                if !title_differs {
+                    st.tracks_title_same += 1;
+                }
+                if !credit_differs {
+                    st.tracks_credit_same += 1;
+                }
+                if !len_differs {
+                    st.tracks_length_same += 1;
+                }
+                let flags = (title_differs as u64)
+                    | ((credit_differs as u64) << 1)
+                    | ((pos_differs as u64) << 2)
+                    | ((len_differs as u64) << 3);
+                pack::write_uvarint(&mut tracks_stream, flags);
+                // The first track of a medium carries an ABSOLUTE recording index so
+                // the medium is decodable on its own; TRACK_IDX's byte offset would
+                // be useless otherwise.
+                if ordinal == 0 {
+                    pack::write_uvarint(&mut tracks_stream, new_idx as u64);
+                } else {
+                    pack::write_zigzag(&mut tracks_stream, new_idx as i64 - prev_rec);
+                }
+                prev_rec = new_idx as i64;
+                if title_differs {
+                    pack::write_uvarint(&mut tracks_stream, pool.offset(t.title) as u64);
+                }
+                if credit_differs {
+                    pack::write_uvarint(&mut tracks_stream, t.credit_id as u64);
+                }
+                if pos_differs {
+                    pack::write_uvarint(&mut tracks_stream, t.position.max(0) as u64);
+                }
+                if len_differs {
+                    pack::write_uvarint(&mut tracks_stream, t.length_s as u64);
+                }
+                if opts.include_track_mbids {
+                    track_mbids.extend_from_slice(&gids[i]);
+                }
+                ordinal += 1;
+                track_count += 1;
+            }
+            // The published count must match what a decode of the run yields, or
+            // TRACKTOTAL and the tracklist disagree.
+            media[m].track_count = ordinal;
+            next_medium += 1;
+        }
+    }
+    // Trailing media with no tracks.
+    while next_medium < media.len() {
+        track_idx[next_medium] = tracks_stream.len() as u32;
+        media[next_medium].track_count = 0;
+        next_medium += 1;
     }
     track_idx[media.len()] = tracks_stream.len() as u32;
     if missing_recordings > 0 {
         st.skipped.push(("tracks whose recording is missing", missing_recordings));
     }
-    drop(tracks);
-    drop(track_gids);
+    drop(spill);
 
     // Standalone recordings (no track anywhere) are appended so recording search
     // can still reach them.
     let tracked = rec_order.len() as u64;
-    for id in 0..rec_rows.len() {
+    for id in 0..rec_present.len() {
         if rec_present[id] && rec_new[id] == pack::NONE {
             rec_new[id] = rec_order.len() as u32;
             rec_order.push(id as u32);
@@ -915,18 +1079,42 @@ pub fn build<W: Write + Seek>(
     }
     st.standalone_recordings = rec_order.len() as u64 - tracked;
 
+    // --- recording MBIDs, scattered in clustered order ------------------------
+    let mut recording_mbids: Vec<u8> = Vec::new();
+    if opts.include_recording_mbids {
+        step!("pass 11: recording MBIDs");
+        recording_mbids = vec![0u8; rec_order.len() * 16];
+        require(
+            source,
+            "recording",
+            Shape { table: "recording", min_fields: 9, ints: &[0, 3], uuids: &[1] },
+            |row| {
+                let Some(id) = row.u32(0) else { return Ok(()) };
+                let Some(&new) = rec_new.get(id as usize) else { return Ok(()) };
+                if new == pack::NONE {
+                    return Ok(());
+                }
+                if let Some(gid) = parse_mbid(&row.str(1)) {
+                    let at = new as usize * 16;
+                    recording_mbids[at..at + 16].copy_from_slice(&gid);
+                }
+                Ok(())
+            },
+        )?;
+    }
+
     // --- ISRCs ----------------------------------------------------------------
-    step!("pass 9: ISRCs");
     let mut isrcs: Vec<(u32, [u8; 7])> = Vec::new();
     if opts.include_isrcs {
+        step!("pass 12: ISRCs");
         let mut rejects = 0u64;
         let n = require(
-            input,
+            source,
             "isrc",
             Shape { table: "isrc", min_fields: 5, ints: &[0, 1], uuids: &[] },
             |row| {
-                let Some(rec) = row.u32(1) else { return Ok(()) };
-                let Some(&new) = rec_new.get(rec as usize) else { return Ok(()) };
+                let Some(recording) = row.u32(1) else { return Ok(()) };
+                let Some(&new) = rec_new.get(recording as usize) else { return Ok(()) };
                 if new == pack::NONE {
                     return Ok(());
                 }
@@ -944,58 +1132,70 @@ pub fn build<W: Write + Seek>(
     }
 
     // --- search index ---------------------------------------------------------
-    step!("pass 10: search index");
+    step!("pass 13: search index");
     let mut term_dict: HashMap<String, u32> = HashMap::new();
     let mut postings: Vec<(u32, u32)> = Vec::new();
     let mut terms_buf: Vec<String> = Vec::new();
-    let mut add = |text: &str, refv: u32, dict: &mut HashMap<String, u32>, post: &mut Vec<(u32, u32)>| {
-        terms_buf.clear();
-        search_terms(text, &mut terms_buf);
-        for t in &terms_buf {
-            let next = dict.len() as u32;
-            let id = *dict.entry(t.clone()).or_insert(next);
-            post.push((id, refv));
-        }
-    };
-    for (i, a) in artists.iter().enumerate() {
-        let name = str_from_pool(&pool, a.name_off);
-        check_searchable(i as u32)?;
-        add(&name, (pack::KIND_ARTIST << pack::KIND_SHIFT) | i as u32, &mut term_dict, &mut postings);
-    }
-    for (i, r) in rgs.iter().enumerate() {
-        let title = str_from_pool(&pool, r.title_off);
-        check_searchable(i as u32)?;
-        add(
-            &title,
-            (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32,
-            &mut term_dict,
-            &mut postings,
-        );
-    }
-    if opts.include_recording_search {
-        for (i, id) in rec_order.iter().enumerate() {
-            let title = str_from_pool(&pool, rec_rows[*id as usize].title_off);
+    {
+        let mut add = |text: &str,
+                       refv: u32,
+                       dict: &mut HashMap<String, u32>,
+                       post: &mut Vec<(u32, u32)>| {
+            terms_buf.clear();
+            search_terms(text, &mut terms_buf);
+            for t in terms_buf.iter() {
+                let next = dict.len() as u32;
+                let id = *dict.entry(t.clone()).or_insert(next);
+                post.push((id, refv));
+            }
+        };
+        for (i, a) in artists.iter().enumerate() {
             check_searchable(i as u32)?;
+            let text = String::from_utf8_lossy(pool.get(a.name)).into_owned();
             add(
-                &title,
-                (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32,
+                &text,
+                (pack::KIND_ARTIST << pack::KIND_SHIFT) | i as u32,
                 &mut term_dict,
                 &mut postings,
             );
+        }
+        for (i, r) in rgs.iter().enumerate() {
+            check_searchable(i as u32)?;
+            let text = String::from_utf8_lossy(pool.get(r.title)).into_owned();
+            add(
+                &text,
+                (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32,
+                &mut term_dict,
+                &mut postings,
+            );
+        }
+        if opts.include_recording_search {
+            for (i, id) in rec_order.iter().enumerate() {
+                check_searchable(i as u32)?;
+                let text =
+                    String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
+                add(
+                    &text,
+                    (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32,
+                    &mut term_dict,
+                    &mut postings,
+                );
+            }
         }
     }
     st.search_postings = postings.len() as u64;
     // Sort the dictionary so the reader can binary search it, then renumber.
     let mut sorted_terms: Vec<(String, u32)> = term_dict.into_iter().collect();
     sorted_terms.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let mut remap = vec![0u32; sorted_terms.len()];
-    for (new, (_, old)) in sorted_terms.iter().enumerate() {
-        remap[*old as usize] = new as u32;
+    {
+        let mut remap = vec![0u32; sorted_terms.len()];
+        for (new, (_, old)) in sorted_terms.iter().enumerate() {
+            remap[*old as usize] = new as u32;
+        }
+        for p in postings.iter_mut() {
+            p.0 = remap[p.0 as usize];
+        }
     }
-    for p in postings.iter_mut() {
-        p.0 = remap[p.0 as usize];
-    }
-    drop(remap);
     postings.sort_unstable();
     postings.dedup();
     let term_count = sorted_terms.len();
@@ -1022,19 +1222,22 @@ pub fn build<W: Write + Seek>(
     term_index.extend_from_slice(&(search_terms_bytes.len() as u32).to_le_bytes());
     term_index.extend_from_slice(&(postings_bytes.len() as u32).to_le_bytes());
     drop(postings);
+    drop(sorted_terms);
 
     // --- assemble -------------------------------------------------------------
-    step!("pass 11: writing");
+    step!("pass 14: writing");
     let mut w = PackWriter::new(out)?;
-    w.section_u32(pack::S_ENUM_POOL, enums.offsets())?;
-    w.section_u32(pack::S_CREDITS, &credits_off)?;
+    let enum_offsets: Vec<u32> = enums.syms().iter().map(|&s| pool.offset(s)).collect();
+    w.section_u32(pack::S_ENUM_POOL, &enum_offsets)?;
+    let credit_offsets: Vec<u32> = credit_syms.iter().map(|&s| pool.offset(s)).collect();
+    w.section_u32(pack::S_CREDITS, &credit_offsets)?;
+    drop(credit_syms);
 
-    let mut buf: Vec<u8> = Vec::new();
     buf.clear();
     for a in &artists {
-        buf.extend_from_slice(&a.name_off.to_le_bytes());
-        buf.extend_from_slice(&a.disamb_off.to_le_bytes());
-        buf.extend_from_slice(&a.area_off.to_le_bytes());
+        buf.extend_from_slice(&pool.offset(a.name).to_le_bytes());
+        buf.extend_from_slice(&pool.offset(a.disamb).to_le_bytes());
+        buf.extend_from_slice(&pool.offset(a.area).to_le_bytes());
         buf.extend_from_slice(&a.begin_date.to_le_bytes());
         buf.extend_from_slice(&a.kind.to_le_bytes());
         buf.extend_from_slice(&a.country.to_le_bytes());
@@ -1048,7 +1251,7 @@ pub fn build<W: Write + Seek>(
 
     buf.clear();
     for r in &rgs {
-        buf.extend_from_slice(&r.title_off.to_le_bytes());
+        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
         buf.extend_from_slice(&r.first_date.to_le_bytes());
         buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
         buf.extend_from_slice(&r.primary.to_le_bytes());
@@ -1065,11 +1268,11 @@ pub fn build<W: Write + Seek>(
 
     buf.clear();
     for r in &releases {
-        buf.extend_from_slice(&r.title_off.to_le_bytes());
+        buf.extend_from_slice(&pool.offset(r.title).to_le_bytes());
         buf.extend_from_slice(&rg_idx.get(r.rg_id).unwrap_or(pack::NONE).to_le_bytes());
         buf.extend_from_slice(&credit_idx_of(r.credit_id, credit_count).to_le_bytes());
         buf.extend_from_slice(&r.date.to_le_bytes());
-        buf.extend_from_slice(&r.disamb_off.to_le_bytes());
+        buf.extend_from_slice(&pool.offset(r.disamb).to_le_bytes());
         buf.extend_from_slice(&r.status.to_le_bytes());
         buf.extend_from_slice(&r.country.to_le_bytes());
     }
@@ -1104,27 +1307,24 @@ pub fn build<W: Write + Seek>(
 
     buf.clear();
     for id in &rec_order {
-        let r = rec_rows[*id as usize];
-        let (lo, hi) = encode_recording_credit(credit_idx_of(r.credit_id, credit_count));
-        buf.extend_from_slice(&r.title_off.to_le_bytes());
-        buf.extend_from_slice(&r.dur_s.to_le_bytes());
+        let i = *id as usize;
+        let (lo, hi) = encode_recording_credit(credit_idx_of(rec_credit[i], credit_count));
+        buf.extend_from_slice(&pool.offset(rec_title[i]).to_le_bytes());
+        buf.extend_from_slice(&rec_dur[i].to_le_bytes());
         buf.extend_from_slice(&lo.to_le_bytes());
         buf.push(hi);
     }
     w.section(pack::S_RECORDINGS, &buf)?;
     if opts.include_recording_mbids {
-        buf.clear();
-        for id in &rec_order {
-            buf.extend_from_slice(&rec_gids[*id as usize]);
-        }
-        w.section(pack::S_RECORDING_MBID, &buf)?;
+        w.section(pack::S_RECORDING_MBID, &recording_mbids)?;
     }
+    drop(recording_mbids);
     w.section_u32(pack::S_REC_FIRST_RELEASE, &rec_first_release)?;
 
     if opts.include_isrcs {
         buf.clear();
-        for (rec, packed) in &isrcs {
-            buf.extend_from_slice(&rec.to_le_bytes());
+        for (recording, packed) in &isrcs {
+            buf.extend_from_slice(&recording.to_le_bytes());
             buf.extend_from_slice(packed);
         }
         w.section(pack::S_ISRCS, &buf)?;
@@ -1133,7 +1333,34 @@ pub fn build<W: Write + Seek>(
     w.section(pack::S_SEARCH_TERMS, &search_terms_bytes)?;
     w.section(pack::S_SEARCH_POSTINGS, &postings_bytes)?;
     w.section(pack::S_SEARCH_TERM_IDX, &term_index)?;
-    w.section(pack::S_STRINGS, pool.bytes())?;
+
+    // STRINGS goes last: it is only complete now, and streaming it here means the
+    // sorted pool is never materialised as a second buffer.
+    let mut string_blocks = 0u32;
+    if opts.compress_strings {
+        let mut bw = StringBlockWriter::new();
+        pool.write_strings(|s| bw.push(s))?;
+        let (compressed, block_offsets) = bw.finish()?;
+        st.string_pool_stored = compressed.len() as u64;
+        string_blocks = (block_offsets.len() - 1) as u32;
+        w.section(pack::S_STRINGS, &compressed)?;
+        w.section_u32(pack::S_STRINGS_BLKIDX, &block_offsets)?;
+    } else {
+        w.begin(pack::S_STRINGS)?;
+        let mut chunk: Vec<u8> = Vec::with_capacity(1 << 16);
+        pool.write_strings(|s| {
+            chunk.extend_from_slice(s);
+            if chunk.len() >= (1 << 16) {
+                let taken = std::mem::take(&mut chunk);
+                w.write(&taken)?;
+                chunk = taken;
+                chunk.clear();
+            }
+            Ok(())
+        })?;
+        w.write(&chunk)?;
+        st.string_pool_stored = w.end()?;
+    }
 
     let counts = HeaderCounts {
         artists: artists.len() as u32,
@@ -1145,16 +1372,15 @@ pub fn build<W: Write + Seek>(
         recordings: rec_order.len() as u32,
         isrcs: isrcs.len() as u32,
         search_terms: term_count as u32,
-        enums: enums.offsets().len() as u32,
+        enums: enum_offsets.len() as u32,
     };
-    w.set_header(&counts, opts.flags(), input.dump_date());
+    w.set_header(&counts, opts.flags(), source.dump_date(), string_blocks);
+    st.string_blocks = string_blocks;
     st.sections = w
         .section_sizes()
         .into_iter()
         .map(|(i, len)| (pack::SECTION_NAMES[i], len))
         .collect();
-    st.distinct_strings = pool.distinct();
-    st.string_pool_bytes = pool.bytes().len();
     st.dense_map_bytes =
         artist_idx.bytes() + rg_idx.bytes() + release_idx.bytes() + medium_idx.bytes();
     st.total_bytes = w.finish()?;
@@ -1189,16 +1415,6 @@ fn credit_idx_of(credit_id: u32, credit_count: u32) -> u32 {
     }
 }
 
-fn str_from_pool(pool: &StringPool, off: u32) -> String {
-    let bytes = pool.bytes();
-    let start = off as usize;
-    if start >= bytes.len() {
-        return String::new();
-    }
-    let end = bytes[start..].iter().position(|&b| b == 0).map_or(bytes.len(), |n| start + n);
-    String::from_utf8_lossy(&bytes[start..end]).into_owned()
-}
-
 /// MusicBrainz stores lengths in milliseconds; the pack stores seconds because
 /// the UI renders m:ss, Tidal matching uses a ±3 s tolerance and LRCLIB takes
 /// seconds. Clamped rather than wrapped: an 18-hour recording is rare but real.
@@ -1221,13 +1437,13 @@ fn to_csr(pairs: &[(u32, u32)], parents: usize) -> (Vec<u32>, Vec<u32>) {
 }
 
 fn read_enum_table(
-    input: &Input,
+    source: &dyn TableSource,
     table: &'static str,
     pool: &mut StringPool,
     enums: &mut EnumPool,
 ) -> io::Result<HashMap<u32, u16>> {
     let mut out = HashMap::new();
-    require(input, table, Shape { table, min_fields: 2, ints: &[0], uuids: &[] }, |row| {
+    require(source, table, Shape { table, min_fields: 2, ints: &[0], uuids: &[] }, |row| {
         if let Some(id) = row.u32(0) {
             out.insert(id, enums.intern(pool, &row.str(1)));
         }
@@ -1237,26 +1453,30 @@ fn read_enum_table(
 }
 
 /// Read a table that must be present, checking its shape on the first row.
-fn require<F>(input: &Input, table: &'static str, shape: Shape, mut f: F) -> io::Result<u64>
+fn require<F>(
+    source: &dyn TableSource,
+    table: &'static str,
+    shape: Shape,
+    mut f: F,
+) -> io::Result<u64>
 where
     F: FnMut(&Row<'_>) -> io::Result<()>,
 {
+    let Some(reader) = source.open_table(table)? else {
+        return Err(other_err(format!(
+            "table `{table}` is missing from {}. The core mbdump.tar.bz2 contains it as \
+             `mbdump/{table}`; a derived or partial dump does not.",
+            source.describe()
+        )));
+    };
     let mut first = true;
-    let rows = input.each_row(table, |row| {
+    each_row(reader, |row| {
         if first {
             shape.check(row)?;
             first = false;
         }
         f(row)
-    })?;
-    match rows {
-        Some(n) => Ok(n),
-        None => Err(other_err(format!(
-            "table `{table}` is missing from {}. The core mbdump.tar.bz2 contains it as \
-             `mbdump/{table}`; a derived or partial dump does not.",
-            input.describe()
-        ))),
-    }
+    })
 }
 
 #[cfg(test)]
@@ -1264,10 +1484,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn track_build_stays_small() {
-        // 57.4 M of these are resident while the track pass sorts, so every byte
-        // here is 57 MB of peak RSS. The README quotes this number.
-        assert_eq!(std::mem::size_of::<TrackBuild>(), 28);
+    fn track_spill_record_stays_small() {
+        // 57.4 M of these go through the spill; the README quotes this width.
+        assert_eq!(TRACK_SPILL_LEN, 24);
+        assert_eq!(TRACK_SPILL_LEN_A, TRACK_SPILL_LEN + 16);
+    }
+
+    #[test]
+    fn track_rows_round_trip_through_the_spill_encoding() {
+        let t = TrackRow {
+            medium_idx: 1_234_567,
+            position: -3,
+            recording_id: 39_881_257,
+            title: 99,
+            credit_id: pack::NONE,
+            length_s: 425,
+        };
+        let mut b = [0u8; TRACK_SPILL_LEN];
+        t.encode(&mut b);
+        let d = TrackRow::decode(&b);
+        assert_eq!(d.medium_idx, t.medium_idx);
+        assert_eq!(d.position, t.position);
+        assert_eq!(d.recording_id, t.recording_id);
+        assert_eq!(d.title, t.title);
+        assert_eq!(d.credit_id, t.credit_id);
+        assert_eq!(d.length_s, t.length_s);
     }
 
     #[test]
@@ -1304,5 +1545,25 @@ mod tests {
         assert_eq!(m.get(4), None);
         assert_eq!(m.get(9_999), None);
         assert!(m.set(MAX_ID + 1, 0).is_err());
+    }
+
+    #[test]
+    fn spill_buckets_are_monotonic_in_medium() {
+        let s = TrackSpill::new(Some(&std::env::temp_dir()), 640_000, TRACK_SPILL_LEN).unwrap();
+        assert!(s.buckets > 1, "a full-scale medium count must use many buckets");
+        let mut prev = 0usize;
+        for m in [0u32, 1, 10_000, 320_000, 639_999] {
+            let b = s.bucket_of(m);
+            assert!(b >= prev, "buckets must not go backwards: medium {m} -> {b}");
+            assert!(b < s.buckets);
+            prev = b;
+        }
+    }
+
+    #[test]
+    fn concurrent_spills_do_not_share_a_directory() {
+        let a = TrackSpill::new(None, 10, TRACK_SPILL_LEN).unwrap();
+        let b = TrackSpill::new(None, 10, TRACK_SPILL_LEN).unwrap();
+        assert_ne!(a.dir, b.dir, "two builds in one process must not collide");
     }
 }

@@ -126,9 +126,14 @@ impl<'a> Row<'a> {
 }
 
 /// A table's byte stream plus, for the archive path, the `tar` process feeding it.
-type TableStream = (Box<dyn Read>, Option<Child>);
+type TableStream = (Box<dyn Read + Send>, Option<Child>);
 
 /// Where the tables come from.
+///
+/// The production path is neither of these: `location_share_server` owns the
+/// download, the bzip2 stream and the tar demux, spills the 20 tables it needs,
+/// and implements [`TableSource`] over them. These two exist so the fixture tests
+/// and the CLI work without that pipeline.
 pub enum Input {
     /// A directory holding the table files, either `<dir>/<table>` or
     /// `<dir>/mbdump/<table>` (i.e. an extracted archive works unchanged).
@@ -177,42 +182,6 @@ impl Input {
         std::str::from_utf8(&d).ok().and_then(|s| s.parse().ok()).unwrap_or(0)
     }
 
-    /// Extract just `tables` (plus `TIMESTAMP`) into `dir` in ONE pass.
-    ///
-    /// Reading tables straight out of the archive costs one full bz2 decompression
-    /// per table, because `tar` has to stream to the member it wants. That is fine
-    /// for a fixture and badly wrong for the real 7 GB dump: ~20 tables means ~20
-    /// passes over ~40 GB of decompressed output. Extracting the tables this crate
-    /// actually reads costs one pass and ~13 GB of disk, versus ~40 GB for the
-    /// whole archive.
-    pub fn extract_to(&self, dir: &Path, tables: &[&str]) -> io::Result<()> {
-        let Input::Archive(path) = self else {
-            return Err(other_err(format!(
-                "{} is already a directory; nothing to extract",
-                self.describe()
-            )));
-        };
-        std::fs::create_dir_all(dir)?;
-        let mut cmd = Command::new("tar");
-        cmd.arg("-xf").arg(path).arg("-C").arg(dir).arg("TIMESTAMP");
-        for t in tables {
-            cmd.arg(format!("mbdump/{t}"));
-        }
-        let status = cmd.status().map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("could not run `tar` to extract {}: {e}", path.display()),
-            )
-        })?;
-        if !status.success() {
-            return Err(other_err(format!(
-                "tar failed extracting {}; is it the core mbdump.tar.bz2?",
-                path.display()
-            )));
-        }
-        Ok(())
-    }
-
     fn open_reader(&self, table: &str) -> io::Result<Option<TableStream>> {
         match self {
             Input::Dir(dir) => {
@@ -224,9 +193,9 @@ impl Input {
                 Ok(None)
             }
             Input::Archive(path) => {
-                // `tar` picks the decompressor from the magic bytes, so this works
-                // for .tar, .tar.bz2 and .tar.gz alike, and streams: nothing is
-                // written to disk. bsdtar (Windows) and GNU tar both support it.
+                // `tar` picks the decompressor from the magic bytes, so this works for
+                // .tar, .tar.bz2 and .tar.gz alike, and streams: nothing is written to
+                // disk. bsdtar (Windows) and GNU tar both support it.
                 let member = format!("mbdump/{table}");
                 let mut child = Command::new("tar")
                     .arg("-xOf")
@@ -240,74 +209,128 @@ impl Input {
                             e.kind(),
                             format!(
                                 "could not run `tar` to stream {member} out of {}: {e}. \
-                                 Archive input needs tar on PATH; extract the archive and \
-                                 pass the directory instead.",
+                                 Archive input needs tar on PATH; pass an extracted \
+                                 directory instead.",
                                 path.display()
                             ),
                         )
                     })?;
-                let out = child.stdout.take().expect("piped stdout");
-                Ok(Some((Box::new(out), Some(child))))
+                let mut out = child.stdout.take().expect("piped stdout");
+                // Probe one byte so a missing member is reported as an absent table
+                // rather than as an empty one -- silently building a pack with no
+                // artists because a member name was wrong would be much worse.
+                let mut probe = [0u8; 1];
+                let n = out.read(&mut probe)?;
+                if n == 0 {
+                    let _ = child.wait();
+                    return Ok(None);
+                }
+                let head = io::Cursor::new(probe[..n].to_vec());
+                Ok(Some((Box::new(head.chain(out)), Some(child))))
             }
         }
     }
+}
 
-    /// Call `f` once per row of `table`. Returns the number of rows, or `None` if
-    /// the table is not in this input at all.
-    ///
-    /// Rows are handed out as borrowed slices and never accumulated, so this is
-    /// safe on `track` (57 M rows) as long as the caller does not accumulate
-    /// either.
-    pub fn each_row<F>(&self, table: &str, mut f: F) -> io::Result<Option<u64>>
-    where
-        F: FnMut(&Row<'_>) -> io::Result<()>,
-    {
-        let Some((reader, child)) = self.open_reader(table)? else {
-            return Ok(None);
-        };
-        let mut reader = BufReader::with_capacity(1 << 20, reader);
-        let mut line: Vec<u8> = Vec::with_capacity(4096);
-        let mut fields: Vec<(u32, u32)> = Vec::with_capacity(32);
-        let mut rows = 0u64;
-        loop {
-            line.clear();
-            let n = reader.read_until(b'\n', &mut line)?;
-            if n == 0 {
-                break;
-            }
-            while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
-                line.pop();
-            }
-            if line.is_empty() {
-                continue;
-            }
-            fields.clear();
-            let mut start = 0u32;
-            for (i, &c) in line.iter().enumerate() {
-                if c == b'\t' {
-                    fields.push((start, i as u32));
-                    start = i as u32 + 1;
-                }
-            }
-            fields.push((start, line.len() as u32));
-            f(&Row { line: &line, fields: &fields })?;
-            rows += 1;
+
+/// A source of mbdump tables, by name.
+///
+/// This is the seam with `location_share_server`: it does one bzip2 traversal of
+/// the archive, demuxes the tar and spills each table, then implements this trait.
+/// This crate never touches the archive, bzip2 or tar.
+///
+/// **Tables must be re-openable.** The ingest calls `open("track")` more than
+/// once, which is what lets it bucket-sort 57.4 M track rows through spill files
+/// instead of holding ~1.6 GB of them in memory to sort.
+pub trait TableSource {
+    /// A fresh sequential reader over the table's COPY-format bytes, or `None` if
+    /// this source does not have that table.
+    fn open_table(&self, table: &str) -> io::Result<Option<Box<dyn BufRead + Send>>>;
+
+    /// The dump's date as `YYYYMMDD`, or 0 when unknown.
+    fn dump_date(&self) -> u32 {
+        0
+    }
+
+    fn describe(&self) -> String {
+        "table source".to_string()
+    }
+}
+
+/// Call `f` once per row of a COPY-format stream. Rows are handed out as borrowed
+/// slices and never accumulated, so this is safe on `track` (57 M rows) as long as
+/// the caller does not accumulate either.
+pub fn each_row<F>(reader: Box<dyn BufRead + Send>, mut f: F) -> io::Result<u64>
+where
+    F: FnMut(&Row<'_>) -> io::Result<()>,
+{
+    let mut reader = reader;
+    let mut line: Vec<u8> = Vec::with_capacity(4096);
+    let mut fields: Vec<(u32, u32)> = Vec::with_capacity(32);
+    let mut rows = 0u64;
+    loop {
+        line.clear();
+        let n = reader.read_until(b'\n', &mut line)?;
+        if n == 0 {
+            break;
         }
-        if let Some(mut child) = child {
-            // A non-zero tar exit means the member was missing or the stream was
-            // truncated; treating that as an empty table would silently produce a
-            // wrong pack.
-            let status = child.wait()?;
-            if !status.success() && rows == 0 {
-                return Ok(None);
-            }
-            if !status.success() {
-                return Err(other_err(format!(
-                    "tar failed after {rows} rows of {table}; the archive is truncated"
-                )));
+        while matches!(line.last(), Some(b'\n') | Some(b'\r')) {
+            line.pop();
+        }
+        if line.is_empty() {
+            continue;
+        }
+        fields.clear();
+        let mut start = 0u32;
+        for (i, &c) in line.iter().enumerate() {
+            if c == b'\t' {
+                fields.push((start, i as u32));
+                start = i as u32 + 1;
             }
         }
-        Ok(Some(rows))
+        fields.push((start, line.len() as u32));
+        f(&Row { line: &line, fields: &fields })?;
+        rows += 1;
+    }
+    Ok(rows)
+}
+
+impl TableSource for Input {
+    fn open_table(&self, table: &str) -> io::Result<Option<Box<dyn BufRead + Send>>> {
+        match self.open_reader(table)? {
+            None => Ok(None),
+            Some((reader, child)) => Ok(Some(Box::new(BufReader::with_capacity(
+                1 << 20,
+                ChildReader { inner: reader, child },
+            )))),
+        }
+    }
+
+    fn dump_date(&self) -> u32 {
+        Input::dump_date(self)
+    }
+
+    fn describe(&self) -> String {
+        Input::describe(self)
+    }
+}
+
+struct ChildReader {
+    inner: Box<dyn Read + Send>,
+    child: Option<Child>,
+}
+
+impl Read for ChildReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Drop for ChildReader {
+    fn drop(&mut self) {
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.wait();
+        }
     }
 }
 

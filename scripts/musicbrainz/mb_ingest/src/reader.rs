@@ -5,20 +5,21 @@
 //! authoritative spec. Every constant here is duplicated there and pinned by the
 //! round-trip test in `tests/round_trip.rs`.
 //!
-//! Written to be copied into / path-depended on by `location_share_server`:
+//! Written to be consumed by `location_share_server`:
 //!
-//!   * it has **no dependencies** and does not own the mapping. `MbPack::open`
-//!     takes a `&[u8]`, so the caller keeps using memmap2 exactly as it does for
-//!     `traffic_edges.bin` (`main.rs:391-405`, `state.rs:26-28`) and hands the
-//!     slice in. `open` only validates the header and directory, so calling it
-//!     per request is cheap and avoids a self-referential `AppState` field.
+//!   * it does **not** own the mapping. `MbPack::open` takes a `&[u8]`, so the
+//!     caller keeps using memmap2 exactly as it does for `traffic_edges.bin`
+//!     (`main.rs:391-405`, `state.rs:26-28`) and hands the slice in. `open` only
+//!     validates the header and directory, so calling it per request is cheap and
+//!     avoids a self-referential `AppState` field.
+//!   * its only dependency is `zstd`, for the compressed string pool, which the
+//!     server already pulls in transitively through `zip 8.6.0`.
 //!   * every accessor is bounds-checked and returns `Option`/empty rather than
 //!     panicking, in the style of `openlr/graph.rs:371-390`. It deliberately does
 //!     *not* copy `handlers/maps/traffic.rs:285-292`, where `mmap.len() - 259200`
 //!     underflows on a truncated file.
-//!   * strings come back as `Cow<'a, str>`. Today the pool is uncompressed so
-//!     they are always borrowed and free; the type is `Cow` so that turning on the
-//!     compressed pool later does not break callers.
+//!   * strings come back as `Cow<'a, str>`: borrowed and free when the pool is
+//!     raw, owned when it is compressed. Do not assume they are free.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -40,7 +41,9 @@ pub enum PackError {
     SectionOutOfBounds { index: usize, offset: u64, len: u64, file_len: u64 },
     SectionMisaligned { index: usize, offset: u64 },
     SectionTruncated { index: usize, need: u64, have: u64 },
-    UnsupportedPoolCodec,
+    /// The pool claims to be compressed but its block index is missing or
+    /// inconsistent, so no offset can be resolved.
+    BadStringBlockIndex { blocks: u32, index_len: u64 },
 }
 
 impl fmt::Display for PackError {
@@ -70,10 +73,10 @@ impl fmt::Display for PackError {
                 f,
                 "section {index} needs {need} bytes for the row count in the header but has {have}"
             ),
-            PackError::UnsupportedPoolCodec => write!(
+            PackError::BadStringBlockIndex { blocks, index_len } => write!(
                 f,
-                "pack uses a compressed string pool, which this reader cannot decode; \
-                 refusing rather than returning garbage"
+                "string pool claims {blocks} compressed blocks but STRINGS_BLKIDX is \
+                 {index_len} bytes; refusing rather than returning garbage"
             ),
         }
     }
@@ -272,6 +275,7 @@ pub struct MbPack<'a> {
     counts: Counts,
     flags: u32,
     dump_date: u32,
+    string_blocks: u32,
 }
 
 impl fmt::Debug for MbPack<'_> {
@@ -281,6 +285,7 @@ impl fmt::Debug for MbPack<'_> {
             .field("counts", &self.counts)
             .field("flags", &self.flags)
             .field("dump_date", &self.dump_date)
+            .field("string_blocks", &self.string_blocks)
             .finish()
     }
 }
@@ -322,10 +327,8 @@ impl<'a> MbPack<'a> {
             enums: g(0x30),
         };
         let flags = g(0x34);
-        if flags & pack::FLAG_STRINGS_COMPRESSED != 0 {
-            return Err(PackError::UnsupportedPoolCodec);
-        }
         let dump_date = g(0x38);
+        let string_blocks = g(0x3C);
 
         let mut dir = [(0u64, 0u64); SECTION_COUNT];
         let file_len = bytes.len() as u64;
@@ -351,7 +354,19 @@ impl<'a> MbPack<'a> {
             *slot = (off, len);
         }
 
-        let me = MbPack { bytes, dir, counts, flags, dump_date };
+        let me = MbPack { bytes, dir, counts, flags, dump_date, string_blocks };
+        if me.strings_compressed() {
+            // The index needs one offset per block plus a trailing sentinel; without
+            // it, no pool offset can be resolved at all.
+            let need = (string_blocks as u64 + 1) * 4;
+            let have = me.dir[pack::S_STRINGS_BLKIDX].1;
+            if string_blocks == 0 || have < need {
+                return Err(PackError::BadStringBlockIndex {
+                    blocks: string_blocks,
+                    index_len: have,
+                });
+            }
+        }
         me.check_capacity(pack::S_ARTISTS, counts.artists, pack::ARTIST_REC_LEN)?;
         me.check_capacity(pack::S_ARTIST_MBID, counts.artists, pack::MBID_TRUNC_LEN)?;
         me.check_capacity(pack::S_ARTIST_MBID_HI, 65537, 4)?;
@@ -426,6 +441,9 @@ impl<'a> MbPack<'a> {
     pub fn official_only(&self) -> bool {
         self.flags & pack::FLAG_OFFICIAL_ONLY != 0
     }
+    pub fn strings_compressed(&self) -> bool {
+        self.flags & pack::FLAG_STRINGS_COMPRESSED != 0
+    }
 
     /// Section byte lengths, for a build report or a `/status` handler.
     pub fn section_sizes(&self) -> Vec<(&'static str, u64)> {
@@ -438,7 +456,25 @@ impl<'a> MbPack<'a> {
 
     // --- strings ---
 
+    /// Decompress one block of the compressed pool.
+    fn string_block(&self, block: usize) -> Option<Vec<u8>> {
+        if block >= self.string_blocks as usize {
+            return None;
+        }
+        let idx = self.sec(pack::S_STRINGS_BLKIDX);
+        let (start, end) = (u32_at(idx, block)?, u32_at(idx, block + 1)?);
+        if start > end {
+            return None;
+        }
+        let pool = self.sec(pack::S_STRINGS);
+        let src = pool.get(start as usize..end as usize)?;
+        zstd::bulk::decompress(src, pack::STRING_BLOCK_SIZE).ok()
+    }
+
     fn str_at(&self, off: u32) -> Cow<'a, str> {
+        if self.strings_compressed() {
+            return Cow::Owned(self.compressed_str_at(off));
+        }
         let pool = self.sec(pack::S_STRINGS);
         let start = off as usize;
         if start >= pool.len() {
@@ -449,6 +485,33 @@ impl<'a> MbPack<'a> {
             None => pool.len(),
         };
         String::from_utf8_lossy(&pool[start..end])
+    }
+
+    /// Blocks cover exactly `STRING_BLOCK_SIZE` of uncompressed pool, so the block
+    /// is a division rather than a search. A string may straddle a boundary, in
+    /// which case we continue into the next block.
+    fn compressed_str_at(&self, off: u32) -> String {
+        let mut block = off as usize / pack::STRING_BLOCK_SIZE;
+        let mut pos = off as usize % pack::STRING_BLOCK_SIZE;
+        let mut out: Vec<u8> = Vec::new();
+        while let Some(raw) = self.string_block(block) {
+            if pos >= raw.len() {
+                break;
+            }
+            let slice = &raw[pos..];
+            match slice.iter().position(|&b| b == 0) {
+                Some(n) => {
+                    out.extend_from_slice(&slice[..n]);
+                    break;
+                }
+                None => {
+                    out.extend_from_slice(slice);
+                    block += 1;
+                    pos = 0;
+                }
+            }
+        }
+        String::from_utf8_lossy(&out).into_owned()
     }
 
     fn enum_str(&self, idx: u16) -> Cow<'a, str> {
@@ -1135,13 +1198,17 @@ mod tests {
     }
 
     #[test]
-    fn refuses_a_compressed_pool_rather_than_guessing() {
+    fn refuses_a_compressed_pool_with_no_block_index() {
         let mut buf = vec![0u8; 64 + SECTION_COUNT * 16];
         buf[0..4].copy_from_slice(&MAGIC.to_le_bytes());
         buf[4..8].copy_from_slice(&VERSION.to_le_bytes());
         buf[8..12].copy_from_slice(&(SECTION_COUNT as u32).to_le_bytes());
         buf[0x34..0x38].copy_from_slice(&pack::FLAG_STRINGS_COMPRESSED.to_le_bytes());
-        assert_eq!(MbPack::open(&buf).unwrap_err(), PackError::UnsupportedPoolCodec);
+        buf[0x3C..0x40].copy_from_slice(&7u32.to_le_bytes());
+        assert!(matches!(
+            MbPack::open(&buf).unwrap_err(),
+            PackError::BadStringBlockIndex { blocks: 7, index_len: 0 }
+        ));
     }
 
     #[test]

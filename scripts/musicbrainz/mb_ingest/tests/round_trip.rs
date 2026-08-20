@@ -440,6 +440,90 @@ fn report_measures_the_ratios_the_design_doc_only_estimated() {
 }
 
 #[test]
+fn compressed_and_raw_pools_read_back_identically() {
+    let compressed = build_fixture(BuildOptions::default());
+    let raw = build_fixture(BuildOptions { compress_strings: false, ..BuildOptions::default() });
+    let pc = MbPack::open(&compressed.bytes).expect("open compressed");
+    let pr = MbPack::open(&raw.bytes).expect("open raw");
+    assert!(pc.strings_compressed());
+    assert!(!pr.strings_compressed());
+
+    // Every string-bearing field must agree between the two encodings, including
+    // the title carrying an escaped tab and newline.
+    for i in 0..pc.counts().artists {
+        let (a, b) = (pc.artist(i).unwrap(), pr.artist(i).unwrap());
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.disambiguation, b.disambiguation);
+        assert_eq!(a.area, b.area);
+        assert_eq!(a.kind, b.kind);
+        assert_eq!(a.country, b.country);
+    }
+    for i in 0..pc.counts().release_groups {
+        let (a, b) = (pc.release_group(i).unwrap(), pr.release_group(i).unwrap());
+        assert_eq!(a.title, b.title);
+        assert_eq!(a.credit, b.credit);
+        assert_eq!(a.primary_type, b.primary_type);
+        assert_eq!(a.secondary_type, b.secondary_type);
+    }
+    for i in 0..pc.counts().releases {
+        let (a, b) = (pc.release(i).unwrap(), pr.release(i).unwrap());
+        assert_eq!(a.title, b.title);
+        assert_eq!(a.status, b.status);
+        assert_eq!(a.country, b.country);
+        assert_eq!(a.disambiguation, b.disambiguation);
+        let (ta, tb) = (pc.release_tracklist(i), pr.release_tracklist(i));
+        assert_eq!(ta.len(), tb.len());
+        for ((ma, tsa), (mb_, tsb)) in ta.iter().zip(tb.iter()) {
+            assert_eq!(ma.format, mb_.format);
+            assert_eq!(tsa.len(), tsb.len());
+            for (x, y) in tsa.iter().zip(tsb.iter()) {
+                assert_eq!(x.title, y.title);
+                assert_eq!(x.credit, y.credit);
+                assert_eq!(x.length_secs, y.length_secs);
+                assert_eq!(x.position, y.position);
+            }
+        }
+    }
+    let rg = pc.release_group_by_mbid(&mb(fixture::RG_WEIRD)).unwrap();
+    assert_eq!(
+        &*pc.release_group(rg).unwrap().title,
+        fixture::WEIRD_TITLE,
+        "escaped control characters must survive compression too"
+    );
+    // Search is unaffected: SEARCH_TERMS is its own uncompressed dictionary.
+    assert_eq!(
+        pc.search_release_groups("dark side", 25),
+        pr.search_release_groups("dark side", 25)
+    );
+}
+
+#[test]
+fn the_string_pool_is_sorted_so_compression_can_work() {
+    // Offsets are assigned after an alphabetical sort. On a fixture this is only
+    // an ordering check -- the ratio itself needs real data -- but if the sort
+    // regresses, the compressed pool quietly loses ~15% of the whole pack.
+    let built = build_fixture(BuildOptions { compress_strings: false, ..BuildOptions::default() });
+    let pack = MbPack::open(&built.bytes).expect("open");
+    let mut titles: Vec<(u32, String)> = Vec::new();
+    for i in 0..pack.counts().release_groups {
+        let g = pack.release_group(i).unwrap();
+        titles.push((i, g.title.into_owned()));
+    }
+    // "Echoes..." < "Homogenic" < "The Dark Side..." < "Untitled\tWeird\nTitle"
+    let mut sorted = titles.clone();
+    sorted.sort_by(|a, b| a.1.cmp(&b.1));
+    assert_eq!(
+        sorted.iter().map(|t| t.1.as_str()).collect::<Vec<_>>(),
+        [
+            "Echoes: The Best of Pink Floyd",
+            "Homogenic",
+            "The Dark Side of the Moon",
+            fixture::WEIRD_TITLE,
+        ]
+    );
+}
+
+#[test]
 fn truncated_pack_is_rejected_not_read() {
     let built = build_fixture(BuildOptions::default());
     for cut in [1usize, 64, 128, built.bytes.len() / 2, built.bytes.len() - 1] {
