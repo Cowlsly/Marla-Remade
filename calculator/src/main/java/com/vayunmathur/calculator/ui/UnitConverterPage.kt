@@ -3,8 +3,6 @@ package com.vayunmathur.calculator.ui
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -26,6 +24,7 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.foundation.text.KeyboardOptions
 import com.vayunmathur.calculator.R
 import com.vayunmathur.calculator.util.CalculatorViewModel
+import com.vayunmathur.calculator.util.UnitCategory
 import com.vayunmathur.calculator.util.UnitConverterActions
 import com.vayunmathur.calculator.util.UnitConverterUiState
 import com.vayunmathur.calculator.util.UnitDef
@@ -34,11 +33,9 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
-import com.vayunmathur.library.ui.CompactTouchTargets
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.FilledTonalIconButton
-import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconSwapLanguages
 import com.vayunmathur.library.ui.MaterialTheme
@@ -54,12 +51,10 @@ fun UnitConverterPage(viewModel: CalculatorViewModel) {
 }
 
 /**
- * The units tab: a plain from/to converter with no equations. Every category is on screen at once
- * as a grid of chips, since the converter itself leaves plenty of room and a scrolling tab row hid
- * most of the twenty-odd categories. Stateless so it can be rendered from a `@Preview` — see
- * `src/screenshotTest`.
+ * The units tab: a plain from/to converter with no equations. The twenty-odd categories are picked
+ * from a single collapsed dropdown, which keeps the converter itself the focus of the screen.
+ * Stateless so it can be rendered from a `@Preview` — see `src/screenshotTest`.
  */
-@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActions) {
     AppScaffold(
@@ -73,20 +68,12 @@ fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActio
                 .padding(padding)
                 .verticalScroll(rememberScrollState()),
         ) {
-            CompactTouchTargets {
-                FlowRow(
-                    Modifier.fillMaxWidth().padding(horizontal = Spacing.lg, vertical = Spacing.xs),
-                    horizontalArrangement = Arrangement.spacedBy(Spacing.xs),
-                ) {
-                    state.categories.forEachIndexed { index, cat ->
-                        FilterChip(
-                            selected = index == state.selectedCategoryIndex,
-                            onClick = { actions.selectCategory(index) },
-                            label = { Text(cat.name) },
-                        )
-                    }
-                }
-            }
+            CategoryDropdown(
+                categories = state.categories,
+                selectedIndex = state.selectedCategoryIndex,
+                onSelect = actions::selectCategory,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = Spacing.lg, vertical = Spacing.xs),
+            )
             if (category != null) {
                 if (state.isCurrencyCategory && category.units.isEmpty()) {
                     CurrencyStatus(
@@ -144,6 +131,42 @@ fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActio
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/**
+ * The category selector, built from [OutlinedButton] + [DropdownMenu] rather than the library's
+ * `ExposedDropdownMenu` wrapper, which currently recurses into itself.
+ */
+@Composable
+private fun CategoryDropdown(
+    categories: List<UnitCategory>,
+    selectedIndex: Int,
+    onSelect: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    Box(modifier) {
+        OutlinedButton(onClick = { expanded = true }, modifier = Modifier.fillMaxWidth()) {
+            Text(
+                categories.getOrNull(selectedIndex)?.name.orEmpty(),
+                modifier = Modifier.weight(1f),
+                textAlign = TextAlign.Start,
+                maxLines = 1,
+            )
+            IconArrowDropDown()
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            categories.forEachIndexed { index, cat ->
+                DropdownMenuItem(
+                    text = { Text(cat.name) },
+                    onClick = {
+                        onSelect(index)
+                        expanded = false
+                    },
+                )
             }
         }
     }
