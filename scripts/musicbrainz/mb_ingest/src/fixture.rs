@@ -176,12 +176,16 @@ pub fn write_fixture(dir: &Path) -> io::Result<()> {
         ],
     )?;
     // release_country: release, country(area id), date y/m/d
+    // Release 1 carries a precise date; release 2 (same release group) carries a
+    // BARE YEAR in the same year. The group's derived first-release-date must be
+    // the precise one -- comparing the packed values raw picks the bare year, which
+    // is exactly the bug that lost 1973-03-24 for The Dark Side of the Moon.
     table(dir, "release_country", &[&["1", "1", "1973", "3", "1"], &["3", "2", "1997", "9", "22"]])?;
     // release_unknown_country: release, date y/m/d
     table(
         dir,
         "release_unknown_country",
-        &[&["2", "2011", N, N], &["4", "2001", "11", "5"]],
+        &[&["2", "1973", N, N], &["4", "2001", "11", "5"]],
     )?;
 
     // medium: id, release, position, format, name, edits_pending, last_updated,

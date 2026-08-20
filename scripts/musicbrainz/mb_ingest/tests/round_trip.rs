@@ -126,6 +126,11 @@ fn release_groups_and_discography() {
     assert_eq!(&*g.primary_type, "Album");
     assert_eq!(&*g.secondary_type, "");
     assert_eq!(&*g.credit, "Pink Floyd");
+    // Derived from the group's releases, because release_group_meta is not in the
+    // core dump. One of this group's releases carries a BARE YEAR in the same year
+    // (1973), and the precise date must still win -- comparing packed dates raw
+    // picks the bare year, which is how the real Dark Side of the Moon lost its
+    // 1973-03-24 and came out as "1973".
     assert_eq!(g.first_release_date.to_ws2(), "1973-03-01");
 
     let rg = pack.release_group_by_mbid(&mb(fixture::RG_ECHOES)).expect("echoes");
@@ -191,7 +196,7 @@ fn releases_and_editions() {
     let r2 = pack.release_by_mbid(&mb(fixture::REL_DARK_SIDE_BOOT)).expect("bootleg");
     let boot = pack.release(r2).expect("release row");
     assert_eq!(&*boot.status, "Bootleg");
-    assert_eq!(boot.date.to_ws2(), "2011");
+    assert_eq!(boot.date.to_ws2(), "1973");
     assert_eq!(&*boot.country, "");
     assert_eq!(&*boot.disambiguation, "vinyl bootleg");
 

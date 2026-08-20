@@ -313,6 +313,28 @@ pub fn pack_date(year: Option<i64>, month: Option<i64>, day: Option<i64>) -> u32
     (y << 9) | (m << 5) | d
 }
 
+/// Ordering key for "which of these dates is earliest", with **unknown month and
+/// day sorting LAST within their year**, and unknown dates sorting last overall.
+///
+/// The packed representation cannot be compared directly for this. `1973` packs
+/// with month and day zero, so a raw `<` makes it earlier than `1973-03-24`, and
+/// picking the minimum then loses the precise date. That is not a theoretical
+/// concern: MusicBrainz gives *The Dark Side of the Moon* a first-release-date of
+/// 1973-03-24, and deriving it with a raw comparison yielded a bare `1973` because
+/// some other release of the group carries a year-only date. Verified against
+/// musicbrainz.org/ws/2 for release group f5093c06-23e3-404f-aeaa-40f72885ee3a.
+pub fn date_rank(packed: u32) -> u32 {
+    if packed == 0 {
+        return u32::MAX;
+    }
+    let y = packed >> 9;
+    let m = (packed >> 5) & 0xf;
+    let d = packed & 0x1f;
+    let m = if m == 0 { 13 } else { m };
+    let d = if d == 0 { 32 } else { d };
+    (y << 11) | (m << 6) | d
+}
+
 // --- MBIDs ---
 
 /// Parse an MBID.
@@ -1206,6 +1228,27 @@ mod tests {
         assert_eq!(read(f.offset(syms[0])), "recording title number 0");
         assert_eq!(read(f.offset(syms[19_999])), "recording title number 19999");
         assert_eq!(read(f.offset(huge_sym)), huge, "a string spanning blocks must survive");
+    }
+
+    #[test]
+    fn date_rank_sorts_partial_dates_last_within_their_year() {
+        let y = pack_date(Some(1973), None, None);
+        let ym = pack_date(Some(1973), Some(3), None);
+        let ymd = pack_date(Some(1973), Some(3), Some(24));
+        let earlier = pack_date(Some(1973), Some(1), Some(1));
+        let unknown = 0u32;
+        // The precise date must win the minimum against a bare year in the same
+        // year -- the raw packed comparison gets this backwards and cost us the
+        // real first-release-date of The Dark Side of the Moon.
+        assert!(date_rank(ymd) < date_rank(y), "1973-03-24 must beat 1973");
+        assert!(date_rank(ym) < date_rank(y), "1973-03 must beat 1973");
+        assert!(date_rank(ymd) < date_rank(ym), "1973-03-24 must beat 1973-03");
+        assert!(date_rank(earlier) < date_rank(ymd), "January still beats March");
+        assert!(date_rank(y) < date_rank(unknown), "a known year beats no date");
+        // Across years the ordinary ordering still holds.
+        assert!(date_rank(pack_date(Some(1972), None, None)) < date_rank(ymd));
+        // And the raw packed comparison really is wrong, so the test is meaningful.
+        assert!(y < ymd, "raw packed order is the trap this function exists to avoid");
     }
 
     #[test]
