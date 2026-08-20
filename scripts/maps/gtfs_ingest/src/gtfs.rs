@@ -1,11 +1,17 @@
 //! Minimal, dependency-free GTFS reader: an RFC 4180-ish CSV parser plus typed
 //! loaders for the GTFS files the offline transit index needs
-//! (`stops`, `routes`, `trips`, `stop_times`, `calendar`, `calendar_dates`).
+//! (`stops`, `routes`, `trips`, `stop_times`, `calendar`, `calendar_dates`,
+//! `shapes`).
 //!
 //! GTFS is CSV text; times may exceed 24:00:00 (legal, means "after service
 //! midnight"). We keep everything in seconds-since-service-midnight.
+//!
+//! `shapes.txt` gets its own streaming loader rather than a [`Csv`]: it is often
+//! the largest file in a feed, and a `Csv` would hold every coordinate as a
+//! `String`.
 
 use std::collections::HashMap;
+use std::io::BufRead;
 use std::path::Path;
 
 /// A parsed CSV table: the header row plus data rows (each a `Vec<String>`).
@@ -123,4 +129,121 @@ pub fn parse_gtfs_date(s: &str) -> Option<u32> {
         return None;
     }
     s.parse().ok()
+}
+
+/// One `shapes.txt` polyline, in `shape_pt_sequence` order.
+pub struct Shape {
+    pub lat_e7: Vec<i32>,
+    pub lon_e7: Vec<i32>,
+    /// `shape_dist_traveled`, present only when *every* point carries one.
+    /// Feed-defined units (km, mi, ft, ...): only ever compared, never converted.
+    pub dist: Option<Vec<f64>>,
+}
+
+/// Split one CSV line into fields, honouring quotes and `""` escapes. Unlike
+/// [`parse_csv`] this cannot span newlines, which `shapes.txt` never needs — all
+/// five of its columns are numbers or an id.
+fn split_line(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut field = String::new();
+    let mut in_quotes = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        if in_quotes {
+            if c == '"' {
+                if chars.peek() == Some(&'"') {
+                    field.push('"');
+                    let _ = chars.next();
+                } else {
+                    in_quotes = false;
+                }
+            } else {
+                field.push(c);
+            }
+        } else if c == '"' {
+            in_quotes = true;
+        } else if c == ',' {
+            out.push(std::mem::take(&mut field));
+        } else {
+            field.push(c);
+        }
+    }
+    out.push(field);
+    out
+}
+
+/// A `shapes.txt` row before ordering: `(sequence, lat_e7, lon_e7, dist)`.
+type RawShapePoint = (i64, i32, i32, Option<f64>);
+
+/// Stream `dir/shapes.txt` into one polyline per `shape_id`. Returns `None` when
+/// the file is absent (it is optional) or carries no usable columns.
+pub fn read_shapes(dir: &Path) -> Option<HashMap<String, Shape>> {
+    let file = std::fs::File::open(dir.join("shapes.txt")).ok()?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut raw: Vec<u8> = Vec::new();
+
+    reader.read_until(b'\n', &mut raw).ok()?;
+    let header_line = String::from_utf8_lossy(&raw);
+    let header = split_line(header_line.trim_end_matches(['\n', '\r']));
+    let col = |name: &str| {
+        header.iter().position(|h| h.trim().trim_start_matches('\u{feff}') == name)
+    };
+    let (c_id, c_lat, c_lon, c_seq) =
+        (col("shape_id")?, col("shape_pt_lat")?, col("shape_pt_lon")?, col("shape_pt_sequence")?);
+    let c_dist = col("shape_dist_traveled");
+
+    // (sequence, lat_e7, lon_e7, dist) per shape, sorted once at the end.
+    let mut acc: HashMap<String, Vec<RawShapePoint>> = HashMap::new();
+    loop {
+        raw.clear();
+        if reader.read_until(b'\n', &mut raw).ok()? == 0 {
+            break;
+        }
+        let line = String::from_utf8_lossy(&raw);
+        let line = line.trim_end_matches(['\n', '\r']);
+        if line.is_empty() {
+            continue;
+        }
+        let f = split_line(line);
+        let get = |i: usize| f.get(i).map(|s| s.trim()).unwrap_or("");
+        let id = get(c_id);
+        if id.is_empty() {
+            continue;
+        }
+        let lat: f64 = match get(c_lat).parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let lon: f64 = match get(c_lon).parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let seq: i64 = get(c_seq).parse().unwrap_or(0);
+        let dist = c_dist.and_then(|i| get(i).parse::<f64>().ok());
+        acc.entry(id.to_string()).or_default().push((
+            seq,
+            (lat * 1e7) as i32,
+            (lon * 1e7) as i32,
+            dist,
+        ));
+    }
+
+    let mut out = HashMap::with_capacity(acc.len());
+    for (id, mut pts) in acc {
+        pts.sort_by_key(|p| p.0);
+        let all_dist = pts.iter().all(|p| p.3.is_some());
+        out.insert(
+            id,
+            Shape {
+                lat_e7: pts.iter().map(|p| p.1).collect(),
+                lon_e7: pts.iter().map(|p| p.2).collect(),
+                dist: if all_dist {
+                    Some(pts.iter().map(|p| p.3.unwrap_or(0.0)).collect())
+                } else {
+                    None
+                },
+            },
+        );
+    }
+    Some(out)
 }

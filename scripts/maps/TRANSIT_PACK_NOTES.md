@@ -21,8 +21,15 @@ pmtiles part alone, so map downloads never block on transit.
 On device, `OfflineRouter` (P11d) discovers every `*.transit` file in the base
 dir and asks the Rust planner (`transit.rs`) to load each and check whether its
 bounding box covers the route endpoints, so the on-disk file name does not have
-to encode the feed id — the feed id lives *inside* the index (used for
-`present_feeds` and route colors).
+to encode the feed id - the feed id lives *inside* the index (used for route
+provenance and colours).
+
+Packs carry a format version (`TRX2` v3), which the reader checks along with the
+section count. A pack built by an older `gtfs_ingest` is therefore **rejected
+outright** rather than misread: `TransitIndex::load` returns `None`,
+`findTransitRouteNative` returns null, and the app falls back to the online MOTIS
+planner. So bumping the format is safe to ship ahead of re-publishing packs -
+transit routing degrades to online-only until the new pack lands.
 
 ## Publishing
 
@@ -45,16 +52,33 @@ cp ./out/sf_bay.transit zone_7.transit        # see "feed -> zone" below
 stage existed in the repo (it was part of an un-checked-in `native-lib.cpp`
 toolchain), so freshly generated road data could not be loaded.
 
-**P16 fixes this.** `generator.cpp` now emits the **single global** graph in the
-exact layout `graph.rs` loads (`nodes.bin`/`edges.bin`/`transit_voyages.bin`/
-`transit_attributes.bin`/`lanes.bin`/`metadata.bin`) in one pass — no per-zone
-artifacts, no separate merge stage. See
-[`README.md` → Single global routing graph](README.md#single-global-routing-graph-p16)
+**P16 fixes this.** The graph builder now emits the **single global** graph in
+the exact layout `graph.rs` loads (`nodes.bin`/`edges.bin`/`lanes.bin`/
+`metadata.bin`/`road_names.bin`) in one pass - no per-zone
+artifacts, no separate merge stage. (The builder itself was later ported from
+`generator.cpp` to `scripts/maps/osm_ingest`; the on-disk layout did not change.)
+See
+[`README.md`  Single global routing graph](README.md#single-global-routing-graph-p16)
 for the on-disk contract and the app download path
-(`ZoneDownloadManager.startGraphDownload`). This did **not** touch offline
-transit: the transit index is still fully self-contained and independent of the
-road graph (access/egress/transfer legs use a straight-line walk heuristic in
-`transit.rs`, not the road graph).
+(`ZoneDownloadManager.startGraphDownload`). The road graph no longer carries
+transit at all - the fake 15-minute-headway synthesizer, `transit_voyages.bin`,
+`transit_attributes.bin` and the duplicated per-OSM-node transit nodes are gone.
+Offline transit was always independent of it (the transit index is
+self-contained, and access/egress/transfer legs are *planned* against a
+straight-line walk heuristic in `transit.rs`), so nothing was lost;
+`TravelMode.PUBLIC_TRANSIT` in the road graph now simply means walking.
+
+The straight lines are, however, no longer what gets *drawn*. `lib.rs`
+post-processes every `LegKind::Walk` leg through the road graph's WALK-mode A\*
+and replaces its polyline and distance, and TRX2 v4 carries GTFS `shapes.txt`
+geometry so ride legs follow the vehicle's real path. Only the geometry changes:
+the legs keep the timings RAPTOR planned them with, because a road-routed walk is
+longer than the crow-flies estimate the journey was built around and re-timing it
+would desynchronise the journey from the departure it was planned for. A shown
+ETA therefore stays slightly optimistic — the same heuristic the pack's
+`TRANSFERS` table already rests on — and a road path more than 2.5x the straight
+line is rejected as a bad snap, keeping the straight line, so the drawn error is
+bounded.
 
 ## Gap (2): zone (Morton) vs feed (metro) boundaries
 

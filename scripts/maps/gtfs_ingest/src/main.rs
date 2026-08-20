@@ -10,7 +10,8 @@
 //! is then the directory's base name). A manifest file lists one `feed_name=dir`
 //! per line (blank lines and `#` comments allowed). `gtfs_dir` is an UNZIPPED
 //! GTFS feed directory (containing `stops.txt`, `routes.txt`, `trips.txt`,
-//! `stop_times.txt`, and optionally `calendar.txt` / `calendar_dates.txt`).
+//! `stop_times.txt`, and optionally `agency.txt` / `calendar.txt` /
+//! `calendar_dates.txt` / `shapes.txt`).
 //! Unzipping is a one-line pre-step (`unzip feed.zip -d <gtfs_dir>`); keeping
 //! this tool zip-free means it builds with zero external crates and resolves
 //! fully offline — the LANGUAGE RULE's Rust-first, no-Python requirement without
@@ -28,6 +29,7 @@
 
 mod gtfs;
 mod index;
+mod shapes;
 
 use index::FeedInput;
 use std::path::{Path, PathBuf};
@@ -117,6 +119,8 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         stop_times: gtfs::Csv,
         calendar: Option<gtfs::Csv>,
         calendar_dates: Option<gtfs::Csv>,
+        agency: Option<gtfs::Csv>,
+        shapes: Option<std::collections::HashMap<String, gtfs::Shape>>,
     }
 
     let mut tables: Vec<FeedTables> = Vec::with_capacity(specs.len());
@@ -132,10 +136,28 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         let stop_times = require("stop_times.txt")?;
         let calendar = gtfs::read_table(dir, "calendar.txt");
         let calendar_dates = gtfs::read_table(dir, "calendar_dates.txt");
+        let agency = gtfs::read_table(dir, "agency.txt");
+        let shapes = gtfs::read_shapes(dir);
+        if shapes.is_none() {
+            eprintln!(
+                "gtfs_ingest: warning: feed '{name}' has no shapes.txt; its ride legs \
+                 will draw stop-to-stop"
+            );
+        }
         if calendar.is_none() && calendar_dates.is_none() {
             eprintln!(
                 "gtfs_ingest: warning: feed '{name}' has no calendar.txt or \
                  calendar_dates.txt; its services will never be scheduled"
+            );
+        }
+        // Without a timezone the device falls back to its own, which is wrong
+        // for any feed outside the user's zone.
+        if agency.as_ref().is_none_or(|a| {
+            a.rows.first().is_none_or(|row| a.get(row, "agency_timezone").trim().is_empty())
+        }) {
+            eprintln!(
+                "gtfs_ingest: warning: feed '{name}' has no agency_timezone; \
+                 the device will route it in its own local time"
             );
         }
         eprintln!("gtfs_ingest: parsed feed '{name}' ({})", dir.display());
@@ -147,6 +169,8 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
             stop_times,
             calendar,
             calendar_dates,
+            agency,
+            shapes,
         });
     }
 
@@ -160,6 +184,8 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
             stop_times: &t.stop_times,
             calendar: t.calendar.as_ref(),
             calendar_dates: t.calendar_dates.as_ref(),
+            agency: t.agency.as_ref(),
+            shapes: t.shapes.as_ref(),
         })
         .collect();
 
@@ -184,7 +210,8 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         "{{\n  \"pack\": {pack},\n  \"format_version\": {ver},\n  \"file\": {file},\n  \
          \"size_bytes\": {size},\n  \"feeds\": {feeds},\n  \"stops\": {stops},\n  \
          \"routes\": {routes},\n  \"trips\": {trips},\n  \"profiles\": {profiles},\n  \
-         \"transfers\": {transfers},\n  \
+         \"transfers\": {transfers},\n  \"shaped_routes\": {shaped},\n  \
+         \"dropped_shape_routes\": {dropped},\n  \
          \"bbox_e7\": [{min_lat}, {min_lon}, {max_lat}, {max_lon}],\n  \
          \"section_bytes\": {{\n{sections}\n  }}\n}}\n",
         pack = json_str(pack_name),
@@ -197,6 +224,8 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         trips = stats.trips,
         profiles = stats.profiles,
         transfers = stats.transfers,
+        shaped = stats.shaped_routes,
+        dropped = stats.dropped_shape_routes,
         min_lat = stats.min_lat_e7,
         min_lon = stats.min_lon_e7,
         max_lat = stats.max_lat_e7,
@@ -218,6 +247,11 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         stats.trips,
         stats.profiles,
         stats.transfers,
+    );
+    eprintln!(
+        "gtfs_ingest: ride geometry: {} of {} routes shaped, {} dropped by validation, \
+         {} with more than one shape_id",
+        stats.shaped_routes, stats.routes, stats.dropped_shape_routes, stats.multi_shape_routes,
     );
     Ok(())
 }
