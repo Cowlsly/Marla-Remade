@@ -34,7 +34,6 @@ class StreamSender(
     private val lock = Any()
 
     private var nextFrameId = FrameId.First
-    private var lastKeyFrameId = FrameId.Leader
     private var firstPresentationTimeUs = -1L
 
     /**
@@ -57,10 +56,18 @@ class StreamSender(
         val elapsedUs = chunk.presentationTimeUs - firstPresentationTimeUs
         val rtpTimestamp = elapsedUs * stream.timebase / 1_000_000L
         val frameId = nextFrameId
-        // A key frame references the leader, having no predecessor. A delta frame references the
-        // last key frame rather than the frame just before it, so one lost delta does not invalidate
-        // every frame that follows.
-        val referenced = if (chunk.isKeyFrame) FrameId.Leader else lastKeyFrameId
+        // A key frame references **itself**, and a delta frame its immediate predecessor. Both are
+        // load-bearing and neither is a free choice:
+        //
+        //  - `encoded_frame.h` is explicit that a frame needing nothing else to decode must set
+        //    referenced_frame_id == frame_id. Pointing a key frame at FrameId.Leader instead makes
+        //    the receiver wait for frame 255 forever and decode nothing at all - a black screen with
+        //    no error anywhere.
+        //  - MediaCodec emits IPPP, where each P frame really does depend on the one before it, so
+        //    naming any other frame misdescribes the bitstream.
+        //
+        // Chromium does exactly this in `media/cast/encoding/media_video_encoder_wrapper.cc`.
+        val referenced = if (chunk.isKeyFrame) frameId else FrameId(frameId.value - 1)
         val frame = EncryptedFrame(
             frameId = frameId,
             referencedFrameId = referenced,
@@ -68,7 +75,6 @@ class StreamSender(
             isKeyFrame = chunk.isKeyFrame,
             payload = crypto.crypt(frameId, chunk.data),
         )
-        if (chunk.isKeyFrame) lastKeyFrameId = frameId
         nextFrameId += 1
         lastFrameId = frameId
         session.record(frame)
@@ -76,7 +82,10 @@ class StreamSender(
         // The wall clock is captured *here*, alongside the RTP timestamp it corresponds to. A sender
         // report has to pair the two for the same instant; pairing "now" with an older frame's
         // timestamp is what makes a receiver's clock estimate drift.
-        stats = stats.copy(lastRtpTimestamp = rtpTimestamp, lastSentAtMillis = System.currentTimeMillis())
+        stats = stats.copy(
+            lastRtpTimestamp = rtpTimestamp,
+            lastSentAtMillis = System.currentTimeMillis(),
+        )
     }
 
     fun retransmit(items: List<Retransmission>) = synchronized(lock) {

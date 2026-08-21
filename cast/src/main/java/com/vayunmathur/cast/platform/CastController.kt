@@ -18,11 +18,15 @@ import com.vayunmathur.cast.domain.streaming.encode
 import com.vayunmathur.cast.domain.streaming.parseAnswer
 import com.vayunmathur.cast.network.CastChannel
 import com.vayunmathur.cast.platform.discovery.CastDiscoveryManager
+import com.vayunmathur.cast.platform.mirror.CaptureGeometry
+import com.vayunmathur.cast.platform.mirror.MirrorConsentActivity
 import com.vayunmathur.cast.platform.mirror.MirrorDegradation
 import com.vayunmathur.cast.platform.mirror.MirrorEngine
+import com.vayunmathur.cast.platform.mirror.MirrorGeometry
 import com.vayunmathur.cast.platform.mirror.MirrorPreferences
 import com.vayunmathur.cast.platform.mirror.MirrorStopReason
 import com.vayunmathur.cast.service.CastService
+import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -33,6 +37,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -103,17 +108,22 @@ object CastController {
             .also { discoveryManager = it }
 
     /**
-     * Open a channel to [device] and launch the mirroring receiver on it.
+     * Open a channel to [device], launch the mirroring receiver, and start mirroring.
      *
-     * A no-op for the device already connected to; switching devices tears the old session down
-     * first, since a sender holds one session at a time. The app id follows from
-     * [CastDevice.kind] and is not negotiable - a receiver refuses the wrong one at LAUNCH.
+     * Connecting and mirroring are one action because there is nothing else this app does. A joined
+     * receiver that is not mirroring is a dead state: the TV is already showing the receiver's idle
+     * screen and the only thing the connection could still be used for is volume. So tapping a
+     * device asks for capture consent as soon as the receiver is joined.
+     *
+     * A no-op for the device already mirroring to; switching devices tears the old session down
+     * first, since a sender holds one session at a time. The app id follows from [CastDevice.kind]
+     * and is not negotiable - a receiver refuses the wrong one at LAUNCH.
      *
      * A [CastPhase.Failed] session is *not* treated as live, so tapping the same device again
-     * retries rather than doing nothing. A refusal is a routine outcome here - the receiver says
-     * no whenever the capability bitmask and the app id disagree - so a dead end would be a bug.
+     * retries rather than doing nothing. A refusal is a routine outcome here - the receiver says no
+     * whenever the capability bitmask and the app id disagree - so a dead end would be a bug.
      */
-    fun connect(context: Context, device: CastDevice) {
+    fun connect(context: Context, device: CastDevice, thenMirror: Boolean = true) {
         val phase = _sessionState.value.phase
         val live = phase != CastPhase.Idle && phase != CastPhase.Failed
         if (_device.value?.id == device.id && live) return
@@ -150,6 +160,17 @@ object CastController {
             // Started only once a channel is actually open, so a failed connection does not
             // leave a notification behind.
             CastService.start(appContext)
+            if (!thenMirror) return@launch
+            // Consent can only be asked for by an Activity, and only once the receiver is joined -
+            // an OFFER sent before that is dropped without an error. Waiting for Failed too so a
+            // refused LAUNCH does not leave a consent dialog queued behind it.
+            val resolved = _sessionState.first {
+                it.phase == CastPhase.Ready || it.phase == CastPhase.Idle ||
+                    it.phase == CastPhase.Failed
+            }
+            if (resolved.phase == CastPhase.Ready) {
+                ExternalIntents.launch(appContext, MirrorConsentActivity.intent(appContext))
+            }
         }
     }
 
@@ -166,6 +187,14 @@ object CastController {
             CastService.stop(appContext)
         }
     }
+
+    /**
+     * Log every packet and a throughput summary once a second.
+     *
+     * A plain switch rather than a build flag: mirroring can only be diagnosed on hardware, and
+     * something that needs a recompile to turn on does not get turned on.
+     */
+    var verboseStreamLogging: Boolean = false
 
     fun setVolume(level: Double) = act { it.setVolume(level) }
 
@@ -194,13 +223,22 @@ object CastController {
             _mirrorPhase.value = MirrorPhase.Negotiating
             _degradation.value = MirrorDegradation()
             _failure.value = null
-            val plan = StreamSelection.offer(device.kind)
+            // The capture size is decided here, before the OFFER, so the resolution advertised is
+            // the resolution actually sent. Offering 1280x720 and then sending a portrait frame
+            // tells the receiver to expect a shape it never gets.
+            val geometry = MirrorGeometry.forDisplay(appContext)
+            val plan = StreamSelection.offer(
+                kind = device.kind,
+                videoWidth = geometry.width,
+                videoHeight = geometry.height,
+                videoBitRate = geometry.bitRate,
+            )
             val streamingSession = StreamingSession(plan)
             streaming = streamingSession
             // Fed by CastSession's webrtc route rather than parsed there: OFFER/ANSWER is its own
             // state machine and the control plane has no business understanding it.
             activeSession.onWebrtcPayload = { payload ->
-                onWebrtcPayload(appContext, payload, projection, device.host)
+                onWebrtcPayload(appContext, payload, projection, device.host, geometry)
             }
             send(activeChannel, activeSession) {
                 it.webrtcFrame(plan.message(it.allocateRequestId()).encode())
@@ -222,6 +260,7 @@ object CastController {
         payload: String,
         projection: MediaProjection,
         host: String,
+        geometry: CaptureGeometry,
     ) {
         val answer = parseAnswer(payload) ?: return
         val streamingSession = streaming ?: return
@@ -258,10 +297,11 @@ object CastController {
                 projection = projection,
                 receiverHost = host,
                 negotiation = negotiation,
+                geometry = geometry,
                 session = streamingSession,
                 onDegraded = { _degradation.value = it },
                 onStopped = { reason -> onEngineStopped(context, reason) },
-            )
+            ).apply { hexDump = verboseStreamLogging }
             engine = newEngine
             if (newEngine.start()) {
                 _mirrorPhase.value = MirrorPhase.Mirroring

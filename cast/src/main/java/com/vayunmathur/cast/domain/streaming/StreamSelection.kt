@@ -26,7 +26,7 @@ object StreamSelection {
     const val AUDIO_CHANNELS = 2
     const val AUDIO_BITRATE = 128_000
 
-    /** `kStartVideoBitrate` from `mirror_settings.cc`. */
+    /** `kStartVideoBitrate` from `mirror_settings.cc`, used when no better figure is supplied. */
     const val VIDEO_MAX_BITRATE = 5_000_000
 
     const val VIDEO_MAX_FRAME_RATE = 30
@@ -62,8 +62,18 @@ object StreamSelection {
      * Stream indexes are load-bearing: `CreateMirroringOffer` in openscreen's `sender_session.cc`
      * puts audio at `[0..N-1]` and video at `[N..K]`, and the ANSWER's `sendIndexes` refers back
      * to them. Audio is therefore always index 0 and video, when present, index 1.
+     *
+     * [videoWidth], [videoHeight] and [videoBitRate] describe what will actually be captured, so
+     * the advertised `resolutions` and `maxBitRate` are honest. A receiver told to expect 1280x720
+     * and then sent a portrait frame has been misinformed.
      */
-    fun offer(kind: CastDeviceKind, random: SecureRandom = SecureRandom()): StreamPlan {
+    fun offer(
+        kind: CastDeviceKind,
+        videoWidth: Int = 1280,
+        videoHeight: Int = 720,
+        videoBitRate: Int = VIDEO_MAX_BITRATE,
+        random: SecureRandom = SecureRandom(),
+    ): StreamPlan {
         val audio = StreamKeys(random.bytes16(), random.bytes16())
         val audioSsrc = random.ssrc(AUDIO_SSRC_MIN, AUDIO_SSRC_MAX)
         val audioStream = OfferStream(
@@ -100,10 +110,9 @@ object StreamSelection {
             aesIvMask = video.ivMask.toHex(),
             timeBase = "1/$VIDEO_TIMEBASE",
             maxFrameRate = "${VIDEO_MAX_FRAME_RATE * 1000}/1000",
-            maxBitRate = VIDEO_MAX_BITRATE,
-            // Only an upper bound. The TV answered `scaling: "sender"` with a 4K display, so the
-            // capture resolution is ours to choose and this is what we promise not to exceed.
-            resolutions = listOf(Resolution(1280, 720)),
+            maxBitRate = videoBitRate,
+            // What will actually be sent, so the receiver is not told to expect another shape.
+            resolutions = listOf(Resolution(videoWidth, videoHeight)),
         )
         return StreamPlan(
             streams = listOf(audioStream, videoStream),

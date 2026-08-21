@@ -108,6 +108,34 @@ class CastRtpPacketizerTest {
     }
 
     @Test
+    fun `a key frame references itself and a delta frame its predecessor`() {
+        // The invariant that made a real TV show nothing. encoded_frame.h: "If this frame does not
+        // require any other frame in order to become decodable (e.g., key frames),
+        // referenced_frame_id must equal frame_id." Pointing a key frame at FrameId.Leader makes the
+        // receiver wait for frame 255 forever, with no error anywhere.
+        val keyFrame = EncryptedFrame(
+            frameId = FrameId.First,
+            referencedFrameId = FrameId.First,
+            rtpTimestamp = 0,
+            isKeyFrame = true,
+            payload = ByteArray(4),
+        )
+        val packet = CastRtpPacketizer(96, 50_001).packetize(keyFrame).single()
+        // Frame id and reference frame id are the same byte value.
+        assertEquals(packet[13], packet[18])
+        assertEquals(0, packet[18].toInt() and 0xff)
+
+        val delta = keyFrame.copy(
+            frameId = FrameId(1),
+            referencedFrameId = FrameId.First,
+            isKeyFrame = false,
+        )
+        val deltaPacket = CastRtpPacketizer(96, 50_001).packetize(delta).single()
+        assertEquals(1, deltaPacket[13].toInt() and 0xff)
+        assertEquals(0, deltaPacket[18].toInt() and 0xff)
+    }
+
+    @Test
     fun `frame id and rtp timestamp are truncated to the wire width`() {
         // The counter is 64-bit; only the low 8 bits go in the header and the low 32 in the
         // timestamp. Anything wider must not corrupt neighbouring fields.

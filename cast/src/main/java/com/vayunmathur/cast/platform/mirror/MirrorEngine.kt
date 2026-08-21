@@ -31,6 +31,7 @@ private const val NTP_UNIX_OFFSET_SECONDS = 2_208_988_800L
 
 private const val FRAME_POLL_MS = 4L
 private const val RTCP_POLL_MS = 20L
+private const val STATS_LOG_INTERVAL_MS = 1_000L
 
 /** What could not be started, so the UI can say so rather than looking broken. */
 data class MirrorDegradation(
@@ -60,6 +61,7 @@ class MirrorEngine(
     private val projection: MediaProjection,
     private val receiverHost: String,
     private val negotiation: Negotiation,
+    private val geometry: CaptureGeometry,
     private val session: StreamingSession,
     private val onDegraded: (MirrorDegradation) -> Unit,
     private val onStopped: (MirrorStopReason) -> Unit,
@@ -84,8 +86,17 @@ class MirrorEngine(
     private var videoEncoder: VideoEncoder? = null
     private var audioEncoder: AudioEncoder? = null
 
-    /** Hex-dump every packet. Off by default: per-packet and very loud. */
+    /**
+     * Hex-dump every packet, and log throughput once a second.
+     *
+     * Settable from [CastController] via a debug switch, because a pipeline that can only be
+     * diagnosed by reading it is a pipeline that cannot be diagnosed.
+     */
     var hexDump: Boolean = false
+
+    /** Counts inbound RTCP so a run can be told apart from one where nothing came back. */
+    private var feedbackPackets = 0L
+    private var unmatchedPackets = 0L
 
     fun start(): Boolean {
         val udp = CastUdpTransport(receiverHost, negotiation.udpPort)
@@ -122,13 +133,12 @@ class MirrorEngine(
     }
 
     private fun startVideo(stream: NegotiatedStream, udp: CastUdpTransport): Boolean {
-        val screen = ScreenCapture(appContext, projection)
-        val geometry = screen.geometry()
+        val screen = ScreenCapture(projection)
         val encoder = VideoEncoder(
             width = geometry.width,
             height = geometry.height,
             frameRate = StreamSelection.VIDEO_MAX_FRAME_RATE,
-            bitRate = StreamSelection.VIDEO_MAX_BITRATE,
+            bitRate = geometry.bitRate,
         )
         if (!encoder.start()) return false
         val surface = encoder.inputSurface
@@ -137,7 +147,11 @@ class MirrorEngine(
             screen.release()
             return false
         }
-        Log.i(TAG, "mirroring at ${geometry.width}x${geometry.height}")
+        Log.i(
+            TAG,
+            "mirroring at ${geometry.width}x${geometry.height} " +
+                "@ ${geometry.bitRate / 1_000_000.0} Mbit/s",
+        )
         videoEncoder = encoder
         capture = screen
         val sender = StreamSender(stream, udp, session)
@@ -180,6 +194,7 @@ class MirrorEngine(
     private fun startRtcp(udp: CastUdpTransport) {
         rtcpJob = scope.launch {
             var lastReport = 0L
+            var lastStatsLog = 0L
             while (isActive) {
                 val now = System.currentTimeMillis()
                 if (now - lastReport >= SENDER_REPORT_INTERVAL_MS) {
@@ -201,6 +216,19 @@ class MirrorEngine(
                             ),
                         )
                     }
+                }
+                // The single most useful line for diagnosing "the TV is black": whether packets are
+                // leaving, and whether the receiver is answering. Feedback arriving at all proves it
+                // is parsing our RTP, which halves the search space.
+                if (now - lastStatsLog >= STATS_LOG_INTERVAL_MS) {
+                    lastStatsLog = now
+                    val summary = senders.entries.joinToString(" ") { (kind, sender) ->
+                        "$kind=${sender.stats.packets}pkt/${sender.stats.octets}B"
+                    }
+                    Log.i(
+                        TAG,
+                        "$summary feedback=$feedbackPackets unmatchedRtcp=$unmatchedPackets",
+                    )
                 }
                 var packet = udp.receive()
                 while (packet != null) {
@@ -227,6 +255,15 @@ class MirrorEngine(
                 senderSsrc = stream.senderSsrc,
                 maxFrameId = sender.lastFrameId,
             ) ?: continue
+            feedbackPackets++
+            if (hexDump) {
+                Log.i(
+                    TAG,
+                    "${stream.kind} feedback checkpoint=${feedback.checkpoint} " +
+                        "nacks=${feedback.nacks.size} acks=${feedback.ackedFrames.size} " +
+                        "playoutDelay=${feedback.playoutDelayMs}",
+                )
+            }
             val recovery = session.onFeedback(feedback)
             sender.retransmit(recovery.retransmissions)
             if (recovery.needsKeyFrame && stream.kind == StreamKind.Video) {
@@ -235,6 +272,9 @@ class MirrorEngine(
             }
             return
         }
+        // Receiver reports and event logs also arrive here and are none of our business, but a run
+        // where *everything* is unmatched means the SSRC pairing is wrong.
+        unmatchedPackets++
     }
 
     /**
