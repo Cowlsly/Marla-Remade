@@ -40,7 +40,6 @@ import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
-import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.library.network.NetworkClient
 import com.vayunmathur.library.network.TrustBundle
@@ -275,7 +274,6 @@ fun Navigation(
     viewModel: SelectedFeatureViewModel = viewModel(),
     searchViewModel: MapsSearchViewModel = viewModel(),
     savedPlacesViewModel: SavedPlacesViewModel = viewModel(),
-    poiViewModel: GooglePoiMapViewModel = viewModel(),
     settingsViewModel: MapSettingsViewModel = viewModel(),
     parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel = viewModel(),
     transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel = viewModel(),
@@ -283,7 +281,7 @@ fun Navigation(
     val backStack = rememberNavBackStack<Route>(Route.MapPage)
     MainNavigation(backStack) {
         entry<Route.MapPage> {
-            MapPage(backStack, viewModel, savedPlacesViewModel, poiViewModel, searchViewModel, settingsViewModel, parkingViewModel, transitViewModel)
+            MapPage(backStack, viewModel, savedPlacesViewModel, searchViewModel, settingsViewModel, parkingViewModel, transitViewModel)
         }
         entry<Route.SettingsPage> {
             MapSettingsPage(backStack, settingsViewModel)

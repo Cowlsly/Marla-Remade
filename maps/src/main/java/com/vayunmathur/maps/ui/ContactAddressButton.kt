@@ -3,19 +3,10 @@ package com.vayunmathur.maps.ui
 import android.Manifest
 import android.app.Activity
 import android.content.ActivityNotFoundException
-import android.content.Context
-import android.content.Intent
-import android.database.Cursor
 import android.net.Uri
 import android.os.Build
-import android.provider.ContactsContract
-import android.provider.ContactsContract.CommonDataKinds.StructuredPostal
-import android.provider.ContactsPickerSessionContract
-import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -37,8 +28,16 @@ import com.vayunmathur.library.ui.IconContacts
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.ui.rememberPermissionRequest
+import com.vayunmathur.maps.util.launchContactPicker
+import com.vayunmathur.maps.util.launchPostalPicker
+import com.vayunmathur.maps.util.newSystemContactPickerIntent
+import com.vayunmathur.maps.util.readAddress
+import com.vayunmathur.maps.util.readContactAddresses
+import com.vayunmathur.maps.util.readSessionAddresses
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.maps.R as MapsR
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -93,6 +92,9 @@ import kotlinx.coroutines.withContext
 fun ContactAddressButton(onAddress: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    val messenger = rememberMessenger()
+    val noPickerMessage = stringResource(MapsR.string.no_contact_picker)
+    val reportNoPicker = { messenger.show(noPickerMessage) }
 
     // A whole-contact URI whose postal read was refused for lack of READ_CONTACTS;
     // retried once the permission is granted. Null while nothing is pending.
@@ -149,12 +151,12 @@ fun ContactAddressButton(onAddress: (String) -> Unit, modifier: Modifier = Modif
             } else {
                 // Row carried no address (or wasn't a postal row) — fall back to
                 // the whole-contact picker.
-                launchContactPicker(context, contactPicker)
+                launchContactPicker(contactPicker, reportNoPicker)
             }
         } catch (_: SecurityException) {
             // The implicit per-row grant didn't cover the query on this OEM —
             // fall back to the whole-contact picker + READ_CONTACTS path.
-            launchContactPicker(context, contactPicker)
+            launchContactPicker(contactPicker, reportNoPicker)
         }
     }
 
@@ -182,18 +184,12 @@ fun ContactAddressButton(onAddress: (String) -> Unit, modifier: Modifier = Modif
                 try {
                     addressPicker.launch(newSystemContactPickerIntent())
                 } catch (_: ActivityNotFoundException) {
-                    runCatching {
-                        Toast.makeText(
-                            context,
-                            context.getString(com.vayunmathur.maps.R.string.no_contact_picker),
-                            Toast.LENGTH_SHORT,
-                        ).show()
-                    }
+                    reportNoPicker()
                 }
             } else {
                 // Older devices: the legacy postal-row ACTION_PICK also returns a
                 // row URI with an implicit read grant (no READ_CONTACTS).
-                launchPostalPicker(context, postalPicker, contactPicker)
+                launchPostalPicker(postalPicker, contactPicker, reportNoPicker)
             }
         },
         modifier = modifier,
@@ -240,181 +236,3 @@ private fun AddressChooserDialog(
     )
 }
 
-/**
- * Build the Android 17 system Contact Picker intent: request the postal-address
- * field only (so the user picks an ADDRESS), single-select. All extras below are
- * compile-time String constants and are therefore inlined, so referencing the
- * new [ContactsPickerSessionContract] symbols is safe even on older runtimes;
- * the call is additionally gated on [Build.VERSION_CODES.CINNAMON_BUN].
- */
-@RequiresApi(Build.VERSION_CODES.CINNAMON_BUN)
-private fun newSystemContactPickerIntent(): Intent =
-    Intent(ContactsPickerSessionContract.ACTION_PICK_CONTACTS).apply {
-        // Also engage the system picker when targeting a lower SDK on Android 17.
-        putExtra(Intent.EXTRA_USE_SYSTEM_CONTACTS_PICKER, true)
-        // Ask only for postal-address rows.
-        putStringArrayListExtra(
-            ContactsPickerSessionContract.EXTRA_PICK_CONTACTS_REQUESTED_DATA_FIELDS,
-            arrayListOf(StructuredPostal.CONTENT_ITEM_TYPE),
-        )
-        putExtra(ContactsPickerSessionContract.EXTRA_PICK_CONTACTS_SELECTION_LIMIT, 1)
-    }
-
-/** Legacy postal-picker path: try the postal-row picker, then the whole-contact
- *  picker. Never throws. */
-private fun launchPostalPicker(
-    context: Context,
-    postalPicker: ActivityResultLauncher<Intent>,
-    contactPicker: ActivityResultLauncher<Void?>,
-) {
-    val postalIntent = Intent(Intent.ACTION_PICK).apply {
-        type = StructuredPostal.CONTENT_TYPE
-    }
-    try {
-        postalPicker.launch(postalIntent)
-    } catch (_: ActivityNotFoundException) {
-        // No postal picker on this device — try the universal contact picker.
-        launchContactPicker(context, contactPicker)
-    }
-}
-
-/** Launch the whole-contact picker, degrading to a quiet toast if even that has
- *  no handler (some stripped OEM images). Never throws. */
-private fun launchContactPicker(
-    context: Context,
-    contactPicker: ActivityResultLauncher<Void?>,
-) {
-    try {
-        contactPicker.launch(null)
-    } catch (_: ActivityNotFoundException) {
-        runCatching {
-            Toast.makeText(context, context.getString(com.vayunmathur.maps.R.string.no_contact_picker), Toast.LENGTH_SHORT).show()
-        }
-    }
-}
-
-/**
- * Read every postal address from the Android 17 picker's [sessionUri]. The session
- * URI is a pre-scoped view of exactly what the user chose, so it does NOT support
- * selection / selectionArgs (passing them throws) — query with nulls. We iterate
- * the returned rows and collect each StructuredPostal address (de-duplicated,
- * order preserved). With SELECTION_LIMIT=1 this is normally one address; if an OEM
- * returns the whole chosen contact's several addresses, the caller shows a chooser.
- */
-private fun readSessionAddresses(context: Context, sessionUri: Uri): List<String> {
-    val out = LinkedHashSet<String>()
-    context.contentResolver.query(sessionUri, SESSION_PROJECTION, null, null, null)?.use { cursor ->
-        val mimeIdx = cursor.getColumnIndex(ContactsContract.Data.MIMETYPE)
-        while (cursor.moveToNext()) {
-            val mime = if (mimeIdx >= 0) cursor.getString(mimeIdx) else null
-            if (mime == null || mime == StructuredPostal.CONTENT_ITEM_TYPE) {
-                cursor.postalAddress()?.let { out.add(it) }
-            }
-        }
-    }
-    return out.toList()
-}
-
-/**
- * Read the postal address at [rowUri] (a StructuredPostal data row). Prefers the
- * pre-formatted [StructuredPostal.FORMATTED_ADDRESS]; if that's blank it
- * composes the address from the individual components. Returns null when the
- * row is gone or holds no address. May throw [SecurityException] when the
- * caller lacks read access to the row.
- */
-private fun readAddress(context: Context, rowUri: Uri): String? {
-    context.contentResolver.query(rowUri, POSTAL_PROJECTION, null, null, null)?.use { cursor ->
-        if (!cursor.moveToFirst()) return null
-        return cursor.postalAddress()
-    }
-    return null
-}
-
-/**
- * Resolve all postal addresses of the whole contact at [contactUri] (as returned
- * by [ActivityResultContracts.PickContact]). Looks up the contact id, then reads
- * its StructuredPostal data rows (de-duplicated, order preserved). Returns empty
- * when the contact has no postal address. Requires READ_CONTACTS (may throw
- * [SecurityException]).
- */
-private fun readContactAddresses(context: Context, contactUri: Uri): List<String> {
-    val contactId = context.contentResolver.query(
-        contactUri,
-        arrayOf(ContactsContract.Contacts._ID),
-        null,
-        null,
-        null,
-    )?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: return emptyList()
-
-    val selection =
-        "${ContactsContract.Data.CONTACT_ID} = ? AND ${ContactsContract.Data.MIMETYPE} = ?"
-    val args = arrayOf(
-        contactId,
-        StructuredPostal.CONTENT_ITEM_TYPE,
-    )
-    val out = LinkedHashSet<String>()
-    context.contentResolver.query(
-        ContactsContract.Data.CONTENT_URI,
-        POSTAL_PROJECTION,
-        selection,
-        args,
-        null,
-    )?.use { cursor ->
-        while (cursor.moveToNext()) {
-            cursor.postalAddress()?.let { out.add(it) }
-        }
-    }
-    return out.toList()
-}
-
-/** Pull a display address out of a StructuredPostal cursor row: the formatted
- *  address if present, else the composed components. Null when the row is empty. */
-private fun Cursor.postalAddress(): String? {
-    fun col(name: String): String? = getColumnIndex(name)
-        .takeIf { it >= 0 }
-        ?.let { getString(it) }
-        ?.takeIf { it.isNotBlank() }
-
-    col(StructuredPostal.FORMATTED_ADDRESS)
-        ?.normalizeAddress()
-        ?.takeIf { it.isNotBlank() }
-        ?.let { return it }
-
-    return listOfNotNull(
-        col(StructuredPostal.STREET),
-        col(StructuredPostal.CITY),
-        col(StructuredPostal.REGION),
-        col(StructuredPostal.POSTCODE),
-        col(StructuredPostal.COUNTRY),
-    ).joinToString(", ").ifBlank { null }
-}
-
-/** Collapse a multi-line postal address to one comma-separated line so it makes
- *  a valid single-line search query (FORMATTED_ADDRESS embeds newlines). Runs of
- *  whitespace within a line collapse to a single space; blank lines are dropped. */
-private fun String.normalizeAddress(): String =
-    lines()
-        .map { it.replace(Regex("\\s+"), " ").trim() }
-        .filter { it.isNotEmpty() }
-        .joinToString(", ")
-
-/** Projection for the Android 17 session URI: MIMETYPE (to spot the postal row)
- *  plus the postal columns. */
-private val SESSION_PROJECTION = arrayOf(
-    ContactsContract.Data.MIMETYPE,
-    StructuredPostal.FORMATTED_ADDRESS,
-    StructuredPostal.STREET,
-    StructuredPostal.CITY,
-    StructuredPostal.REGION,
-    StructuredPostal.POSTCODE,
-    StructuredPostal.COUNTRY,
-)
-
-private val POSTAL_PROJECTION = arrayOf(
-    StructuredPostal.FORMATTED_ADDRESS,
-    StructuredPostal.STREET,
-    StructuredPostal.CITY,
-    StructuredPostal.REGION,
-    StructuredPostal.POSTCODE,
-    StructuredPostal.COUNTRY,
-)

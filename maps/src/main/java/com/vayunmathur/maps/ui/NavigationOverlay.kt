@@ -2,6 +2,7 @@ package com.vayunmathur.maps.ui
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -41,7 +42,9 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SmallFloatingActionButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.R
+import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.maps.data.PostedLimit
+import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.ui.nav.ArrivalSummary
 import com.vayunmathur.maps.ui.nav.ManeuverBanner
 import com.vayunmathur.maps.ui.nav.SpeedWidget
@@ -74,52 +77,42 @@ fun NavigationOverlay(
     northUp: Boolean = false,
     onToggleNorthUp: () -> Unit = {},
     destinationName: String? = null,
+    darkBasemap: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     if (navState is NavigationSessionManager.NavState.Idle) return
 
     var showSteps by remember { mutableStateOf(false) }
 
-    Box(Modifier.fillMaxSize()) {
+    Box(modifier.fillMaxSize()) {
         // ---- Top maneuver banner / status ----
         when (navState) {
             is NavigationSessionManager.NavState.Navigating -> {
                 ManeuverBanner(
                     progress = navState.progress,
                     steps = steps,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = navTopSlot(),
                 )
             }
             NavigationSessionManager.NavState.Starting -> {
                 StatusCard(
                     text = stringResource(R.string.nav_status_starting),
                     showProgress = true,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = navTopSlot(),
                 )
             }
             NavigationSessionManager.NavState.Recalculating -> {
                 StatusCard(
                     text = stringResource(R.string.nav_off_route),
                     showProgress = true,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = navTopSlot(),
                 )
             }
             is NavigationSessionManager.NavState.Failed -> {
                 FailureCard(
                     reason = navState.reason,
                     onDismiss = onDismissArrival,
-                    modifier = Modifier
-                        .align(Alignment.TopCenter)
-                        .windowInsetsPadding(WindowInsets.statusBars)
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    modifier = navTopSlot(),
                 )
             }
             else -> {}
@@ -130,8 +123,8 @@ fun NavigationOverlay(
             Column(
                 modifier = Modifier
                     .align(Alignment.CenterEnd)
-                    .padding(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp),
+                    .padding(MapChromeMetrics.chromeMargin),
+                verticalArrangement = Arrangement.spacedBy(MapChromeMetrics.fabSpacing),
                 horizontalAlignment = Alignment.End,
             ) {
                 SmallFloatingActionButton(onClick = onToggleNorthUp) {
@@ -155,10 +148,14 @@ fun NavigationOverlay(
             SpeedWidget(
                 speedMps = navState.progress.speedMps,
                 postedLimit = postedLimit,
+                darkBasemap = darkBasemap,
                 modifier = Modifier
                     .align(Alignment.BottomStart)
                     .windowInsetsPadding(WindowInsets.systemBars)
-                    .padding(start = 16.dp, bottom = 96.dp),
+                    .padding(
+                        start = MapChromeMetrics.chromeMargin,
+                        bottom = MapChromeMetrics.aboveEtaStrip,
+                    ),
             )
         }
 
@@ -168,11 +165,14 @@ fun NavigationOverlay(
                 steps = steps,
                 currentStepIndex = navState.progress.currentStepIndex,
                 onClose = { showSteps = false },
+                // Insets before the clearance padding, matching the speedometer above. The
+                // two were in opposite orders, which shifted them apart by the nav-bar
+                // height on top of the clearance they already disagreed on.
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .fillMaxWidth()
-                    .padding(bottom = 84.dp)
-                    .windowInsetsPadding(WindowInsets.systemBars),
+                    .windowInsetsPadding(WindowInsets.systemBars)
+                    .padding(bottom = MapChromeMetrics.aboveEtaStripTight),
             )
         }
 
@@ -197,13 +197,24 @@ fun NavigationOverlay(
                         .align(Alignment.BottomCenter)
                         .fillMaxWidth()
                         .windowInsetsPadding(WindowInsets.systemBars)
-                        .padding(16.dp),
+                        .padding(MapChromeMetrics.chromeMargin),
                 )
             }
             else -> {}
         }
     }
 }
+
+/**
+ * The top status slot: whichever single card the nav state calls for, tucked under the status
+ * bar. One function because all four callers want byte-identical geometry — they were four
+ * copies of the same chain, which is how they would have drifted apart.
+ */
+@Composable
+private fun BoxScope.navTopSlot(): Modifier = Modifier
+    .align(Alignment.TopCenter)
+    .windowInsetsPadding(WindowInsets.statusBars)
+    .padding(horizontal = Spacing.md, vertical = Spacing.sm)
 
 @Composable
 private fun StatusCard(

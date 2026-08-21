@@ -228,8 +228,8 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
 }
 
 @Composable
-private fun ResultsList(results: List<SearchResult>, actions: SearchActions) {
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+private fun ResultsList(results: List<SearchResult>, actions: SearchActions, modifier: Modifier = Modifier) {
+    LazyColumn(modifier = modifier.fillMaxSize()) {
         items(results, key = { it.id }) { result ->
             ListItem(
                 content = { Text(result.title) },
@@ -247,8 +247,8 @@ private fun ResultsList(results: List<SearchResult>, actions: SearchActions) {
 }
 
 @Composable
-private fun RecentsList(recents: List<String>, actions: SearchActions) {
-    LazyColumn(modifier = Modifier.fillMaxSize()) {
+private fun RecentsList(recents: List<String>, actions: SearchActions, modifier: Modifier = Modifier) {
+    LazyColumn(modifier = modifier.fillMaxSize()) {
         item {
             Row(
                 modifier = Modifier

@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -196,8 +195,8 @@ private fun StreetViewEntry(feature: SpecificFeature.RoutableFeature) {
 }
 
 @Composable
-private fun PlaceHeader(name: String, poi: GooglePoiInfo?, hasOsmHours: Boolean) {
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+private fun PlaceHeader(name: String, poi: GooglePoiInfo?, hasOsmHours: Boolean, modifier: Modifier = Modifier) {
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(name, style = MaterialTheme.typography.titleLarge)
 
         val subtitle = listOfNotNull(poi?.category?.ifBlank { null }, poi?.priceText?.ifBlank { null })
@@ -233,9 +232,16 @@ private fun PlaceHeader(name: String, poi: GooglePoiInfo?, hasOsmHours: Boolean)
     }
 }
 
+/**
+ * Five stars, filled up to [rating].
+ *
+ * `Double` rather than `Int` because Google's place rating is fractional; a review's own
+ * rating is a whole number and converts. There used to be one of these per file, differing
+ * only in that parameter type.
+ */
 @Composable
-private fun RatingStars(rating: Double) {
-    Row {
+internal fun RatingStars(rating: Double, modifier: Modifier = Modifier) {
+    Row(modifier) {
         repeat(5) { i ->
             if (i < rating.toInt()) IconStar(Modifier.size(16.dp), tint = MaterialTheme.colorScheme.tertiary)
             else IconStarBorder(Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -252,6 +258,7 @@ private fun PlaceActionRow(
     savedPlacesViewModel: SavedPlacesViewModel,
     requestDirections: () -> Unit,
     orderDeepLink: String?,
+    modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val saved by savedPlacesViewModel.saved.collectAsState()

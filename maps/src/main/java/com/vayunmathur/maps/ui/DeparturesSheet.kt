@@ -120,7 +120,7 @@ fun DeparturesSheet(
 /** Group departures by line (ordered by the soonest departure in each group)
  *  and render each as a coloured line badge + its upcoming trips. */
 @Composable
-private fun DepartureList(departures: List<Departure>, now: Long) {
+private fun DepartureList(departures: List<Departure>, now: Long, modifier: Modifier = Modifier) {
     val groups = remember(departures) {
         departures
             .sortedBy { it.realtimeMillis }
@@ -129,7 +129,7 @@ private fun DepartureList(departures: List<Departure>, now: Long) {
             .sortedBy { entry -> entry.value.minOfOrNull { it.realtimeMillis } ?: Long.MAX_VALUE }
     }
 
-    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
+    LazyColumn(modifier.fillMaxWidth().heightIn(max = 420.dp)) {
         items(groups, key = { it.key }) { (line, trips) ->
             Column(Modifier.fillMaxWidth().padding(vertical = 6.dp)) {
                 LineBadge(line, trips.first().routeColor)
@@ -144,9 +144,9 @@ private fun DepartureList(departures: List<Departure>, now: Long) {
 }
 
 @Composable
-private fun DepartureRow(dep: Departure, now: Long) {
+private fun DepartureRow(dep: Departure, now: Long, modifier: Modifier = Modifier) {
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+        modifier.fillMaxWidth().padding(vertical = 4.dp),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {

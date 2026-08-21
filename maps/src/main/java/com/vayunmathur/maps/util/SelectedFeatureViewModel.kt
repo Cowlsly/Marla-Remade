@@ -90,6 +90,18 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     }
 
     /**
+     * Park the current route, if the selection is one, before selecting something else.
+     *
+     * Tapping a place while directions are up should keep the route recoverable rather than
+     * discard it, which is why every such tap handler did this. They each did it with an
+     * unchecked `as SpecificFeature.Route` guarded by a separate `is` check, so the cast was
+     * only safe by inspection; reading the selection once here makes it safe by construction.
+     */
+    fun stashRouteSelection() {
+        (_selectedFeature.value as? SpecificFeature.Route)?.let { _inactiveNavigation.value = it }
+    }
+
+    /**
      * Keyless Google Maps enrichment (rating, reviews, hours, photos, price,
      * popular times, …) for the currently selected restaurant or generic place.
      * Emits null for other feature types and while the network scrape is in

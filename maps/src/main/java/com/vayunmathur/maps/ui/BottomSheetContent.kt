@@ -126,9 +126,9 @@ fun BottomSheetContent(
  * it read as noise and — being plain text — could not actually be opened.
  */
 @Composable
-private fun AdminLabelHeader(name: String, wikipedia: String) {
+private fun AdminLabelHeader(name: String, wikipedia: String, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Text(
             name,
             style = MaterialTheme.typography.titleLarge,
@@ -155,8 +155,9 @@ fun RouteSheet(
     setSelectedRouteType: (RouteService.TravelMode) -> Unit,
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
     userPosition: Position? = null,
+    modifier: Modifier = Modifier,
 ) {
-    Column {
+    Column(modifier) {
         PrimaryTabRow(route.entries.indexOfFirst { it.key == selectedRouteType }) {
             route.entries.forEach {
                 Tab(

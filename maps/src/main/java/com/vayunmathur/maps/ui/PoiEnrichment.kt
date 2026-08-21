@@ -6,7 +6,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
@@ -38,7 +37,6 @@ import com.vayunmathur.library.ui.IconInfo
 import com.vayunmathur.library.ui.IconPhotoLibrary
 import com.vayunmathur.library.ui.IconSchedule
 import com.vayunmathur.library.ui.IconStar
-import com.vayunmathur.library.ui.IconStarBorder
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
@@ -196,7 +194,7 @@ private fun ReviewCard(review: GoogleReview) {
                     }
                 }
             }
-            if (review.rating in 1..5) RatingStars(review.rating)
+            if (review.rating in 1..5) RatingStars(review.rating.toDouble())
             review.text?.let {
                 Text(it, style = MaterialTheme.typography.bodyMedium, maxLines = 6)
             }
@@ -212,16 +210,6 @@ private fun ReviewCard(review: GoogleReview) {
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun RatingStars(rating: Int) {
-    Row {
-        repeat(5) { i ->
-            if (i < rating) IconStar(Modifier.size(16.dp), tint = MaterialTheme.colorScheme.tertiary)
-            else IconStarBorder(Modifier.size(16.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

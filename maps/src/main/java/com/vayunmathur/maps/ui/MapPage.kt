@@ -4,7 +4,6 @@ import android.content.Context
 import android.util.Log
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -24,7 +23,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.IconDragHandle
 import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
@@ -42,7 +40,6 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.rememberFreeHeightSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -57,9 +54,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.DpRect
 import androidx.compose.ui.unit.dp
@@ -74,12 +69,13 @@ import com.vayunmathur.maps.data.parse
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.SavedPlacesViewModel
-import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.ui.theme.BasemapPalette
+import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import com.vayunmathur.maps.util.visibleBoundsOrWorld
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -104,16 +100,18 @@ import org.maplibre.compose.util.ClickResult
 import org.maplibre.spatialk.geojson.Position
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.draggableHandle
+import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
-import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.maps.R as MapsR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, savedPlacesViewModel: SavedPlacesViewModel, poiViewModel: GooglePoiMapViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
+fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, savedPlacesViewModel: SavedPlacesViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
     val selectedFeature by viewModel.selectedFeature.collectAsState()
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
+    val messenger = rememberMessenger()
+    val noResultsMessage = stringResource(MapsR.string.no_results_found)
 
     val savedHome by savedPlacesViewModel.home.collectAsState()
     val savedWork by savedPlacesViewModel.work.collectAsState()
@@ -262,33 +260,10 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         sheetState.hide()
     }
 
-    fun openSearch() {
-        // Style may not have finished loading — fall back to a world-spanning
-        // bbox so the search query still works.
-        val bbox = camera.projection?.queryVisibleBoundingBox()
+    fun openSearch(query: String? = null) {
+        val bbox = camera.visibleBoundsOrWorld()
         backStack.add(
-            Route.SearchPage(
-                null,
-                bbox?.east ?: 180.0,
-                bbox?.west ?: -180.0,
-                bbox?.north ?: 85.0,
-                bbox?.south ?: -85.0,
-            )
-        )
-    }
-
-    // Browse category chip → open search pre-filled with the category query.
-    fun openCategorySearch(query: String) {
-        val bbox = camera.projection?.queryVisibleBoundingBox()
-        backStack.add(
-            Route.SearchPage(
-                null,
-                bbox?.east ?: 180.0,
-                bbox?.west ?: -180.0,
-                bbox?.north ?: 85.0,
-                bbox?.south ?: -85.0,
-                query,
-            )
+            Route.SearchPage(null, bbox.east, bbox.west, bbox.north, bbox.south, query)
         )
     }
 
@@ -359,7 +334,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         Column(Modifier.padding(horizontal = 16.dp).padding(top = 8.dp)) {
             BottomSheetContent(viewModel, selectedFeature, { viewModel.set(it) }, route, selectedRouteType, { selectedRouteType = it }, inactiveNavigation, savedPlacesViewModel, transitViewModel, navState)
         }
-    }, Modifier, sheetState, 170.dp, contentKey = listOf(selectedFeature, selectedRouteType)) { paddingValues ->
+    }, Modifier, sheetState, MapChromeMetrics.sheetPeekHeight, contentKey = listOf(selectedFeature, selectedRouteType)) { paddingValues ->
         AppScaffold(
             title = {
                 // Search bar lives IN the top app bar (Google-Maps style).
@@ -384,14 +359,12 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         // DIRECTLY (fly there + peek pane) — never through the
                         // search box (no query prefill, no results list).
                         ContactAddressButton(onAddress = { address ->
-                            val bbox = camera.projection?.queryVisibleBoundingBox()
-                            val nearLat = ((bbox?.north ?: 85.0) + (bbox?.south ?: -85.0)) / 2.0
-                            val nearLon = ((bbox?.east ?: 180.0) + (bbox?.west ?: -180.0)) / 2.0
+                            val bbox = camera.visibleBoundsOrWorld()
+                            val nearLat = (bbox.north + bbox.south) / 2.0
+                            val nearLon = (bbox.east + bbox.west) / 2.0
                             searchViewModel.resolveAndSelect(address, nearLat, nearLon) { place ->
                                 if (place != null) {
-                                    if (selectedFeature is SpecificFeature.Route) {
-                                        viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
-                                    }
+                                    viewModel.stashRouteSelection()
                                     // Fly to the resolved place + open the peek pane
                                     // (Vela place-card), the same direct-open path as
                                     // a geo:/maps deep link.
@@ -400,19 +373,13 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         zoom = maxOf(camera.position.zoom, 14.0),
                                     )
                                 } else {
-                                    runCatching {
-                                        android.widget.Toast.makeText(
-                                            context,
-                                            context.getString(MapsR.string.no_results_found),
-                                            android.widget.Toast.LENGTH_SHORT,
-                                        ).show()
-                                    }
+                                    messenger.show(noResultsMessage)
                                 }
                             }
                         })
                         // Voice search (P8): a transcript opens the search page
                         // pre-filled, which runs the P3 Google search.
-                        VoiceSearchButton(onResult = { openCategorySearch(it) })
+                        VoiceSearchButton(onResult = { openSearch(it) })
                     }
                 }
             },
@@ -453,7 +420,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 // around the touch point so tapping NEAR a small
                                 // POI glyph still selects it, instead of only
                                 // registering on a pixel-exact hit.
-                                val pad = 22.dp
+                                val pad = MapChromeMetrics.hitSlop
                                 val hitBox = DpRect(offset.x - pad, offset.y - pad, offset.x + pad, offset.y + pad)
                                 // Parking pin (P9): tapping the saved car spot
                                 // opens the parking sheet instead of selecting a
@@ -504,9 +471,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         setOf(MA_POIS_LAYER_ID)
                                     )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
                                 if (pinHit != null) {
-                                    if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
-                                        selectedFeature as SpecificFeature.Route
-                                    )
+                                    viewModel.stashRouteSelection()
                                     viewModel.set(pinHit)
                                     sheetState.partialExpand()
                                     return@launch
@@ -533,9 +498,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
 
                                 if (firstFeature != null) {
-                                    if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
-                                        selectedFeature as SpecificFeature.Route
-                                    )
+                                    viewModel.stashRouteSelection()
                                     viewModel.set(firstFeature)
                                     sheetState.partialExpand()
                                     return@launch
@@ -546,9 +509,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 // FTS geocoder — online-only (Decision D2).
                                 searchViewModel.reverseGeocode(latLng.latitude, latLng.longitude) { place ->
                                     if (place != null) {
-                                        if (selectedFeature is SpecificFeature.Route) viewModel.setInactiveNavigation(
-                                            selectedFeature as SpecificFeature.Route
-                                        )
+                                        viewModel.stashRouteSelection()
                                         viewModel.set(place)
                                         coroutineScope.launch { sheetState.partialExpand() }
                                     }
@@ -563,7 +524,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
                 // ROUTE OVERLAY HEADERS
                 if(selectedFeature is SpecificFeature.Route || inactiveNavigation != null) {
-                    val routeFeature = if(selectedFeature is SpecificFeature.Route) selectedFeature as SpecificFeature.Route else inactiveNavigation!!
+                    val routeFeature = (selectedFeature as? SpecificFeature.Route) ?: inactiveNavigation!!
                     val listState = rememberLazyListState()
                     val state = rememberReorderableLazyListState(listState, onMove = { from, to ->
                         // swap their indices in the list
@@ -589,15 +550,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                                 ?: stringResource(MapsR.string.your_location)
                                         )
                                     }, Modifier.clickable {
-                                        // Style may not have finished loading
-                                        // — fall back to a world-spanning bbox
-                                        // so the search query still works.
-                                        val bbox = camera.projection?.queryVisibleBoundingBox()
+                                        val bbox = camera.visibleBoundsOrWorld()
                                         backStack.add(Route.SearchPage(idx,
-                                            bbox?.east ?: 180.0,
-                                            bbox?.west ?: -180.0,
-                                            bbox?.north ?: 85.0,
-                                            bbox?.south ?: -85.0))
+                                            bbox.east, bbox.west, bbox.north, bbox.south))
                                     }, trailingContent = {
                                         Row(verticalAlignment = Alignment.CenterVertically) {
                                             if(idx > 0 && idx < routeFeature.waypoints.size - 1) {
@@ -652,15 +607,15 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         modifier = Modifier
                             .align(Alignment.BottomStart)
                             .windowInsetsPadding(WindowInsets.systemBars)
-                            .padding(16.dp),
+                            .padding(MapChromeMetrics.chromeMargin),
                     )
                     Column(
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
                             .windowInsetsPadding(WindowInsets.systemBars)
-                            .padding(16.dp),
+                            .padding(MapChromeMetrics.chromeMargin),
                         horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(MapChromeMetrics.fabSpacing),
                     ) {
                         // Compass sits on top and only shows when the map is
                         // rotated; layers in the middle; my-location is the
@@ -740,6 +695,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                     northUp = navNorthUp,
                     onToggleNorthUp = { navNorthUp = !navNorthUp },
                     destinationName = com.vayunmathur.maps.util.NavigationSessionManager.destinationName,
+                    darkBasemap = darkMap,
                 )
 
                 // Map-layers toggle sheet (P6), opened from the LayersButton.
@@ -772,9 +728,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 val feature = spot.toFeature(
                                     context.getString(MapsR.string.parking_title)
                                 )
-                                if (selectedFeature is SpecificFeature.Route) {
-                                    viewModel.setInactiveNavigation(selectedFeature as SpecificFeature.Route)
-                                }
+                                viewModel.stashRouteSelection()
                                 viewModel.set(SpecificFeature.Route(listOf(null, feature)))
                                 showParkingSheet = false
                                 coroutineScope.launch { sheetState.partialExpand() }

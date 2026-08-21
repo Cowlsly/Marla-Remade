@@ -199,9 +199,11 @@ private fun SavedPlaceRow(
     onRename: () -> Unit,
     onAddToList: () -> Unit,
     onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
     SettingsRow(
+        modifier = modifier,
         title = place.name,
         leadingContent = { IconStar() },
         trailingContent = {

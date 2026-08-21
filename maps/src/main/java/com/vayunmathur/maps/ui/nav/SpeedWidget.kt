@@ -43,6 +43,7 @@ fun SpeedWidget(
     postedLimit: PostedLimit?,
     modifier: Modifier = Modifier,
     defaultMph: Boolean = isImperialUnits(),
+    darkBasemap: Boolean = false,
 ) {
     val useMph = postedLimit?.displayIsMph ?: defaultMph
     val speed = if (useMph) (speedMps * MPS_TO_MPH).roundToInt() else (speedMps * MPS_TO_KMH).roundToInt()
@@ -83,13 +84,26 @@ fun SpeedWidget(
         // Posted-limit sign (only when we have a limit). White disc, red ring, near-black
         // numerals in BOTH themes: this is a reproduction of a legal road sign, and there is
         // no dark-mode variant of one. The speed pill beside it does follow the theme.
+        //
+        // Over a dark basemap the white disc is the brightest thing on screen, so it gains a
+        // hairline ring in the ink colour. Drawn INSIDE the fixed 56 dp box (ring, then 1 dp
+        // of padding, then the disc) so the sign's colours and its footprint both stay put —
+        // an outer ring would paint under the red one, and a larger box would make the widget
+        // change size with the theme.
         if (limitValue != null) {
             Box(
                 Modifier
                     .shadow(4.dp, CircleShape)
+                    .size(56.dp)
+                    .then(
+                        if (darkBasemap) {
+                            Modifier.border(1.dp, SpeedSign.ink, CircleShape).padding(1.dp)
+                        } else {
+                            Modifier
+                        }
+                    )
                     .background(SpeedSign.disc, CircleShape)
-                    .border(4.dp, SpeedSign.ring, CircleShape)
-                    .size(56.dp),
+                    .border(4.dp, SpeedSign.ring, CircleShape),
                 contentAlignment = Alignment.Center,
             ) {
                 Text(
