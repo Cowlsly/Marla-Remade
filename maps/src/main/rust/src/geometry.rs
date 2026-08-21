@@ -7,8 +7,7 @@
 use std::collections::HashMap;
 
 use crate::graph::{
-    Edge, Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MAX_DRIVING_KMH, MOTORWAY,
-    PUBLIC_TRANSIT, STEPS, TRANSIT_FLAG,
+    Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MAX_DRIVING_KMH, MOTORWAY, STEPS,
 };
 
 /// Live traffic snapshot: global edge id -> speed (km/h). 0 means "unknown".
@@ -20,9 +19,9 @@ pub fn is_mode_allowed(road_type: u8, mode: i32) -> bool {
     if mode == DRIVING {
         return (MOTORWAY..=LIVING_STREET).contains(&ty);
     }
-    if mode == PUBLIC_TRANSIT {
-        return (road_type & TRANSIT_FLAG != 0) || (MOTORWAY..=STEPS).contains(&ty);
-    }
+    // PUBLIC_TRANSIT reaches the road graph only for a journey's walking legs
+    // (the timetable lives in the separate `.transit` index), so it permits
+    // exactly what WALK does.
     (MOTORWAY..=STEPS).contains(&ty)
 }
 
@@ -110,89 +109,7 @@ pub fn heuristic_time_10ms(g: &Graph, lat1: i32, lon1: i32, lat2: i32, lon2: i32
     (scaled_time >> 32) as u32
 }
 
-/// GTFS transit edge cost with next-departure scheduling. Returns
-/// `0xFFFFFFFF` when no voyage is usable. Mirrors `get_transit_edge_time_10ms`.
 #[inline]
-pub fn get_transit_edge_time_10ms(
-    g: &Graph,
-    edge: &Edge,
-    current_time_from_start: u32,
-    start_time_abs: u32,
-    feed_off: u32,
-    is_boarding_or_transfer: bool,
-) -> (u32, u32, u32) {
-    // Returns (total_time, wait_out, travel_out).
-    if !g.has_transit_voyages() {
-        return (0xFFFF_FFFF, 0, 0);
-    }
-
-    let voyage_offset = edge.dist_mm as u64;
-    let voyage_count = edge.speed_limit as u32;
-    if voyage_count == 0 {
-        return (0xFFFF_FFFF, 0, 0);
-    }
-
-    // Feed not present offline: report just the (unscheduled) voyage-0 duration.
-    if feed_off != 0xFFFF_FFFF && (feed_off as usize) < g.road_names_size {
-        if let Some(feed_name) = g.road_name(feed_off) {
-            if !g.present_feeds.contains(&feed_name) {
-                let travel = g.transit_voyage_at(voyage_offset + 1).dep_delta as u32;
-                return (travel, 0, travel);
-            }
-        }
-    }
-
-    const BOARDING_PENALTY: u32 = 6000; // 1 minute to platform
-    const DAY_10MS: u32 = 24 * 3600 * 100;
-    let abs_now = (start_time_abs + current_time_from_start) % DAY_10MS;
-    let arrival_at_platform =
-        (abs_now + if is_boarding_or_transfer { BOARDING_PENALTY } else { 0 }) % DAY_10MS;
-
-    let mut best_wait: u32 = 0xFFFF_FFFF;
-    let mut best_travel: u32 = 0;
-
-    let wait_for = |dep: u32| -> u32 {
-        let dep_mod = dep % DAY_10MS;
-        if dep_mod >= arrival_at_platform {
-            dep_mod - arrival_at_platform
-        } else {
-            (DAY_10MS - arrival_at_platform) + dep_mod
-        }
-    };
-
-    // Voyage 0.
-    let dep0 = g.transit_dep_u32(voyage_offset);
-    let duration0 = g.transit_voyage_at(voyage_offset + 1).dep_delta as u32;
-    {
-        let wait = wait_for(dep0);
-        if wait < best_wait {
-            best_wait = wait;
-            best_travel = duration0;
-        }
-    }
-
-    // Voyages 1+.
-    let mut dep_prev = dep0;
-    for i in 1..voyage_count as u64 {
-        let compact = g.transit_voyage_at(voyage_offset + 1 + i);
-        let dep = dep_prev.wrapping_add(compact.dep_delta as u32 * 100);
-        dep_prev = dep;
-        let wait = wait_for(dep);
-        if wait < best_wait {
-            best_wait = wait;
-            best_travel = compact.duration as u32;
-        }
-    }
-
-    if best_wait == 0xFFFF_FFFF {
-        return (0xFFFF_FFFF, 0, 0);
-    }
-
-    let total =
-        (if is_boarding_or_transfer { BOARDING_PENALTY } else { 0 }) + best_wait + best_travel;
-    (total, best_wait, best_travel)
-}
-
 pub fn get_bearing(lat1: i32, lon1: i32, lat2: i32, lon2: i32) -> f64 {
     let f1 = (lat1 as f64 / 1e7) * DEG_TO_RAD;
     let f2 = (lat2 as f64 / 1e7) * DEG_TO_RAD;

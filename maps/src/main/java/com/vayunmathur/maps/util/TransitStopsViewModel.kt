@@ -3,6 +3,7 @@ package com.vayunmathur.maps.util
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.library.util.ConnectivityMonitor
 import com.vayunmathur.maps.data.transit.Departure
 import com.vayunmathur.maps.data.transit.TransitStop
 import com.vayunmathur.maps.data.transit.TransitousDataSource
@@ -39,7 +40,11 @@ import kotlin.math.abs
  *    [refresh]. The live countdown itself is computed client-side in the sheet
  *    from each departure's epoch time, so no polling is needed here.
  *
- * All network is on [Dispatchers.IO]. ONLINE-ONLY (P11 adds offline).
+ * All network is on [Dispatchers.IO], and is skipped entirely when
+ * [ConnectivityMonitor] reports no validated internet — otherwise every offline
+ * lookup pays a full HTTP timeout. The departure board is offline-first: the
+ * baked `.transit` pack supplies the schedule and MOTIS supplies the realtime
+ * overlay on top of it.
  */
 class TransitStopsViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -53,7 +58,10 @@ class TransitStopsViewModel(application: Application) : AndroidViewModel(applica
         .filterNotNull()
         .debounce(DEBOUNCE_MS)
         .distinctUntilChanged()
-        .mapLatest { b -> TransitousDataSource.stopsInBbox(b.south, b.west, b.north, b.east) }
+        .mapLatest { b ->
+            if (!ConnectivityMonitor.isOnline(getApplication())) emptyList()
+            else TransitousDataSource.stopsInBbox(b.south, b.west, b.north, b.east)
+        }
         .flowOn(Dispatchers.IO)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -88,18 +96,22 @@ class TransitStopsViewModel(application: Application) : AndroidViewModel(applica
                     flow {
                         emit(DeparturesState.Loading(stop))
                         val force = tick > 0
-                        val online = TransitousDataSource.departures(stop.id, force = force)
-                        // Offline scheduled fallback (no internet / feed gap): the
-                        // online board already carries GTFS-RT delays, so only fall
-                        // back to the baked .transit schedule when it's empty.
-                        val deps = if (online.isNotEmpty()) {
-                            online
-                        } else {
-                            runCatching {
-                                OfflineRouter.getStopDeparturesOffline(
-                                    getApplication(), stop.lat, stop.lon,
-                                )
-                            }.getOrDefault(emptyList())
+                        // Offline-first now that the baked board folds MOTIS
+                        // realtime in as an overlay: the pack has the complete
+                        // schedule, the overlay supplies the live delays. Fall
+                        // back to the pure online board only when no pack covers
+                        // this stop.
+                        val offline = runCatching {
+                            OfflineRouter.getStopDeparturesOffline(
+                                getApplication(), stop.lat, stop.lon,
+                            )
+                        }.getOrDefault(emptyList())
+                        val deps = offline.ifEmpty {
+                            if (ConnectivityMonitor.isOnline(getApplication())) {
+                                TransitousDataSource.departures(stop.id, force = force)
+                            } else {
+                                emptyList()
+                            }
                         }
                         emit(DeparturesState.Loaded(stop, deps))
                     }.flowOn(Dispatchers.IO)

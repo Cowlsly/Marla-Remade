@@ -214,7 +214,7 @@ class MainActivity : ComponentActivity() {
             }
 
             val computed = try {
-                OfflineRouter.getRouteMulti(applicationContext, route, origin, mode)
+                OfflineRouter.getRouteForMode(applicationContext, route, origin, mode)
             } catch (e: Exception) {
                 Log.w(TAG, "navigateTo: routing failed", e); null
             }

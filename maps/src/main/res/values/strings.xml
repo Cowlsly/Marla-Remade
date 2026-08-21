@@ -321,6 +321,15 @@
     <string name="transit_minutes">%1$d min</string>
     <!-- Departure board: realtime delay vs schedule, signed. %1$d = signed minutes e.g. "+3 min" -->
     <string name="transit_delay_minutes">%1$+d min</string>
+    <!-- Transit directions: the direction a line is heading. %1$s = headsign e.g. "Ocean Beach" -->
+    <string name="transit_towards">Towards %1$s</string>
+    <!-- Transit directions: how many stops are ridden. %1$d = stop count -->
+    <plurals name="transit_stop_count">
+        <item quantity="one">%1$d stop</item>
+        <item quantity="other">%1$d stops</item>
+    </plurals>
+    <!-- Transit directions: joins the headsign and the stop count, e.g. "Towards Ocean Beach · 4 stops" -->
+    <string name="transit_detail_separator">%1$s \u00b7 %2$s</string>
 
     <!-- Settings: screen title. Noun. -->
     <string name="settings_title">Settings</string>

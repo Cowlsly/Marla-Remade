@@ -121,7 +121,7 @@ const ROUTING_PAGE_SIZE: usize = 1 << PAGE_BITS;
 const ROUTING_PAGE_MASK: u32 = (ROUTING_PAGE_SIZE as u32) - 1;
 const DIR_SIZE: usize = (1usize << 32) >> PAGE_BITS;
 
-/// Two-level page table indexed by `(node_id << 1) | state`, sparsely allocated.
+/// Two-level page table indexed by node id, sparsely allocated.
 pub struct RoutingScratchpad {
     directory: Vec<Option<Box<[Entry]>>>,
     active_pages: Vec<u32>,
@@ -145,10 +145,9 @@ impl RoutingScratchpad {
     }
 
     #[inline]
-    pub fn get_entry(&mut self, node_id: u32, state: i32) -> &mut Entry {
-        let index = (node_id << 1) | (state as u32 & 1);
-        let dir_idx = (index >> PAGE_BITS) as usize;
-        let page_offset = (index & ROUTING_PAGE_MASK) as usize;
+    pub fn get_entry(&mut self, node_id: u32) -> &mut Entry {
+        let dir_idx = (node_id >> PAGE_BITS) as usize;
+        let page_offset = (node_id & ROUTING_PAGE_MASK) as usize;
 
         if self.directory[dir_idx].is_none() {
             let page = vec![Entry::FRESH; ROUTING_PAGE_SIZE].into_boxed_slice();

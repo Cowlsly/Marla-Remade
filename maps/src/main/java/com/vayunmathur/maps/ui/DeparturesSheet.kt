@@ -1,6 +1,5 @@
 package com.vayunmathur.maps.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,7 +10,6 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -19,7 +17,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -146,21 +143,6 @@ private fun DepartureList(departures: List<Departure>, now: Long) {
 }
 
 @Composable
-private fun LineBadge(line: String, routeColor: String?) {
-    val bg = parseHexColor(routeColor) ?: MaterialTheme.colorScheme.primary
-    Text(
-        text = line.ifBlank { "—" },
-        style = MaterialTheme.typography.labelLarge,
-        fontWeight = FontWeight.Bold,
-        color = onColorFor(bg),
-        modifier = Modifier
-            .clip(RoundedCornerShape(6.dp))
-            .background(bg)
-            .padding(horizontal = 8.dp, vertical = 2.dp),
-    )
-}
-
-@Composable
 private fun DepartureRow(dep: Departure, now: Long) {
     Row(
         Modifier.fillMaxWidth().padding(vertical = 4.dp),
@@ -229,18 +211,6 @@ private fun delayColor(delayMinutes: Int): Color = when {
     delayMinutes <= 0 -> DELAY_ON_TIME
     delayMinutes < 5 -> DELAY_SLIGHT
     else -> DELAY_LATE
-}
-
-/** Parse a 6-digit hex (with or without `#`) → [Color], or null. */
-private fun parseHexColor(hex: String?): Color? {
-    if (hex.isNullOrBlank()) return null
-    return runCatching { Color(android.graphics.Color.parseColor("#" + hex.removePrefix("#"))) }.getOrNull()
-}
-
-/** Readable text colour (black/white) for a coloured badge background. */
-private fun onColorFor(bg: Color): Color {
-    val luminance = 0.299 * bg.red + 0.587 * bg.green + 0.114 * bg.blue
-    return if (luminance > 0.6) Color.Black else Color.White
 }
 
 /** A once-per-15s ticker that reports the current epoch millis to [onTick]. */

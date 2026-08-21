@@ -2,11 +2,11 @@
 //! cost tables, spatial (Morton) indexing and delta-decoded edge geometry.
 //!
 //! Faithful port of the data model in the old `native-lib.cpp` (`NodeMaster`,
-//! `Edge`, `TransitVoyageCompact`, `TransitAttribute`, the `m_file` mmap loader
-//! in `init`, and the geometry helpers around it). The graph is loaded once and
-//! is read-only afterwards, so it is shared behind an `Arc` (see `lib.rs`).
+//! `Edge`, the `m_file` mmap loader in `init`, and the geometry helpers around
+//! it). The graph is loaded once and is read-only afterwards, so it is shared
+//! behind an `Arc` (see `lib.rs`).
 
-use std::collections::HashSet;
+#[cfg(unix)]
 use std::ffi::CString;
 use std::ptr;
 
@@ -22,13 +22,12 @@ pub const LIVING_STREET: u8 = 9;
 pub const STEPS: u8 = 15;
 
 pub const REVERSE_GEOMETRY_FLAG: u8 = 0x40;
-pub const TRANSIT_FLAG: u8 = 0x80;
 
 // --- OSM turn:lanes indication bits (one u16 mask per lane) ---
-// Emitted per directed edge by `scripts/maps/generator.cpp` into `lanes.bin`
-// and decoded here into per-lane turn-direction sets. A lane with no marking
-// ("none"/empty) is stored as `LANE_NONE`. These bits are an on-disk contract
-// with the generator; keep the two in sync.
+// Emitted per directed edge by `scripts/maps/osm_ingest` (`road_graph`) into
+// `lanes.bin` and decoded here into per-lane turn-direction sets. A lane with no
+// marking ("none"/empty) is stored as `LANE_NONE`. These bits are an on-disk
+// contract with the generator; keep the two in sync.
 pub const LANE_NONE: u16 = 1 << 0;
 pub const LANE_THROUGH: u16 = 1 << 1;
 pub const LANE_LEFT: u16 = 1 << 2;
@@ -55,10 +54,15 @@ pub const BICYCLE_SPEED_M_S: f64 = 16.0 / 3.6;
 /// mis-buckets it, and A* terminates on a suboptimal path (the "detours the
 /// wrong way / no route" bug). 130 km/h ≈ 80 mph covers every real US limit.
 pub const MAX_DRIVING_KMH: f64 = 130.0;
-/// Upper bound on any transit in-vehicle speed (km/h) for the same consistency
-/// reason — CA rail (BART/Caltrain/Amtrak) all exceed the old 80 km/h estimate.
-pub const MAX_TRANSIT_KMH: f64 = 150.0;
 pub const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
+
+// --- metadata.bin header ---
+/// `"MARG"` (Modern-Apps Road Graph), little-endian. Added when the duplicated
+/// per-OSM-node transit nodes were removed: that changed `node_count` and
+/// `edge_count`, so a pack directory holding files from two vintages reads
+/// garbage. The magic + version make that a clean rejection instead.
+pub const GRAPH_MAGIC: u32 = 0x4752_414D;
+pub const GRAPH_VERSION: u32 = 1;
 
 // --- On-disk packed structs ---
 // `#[repr(C, packed)]` reproduces the exact byte strides the generator writes
@@ -83,20 +87,6 @@ pub struct Edge {
     pub speed_limit: u8,
 }
 
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct TransitVoyageCompact {
-    pub dep_delta: u16,
-    pub duration: u16,
-}
-
-#[repr(C, packed)]
-#[derive(Clone, Copy)]
-pub struct TransitAttribute {
-    pub stop_code_off: u32,
-    pub feed_name_off: u32,
-}
-
 #[derive(Clone, Copy)]
 pub struct LatLon {
     pub lat_e7: i32,
@@ -117,6 +107,7 @@ unsafe impl Sync for MmapRegion {}
 impl MmapRegion {
     /// mmap `path` read-only. Returns `None` for missing/empty/unreadable files,
     /// mirroring the C++ `m_file` lambda.
+    #[cfg(unix)]
     pub(crate) fn map(path: &str) -> Option<MmapRegion> {
         let c = CString::new(path).ok()?;
         unsafe {
@@ -146,12 +137,21 @@ impl MmapRegion {
         }
     }
 
+    /// This crate ships to Android, so the real loader is Unix-only. The stub
+    /// exists purely so a host `cargo test` can build and exercise the parts
+    /// that don't need a pack file (the in-memory transit index).
+    #[cfg(not(unix))]
+    pub(crate) fn map(_path: &str) -> Option<MmapRegion> {
+        None
+    }
+
     #[inline]
     pub(crate) fn base(&self) -> *const u8 {
         self.ptr as *const u8
     }
 }
 
+#[cfg(unix)]
 impl Drop for MmapRegion {
     fn drop(&mut self) {
         unsafe {
@@ -172,8 +172,6 @@ pub struct Graph {
     // mmap regions kept alive for the lifetime of the graph.
     _nodes_region: MmapRegion,
     _edges_region: MmapRegion,
-    _transit_voyages_region: Option<MmapRegion>,
-    _transit_attributes_region: Option<MmapRegion>,
     _intermediate_region: Option<MmapRegion>,
     _road_names_region: Option<MmapRegion>,
     _lanes_region: Option<MmapRegion>,
@@ -182,10 +180,6 @@ pub struct Graph {
     pub node_count: u32, // real nodes; nodes.bin has node_count + 1 (sentinel)
     edges: *const u8,
     pub edge_count: u64,
-    transit_voyages: *const u8,
-    #[allow(dead_code)]
-    transit_voyage_count: u64,
-    transit_attributes: *const u8,
 
     intermediate_edge_offsets: *const u8, // u64[edge_count + 1] byte offsets
     intermediate_data: *const u8,         // delta-encoded coordinate bytes
@@ -201,8 +195,6 @@ pub struct Graph {
     road_names: *const u8,
     pub road_names_size: usize,
 
-    pub present_feeds: HashSet<String>,
-
     // Derived cost tables (computed in `load`, matching the C++ `init`).
     pub lon_to_mm_scale: [u32; 4096],
     pub time_scale_fixed: [u64; 4],
@@ -214,43 +206,45 @@ unsafe impl Sync for Graph {}
 
 impl Graph {
     /// Load the graph from `base` (a directory path, trailing slash optional).
-    /// Returns `None` if the mandatory nodes/edges/metadata files are absent,
-    /// mirroring the failure cases of the C++ `init`.
-    pub fn load(base: &str, present_feeds: HashSet<String>) -> Option<Graph> {
+    /// Returns `None` if the mandatory nodes/edges/metadata files are absent, if
+    /// `metadata.bin` is not a [`GRAPH_VERSION`] header, or if `intermediate.bin`
+    /// is too short for this `edge_count` (a mixed-vintage pack directory).
+    pub fn load(base: &str) -> Option<Graph> {
         let mut base = base.to_string();
         if !base.is_empty() && !base.ends_with('/') {
             base.push('/');
         }
 
-        // metadata.bin is a single u64 node_count.
-        let meta = MmapRegion::map(&format!("{base}metadata.bin"))?;
-        if meta.len < std::mem::size_of::<u64>() {
-            return None;
-        }
-        let node_count = unsafe { read_at::<u64>(meta.base(), 0) } as u32;
-        drop(meta);
+        // metadata.bin: u32 magic, u32 version, u64 node_count. Scoped so the
+        // mapping is released before the big regions are mapped.
+        let node_count = {
+            let meta = MmapRegion::map(&format!("{base}metadata.bin"))?;
+            if meta.len < 16 {
+                return None;
+            }
+            let magic = unsafe { read_at::<u32>(meta.base(), 0) };
+            let version = unsafe { read_at::<u32>(meta.base(), 1) };
+            if magic != GRAPH_MAGIC || version != GRAPH_VERSION {
+                return None;
+            }
+            (unsafe { read_at::<u64>(meta.base().add(8), 0) }) as u32
+        };
 
         let nodes_region = MmapRegion::map(&format!("{base}nodes.bin"))?;
         let edges_region = MmapRegion::map(&format!("{base}edges.bin"))?;
         let edge_count = (edges_region.len / std::mem::size_of::<Edge>()) as u64;
 
-        let transit_voyages_region = MmapRegion::map(&format!("{base}transit_voyages.bin"));
-        let transit_voyage_count = transit_voyages_region
-            .as_ref()
-            .map(|r| (r.len / std::mem::size_of::<TransitVoyageCompact>()) as u64)
-            .unwrap_or(0);
-        let transit_attributes_region = MmapRegion::map(&format!("{base}transit_attributes.bin"));
-
         // intermediate.bin: [ u64 edge_offsets[edge_count + 1] ][ coord blob ].
-        let intermediate_region = MmapRegion::map(&format!("{base}intermediate.bin"));
+        // Length-validated: the offset array is sized from `edge_count`, so a
+        // stale file from a different graph vintage would be read out of bounds.
+        let offsets_bytes = (edge_count + 1) * std::mem::size_of::<u64>() as u64;
+        let intermediate_region = MmapRegion::map(&format!("{base}intermediate.bin"))
+            .filter(|r| r.len as u64 >= offsets_bytes);
         let (intermediate_edge_offsets, intermediate_data, has_intermediate) =
             match &intermediate_region {
                 Some(r) => {
                     let offsets = r.base();
-                    let data = unsafe {
-                        r.base()
-                            .add(((edge_count + 1) * std::mem::size_of::<u64>() as u64) as usize)
-                    };
+                    let data = unsafe { r.base().add(offsets_bytes as usize) };
                     (offsets, data, true)
                 }
                 None => (ptr::null(), ptr::null(), false),
@@ -267,14 +261,9 @@ impl Graph {
         // lanes so routing falls back to topology inference.
         let lanes_region = MmapRegion::map(&format!("{base}lanes.bin"));
         let (lane_edge_offsets, lane_data, has_lanes) = match &lanes_region {
-            Some(r)
-                if r.len as u64 >= (edge_count + 1) * std::mem::size_of::<u64>() as u64 =>
-            {
+            Some(r) if r.len as u64 >= offsets_bytes => {
                 let offsets = r.base();
-                let data = unsafe {
-                    r.base()
-                        .add(((edge_count + 1) * std::mem::size_of::<u64>() as u64) as usize)
-                };
+                let data = unsafe { r.base().add(offsets_bytes as usize) };
                 (offsets, data, true)
             }
             _ => (ptr::null(), ptr::null(), false),
@@ -282,14 +271,6 @@ impl Graph {
 
         let nodes = nodes_region.base();
         let edges = edges_region.base();
-        let transit_voyages = transit_voyages_region
-            .as_ref()
-            .map(|r| r.base())
-            .unwrap_or(ptr::null());
-        let transit_attributes = transit_attributes_region
-            .as_ref()
-            .map(|r| r.base())
-            .unwrap_or(ptr::null());
 
         // --- Derived tables (identical formulas to the C++ init) ---
         let mut lon_to_mm_scale = [0u32; 4096];
@@ -308,8 +289,11 @@ impl Graph {
         // clamped to MAX_DRIVING_KMH in get_edge_time_10ms) so the heuristic stays
         // consistent for the monotonic radix heap. See MAX_DRIVING_KMH.
         time_scale_fixed[DRIVING as usize] = calc_scale(MAX_DRIVING_KMH / 3.6);
-        // Same consistency requirement for transit in-vehicle speed.
-        time_scale_fixed[PUBLIC_TRANSIT as usize] = calc_scale(MAX_TRANSIT_KMH / 3.6);
+        // PUBLIC_TRANSIT only ever walks in the road graph (see is_mode_allowed),
+        // so it MUST use walk speed. Leaving it at a vehicle speed makes the A*
+        // heuristic wildly over-optimistic: still correct, but catastrophically
+        // slow because almost the whole graph gets expanded.
+        time_scale_fixed[PUBLIC_TRANSIT as usize] = calc_scale(WALK_SPEED_M_S);
 
         let mut edge_time_multipliers = [[0u64; 16]; 4];
         for (m, row) in edge_time_multipliers.iter_mut().enumerate() {
@@ -335,8 +319,6 @@ impl Graph {
         Some(Graph {
             _nodes_region: nodes_region,
             _edges_region: edges_region,
-            _transit_voyages_region: transit_voyages_region,
-            _transit_attributes_region: transit_attributes_region,
             _intermediate_region: intermediate_region,
             _road_names_region: road_names_region,
             _lanes_region: lanes_region,
@@ -344,9 +326,6 @@ impl Graph {
             node_count,
             edges,
             edge_count,
-            transit_voyages,
-            transit_voyage_count,
-            transit_attributes,
             intermediate_edge_offsets,
             intermediate_data,
             has_intermediate,
@@ -355,7 +334,6 @@ impl Graph {
             has_lanes,
             road_names,
             road_names_size,
-            present_feeds,
             lon_to_mm_scale,
             time_scale_fixed,
             edge_time_multipliers,
@@ -418,38 +396,6 @@ impl Graph {
     #[inline]
     fn intermediate_offset(&self, idx: u64) -> u64 {
         unsafe { read_at::<u64>(self.intermediate_edge_offsets, idx as usize) }
-    }
-
-    #[inline]
-    fn transit_voyage(&self, idx: u64) -> TransitVoyageCompact {
-        unsafe { read_at::<TransitVoyageCompact>(self.transit_voyages, idx as usize) }
-    }
-
-    #[inline]
-    pub fn has_transit_voyages(&self) -> bool {
-        !self.transit_voyages.is_null()
-    }
-
-    #[inline]
-    pub fn get_node_transit_attr(&self, node_id: u32) -> TransitAttribute {
-        if !self.transit_attributes.is_null() && node_id < self.node_count {
-            unsafe { read_at::<TransitAttribute>(self.transit_attributes, node_id as usize) }
-        } else {
-            TransitAttribute {
-                stop_code_off: 0xFFFF_FFFF,
-                feed_name_off: 0xFFFF_FFFF,
-            }
-        }
-    }
-
-    #[inline]
-    pub fn get_node_feed_name_off(&self, node_id: u32) -> u32 {
-        self.get_node_transit_attr(node_id).feed_name_off
-    }
-
-    #[inline]
-    pub fn get_node_stop_code_off(&self, node_id: u32) -> u32 {
-        self.get_node_transit_attr(node_id).stop_code_off
     }
 
     /// Borrow a NUL-terminated road/feed/stop name from the string pool at
@@ -576,19 +522,6 @@ impl Graph {
             off += 4;
         }
         count
-    }
-
-    /// Voyage record at absolute index `idx` (used for durations / deltas).
-    #[inline]
-    pub fn transit_voyage_at(&self, idx: u64) -> TransitVoyageCompact {
-        self.transit_voyage(idx)
-    }
-
-    /// The first 4 bytes at voyage index `idx` reinterpreted as a u32 — the
-    /// absolute departure time of voyage 0 (`*(uint32_t*)base` in the C++).
-    #[inline]
-    pub fn transit_dep_u32(&self, idx: u64) -> u32 {
-        unsafe { read_at::<u32>(self.transit_voyages, idx as usize) }
     }
 }
 

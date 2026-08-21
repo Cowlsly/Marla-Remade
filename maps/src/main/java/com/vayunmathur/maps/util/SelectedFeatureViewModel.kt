@@ -150,18 +150,11 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
                 // TRANSIT prefers the on-device RAPTOR planner over any
                 // downloaded region index (P11d); if none covers the trip, it
                 // falls back to the P10 online Transitous (MOTIS) planner.
+                // getRouteForMode owns that split so the road graph, which has no
+                // timetable, never sees TRANSIT.
                 RouteService.TravelMode.entries.forEach { mode ->
                     val result = try {
-                        if (mode == RouteService.TravelMode.TRANSIT) {
-                            val positions = routeFeature.waypoints.map { it?.position ?: pos }
-                            val start = positions.first()
-                            val end = positions.last()
-                            OfflineRouter.getTransitRouteOffline(application, start, end)
-                                ?: com.vayunmathur.maps.data.transit.TransitousDataSource
-                                    .planRoute(start, end)
-                        } else {
-                            OfflineRouter.getRouteMulti(application, routeFeature, pos, mode)
-                        }
+                        OfflineRouter.getRouteForMode(application, routeFeature, pos, mode)
                     } catch (_: Exception) {
                         null
                     }

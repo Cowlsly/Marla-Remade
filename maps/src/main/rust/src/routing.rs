@@ -47,7 +47,6 @@ pub struct RoutingContext {
     pub end: SnappedEdge,
     pub target_node: u32,
     pub iterations: i32,
-    pub start_time: u32,
 }
 
 /// One coalesced navigation step (pre-localization). Marshaled to Kotlin
@@ -59,11 +58,6 @@ pub struct StepData {
     pub coords: Vec<f64>, // flat [lon, lat, lon, lat, ...]
     pub maneuver: i32,
     pub speed_ratio: f64,
-    pub is_transit: bool,
-    pub feed_off: u32,
-    pub code_off: u32,
-    pub end_code_off: u32,
-    pub stop_count: i32,
     /// Derived turn-lane guidance for this step's maneuver. Each entry is one
     /// available turn lane at the junction (ordered left→right), packed as
     /// `dir_mask * 2 + valid` where `dir_mask` is a bitmask of maneuver-enum
@@ -197,9 +191,6 @@ fn junction_lanes(
 
     for k in s..e_ptr {
         let edge = g.edge(k);
-        if edge.type_ & TRANSIT_FLAG != 0 {
-            continue;
-        }
         if !is_mode_allowed(edge.type_, DRIVING) {
             continue;
         }
@@ -294,9 +285,6 @@ pub fn find_nearest_edge(g: &Graph, lat: f64, lon: f64, mode: i32) -> SnappedEdg
         let e_ptr = g.node(u_global + 1).edge_ptr; // sentinel valid
         for j in node_u.edge_ptr..e_ptr {
             let e = g.edge(j);
-            if e.type_ & TRANSIT_FLAG != 0 {
-                continue;
-            }
             if !is_mode_allowed(e.type_, mode) {
                 continue;
             }
@@ -373,7 +361,6 @@ pub fn prepare_routing(
     e_lat: f64,
     e_lon: f64,
     mode: i32,
-    start_time: u32,
     scratch: &mut RoutingScratchpad,
     heap: &mut RadixHeap,
 ) -> Option<RoutingContext> {
@@ -395,14 +382,14 @@ pub fn prepare_routing(
             g, traffic, INVALID_EDGE, travel_dist_mm, start.type_, start.speed_limit, mode,
         );
         {
-            let entry = scratch.get_entry(node, 0);
+            let entry = scratch.get_entry(node);
             entry.g_fwd = t_actual;
             entry.g_bwd = t_actual;
             entry.last_type = start.type_;
         }
         let n_data = g.get_node(node);
         let h = heuristic_time_10ms(g, n_data.lat_e7, n_data.lon_e7, end.proj_lat, end.proj_lon, mode);
-        heap.push(t_actual.wrapping_add(h), node << 1);
+        heap.push(t_actual.wrapping_add(h), node);
     };
     push(start.node_a, start.dist_a_mm, scratch, heap);
     push(start.node_b, start.dist_b_mm, scratch, heap);
@@ -412,7 +399,6 @@ pub fn prepare_routing(
         end,
         target_node: 0xFFFF_FFFF,
         iterations: 0,
-        start_time,
     })
 }
 
@@ -430,21 +416,14 @@ pub fn perform_search_loop(
     // the longest routes (SF->LA), so the old 1M cap aborted them ("no route").
     while !heap.empty() && ctx.iterations < 25_000_000 {
         ctx.iterations += 1;
-        let u_idx = heap.pop();
-        let u = u_idx >> 1;
-        let u_state = (u_idx & 1) as i32;
+        let u = heap.pop();
 
-        if (u == ctx.end.node_a || u == ctx.end.node_b)
-            && (mode != PUBLIC_TRANSIT || u_state == 1)
-        {
-            ctx.target_node = u_idx;
+        if u == ctx.end.node_a || u == ctx.end.node_b {
+            ctx.target_node = u;
             break;
         }
 
-        let (u_cost, u_actual_time, u_last_type, u_last_name_off) = {
-            let e = scratch.get_entry(u, u_state);
-            (e.g_fwd, e.g_bwd, e.last_type, e.last_name_off)
-        };
+        let u_cost = scratch.get_entry(u).g_fwd;
         if u >= g.node_count {
             continue;
         }
@@ -462,52 +441,17 @@ pub fn perform_search_loop(
                 continue;
             }
 
-            let v_state: i32 = if mode == PUBLIC_TRANSIT && (edge.type_ & TRANSIT_FLAG) != 0 {
-                1
-            } else {
-                0
-            };
-            let travel_time: u32 = if v_state == 1 {
-                let is_boarding = (u_last_type & TRANSIT_FLAG) == 0;
-                let is_transfer = !is_boarding && (edge.name_offset != u_last_name_off);
-
-                let ta_u = g.get_node_transit_attr(u);
-                // Only board/transfer at recognized transit stops.
-                if (is_boarding || is_transfer) && ta_u.stop_code_off == 0xFFFF_FFFF {
-                    continue;
-                }
-
-                let (tt, _wait, _move) = get_transit_edge_time_10ms(
-                    g,
-                    &edge,
-                    u_actual_time,
-                    ctx.start_time,
-                    ta_u.feed_name_off,
-                    is_boarding || is_transfer,
-                );
-                if tt == 0xFFFF_FFFF {
-                    continue;
-                }
-                tt
-            } else {
-                // Only alight from transit at recognized transit stops.
-                if mode == PUBLIC_TRANSIT && (u_last_type & TRANSIT_FLAG) != 0 {
-                    let ta_u = g.get_node_transit_attr(u);
-                    if ta_u.stop_code_off == 0xFFFF_FFFF {
-                        continue;
-                    }
-                }
-                get_edge_time_10ms(g, traffic, i, edge.dist_mm, edge.type_, edge.speed_limit, mode)
-            };
+            let travel_time =
+                get_edge_time_10ms(g, traffic, i, edge.dist_mm, edge.type_, edge.speed_limit, mode);
 
             let v = edge.target;
             let new_g = u_cost.wrapping_add(travel_time);
             let update = {
-                let entry_v = scratch.get_entry(v, v_state);
+                let entry_v = scratch.get_entry(v);
                 if new_g < entry_v.g_fwd {
                     entry_v.g_fwd = new_g;
                     entry_v.g_bwd = new_g;
-                    entry_v.p_fwd = u_idx;
+                    entry_v.p_fwd = u;
                     entry_v.last_type = edge.type_;
                     entry_v.last_name_off = edge.name_offset;
                     true
@@ -520,7 +464,7 @@ pub fn perform_search_loop(
                 let h = heuristic_time_10ms(
                     g, n_v.lat_e7, n_v.lon_e7, ctx.end.proj_lat, ctx.end.proj_lon, mode,
                 );
-                heap.push(new_g.wrapping_add(h), (v << 1) | v_state as u32);
+                heap.push(new_g.wrapping_add(h), v);
             }
         }
     }
@@ -531,11 +475,8 @@ struct StepBuilder<'a> {
     g: &'a Graph,
     traffic: &'a TrafficSpeeds,
     mode: i32,
-    start_time_abs: u32,
     steps: Vec<StepData>,
     last_bearing: f64,
-    current_elapsed_10ms: u32,
-    last_was_transit: bool,
     /// Junction node for the next segment's maneuver (or [`INVALID_NODE`]).
     pending_junction: u32,
     /// Node we arrive from at that junction, to exclude the U-turn lane.
@@ -558,9 +499,6 @@ impl<'a> StepBuilder<'a> {
         limit: u8,
         dist_mm: u32,
         edge_idx: u64,
-        feed_off: u32,
-        code_off: u32,
-        target_code_off: u32,
     ) {
         // Junction context for lane derivation is set on the builder before the
         // first segment of a main-path edge and consumed (then cleared) here.
@@ -578,59 +516,8 @@ impl<'a> StepBuilder<'a> {
             }
         }
 
-        let time_10ms: u32;
-        let mut is_transit = false;
-        if self.mode == PUBLIC_TRANSIT && (type_ & TRANSIT_FLAG) != 0 {
-            is_transit = true;
-            if edge_idx != INVALID_EDGE {
-                let is_boarding = !self.last_was_transit;
-                let is_transfer =
-                    self.last_was_transit && (name_off != self.steps.last().unwrap().name_off);
-                let edge = self.g.edge(edge_idx);
-                let (tt, wait, transit_move) = get_transit_edge_time_10ms(
-                    self.g,
-                    &edge,
-                    self.current_elapsed_10ms,
-                    self.start_time_abs,
-                    feed_off,
-                    is_boarding || is_transfer,
-                );
-                let (wait, transit_move) = if tt == 0xFFFF_FFFF {
-                    (0, 0)
-                } else {
-                    (wait, transit_move)
-                };
-
-                if is_boarding || is_transfer {
-                    let penalty: u32 = 6000;
-                    self.steps.push(StepData {
-                        name_off,
-                        dist_mm: 0,
-                        time_10ms: (wait + penalty) as u64,
-                        coords: vec![lon1, lat1],
-                        maneuver: 21,
-                        speed_ratio: 1.0,
-                        is_transit: true,
-                        feed_off,
-                        code_off,
-                        end_code_off: 0xFFFF_FFFF,
-                        stop_count: 0,
-                        lanes: Vec::new(),
-                    });
-                    self.current_elapsed_10ms += wait + penalty;
-                    time_10ms = transit_move;
-                } else {
-                    time_10ms = transit_move;
-                }
-            } else {
-                time_10ms = 0;
-            }
-        } else {
-            time_10ms =
-                get_edge_time_10ms(self.g, self.traffic, edge_idx, dist_mm, type_, limit, self.mode);
-        }
-        self.current_elapsed_10ms += time_10ms;
-        self.last_was_transit = (type_ & TRANSIT_FLAG) != 0;
+        let time_10ms =
+            get_edge_time_10ms(self.g, self.traffic, edge_idx, dist_mm, type_, limit, self.mode);
         let bearing = get_bearing(
             (lat1 * 1e7) as i32,
             (lon1 * 1e7) as i32,
@@ -648,14 +535,11 @@ impl<'a> StepBuilder<'a> {
             }
         };
 
-        let mut maneuver = if self.steps.is_empty() {
+        let maneuver = if self.steps.is_empty() {
             0
         } else {
             get_maneuver(self.last_bearing, bearing)
         };
-        if is_transit && !self.steps.is_empty() && self.steps.last().unwrap().maneuver != 21 {
-            maneuver = 23; // RIDE
-        }
 
         let push_new = {
             match self.steps.last() {
@@ -663,9 +547,7 @@ impl<'a> StepBuilder<'a> {
                 Some(back) => {
                     name_off != back.name_off
                         || ratio_cat(ratio) != ratio_cat(back.speed_ratio)
-                        || is_transit != back.is_transit
-                        || (maneuver != 9 && maneuver != 0 && maneuver != 23)
-                        || back.maneuver == 21
+                        || (maneuver != 9 && maneuver != 0)
                 }
             }
         };
@@ -686,11 +568,6 @@ impl<'a> StepBuilder<'a> {
                 coords: vec![lon1, lat1],
                 maneuver,
                 speed_ratio: ratio,
-                is_transit,
-                feed_off,
-                code_off,
-                end_code_off: 0xFFFF_FFFF,
-                stop_count: 0,
                 lanes,
             });
         }
@@ -700,10 +577,6 @@ impl<'a> StepBuilder<'a> {
         back.time_10ms += time_10ms as u64;
         back.coords.push(lon2);
         back.coords.push(lat2);
-        if is_transit && back.maneuver != 21 {
-            back.end_code_off = target_code_off;
-            back.stop_count += 1;
-        }
         self.last_bearing = bearing;
     }
 }
@@ -717,30 +590,25 @@ pub fn reconstruct_path(
     ctx: &RoutingContext,
     scratch: &mut RoutingScratchpad,
 ) -> Vec<StepData> {
-    let mut path_indices: Vec<u32> = Vec::new();
+    let mut path_nodes: Vec<u32> = Vec::new();
     let mut curr = ctx.target_node;
     let mut safety = 0u32;
     while curr != 0xFFFF_FFFF && safety < 1_000_000 {
-        path_indices.push(curr);
-        curr = scratch.get_entry(curr >> 1, (curr & 1) as i32).p_fwd;
+        path_nodes.push(curr);
+        curr = scratch.get_entry(curr).p_fwd;
         safety += 1;
     }
-    path_indices.reverse();
-    if path_indices.is_empty() {
+    path_nodes.reverse();
+    if path_nodes.is_empty() {
         return Vec::new();
     }
-
-    let path_nodes: Vec<u32> = path_indices.iter().map(|&idx| idx >> 1).collect();
 
     let mut b = StepBuilder {
         g,
         traffic,
         mode,
-        start_time_abs: ctx.start_time,
         steps: Vec::new(),
         last_bearing: 0.0,
-        current_elapsed_10ms: 0,
-        last_was_transit: false,
         pending_junction: INVALID_NODE,
         pending_prev: INVALID_NODE,
         pending_approach: INVALID_EDGE,
@@ -762,8 +630,6 @@ pub fn reconstruct_path(
         if let Some((count, is_reversed)) = geom.filter(|&(c, _)| c >= 2) {
             let num_pts = count;
             let seg_idx = ctx.start.segment_idx;
-            let feed = g.get_node_feed_name_off(n0);
-            let code = g.get_node_stop_code_off(n0);
 
             if n0 == ctx.start.node_a {
                 let p_next = get_pt_at(&coords, count, is_reversed, seg_idx);
@@ -775,7 +641,7 @@ pub fn reconstruct_path(
                     ctx.start.proj_lon as f64 * 1e-7,
                     p_next.lat_e7 as f64 * 1e-7,
                     p_next.lon_e7 as f64 * 1e-7,
-                    ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j, feed, code, code,
+                    ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j,
                 );
                 let mut p = seg_idx as i32;
                 while p >= 1 {
@@ -785,7 +651,7 @@ pub fn reconstruct_path(
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
-                        ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j, feed, code, code,
+                        ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j,
                     );
                     p -= 1;
                 }
@@ -799,7 +665,7 @@ pub fn reconstruct_path(
                     ctx.start.proj_lon as f64 * 1e-7,
                     p_next.lat_e7 as f64 * 1e-7,
                     p_next.lon_e7 as f64 * 1e-7,
-                    ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j, feed, code, code,
+                    ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d1, j,
                 );
                 for p in seg_idx + 1..num_pts - 1 {
                     let p_from = get_pt_at(&coords, count, is_reversed, p);
@@ -808,7 +674,7 @@ pub fn reconstruct_path(
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
-                        ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j, feed, code, code,
+                        ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, d_seg, j,
                     );
                 }
             }
@@ -824,7 +690,6 @@ pub fn reconstruct_path(
                 node0.lat_e7 as f64 * 1e-7,
                 node0.lon_e7 as f64 * 1e-7,
                 ctx.start.name_offset, ctx.start.type_, ctx.start.speed_limit, dist, INVALID_EDGE,
-                g.get_node_feed_name_off(n0), g.get_node_stop_code_off(n0), g.get_node_stop_code_off(n0),
             );
         }
     }
@@ -856,13 +721,9 @@ pub fn reconstruct_path(
 
         let e = g.edge(best_e_idx);
         let mut d = e.dist_mm;
-        if d == 0 || (e.type_ & TRANSIT_FLAG) != 0 {
+        if d == 0 {
             d = accurate_dist_mm(node_u.lat_e7, node_u.lon_e7, node_v.lat_e7, node_v.lon_e7);
         }
-
-        let feed = g.get_node_feed_name_off(u);
-        let code_u = g.get_node_stop_code_off(u);
-        let code_v = g.get_node_stop_code_off(v);
 
         // Lane guidance is derived at the junction where this edge begins
         // (node u), excluding the node we arrived from. Set it just before the
@@ -886,14 +747,14 @@ pub fn reconstruct_path(
                 b.add_segment(
                     p1.lat_e7 as f64 * 1e-7, p1.lon_e7 as f64 * 1e-7,
                     p2.lat_e7 as f64 * 1e-7, p2.lon_e7 as f64 * 1e-7,
-                    e.name_offset, e.type_, e.speed_limit, seg_dist, best_e_idx, feed, code_u, code_v,
+                    e.name_offset, e.type_, e.speed_limit, seg_dist, best_e_idx,
                 );
             }
         } else {
             b.add_segment(
                 node_u.lat_e7 as f64 * 1e-7, node_u.lon_e7 as f64 * 1e-7,
                 node_v.lat_e7 as f64 * 1e-7, node_v.lon_e7 as f64 * 1e-7,
-                e.name_offset, e.type_, e.speed_limit, d, best_e_idx, feed, code_u, code_v,
+                e.name_offset, e.type_, e.speed_limit, d, best_e_idx,
             );
         }
     }
@@ -912,8 +773,6 @@ pub fn reconstruct_path(
         if let Some((count, is_reversed)) = geom.filter(|&(c, _)| c >= 2) {
             let num_pts = count;
             let seg_idx = ctx.end.segment_idx;
-            let feed = g.get_node_feed_name_off(nk);
-            let code = g.get_node_stop_code_off(nk);
 
             if nk == ctx.end.node_a {
                 for p in 0..seg_idx {
@@ -923,7 +782,7 @@ pub fn reconstruct_path(
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
-                        ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j, feed, code, 0xFFFF_FFFF,
+                        ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j,
                     );
                 }
                 let p_last = get_pt_at(&coords, count, is_reversed, seg_idx);
@@ -931,7 +790,7 @@ pub fn reconstruct_path(
                 b.add_segment(
                     p_last.lat_e7 as f64 * 1e-7, p_last.lon_e7 as f64 * 1e-7,
                     ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
-                    ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j, feed, code, 0xFFFF_FFFF,
+                    ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j,
                 );
             } else {
                 let mut p = num_pts as i32 - 1;
@@ -942,7 +801,7 @@ pub fn reconstruct_path(
                     b.add_segment(
                         p_from.lat_e7 as f64 * 1e-7, p_from.lon_e7 as f64 * 1e-7,
                         p_to.lat_e7 as f64 * 1e-7, p_to.lon_e7 as f64 * 1e-7,
-                        ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j, feed, code, 0xFFFF_FFFF,
+                        ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d_seg, j,
                     );
                     p -= 1;
                 }
@@ -951,7 +810,7 @@ pub fn reconstruct_path(
                 b.add_segment(
                     p_last.lat_e7 as f64 * 1e-7, p_last.lon_e7 as f64 * 1e-7,
                     ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
-                    ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j, feed, code, 0xFFFF_FFFF,
+                    ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, d2, j,
                 );
             }
         } else {
@@ -964,7 +823,6 @@ pub fn reconstruct_path(
                 nodek.lat_e7 as f64 * 1e-7, nodek.lon_e7 as f64 * 1e-7,
                 ctx.end.proj_lat as f64 * 1e-7, ctx.end.proj_lon as f64 * 1e-7,
                 ctx.end.name_offset, ctx.end.type_, ctx.end.speed_limit, dist, INVALID_EDGE,
-                g.get_node_feed_name_off(nk), g.get_node_stop_code_off(nk), 0xFFFF_FFFF,
             );
         }
     }

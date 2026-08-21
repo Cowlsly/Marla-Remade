@@ -4,9 +4,11 @@ import android.content.Context
 import android.util.Log
 import androidx.annotation.Keep
 import com.vayunmathur.library.network.NetworkClient
+import com.vayunmathur.library.util.ConnectivityMonitor
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.transit.Departure
+import com.vayunmathur.maps.data.transit.TransitousDataSource
 import java.io.File
 import java.io.OutputStream
 import java.net.InetAddress
@@ -16,6 +18,9 @@ import java.util.concurrent.Executors
 import kotlin.time.Duration.Companion.seconds
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
@@ -91,21 +96,30 @@ object OfflineRouter {
         }
     }
 
-    private external fun init(basePath: String, presentFeeds: Array<String>): Boolean
+    private external fun init(basePath: String): Boolean
     private external fun findRouteNative(
             sLat: Double,
             sLon: Double,
             eLat: Double,
             eLon: Double,
-            mode: Int,
-            startTime: Long
+            mode: Int
     ): Array<RawStep>?
     /**
      * Offline transit journey planning (P11b): RAPTOR over the per-region
      * `<feed>.transit` index at `<basePath>/<feed>.transit`. `depSecs` is seconds
-     * since local midnight, `weekday` is 0=Mon..6=Sun, `date` is yyyymmdd.
-     * Returns walk + ride legs as [RawStep]s, or null when the feed is missing,
-     * doesn't cover the endpoints, or no journey exists.
+     * since midnight, `weekday` is 0=Mon..6=Sun, `date` is yyyymmdd — all in the
+     * **feed's** timezone (see [getFeedTimezoneNative]), since the index is
+     * world-merged. `prevWeekday`/`prevDate` describe the preceding service day,
+     * whose GTFS `>24:00:00` trips run into the query day.
+     *
+     * `overlay*` carry MOTIS realtime so the planner skips cancelled trips and
+     * uses live times; pass empty arrays for a schedule-only plan.
+     * `overlayCoords` is interleaved `[lat, lon, ...]` and `overlayTimes` is
+     * interleaved `[schedSecs, delaySecs, cancelled, ...]`, both parallel to
+     * `overlayRoutes`.
+     *
+     * Returns walk + wait + ride legs as [RawStep]s, or null when the feed is
+     * missing, doesn't cover the endpoints, or no journey exists.
      */
     private external fun findTransitRouteNative(
             basePath: String,
@@ -116,12 +130,17 @@ object OfflineRouter {
             eLon: Double,
             depSecs: Int,
             weekday: Int,
-            date: Int
+            date: Int,
+            prevWeekday: Int,
+            prevDate: Int,
+            overlayCoords: DoubleArray,
+            overlayRoutes: Array<String>,
+            overlayTimes: IntArray
     ): Array<RawStep>?
     /**
-     * Offline scheduled departure board (no internet): upcoming departures from
-     * the stop nearest `(lat,lon)` in `<basePath>/<feed>.transit`. `depSecs` is
-     * seconds since local midnight, `weekday` 0=Mon..6=Sun, `date` yyyymmdd.
+     * Offline scheduled departure board: upcoming departures from the stop
+     * nearest `(lat,lon)` in `<basePath>/<feed>.transit`. Time and overlay
+     * arguments are as in [findTransitRouteNative].
      * Returns null when the feed is missing or doesn't cover the point.
      */
     private external fun getStopDeparturesNative(
@@ -132,8 +151,24 @@ object OfflineRouter {
             depSecs: Int,
             weekday: Int,
             date: Int,
+            prevWeekday: Int,
+            prevDate: Int,
+            overlayCoords: DoubleArray,
+            overlayRoutes: Array<String>,
+            overlayTimes: IntArray,
             max: Int
     ): Array<RawDeparture>?
+    /**
+     * IANA timezone of the feed covering `(lat,lon)` in the given pack, or null
+     * when the pack is stale/absent, doesn't cover the point, or its GTFS had no
+     * `agency.txt`. Callers resolve this before deriving any query times.
+     */
+    private external fun getFeedTimezoneNative(
+            basePath: String,
+            feed: String,
+            lat: Double,
+            lon: Double
+    ): String?
     private external fun updateTrafficNative(
             edgeIds: LongArray,
             speeds: ByteArray,
@@ -236,7 +271,18 @@ object OfflineRouter {
             val stopCount: Int,
             /** Packed turn lanes: one int per lane, `dirMask * 2 + valid`, where
              * `dirMask` is a bitmask of Maneuver ordinals the lane offers. */
-            val lanePacked: IntArray
+            val lanePacked: IntArray,
+            // Transit-only tail. The JNI ctor descriptor is shared with the
+            // driving path, which passes null/0 — keep these LAST so adding to
+            // them never renumbers the arguments above.
+            /** GTFS `trip_headsign` of the ridden trip. */
+            val headsign: String?,
+            /** GTFS `route_color` packed as 0xRRGGBB, or 0 when absent. */
+            val routeColor: Int,
+            /** Departure, seconds since feed-local midnight (0 when unknown). */
+            val depSecs: Int,
+            /** Arrival, seconds since feed-local midnight (0 when unknown). */
+            val arrSecs: Int,
     )
 
     /** One offline scheduled departure from the baked `.transit` index. */
@@ -251,9 +297,32 @@ object OfflineRouter {
             val routeColor: Int,
             /** GTFS route_type. */
             val routeType: Int,
-            /** Seconds since local (service-day) midnight. */
-            val depSecs: Int
+            /** Scheduled departure, seconds since feed-local midnight. */
+            val depSecs: Int,
+            /** Realtime shift in seconds; 0 without live data. */
+            val delaySecs: Int,
+            val cancelled: Boolean,
+            /** Whether the realtime overlay covered this departure. */
+            val realTime: Boolean
     )
+
+    /**
+     * MOTIS realtime, flattened for the JNI overlay arguments. [coords] is
+     * interleaved `[lat, lon, ...]`, [times] is interleaved
+     * `[schedSecs, delaySecs, cancelled, ...]`, and both are parallel to
+     * [routes]. Empty means "plan against the schedule only".
+     */
+    private class Overlay(
+            val coords: DoubleArray,
+            val routes: Array<String>,
+            val times: IntArray,
+    ) {
+        val isEmpty: Boolean get() = routes.isEmpty()
+
+        companion object {
+            val EMPTY = Overlay(DoubleArray(0), emptyArray(), IntArray(0))
+        }
+    }
 
     private var isInitialized = false
     /** Base dir (external files) holding downloaded packs incl. `*.transit`. */
@@ -266,11 +335,7 @@ object OfflineRouter {
         basePath = path
         Log.d("OfflineRouter", "Initializing with path: $path")
 
-        val presentFeeds = context.assets.list("")?.filter {
-            try { context.assets.list(it)?.contains("routes.txt") == true } catch(_: Exception) { false }
-        }?.toTypedArray() ?: emptyArray()
-
-        isInitialized = init(path, presentFeeds)
+        isInitialized = init(path)
         Log.d("OfflineRouter", "Initialization result: $isInitialized")
         cacheDirPath = context.cacheDir.absolutePath
     }
@@ -287,17 +352,36 @@ object OfflineRouter {
         initialize(context)
     }
 
-    suspend fun getRoute(
+    /**
+     * Plan a route for any [mode]. TRANSIT goes to the on-device RAPTOR planner
+     * (falling back to the online MOTIS planner); every other mode goes to the
+     * road graph via [getRouteMulti].
+     *
+     * This is the **only** correct entry point for a caller whose mode is not a
+     * literal: the road graph carries no timetable, so TRANSIT must never reach
+     * [getRouteMulti]. Routing every mode-agnostic caller through here is what
+     * guarantees that.
+     */
+    suspend fun getRouteForMode(
             context: Context,
             route: SpecificFeature.Route,
             userPosition: Position,
-            type: RouteService.TravelMode
-    ): RouteService.Route =
-            withContext(Dispatchers.Default) {
-                val start = route.waypoints.first()?.position ?: userPosition
-                val end = route.waypoints.last()?.position ?: userPosition
-                return@withContext getRoute(context, start, end, type)
-            }
+            mode: RouteService.TravelMode,
+    ): RouteService.Route? = withContext(Dispatchers.Default) {
+        if (mode != RouteService.TravelMode.TRANSIT) {
+            return@withContext getRouteMulti(context, route, userPosition, mode)
+        }
+        val positions = route.waypoints.map { it?.position ?: userPosition }
+        if (positions.size < 2) return@withContext null
+        val start = positions.first()
+        val end = positions.last()
+        getTransitRouteOffline(context, start, end)
+                ?: if (ConnectivityMonitor.isOnline(context)) {
+                    TransitousDataSource.planRoute(start, end)
+                } else {
+                    null
+                }
+    }
 
     /**
      * Offline-only multi-waypoint chaining. Replaces the old server-side
@@ -340,6 +424,12 @@ object OfflineRouter {
      * planner over any downloaded per-region `*.transit` index that covers the
      * endpoints. Returns null when no index is present/covering or no journey is
      * found — the caller then falls back to the P10 online Transitous planner.
+     *
+     * Runs at most **two** RAPTOR passes: a schedule-only plan, then, when the
+     * device is online, a replan against MOTIS realtime for the stops that plan
+     * actually touches, so a cancelled or badly delayed trip is avoided. If the
+     * replan finds nothing we keep the schedule-only journey rather than
+     * iterating.
      */
     suspend fun getTransitRouteOffline(
             context: Context,
@@ -354,40 +444,104 @@ object OfflineRouter {
                 ?: emptyList()
         if (feeds.isEmpty()) return@withContext null
 
-        val now = java.util.Calendar.getInstance()
-        val depSecs = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
-                now.get(java.util.Calendar.MINUTE) * 60 +
-                now.get(java.util.Calendar.SECOND)
-        // Calendar: SUNDAY=1..SATURDAY=7 -> Mon=0..Sun=6 for the index masks.
-        val weekday = (now.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
-        val date = now.get(java.util.Calendar.YEAR) * 10000 +
-                (now.get(java.util.Calendar.MONTH) + 1) * 100 +
-                now.get(java.util.Calendar.DAY_OF_MONTH)
-
         for (feed in feeds) {
-            val raw = try {
-                findTransitRouteNative(
-                        base, feed,
-                        start.latitude, start.longitude,
-                        end.latitude, end.longitude,
-                        depSecs, weekday, date
-                )
-            } catch (_: Exception) {
-                null
+            // The index is world-merged, so query times must be in the feed's
+            // timezone. Journeys spanning two zones use the origin's — a known
+            // limitation, but far better than always using the device's.
+            val clock = transitClock(
+                    runCatching {
+                        getFeedTimezoneNative(base, feed, start.latitude, start.longitude)
+                    }.getOrNull()
+            )
+            val plan = { overlay: Overlay ->
+                try {
+                    findTransitRouteNative(
+                            base, feed,
+                            start.latitude, start.longitude,
+                            end.latitude, end.longitude,
+                            clock.depSecs, clock.weekday, clock.date,
+                            clock.prevWeekday, clock.prevDate,
+                            overlay.coords, overlay.routes, overlay.times
+                    )
+                } catch (_: Exception) {
+                    null
+                }
             }
-            if (raw != null && raw.isNotEmpty()) {
-                return@withContext buildRoute(context, raw, RouteService.TravelMode.TRANSIT)
-            }
+
+            val scheduled = plan(Overlay.EMPTY)
+            if (scheduled == null || scheduled.isEmpty()) continue
+
+            val overlay = realtimeOverlay(context, journeyStops(scheduled), clock)
+            val raw = if (overlay.isEmpty) scheduled else plan(overlay) ?: scheduled
+            return@withContext buildRoute(context, raw, RouteService.TravelMode.TRANSIT)
         }
         null
     }
 
     /**
-     * Offline scheduled departure board: upcoming departures for the stop nearest
-     * `(lat,lon)` from any downloaded `*.transit` index covering it. Scheduled
-     * times only (`realTime=false`); the online Transitous board (which already
-     * carries GTFS-RT delays) is preferred when the device is online — this is
-     * the no-internet fallback. Returns an empty list when nothing is available.
+     * Board and alight coordinates of every ride in a planned journey. A ride
+     * leg's geometry runs through its stops, so the first and last points are
+     * exactly the two stops whose realtime we need.
+     */
+    private fun journeyStops(steps: Array<RawStep>): List<Position> =
+            steps.filter { it.isTransit && it.geometry.size >= 4 }
+                    .flatMap { s ->
+                        val g = s.geometry
+                        listOf(
+                                Position(g[0], g[1]),
+                                Position(g[g.size - 2], g[g.size - 1]),
+                        )
+                    }
+                    .distinct()
+
+    /**
+     * Fetch MOTIS boards for [stops] concurrently and flatten them into an
+     * [Overlay]. Returns [Overlay.EMPTY] when the device is offline — without
+     * that gate every offline plan would pay a full HTTP timeout per stop before
+     * `runCatching` swallowed it.
+     */
+    private suspend fun realtimeOverlay(
+            context: Context,
+            stops: List<Position>,
+            clock: TransitClock,
+    ): Overlay {
+        if (stops.isEmpty() || !ConnectivityMonitor.isOnline(context)) return Overlay.EMPTY
+        val boards = coroutineScope {
+            stops.map { p ->
+                async(Dispatchers.IO) {
+                    p to runCatching {
+                        TransitousDataSource.departuresNear(p.latitude, p.longitude)
+                    }.getOrDefault(emptyList())
+                }
+            }.awaitAll()
+        }
+
+        val coords = mutableListOf<Double>()
+        val routes = mutableListOf<String>()
+        val times = mutableListOf<Int>()
+        for ((pos, deps) in boards) {
+            for (d in deps) {
+                if (d.line.isBlank()) continue
+                val delaySecs = ((d.realtimeMillis - d.scheduledMillis) / 1000L).toInt()
+                if (delaySecs == 0 && !d.cancelled) continue
+                coords.add(pos.latitude)
+                coords.add(pos.longitude)
+                routes.add(d.line)
+                times.add(((d.scheduledMillis - clock.midnightMillis) / 1000L).toInt())
+                times.add(delaySecs)
+                times.add(if (d.cancelled) 1 else 0)
+            }
+        }
+        if (routes.isEmpty()) return Overlay.EMPTY
+        return Overlay(coords.toDoubleArray(), routes.toTypedArray(), times.toIntArray())
+    }
+
+    /**
+     * Departure board from the baked `*.transit` index for the stop nearest
+     * `(lat,lon)`. Scheduled times come from the pack; when the device is online
+     * the MOTIS board for that stop is folded in as a realtime overlay, so
+     * `delayMinutes`/`realTime`/`cancelled` are live. Returns an empty list when
+     * no pack covers the point.
      */
     suspend fun getStopDeparturesOffline(
             context: Context,
@@ -403,48 +557,42 @@ object OfflineRouter {
                 ?: emptyList()
         if (feeds.isEmpty()) return@withContext emptyList()
 
-        val now = java.util.Calendar.getInstance()
-        val depSecs = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
-                now.get(java.util.Calendar.MINUTE) * 60 +
-                now.get(java.util.Calendar.SECOND)
-        val weekday = (now.get(java.util.Calendar.DAY_OF_WEEK) + 5) % 7
-        val date = now.get(java.util.Calendar.YEAR) * 10000 +
-                (now.get(java.util.Calendar.MONTH) + 1) * 100 +
-                now.get(java.util.Calendar.DAY_OF_MONTH)
-        // Epoch millis of local midnight, so depSecs -> absolute scheduled time.
-        now.set(java.util.Calendar.HOUR_OF_DAY, 0)
-        now.set(java.util.Calendar.MINUTE, 0)
-        now.set(java.util.Calendar.SECOND, 0)
-        now.set(java.util.Calendar.MILLISECOND, 0)
-        val midnightMillis = now.timeInMillis
-
         val all = mutableListOf<Departure>()
         for (feed in feeds) {
+            val clock = transitClock(
+                    runCatching { getFeedTimezoneNative(base, feed, lat, lon) }.getOrNull()
+            )
+            val overlay = realtimeOverlay(context, listOf(Position(lon, lat)), clock)
             val raw = try {
-                getStopDeparturesNative(base, feed, lat, lon, depSecs, weekday, date, max)
+                getStopDeparturesNative(
+                        base, feed, lat, lon,
+                        clock.depSecs, clock.weekday, clock.date,
+                        clock.prevWeekday, clock.prevDate,
+                        overlay.coords, overlay.routes, overlay.times, max
+                )
             } catch (_: Exception) {
                 null
             } ?: continue
             for (d in raw) {
-                val scheduled = midnightMillis + d.depSecs.toLong() * 1000L
+                val scheduled = clock.midnightMillis + d.depSecs.toLong() * 1000L
                 all.add(
                         Departure(
                                 line = d.routeName,
                                 headsign = d.headsign,
                                 scheduledMillis = scheduled,
-                                realtimeMillis = scheduled,
-                                delayMinutes = 0,
-                                realTime = false,
+                                realtimeMillis = scheduled + d.delaySecs * 1000L,
+                                delayMinutes = d.delaySecs / 60,
+                                realTime = d.realTime,
                                 platform = null,
                                 mode = gtfsRouteTypeToMode(d.routeType),
                                 routeColor = if (d.routeColor == 0) null
                                              else String.format("%06X", d.routeColor and 0xFFFFFF),
-                                cancelled = false,
+                                cancelled = d.cancelled,
                         )
                 )
             }
         }
-        all.sortBy { it.scheduledMillis }
+        all.sortBy { it.realtimeMillis }
         all.take(max)
     }
 
@@ -475,20 +623,13 @@ object OfflineRouter {
                 }
                 Log.d("OfflineRouter", "isInitialized=$isInitialized")
 
-                val now = java.util.Calendar.getInstance()
-                val secondsSinceMidnight = now.get(java.util.Calendar.HOUR_OF_DAY) * 3600 +
-                        now.get(java.util.Calendar.MINUTE) * 60 +
-                        now.get(java.util.Calendar.SECOND)
-                val startTime10ms = secondsSinceMidnight * 100L
-
                 val rawSteps =
                         findRouteNative(
                                 start.latitude,
                                 start.longitude,
                                 end.latitude,
                                 end.longitude,
-                                mode.ordinal,
-                                startTime10ms
+                                mode.ordinal
                         )
                                 ?: throw IllegalStateException("No route found")
 
@@ -740,15 +881,23 @@ object OfflineRouter {
                                     lanes = lanes,
                                     transitDetails = if (raw.isTransit && raw.gtfsFeed != null && raw.stopCode != null) {
                                         RouteService.API.TransitDetails(
-                                            headsign = "", // Not stored yet
+                                            headsign = raw.headsign ?: "",
                                             stopCount = raw.stopCount,
                                             transitLine = RouteService.API.TransitLine(
                                                 name = raw.roadName,
-                                                color = raw.gtfsFeed.let { GTFSProvider.getRouteColor(context, it, raw.roadName) } ?: "#FF0000"
+                                                // The index carries route_color for
+                                                // every feed; GTFSProvider only sees
+                                                // the bundled APK asset feed, so it is
+                                                // just a fallback now.
+                                                color = raw.routeColor
+                                                    .takeIf { it != 0 }
+                                                    ?.let { "#%06X".format(it and 0xFFFFFF) }
+                                                    ?: GTFSProvider.getRouteColor(context, raw.gtfsFeed, raw.roadName)
+                                                    ?: "#FF0000"
                                             ),
                                             stopDetails = RouteService.API.StopDetails(
-                                                arrivalTime = "",
-                                                departureTime = "",
+                                                arrivalTime = formatServiceTime(raw.arrSecs),
+                                                departureTime = formatServiceTime(raw.depSecs),
                                                 arrivalStop = RouteService.API.Stop(raw.endStopCode ?: ""),
                                                 departureStop = RouteService.API.Stop(raw.stopCode)
                                             ),
