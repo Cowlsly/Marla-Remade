@@ -53,8 +53,15 @@ class VideoEncoder(
     private var codec: MediaCodec? = null
     private val bufferInfo = MediaCodec.BufferInfo()
 
-    /** SPS/PPS, cached from the codec-config buffer and prepended to the first key frame. */
+    /**
+     * SPS/PPS, cached from the codec-config buffer and prepended to the first key frame.
+     *
+     * [sentParameterSets] is volatile because [requestKeyFrame] runs on the RTCP loop while [drain]
+     * runs on the encoder loop.
+     */
     private var parameterSets: ByteArray? = null
+
+    @Volatile
     private var sentParameterSets = false
 
     var inputSurface: Surface? = null

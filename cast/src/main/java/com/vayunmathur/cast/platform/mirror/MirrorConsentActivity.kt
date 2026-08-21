@@ -69,10 +69,12 @@ class MirrorConsentActivity : ComponentActivity() {
          * An intent that starts the consent flow.
          *
          * `NEW_TASK` because the callers are a tile and a notification, neither of which has a task
-         * of its own to launch into.
+         * of its own. Deliberately **not** `CLEAR_TASK`: this activity has no `taskAffinity` of its
+         * own, so it lands in the app's task and clearing it would finish `MainActivity` - which is
+         * exactly where the user is standing when they press the in-app button.
          */
         fun intent(context: Context): Intent =
             Intent(context, MirrorConsentActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
 }

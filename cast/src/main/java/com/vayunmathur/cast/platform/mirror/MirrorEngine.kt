@@ -14,9 +14,12 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "MirrorEngine"
 
@@ -64,8 +67,13 @@ class MirrorEngine(
 
     private val appContext: Context = context.applicationContext
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val senders = mutableMapOf<StreamKind, StreamSender>()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    /**
+     * Concurrent because the RTCP loop iterates it while [stop] clears it, and the encoder loops
+     * populate it during [start].
+     */
+    private val senders = ConcurrentHashMap<StreamKind, StreamSender>()
 
     private var videoJob: Job? = null
     private var audioJob: Job? = null
@@ -178,13 +186,18 @@ class MirrorEngine(
                     lastReport = now
                     for ((kind, sender) in senders) {
                         val stream = negotiation.streams.firstOrNull { it.kind == kind } ?: continue
+                        val stats = sender.stats
+                        // Nothing has been sent yet, so there is no clock mapping to report.
+                        if (stats.lastSentAtMillis == 0L) continue
                         udp.send(
                             CastRtcp.senderReport(
                                 senderSsrc = stream.senderSsrc,
-                                ntpTimestamp = ntpTimestamp(now),
-                                rtpTimestamp = sender.stats.lastRtpTimestamp,
-                                packetCount = sender.stats.packets,
-                                octetCount = sender.stats.octets,
+                                // Paired with the RTP timestamp captured at the same instant, not
+                                // with the current clock.
+                                ntpTimestamp = ntpTimestamp(stats.lastSentAtMillis),
+                                rtpTimestamp = stats.lastRtpTimestamp,
+                                packetCount = stats.packets,
+                                octetCount = stats.octets,
                             ),
                         )
                     }
@@ -224,12 +237,28 @@ class MirrorEngine(
         }
     }
 
+    /**
+     * Stop everything, in an order that does not race.
+     *
+     * The loops are cancelled **and joined** before anything they touch is released: they call into
+     * `MediaCodec` and `AudioRecord` directly, and releasing either underneath a thread parked
+     * inside it is a native-side crash rather than a catchable exception. `runBlocking` is
+     * acceptable here because the loops only ever park for a few milliseconds.
+     */
     fun stop() {
-        videoJob?.cancel()
-        audioJob?.cancel()
-        rtcpJob?.cancel()
-        // The display goes first: it is what is writing into the encoder's surface, and releasing
-        // the encoder underneath a live VirtualDisplay is what makes the codec throw on the way out.
+        val jobs = listOfNotNull(videoJob, audioJob, rtcpJob)
+        videoJob = null
+        audioJob = null
+        rtcpJob = null
+        runCatching {
+            runBlocking {
+                for (job in jobs) {
+                    job.cancel()
+                    job.join()
+                }
+            }
+        }
+        // The display goes before the encoder: it is what is writing into the encoder's surface.
         capture?.release()
         videoEncoder?.release()
         audioEncoder?.release()
@@ -239,6 +268,7 @@ class MirrorEngine(
         audioEncoder = null
         transport = null
         senders.clear()
+        scope.cancel()
     }
 
     /** 32 bits of seconds since 1900, then 32 bits of fraction. */

@@ -229,19 +229,31 @@ object CastController {
             val failure = streamingSession.onAnswer(answer)
             if (failure != null) {
                 Log.w(TAG, "the receiver would not agree a stream: $failure")
-                _mirrorPhase.value = MirrorPhase.Failed
-                _failure.value = context.getString(
-                    when (failure) {
-                        is NegotiationFailure.NoStreams -> R.string.cast_mirror_no_streams
-                        else -> R.string.cast_mirror_negotiation_failed
-                    },
+                abandonMirroring(
+                    context,
+                    projection,
+                    context.getString(
+                        when (failure) {
+                            is NegotiationFailure.NoStreams -> R.string.cast_mirror_no_streams
+                            else -> R.string.cast_mirror_negotiation_failed
+                        },
+                    ),
                 )
-                projection.stop()
-                CastService.stopMirroring(context)
                 return@launch
             }
-            val negotiation = streamingSession.negotiation ?: return@launch
-            val started = MirrorEngine(
+            val negotiation = streamingSession.negotiation
+            if (negotiation == null) {
+                // onAnswer reported no failure, so this cannot happen - but leaving a live
+                // projection behind if it ever did would be a camera-light-style bug.
+                Log.w(TAG, "an accepted answer produced no negotiation")
+                abandonMirroring(
+                    context,
+                    projection,
+                    context.getString(R.string.cast_mirror_negotiation_failed),
+                )
+                return@launch
+            }
+            val newEngine = MirrorEngine(
                 context = context,
                 projection = projection,
                 receiverHost = host,
@@ -249,9 +261,26 @@ object CastController {
                 session = streamingSession,
                 onDegraded = { _degradation.value = it },
                 onStopped = { reason -> onEngineStopped(context, reason) },
-            ).also { engine = it }.start()
-            _mirrorPhase.value = if (started) MirrorPhase.Mirroring else MirrorPhase.Failed
+            )
+            engine = newEngine
+            if (newEngine.start()) {
+                _mirrorPhase.value = MirrorPhase.Mirroring
+            } else {
+                // start() already called onStopped, which set the message and the phase; all that
+                // is left is to make sure nothing keeps holding the screen.
+                engine = null
+                runCatching { projection.stop() }
+            }
         }
+    }
+
+    /** Give up on mirroring, and make sure the screen stops being captured. */
+    private fun abandonMirroring(context: Context, projection: MediaProjection, message: String) {
+        _mirrorPhase.value = MirrorPhase.Failed
+        _failure.value = message
+        streaming = null
+        runCatching { projection.stop() }
+        CastService.stopMirroring(context)
     }
 
     private fun onEngineStopped(context: Context, reason: MirrorStopReason) {

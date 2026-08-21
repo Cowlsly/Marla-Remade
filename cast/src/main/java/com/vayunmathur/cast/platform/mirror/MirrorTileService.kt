@@ -13,6 +13,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -48,9 +49,17 @@ class MirrorTileService : TileService() {
 
     override fun onClick() {
         super.onClick()
-        if (CastController.mirrorPhase.value != MirrorPhase.Idle) {
+        val phase = CastController.mirrorPhase.value
+        // Failed is drawn as inactive, so a tap on it has to *start* rather than stop - otherwise
+        // the first press after a failure looks like it did nothing.
+        if (phase == MirrorPhase.Mirroring || phase == MirrorPhase.Negotiating) {
             CastController.stopMirroring(this)
-            refreshTile()
+            // stopMirroring is asynchronous, so waiting for Idle rather than reading the phase
+            // straight back: refreshing now would re-publish the state we are leaving.
+            scope.launch {
+                CastController.mirrorPhase.first { it != MirrorPhase.Mirroring }
+                refreshTile()
+            }
             return
         }
         scope.launch {

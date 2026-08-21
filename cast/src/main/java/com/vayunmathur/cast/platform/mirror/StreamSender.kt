@@ -24,18 +24,33 @@ class StreamSender(
     private val crypto = CastCrypto(stream.keys.key, stream.keys.ivMask)
     private val packetizer = CastRtpPacketizer(stream.payloadType, stream.senderSsrc)
 
+    /**
+     * One send at a time.
+     *
+     * [send] runs on the encoder loop and [retransmit] on the RTCP loop, and both drive the same
+     * packetizer - whose RTP sequence number is a plain counter. Interleaving them would emit two
+     * packets with the same sequence number, which a receiver reads as a duplicate and drops.
+     */
+    private val lock = Any()
+
     private var nextFrameId = FrameId.First
     private var lastKeyFrameId = FrameId.Leader
     private var firstPresentationTimeUs = -1L
 
-    /** The highest frame id sent, which is what an 8-bit checkpoint is expanded against. */
+    /**
+     * The highest frame id sent, which is what an 8-bit checkpoint is expanded against.
+     *
+     * Volatile because the RTCP loop reads it while the encoder loop writes it.
+     */
+    @Volatile
     var lastFrameId: FrameId = FrameId.First
         private set
 
+    @Volatile
     var stats: SenderStats = SenderStats()
         private set
 
-    fun send(chunk: EncodedChunk) {
+    fun send(chunk: EncodedChunk) = synchronized(lock) {
         // Timestamps are relative to the first frame, so a receiver does not have to know when the
         // encoder happened to start.
         if (firstPresentationTimeUs < 0) firstPresentationTimeUs = chunk.presentationTimeUs
@@ -58,10 +73,13 @@ class StreamSender(
         lastFrameId = frameId
         session.record(frame)
         emit(frame, packetIds = null)
-        stats = stats.copy(lastRtpTimestamp = rtpTimestamp)
+        // The wall clock is captured *here*, alongside the RTP timestamp it corresponds to. A sender
+        // report has to pair the two for the same instant; pairing "now" with an older frame's
+        // timestamp is what makes a receiver's clock estimate drift.
+        stats = stats.copy(lastRtpTimestamp = rtpTimestamp, lastSentAtMillis = System.currentTimeMillis())
     }
 
-    fun retransmit(items: List<Retransmission>) {
+    fun retransmit(items: List<Retransmission>) = synchronized(lock) {
         for (item in items) emit(item.frame, item.packetIds)
     }
 
@@ -72,12 +90,14 @@ class StreamSender(
         var octets = 0L
         packets.forEachIndexed { index, packet ->
             if (packetIds != null && index !in packetIds) return@forEachIndexed
+            // Only a datagram the kernel actually accepted is counted: a sender report that
+            // over-reports what was sent makes the receiver's loss estimate wrong.
             if (udp.send(packet)) {
                 sent++
                 octets += packet.size
             }
         }
-        stats = SenderStats(stats.packets + sent, stats.octets + octets, stats.lastRtpTimestamp)
+        stats = stats.copy(packets = stats.packets + sent, octets = stats.octets + octets)
     }
 }
 
@@ -86,4 +106,6 @@ data class SenderStats(
     val packets: Long = 0,
     val octets: Long = 0,
     val lastRtpTimestamp: Long = 0,
+    /** When [lastRtpTimestamp] was sent, so a report can pair the two honestly. */
+    val lastSentAtMillis: Long = 0,
 )

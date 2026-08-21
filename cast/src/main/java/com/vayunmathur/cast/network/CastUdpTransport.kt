@@ -43,8 +43,10 @@ class CastUdpTransport(private val host: String, private val port: Int) {
         val active = channel ?: return false
         if (hexDump) Log.i(TAG, "-> ${packet.size}B ${packet.toHexPreview()}")
         return try {
-            active.write(ByteBuffer.wrap(packet))
-            true
+            // A non-blocking write can accept fewer bytes than offered when the send buffer is
+            // full, which for a datagram socket means the packet did not go. Reporting it as sent
+            // would inflate the sender report and skew the receiver's loss estimate.
+            active.write(ByteBuffer.wrap(packet)) == packet.size
         } catch (e: Exception) {
             Log.w(TAG, "udp send failed", e)
             false

@@ -89,10 +89,14 @@ class CastService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        val isMirroring = intent?.action == ACTION_START_MIRRORING
         // Before anything else: this is started with startForegroundService, and the platform kills
-        // a process that does not honour that within a few seconds.
-        enterForeground(withProjection = isMirroring)
+        // a process that does not honour that within a few seconds. The type must be
+        // mediaProjection both when a projection is about to be obtained and whenever one is
+        // already held - downgrading to mediaPlayback under a live VirtualDisplay is what gets a
+        // capturing service killed.
+        val needsProjectionType =
+            intent?.action == ACTION_START_MIRRORING || projection != null
+        enterForeground(withProjection = needsProjectionType)
         when (intent?.action) {
             ACTION_STOP -> {
                 CastController.disconnect(this)
@@ -100,6 +104,8 @@ class CastService : Service() {
             }
             ACTION_STOP_MIRRORING -> {
                 releaseProjection()
+                // No projection is held any more, so the service should stop claiming that type.
+                enterForeground(withProjection = false)
                 return START_NOT_STICKY
             }
             ACTION_START_MIRRORING -> startMirroringFrom(intent)
@@ -136,6 +142,7 @@ class CastService : Service() {
         val data = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
         if (data == null) {
             Log.w(TAG, "no consent token in the mirroring request")
+            demoteFromProjection()
             return
         }
         val manager = getSystemService<MediaProjectionManager>()
@@ -148,12 +155,23 @@ class CastService : Service() {
         }
         if (granted == null) {
             Log.w(TAG, "no projection")
+            demoteFromProjection()
             return
         }
         releaseProjection()
         granted.registerCallback(projectionCallback, null)
         projection = granted
         CastController.startMirroring(this, granted)
+    }
+
+    /**
+     * Drop back to `mediaPlayback` after failing to obtain a projection.
+     *
+     * Staying typed `mediaProjection` with no projection to show for it is the state the platform
+     * objects to, so it is worth correcting rather than leaving until the next start command.
+     */
+    private fun demoteFromProjection() {
+        if (projection == null) enterForeground(withProjection = false)
     }
 
     private fun releaseProjection() {
