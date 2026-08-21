@@ -428,26 +428,6 @@ struct BuiltTrip {
     stop_dists: Option<Vec<f64>>,
 }
 
-/// Register a service id that appears (e.g. only in calendar_dates), returning
-/// its global index. Feed-local ids are namespaced by the caller.
-fn ensure_service(
-    sid: &str,
-    map: &mut HashMap<String, u32>,
-    mask: &mut Vec<u8>,
-    start: &mut Vec<u32>,
-    end: &mut Vec<u32>,
-) -> u32 {
-    if let Some(&i) = map.get(sid) {
-        return i;
-    }
-    let i = mask.len() as u32;
-    map.insert(sid.to_string(), i);
-    mask.push(0);
-    start.push(0);
-    end.push(99_999_999);
-    i
-}
-
 /// Build the full index blob from one or more GTFS feeds. `pack_name` is stored
 /// in the string pool and surfaced to the on-device planner as a fallback.
 ///
@@ -468,47 +448,123 @@ pub fn build_index_to(
     feeds: &[FeedInput],
     out: &mut impl Write,
 ) -> Result<BuildStats, String> {
-    let mut pool = StringPool::new();
-    let feed_name_off = pool.intern(pack_name);
-
-    // --- Global (merged) accumulators ---
-    let mut stop_lat: Vec<i32> = Vec::new();
-    let mut stop_lon: Vec<i32> = Vec::new();
-    let mut stop_name_off: Vec<u32> = Vec::new();
-    let mut stop_code_off: Vec<u32> = Vec::new();
-    // Raw GTFS `stop_id` per stop, for composing MOTIS ids on device (v5).
-    let mut stop_gtfs_id_off: Vec<u32> = Vec::new();
-    let (mut min_lat, mut min_lon) = (i32::MAX, i32::MAX);
-    let (mut max_lat, mut max_lon) = (i32::MIN, i32::MIN);
-
-    // Global services (namespaced by feed) + exceptions (global service idx).
-    let mut service_key_to_idx: HashMap<String, u32> = HashMap::new();
-    let mut svc_mask: Vec<u8> = Vec::new();
-    let mut svc_start: Vec<u32> = Vec::new();
-    let mut svc_end: Vec<u32> = Vec::new();
-    let mut exceptions: Vec<(u32, u32, u32)> = Vec::new();
-
-    let mut feed_name_offs: Vec<u32> = Vec::new();
-    let mut feed_tz_offs: Vec<u32> = Vec::new();
-    let mut feed_motis_prefix_offs: Vec<u32> = Vec::new();
-    let mut raptor_routes: Vec<RaptorRoute> = Vec::new();
-    let mut built_trips: Vec<BuiltTrip> = Vec::new();
-    // `shapes.txt` polylines from every feed, keyed "feed|shape_id" so ids from
-    // different agencies cannot collide. Only referenced shapes are kept.
-    let mut shapes_by_key: HashMap<String, &Shape> = HashMap::new();
-
+    let mut builder = IndexBuilder::new(pack_name);
     for feed in feeds {
-        let feed_idx = feed_name_offs.len() as u32;
-        feed_name_offs.push(pool.intern(&feed.name));
+        builder.add_feed(feed);
+    }
+    builder.finish_to(out)
+}
+
+/// One GTFS route's own fields, before its trips are grouped into patterns.
+struct RouteMeta {
+    name_off: u32,
+    color: u32,
+    route_type: u32,
+}
+
+/// One GTFS trip's own fields, before its `stop_times` are attached.
+struct TripMeta {
+    route_id: String,
+    service_id: String,
+    headsign_off: u32,
+    shape_id: String,
+}
+
+/// Accumulates GTFS feeds into one merged pack.
+///
+/// Feeds go in one at a time through [`IndexBuilder::add_feed`] and the pack
+/// comes out of [`IndexBuilder::finish_to`], so peak memory is set by what has to
+/// survive a feed boundary rather than by the whole corpus.
+struct IndexBuilder<'a> {
+    pool: StringPool,
+    /// STRINGS offset of the pack name, for the header.
+    pack_name_off: u32,
+
+    // Merged stops, in feed order; a feed's stops are one contiguous run.
+    stop_lat: Vec<i32>,
+    stop_lon: Vec<i32>,
+    stop_name_off: Vec<u32>,
+    stop_code_off: Vec<u32>,
+    /// Raw GTFS `stop_id` per stop, for composing MOTIS ids on device (v5).
+    stop_gtfs_id_off: Vec<u32>,
+    min_lat: i32,
+    min_lon: i32,
+    max_lat: i32,
+    max_lon: i32,
+
+    // Services, namespaced by feed, plus exceptions against the global index.
+    service_key_to_idx: HashMap<String, u32>,
+    svc_mask: Vec<u8>,
+    svc_start: Vec<u32>,
+    svc_end: Vec<u32>,
+    exceptions: Vec<(u32, u32, u32)>,
+
+    feed_name_offs: Vec<u32>,
+    feed_tz_offs: Vec<u32>,
+    feed_motis_prefix_offs: Vec<u32>,
+
+    raptor_routes: Vec<RaptorRoute>,
+    built_trips: Vec<BuiltTrip>,
+    /// `shapes.txt` polylines from every feed, keyed "feed|shape_id" so ids from
+    /// different agencies cannot collide. Only referenced shapes are kept.
+    shapes_by_key: HashMap<String, &'a Shape>,
+}
+
+impl<'a> IndexBuilder<'a> {
+    fn new(pack_name: &str) -> IndexBuilder<'a> {
+        let mut pool = StringPool::new();
+        let pack_name_off = pool.intern(pack_name);
+        IndexBuilder {
+            pool,
+            pack_name_off,
+            stop_lat: Vec::new(),
+            stop_lon: Vec::new(),
+            stop_name_off: Vec::new(),
+            stop_code_off: Vec::new(),
+            stop_gtfs_id_off: Vec::new(),
+            min_lat: i32::MAX,
+            min_lon: i32::MAX,
+            max_lat: i32::MIN,
+            max_lon: i32::MIN,
+            service_key_to_idx: HashMap::new(),
+            svc_mask: Vec::new(),
+            svc_start: Vec::new(),
+            svc_end: Vec::new(),
+            exceptions: Vec::new(),
+            feed_name_offs: Vec::new(),
+            feed_tz_offs: Vec::new(),
+            feed_motis_prefix_offs: Vec::new(),
+            raptor_routes: Vec::new(),
+            built_trips: Vec::new(),
+            shapes_by_key: HashMap::new(),
+        }
+    }
+
+    /// Register a feed-namespaced service id, returning its global index.
+    fn ensure_service(&mut self, key: &str) -> u32 {
+        if let Some(&i) = self.service_key_to_idx.get(key) {
+            return i;
+        }
+        let i = self.svc_mask.len() as u32;
+        self.service_key_to_idx.insert(key.to_string(), i);
+        self.svc_mask.push(0);
+        self.svc_start.push(0);
+        self.svc_end.push(99_999_999);
+        i
+    }
+
+    fn add_feed(&mut self, feed: &'a FeedInput<'a>) {
+        let feed_idx = self.feed_name_offs.len() as u32;
+        self.feed_name_offs.push(self.pool.intern(&feed.name));
         // Per-feed IANA timezone. Dedup in the pool means one shared
         // "America/Los_Angeles" no matter how many feeds use it.
         let tz = feed
             .agency
             .and_then(|a| a.rows.first().map(|row| a.get(row, "agency_timezone").trim()))
             .unwrap_or("");
-        feed_tz_offs.push(pool.intern(tz));
+        self.feed_tz_offs.push(self.pool.intern(tz));
         // Interned once per feed, so every stop's MOTIS id shares this entry.
-        feed_motis_prefix_offs.push(pool.intern(feed.motis_prefix.trim()));
+        self.feed_motis_prefix_offs.push(self.pool.intern(feed.motis_prefix.trim()));
 
         // --- Stops (this feed) -> global indices ---
         let mut stop_id_to_idx: HashMap<String, u32> = HashMap::new();
@@ -526,27 +582,25 @@ pub fn build_index_to(
             let lon_e7 = (lon * 1e7) as i32;
             let name = feed.stops.get(row, "stop_name");
             let code = feed.stops.get(row, "stop_code");
-            let idx = stop_lat.len() as u32;
+            let idx = self.stop_lat.len() as u32;
             stop_id_to_idx.insert(id.to_string(), idx);
-            stop_lat.push(lat_e7);
-            stop_lon.push(lon_e7);
-            stop_name_off.push(pool.intern(name));
-            stop_code_off.push(pool.intern(if code.is_empty() { id } else { code }));
+            self.stop_lat.push(lat_e7);
+            self.stop_lon.push(lon_e7);
+            let name_off = self.pool.intern(name);
+            self.stop_name_off.push(name_off);
+            let code_off = self.pool.intern(if code.is_empty() { id } else { code });
+            self.stop_code_off.push(code_off);
             // Interned explicitly: `code_off` above falls back to `stop_id` only
             // when `stop_code` is blank, so it cannot stand in for the real id.
-            stop_gtfs_id_off.push(pool.intern(id));
-            min_lat = min_lat.min(lat_e7);
-            min_lon = min_lon.min(lon_e7);
-            max_lat = max_lat.max(lat_e7);
-            max_lon = max_lon.max(lon_e7);
+            let gtfs_off = self.pool.intern(id);
+            self.stop_gtfs_id_off.push(gtfs_off);
+            self.min_lat = self.min_lat.min(lat_e7);
+            self.min_lon = self.min_lon.min(lon_e7);
+            self.max_lat = self.max_lat.max(lat_e7);
+            self.max_lon = self.max_lon.max(lon_e7);
         }
 
         // --- Route metadata (this feed) ---
-        struct RouteMeta {
-            name_off: u32,
-            color: u32,
-            route_type: u32,
-        }
         let mut route_meta: HashMap<String, RouteMeta> = HashMap::new();
         for row in &feed.routes.rows {
             let id = feed.routes.get(row, "route_id");
@@ -559,32 +613,25 @@ pub fn build_index_to(
             let color =
                 u32::from_str_radix(feed.routes.get(row, "route_color").trim(), 16).unwrap_or(0);
             let rtype: u32 = feed.routes.get(row, "route_type").trim().parse().unwrap_or(3);
-            route_meta.insert(
-                id.to_string(),
-                RouteMeta { name_off: pool.intern(name), color, route_type: rtype },
-            );
+            let name_off = self.pool.intern(name);
+            route_meta
+                .insert(id.to_string(), RouteMeta { name_off, color, route_type: rtype });
         }
 
         // --- Trips (this feed) ---
-        struct TripMeta {
-            route_id: String,
-            service_id: String,
-            headsign_off: u32,
-            shape_id: String,
-        }
         let mut trip_meta: HashMap<String, TripMeta> = HashMap::new();
         for row in &feed.trips.rows {
             let id = feed.trips.get(row, "trip_id");
             if id.is_empty() {
                 continue;
             }
-            let headsign = feed.trips.get(row, "trip_headsign");
+            let headsign_off = self.pool.intern(feed.trips.get(row, "trip_headsign"));
             trip_meta.insert(
                 id.to_string(),
                 TripMeta {
                     route_id: feed.trips.get(row, "route_id").to_string(),
                     service_id: feed.trips.get(row, "service_id").to_string(),
-                    headsign_off: pool.intern(headsign),
+                    headsign_off,
                     shape_id: feed.trips.get(row, "shape_id").trim().to_string(),
                 },
             );
@@ -630,7 +677,7 @@ pub fn build_index_to(
                     continue;
                 }
                 let key = feed_key(id);
-                if service_key_to_idx.contains_key(&key) {
+                if self.service_key_to_idx.contains_key(&key) {
                     continue;
                 }
                 let mut mask = 0u8;
@@ -639,11 +686,12 @@ pub fn build_index_to(
                         mask |= 1 << b;
                     }
                 }
-                let idx = svc_mask.len() as u32;
-                service_key_to_idx.insert(key, idx);
-                svc_mask.push(mask);
-                svc_start.push(parse_gtfs_date(cal.get(row, "start_date")).unwrap_or(0));
-                svc_end.push(parse_gtfs_date(cal.get(row, "end_date")).unwrap_or(99_999_999));
+                let idx = self.svc_mask.len() as u32;
+                self.service_key_to_idx.insert(key, idx);
+                self.svc_mask.push(mask);
+                self.svc_start.push(parse_gtfs_date(cal.get(row, "start_date")).unwrap_or(0));
+                self.svc_end
+                    .push(parse_gtfs_date(cal.get(row, "end_date")).unwrap_or(99_999_999));
             }
         }
 
@@ -659,14 +707,8 @@ pub fn build_index_to(
                     None => continue,
                 };
                 let added = if cd.get(row, "exception_type").trim() == "1" { 1 } else { 0 };
-                let sidx = ensure_service(
-                    &feed_key(sid),
-                    &mut service_key_to_idx,
-                    &mut svc_mask,
-                    &mut svc_start,
-                    &mut svc_end,
-                );
-                exceptions.push((sidx, date, added));
+                let sidx = self.ensure_service(&feed_key(sid));
+                self.exceptions.push((sidx, date, added));
             }
         }
 
@@ -688,21 +730,15 @@ pub fn build_index_to(
                 Some(m) => m,
                 None => continue,
             };
-            let service_idx = ensure_service(
-                &feed_key(&tmeta.service_id),
-                &mut service_key_to_idx,
-                &mut svc_mask,
-                &mut svc_start,
-                &mut svc_end,
-            );
-            let mut hasher = fnv1a(tmeta.route_id.as_bytes());
+            let service_idx = self.ensure_service(&feed_key(&tmeta.service_id));
+            let mut hash = fnv1a(tmeta.route_id.as_bytes());
             for &s in &pattern {
-                hasher = fnv1a_mix(hasher, &s.to_le_bytes());
+                hash = fnv1a_mix(hash, &s.to_le_bytes());
             }
-            let slot = pattern_index.entry(hasher).or_default();
+            let slot = pattern_index.entry(hash).or_default();
             let route_idx = match slot.iter().copied().find(|&i| {
-                raptor_routes[i].route_id == tmeta.route_id
-                    && raptor_routes[i].stop_pattern == pattern
+                self.raptor_routes[i].route_id == tmeta.route_id
+                    && self.raptor_routes[i].stop_pattern == pattern
             }) {
                 Some(i) => i,
                 None => {
@@ -710,7 +746,7 @@ pub fn build_index_to(
                         Some(m) => (m.name_off, m.color, m.route_type),
                         None => (NONE, 0, 3),
                     };
-                    raptor_routes.push(RaptorRoute {
+                    self.raptor_routes.push(RaptorRoute {
                         feed_idx,
                         route_id: tmeta.route_id.clone(),
                         name_off,
@@ -719,7 +755,7 @@ pub fn build_index_to(
                         stop_pattern: pattern,
                         trips: Vec::new(),
                     });
-                    let i = raptor_routes.len() - 1;
+                    let i = self.raptor_routes.len() - 1;
                     slot.push(i);
                     i
                 }
@@ -734,454 +770,479 @@ pub fn build_index_to(
                 } else {
                     let key = feed_key(&tmeta.shape_id);
                     if let Some(sh) = feed.shapes.and_then(|m| m.get(&tmeta.shape_id)) {
-                        shapes_by_key.insert(key.clone(), sh);
+                        self.shapes_by_key.insert(key.clone(), sh);
                         key
                     } else {
                         String::new()
                     }
                 },
-                stop_dists: sts
-                    .iter()
-                    .map(|s| s.dist)
-                    .collect::<Option<Vec<f64>>>(),
+                stop_dists: sts.iter().map(|s| s.dist).collect::<Option<Vec<f64>>>(),
             };
-            let ti = built_trips.len();
-            built_trips.push(bt);
-            raptor_routes[route_idx].trips.push(ti);
+            let ti = self.built_trips.len();
+            self.built_trips.push(bt);
+            self.raptor_routes[route_idx].trips.push(ti);
         }
     }
 
-    let stop_count = stop_lat.len();
-    if stop_count == 0 {
-        return Err("no usable stops in any feed".to_string());
-    }
+    /// Serialize every section and write the pack to `out`.
+    fn finish_to(self, out: &mut impl Write) -> Result<BuildStats, String> {
+        let IndexBuilder {
+            pool,
+            pack_name_off,
+            stop_lat,
+            stop_lon,
+            stop_name_off,
+            stop_code_off,
+            stop_gtfs_id_off,
+            min_lat,
+            min_lon,
+            max_lat,
+            max_lon,
+            service_key_to_idx: _,
+            svc_mask,
+            svc_start,
+            svc_end,
+            mut exceptions,
+            feed_name_offs,
+            feed_tz_offs,
+            feed_motis_prefix_offs,
+            raptor_routes,
+            built_trips,
+            shapes_by_key,
+        } = self;
+        let stop_count = stop_lat.len();
+        if stop_count == 0 {
+            return Err("no usable stops in any feed".to_string());
+        }
 
-    // --- Profiles: dedup run-time shapes into a varint table ---
-    let mut profiles = ProfileTable::new();
+        // --- Profiles: dedup run-time shapes into a varint table ---
+        let mut profiles = ProfileTable::new();
 
-    // --- Flatten stops ---
-    let mut sec_stops = Vec::with_capacity(stop_count * 16);
-    for i in 0..stop_count {
-        append_i32(&mut sec_stops, stop_lat[i]);
-        append_i32(&mut sec_stops, stop_lon[i]);
-        append_u32(&mut sec_stops, stop_name_off[i]);
-        append_u32(&mut sec_stops, stop_code_off[i]);
-    }
+        // --- Flatten stops ---
+        let mut sec_stops = Vec::with_capacity(stop_count * 16);
+        for i in 0..stop_count {
+            append_i32(&mut sec_stops, stop_lat[i]);
+            append_i32(&mut sec_stops, stop_lon[i]);
+            append_u32(&mut sec_stops, stop_name_off[i]);
+            append_u32(&mut sec_stops, stop_code_off[i]);
+        }
 
-    // --- Routes + route_stops + route_trips (+ profiles) ---
-    let mut sec_routes = Vec::new();
-    let mut sec_route_stops = Vec::new();
-    let mut sec_route_trips = Vec::new();
-    let mut stop_routes: Vec<Vec<u32>> = vec![Vec::new(); stop_count];
-    // Parallel to `stop_routes`: the stop's position in that route's pattern.
-    let mut stop_route_pos: Vec<Vec<u32>> = vec![Vec::new(); stop_count];
+        // --- Routes + route_stops + route_trips (+ profiles) ---
+        let mut sec_routes = Vec::new();
+        let mut sec_route_stops = Vec::new();
+        let mut sec_route_trips = Vec::new();
+        let mut stop_routes: Vec<Vec<u32>> = vec![Vec::new(); stop_count];
+        // Parallel to `stop_routes`: the stop's position in that route's pattern.
+        let mut stop_route_pos: Vec<Vec<u32>> = vec![Vec::new(); stop_count];
 
-    let mut trip_total: usize = 0;
-    let route_count = raptor_routes.len();
-    // --- v4 ride geometry ---
-    let mut shape_blobs = ShapeBlobs::new();
-    let mut sec_route_shape_idx = Vec::new();
-    let mut sec_route_stop_shape = Vec::new();
-    let mut shaped_routes = 0usize;
-    let mut multi_shape_routes = 0usize;
-    let mut dropped_shape_routes = 0usize;
+        let mut trip_total: usize = 0;
+        let route_count = raptor_routes.len();
+        // --- v4 ride geometry ---
+        let mut shape_blobs = ShapeBlobs::new();
+        let mut sec_route_shape_idx = Vec::new();
+        let mut sec_route_stop_shape = Vec::new();
+        let mut shaped_routes = 0usize;
+        let mut multi_shape_routes = 0usize;
+        let mut dropped_shape_routes = 0usize;
 
-    for (ridx, rr) in raptor_routes.iter().enumerate() {
-        // Trips of one pattern normally share a `shape_id`. Where they do not
-        // (versioned shapes, rare express variants) the modal one keeps the
-        // common case exact; direction differences already form distinct
-        // patterns, so they never land here.
-        let mut votes: HashMap<&str, usize> = HashMap::new();
-        for &ti in &rr.trips {
-            let k = built_trips[ti].shape_key.as_str();
-            if !k.is_empty() {
-                *votes.entry(k).or_insert(0) += 1;
+        for (ridx, rr) in raptor_routes.iter().enumerate() {
+            // Trips of one pattern normally share a `shape_id`. Where they do not
+            // (versioned shapes, rare express variants) the modal one keeps the
+            // common case exact; direction differences already form distinct
+            // patterns, so they never land here.
+            let mut votes: HashMap<&str, usize> = HashMap::new();
+            for &ti in &rr.trips {
+                let k = built_trips[ti].shape_key.as_str();
+                if !k.is_empty() {
+                    *votes.entry(k).or_insert(0) += 1;
+                }
             }
-        }
-        if votes.len() > 1 {
-            multi_shape_routes += 1;
-        }
-        let mut ranked: Vec<(&str, usize)> = votes.into_iter().collect();
-        ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
-        let modal = ranked.first().map(|&(k, _)| k.to_string());
-        let fitted = modal.as_ref().and_then(|key| {
-            let shape = shapes_by_key.get(key.as_str())?;
-            let stop_ll: Vec<(i32, i32)> = rr
-                .stop_pattern
-                .iter()
-                .map(|&s| (stop_lat[s as usize], stop_lon[s as usize]))
-                .collect();
-            // `shape_dist_traveled` only helps when both files carry it, so take
-            // it from a trip that actually uses the modal shape.
-            let dists = rr
-                .trips
-                .iter()
-                .filter(|&&ti| built_trips[ti].shape_key == *key)
-                .find_map(|&ti| built_trips[ti].stop_dists.as_ref())
-                .filter(|d| d.len() == rr.stop_pattern.len());
-            shapes::fit(shape, &stop_ll, dists.map(|d| d.as_slice()))
-        });
-        if modal.is_some() {
-            if fitted.is_some() {
-                shaped_routes += 1;
-            } else {
-                dropped_shape_routes += 1;
+            if votes.len() > 1 {
+                multi_shape_routes += 1;
             }
-        }
-        let shape_off = match &fitted {
-            None => NONE,
-            Some(f) => shape_blobs.intern(&shapes::encode(&f.points))?,
-        };
-        append_u32(&mut sec_route_shape_idx, shape_off);
-
-        let first_route_stop = (sec_route_stops.len() / 4) as u32;
-        for (pos, &s) in rr.stop_pattern.iter().enumerate() {
-            append_u32(&mut sec_route_stops, s);
-            let vertex = fitted
-                .as_ref()
-                .and_then(|f| f.stop_vertices.get(pos).copied())
-                .unwrap_or(NONE);
-            append_u32(&mut sec_route_stop_shape, vertex);
-            let rv = &mut stop_routes[s as usize];
-            if rv.last() != Some(&(ridx as u32)) && !rv.contains(&(ridx as u32)) {
-                rv.push(ridx as u32);
-                // First occurrence only, matching the reader's `break`-on-match
-                // scan that this section replaces.
-                stop_route_pos[s as usize].push(pos as u32);
+            let mut ranked: Vec<(&str, usize)> = votes.into_iter().collect();
+            ranked.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+            let modal = ranked.first().map(|&(k, _)| k.to_string());
+            let fitted = modal.as_ref().and_then(|key| {
+                let shape = shapes_by_key.get(key.as_str())?;
+                let stop_ll: Vec<(i32, i32)> = rr
+                    .stop_pattern
+                    .iter()
+                    .map(|&s| (stop_lat[s as usize], stop_lon[s as usize]))
+                    .collect();
+                // `shape_dist_traveled` only helps when both files carry it, so take
+                // it from a trip that actually uses the modal shape.
+                let dists = rr
+                    .trips
+                    .iter()
+                    .filter(|&&ti| built_trips[ti].shape_key == *key)
+                    .find_map(|&ti| built_trips[ti].stop_dists.as_ref())
+                    .filter(|d| d.len() == rr.stop_pattern.len());
+                shapes::fit(shape, &stop_ll, dists.map(|d| d.as_slice()))
+            });
+            if modal.is_some() {
+                if fitted.is_some() {
+                    shaped_routes += 1;
+                } else {
+                    dropped_shape_routes += 1;
+                }
             }
+            let shape_off = match &fitted {
+                None => NONE,
+                Some(f) => shape_blobs.intern(&shapes::encode(&f.points))?,
+            };
+            append_u32(&mut sec_route_shape_idx, shape_off);
+
+            let first_route_stop = (sec_route_stops.len() / 4) as u32;
+            for (pos, &s) in rr.stop_pattern.iter().enumerate() {
+                append_u32(&mut sec_route_stops, s);
+                let vertex = fitted
+                    .as_ref()
+                    .and_then(|f| f.stop_vertices.get(pos).copied())
+                    .unwrap_or(NONE);
+                append_u32(&mut sec_route_stop_shape, vertex);
+                let rv = &mut stop_routes[s as usize];
+                if rv.last() != Some(&(ridx as u32)) && !rv.contains(&(ridx as u32)) {
+                    rv.push(ridx as u32);
+                    // First occurrence only, matching the reader's `break`-on-match
+                    // scan that this section replaces.
+                    stop_route_pos[s as usize].push(pos as u32);
+                }
+            }
+            let n_stops = rr.stop_pattern.len() as u32;
+
+            // Sort this route's trips by first-stop departure, then varint-pack.
+            let mut trip_order = rr.trips.clone();
+            trip_order.sort_by_key(|&ti| built_trips[ti].start_time);
+            // RouteRec.trips_off is a u32 byte offset into ROUTE_TRIPS.
+            let trips_off = u32::try_from(sec_route_trips.len()).map_err(|_| {
+                "ROUTE_TRIPS exceeded 4 GiB, which a u32 RouteRec.trips_off cannot address"
+                    .to_string()
+            })?;
+            let mut prev_start: u32 = 0;
+            for &ti in &trip_order {
+                let bt = &built_trips[ti];
+                let profile_id = profiles.intern(&bt.stoptimes)?;
+                let start_delta = bt.start_time.saturating_sub(prev_start);
+                write_uvarint(&mut sec_route_trips, start_delta as u64);
+                write_uvarint(&mut sec_route_trips, profile_id as u64);
+                write_uvarint(&mut sec_route_trips, bt.service_idx as u64);
+                write_uvarint(&mut sec_route_trips, bt.headsign_off as u64);
+                prev_start = bt.start_time;
+                trip_total += 1;
+            }
+            let n_trips = trip_order.len() as u32;
+
+            append_u32(&mut sec_routes, rr.name_off);
+            append_u32(&mut sec_routes, rr.color);
+            append_u32(&mut sec_routes, rr.route_type);
+            append_u32(&mut sec_routes, rr.feed_idx);
+            append_u32(&mut sec_routes, n_stops);
+            append_u32(&mut sec_routes, first_route_stop);
+            append_u32(&mut sec_routes, n_trips);
+            append_u32(&mut sec_routes, trips_off);
         }
-        let n_stops = rr.stop_pattern.len() as u32;
+        // Terminating bound the reader validates offsets against.
+        append_u32(&mut sec_route_shape_idx, shape_blobs.bytes.len() as u32);
 
-        // Sort this route's trips by first-stop departure, then varint-pack.
-        let mut trip_order = rr.trips.clone();
-        trip_order.sort_by_key(|&ti| built_trips[ti].start_time);
-        // RouteRec.trips_off is a u32 byte offset into ROUTE_TRIPS.
-        let trips_off = u32::try_from(sec_route_trips.len()).map_err(|_| {
-            "ROUTE_TRIPS exceeded 4 GiB, which a u32 RouteRec.trips_off cannot address"
-                .to_string()
-        })?;
-        let mut prev_start: u32 = 0;
-        for &ti in &trip_order {
-            let bt = &built_trips[ti];
-            let profile_id = profiles.intern(&bt.stoptimes)?;
-            let start_delta = bt.start_time.saturating_sub(prev_start);
-            write_uvarint(&mut sec_route_trips, start_delta as u64);
-            write_uvarint(&mut sec_route_trips, profile_id as u64);
-            write_uvarint(&mut sec_route_trips, bt.service_idx as u64);
-            write_uvarint(&mut sec_route_trips, bt.headsign_off as u64);
-            prev_start = bt.start_time;
-            trip_total += 1;
+        // Profiles index (byte offset per id, plus terminating length).
+        let mut sec_profiles_idx = Vec::new();
+        for &off in &profiles.offsets {
+            append_u32(&mut sec_profiles_idx, off);
         }
-        let n_trips = trip_order.len() as u32;
+        append_u32(&mut sec_profiles_idx, profiles.bytes.len() as u32);
+        let profile_count = profiles.offsets.len();
 
-        append_u32(&mut sec_routes, rr.name_off);
-        append_u32(&mut sec_routes, rr.color);
-        append_u32(&mut sec_routes, rr.route_type);
-        append_u32(&mut sec_routes, rr.feed_idx);
-        append_u32(&mut sec_routes, n_stops);
-        append_u32(&mut sec_routes, first_route_stop);
-        append_u32(&mut sec_routes, n_trips);
-        append_u32(&mut sec_routes, trips_off);
-    }
-    // Terminating bound the reader validates offsets against.
-    append_u32(&mut sec_route_shape_idx, shape_blobs.bytes.len() as u32);
+        // A wrapped STRINGS offset would name the wrong stop rather than fail, so
+        // this is checked before anything is written.
+        if pool.overflowed {
+            return Err(
+                "STRINGS exceeded the 4 GiB a u32 string offset can address; the pack cannot \
+                 represent this many feeds"
+                    .to_string(),
+            );
+        }
 
-    // Profiles index (byte offset per id, plus terminating length).
-    let mut sec_profiles_idx = Vec::new();
-    for &off in &profiles.offsets {
-        append_u32(&mut sec_profiles_idx, off);
-    }
-    append_u32(&mut sec_profiles_idx, profiles.bytes.len() as u32);
-    let profile_count = profiles.offsets.len();
-
-    // A wrapped STRINGS offset would name the wrong stop rather than fail, so
-    // this is checked before anything is written.
-    if pool.overflowed {
-        return Err(
-            "STRINGS exceeded the 4 GiB a u32 string offset can address; the pack cannot \
-             represent this many feeds"
-                .to_string(),
-        );
-    }
-
-    // --- stop_routes flattened + index (+ parallel stop positions) ---
-    let mut sec_stop_routes = Vec::new();
-    let mut sec_stop_routes_idx = Vec::new();
-    let mut sec_stop_route_pos = Vec::new();
-    let mut acc: u32 = 0;
-    for (s, sr) in stop_routes.iter().enumerate() {
+        // --- stop_routes flattened + index (+ parallel stop positions) ---
+        let mut sec_stop_routes = Vec::new();
+        let mut sec_stop_routes_idx = Vec::new();
+        let mut sec_stop_route_pos = Vec::new();
+        let mut acc: u32 = 0;
+        for (s, sr) in stop_routes.iter().enumerate() {
+            append_u32(&mut sec_stop_routes_idx, acc);
+            for (k, &r) in sr.iter().enumerate() {
+                append_u32(&mut sec_stop_routes, r);
+                append_u32(&mut sec_stop_route_pos, stop_route_pos[s][k]);
+            }
+            acc += sr.len() as u32;
+        }
         append_u32(&mut sec_stop_routes_idx, acc);
-        for (k, &r) in sr.iter().enumerate() {
-            append_u32(&mut sec_stop_routes, r);
-            append_u32(&mut sec_stop_route_pos, stop_route_pos[s][k]);
-        }
-        acc += sr.len() as u32;
-    }
-    append_u32(&mut sec_stop_routes_idx, acc);
 
-    // --- Footpath transfers via a coarse spatial grid (cross-feed for free) ---
-    // A flat `(cell, stop)` vector sorted once, not a `HashMap` of buckets: on a
-    // world pack the map is millions of cells each holding a tiny `Vec`, whose
-    // headers and allocations cost far more than the stop ids in them. Sorting
-    // by `(cell, stop)` keeps each cell's stops ascending, which is the order the
-    // old bucket pushes produced and which the distance sort below tie-breaks on.
-    let xcell = |lat_e7: i32, lon_e7: i32| -> (i32, i32) {
-        (
-            (lat_e7 as f64 * 1e-7 / CELL_DEG).floor() as i32,
-            (lon_e7 as f64 * 1e-7 / CELL_DEG).floor() as i32,
-        )
-    };
-    let mut xgrid: Vec<((i32, i32), u32)> = (0..stop_count)
-        .map(|i| (xcell(stop_lat[i], stop_lon[i]), i as u32))
-        .collect();
-    xgrid.sort_unstable();
-    let xbucket = |key: (i32, i32)| -> &[((i32, i32), u32)] {
-        let lo = xgrid.partition_point(|&(k, _)| k < key);
-        let hi = xgrid.partition_point(|&(k, _)| k <= key);
-        &xgrid[lo..hi]
-    };
-    let mut transfer_total = 0usize;
-    let mut sec_transfers = Vec::new();
-    let mut sec_transfers_idx = Vec::new();
-    let mut tacc: u32 = 0;
-    for i in 0..stop_count {
-        append_u32(&mut sec_transfers_idx, tacc);
-        let (cx, cy) = xcell(stop_lat[i], stop_lon[i]);
-        let mut cand: Vec<(u32, f64)> = Vec::new();
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for &(_, j) in xbucket((cx + dx, cy + dy)) {
-                    if j as usize == i {
-                        continue;
-                    }
-                    let d =
-                        dist_m(stop_lat[i], stop_lon[i], stop_lat[j as usize], stop_lon[j as usize]);
-                    if d <= MAX_TRANSFER_M {
-                        cand.push((j, d));
+        // --- Footpath transfers via a coarse spatial grid (cross-feed for free) ---
+        // A flat `(cell, stop)` vector sorted once, not a `HashMap` of buckets: on a
+        // world pack the map is millions of cells each holding a tiny `Vec`, whose
+        // headers and allocations cost far more than the stop ids in them. Sorting
+        // by `(cell, stop)` keeps each cell's stops ascending, which is the order the
+        // old bucket pushes produced and which the distance sort below tie-breaks on.
+        let xcell = |lat_e7: i32, lon_e7: i32| -> (i32, i32) {
+            (
+                (lat_e7 as f64 * 1e-7 / CELL_DEG).floor() as i32,
+                (lon_e7 as f64 * 1e-7 / CELL_DEG).floor() as i32,
+            )
+        };
+        let mut xgrid: Vec<((i32, i32), u32)> = (0..stop_count)
+            .map(|i| (xcell(stop_lat[i], stop_lon[i]), i as u32))
+            .collect();
+        xgrid.sort_unstable();
+        let xbucket = |key: (i32, i32)| -> &[((i32, i32), u32)] {
+            let lo = xgrid.partition_point(|&(k, _)| k < key);
+            let hi = xgrid.partition_point(|&(k, _)| k <= key);
+            &xgrid[lo..hi]
+        };
+        let mut transfer_total = 0usize;
+        let mut sec_transfers = Vec::new();
+        let mut sec_transfers_idx = Vec::new();
+        let mut tacc: u32 = 0;
+        for i in 0..stop_count {
+            append_u32(&mut sec_transfers_idx, tacc);
+            let (cx, cy) = xcell(stop_lat[i], stop_lon[i]);
+            let mut cand: Vec<(u32, f64)> = Vec::new();
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    for &(_, j) in xbucket((cx + dx, cy + dy)) {
+                        if j as usize == i {
+                            continue;
+                        }
+                        let d =
+                            dist_m(stop_lat[i], stop_lon[i], stop_lat[j as usize], stop_lon[j as usize]);
+                        if d <= MAX_TRANSFER_M {
+                            cand.push((j, d));
+                        }
                     }
                 }
             }
-        }
-        // Stable, so equidistant candidates keep the dx/dy/stop order above and
-        // `truncate` drops a deterministic tail.
-        cand.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-        cand.truncate(MAX_TRANSFERS_PER_STOP);
-        for (j, d) in cand {
-            let secs = (d / WALK_SPEED_M_S).ceil() as u32;
-            append_u32(&mut sec_transfers, j);
-            append_u32(&mut sec_transfers, secs);
-            tacc += 1;
-            transfer_total += 1;
-        }
-    }
-    append_u32(&mut sec_transfers_idx, tacc);
-
-    // --- Services + exceptions ---
-    let mut sec_services = Vec::new();
-    for i in 0..svc_mask.len() {
-        sec_services.push(svc_mask[i]);
-        sec_services.extend_from_slice(&[0u8, 0, 0]);
-        append_u32(&mut sec_services, svc_start[i]);
-        append_u32(&mut sec_services, svc_end[i]);
-    }
-    // --- Exceptions: sorted by (service_idx, date), one row per pair, with a
-    // CSR index so the device does a range lookup + binary search instead of a
-    // full scan per trip. Sorting is stable, so for duplicate (service, date)
-    // rows the last one in CSV order wins — matching the old reader, which
-    // scanned every exception without breaking out. ---
-    exceptions.sort_by_key(|&(sidx, date, _)| (sidx, date));
-    let mut exc_unique: Vec<(u32, u32, u32)> = Vec::with_capacity(exceptions.len());
-    for e in exceptions {
-        match exc_unique.last_mut() {
-            Some(last) if last.0 == e.0 && last.1 == e.1 => *last = e,
-            _ => exc_unique.push(e),
-        }
-    }
-    let mut sec_exceptions = Vec::new();
-    let mut sec_exceptions_idx = Vec::new();
-    let mut eacc: u32 = 0;
-    let mut ei = 0usize;
-    for s in 0..svc_mask.len() as u32 {
-        append_u32(&mut sec_exceptions_idx, eacc);
-        while let Some(&(sidx, date, added)) = exc_unique.get(ei) {
-            if sidx != s {
-                break;
+            // Stable, so equidistant candidates keep the dx/dy/stop order above and
+            // `truncate` drops a deterministic tail.
+            cand.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            cand.truncate(MAX_TRANSFERS_PER_STOP);
+            for (j, d) in cand {
+                let secs = (d / WALK_SPEED_M_S).ceil() as u32;
+                append_u32(&mut sec_transfers, j);
+                append_u32(&mut sec_transfers, secs);
+                tacc += 1;
+                transfer_total += 1;
             }
-            append_u32(&mut sec_exceptions, sidx);
-            append_u32(&mut sec_exceptions, date);
-            append_u32(&mut sec_exceptions, added);
-            eacc += 1;
-            ei += 1;
         }
-    }
-    append_u32(&mut sec_exceptions_idx, eacc);
+        append_u32(&mut sec_transfers_idx, tacc);
 
-    // --- Spatial grid (sparse CSR keyed by cell id) ---
-    let grid_lat0 = min_lat;
-    let grid_lon0 = min_lon;
-    let grid_cell_e7 = (GRID_CELL_DEG * 1e7) as u32;
-    let cell_col = |lon_e7: i32| -> i64 {
-        ((lon_e7 as i64 - grid_lon0 as i64) / grid_cell_e7 as i64).max(0)
-    };
-    let cell_row = |lat_e7: i32| -> i64 {
-        ((lat_e7 as i64 - grid_lat0 as i64) / grid_cell_e7 as i64).max(0)
-    };
-    let grid_cols = (cell_col(max_lon) + 1) as u32;
-    let grid_rows = (cell_row(max_lat) + 1) as u32;
-    // Sorted by `(cell_id, stop)`, which is exactly the two orderings the device
-    // requires: GRID_CELL_IDS ascending, because the reader binary-searches it,
-    // and each cell's GRID_STOPS run stop-ascending.
-    let mut grid: Vec<(u32, u32)> = (0..stop_count)
-        .map(|i| {
-            let row = cell_row(stop_lat[i]) as u32;
-            let col = cell_col(stop_lon[i]) as u32;
-            (row * grid_cols + col, i as u32)
+        // --- Services + exceptions ---
+        let mut sec_services = Vec::new();
+        for i in 0..svc_mask.len() {
+            sec_services.push(svc_mask[i]);
+            sec_services.extend_from_slice(&[0u8, 0, 0]);
+            append_u32(&mut sec_services, svc_start[i]);
+            append_u32(&mut sec_services, svc_end[i]);
+        }
+        // --- Exceptions: sorted by (service_idx, date), one row per pair, with a
+        // CSR index so the device does a range lookup + binary search instead of a
+        // full scan per trip. Sorting is stable, so for duplicate (service, date)
+        // rows the last one in CSV order wins — matching the old reader, which
+        // scanned every exception without breaking out. ---
+        exceptions.sort_by_key(|&(sidx, date, _)| (sidx, date));
+        let mut exc_unique: Vec<(u32, u32, u32)> = Vec::with_capacity(exceptions.len());
+        for e in exceptions {
+            match exc_unique.last_mut() {
+                Some(last) if last.0 == e.0 && last.1 == e.1 => *last = e,
+                _ => exc_unique.push(e),
+            }
+        }
+        let mut sec_exceptions = Vec::new();
+        let mut sec_exceptions_idx = Vec::new();
+        let mut eacc: u32 = 0;
+        let mut ei = 0usize;
+        for s in 0..svc_mask.len() as u32 {
+            append_u32(&mut sec_exceptions_idx, eacc);
+            while let Some(&(sidx, date, added)) = exc_unique.get(ei) {
+                if sidx != s {
+                    break;
+                }
+                append_u32(&mut sec_exceptions, sidx);
+                append_u32(&mut sec_exceptions, date);
+                append_u32(&mut sec_exceptions, added);
+                eacc += 1;
+                ei += 1;
+            }
+        }
+        append_u32(&mut sec_exceptions_idx, eacc);
+
+        // --- Spatial grid (sparse CSR keyed by cell id) ---
+        let grid_lat0 = min_lat;
+        let grid_lon0 = min_lon;
+        let grid_cell_e7 = (GRID_CELL_DEG * 1e7) as u32;
+        let cell_col = |lon_e7: i32| -> i64 {
+            ((lon_e7 as i64 - grid_lon0 as i64) / grid_cell_e7 as i64).max(0)
+        };
+        let cell_row = |lat_e7: i32| -> i64 {
+            ((lat_e7 as i64 - grid_lat0 as i64) / grid_cell_e7 as i64).max(0)
+        };
+        let grid_cols = (cell_col(max_lon) + 1) as u32;
+        let grid_rows = (cell_row(max_lat) + 1) as u32;
+        // Sorted by `(cell_id, stop)`, which is exactly the two orderings the device
+        // requires: GRID_CELL_IDS ascending, because the reader binary-searches it,
+        // and each cell's GRID_STOPS run stop-ascending.
+        let mut grid: Vec<(u32, u32)> = (0..stop_count)
+            .map(|i| {
+                let row = cell_row(stop_lat[i]) as u32;
+                let col = cell_col(stop_lon[i]) as u32;
+                (row * grid_cols + col, i as u32)
+            })
+            .collect();
+        grid.sort_unstable();
+        let mut sec_grid_cell_ids = Vec::new();
+        let mut sec_grid_cell_off = Vec::new();
+        let mut sec_grid_stops = Vec::with_capacity(stop_count * 4);
+        let mut grid_cell_count = 0usize;
+        for (k, &(cid, stop)) in grid.iter().enumerate() {
+            if k == 0 || cid != grid[k - 1].0 {
+                append_u32(&mut sec_grid_cell_ids, cid);
+                append_u32(&mut sec_grid_cell_off, k as u32);
+                grid_cell_count += 1;
+            }
+            append_u32(&mut sec_grid_stops, stop);
+        }
+        append_u32(&mut sec_grid_cell_off, grid.len() as u32);
+
+        // --- Feeds ---
+        let mut sec_feeds = Vec::with_capacity(feed_name_offs.len() * 4);
+        for &off in &feed_name_offs {
+            append_u32(&mut sec_feeds, off);
+        }
+        let mut sec_feed_tz = Vec::with_capacity(feed_tz_offs.len() * 4);
+        for &off in &feed_tz_offs {
+            append_u32(&mut sec_feed_tz, off);
+        }
+        let mut sec_feed_motis_prefix = Vec::with_capacity(feed_motis_prefix_offs.len() * 4);
+        for &off in &feed_motis_prefix_offs {
+            append_u32(&mut sec_feed_motis_prefix, off);
+        }
+        let mut sec_stop_gtfs_id = Vec::with_capacity(stop_gtfs_id_off.len() * 4);
+        for &off in &stop_gtfs_id_off {
+            append_u32(&mut sec_stop_gtfs_id, off);
+        }
+
+        // --- Assemble file: header + directory + aligned sections ---
+        let section_names: [&'static str; SECTION_COUNT] = [
+            "STRINGS",
+            "STOPS",
+            "ROUTES",
+            "ROUTE_STOPS",
+            "ROUTE_TRIPS",
+            "PROFILES",
+            "PROFILES_IDX",
+            "STOP_ROUTES",
+            "STOP_ROUTES_IDX",
+            "TRANSFERS",
+            "TRANSFERS_IDX",
+            "SERVICES",
+            "EXCEPTIONS",
+            "GRID_CELL_IDS",
+            "GRID_CELL_OFF",
+            "GRID_STOPS",
+            "FEEDS",
+            "FEED_TZ",
+            "EXCEPTIONS_IDX",
+            "STOP_ROUTE_POS",
+            "SHAPE_COORDS",
+            "ROUTE_SHAPE_IDX",
+            "ROUTE_STOP_SHAPE",
+            "FEED_MOTIS_PREFIX",
+            "STOP_GTFS_ID",
+        ];
+        let sections: [&[u8]; SECTION_COUNT] = [
+            &pool.bytes,
+            &sec_stops,
+            &sec_routes,
+            &sec_route_stops,
+            &sec_route_trips,
+            &profiles.bytes,
+            &sec_profiles_idx,
+            &sec_stop_routes,
+            &sec_stop_routes_idx,
+            &sec_transfers,
+            &sec_transfers_idx,
+            &sec_services,
+            &sec_exceptions,
+            &sec_grid_cell_ids,
+            &sec_grid_cell_off,
+            &sec_grid_stops,
+            &sec_feeds,
+            &sec_feed_tz,
+            &sec_exceptions_idx,
+            &sec_stop_route_pos,
+            &shape_blobs.bytes,
+            &sec_route_shape_idx,
+            &sec_route_stop_shape,
+            &sec_feed_motis_prefix,
+            &sec_stop_gtfs_id,
+        ];
+
+        let dir_len = SECTION_COUNT * 16;
+        let mut data_off = HEADER_LEN + dir_len;
+        let align = |o: usize| (o + 7) & !7;
+        for s in sections.iter() {
+            data_off = align(data_off) + s.len();
+        }
+        let total = data_off;
+
+        let mut header: Vec<u8> = Vec::with_capacity(HEADER_LEN);
+        append_u32(&mut header, MAGIC);
+        append_u32(&mut header, VERSION);
+        append_u32(&mut header, SECTION_COUNT as u32);
+        append_u32(&mut header, stop_count as u32);
+        append_u32(&mut header, route_count as u32);
+        append_u32(&mut header, trip_total as u32);
+        append_u32(&mut header, svc_mask.len() as u32);
+        append_u32(&mut header, profile_count as u32);
+        append_u32(&mut header, feed_name_offs.len() as u32);
+        append_u32(&mut header, grid_cell_count as u32);
+        append_u32(&mut header, pack_name_off);
+        append_i32(&mut header, min_lat);
+        append_i32(&mut header, min_lon);
+        append_i32(&mut header, max_lat);
+        append_i32(&mut header, max_lon);
+        append_i32(&mut header, grid_lat0);
+        append_i32(&mut header, grid_lon0);
+        append_u32(&mut header, grid_cell_e7);
+        append_u32(&mut header, grid_cols);
+        append_u32(&mut header, grid_rows);
+        debug_assert_eq!(header.len(), HEADER_LEN);
+
+        let written =
+            write_pack(out, &header, &sections).map_err(|e| format!("cannot write the pack: {e}"))?;
+        debug_assert_eq!(written, total);
+
+        let section_sizes: Vec<(&'static str, usize)> =
+            section_names.iter().zip(sections.iter()).map(|(&n, s)| (n, s.len())).collect();
+
+        Ok(BuildStats {
+            stops: stop_count,
+            routes: route_count,
+            trips: trip_total,
+            profiles: profile_count,
+            feeds: feed_name_offs.len(),
+            transfers: transfer_total,
+            min_lat_e7: min_lat,
+            min_lon_e7: min_lon,
+            max_lat_e7: max_lat,
+            max_lon_e7: max_lon,
+            size_bytes: written,
+            section_sizes,
+            shaped_routes,
+            multi_shape_routes,
+            dropped_shape_routes,
         })
-        .collect();
-    grid.sort_unstable();
-    let mut sec_grid_cell_ids = Vec::new();
-    let mut sec_grid_cell_off = Vec::new();
-    let mut sec_grid_stops = Vec::with_capacity(stop_count * 4);
-    let mut grid_cell_count = 0usize;
-    for (k, &(cid, stop)) in grid.iter().enumerate() {
-        if k == 0 || cid != grid[k - 1].0 {
-            append_u32(&mut sec_grid_cell_ids, cid);
-            append_u32(&mut sec_grid_cell_off, k as u32);
-            grid_cell_count += 1;
-        }
-        append_u32(&mut sec_grid_stops, stop);
-    }
-    append_u32(&mut sec_grid_cell_off, grid.len() as u32);
-
-    // --- Feeds ---
-    let mut sec_feeds = Vec::with_capacity(feed_name_offs.len() * 4);
-    for &off in &feed_name_offs {
-        append_u32(&mut sec_feeds, off);
-    }
-    let mut sec_feed_tz = Vec::with_capacity(feed_tz_offs.len() * 4);
-    for &off in &feed_tz_offs {
-        append_u32(&mut sec_feed_tz, off);
-    }
-    let mut sec_feed_motis_prefix = Vec::with_capacity(feed_motis_prefix_offs.len() * 4);
-    for &off in &feed_motis_prefix_offs {
-        append_u32(&mut sec_feed_motis_prefix, off);
-    }
-    let mut sec_stop_gtfs_id = Vec::with_capacity(stop_gtfs_id_off.len() * 4);
-    for &off in &stop_gtfs_id_off {
-        append_u32(&mut sec_stop_gtfs_id, off);
     }
 
-    // --- Assemble file: header + directory + aligned sections ---
-    let section_names: [&'static str; SECTION_COUNT] = [
-        "STRINGS",
-        "STOPS",
-        "ROUTES",
-        "ROUTE_STOPS",
-        "ROUTE_TRIPS",
-        "PROFILES",
-        "PROFILES_IDX",
-        "STOP_ROUTES",
-        "STOP_ROUTES_IDX",
-        "TRANSFERS",
-        "TRANSFERS_IDX",
-        "SERVICES",
-        "EXCEPTIONS",
-        "GRID_CELL_IDS",
-        "GRID_CELL_OFF",
-        "GRID_STOPS",
-        "FEEDS",
-        "FEED_TZ",
-        "EXCEPTIONS_IDX",
-        "STOP_ROUTE_POS",
-        "SHAPE_COORDS",
-        "ROUTE_SHAPE_IDX",
-        "ROUTE_STOP_SHAPE",
-        "FEED_MOTIS_PREFIX",
-        "STOP_GTFS_ID",
-    ];
-    let sections: [&[u8]; SECTION_COUNT] = [
-        &pool.bytes,
-        &sec_stops,
-        &sec_routes,
-        &sec_route_stops,
-        &sec_route_trips,
-        &profiles.bytes,
-        &sec_profiles_idx,
-        &sec_stop_routes,
-        &sec_stop_routes_idx,
-        &sec_transfers,
-        &sec_transfers_idx,
-        &sec_services,
-        &sec_exceptions,
-        &sec_grid_cell_ids,
-        &sec_grid_cell_off,
-        &sec_grid_stops,
-        &sec_feeds,
-        &sec_feed_tz,
-        &sec_exceptions_idx,
-        &sec_stop_route_pos,
-        &shape_blobs.bytes,
-        &sec_route_shape_idx,
-        &sec_route_stop_shape,
-        &sec_feed_motis_prefix,
-        &sec_stop_gtfs_id,
-    ];
-
-    let dir_len = SECTION_COUNT * 16;
-    let mut data_off = HEADER_LEN + dir_len;
-    let align = |o: usize| (o + 7) & !7;
-    for s in sections.iter() {
-        data_off = align(data_off) + s.len();
-    }
-    let total = data_off;
-
-    let mut header: Vec<u8> = Vec::with_capacity(HEADER_LEN);
-    append_u32(&mut header, MAGIC);
-    append_u32(&mut header, VERSION);
-    append_u32(&mut header, SECTION_COUNT as u32);
-    append_u32(&mut header, stop_count as u32);
-    append_u32(&mut header, route_count as u32);
-    append_u32(&mut header, trip_total as u32);
-    append_u32(&mut header, svc_mask.len() as u32);
-    append_u32(&mut header, profile_count as u32);
-    append_u32(&mut header, feed_name_offs.len() as u32);
-    append_u32(&mut header, grid_cell_count as u32);
-    append_u32(&mut header, feed_name_off);
-    append_i32(&mut header, min_lat);
-    append_i32(&mut header, min_lon);
-    append_i32(&mut header, max_lat);
-    append_i32(&mut header, max_lon);
-    append_i32(&mut header, grid_lat0);
-    append_i32(&mut header, grid_lon0);
-    append_u32(&mut header, grid_cell_e7);
-    append_u32(&mut header, grid_cols);
-    append_u32(&mut header, grid_rows);
-    debug_assert_eq!(header.len(), HEADER_LEN);
-
-    let written =
-        write_pack(out, &header, &sections).map_err(|e| format!("cannot write the pack: {e}"))?;
-    debug_assert_eq!(written, total);
-
-    let section_sizes: Vec<(&'static str, usize)> =
-        section_names.iter().zip(sections.iter()).map(|(&n, s)| (n, s.len())).collect();
-
-    Ok(BuildStats {
-        stops: stop_count,
-        routes: route_count,
-        trips: trip_total,
-        profiles: profile_count,
-        feeds: feed_name_offs.len(),
-        transfers: transfer_total,
-        min_lat_e7: min_lat,
-        min_lon_e7: min_lon,
-        max_lat_e7: max_lat,
-        max_lon_e7: max_lon,
-        size_bytes: written,
-        section_sizes,
-        shaped_routes,
-        multi_shape_routes,
-        dropped_shape_routes,
-    })
 }
 
 /// Write header + section directory + 8-byte-aligned payloads to `out`, and
