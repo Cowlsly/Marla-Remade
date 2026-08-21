@@ -88,12 +88,6 @@ data class SearchUiState(
     val tab: SearchTab = SearchTab.Releases,
     val loading: Boolean = false,
     val error: String? = null,
-    /** The catalogue is still importing, so this is a wait rather than a fault. */
-    val notReady: Boolean = false,
-    /** The server's reason, when a missing catalogue is not simply on its way. */
-    val notReadyReason: String? = null,
-    /** Whether asking again could ever produce a catalogue. The server decides this. */
-    val notReadyRetryable: Boolean = true,
     val hasSearched: Boolean = false,
     val artists: List<ArtistRow> = emptyList(),
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -103,12 +97,6 @@ data class SearchUiState(
 data class ArtistUiState(
     val loading: Boolean = true,
     val error: String? = null,
-    /** The catalogue is still importing, so this is a wait rather than a fault. */
-    val notReady: Boolean = false,
-    /** The server's reason, when a missing catalogue is not simply on its way. */
-    val notReadyReason: String? = null,
-    /** Whether asking again could ever produce a catalogue. The server decides this. */
-    val notReadyRetryable: Boolean = true,
     val name: String = "",
     val subtitle: String? = null,
     val releaseGroups: List<ReleaseGroupRow> = emptyList(),
@@ -117,12 +105,6 @@ data class ArtistUiState(
 data class ReleaseGroupUiState(
     val loading: Boolean = true,
     val error: String? = null,
-    /** The catalogue is still importing, so this is a wait rather than a fault. */
-    val notReady: Boolean = false,
-    /** The server's reason, when a missing catalogue is not simply on its way. */
-    val notReadyReason: String? = null,
-    /** Whether asking again could ever produce a catalogue. The server decides this. */
-    val notReadyRetryable: Boolean = true,
     val title: String = "",
     val artist: String = "",
     val coverUrl: String? = null,
@@ -132,12 +114,6 @@ data class ReleaseGroupUiState(
 data class ReleaseUiState(
     val loading: Boolean = true,
     val error: String? = null,
-    /** The catalogue is still importing, so this is a wait rather than a fault. */
-    val notReady: Boolean = false,
-    /** The server's reason, when a missing catalogue is not simply on its way. */
-    val notReadyReason: String? = null,
-    /** Whether asking again could ever produce a catalogue. The server decides this. */
-    val notReadyRetryable: Boolean = true,
     val id: String = "",
     val title: String = "",
     val artist: String = "",

@@ -10,7 +10,6 @@ import com.vayunmathur.musicbrainz.data.library.LibraryScanner
 import com.vayunmathur.musicbrainz.data.library.LibrarySnapshot
 import com.vayunmathur.musicbrainz.data.tidal.TidalAuth
 import com.vayunmathur.musicbrainz.data.tidal.TidalPollResult
-import com.vayunmathur.musicbrainz.network.api.CatalogueNotReadyException
 import com.vayunmathur.musicbrainz.network.api.CoverArt
 import com.vayunmathur.musicbrainz.network.api.MbRecording
 import com.vayunmathur.musicbrainz.network.api.MbRelease
@@ -143,9 +142,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
             _search.value = _search.value.copy(
                 loading = true,
                 error = null,
-                notReady = false,
-                notReadyReason = null,
-                notReadyRetryable = true,
                 hasSearched = true,
             )
             try {
@@ -186,9 +182,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 _search.value = _search.value.copy(
                     loading = false,
                     error = e.readableMessage(),
-                    notReady = e is CatalogueNotReadyException,
-                    notReadyReason = e.notReadyReason(),
-                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -240,9 +233,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 _artist.value = _artist.value.copy(
                     loading = false,
                     error = e.readableMessage(),
-                    notReady = e is CatalogueNotReadyException,
-                    notReadyReason = e.notReadyReason(),
-                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -299,9 +289,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 _releaseGroup.value = ReleaseGroupUiState(
                     loading = false,
                     error = e.readableMessage(),
-                    notReady = e is CatalogueNotReadyException,
-                    notReadyReason = e.notReadyReason(),
-                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -323,9 +310,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
                 _release.value = ReleaseUiState(
                     loading = false,
                     error = e.readableMessage(),
-                    notReady = e is CatalogueNotReadyException,
-                    notReadyReason = e.notReadyReason(),
-                    notReadyRetryable = e.notReadyRetryable(),
                 )
             }
         }
@@ -594,17 +578,6 @@ class MusicBrainzViewModel(application: Application) : AndroidViewModel(applicat
         album = row.album,
         title = row.title,
     )
-
-    /**
-     * The server's explanation for a catalogue that is not merely on its way, so the screen can
-     * say why instead of promising it will be along shortly.
-     */
-    private fun Exception.notReadyReason(): String? =
-        (this as? CatalogueNotReadyException)?.reason
-
-    /** The server's word on whether retrying can help; assume it can when it did not say. */
-    private fun Exception.notReadyRetryable(): Boolean =
-        (this as? CatalogueNotReadyException)?.retryable ?: true
 
     private fun Exception.readableMessage(): String =
         message?.takeIf { it.isNotBlank() }?.take(200) ?: "Something went wrong"

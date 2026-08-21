@@ -16,6 +16,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.EmptyState
+import com.vayunmathur.library.ui.ErrorState
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.LoadingState
 import com.vayunmathur.library.ui.MaterialTheme
@@ -24,7 +25,6 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
 import com.vayunmathur.musicbrainz.ui.components.CoverArtImage
-import com.vayunmathur.musicbrainz.ui.components.LoadFailureState
 import com.vayunmathur.musicbrainz.ui.components.SecondaryText
 import com.vayunmathur.musicbrainz.platform.ArtistUiState
 import com.vayunmathur.musicbrainz.platform.MusicBrainzActions
@@ -50,12 +50,10 @@ fun ArtistScreen(
     ) { padding ->
         when {
             state.loading -> LoadingState(Modifier.fillMaxSize().padding(padding))
-            state.error != null -> LoadFailureState(
-                error = state.error,
-                notReady = state.notReady,
-                notReadyReason = state.notReadyReason,
-                notReadyRetryable = state.notReadyRetryable,
+            state.error != null -> ErrorState(
+                title = stringResource(R.string.load_failed),
                 modifier = Modifier.fillMaxSize().padding(padding),
+                message = state.error,
             )
             state.releaseGroups.isEmpty() -> EmptyState(
                 title = stringResource(R.string.no_releases),
