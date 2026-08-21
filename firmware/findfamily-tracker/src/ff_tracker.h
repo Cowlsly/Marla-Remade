@@ -103,6 +103,16 @@ bool ff_ble_take_provision_event(void);
 /* Copies FF_UWB_PARAMS_LEN bytes into `out` when a session-params write is pending. */
 bool ff_ble_take_uwb_params(uint8_t *out);
 
+/*
+ * True once after a disconnect left the tracker in the wrong advertising mode. A
+ * connectable advertisement needs a free connection slot, so the switch to beacon mode
+ * right after a bind fails while the phone is still attached.
+ */
+bool ff_ble_take_readvertise_event(void);
+
+/* The mode the tracker is meant to be in, which may differ from what actually started. */
+enum ff_ble_mode ff_ble_desired_mode(void);
+
 /* Recomputes the epoch id and pushes fresh service data into the beacon adv set. */
 int ff_ble_refresh_beacon(uint8_t battery_percent);
 

@@ -49,6 +49,13 @@ static const struct bt_uuid_128 uuid_uwb_chr = BT_UUID_INIT_128(FF_UUID_UWB_CHR)
 
 static struct ff_tracker_state *state;
 static enum ff_ble_mode current_mode = FF_BLE_MODE_IDLE;
+/*
+ * The mode we want to be in, as distinct from the one we managed to start. Starting a
+ * connectable advertisement needs a spare connection slot, so a mode switch requested
+ * while a phone is still connected can fail; this lets the main loop retry once the
+ * connection drops.
+ */
+static enum ff_ble_mode desired_mode = FF_BLE_MODE_IDLE;
 
 static struct bt_le_ext_adv *pairing_adv;
 static struct bt_le_ext_adv *beacon_adv;
@@ -76,7 +83,73 @@ static struct bt_data beacon_ad[] = {
  */
 static atomic_t pending_provision;
 static atomic_t pending_uwb;
+static atomic_t pending_readvertise;
 static uint8_t pending_uwb_params[FF_UWB_PARAMS_LEN];
+
+/*
+ * Reassembly buffer for the provisioning blob. A client that hasn't negotiated a larger
+ * ATT MTU delivers it as a long write in ~20-byte chunks.
+ */
+static uint8_t provision_staging[FF_PROVISION_BLOB_LEN];
+
+/* ---- Connection tracking (bring-up visibility) ------------------------- */
+
+static void on_connected(struct bt_conn *conn, uint8_t err)
+{
+	struct bt_conn_info info;
+
+	if (err) {
+		LOG_WRN("connection failed: 0x%02x", err);
+		return;
+	}
+	if (bt_conn_get_info(conn, &info) == 0) {
+		LOG_INF("connected (interval=%uus latency=%u timeout=%u)",
+			info.le.interval_us, info.le.latency, info.le.timeout);
+	} else {
+		LOG_INF("connected");
+	}
+}
+
+static void on_disconnected(struct bt_conn *conn, uint8_t reason)
+{
+	ARG_UNUSED(conn);
+	/*
+	 * Worth logging the reason: 0x08 is a supervision timeout (out of range or the
+	 * phone stopped responding) and 0x13/0x16 are a deliberate disconnect by peer or
+	 * host, which is what a completed or abandoned bind looks like.
+	 */
+	LOG_INF("disconnected (reason=0x%02x)", reason);
+
+	/*
+	 * A connectable advertisement cannot start while the single connection slot is
+	 * taken, so the switch to beacon mode after a bind fails with -ENOMEM and leaves
+	 * the tracker silent. Now that the slot is free, have the main loop re-apply
+	 * whatever mode we are supposed to be in.
+	 */
+	if (desired_mode != current_mode) {
+		atomic_set(&pending_readvertise, 1);
+	}
+}
+
+BT_CONN_CB_DEFINE(conn_callbacks) = {
+	.connected = on_connected,
+	.disconnected = on_disconnected,
+};
+
+static void on_mtu_updated(struct bt_conn *conn, uint16_t tx, uint16_t rx)
+{
+	ARG_UNUSED(conn);
+	/*
+	 * The provisioning blob is FF_PROVISION_BLOB_LEN bytes and an ATT write carries
+	 * MTU-3, so anything below 51 means the client has to use a long write.
+	 */
+	LOG_INF("ATT MTU updated: tx=%u rx=%u (%u needed to write the blob in one go)", tx,
+		rx, FF_PROVISION_BLOB_LEN + 3);
+}
+
+static struct bt_gatt_cb gatt_callbacks = {
+	.att_mtu_updated = on_mtu_updated,
+};
 
 /* ---- GATT -------------------------------------------------------------- */
 
@@ -86,23 +159,41 @@ static ssize_t on_provision_write(struct bt_conn *conn, const struct bt_gatt_att
 	const uint8_t *data = buf;
 	uint64_t user_id;
 	uint64_t unix_seconds = 0U;
+	uint16_t total;
 	int rc;
 
 	ARG_UNUSED(conn);
 	ARG_UNUSED(attr);
-	ARG_UNUSED(flags);
 
-	if (offset != 0U) {
-		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
+	/*
+	 * The blob is 48 bytes, well past the 20 usable bytes of a default 23-byte ATT
+	 * MTU, so a client that hasn't negotiated a larger MTU sends it as a long write:
+	 * several Prepare Writes at increasing offsets, then one Execute Write. Chunks are
+	 * staged here and only acted on once a whole blob has arrived.
+	 *
+	 * Zephyr invokes this with BT_GATT_WRITE_FLAG_PREPARE and len 0 first, purely to
+	 * ask whether the write is permitted; the real data comes at execute time.
+	 */
+	if (flags & BT_GATT_WRITE_FLAG_PREPARE) {
+		return 0;
 	}
-	if (len != FF_PROVISION_BLOB_LEN && len != FF_PROVISION_BLOB_LEN_NO_TIME) {
-		LOG_WRN("provisioning write of %u bytes rejected (want %d or %d)", len,
-			FF_PROVISION_BLOB_LEN_NO_TIME, FF_PROVISION_BLOB_LEN);
+
+	if (offset + len > sizeof(provision_staging)) {
+		LOG_WRN("provisioning write past end of blob (offset=%u len=%u)", offset, len);
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
+	memcpy(&provision_staging[offset], data, len);
+	total = offset + len;
+
+	if (total != FF_PROVISION_BLOB_LEN && total != FF_PROVISION_BLOB_LEN_NO_TIME) {
+		/* A partial chunk: acknowledge it and wait for the rest. */
+		LOG_DBG("provisioning chunk: offset=%u len=%u", offset, len);
+		return len;
+	}
+	data = provision_staging;
 
 	user_id = sys_get_be64(data);
-	if (len == FF_PROVISION_BLOB_LEN) {
+	if (total == FF_PROVISION_BLOB_LEN) {
 		unix_seconds = sys_get_be64(&data[8 + FF_SECRET_LEN]);
 	}
 
@@ -118,7 +209,7 @@ static ssize_t on_provision_write(struct bt_conn *conn, const struct bt_gatt_att
 	state->unix_at_base = unix_seconds;
 	state->uptime_at_base_ms = k_uptime_get();
 
-	LOG_INF("provisioned: userId=%llu, %u-byte blob, unix=%llu", user_id, len,
+	LOG_INF("provisioned: userId=%llu, %u-byte blob, unix=%llu", user_id, total,
 		unix_seconds);
 	if (unix_seconds == 0U) {
 		LOG_WRN("no timestamp in blob: epoch ids will not resolve for the owner");
@@ -166,6 +257,16 @@ bool ff_ble_take_uwb_params(uint8_t *out)
 	}
 	memcpy(out, pending_uwb_params, FF_UWB_PARAMS_LEN);
 	return true;
+}
+
+bool ff_ble_take_readvertise_event(void)
+{
+	return atomic_cas(&pending_readvertise, 1, 0);
+}
+
+enum ff_ble_mode ff_ble_desired_mode(void)
+{
+	return desired_mode;
 }
 
 BT_GATT_SERVICE_DEFINE(ff_tracker_svc,
@@ -251,6 +352,7 @@ int ff_ble_init(struct ff_tracker_state *st)
 		LOG_ERR("bt_enable: %d", rc);
 		return rc;
 	}
+	bt_gatt_cb_register(&gatt_callbacks);
 	LOG_INF("Bluetooth initialised");
 	return create_adv_sets();
 }
@@ -278,11 +380,12 @@ int ff_ble_refresh_beacon(uint8_t battery_percent)
 	memcpy(&beacon_sd[16], epoch_id, FF_EPOCH_ID_LEN);
 	beacon_sd[16 + FF_EPOCH_ID_LEN] = battery_percent;
 
-	LOG_INF("epoch=%llu id=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x batt=%u%%",
+	LOG_INF("epoch=%llu id=%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x%02x batt=%u%% %s",
 		epoch, epoch_id[0], epoch_id[1], epoch_id[2], epoch_id[3], epoch_id[4],
 		epoch_id[5], epoch_id[6], epoch_id[7], epoch_id[8], epoch_id[9],
 		epoch_id[10], epoch_id[11], epoch_id[12], epoch_id[13], epoch_id[14],
-		epoch_id[15], battery_percent);
+		epoch_id[15], battery_percent,
+		current_mode == FF_BLE_MODE_BEACON ? "(on air)" : "(NOT advertising)");
 
 	if (current_mode != FF_BLE_MODE_BEACON) {
 		return 0;
@@ -297,6 +400,8 @@ int ff_ble_refresh_beacon(uint8_t battery_percent)
 int ff_ble_set_mode(enum ff_ble_mode mode)
 {
 	int rc;
+
+	desired_mode = mode;
 
 	if (mode == current_mode) {
 		return 0;

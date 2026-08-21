@@ -102,23 +102,46 @@ class TrackerProvisioner(private val context: Context) {
             val callback = object : BluetoothGattCallback() {
                 override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                     if (newState == BluetoothProfile.STATE_CONNECTED) {
-                        runCatching { g.discoverServices() }
+                        /*
+                         * Ask for an MTU big enough to carry the whole blob in one ATT
+                         * write. On the default 23-byte MTU only 20 bytes fit, so the
+                         * stack would fall back to a long write — which works, but only
+                         * if the peer reassembles chunked offsets, and it is slower.
+                         * Service discovery waits for the MTU result.
+                         */
+                        if (!runCatching { g.requestMtu(PREFERRED_MTU) }.getOrDefault(false)) {
+                            Log.w(TAG, "requestMtu failed; continuing on default MTU")
+                            runCatching { g.discoverServices() }
+                        }
                     } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                        Log.i(TAG, "disconnected before the write completed (status=$status)")
                         finish(false)
                     }
                 }
 
+                override fun onMtuChanged(g: BluetoothGatt, mtu: Int, status: Int) {
+                    Log.i(TAG, "MTU now $mtu (status=$status); discovering services")
+                    runCatching { g.discoverServices() }
+                }
+
                 override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-                    if (status != BluetoothGatt.GATT_SUCCESS) { finish(false); return }
+                    if (status != BluetoothGatt.GATT_SUCCESS) {
+                        Log.w(TAG, "service discovery failed: $status")
+                        finish(false); return
+                    }
                     val ch = g.getService(TrackerBle.UNPROVISIONED_SERVICE_UUID)
                         ?.getCharacteristic(TrackerBle.PROVISION_CHARACTERISTIC_UUID)
-                    if (ch == null) { finish(false); return }
+                    if (ch == null) {
+                        Log.w(TAG, "provisioning characteristic not found on this device")
+                        finish(false); return
+                    }
                     val ok = writeChar(g, ch, blob)
                     if (!ok) finish(false)
                 }
 
                 @Deprecated("compat shim for API < 33")
                 override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+                    Log.i(TAG, "provisioning write completed with status=$status")
                     finish(status == BluetoothGatt.GATT_SUCCESS)
                 }
             }
@@ -151,5 +174,11 @@ class TrackerProvisioner(private val context: Context) {
 
     companion object {
         private const val TAG = "TrackerProvisioner"
+
+        /**
+         * Enough for `[TrackerBle.PROVISION_BLOB_LEN]` plus the 3-byte ATT write header,
+         * with room to spare. Keeps the blob in a single write instead of a long write.
+         */
+        private const val PREFERRED_MTU = 64
     }
 }

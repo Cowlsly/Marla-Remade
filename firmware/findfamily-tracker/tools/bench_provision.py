@@ -70,9 +70,10 @@ async def main() -> int:
     await scanner.stop()
 
     if not seen:
-        print("no beacon heard. The firmware log is the tiebreaker: if it prints an")
-        print("epoch id, the firmware is fine and this PC's adapter is not reporting")
-        print("extended advertisements (many Windows adapters do not).")
+        print("no beacon heard. Check the firmware log first: it prints the live epoch id")
+        print("every second and marks whether it is '(on air)' or '(NOT advertising)'.")
+        print("If it says NOT advertising, the tracker never started the beacon and this")
+        print("is a firmware problem, not a reception one.")
         return 1
 
     ok = False

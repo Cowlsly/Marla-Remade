@@ -153,8 +153,16 @@ int main(void)
 		if (ff_ble_take_provision_event()) {
 			LOG_INF("provisioning accepted: switching to beacon mode");
 			if (ff_ble_set_mode(FF_BLE_MODE_BEACON) != 0) {
-				(void)ff_ble_set_mode(FF_BLE_MODE_PAIRING);
+				/* Expected while the phone is still connected: a connectable
+				 * advertisement needs a free connection slot. The disconnect
+				 * handler asks us to retry. */
+				LOG_INF("beacon will start once the phone disconnects");
 			}
+		}
+
+		if (ff_ble_take_readvertise_event()) {
+			LOG_INF("connection slot free: re-applying advertising mode");
+			(void)ff_ble_set_mode(ff_ble_desired_mode());
 		}
 
 		{
