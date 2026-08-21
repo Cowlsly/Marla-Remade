@@ -12,8 +12,8 @@ import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.glance.LocalContext
 import com.vayunmathur.calendar.R
 import com.vayunmathur.calendar.data.Event
 import com.vayunmathur.calendar.util.AllDayFormat
