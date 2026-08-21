@@ -14,6 +14,10 @@
 //!     for both its directories and its tiles.
 //!   * [`pmtiles`] — the v3 container, read and write, including Hilbert tile ids
 //!     and the root/leaf directory split.
+//!   * [`tiling`] — project and bucket points into tiles, and merge tilesets.
+//!
+//! Two binaries sit on top: `tile_points` (the `tippecanoe` replacement, for point
+//! layers) and `tile_join` (the `tile-join` replacement).
 //!
 //! Verified against the published `v5-ca.pmtiles` during development: its header,
 //! gzipped root directory and gzipped leaf directories all decode with byte-exact
@@ -24,3 +28,4 @@ pub mod gz;
 pub mod mvt;
 pub mod pmtiles;
 pub mod proto;
+pub mod tiling;

@@ -25,6 +25,12 @@ description = "MVT + PMTiles v3 reader/writer for the Maps basemap (replaces tip
 [lib]
 name = "tile_build"
 path = "src/lib.rs"
+[[bin]]
+name = "tile_points"
+path = "src/bin/tile_points.rs"
+[[bin]]
+name = "tile_join"
+path = "src/bin/tile_join.rs"
 [dependencies]
 miniz_oxide = "0.8"
 [profile.release]
