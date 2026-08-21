@@ -1,17 +1,13 @@
 package com.vayunmathur.library.ui
 
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.PagerState
 import androidx.compose.foundation.pager.rememberPagerState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
@@ -125,8 +121,13 @@ fun TabbedPagerScaffold(
 }
 
 /**
- * A lightweight, non-swiping tab row of [FilterChip]s - the "product tabs" look
- * (travel). For swipeable page hosting use [TabbedPagerScaffold].
+ * A lightweight, non-swiping tab row - the "product tabs" look (travel). For swipeable page
+ * hosting use [TabbedPagerScaffold].
+ *
+ * A [ButtonGroup] rather than a row of chips: the choices are one control, so they should read
+ * as one object. The group also owns its own overflow menu, which is why this no longer needs
+ * to scroll horizontally - a label that does not fit becomes a menu entry instead of scrolling
+ * off the edge where it is easy to miss.
  */
 @Composable
 fun ChipTabRow(
@@ -135,17 +136,12 @@ fun ChipTabRow(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    Row(
-        modifier = modifier
-            .horizontalScroll(rememberScrollState())
-            .padding(horizontal = Spacing.lg),
-        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
-    ) {
+    ButtonGroup(modifier = modifier.padding(horizontal = Spacing.lg)) {
         tabs.forEachIndexed { index, label ->
-            FilterChip(
-                selected = selected == index,
-                onClick = { onSelect(index) },
-                label = { Text(label) },
+            toggleableItem(
+                checked = selected == index,
+                label = label,
+                onCheckedChange = { onSelect(index) },
             )
         }
     }

@@ -187,11 +187,10 @@ fun BoxScope.HistoryScrubberCard(
                     { Text(DateString.monthDayYear(state.date)) }
                 )
                 Spacer(Modifier.weight(1f))
-                FilterChip(
-                    selected = state.nowMode,
-                    onClick = { state.goNow() },
-                    label = { Text(stringResource(R.string.label_now)) }
-                )
+                ToggleButton(
+                    checked = state.nowMode,
+                    onCheckedChange = { state.goNow() },
+                ) { Text(stringResource(R.string.label_now)) }
             }
             Row(
                 Modifier.fillMaxWidth(),

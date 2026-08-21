@@ -20,7 +20,7 @@ import androidx.compose.ui.unit.dp
 @Composable
 @ReadOnlyComposable
 fun verticalShape(index: Int, count: Int): RoundedCornerShape {
-    val outer = MaterialTheme.shapes.medium.topStart
+    val outer = MaterialTheme.shapes.largeIncreased.topStart
     val inner = CornerSize(0.dp)
     return RoundedCornerShape(
         topStart = if (index == 0) outer else inner,

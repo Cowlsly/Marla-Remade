@@ -6,6 +6,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBarScrollBehavior
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
@@ -19,6 +20,21 @@ import com.vayunmathur.library.util.NavKey
  * choosing between them used to mean writing the whole scaffold out again.
  */
 enum class AppBarAlignment { Start, Center }
+
+/**
+ * How tall [AppScaffold]'s top bar is, and so how much presence its title has.
+ *
+ * [Small] is the default and stays the default deliberately: it is what all 39 modules using
+ * [AppScaffold] already render, and the taller bars change every screen's vertical rhythm.
+ * The two flexible sizes are the Expressive two-row bars - they collapse to a single row as
+ * content scrolls under them, and are worth opting into on a screen whose title is the screen's
+ * identity rather than a label above content. [LargeFlexible] treats the title as the headline;
+ * [MediumFlexible] is the middle ground.
+ *
+ * A flexible size needs a `scrollBehavior` to be worth having: without one the bar stays
+ * expanded and simply eats vertical space.
+ */
+enum class AppBarSize { Small, MediumFlexible, LargeFlexible }
 
 /**
  * Scaffold for an ordinary screen: a top app bar with an optional back button,
@@ -37,43 +53,34 @@ enum class AppBarAlignment { Start, Center }
 fun AppScaffold(
     title: String,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     onNavigateBack: (() -> Unit)? = null,
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
     floatingActionButton: @Composable () -> Unit = {},
     bottomBar: @Composable () -> Unit = {},
     snackbarHost: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
-) {
-    val resolvedNavigationIcon = resolveNavigationIcon(navigationIcon, onClose, onNavigateBack)
-
-    Scaffold(
-        modifier = modifier,
-        topBar = {
-            when (alignment) {
-                AppBarAlignment.Start -> TopAppBar(
-                    title = { Text(title) },
-                    navigationIcon = resolvedNavigationIcon,
-                    actions = actions,
-                    scrollBehavior = scrollBehavior,
-                )
-                AppBarAlignment.Center -> CenterAlignedTopAppBar(
-                    title = { Text(title) },
-                    navigationIcon = resolvedNavigationIcon,
-                    actions = actions,
-                    scrollBehavior = scrollBehavior,
-                )
-            }
-        },
-        floatingActionButton = floatingActionButton,
-        bottomBar = bottomBar,
-        snackbarHost = snackbarHost,
-        content = content,
-    )
-}
+) = AppScaffold(
+    title = { Text(title) },
+    modifier = modifier,
+    subtitle = subtitle?.let { text -> { Text(text) } },
+    onNavigateBack = onNavigateBack,
+    onClose = onClose,
+    navigationIcon = navigationIcon,
+    alignment = alignment,
+    size = size,
+    actions = actions,
+    scrollBehavior = scrollBehavior,
+    floatingActionButton = floatingActionButton,
+    bottomBar = bottomBar,
+    snackbarHost = snackbarHost,
+    content = content,
+)
 
 /**
  * [AppScaffold] taking a title slot rather than a string.
@@ -86,10 +93,12 @@ fun AppScaffold(
 fun AppScaffold(
     title: @Composable () -> Unit,
     modifier: Modifier = Modifier,
+    subtitle: (@Composable () -> Unit)? = null,
     onNavigateBack: (() -> Unit)? = null,
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
     floatingActionButton: @Composable () -> Unit = {},
@@ -101,16 +110,15 @@ fun AppScaffold(
     Scaffold(
         modifier = modifier,
         topBar = {
-            when (alignment) {
-                AppBarAlignment.Start -> TopAppBar(
-                    title = title, navigationIcon = resolvedNavigationIcon,
-                    actions = actions, scrollBehavior = scrollBehavior,
-                )
-                AppBarAlignment.Center -> CenterAlignedTopAppBar(
-                    title = title, navigationIcon = resolvedNavigationIcon,
-                    actions = actions, scrollBehavior = scrollBehavior,
-                )
-            }
+            AppTopBar(
+                title = title,
+                subtitle = subtitle,
+                navigationIcon = resolvedNavigationIcon,
+                actions = actions,
+                alignment = alignment,
+                size = size,
+                scrollBehavior = scrollBehavior,
+            )
         },
         floatingActionButton = floatingActionButton,
         bottomBar = bottomBar,
@@ -126,9 +134,11 @@ fun <T : NavKey> AppScaffold(
     title: String,
     backStack: NavBackStack<T>,
     modifier: Modifier = Modifier,
+    subtitle: String? = null,
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
     scrollBehavior: TopAppBarScrollBehavior? = null,
     floatingActionButton: @Composable () -> Unit = {},
@@ -138,10 +148,12 @@ fun <T : NavKey> AppScaffold(
 ) = AppScaffold(
     title = title,
     modifier = modifier,
+    subtitle = subtitle,
     onNavigateBack = { backStack.pop() },
     onClose = onClose,
     navigationIcon = navigationIcon,
     alignment = alignment,
+    size = size,
     actions = actions,
     scrollBehavior = scrollBehavior,
     floatingActionButton = floatingActionButton,
@@ -149,6 +161,51 @@ fun <T : NavKey> AppScaffold(
     snackbarHost = snackbarHost,
     content = content,
 )
+
+/**
+ * The top bar [AppScaffold] renders, resolved from [size] and [alignment].
+ *
+ * Kept private and shared so the three overloads cannot drift apart. [subtitle] is only rendered
+ * by the flexible sizes - the small bar is a single row and has nowhere to put it.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun AppTopBar(
+    title: @Composable () -> Unit,
+    subtitle: (@Composable () -> Unit)?,
+    navigationIcon: @Composable () -> Unit,
+    actions: @Composable RowScope.() -> Unit,
+    alignment: AppBarAlignment,
+    size: AppBarSize,
+    scrollBehavior: TopAppBarScrollBehavior?,
+) {
+    val titleAlignment = when (alignment) {
+        AppBarAlignment.Start -> Alignment.Start
+        AppBarAlignment.Center -> Alignment.CenterHorizontally
+    }
+    when (size) {
+        AppBarSize.Small -> when (alignment) {
+            AppBarAlignment.Start -> TopAppBar(
+                title = title, navigationIcon = navigationIcon,
+                actions = actions, scrollBehavior = scrollBehavior,
+            )
+            AppBarAlignment.Center -> CenterAlignedTopAppBar(
+                title = title, navigationIcon = navigationIcon,
+                actions = actions, scrollBehavior = scrollBehavior,
+            )
+        }
+        AppBarSize.MediumFlexible -> MediumFlexibleTopAppBar(
+            title = title, subtitle = subtitle, navigationIcon = navigationIcon,
+            actions = actions, titleHorizontalAlignment = titleAlignment,
+            scrollBehavior = scrollBehavior,
+        )
+        AppBarSize.LargeFlexible -> LargeFlexibleTopAppBar(
+            title = title, subtitle = subtitle, navigationIcon = navigationIcon,
+            actions = actions, titleHorizontalAlignment = titleAlignment,
+            scrollBehavior = scrollBehavior,
+        )
+    }
+}
 
 /**
  * Resolves the top-bar navigation icon from the available options, in priority

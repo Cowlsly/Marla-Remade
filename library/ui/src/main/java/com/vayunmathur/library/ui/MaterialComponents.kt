@@ -22,6 +22,7 @@ import androidx.compose.material3.DrawerDefaults
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.FloatingActionButtonDefaults
 import androidx.compose.material3.IconButtonDefaults
+import androidx.compose.material3.LoadingIndicatorDefaults
 import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.NavigationBarItem as Material3NavigationBarItem
@@ -33,6 +34,7 @@ import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.contentColorFor
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.RectangleShape
@@ -315,6 +317,50 @@ fun CenterAlignedTopAppBar(
     colors = colors, scrollBehavior = scrollBehavior,
 )
 
+// --- Top app bars (expressive, two-row) ---
+/**
+ * A two-row top app bar that collapses to a single row as content scrolls under it.
+ *
+ * The Expressive medium bar: unlike `MediumTopAppBar` it takes a [subtitle] and lets the title
+ * block be centred, and its heights follow the expressive scale. Worth a taller bar on a
+ * top-level screen whose title is the screen's identity; ordinary content screens should stay
+ * on [TopAppBar].
+ *
+ * Pass a `scrollBehavior` or the bar has nothing to collapse in response to.
+ */
+@Composable
+fun MediumFlexibleTopAppBar(
+    title: @Composable () -> Unit = {},
+    modifier: Modifier = Modifier,
+    subtitle: (@Composable () -> Unit)? = null,
+    navigationIcon: @Composable () -> Unit = {},
+    actions: @Composable RowScope.() -> Unit = {},
+    titleHorizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    colors: TopAppBarColors = TopAppBarDefaults.topAppBarColors(),
+    scrollBehavior: TopAppBarScrollBehavior? = null,
+) = androidx.compose.material3.MediumFlexibleTopAppBar(
+    title = title, modifier = modifier, subtitle = subtitle, navigationIcon = navigationIcon,
+    actions = actions, titleHorizontalAlignment = titleHorizontalAlignment,
+    colors = colors, scrollBehavior = scrollBehavior,
+)
+
+/** [MediumFlexibleTopAppBar] with a taller expanded row, for a screen whose title is the headline. */
+@Composable
+fun LargeFlexibleTopAppBar(
+    title: @Composable () -> Unit = {},
+    modifier: Modifier = Modifier,
+    subtitle: (@Composable () -> Unit)? = null,
+    navigationIcon: @Composable () -> Unit = {},
+    actions: @Composable RowScope.() -> Unit = {},
+    titleHorizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    colors: TopAppBarColors = TopAppBarDefaults.topAppBarColors(),
+    scrollBehavior: TopAppBarScrollBehavior? = null,
+) = androidx.compose.material3.LargeFlexibleTopAppBar(
+    title = title, modifier = modifier, subtitle = subtitle, navigationIcon = navigationIcon,
+    actions = actions, titleHorizontalAlignment = titleHorizontalAlignment,
+    colors = colors, scrollBehavior = scrollBehavior,
+)
+
 // --- Slider ---
 @Composable
 fun Slider(
@@ -383,6 +429,59 @@ fun LinearProgressIndicator(
     trackColor: Color = ProgressIndicatorDefaults.linearTrackColor,
     strokeCap: StrokeCap = ProgressIndicatorDefaults.LinearStrokeCap,
 ) = androidx.compose.material3.LinearProgressIndicator(progress = progress, modifier = modifier, color = color, trackColor = trackColor, strokeCap = strokeCap)
+
+// --- Loading indicator (expressive) ---
+/**
+ * The Expressive "working on it" indicator: a sequence of morphing shapes rather than a
+ * spinning arc.
+ *
+ * Prefer this to [CircularProgressIndicator] for an ordinary wait. It occupies the same
+ * footprint, so swapping one for the other does not move layout. [CircularProgressIndicator]
+ * stays for callers that set a `strokeWidth` or `trackColor`, which this has no equivalent of.
+ */
+@Composable
+fun LoadingIndicator(
+    modifier: Modifier = Modifier,
+    color: Color = LoadingIndicatorDefaults.indicatorColor,
+) = androidx.compose.material3.LoadingIndicator(modifier = modifier, color = color)
+
+/** Determinate [LoadingIndicator]: the shape morphs in step with [progress]. */
+@Composable
+fun LoadingIndicator(
+    progress: () -> Float,
+    modifier: Modifier = Modifier,
+    color: Color = LoadingIndicatorDefaults.indicatorColor,
+) = androidx.compose.material3.LoadingIndicator(progress = progress, modifier = modifier, color = color)
+
+/**
+ * [LoadingIndicator] on its own filled container.
+ *
+ * For an indicator that sits over content - a pull-to-refresh or an overlay - where the bare
+ * indicator would not have enough contrast against whatever is behind it.
+ */
+@Composable
+fun ContainedLoadingIndicator(
+    modifier: Modifier = Modifier,
+    containerColor: Color = LoadingIndicatorDefaults.containedContainerColor,
+    indicatorColor: Color = LoadingIndicatorDefaults.containedIndicatorColor,
+    containerShape: Shape = LoadingIndicatorDefaults.containerShape,
+) = androidx.compose.material3.ContainedLoadingIndicator(
+    modifier = modifier, containerColor = containerColor,
+    indicatorColor = indicatorColor, containerShape = containerShape,
+)
+
+/** Determinate [ContainedLoadingIndicator]. */
+@Composable
+fun ContainedLoadingIndicator(
+    progress: () -> Float,
+    modifier: Modifier = Modifier,
+    containerColor: Color = LoadingIndicatorDefaults.containedContainerColor,
+    indicatorColor: Color = LoadingIndicatorDefaults.containedIndicatorColor,
+    containerShape: Shape = LoadingIndicatorDefaults.containerShape,
+) = androidx.compose.material3.ContainedLoadingIndicator(
+    progress = progress, modifier = modifier, containerColor = containerColor,
+    indicatorColor = indicatorColor, containerShape = containerShape,
+)
 
 // --- Cards ---
 @Composable
