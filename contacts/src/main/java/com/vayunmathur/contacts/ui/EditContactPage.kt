@@ -91,6 +91,7 @@ import com.vayunmathur.library.ui.IconEvent
 import com.vayunmathur.library.ui.IconGroup
 import com.vayunmathur.library.ui.IconMail
 import com.vayunmathur.library.ui.IconRemoveCircle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.ResultEffect
 import kotlinx.datetime.LocalDate
@@ -150,7 +151,8 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             if (noteController.focused) {
                 com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(noteController)
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Column(
             modifier = Modifier.fillMaxWidth(),

@@ -17,6 +17,7 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -48,6 +49,7 @@ fun DownloadsScreen(
                 IconButton(actions::clearFinishedDownloads) { IconDelete() }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (downloads.isEmpty()) {
             EmptyState(

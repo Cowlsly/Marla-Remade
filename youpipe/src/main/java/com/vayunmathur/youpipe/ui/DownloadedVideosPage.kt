@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -89,6 +90,7 @@ fun DownloadedVideosPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPi
                 },
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             // Active downloads
             items(activeDownloads.toList(), key = { (videoID, _) -> "active-$videoID" }) { (videoID, status) ->

@@ -54,6 +54,7 @@ import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TextField
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.math.roundToInt
 
@@ -140,6 +141,7 @@ fun DeckListScreen(
         floatingActionButton = {
             FloatingActionButton(onClick = { showAddDialog = true }) { IconAdd() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (localDecks.isEmpty()) {
             EmptyState(

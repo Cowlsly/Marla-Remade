@@ -64,6 +64,7 @@ import java.io.ByteArrayOutputStream
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.longPressDraggableHandle
 import com.vayunmathur.library.ui.rememberReorderableLazyGridState
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 
 /**
@@ -197,6 +198,7 @@ fun CutGlueContent(
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             if (pageKeys.isEmpty()) {

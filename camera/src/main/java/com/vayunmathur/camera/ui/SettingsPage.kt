@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.ExposedDropdownMenuBox
 import com.vayunmathur.library.ui.ExposedDropdownMenuDefaults
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.rememberPermissionRequest
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
 
@@ -54,6 +55,7 @@ fun <T : NavKey> SettingsPage(backStack: NavBackStack<T>, viewModel: CameraViewM
     AppScaffold(
         title = stringResource(UiR.string.settings),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

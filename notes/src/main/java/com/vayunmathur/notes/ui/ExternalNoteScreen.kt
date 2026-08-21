@@ -12,6 +12,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.OdfMarkdownEditor
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -77,6 +78,7 @@ fun ExternalNoteScreen(
                 }
             }) { IconAdd() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (loaded) {
             OdfMarkdownEditor(

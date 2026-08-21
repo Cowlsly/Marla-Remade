@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.CommonSearchBar
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.hub.R
 
@@ -59,7 +60,7 @@ fun AchievementsScreen(
         list.sortedWith(compareBy<AchievementWithProgress> { !it.isUnlocked }.thenBy { it.gameId }.thenBy { it.name })
     }
 
-    AppScaffold(title = { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(0.dp)) }) { padding ->
+    AppScaffold(title = { CommonSearchBar(value = search, onValueChange = { search = it }, padding = PaddingValues(0.dp)) }, scrollBehavior = appBarScrollBehavior()) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             item {
                 LazyRow(contentPadding = PaddingValues(horizontal = 16.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -513,6 +513,7 @@ fun DirectoryScreen(
                     }
                 }
             },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
         val query = state.searchQuery.trim()
         fun matches(item: FileBrowserItem) =

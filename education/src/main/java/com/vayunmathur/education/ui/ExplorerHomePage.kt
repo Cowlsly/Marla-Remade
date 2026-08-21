@@ -39,6 +39,7 @@ import com.vayunmathur.education.content.Course
 import com.vayunmathur.education.content.Subject
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.education.R
@@ -80,6 +81,7 @@ fun ExplorerHomePage(backStack: NavBackStack<Route>, viewModel: EducationViewMod
             }
             IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         item {
             Row(

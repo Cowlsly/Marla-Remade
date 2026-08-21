@@ -65,6 +65,7 @@ import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 @Composable
 fun MessageListPage(
@@ -177,6 +178,7 @@ fun MessageListScreen(
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             Box(modifier = Modifier.fillMaxWidth().height(2.dp)) {

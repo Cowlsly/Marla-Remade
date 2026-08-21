@@ -15,6 +15,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -155,7 +156,8 @@ fun CropPhotoScreen(
                 if (cropped !== scaled) cropped.recycle()
                 onCropComplete(scaled)
             }) { Text(stringResource(UiR.string.done)) }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val currentBitmap = bitmap ?: return@AppScaffold
 

@@ -33,6 +33,7 @@ import com.vayunmathur.education.content.Band
 import com.vayunmathur.education.util.EducationAchievements
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.AchievementStatus
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
@@ -49,6 +50,7 @@ fun BadgesPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel) {
     AppScaffold(
         title = if (band == Band.K2) stringResource(R.string.my_stickers) else stringResource(R.string.badges),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(
             modifier = Modifier

@@ -41,6 +41,7 @@ import com.vayunmathur.everysync.platform.EverySyncViewModel
 import com.vayunmathur.library.ui.PermissionsChecker
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.is24Hour
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.time.Instant
 
@@ -104,6 +105,7 @@ fun AccountsScreen(state: AccountsUiState, actions: AccountsActions) {
                 IconAdd()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (state.accounts.isEmpty()) {
             EmptyState(

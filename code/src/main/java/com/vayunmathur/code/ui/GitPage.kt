@@ -47,6 +47,7 @@ import com.vayunmathur.library.ui.OverflowMenu
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import java.io.File
 
@@ -65,6 +66,7 @@ fun GitPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>) {
         actions = {
             IconButton(onClick = { viewModel.refreshGit() }) { IconRefresh() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

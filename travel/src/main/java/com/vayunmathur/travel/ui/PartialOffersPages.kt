@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.OfferDto
@@ -130,6 +131,7 @@ private fun PartialLegScaffold(
                 navigationIcon = { IconNavigation(backStack) },
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         items(state.offers) { offer -> PartialOfferCard(offer) { onSelect(offer) } }
         if (state.loading || state.error != null || state.offers.isEmpty()) {

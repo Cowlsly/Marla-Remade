@@ -26,6 +26,7 @@ import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.domain.TOTP
 import com.vayunmathur.passwords.platform.MenuUiState
 import com.vayunmathur.passwords.platform.PasswordsActions
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 @Composable
 fun MenuScreen(
@@ -60,7 +61,7 @@ fun MenuScreen(
             is CredentialItem.PasskeyItem -> Route.PasskeyPage(item.passkey.id)
             null -> Route.Menu
         }
-    }, { Route.PasswordEditPage(0) }, Route.Settings, trailingContent = {
+    }, editPage = { Route.PasswordEditPage(0) }, settingsPage = Route.Settings, trailingContent = {
         if (it is CredentialItem.PasswordItem) {
             val password = it.password
             if (password.totpSecret.isNullOrBlank()) return@ListPage
@@ -86,5 +87,5 @@ fun MenuScreen(
             is CredentialItem.PasswordItem -> "${it.password.name} ${it.password.username} ${it.password.email} ${it.password.websites.joinToString(" ")}"
             is CredentialItem.PasskeyItem -> "${it.passkey.rpName} ${it.passkey.rpId} ${it.passkey.userName}"
         }
-    })
+    }, scrollBehavior = appBarScrollBehavior())
 }

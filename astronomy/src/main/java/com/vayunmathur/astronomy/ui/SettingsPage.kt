@@ -64,7 +64,7 @@ fun SettingsScreen(backStack: NavBackStack<Route>, state: SettingsUiState, actio
     val linesLabel = stringResource(R.string.lines_only)
     val linesArtLabel = stringResource(R.string.lines_art)
 
-    AppScaffold(title = stringResource(R.string.settings), onNavigateBack = { backStack.pop() }) { padding ->
+    AppScaffold(title = stringResource(R.string.settings), onNavigateBack = { backStack.pop() }, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState())) {
             SettingsSection(title = stringResource(R.string.display)) {
                 SettingsSelectRow(

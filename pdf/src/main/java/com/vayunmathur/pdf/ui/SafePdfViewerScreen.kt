@@ -170,6 +170,7 @@ import com.vayunmathur.library.ui.IconShapeStarFill
 import com.vayunmathur.library.ui.IconShapeStarOutline
 import com.vayunmathur.library.ui.IconShapeTriangleFill
 import com.vayunmathur.library.ui.IconShapeTriangleOutline
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.pdf.util.SafeOutlineItem
 import kotlinx.coroutines.CoroutineScope
 import kotlin.math.roundToInt
@@ -966,6 +967,7 @@ fun SafePdfViewerScreen(uri: Uri, onBack: () -> Unit) {
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Box(
             Modifier

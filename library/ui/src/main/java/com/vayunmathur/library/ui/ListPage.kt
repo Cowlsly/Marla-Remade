@@ -25,6 +25,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.NavKey
@@ -40,6 +41,7 @@ inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> 
     crossinline headlineContent: @Composable (T) -> Unit,
     crossinline supportingContent: @Composable (T) -> Unit,
     crossinline viewPage: suspend (id: Long) -> Route,
+    scrollBehavior: TopAppBarScrollBehavior,
     noinline editPage: (() -> Route)? = null,
     settingsPage: Route? = null,
     crossinline otherActions: @Composable () -> Unit = {},
@@ -68,6 +70,7 @@ inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> 
     val coroutineScope = rememberCoroutineScope()
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
                 title = {
@@ -89,7 +92,8 @@ inline fun <reified T : DatabaseItem, Route : NavKey, reified EditPage : Route> 
                             IconSettings()
                         }
                     }
-                }
+                },
+                scrollBehavior = scrollBehavior,
             )
         },
         bottomBar = bottomBar,

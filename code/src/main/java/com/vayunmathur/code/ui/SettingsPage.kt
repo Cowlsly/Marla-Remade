@@ -36,6 +36,7 @@ import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlin.math.roundToInt
 
@@ -50,7 +51,7 @@ fun SettingsPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>) {
     var showTabWidthDialog by remember { mutableStateOf(false) }
     var showEditorThemeDialog by remember { mutableStateOf(false) }
 
-    AppScaffold(title = stringResource(R.string.settings), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.settings), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             Modifier
                 .padding(padding)

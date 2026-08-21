@@ -20,6 +20,7 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +44,7 @@ fun ThingsApp(
 ) {
     AppScaffold(
         title = stringResource(R.string.hydration),
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

@@ -51,6 +51,7 @@ import com.vayunmathur.education.content.ModuleType
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
@@ -70,6 +71,7 @@ fun ParentPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel) {
     AppScaffold(
         title = stringResource(R.string.parent_settings),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

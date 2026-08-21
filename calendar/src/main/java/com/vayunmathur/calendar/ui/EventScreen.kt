@@ -45,6 +45,7 @@ import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalTime
 import com.vayunmathur.library.ui.DateString
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [CalendarViewModel] to the stateless [EventScreen]. */
 @Composable
@@ -139,7 +140,8 @@ fun EventScreen(state: EventUiState, actions: EventActions) {
                     }
                 }
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             ListItem({
                 Text(event.title, style = MaterialTheme.typography.titleLarge)

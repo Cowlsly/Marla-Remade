@@ -19,6 +19,7 @@ import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.launch
@@ -46,6 +47,7 @@ fun AlarmSettingsPage(backStack: NavBackStack<Route>, ds: DataStoreUtils) {
     DetailScaffold(
         title = stringResource(R.string.alarm_settings),
         onNavigateBack = { backStack.pop() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Text(
             stringResource(R.string.defaults_for_new_alarms),

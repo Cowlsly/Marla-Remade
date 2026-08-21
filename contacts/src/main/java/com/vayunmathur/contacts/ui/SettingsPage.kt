@@ -90,6 +90,7 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                 IconAdd()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             item {
                 Text(

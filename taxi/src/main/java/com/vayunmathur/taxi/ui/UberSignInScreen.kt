@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.network.uber.UberAuth
 import com.vayunmathur.taxi.network.uber.UberAuthResult
@@ -58,7 +59,7 @@ fun UberSignInScreen(onBack: () -> Unit, onUseWebView: () -> Unit) {
         }
     }
 
-    AppScaffold(title = stringResource(R.string.provider_uber), onNavigateBack = onBack) { padding ->
+    AppScaffold(title = stringResource(R.string.provider_uber), onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

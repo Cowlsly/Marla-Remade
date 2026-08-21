@@ -62,6 +62,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [AppStoreViewModel] to the stateless [AppDetailScreen]. */
 @Composable
@@ -101,6 +102,7 @@ fun AppDetailScreen(
         actions = {
             IconButton(onClick = { actions.shareApp(app) }) { IconShare() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

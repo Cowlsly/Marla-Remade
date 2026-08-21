@@ -13,6 +13,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -36,7 +37,8 @@ fun SettingsPage(viewModel: WordMakerViewModel, onBack: () -> Unit) {
             com.vayunmathur.library.ui.BackupButtons(
                 datastoreNames = listOf("settings")
             )
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),

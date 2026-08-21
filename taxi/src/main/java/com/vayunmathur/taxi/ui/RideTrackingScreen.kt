@@ -58,6 +58,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.data.ActiveRide
 import com.vayunmathur.taxi.data.CancelResult
@@ -138,7 +139,7 @@ fun RideTrackingScreen(rideId: String) {
 
     val driverLoc = liveLocation ?: ride?.driverLocation
 
-    AppScaffold(title = stringResource(R.string.tracking_title)) { padding ->
+    AppScaffold(title = stringResource(R.string.tracking_title), scrollBehavior = appBarScrollBehavior()) { padding ->
         Box(Modifier.fillMaxSize().padding(top = padding.calculateTopPadding())) {
             TrackingMap(ride, driverLoc, Modifier.fillMaxSize())
 

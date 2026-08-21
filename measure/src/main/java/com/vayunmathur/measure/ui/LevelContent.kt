@@ -21,6 +21,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.domain.Units
 import com.vayunmathur.measure.platform.LevelActions
 import com.vayunmathur.measure.platform.LevelUiState
@@ -39,6 +40,7 @@ fun LevelContent(
         title = "Level",
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),

@@ -38,6 +38,7 @@ import com.vayunmathur.library.ui.IconHistory
 import com.vayunmathur.library.ui.IconHome
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconWork
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.round
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.SavedPlace
@@ -175,6 +176,7 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
             )
         },
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
             CategoryChips(

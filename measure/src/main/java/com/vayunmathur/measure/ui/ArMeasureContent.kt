@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.IconUndo
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.data.model.TrackingQuality
 import com.vayunmathur.measure.domain.MeasureNative
 import com.vayunmathur.measure.domain.Units
@@ -48,6 +49,7 @@ fun ArMeasureContent(
         title = "Measure",
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
 

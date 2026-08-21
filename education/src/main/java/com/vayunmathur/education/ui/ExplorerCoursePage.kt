@@ -38,6 +38,7 @@ import com.vayunmathur.education.content.CourseUnit
 import com.vayunmathur.education.content.ModuleType
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 
@@ -53,6 +54,7 @@ fun ExplorerCoursePage(backStack: NavBackStack<Route>, viewModel: EducationViewM
     AppScaffold(
         title = course?.title ?: stringResource(R.string.topic),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (course == null) {
             MissingContent(padding, stringResource(R.string.this_topic_is_unavailable))

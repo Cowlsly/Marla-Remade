@@ -6,6 +6,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.share.platform.ShareViewModel
@@ -29,7 +30,7 @@ fun Navigation(viewModel: ShareViewModel) {
  */
 @Composable
 private fun ShareApp(viewModel: ShareViewModel) {
-    AppScaffold(title = stringResource(R.string.app_name)) { padding ->
+    AppScaffold(title = stringResource(R.string.app_name), scrollBehavior = appBarScrollBehavior()) { padding ->
         ShareSendScreen(
             viewModel = viewModel,
             modifier = Modifier.fillMaxSize().padding(padding),

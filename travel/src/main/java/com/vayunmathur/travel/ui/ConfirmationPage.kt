@@ -24,6 +24,7 @@ import com.vayunmathur.library.ui.IconCheckCircle
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.util.TravelViewModel
@@ -48,6 +49,7 @@ fun ConfirmationPage(
 
     DetailScaffold(
         title = if (trip?.awaitingPayment == true) stringResource(R.string.on_hold) else stringResource(R.string.booking_confirmed),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Column(
             Modifier.fillMaxWidth(),

@@ -37,6 +37,7 @@ import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [AppStoreViewModel] to the stateless [UpdatesScreen]. */
 @Composable
@@ -65,6 +66,7 @@ fun UpdatesScreen(
                 CircularProgressIndicator(Modifier.size(18.dp).padding(end = 4.dp))
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Row(

@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.DEFAULT_PAGE_OPTIONS
 import com.vayunmathur.youpipe.R
@@ -46,6 +47,7 @@ fun GeneralSettingsPage(
     AppScaffold(
         title = stringResource(R.string.settings_general_content),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

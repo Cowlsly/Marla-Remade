@@ -75,6 +75,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.rememberDrawerState
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.launch
 
 /**
@@ -212,6 +213,7 @@ fun EditorScreen(
                 }) { IconSearch() }
                 IconButton(onClick = onOpenSettings) { IconSettings() }
             },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 val tab = state.currentTab

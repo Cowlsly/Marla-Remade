@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import com.vayunmathur.communicate.data.whatsapp.backup.BackupImporter
 import com.vayunmathur.library.ui.DetailScaffold
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -49,7 +50,7 @@ fun WhatsAppBackupImportScreen(onBack: () -> Unit) {
         }
     }
 
-    DetailScaffold(title = "Import WhatsApp backup") {
+    DetailScaffold(title = "Import WhatsApp backup", scrollBehavior = appBarScrollBehavior()) {
         Text("Select a msgstore.db.crypt15 file and enter its 64-character hex backup key.")
 
         OutlinedButton(

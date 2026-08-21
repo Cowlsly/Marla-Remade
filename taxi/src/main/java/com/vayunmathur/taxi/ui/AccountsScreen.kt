@@ -37,6 +37,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.data.AddCardResult
 import com.vayunmathur.taxi.data.ChargeAccount
@@ -97,7 +98,7 @@ fun AccountsScreen(onConnectLyft: () -> Unit) {
         busyId = null
     }
 
-    AppScaffold(title = stringResource(R.string.nav_settings)) { padding ->
+    AppScaffold(title = stringResource(R.string.nav_settings), scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

@@ -74,6 +74,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.contentColorOn
 import com.vayunmathur.library.ui.rememberModalBottomSheetState
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.AppMessages
 
 @Composable
@@ -122,6 +123,7 @@ fun MessageThreadScreen(
     AppScaffold(
         title = messages.firstOrNull()?.subject ?: stringResource(R.string.conversation),
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(modifier = Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(messages, key = { "${it.accountEmail}|${it.folderName}|${it.id}" }) { msg ->

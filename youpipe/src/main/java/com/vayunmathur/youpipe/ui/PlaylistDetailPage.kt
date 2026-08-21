@@ -39,6 +39,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
@@ -144,6 +145,7 @@ fun PlaylistDetailPage(
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (localData.isEmpty()) {
             Box(Modifier.fillMaxSize().padding(paddingValues), contentAlignment = Alignment.Center) {

@@ -24,6 +24,7 @@ import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Spacing
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /**
  * Launcher settings, and the only route to the wallpaper chooser and the widget picker.
@@ -38,7 +39,7 @@ fun SettingsContent(
     onBack: () -> Unit = {},
     onOpenWidgetPicker: () -> Unit = {},
 ) {
-    AppScaffold(title = "Home screen", onNavigateBack = onBack) { padding ->
+    AppScaffold(title = "Home screen", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()

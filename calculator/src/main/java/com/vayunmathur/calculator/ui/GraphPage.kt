@@ -64,6 +64,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.ToggleButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -91,6 +92,7 @@ fun GraphScreen(state: GraphUiState, actions: GraphActions) {
                 modifier = Modifier.padding(end = 12.dp),
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             GraphCanvas(state, actions, Modifier.fillMaxWidth().weight(1f))

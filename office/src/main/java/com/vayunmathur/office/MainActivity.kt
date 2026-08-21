@@ -134,6 +134,8 @@ import com.vayunmathur.office.ui.*
 import com.vayunmathur.office.util.OfficeViewModel
 import kotlinx.coroutines.launch
 
+import com.vayunmathur.library.ui.appBarScrollBehavior
+
 // Public so `src/screenshotTest` can wrap a document exactly the way DocumentScreen does;
 // without it the listing images would show the paper in the wrong scheme.
 @Composable
@@ -412,7 +414,7 @@ fun HomeScreen(
     onNewSpreadsheet: () -> Unit = {},
     onNewPresentation: () -> Unit = {},
 ) {
-    AppScaffold(title = stringResource(R.string.app_name)) { pad ->
+    AppScaffold(title = stringResource(R.string.app_name), scrollBehavior = appBarScrollBehavior()) { pad ->
         Column(Modifier.fillMaxSize().padding(pad).background(MaterialTheme.colorScheme.background).padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Spacer(Modifier.height(24.dp))
             Text(stringResource(R.string.open_document_format_viewer_editor), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -651,7 +653,8 @@ fun OnlineTab(viewModel: OfficeViewModel, onOpenDoc: (com.vayunmathur.office.uti
             IconButton(onClick = { viewModel.refreshOnline() }) {
                 IconRefresh()
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { pad ->
         Column(Modifier.fillMaxSize().padding(pad)) {
             OfflineBanner(online)
@@ -1000,6 +1003,7 @@ fun DocumentScreen(document: OdfDocument, viewModel: OfficeViewModel, activity: 
                     OfficeBottomBar(document, formatTarget, caps, viewModel, actions, activeTableBlock, activeTableRow, activeTableCol)
                 }
             },
+            scrollBehavior = appBarScrollBehavior(),
         ) { paddingValues ->
             Column(Modifier.fillMaxSize().padding(paddingValues)) {
                     // Office-style menu bar

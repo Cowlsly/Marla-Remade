@@ -22,6 +22,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconDelete
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.Route
 import com.vayunmathur.passwords.platform.PasswordsViewModel
@@ -54,6 +55,7 @@ fun PasskeyPage(
                 IconDelete()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         DetailCard(stringResource(R.string.passkey_rp_name), passkey.rpName)
         DetailCard(stringResource(R.string.passkey_rp_id), passkey.rpId)

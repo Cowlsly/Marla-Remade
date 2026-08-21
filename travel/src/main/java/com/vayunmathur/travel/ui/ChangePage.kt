@@ -35,6 +35,7 @@ import com.vayunmathur.library.ui.OutlinedCard
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.ChangeOfferDto
@@ -63,6 +64,7 @@ fun ChangePage(
     AppScaffold(
         title = stringResource(R.string.change_flights),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val order = detail.order
         Column(

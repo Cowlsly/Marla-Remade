@@ -103,6 +103,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
@@ -394,7 +395,8 @@ fun ChessGameScreen(
             IconButton(onClick = onOpenGameCenter) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         BoxWithConstraints(
             Modifier
@@ -766,6 +768,7 @@ fun LearnStageScreen(
     AppScaffold(
         title = stage?.title ?: stringResource(R.string.tab_learn),
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { pad ->
         if (stage == null || level == null) {
             Box(Modifier.fillMaxSize().padding(pad), Alignment.Center) { CircularProgressIndicator() }

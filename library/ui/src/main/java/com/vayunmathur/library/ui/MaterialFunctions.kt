@@ -121,6 +121,23 @@ fun rememberSwipeToDismissBoxState(
     initialValue = initialValue, confirmValueChange = confirmValueChange,
 )
 
+// --- App bar scroll behavior ---
+/**
+ * The scroll behavior an [AppBarSize] needs, so a screen cannot pair a size with the wrong one.
+ *
+ * [AppBarSize.Small] gets `pinned`, which does not move the bar - it only lets the bar's container
+ * colour react to scroll offset. The two flexible sizes get `exitUntilCollapsed`, which is what
+ * makes their second row actually collapse; without it they would render permanently expanded and
+ * just eat vertical space.
+ */
+@Composable
+fun appBarScrollBehavior(size: AppBarSize = AppBarSize.Small): TopAppBarScrollBehavior =
+    when (size) {
+        AppBarSize.Small -> TopAppBarDefaults.pinnedScrollBehavior()
+        AppBarSize.MediumFlexible, AppBarSize.LargeFlexible ->
+            TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
+    }
+
 // --- Density ---
 /**
  * Relaxes Material's minimum touch target, which it enforces by padding a control out to 48dp

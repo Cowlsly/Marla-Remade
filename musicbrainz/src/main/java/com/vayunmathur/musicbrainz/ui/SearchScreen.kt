@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.PrimaryTabRow
 import com.vayunmathur.library.ui.SearchBarInputField
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -67,6 +68,7 @@ fun SearchScreen(
             IconButton({ backStack.add(Route.Downloads) }) { IconDownload() }
             IconButton({ backStack.add(Route.Settings) }) { IconSettings() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             // The input field rather than CommonSearchBar: that one filters a local list

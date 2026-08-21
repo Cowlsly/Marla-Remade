@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.IconPlay
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.music.ui.components.PlayShuffleRow
 import com.vayunmathur.music.ui.components.PlayingBottomBar
 import com.vayunmathur.music.ui.components.TrackListItem
@@ -70,6 +71,7 @@ fun ArtistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicView
         title = {},
         onNavigateBack = { backStack.pop() },
         bottomBar = { PlayingBottomBar(musicViewModel, backStack) },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             // Header: Album Art
             item {

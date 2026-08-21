@@ -28,6 +28,7 @@ fun SettingsScreen(viewModel: EmailViewModel, onBack: () -> Unit) {
     DetailScaffold(
         title = stringResource(UiR.string.settings),
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         val settings = remember(context) { com.vayunmathur.email.data.EmailSettings.get(context) }
         val loadRemoteImages by settings.loadRemoteImages.collectAsStateWithLifecycle()

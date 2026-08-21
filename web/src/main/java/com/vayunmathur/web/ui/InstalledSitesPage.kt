@@ -44,6 +44,8 @@ import com.vayunmathur.web.platform.BrowserUtils
 import com.vayunmathur.web.platform.PwaHelper
 import com.vayunmathur.web.platform.WebViewModel
 
+import com.vayunmathur.library.ui.appBarScrollBehavior
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun InstalledSitesPage(
@@ -56,6 +58,7 @@ fun InstalledSitesPage(
     AppScaffold(
         title = stringResource(R.string.installed_apps),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (installed.isEmpty()) {
             Box(

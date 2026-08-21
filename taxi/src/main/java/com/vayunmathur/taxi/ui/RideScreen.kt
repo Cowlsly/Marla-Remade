@@ -62,6 +62,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.data.BookingTrip
 import com.vayunmathur.taxi.data.Place
@@ -235,7 +236,7 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
         quote()
     }
 
-    AppScaffold(title = stringResource(R.string.nav_ride)) { padding ->
+    AppScaffold(title = stringResource(R.string.nav_ride), scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Box(
                 Modifier

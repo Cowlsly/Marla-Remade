@@ -15,6 +15,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalLayoutDirection
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -44,6 +45,7 @@ fun LazyListScaffold(
     topBar: @Composable () -> Unit = {},
     title: String = "",
     actions: (@Composable RowScope.() -> Unit)? = null,
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     snackbarHost: @Composable () -> Unit = {},
     floatingActionButton: @Composable () -> Unit = {},
@@ -54,12 +56,12 @@ fun LazyListScaffold(
     containerColor: Color = MaterialTheme.colorScheme.background,
     content: LazyListScope.() -> Unit,
 ) = Scaffold(
-    modifier,
+    modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
     // A caller can either pass a fully custom [topBar], or - the common case -
     // let the scaffold build a plain top bar from [title]/[actions]. When neither
     // a title nor actions are given, no bar is drawn (the historical default).
     if (actions != null || title.isNotEmpty()) {
-        { TopAppBar(title = { Text(title) }, actions = actions ?: {}) }
+        { TopAppBar(title = { Text(title) }, actions = actions ?: {}, scrollBehavior = scrollBehavior) }
     } else topBar,
     bottomBar,
     snackbarHost,

@@ -33,6 +33,7 @@ import com.vayunmathur.education.util.HomeUiState
 import com.vayunmathur.library.ui.IconChevronRight
 import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 
@@ -109,6 +110,7 @@ fun ScholarHomeScreen(state: HomeUiState, actions: HomeActions) {
                 IconSettings()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         item {
             Row(

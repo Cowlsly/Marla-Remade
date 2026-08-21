@@ -43,7 +43,9 @@ fun DetailScaffold(
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) = AppScaffold(
@@ -53,7 +55,9 @@ fun DetailScaffold(
     onClose = onClose,
     navigationIcon = navigationIcon,
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
 ) { pad ->
     DetailColumn(pad, content)
@@ -68,7 +72,9 @@ fun DetailScaffold(
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) = AppScaffold(
@@ -78,7 +84,9 @@ fun DetailScaffold(
     onClose = onClose,
     navigationIcon = navigationIcon,
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
 ) { pad ->
     DetailColumn(pad, content)
@@ -93,7 +101,9 @@ fun <T : NavKey> DetailScaffold(
     onClose: (() -> Unit)? = null,
     navigationIcon: (@Composable () -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: @Composable ColumnScope.() -> Unit,
 ) = DetailScaffold(
@@ -103,7 +113,9 @@ fun <T : NavKey> DetailScaffold(
     onClose = onClose,
     navigationIcon = navigationIcon,
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
     content = content,
 )
@@ -120,7 +132,9 @@ fun DetailLazyColumn(
     modifier: Modifier = Modifier,
     onNavigateBack: (() -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: LazyListScope.() -> Unit,
 ) = AppScaffold(
@@ -128,7 +142,9 @@ fun DetailLazyColumn(
     modifier = modifier,
     onNavigateBack = onNavigateBack,
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
 ) { pad ->
     DetailList(pad, content)
@@ -141,7 +157,9 @@ fun DetailLazyColumn(
     modifier: Modifier = Modifier,
     onNavigateBack: (() -> Unit)? = null,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: LazyListScope.() -> Unit,
 ) = AppScaffold(
@@ -149,7 +167,9 @@ fun DetailLazyColumn(
     modifier = modifier,
     onNavigateBack = onNavigateBack,
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
 ) { pad ->
     DetailList(pad, content)
@@ -162,7 +182,9 @@ fun <T : NavKey> DetailLazyColumn(
     backStack: NavBackStack<T>,
     modifier: Modifier = Modifier,
     alignment: AppBarAlignment = AppBarAlignment.Start,
+    size: AppBarSize = AppBarSize.Small,
     actions: @Composable RowScope.() -> Unit = {},
+    scrollBehavior: TopAppBarScrollBehavior,
     bottomBar: @Composable () -> Unit = {},
     content: LazyListScope.() -> Unit,
 ) = DetailLazyColumn(
@@ -170,7 +192,9 @@ fun <T : NavKey> DetailLazyColumn(
     modifier = modifier,
     onNavigateBack = { backStack.pop() },
     alignment = alignment,
+    size = size,
     actions = actions,
+    scrollBehavior = scrollBehavior,
     bottomBar = bottomBar,
     content = content,
 )

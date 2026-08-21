@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.IconStop
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 
 /**
@@ -52,6 +53,7 @@ fun TerminalPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>) {
             IconButton(onClick = { viewModel.terminalInterrupt() }, enabled = hasFolder) { IconStop() }
             IconButton(onClick = { viewModel.clearTerminal() }) { IconDelete() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             if (!hasFolder) {

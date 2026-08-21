@@ -95,6 +95,7 @@ import com.vayunmathur.library.ui.IconStarBorder
 import com.vayunmathur.library.ui.IconVideoCamera
 import com.vayunmathur.library.ui.OverflowMenu
 import com.vayunmathur.library.ui.rememberMessenger
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -214,6 +215,7 @@ fun ContactDetailsScreen(
                 IconDelete()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
 
             item {

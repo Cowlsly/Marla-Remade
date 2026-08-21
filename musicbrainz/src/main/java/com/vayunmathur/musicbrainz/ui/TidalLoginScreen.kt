@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -69,7 +70,7 @@ fun TidalLoginScreen(
     onRetry: () -> Unit,
 ) {
     val context = LocalContext.current
-    AppScaffold(title = stringResource(R.string.tidal_sign_in), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.tidal_sign_in), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()

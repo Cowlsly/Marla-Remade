@@ -37,6 +37,7 @@ import com.vayunmathur.library.ui.HtmlText
 import com.vayunmathur.library.ui.IconForward
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.contentColorOn
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -85,6 +86,7 @@ fun EmlViewerScreen(
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         when {
             loading -> {

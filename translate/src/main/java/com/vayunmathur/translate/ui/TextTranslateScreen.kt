@@ -51,6 +51,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.ui.rememberPermissionRequest
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.translate.domain.Languages
 import com.vayunmathur.translate.platform.AndroidSpeechRecognizer
 import com.vayunmathur.translate.platform.MicState
@@ -232,6 +233,7 @@ fun TextTranslateScreen(state: TextTranslateUiState, actions: TextTranslateActio
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

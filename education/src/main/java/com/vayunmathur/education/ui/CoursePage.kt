@@ -17,6 +17,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -83,6 +84,7 @@ fun ScholarCourseScreen(state: CourseUiState, actions: CourseActions) {
         AppScaffold(
             title = state.title,
             onNavigateBack = { actions.navigateUp() },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             MissingContent(padding, stringResource(R.string.this_course_is_unavailable))
         }
@@ -91,6 +93,7 @@ fun ScholarCourseScreen(state: CourseUiState, actions: CourseActions) {
     DetailLazyColumn(
         title = state.title,
         onNavigateBack = { actions.navigateUp() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (state.description.isNotBlank()) {
             item {

@@ -17,6 +17,7 @@ import com.vayunmathur.library.ui.SettingsDivider
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.platform.DiagnosticsActions
 import com.vayunmathur.measure.platform.DiagnosticsUiState
 
@@ -26,7 +27,7 @@ fun DiagnosticsContent(
     actions: DiagnosticsActions,
     onBack: () -> Unit = {},
 ) {
-    AppScaffold(title = "Diagnostics", onNavigateBack = onBack) { padding ->
+    AppScaffold(title = "Diagnostics", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding)
                 .verticalScroll(rememberScrollState())

@@ -61,6 +61,7 @@ import com.vayunmathur.pdf.util.PdfViewModel
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.longPressDraggableHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -260,7 +261,8 @@ fun CapturePdfScreen(
                         }
                     }
                 }
-            }
+            },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             Box(Modifier.padding(padding).fillMaxSize()) {
                 val sel = selectedIndex

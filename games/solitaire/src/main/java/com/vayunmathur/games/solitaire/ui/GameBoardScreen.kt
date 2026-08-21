@@ -23,6 +23,7 @@ import com.vayunmathur.games.solitaire.data.GameMode
 import com.vayunmathur.games.solitaire.data.SolitaireUiState
 import com.vayunmathur.games.solitaire.platform.SolitaireActions
 import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 private val SolitaireBoardMaxWidth = 640.dp
 
@@ -45,7 +46,8 @@ fun GameBoardScreen(state: SolitaireUiState, mode: GameMode, actions: SolitaireA
         actions = {
             Text(timeText, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
             Text("${stringResource(R.string.moves)}: $moveCount", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Box(Modifier.fillMaxSize()) {
             Column(Modifier.fillMaxSize().padding(innerPadding).padding(horizontal = 8.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(8.dp)) {

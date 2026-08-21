@@ -54,6 +54,7 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.TextField
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.graphics.Color
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -150,6 +151,7 @@ class DocumentPickerActivity : ComponentActivity() {
             title = titleFor(mode),
             modifier = Modifier.imePadding(),
             onNavigateBack = { navUp() },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             Column(Modifier.fillMaxSize().padding(padding)) {
                 Text(

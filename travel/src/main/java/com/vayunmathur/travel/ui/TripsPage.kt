@@ -28,6 +28,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.data.BookedTrip
@@ -49,6 +50,7 @@ fun TripsPage(backStack: NavBackStack<Route>, viewModel: TravelViewModel) {
     AppScaffold(
         title = stringResource(R.string.my_trips),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),

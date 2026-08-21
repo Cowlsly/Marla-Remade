@@ -13,6 +13,7 @@ import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.data.model.UnitSystem
 import com.vayunmathur.measure.platform.SettingsActions
 import com.vayunmathur.measure.platform.SettingsUiState
@@ -25,7 +26,7 @@ fun SettingsContent(
     onOpenDiagnostics: () -> Unit = {},
     onOpenSaved: () -> Unit = {},
 ) {
-    AppScaffold(title = "Settings", onNavigateBack = onBack) { padding ->
+    AppScaffold(title = "Settings", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             // The list is taller than the dialog on most phones; without this the
             // advanced section at the bottom is simply unreachable.

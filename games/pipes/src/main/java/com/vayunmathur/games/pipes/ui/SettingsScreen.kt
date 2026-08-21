@@ -20,6 +20,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.R as UiR
 
@@ -27,7 +28,7 @@ import com.vayunmathur.library.ui.R as UiR
 @Composable
 fun SettingsScreen(backStack: NavBackStack<Route>, viewModel: PipesViewModel) {
     val colorblind by viewModel.colorblind.collectAsState()
-    DetailScaffold(title = stringResource(UiR.string.settings), backStack = backStack) {
+    DetailScaffold(title = stringResource(UiR.string.settings), backStack = backStack, scrollBehavior = appBarScrollBehavior()) {
         Row(Modifier.fillMaxWidth().padding(vertical = 8.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) { Text(stringResource(R.string.colorblind_mode), style = MaterialTheme.typography.titleMedium); Text(stringResource(R.string.colorblind_mode_desc), style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }
             Switch(checked = colorblind, onCheckedChange = { viewModel.setColorblind(it) })

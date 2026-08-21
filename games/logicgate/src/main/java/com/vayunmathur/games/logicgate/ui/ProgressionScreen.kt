@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.ui.Text as LibText
 
 private sealed class TimelineItem {
@@ -76,7 +77,8 @@ fun ProgressionScreen(
             IconButton(onClick = onOpenGameCenter) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), contentDescription = stringResource(R.string.cd_achievements))
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         BoxWithConstraints(
             modifier = Modifier.fillMaxSize().padding(paddingValues).background(MaterialTheme.colorScheme.background)

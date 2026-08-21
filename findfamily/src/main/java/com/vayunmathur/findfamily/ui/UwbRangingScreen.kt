@@ -40,6 +40,7 @@ import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.findfamily.util.FindFamilyViewModel
 import com.vayunmathur.findfamily.util.UwbSessionManager
 import com.vayunmathur.library.ui.IconNavigationArrow
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 
 /**
@@ -129,6 +130,7 @@ fun UwbRangingContent(
     AppScaffold(
         title = peerName,
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

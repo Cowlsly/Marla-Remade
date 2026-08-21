@@ -117,6 +117,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.IconUndo
 import com.vayunmathur.library.ui.IconVisible
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.ink.InkCanvasView
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ink.translate
@@ -715,6 +716,7 @@ fun EditPhotoPage(
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         val layoutDirection = LocalLayoutDirection.current
         Column(

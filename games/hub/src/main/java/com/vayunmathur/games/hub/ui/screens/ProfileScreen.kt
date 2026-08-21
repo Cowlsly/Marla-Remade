@@ -38,6 +38,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 
 private val avatarOptions = listOf(
@@ -73,7 +74,8 @@ fun ProfileScreen(
                 selectedAvatar = state.avatarSymbol
                 showEditDialog = true
             }) { IconPerson() }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             item {

@@ -11,6 +11,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.SettingsRow
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.Route
@@ -23,6 +24,7 @@ fun SettingsPage(backStack: NavBackStack<Route>, vm: VpnViewModel) {
     AppScaffold(
         title = stringResource(R.string.settings_about),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { pad ->
         Column(
             Modifier.fillMaxSize().padding(pad).verticalScroll(rememberScrollState()),

@@ -23,6 +23,7 @@ import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.OrderDetailDto
@@ -88,6 +89,7 @@ fun OrderDetailScreen(state: OrderDetailUiState, actions: OrderDetailActions) {
     DetailScaffold(
         title = stringResource(R.string.order),
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         val order = state.order
         if (order == null) {

@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.network.lyft.LyftAuth
 import com.vayunmathur.taxi.network.lyft.LyftAuthResult
@@ -63,7 +64,7 @@ fun LyftSignInScreen(onBack: () -> Unit) {
         }
     }
 
-    AppScaffold(title = stringResource(R.string.provider_lyft), onNavigateBack = onBack) { padding ->
+    AppScaffold(title = stringResource(R.string.provider_lyft), onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),

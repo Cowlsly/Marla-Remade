@@ -26,6 +26,7 @@ import com.vayunmathur.education.content.VideoRef
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.IconPlay
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.education.R
@@ -39,6 +40,7 @@ fun LessonPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, le
     AppScaffold(
         title = lesson?.title ?: stringResource(R.string.lesson),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (lesson == null) {
             MissingContent(padding, stringResource(R.string.this_lesson_is_unavailable))

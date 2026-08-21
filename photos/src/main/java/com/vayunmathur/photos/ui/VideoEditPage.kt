@@ -75,6 +75,7 @@ import com.vayunmathur.library.ui.RangeSlider
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.photos.R
 import com.vayunmathur.photos.data.VideoEditState
 import com.vayunmathur.photos.data.VideoFilterPreset
@@ -126,6 +127,7 @@ fun VideoEditPage(vm: VideoEditViewModel, id: Long, uri: String?) {
         actions = {
             IconButton(onClick = { showSaveDialog = true }, enabled = !exporting) { IconSave() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().background(Color.Black).padding(padding),

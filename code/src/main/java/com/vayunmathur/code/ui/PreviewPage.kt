@@ -20,6 +20,7 @@ import com.vayunmathur.code.util.markdownToHtml
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 
 /**
@@ -28,7 +29,7 @@ import com.vayunmathur.library.util.NavBackStack
  */
 @Composable
 fun PreviewPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>) {
-    AppScaffold(title = stringResource(R.string.preview), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.preview), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         val tab = viewModel.currentTab
         if (tab == null) {
             Text(

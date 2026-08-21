@@ -35,6 +35,7 @@ import com.vayunmathur.games.solitaire.ui.dialogs.GameConfigDialog
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -55,7 +56,8 @@ fun HomeScreen(backStack: NavBackStack<Route>, viewModel: SolitaireViewModel) {
             IconButton(onClick = { backStack.add(Route.GameCenter) }) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(
             Modifier.fillMaxSize().padding(paddingValues).padding(16.dp),

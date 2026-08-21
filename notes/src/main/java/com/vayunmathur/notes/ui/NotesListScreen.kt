@@ -45,6 +45,7 @@ import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.ReorderableItem
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.notes.R
 import com.vayunmathur.notes.data.Note
 import com.vayunmathur.notes.platform.NotesListActions
@@ -199,6 +200,7 @@ fun NotesListScreen(
             }
         },
         state = listState,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             items(localData, key = { it.id }) { note ->
                 val dragging = reorderState.draggingKey == note.id

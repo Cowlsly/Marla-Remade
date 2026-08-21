@@ -39,6 +39,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import com.vayunmathur.passwords.R
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.BackupButtons
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.passwords.sync.KdbxPasswordHelper
 import com.vayunmathur.passwords.sync.KdbxSyncScheduler
 import com.vayunmathur.passwords.sync.KdbxSyncSettings
@@ -77,6 +78,7 @@ fun SettingsPage(
                 format = passwordsViewModel.buildBackupFormat(),
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             Text(stringResource(R.string.import_csv_warning))
             Spacer(Modifier.height(16.dp))

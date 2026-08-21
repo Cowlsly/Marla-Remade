@@ -14,6 +14,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.network.uber.UberWebView
 
@@ -29,7 +30,7 @@ import com.vayunmathur.taxi.network.uber.UberWebView
 fun UberConnectScreen(onBack: () -> Unit, onTryNative: () -> Unit = {}) {
     var captured by remember { mutableIntStateOf(0) }
 
-    AppScaffold(title = stringResource(R.string.provider_uber), onNavigateBack = onBack) { padding ->
+    AppScaffold(title = stringResource(R.string.provider_uber), onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             if (captured > 0) {
                 Text(

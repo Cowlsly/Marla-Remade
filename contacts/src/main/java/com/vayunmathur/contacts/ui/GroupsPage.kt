@@ -84,6 +84,7 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
         },
         horizontalPadding = 8.dp,
         verticalArrangement = Arrangement.spacedBy(4.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             state.groups.forEach { (group, contactsInGroup) ->
                 val isExpanded = group.id in expandedGroups

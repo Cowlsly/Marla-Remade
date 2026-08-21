@@ -33,6 +33,7 @@ import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.SnackbarHost
 import com.vayunmathur.library.ui.SnackbarHostState
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.data.VpnConfig
 
@@ -61,6 +62,7 @@ fun ConfigListContent(
         },
         horizontalPadding = 16.dp,
         verticalArrangement = Arrangement.spacedBy(12.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (configs.isEmpty()) {
             item {

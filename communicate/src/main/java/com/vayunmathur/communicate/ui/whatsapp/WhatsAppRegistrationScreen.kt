@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.communicate.data.whatsapp.WhatsAppLineSession
 import com.vayunmathur.communicate.data.whatsapp.registration.RegistrationHttpClient
 import com.vayunmathur.library.ui.DetailScaffold
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -71,7 +72,7 @@ fun WhatsAppRegistrationScreen(
         }
     }
 
-    DetailScaffold(title = "Register WhatsApp") {
+    DetailScaffold(title = "Register WhatsApp", scrollBehavior = appBarScrollBehavior()) {
         Text(
             "Registers this number as the PRIMARY WhatsApp device. This will log WhatsApp out " +
                 "on the number's real phone — use a test number.",

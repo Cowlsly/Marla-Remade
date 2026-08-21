@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.R
 import com.vayunmathur.web.Route
@@ -186,7 +187,7 @@ internal fun ShieldsPage(
     val overrides by viewModel.shieldSettings.collectAsStateWithLifecycle()
     val global = viewModel.shields
 
-    AppScaffold(title = stringResource(R.string.shields), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.shields), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         LazyColumn(Modifier.padding(padding)) {
             item {
                 Text(

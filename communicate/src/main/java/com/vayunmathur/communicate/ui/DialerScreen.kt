@@ -59,6 +59,7 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.collectAsState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -109,6 +110,7 @@ fun DialerScreen() {
                 )
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         DefaultDialerGate(modifier = Modifier.padding(padding)) { roleRevision ->
             Column(

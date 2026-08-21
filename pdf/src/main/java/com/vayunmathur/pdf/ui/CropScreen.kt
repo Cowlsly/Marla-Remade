@@ -49,6 +49,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.ui.IconSave
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.pdf.R
 import com.vayunmathur.pdf.model.Quadrilateral
 import com.vayunmathur.pdf.util.AutoFrameDetector
@@ -121,6 +122,7 @@ fun CropScreen(
                 Text(stringResource(R.string.auto_detect))
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
         BoxWithConstraints(

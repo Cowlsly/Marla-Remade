@@ -21,6 +21,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -102,6 +103,7 @@ fun K2QuizScreen(state: QuizUiState, actions: QuizActions) {
     AppScaffold(
         title = "",
         onNavigateBack = { actions.navigateUp() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (questions.isEmpty()) {
             MissingContent(padding, stringResource(R.string.let_s_go_back))

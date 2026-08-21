@@ -27,6 +27,7 @@ import com.vayunmathur.education.Route
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.education.util.LocalNarrator
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 
@@ -43,6 +44,7 @@ fun K2LessonPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, 
     AppScaffold(
         title = lesson?.title ?: stringResource(R.string.lesson),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (lesson == null) {
             MissingContent(padding, stringResource(R.string.let_s_go_back))

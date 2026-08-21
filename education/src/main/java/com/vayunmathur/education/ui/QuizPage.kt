@@ -67,6 +67,7 @@ import com.vayunmathur.education.util.QuizActions
 import com.vayunmathur.education.util.QuizUiState
 import com.vayunmathur.library.ui.IconKeyboardArrowDown
 import com.vayunmathur.library.ui.IconKeyboardArrowUp
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.education.R
@@ -130,6 +131,7 @@ fun QuizScreen(
         AppScaffold(
             title = state.title,
             onNavigateBack = { actions.navigateUp() },
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             MissingContent(padding, stringResource(R.string.this_exercise_has_no_questions_yet))
         }
@@ -142,6 +144,7 @@ fun QuizScreen(
     DetailScaffold(
         title = state.title,
         onNavigateBack = { actions.navigateUp() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         LinearProgressIndicator(
             progress = { (index + 1f) / questions.size },

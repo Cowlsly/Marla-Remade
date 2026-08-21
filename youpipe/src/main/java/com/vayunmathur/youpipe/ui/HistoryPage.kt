@@ -18,6 +18,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.vayunmathur.library.ui.IconDelete
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.util.YouPipeViewModel
@@ -47,6 +48,7 @@ fun HistoryPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewMod
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         items(history, key = { it.id }) { historyItem ->
                 val isSelected = historyItem.id in selectedIds

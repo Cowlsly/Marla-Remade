@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.SheetValue
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.rememberFreeHeightSheetState
 import com.vayunmathur.library.ui.rememberMessenger
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.SpecificFeature
@@ -254,6 +255,7 @@ fun MapPage(
             actions = {
                 IconButton({ backStack.add(Route.SettingsPage) }) { IconSettings() }
             },
+            scrollBehavior = appBarScrollBehavior(),
         ) { innerPadding ->
             Box(Modifier.padding(innerPadding).fillMaxSize()) {
                 MapSurface(

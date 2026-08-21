@@ -33,6 +33,7 @@ import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.platform.WebViewModel
@@ -53,6 +54,7 @@ fun DownloadsPage(
                 IconButton(onClick = { viewModel.clearAllDownloads() }) { IconDelete() }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (downloads.isEmpty()) {
             EmptyState(

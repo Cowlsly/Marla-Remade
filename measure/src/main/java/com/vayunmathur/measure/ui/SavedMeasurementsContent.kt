@@ -16,6 +16,7 @@ import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SettingsRow
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.data.model.MeasurementKind
 import com.vayunmathur.measure.data.model.SavedMeasurement
 import com.vayunmathur.measure.data.model.UnitSystem
@@ -29,7 +30,7 @@ fun SavedMeasurementsContent(
     actions: SavedActions,
     onBack: () -> Unit = {},
 ) {
-    AppScaffold(title = "Saved", onNavigateBack = onBack) { padding ->
+    AppScaffold(title = "Saved", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { padding ->
         if (state.measurements.isEmpty()) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(padding).padding(32.dp),

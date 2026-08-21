@@ -27,6 +27,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 
 enum class GameSort { LAST_PLAYED, MOST_PLAYED, NAME, COMPLETION }
@@ -77,7 +78,8 @@ fun GamesListScreen(
                 DropdownMenuItem(text = { Text(stringResource(R.string.sort_name)) }, onClick = { sort = GameSort.NAME; showSortMenu = false })
                 DropdownMenuItem(text = { Text(stringResource(R.string.sort_completion)) }, onClick = { sort = GameSort.COMPLETION; showSortMenu = false })
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(modifier = modifier.fillMaxSize().padding(padding), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             if (filteredSorted.isEmpty()) {

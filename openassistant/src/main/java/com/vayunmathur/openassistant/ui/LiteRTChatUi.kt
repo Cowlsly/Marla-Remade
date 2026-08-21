@@ -251,6 +251,7 @@ fun ChatScreen(
                 onRemoveImage = { actions.removeImage(it) }
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         SelectionContainer {
             LazyColumn(state = listState, modifier = Modifier.padding(padding).fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {

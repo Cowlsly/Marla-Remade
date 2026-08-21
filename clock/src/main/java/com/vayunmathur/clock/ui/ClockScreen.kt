@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.toLocalDateTime
 
@@ -40,7 +41,7 @@ fun ClockScreen(backStack: NavBackStack<Route>, state: ClockUiState) {
         FloatingActionButton({
             backStack.add(Route.SelectTimeZonesDialog)
         }) { IconAdd() }
-    }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+    }, verticalArrangement = Arrangement.spacedBy(4.dp), scrollBehavior = appBarScrollBehavior()) {
         item {
             val is24h = state.is24Hour
             Row(Modifier.fillParentMaxWidth(), horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.Bottom) {

@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.reorderDragHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
@@ -108,6 +109,7 @@ fun SavedPage(backStack: NavBackStack<Route>, youPipeViewModel: YouPipeViewModel
                 IconAdd()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             // Pinned: Downloads (the existing downloads UI, not a real playlist).
             item(key = "pinned-downloads") {

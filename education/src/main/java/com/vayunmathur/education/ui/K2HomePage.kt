@@ -31,6 +31,7 @@ import com.vayunmathur.education.content.Lesson
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.education.util.LocalNarrator
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 
@@ -70,6 +71,7 @@ fun K2HomePage(backStack: NavBackStack<Route>, viewModel: EducationViewModel) {
             }
             IconButton(onClick = { backStack.add(Route.ParentGate) }) { IconSettings() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

@@ -62,6 +62,7 @@ fun AddAccountScreen(
             }
             if (backTarget != null) { IconNavigation(backTarget) }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Box(Modifier.padding(padding).fillMaxSize()) {
             if (selectedProvider == null) {

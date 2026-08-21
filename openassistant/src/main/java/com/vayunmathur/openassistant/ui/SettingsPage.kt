@@ -90,6 +90,7 @@ fun SettingsScreen(
         title = stringResource(R.string.settings_title),
         onNavigateBack = { actions.back() },
         actions = backupButtons,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             item {
                 Text(

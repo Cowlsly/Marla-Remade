@@ -69,6 +69,7 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.library.ui.rememberSelectionState
 import com.vayunmathur.library.ui.reorderDragHandle
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.parseMarkdown
 
@@ -285,6 +286,7 @@ fun NoteListScreen(
                 FloatingActionButton(onClick = { actions.addNote() }) { IconAdd() }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(Modifier.fillMaxSize().padding(paddingValues)) {
             if (state.dueCount > 0 && !selection.isActive) {

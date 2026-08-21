@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconUnarchive
 import com.vayunmathur.library.ui.BackupButtons
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.room.SqlCipherDbCodec
 import java.io.File
 import com.vayunmathur.library.util.NavBackStack
@@ -89,7 +90,8 @@ fun SecureFolderPage(
                 )
             }
         },
-        bottomBar = { if (!isSelectionMode) NavigationBar(Route.SecureFolder, backStack) }
+        bottomBar = { if (!isSelectionMode) NavigationBar(Route.SecureFolder, backStack) },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (photos.isEmpty()) {
             EmptyState(

@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.backup.ui.components.BackendSection
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 private enum class SetupMode { NEW, RESTORE }
 
@@ -39,7 +40,7 @@ fun OnboardingScreen(
     onRestoreWithCode: (List<String>) -> Unit,
     onDismissMessages: () -> Unit,
 ) {
-    AppScaffold(title = "Set up Backup") { padding ->
+    AppScaffold(title = "Set up Backup", scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxWidth()

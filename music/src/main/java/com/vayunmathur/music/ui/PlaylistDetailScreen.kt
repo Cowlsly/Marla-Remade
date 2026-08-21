@@ -72,6 +72,7 @@ fun PlaylistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicVi
                     }
         },
         bottomBar = { PlayingBottomBar(musicViewModel, backStack) },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             item {
                 Column(

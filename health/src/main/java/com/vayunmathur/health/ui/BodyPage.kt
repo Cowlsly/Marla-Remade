@@ -29,6 +29,7 @@ import com.vayunmathur.health.util.MainPageMetrics
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconBodySystem
 import com.vayunmathur.library.ui.IconClose
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.round
 
@@ -86,6 +87,7 @@ fun BodyPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel) {
             }
         },
         verticalArrangement = Arrangement.spacedBy(12.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             // Body composition
             item {

@@ -24,6 +24,7 @@ import com.vayunmathur.contacts.MainActivity
 import com.vayunmathur.contacts.data.ContactDetails
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconSave
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.contacts.data.Contact
 import com.vayunmathur.contacts.util.VcfUtils
 import com.vayunmathur.contacts.R
@@ -60,7 +61,8 @@ fun ImportScreen(contacts: List<Contact>, onImport: () -> Unit) {
             FloatingActionButton(onClick = onImport) {
                 IconSave()
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         LazyColumn(
             modifier = Modifier

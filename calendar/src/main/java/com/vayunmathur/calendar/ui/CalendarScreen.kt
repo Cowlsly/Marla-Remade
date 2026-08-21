@@ -89,6 +89,7 @@ import kotlinx.datetime.number
 import kotlinx.datetime.plus
 import kotlinx.datetime.toLocalDateTime
 import com.vayunmathur.library.ui.DateString
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.datetime.todayIn
 import java.util.Locale
 import kotlin.time.Clock
@@ -209,7 +210,8 @@ fun CalendarScreen(state: CalendarUiState, actions: CalendarActions) {
             FloatingActionButton({ actions.createEvent() }) {
                 IconAdd()
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Column(Modifier.padding(innerPadding).fillMaxSize()) {
             when (state.layout) {

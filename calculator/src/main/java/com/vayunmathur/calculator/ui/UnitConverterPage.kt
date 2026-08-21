@@ -43,6 +43,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [CalculatorViewModel] to the stateless [UnitConverterScreen]. */
 @Composable
@@ -60,6 +61,7 @@ fun UnitConverterScreen(state: UnitConverterUiState, actions: UnitConverterActio
     AppScaffold(
         title = stringResource(R.string.units),
         alignment = AppBarAlignment.Center,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val category = state.categories.getOrNull(state.selectedCategoryIndex)
         Column(

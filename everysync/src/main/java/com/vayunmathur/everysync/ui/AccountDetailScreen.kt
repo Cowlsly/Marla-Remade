@@ -9,6 +9,7 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
@@ -68,6 +69,7 @@ fun AccountDetailScreen(state: AccountDetailUiState, actions: AccountDetailActio
     DetailScaffold(
         title = state.accountName,
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (provider == null) {
             Text(stringResource(R.string.no_accounts))

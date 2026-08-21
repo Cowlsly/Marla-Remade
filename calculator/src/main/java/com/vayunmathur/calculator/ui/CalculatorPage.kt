@@ -63,6 +63,7 @@ import com.vayunmathur.library.ui.PrimaryScrollableTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 private enum class KeyEmphasis { Digit, Operator, Primary, Function, Toggle }
 
@@ -216,6 +217,7 @@ fun CalculatorScreen(
             IconButton({ showUnitPicker = true }) { IconRuler() }
             IconButton({ showHistory = true }) { IconHistory() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             // ---- Display ----

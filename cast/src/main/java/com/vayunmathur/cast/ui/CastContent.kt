@@ -28,6 +28,7 @@ import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /**
  * The whole app: pick a TV, type the code it shows the first time, mirror.
@@ -53,6 +54,7 @@ fun CastContent(
                 IconButton(onClick = actions::startScan) { IconRefresh() }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(
             modifier = Modifier.fillMaxSize().padding(padding),

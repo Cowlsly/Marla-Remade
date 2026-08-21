@@ -44,6 +44,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
 import com.vayunmathur.library.ui.DateString
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.StayRateDto
@@ -197,6 +198,7 @@ fun StayResultsScreen(
                 navigationIcon = { IconNavigation { actions.back() } },
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         items(state.results) { result ->
             StayResultCard(result) { actions.openStay(result) }
@@ -270,6 +272,7 @@ fun StayDetailPage(
     AppScaffold(
         title = route.name.ifBlank { stringResource(R.string.hotel) },
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val rates = state.rates
         if (rates == null) {
@@ -368,6 +371,7 @@ fun StayGuestsPage(
     AppScaffold(
         title = stringResource(R.string.guest_details),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val loading = booking is StayBookingState.Loading
         Column(
@@ -461,7 +465,7 @@ fun StayConfirmationPage(
     val trips by viewModel.bookedTrips.collectAsStateWithLifecycle()
     val trip = trips.find { it.orderId == route.bookingId }
 
-    DetailScaffold(title = stringResource(R.string.booking_confirmed)) {
+    DetailScaffold(title = stringResource(R.string.booking_confirmed), scrollBehavior = appBarScrollBehavior()) {
         Column(
             Modifier.fillMaxWidth(),
             verticalArrangement = Arrangement.spacedBy(16.dp),

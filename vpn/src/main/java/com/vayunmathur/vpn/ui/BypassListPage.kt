@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.vpn.R
 import com.vayunmathur.vpn.Route
@@ -55,6 +56,7 @@ fun BypassListPage(backStack: NavBackStack<Route>) {
     AppScaffold(
         title = stringResource(R.string.bypass_list_title),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { pad ->
         val list = apps
         if (list == null) {

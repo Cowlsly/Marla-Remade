@@ -25,12 +25,13 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.ui.R as UiR
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun GameBoardScreen(state: GameBoardUiState, actions: PipesActions, onBack: () -> Unit, onLevelChange: (Int) -> Unit) {
-    AppScaffold(title = "", onNavigateBack = onBack) { innerPadding ->
+    AppScaffold(title = "", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { innerPadding ->
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
             val infoBoxes = @Composable { PuzzleInfoBox(levelIndex = state.levelIndex, onLevelChange = onLevelChange, isCompleted = state.isCompleted, maxLevelIndex = state.maxLevelIndex); MovesInfoBox(moves = state.moves, bestScore = state.bestScore, optimalMoves = state.levelData.optimalMoves) }
             val actionButtons = @Composable { if (!state.isLevelWon) { Button(onClick = { actions.onUndo() }, enabled = state.canUndo) { Text(stringResource(UiR.string.undo)) }; Button(onClick = { actions.onRestart() }, enabled = state.canUndo) { Text(stringResource(R.string.restart)) } } else if (state.levelIndex < state.maxLevelIndex) { Button(onClick = { onLevelChange(state.levelIndex + 1) }) { Text(stringResource(R.string.next_level)) } } }

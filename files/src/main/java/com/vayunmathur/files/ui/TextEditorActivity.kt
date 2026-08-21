@@ -35,6 +35,7 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconVisible
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 class TextEditorActivity : ComponentActivity() {
     private val viewModel: TextEditorViewModel by viewModels()
@@ -66,6 +67,7 @@ private fun TextEditorScreen(uri: Uri, viewModel: TextEditorViewModel) {
         AppScaffold(
             title = uri.lastPathSegment ?: stringResource(R.string.file_fallback),
             modifier = Modifier.imePadding(),
+            scrollBehavior = appBarScrollBehavior(),
         ) { }
     } else {
         TextEditorLoaded(uri, content, viewModel)
@@ -91,6 +93,7 @@ private fun TextEditorLoaded(uri: Uri, initialContent: String, viewModel: TextEd
                 if (isEditing) if (initialContent == state.text.toString()) IconVisible() else IconSave() else IconEdit()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(
             modifier = Modifier

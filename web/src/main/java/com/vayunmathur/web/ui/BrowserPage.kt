@@ -78,6 +78,7 @@ import com.vayunmathur.library.ui.IconClose
 import com.vayunmathur.library.ui.IconMoreVert
 import com.vayunmathur.library.ui.IconSearch
 import com.vayunmathur.library.ui.IconShield
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.web.Route
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
@@ -201,6 +202,7 @@ fun BrowserPage(
                         viewModel.omniboxFocused = false
                     }) { IconBack() }
                 },
+                scrollBehavior = appBarScrollBehavior(),
             ) { paddingValues ->
                 LazyColumn(
                     modifier = Modifier

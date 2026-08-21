@@ -38,6 +38,7 @@ import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.SeatCabinDto
@@ -135,6 +136,7 @@ fun SeatMapScreen(
     AppScaffold(
         title = stringResource(R.string.choose_seats),
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val cabins = state.cabins.filter { it.segmentId == segmentId }
         if (state.loading || state.error != null || cabins.isEmpty()) {

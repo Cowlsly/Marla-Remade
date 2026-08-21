@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.network.OfferDto
@@ -53,6 +54,7 @@ fun AncillariesPage(
     AppScaffold(
         title = stringResource(R.string.add_extras),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (offer == null) {
             StatusBox(loading = false, error = null, isEmpty = true, emptyMessage = "No offer selected.")

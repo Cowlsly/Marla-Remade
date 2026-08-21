@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 @Composable
 fun CompetitiveLobbyPage(
@@ -79,6 +80,7 @@ fun CompetitiveLobbyScreen(
             }
         },
         alignment = AppBarAlignment.Center,
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Column(
             modifier = Modifier

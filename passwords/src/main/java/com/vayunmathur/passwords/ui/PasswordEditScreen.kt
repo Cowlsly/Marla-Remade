@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.passwords.R
 import com.vayunmathur.passwords.platform.PasswordEditUiState
@@ -87,6 +88,7 @@ fun PasswordEditScreen(
                 Text(stringResource(UiR.string.save))
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (saveError != null) {
             Text(saveError!!, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)

@@ -11,6 +11,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.ui.ListPage
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.music.ui.components.ShufflePlayFab
 import com.vayunmathur.music.platform.AlbumArt
 import com.vayunmathur.music.platform.MusicViewModel
@@ -30,5 +31,5 @@ fun AlbumsTabContent(backStack: NavBackStack<Route>, musicViewModel: MusicViewMo
         AlbumArt(album.uri.toUri(), Modifier.size(40.dp))
     }, searchEnabled = true, fab = {
         ShufflePlayFab(musicViewModel)
-    }, sortOrder = Comparator.comparing { it.name })
+    }, sortOrder = Comparator.comparing { it.name }, scrollBehavior = appBarScrollBehavior())
 }

@@ -69,6 +69,7 @@ import kotlin.time.Clock
 import kotlin.time.Duration
 import kotlin.time.Duration.Companion.hours
 import com.vayunmathur.library.ui.DateString
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 // Result keys for the date/time pickers
 private const val KEY_START_DATE = "EditEvent.startDate"
@@ -248,7 +249,8 @@ fun EditEventScreen(viewModel: CalendarViewModel, editRoute: Route.EditEvent, ba
             if (descriptionController.focused) {
                 com.vayunmathur.library.ui.OdfMarkdownEditorToolbar(descriptionController)
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth().padding(8.dp), label = { Text(stringResource(R.string.label_title)) })
 

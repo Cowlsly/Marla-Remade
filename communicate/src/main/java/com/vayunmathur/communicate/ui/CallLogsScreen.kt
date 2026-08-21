@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.CommunicateCallLogEntry
 import com.vayunmathur.communicate.data.CommunicateCallType
@@ -47,6 +48,7 @@ fun CallLogsScreen() {
     var pendingDelete by androidx.compose.runtime.remember { androidx.compose.runtime.mutableStateOf<CommunicateCallLogEntry?>(null) }
     AppScaffold(
         title = stringResource(R.string.call_logs_title),
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         DefaultDialerGate(modifier = Modifier.padding(padding)) { roleRevision ->
             PermissionGate(

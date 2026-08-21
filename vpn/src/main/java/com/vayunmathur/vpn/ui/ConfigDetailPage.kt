@@ -19,6 +19,7 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.vpn.Route
 import com.vayunmathur.vpn.data.WgConfigParser
 import com.vayunmathur.vpn.platform.VpnViewModel
@@ -36,6 +37,7 @@ fun ConfigDetailPage(backStack: NavBackStack<Route>, vm: VpnViewModel, id: Long)
     DetailScaffold(
         title = stringResource(R.string.tunnel, cfg.name),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Text(
             stringResource(R.string.imported_from_wireguard_conf_using_gotat),

@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
@@ -55,6 +56,7 @@ fun AlbumDetailContent(
         title = {},
         onNavigateBack = { backStack.pop() },
         bottomBar = bottomBar,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
             // Header: Album Art
             item {

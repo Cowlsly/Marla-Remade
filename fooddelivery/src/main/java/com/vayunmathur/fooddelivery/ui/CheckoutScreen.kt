@@ -47,6 +47,7 @@ import com.vayunmathur.library.ui.SegmentedButtonDefaults
 import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.fooddelivery.api.BitesApi
 import com.vayunmathur.fooddelivery.BuildConfig
 import com.vayunmathur.fooddelivery.data.AddressStore
@@ -251,6 +252,7 @@ fun CheckoutScreen(
     if (orderSuccess) {
         AppScaffold(
             title = stringResource(R.string.order_confirmed),
+            scrollBehavior = appBarScrollBehavior(),
         ) { padding ->
             Column(
                 Modifier.fillMaxSize().padding(padding),
@@ -271,6 +273,7 @@ fun CheckoutScreen(
     AppScaffold(
         title = stringResource(R.string.checkout),
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             LazyColumn(

@@ -272,6 +272,7 @@ fun ComposerScreen(
                     })
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(modifier = Modifier.padding(padding).padding(horizontal = 16.dp, vertical = 8.dp).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Surface(

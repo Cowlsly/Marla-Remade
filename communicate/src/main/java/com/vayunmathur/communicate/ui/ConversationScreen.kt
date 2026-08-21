@@ -53,6 +53,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.compose.AsyncImageState
 import com.vayunmathur.communicate.R
@@ -323,6 +324,7 @@ fun ConversationScreen(
                 },
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         // Google Voice threads don't require the default-SMS role or READ_SMS; only SIM does.
         if (line == CommunicateLine.GoogleVoice) {

@@ -55,6 +55,7 @@ import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconEdit
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [CalendarViewModel] to the stateless [SettingsScreen]. */
 @Composable
@@ -159,7 +160,8 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                     IconAdd()
                 }
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (calendars.isEmpty()) {
             Box(

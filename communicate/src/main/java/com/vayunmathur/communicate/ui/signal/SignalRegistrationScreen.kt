@@ -26,6 +26,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.communicate.data.signal.SignalLineSession
 import com.vayunmathur.communicate.data.signal.registration.RegistrationHttpClient
 import com.vayunmathur.library.ui.DetailScaffold
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -76,7 +77,7 @@ fun SignalRegistrationScreen(
         }
     }
 
-    DetailScaffold(title = "Register Signal") {
+    DetailScaffold(title = "Register Signal", scrollBehavior = appBarScrollBehavior()) {
         Text(
             "Registers this number as the PRIMARY Signal device. This will link Signal to this app — " +
                 "use a test number.",

@@ -64,6 +64,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.games.wordmaker.ui.components.CompetitiveStatusBar
 import com.vayunmathur.games.wordmaker.ui.components.CrosswordBoard
@@ -218,6 +219,7 @@ fun WordGameScreen(
             }
         },
         alignment = AppBarAlignment.Center,
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Box(
             modifier = Modifier

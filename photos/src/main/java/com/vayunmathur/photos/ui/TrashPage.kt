@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.ui.IconDelete
 import com.vayunmathur.library.ui.IconUnarchive
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.photos.LocalColumnCount
 import com.vayunmathur.photos.NavigationBar
@@ -114,7 +115,8 @@ fun TrashPage(backStack: NavBackStack<Route>, galleryViewModel: GalleryViewModel
                 }
             }
         },
-        bottomBar = { if (!isSelectionMode) NavigationBar(Route.Trash, backStack) }
+        bottomBar = { if (!isSelectionMode) NavigationBar(Route.Trash, backStack) },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         if (trashedPhotos.isEmpty()) {
             EmptyState(

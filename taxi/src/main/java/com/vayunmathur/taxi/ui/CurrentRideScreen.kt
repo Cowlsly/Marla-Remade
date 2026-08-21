@@ -19,6 +19,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.taxi.R
 import com.vayunmathur.taxi.data.RideStatusResult
 import com.vayunmathur.taxi.network.lyft.LyftProvider
@@ -50,7 +51,7 @@ fun CurrentRideScreen() {
         return
     }
 
-    AppScaffold(title = stringResource(R.string.nav_current_ride)) { padding ->
+    AppScaffold(title = stringResource(R.string.nav_current_ride), scrollBehavior = appBarScrollBehavior()) { padding ->
         Box(
             Modifier.fillMaxSize().padding(padding).padding(24.dp),
             contentAlignment = Alignment.Center,

@@ -71,6 +71,7 @@ fun RecipeManagementPage(backStack: NavBackStack<Route>, viewModel: HealthViewMo
                 }
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(modifier = Modifier.padding(padding).fillMaxSize()) {
             PrimaryTabRow(
@@ -259,6 +260,7 @@ fun RecipeEditorPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel,
     AppScaffold(
         title = if (recipeId == null) stringResource(R.string.create_recipe) else stringResource(R.string.edit_recipe),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(modifier = Modifier.padding(padding).padding(16.dp).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(16.dp)) {
             OutlinedTextField(

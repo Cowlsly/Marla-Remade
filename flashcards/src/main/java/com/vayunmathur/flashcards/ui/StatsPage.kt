@@ -36,6 +36,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SecondaryTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import java.time.LocalDate
 
@@ -133,6 +134,7 @@ fun StatsScreen(state: StatsUiState, actions: StatsActions) {
     AppScaffold(
         title = stringResource(R.string.nav_stats),
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(
             Modifier

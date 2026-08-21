@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedCard
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.data.BookedTrip
@@ -60,6 +61,7 @@ fun HomePage(backStack: NavBackStack<Route>, viewModel: TravelViewModel) {
                 IconSettings()
             }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

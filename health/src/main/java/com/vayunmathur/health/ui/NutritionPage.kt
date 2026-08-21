@@ -187,6 +187,7 @@ fun NutritionScreen(state: NutritionUiState, actions: NutritionActions) {
         },
         horizontalPadding = 16.dp,
         verticalArrangement = Arrangement.spacedBy(16.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         // Calorie ring
         item {

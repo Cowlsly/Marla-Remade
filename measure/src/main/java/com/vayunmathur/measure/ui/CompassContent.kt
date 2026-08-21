@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.measure.domain.Units
 import com.vayunmathur.measure.platform.CompassActions
 import com.vayunmathur.measure.platform.CompassUiState
@@ -54,6 +55,7 @@ fun CompassContent(
         title = "Compass",
         actions = { IconButton(onClick = onOpenSettings) { IconSettings() } },
         bottomBar = bottomBar,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(16.dp),

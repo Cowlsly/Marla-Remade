@@ -26,6 +26,7 @@ import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.IconPackage
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Binds [AppStoreViewModel] to the stateless [LibraryScreen]. */
 @Composable
@@ -51,6 +52,7 @@ fun LibraryScreen(
             R.string.library_title,
             state.counts[SourceFilter.ALL] ?: state.apps.size,
         ),
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             LazyRow(

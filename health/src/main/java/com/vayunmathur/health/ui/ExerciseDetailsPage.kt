@@ -63,6 +63,7 @@ fun ExerciseDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewMod
     AppScaffold(
         title = stringResource(R.string.label_exercise),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (records.isEmpty()) {
             EmptyState(

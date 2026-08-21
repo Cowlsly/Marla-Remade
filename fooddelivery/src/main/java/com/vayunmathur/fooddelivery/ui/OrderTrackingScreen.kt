@@ -65,6 +65,7 @@ import kotlinx.coroutines.delay
 import kotlin.time.Instant
 import com.vayunmathur.library.ui.DateString
 import com.vayunmathur.library.ui.rememberIs24Hour
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import kotlin.math.max
 import kotlin.math.min
 
@@ -104,6 +105,7 @@ fun OrderTrackingScreen(orderId: Int, onBack: () -> Unit) {
     AppScaffold(
         title = order?.merchant?.name ?: stringResource(R.string.tracking),
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val o = order
         when {

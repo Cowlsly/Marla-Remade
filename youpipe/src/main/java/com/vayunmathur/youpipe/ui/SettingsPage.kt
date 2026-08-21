@@ -12,6 +12,7 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.SettingsRow
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
@@ -34,6 +35,7 @@ fun SettingsPage(
 
     AppScaffold(
         title = stringResource(UiR.string.settings),
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

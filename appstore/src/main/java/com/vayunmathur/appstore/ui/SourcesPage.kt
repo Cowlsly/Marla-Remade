@@ -29,6 +29,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import java.text.SimpleDateFormat
 import java.util.Date
 
@@ -52,6 +53,7 @@ fun SourcesPage(
         title = stringResource(R.string.repositories),
         onNavigateBack = onBack,
         alignment = AppBarAlignment.Center,
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         Text(
             stringResource(R.string.sources_are_fixed),

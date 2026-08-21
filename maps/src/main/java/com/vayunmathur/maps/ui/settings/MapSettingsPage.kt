@@ -18,6 +18,7 @@ import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.SettingsSwitchRow
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.ThemeMode
@@ -55,6 +56,7 @@ fun MapSettingsPage(backStack: NavBackStack<Route>, viewModel: MapSettingsViewMo
     AppScaffold(
         title = stringResource(R.string.settings_title),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             Modifier

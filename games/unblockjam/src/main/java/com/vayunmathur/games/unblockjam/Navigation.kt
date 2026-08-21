@@ -66,6 +66,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.MainNavigation
@@ -158,7 +159,8 @@ fun PackScreen(
             IconButton(onClick = onOpenGameCenter) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
             }
-        }
+        },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         LazyColumn(
             Modifier.fillMaxSize(),
@@ -258,7 +260,7 @@ fun LevelScreen(
     onOpenLevel: (Int) -> Unit,
     title: String = stringResource(R.string.level_selector)
 ) {
-    AppScaffold(title = title) { paddingValues ->
+    AppScaffold(title = title, scrollBehavior = appBarScrollBehavior()) { paddingValues ->
         LazyVerticalGrid(
             GridCells.Adaptive(88.dp),
             Modifier.fillMaxSize(),
@@ -363,6 +365,7 @@ fun GameScreen(state: GameUiState, actions: GameActions, onBack: () -> Unit) {
     AppScaffold(
         title = {},
         onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { innerPadding ->
         Surface(
             modifier = Modifier.fillMaxSize(),

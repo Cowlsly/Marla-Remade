@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.ui.res.stringResource
 
 /**
@@ -54,7 +55,8 @@ fun DashboardScreen(
 ) {
     AppScaffold(
         title = { Text(stringResource(R.string.app_name), fontWeight = FontWeight.Bold) },
-        actions = topBarActions
+        actions = topBarActions,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(
             modifier = modifier.fillMaxSize().padding(padding),

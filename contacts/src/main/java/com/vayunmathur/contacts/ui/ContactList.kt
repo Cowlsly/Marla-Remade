@@ -263,6 +263,7 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         },
         horizontalPadding = 8.dp,
         verticalArrangement = Arrangement.spacedBy(8.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (favorites.isNotEmpty()) {
             item(key = "favorites-header") { FavoritesHeader() }
@@ -346,6 +347,7 @@ fun ContactListPick(
         },
         horizontalPadding = 16.dp,
         verticalArrangement = Arrangement.spacedBy(8.dp),
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         if (favorites.isNotEmpty()) {
             item(key = "pick-favorites-header") { FavoritesHeader() }

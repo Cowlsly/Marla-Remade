@@ -83,6 +83,7 @@ import com.vayunmathur.library.ui.IconCheck
 import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconFavorite
 import com.vayunmathur.library.ui.IconFire
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.round
 import com.vayunmathur.library.util.toStringCommas
 import com.vayunmathur.library.util.toStringDigits
@@ -379,6 +380,7 @@ fun BarChartDetailsScreen(
     AppScaffold(
         title = stringResource(config.titleRes),
         onNavigateBack = { actions.navigateUp() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

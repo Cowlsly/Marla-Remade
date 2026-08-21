@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.PullToRefreshBox
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.rememberDrawerState
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -397,7 +398,7 @@ private fun ForecastColumn(
 private fun EmptyHome(viewModel: WeatherViewModel, onAddLocation: () -> Unit) {
     val (onUseCurrent, requesting) = rememberRequestDeviceLocation(viewModel)
 
-    AppScaffold(title = stringResource(R.string.weather_title)) { padding ->
+    AppScaffold(title = stringResource(R.string.weather_title), scrollBehavior = appBarScrollBehavior()) { padding ->
         Box(modifier = Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(stringResource(R.string.no_locations_yet), style = MaterialTheme.typography.titleMedium)

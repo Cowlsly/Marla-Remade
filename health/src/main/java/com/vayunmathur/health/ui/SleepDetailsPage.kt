@@ -49,6 +49,7 @@ fun SleepDetailsPage(backStack: NavBackStack<Route>, viewModel: HealthViewModel)
     AppScaffold(
         title = stringResource(R.string.label_sleep),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier

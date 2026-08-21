@@ -44,6 +44,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.games.hub.R
@@ -69,6 +70,7 @@ fun GameDetailScreen(
     AppScaffold(
         title = game?.displayName ?: gameId,
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         val g = game
         if (g == null) {

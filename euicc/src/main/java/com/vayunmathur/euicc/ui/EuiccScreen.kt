@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 @Composable
 fun EuiccScreen(viewModel: EuiccViewModel) {
@@ -66,6 +67,7 @@ fun EuiccScreen(
             IconButton(onClick = { showDownload = true }, enabled = !state.loading) { IconAdd() }
             IconButton(onClick = onReload, enabled = !state.loading) { IconRefresh() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxWidth().padding(padding).padding(16.dp).verticalScroll(rememberScrollState()),

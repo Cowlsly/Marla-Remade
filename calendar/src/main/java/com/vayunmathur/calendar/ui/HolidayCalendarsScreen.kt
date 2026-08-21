@@ -40,6 +40,7 @@ import com.vayunmathur.calendar.util.CalendarViewModel
 import com.vayunmathur.calendar.util.HolidayCalendarManager
 import com.vayunmathur.calendar.util.HolidayData
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -109,6 +110,7 @@ fun HolidayCalendarsScreen(viewModel: CalendarViewModel, backStack: NavBackStack
     AppScaffold(
         title = stringResource(R.string.holiday_calendars),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(Modifier.padding(paddingValues).fillMaxSize()) {
             OutlinedTextField(

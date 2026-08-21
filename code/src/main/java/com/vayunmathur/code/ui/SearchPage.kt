@@ -30,6 +30,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.delay
 
@@ -51,7 +52,7 @@ fun SearchPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>) {
         viewModel.searchProject(query, caseSensitive, useRegex)
     }
 
-    AppScaffold(title = stringResource(R.string.search), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.search), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             OutlinedTextField(
                 value = query,

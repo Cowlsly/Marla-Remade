@@ -29,6 +29,7 @@ import com.vayunmathur.education.Route
 import com.vayunmathur.education.content.ModuleType
 import com.vayunmathur.education.util.EducationViewModel
 import com.vayunmathur.library.ui.IconNavigation
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.res.pluralStringResource
@@ -43,6 +44,7 @@ fun UnitPage(backStack: NavBackStack<Route>, viewModel: EducationViewModel, unit
     AppScaffold(
         title = unit?.title ?: stringResource(R.string.unit),
         backStack = backStack,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         if (unit == null) {
             MissingContent(padding, stringResource(R.string.this_unit_is_unavailable))

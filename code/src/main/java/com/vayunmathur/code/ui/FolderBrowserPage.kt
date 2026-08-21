@@ -34,6 +34,7 @@ import com.vayunmathur.library.ui.IconChevronRight
 import com.vayunmathur.library.ui.IconFolder
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -56,7 +57,7 @@ fun FolderBrowserPage(viewModel: EditorViewModel, backStack: NavBackStack<Route>
         }
     }
 
-    AppScaffold(title = stringResource(R.string.open_folder), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.open_folder), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         Column(Modifier.padding(padding).fillMaxSize()) {
             Text(
                 text = currentDir.absolutePath,

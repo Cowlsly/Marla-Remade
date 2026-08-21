@@ -48,6 +48,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 
 // -------
@@ -98,6 +99,7 @@ fun NoteTypeListScreen(state: NoteTypeListUiState, actions: NoteTypeListActions)
         floatingActionButton = {
             FloatingActionButton(onClick = { actions.addNoteType() }) { IconAdd() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         LazyColumn(Modifier.fillMaxSize(), contentPadding = paddingValues) {
             items(state.noteTypes, key = { it.id }) { summary ->
@@ -198,6 +200,7 @@ fun NoteTypeEditScreen(state: NoteTypeEditUiState, actions: NoteTypeEditActions)
                 actions.save(name.ifBlank { "Note type" }, css, type, fields.toList(), templates.toList())
             }) { com.vayunmathur.library.ui.IconSave() }
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
         Column(
             Modifier

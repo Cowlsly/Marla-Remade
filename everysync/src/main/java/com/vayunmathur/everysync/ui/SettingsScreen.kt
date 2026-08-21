@@ -11,6 +11,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.RadioButton
 import com.vayunmathur.library.ui.Switch
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -71,6 +72,7 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
     DetailScaffold(
         title = stringResource(R.string.settings_title),
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         OutlinedTextField(
             value = intervalText,

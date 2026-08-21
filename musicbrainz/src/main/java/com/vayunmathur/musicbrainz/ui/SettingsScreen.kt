@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.SettingsSection
 import com.vayunmathur.library.ui.SettingsSelectRow
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.musicbrainz.R
 import com.vayunmathur.musicbrainz.Route
@@ -58,7 +59,7 @@ fun SettingsScreen(
     backStack: NavBackStack<Route>,
     onPickFolder: () -> Unit,
 ) {
-    AppScaffold(title = stringResource(R.string.settings), backStack = backStack) { padding ->
+    AppScaffold(title = stringResource(R.string.settings), backStack = backStack, scrollBehavior = appBarScrollBehavior()) { padding ->
         // Resolved up front: SettingsSelectRow's label is a plain lambda, not composable.
         val sourceLabels = DownloadSource.entries.associateWith { stringResource(it.labelRes) }
         Column(

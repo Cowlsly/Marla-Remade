@@ -32,6 +32,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TopAppBar
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.travel.Route
 import com.vayunmathur.travel.R
@@ -105,6 +106,7 @@ fun FlightResultsScreen(
                 navigationIcon = { IconNavigation { actions.back() } },
             )
         },
+        scrollBehavior = appBarScrollBehavior(),
     ) {
         val visible = state.visibleOffers
         val expiry = visible.mapNotNull { it.expiresAt.ifBlank { null } }.minOrNull()

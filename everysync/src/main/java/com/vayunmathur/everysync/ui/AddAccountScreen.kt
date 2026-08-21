@@ -8,6 +8,7 @@ import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
@@ -56,6 +57,7 @@ fun AddAccountScreen(actions: AddAccountActions) {
     AppScaffold(
         title = stringResource(R.string.add_account_title),
         onNavigateBack = { actions.back() },
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         LazyColumn(Modifier.padding(padding)) {
             items(ProviderRegistry.all, key = { it.id }) { provider ->

@@ -18,6 +18,7 @@ import com.vayunmathur.library.ui.ListItemDefaults
 import com.vayunmathur.library.ui.ListPage
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
@@ -80,5 +81,5 @@ fun SongsScreen(state: SongsUiState, actions: MusicActions, backStack: NavBackSt
         ShufflePlayFab(state.songs) {
             actions.playShuffled(state.songs, sourceId = SOURCE_ALL_SONGS, sourceName = SOURCE_ALL_SONGS_NAME)
         }
-    }, sortOrder = Comparator.comparing { it.title })
+    }, sortOrder = Comparator.comparing { it.title }, scrollBehavior = appBarScrollBehavior())
 }
