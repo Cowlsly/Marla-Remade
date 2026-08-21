@@ -379,9 +379,48 @@ fn search_finds_things_by_word_prefix() {
     assert_eq!(hits.len(), 1);
     assert_eq!(&*pack.recording(hits[0].idx).unwrap().title, "Breathe");
 
-    // A search term shared by several release groups ranks, dedups and truncates.
+    // Artist-credit terms are folded into the release-group and recording indexes,
+    // because WS/2's `release-group?query=` matches artist names: a title-only index
+    // would be a REGRESSION against the live API, returning nothing for "radiohead"
+    // in the albums tab rather than fewer results.
+    let hits = pack.search_release_groups("pink", 25);
+    let titles: Vec<String> = hits
+        .iter()
+        .map(|h| pack.release_group(h.idx).unwrap().title.into_owned())
+        .collect();
+    assert!(
+        !titles.contains(&"Homogenic".to_string()),
+        "Homogenic is not credited to Pink Floyd"
+    );
+    assert!(
+        titles.iter().any(|t| t == "The Dark Side of the Moon"),
+        "an artist-credit term must reach the artist's albums, got {titles:?}"
+    );
+    // "björk" appears in no release-group TITLE in the fixture, only in credits.
+    let hits = pack.search_release_groups("björk", 25);
+    let titles: Vec<String> = hits
+        .iter()
+        .map(|h| pack.release_group(h.idx).unwrap().title.into_owned())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t == "Homogenic"),
+        "credit-only match must work, got {titles:?}"
+    );
+    // Same for recordings, whose credits are attached per recording.
+    let hits = pack.search_recordings("björk", 25);
+    assert!(!hits.is_empty(), "recording credits must be searchable too");
+    let found: Vec<String> =
+        hits.iter().map(|h| pack.recording(h.idx).unwrap().title.into_owned()).collect();
+    assert!(
+        found.iter().any(|t| t == "Jóga" || t == "Bachelorette"),
+        "expected a Björk recording, got {found:?}"
+    );
+
+    // "pink floyd" now matches every release group CREDITED to Pink Floyd, not just
+    // the one with both words in its title. That is the whole point of folding
+    // credits in, and it is parity with what WS/2 does today.
     let hits = pack.search_release_groups("pink floyd", 25);
-    assert_eq!(hits.len(), 1, "only the compilation has both words in its title");
+    assert_eq!(hits.len(), 3, "Dark Side, Echoes and the feat. release group");
     let hits = pack.search_artists("pink", 0);
     assert!(hits.is_empty(), "limit 0 returns nothing rather than everything");
     assert!(pack.search_artists("", 25).is_empty());

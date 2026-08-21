@@ -468,6 +468,14 @@ impl Drop for PostingSpill {
     }
 }
 
+/// The display-string symbol for a credit id, or `SYM_EMPTY` when there is none.
+fn credit_sym_of(credit_syms: &[Sym], credit_id: u32) -> Sym {
+    if credit_id == pack::NONE {
+        return SYM_EMPTY;
+    }
+    credit_syms.get(credit_id as usize).copied().unwrap_or(SYM_EMPTY)
+}
+
 /// Tokenise `text` and spill one posting per term. The term must already be in
 /// `terms` from the dictionary pass.
 fn emit_postings(
@@ -1123,7 +1131,12 @@ pub fn build<W: Write + Seek>(
     let credit_offsets: Vec<u32> = credit_syms.iter().map(|&s| pool.offset(s)).collect();
     w.section_u32(pack::S_CREDITS, &credit_offsets)?;
     drop(credit_offsets);
-    drop(credit_syms);
+    // `credit_syms` survives to the search pass: artist-credit terms are folded into
+    // the release-group and recording indexes so that typing an artist name into the
+    // albums tab finds their albums. WS/2's `release-group?query=` matches artist
+    // names, so a title-only index would be a REGRESSION against the live API the
+    // pack replaces -- "radiohead" would return nothing rather than fewer results.
+    // 20 MB to keep, and dropped as soon as the index is built.
 
     let mut buf: Vec<u8> = Vec::new();
     for a in &artists {
@@ -1163,6 +1176,10 @@ pub fn build<W: Write + Seek>(
     drop(recs);
     drop(hi);
     let rg_title_syms: Vec<Sym> = rgs.iter().map(|r| r.title).collect();
+    let rg_credit_syms: Vec<Sym> = rgs
+        .iter()
+        .map(|r| credit_sym_of(&credit_syms, r.credit_id))
+        .collect();
     drop(rgs);
 
     w.section_u32(pack::S_ARTIST_RGS, &artist_rgs)?;
@@ -1415,6 +1432,20 @@ pub fn build<W: Write + Seek>(
             terms.intern(t);
         }
     }
+    // Every artist-credit display string, interned once. That covers the credits of
+    // both release groups and recordings without walking 39.9 M recordings here --
+    // 5.08 M strings instead. The postings pass below attaches them per entity.
+    for &sym in credit_syms.iter() {
+        if sym == SYM_EMPTY {
+            continue;
+        }
+        let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
+        terms_buf.clear();
+        search_terms(&text, &mut terms_buf);
+        for t in terms_buf.iter() {
+            terms.intern(t);
+        }
+    }
     if opts.include_recording_search {
         for id in rec_order.iter() {
             let text = String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
@@ -1452,35 +1483,44 @@ pub fn build<W: Write + Seek>(
         }
         for (i, &sym) in rg_title_syms.iter().enumerate() {
             check_searchable(i as u32)?;
+            let refv = (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32;
             let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
-            emit_postings(
-                &text,
-                (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32,
-                &terms,
-                &term_ranks,
-                &mut terms_buf,
-                &mut post_spill,
-            )?;
+            emit_postings(&text, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
+            // Its artist credit, so "radiohead" finds Radiohead's albums. Duplicate
+            // (term, entity) pairs between title and credit dedup at emit time.
+            let csym = rg_credit_syms[i];
+            if csym != SYM_EMPTY {
+                let ctext = String::from_utf8_lossy(pool.get(csym)).into_owned();
+                emit_postings(&ctext, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
+            }
         }
         if opts.include_recording_search {
             for (i, id) in rec_order.iter().enumerate() {
                 check_searchable(i as u32)?;
+                let refv = (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32;
                 let text =
                     String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
-                emit_postings(
-                    &text,
-                    (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32,
-                    &terms,
-                    &term_ranks,
-                    &mut terms_buf,
-                    &mut post_spill,
-                )?;
+                emit_postings(&text, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
+                let csym = credit_sym_of(&credit_syms, rec_credit[*id as usize]);
+                if csym != SYM_EMPTY {
+                    let ctext = String::from_utf8_lossy(pool.get(csym)).into_owned();
+                    emit_postings(
+                        &ctext,
+                        refv,
+                        &terms,
+                        &term_ranks,
+                        &mut terms_buf,
+                        &mut post_spill,
+                    )?;
+                }
             }
         }
     }
     drop(term_ranks);
     drop(artist_name_syms);
     drop(rg_title_syms);
+    drop(rg_credit_syms);
+    drop(credit_syms);
     st.search_postings = post_spill.written / 8;
     let post_buckets = post_spill.finish()?;
 
