@@ -8,6 +8,8 @@ set -euo pipefail
 #            + maxspeed   (posted speed limits for the P5b MaxspeedSource)
 #            + transit_lines (OSM rail/subway/tram/… lines for the P22 highlight)
 #            + ma_pois    (OUR baked OSM POI layer: placement/name/type from OSM)
+#            + transit_stops (GTFS stop pins + their MOTIS ids, replacing the
+#                          removed /api/v1/map/stops per-viewport fetch)
 #            + admin_country / admin_region / admin_city  (borders; replaces .fgb)
 #
 # The ma_pois step ALSO emits two compact side files next to --out
@@ -25,7 +27,11 @@ set -euo pipefail
 #   4. build_transit_lines_layer.sh -> transit_lines.pmtiles (osmium/ogr2ogr + tippecanoe)
 #   5. build_pois_layer.sh    -> ma_pois.pmtiles + poi_names.bin + poi_index.bin
 #   6. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
-#   7. tile-join              -> v5.pmtiles             (merge all layers)
+#   7. build_transit_stops_layer.sh -> transit_stops.pmtiles (GTFS, cargo-only)
+#   8. tile_join              -> v5.pmtiles             (merge all layers)
+#
+# Steps 7 and 8 are cargo-only (scripts/maps/tile_build), so they need neither
+# tippecanoe nor osmium. The rest still do -- see README.md.
 #
 # Full planet build is the user's infra step (large + long). Prove correctness
 # first with a metro dry run:
@@ -41,6 +47,10 @@ set -euo pipefail
 #   --out FILE        final output (default v5.pmtiles)
 #   --workdir DIR     scratch dir for intermediates (default ./v5_work)
 #   --bbox BOX        metro bbox "minlon,minlat,maxlon,maxlat" (dry runs)
+#   --gtfs-manifest F feeds.manifest for the transit_stops layer (`name=dir[=motis_prefix]`
+#                     per line, as build_ca_transit.ps1 writes). Without it the
+#                     transit_stops step is skipped -- this layer takes GTFS dirs,
+#                     not --pbf.
 #   --base-mode M     build|reuse (passed to build_base_layers.sh; default reuse)
 #   --base-jar FILE   protomaps basemap jar (base-mode build)
 #   --base-area A     planetiler area name/path (base-mode build; default planet)
@@ -50,13 +60,16 @@ set -euo pipefail
 #   --skip-transit-lines omit transit_lines layer
 #   --skip-pois       omit ma_pois layer + poi_names.bin/poi_index.bin side files
 #   --skip-admin      omit admin layers
+#   --skip-transit-stops omit transit_stops layer
 #   --publish         after a successful build, upload $OUT to R2 (publish_r2.sh;
 #                     reads R2_ENDPOINT/R2_ACCESS_KEY_ID/R2_SECRET_ACCESS_KEY from env)
 #   --publish-key K   remote object key when publishing (default: basename of --out)
 #   --keep-work       keep intermediates
 #
-# Tools: tile-join + tippecanoe, osmium, ogr2ogr (GDAL), python3, and either
-#        java+planetiler (base build) or curl/pmtiles (base reuse). See README.md.
+# Tools: osmium, ogr2ogr (GDAL), python3, tippecanoe (base/safety/maxspeed/
+#        transit_lines/pois/admin layers), and either java+planetiler (base build)
+#        or curl/pmtiles (base reuse). The transit_stops layer and the final merge
+#        need only cargo. See README.md.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
@@ -72,6 +85,8 @@ SKIP_MAXSPEED=0
 SKIP_TRANSIT_LINES=0
 SKIP_POIS=0
 SKIP_ADMIN=0
+SKIP_TRANSIT_STOPS=0
+GTFS_MANIFEST=""
 KEEP_WORK=0
 PUBLISH=0
 PUBLISH_KEY=""
@@ -91,15 +106,17 @@ while [[ $# -gt 0 ]]; do
         --skip-transit-lines) SKIP_TRANSIT_LINES=1; shift ;;
         --skip-pois) SKIP_POIS=1; shift ;;
         --skip-admin) SKIP_ADMIN=1; shift ;;
+        --skip-transit-stops) SKIP_TRANSIT_STOPS=1; shift ;;
+        --gtfs-manifest) GTFS_MANIFEST="$2"; shift 2 ;;
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,52p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,72p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
-command -v tile-join >/dev/null || { echo "ERROR: tile-join (tippecanoe pkg) not installed" >&2; exit 1; }
+command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
 mkdir -p "$WORK"
 
 INPUTS=()
@@ -167,18 +184,37 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     done
 fi
 
-# --- 7. merge ---
+# --- 7. transit_stops (GTFS stop pins; cargo-only, takes GTFS dirs not --pbf) ---
+if [[ "$SKIP_TRANSIT_STOPS" == "0" ]]; then
+    if [[ -z "$GTFS_MANIFEST" ]]; then
+        # Not an error: this layer's input is a set of GTFS feeds, which a plain
+        # --pbf build has no way to produce. Say so rather than failing a build
+        # that never asked for stops.
+        echo "[v5] no --gtfs-manifest given; skipping transit_stops layer" >&2
+    else
+        "$HERE/build_transit_stops_layer.sh" \
+            --manifest "$GTFS_MANIFEST" \
+            --out "$WORK/transit_stops.pmtiles" \
+            --workdir "$WORK/transit_stops"
+        INPUTS+=("$WORK/transit_stops.pmtiles")
+    fi
+fi
+# --- 8. merge ---
 echo "[v5] merging ${#INPUTS[@]} source(s) -> $OUT"
 printf '  + %s\n' "${INPUTS[@]}"
-# --no-tile-size-limit: don't drop features when combining dense base + overlays.
-tile-join --force --no-tile-size-limit -o "$OUT" "${INPUTS[@]}"
+# Our own tile_join, not tippecanoe's: it unions each tile's layers and carries
+# line/polygon geometry through untouched, and needs no tippecanoe install. Later
+# inputs win a layer-name collision, so a rebuilt overlay replaces a stale copy.
+cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
+    --bin tile_join -- --out "$OUT" "${INPUTS[@]}"
 
 SIZE="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo '?')"
 echo "[v5] done: $OUT (${SIZE} bytes)"
 echo ""
 echo "Layers now in $OUT:"
 echo "  base : earth landcover landuse water roads buildings boundaries pois places"
-echo "  new  : safety maxspeed transit_lines ma_pois admin_country admin_region admin_city"
+echo "  new  : safety maxspeed transit_lines ma_pois transit_stops"
+echo "         admin_country admin_region admin_city"
 echo ""
 if [[ "$SKIP_POIS" == "0" ]]; then
     echo "POI side files (emitted beside $OUT for the app to mmap):"

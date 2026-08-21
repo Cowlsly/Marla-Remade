@@ -163,7 +163,7 @@ mutually consistent (same POI set, same coordinates). See
 
 | File | Purpose |
 |---|---|
-| `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + maxspeed + transit_lines + admin → merge → `v5.pmtiles` |
+| `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
@@ -172,6 +172,10 @@ mutually consistent (same POI set, same coordinates). See
 | `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files) and `road_graph` (routing graph). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
+| `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
+| `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
+| `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
+| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**: `tile_points` (tile a point geojsonseq) and `tile_join` (merge archives). Container layout documented in `src/pmtiles.rs` |
 | `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
@@ -187,18 +191,43 @@ mutually consistent (same POI set, same coordinates). See
 Full build needs (all are existing off-the-shelf tools — the only code authored
 here is Rust and Python):
 
-* **tippecanoe** ≥ 2.x (provides `tippecanoe` + `tile-join`, both write `.pmtiles`)
-* **osmium-tool** (`osmium`)
-* **GDAL** (`ogr2ogr`)
-* **cargo** (https://rustup.rs) — for the `ma_pois` extractor and the routing
-  graph, both in [`osm_ingest`](osm_ingest/). No C/C++ toolchain and no
-  libosmium: `osm_ingest` reads `.osm.pbf` natively, so the routing graph and the
-  two POI side files build on **Windows** as well (`build_graph.ps1`). Only the
-  `.pmtiles` steps still need tippecanoe/osmium.
-* **python3** (stdlib only)
+* **cargo** (https://rustup.rs) — and for a growing share of the pipeline, the
+  *only* thing needed. It builds:
+  * [`osm_ingest`](osm_ingest/) — the `ma_pois` extractor and the routing graph.
+    No C/C++ toolchain and no libosmium: it reads `.osm.pbf` natively.
+  * [`gtfs_ingest`](gtfs_ingest/) — the on-device `.transit` pack and the
+    `transit_stops` basemap layer.
+  * [`tile_build`](tile_build/) — MVT and PMTiles v3 read/write, which **replaces
+    tippecanoe and tile-join**. The final merge and the `transit_stops` layer both
+    go through it, so they run on **Windows**.
+* **tippecanoe** ≥ 2.x — still required by the safety, maxspeed, transit_lines,
+  ma_pois and admin layer scripts, which pipe GeoJSON through it. The merge no
+  longer uses its `tile-join`.
+* **osmium-tool** (`osmium`) — still required by those same OSM-derived layers.
+* **GDAL** (`ogr2ogr`) — transit_lines only.
+* **python3** (stdlib only) — the `normalize_*.py` schema mappers.
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
 * Base reuse mode only: `curl`, and `go-pmtiles` (`pmtiles`) if using `--bbox`
+
+### What builds on Windows
+
+Everything that is cargo-only: the routing graph (`build_graph.ps1`), the offline
+transit pack (`build_ca_transit.ps1`), the `transit_stops` layer
+(`build_transit_stops_layer.ps1`) and the final merge (`tile_join`). The
+OSM-derived vector layers still need tippecanoe + osmium and therefore a Linux
+box or WSL.
+
+That is why `tile_build` exists rather than shelling out to tippecanoe: there is
+no Windows path for it (see the note at `build_graph.ps1:29`), which would
+otherwise have left `transit_stops` unbuildable on the dev box.
+
+> **`tile_join` memory.** It reads every input archive wholly into memory. That is
+> fine for the overlay layers (tens of MB each) but **not** for compositing against
+> the full 1.5 GB published basemap — do that on a machine with the RAM for it, or
+> merge the overlays first and composite once.
+
+Install
 
 Install (Fedora/Amazon Linux, matching `run_generator.sh` conventions):
 
@@ -562,9 +591,16 @@ R2 (no `*_zone_*.bin`).
 ## Dry-run result (this checkout)
 
 `tippecanoe`/`osmium`/`ogr2ogr` are not installed on the dev box, so the
-tile-level build was not executed here. The **schema-mapping core** (the part
-that defines the new `safety` + admin layers) was dry-run via the unit test and
-passes:
+OSM-derived tile builds were not executed here. The **schema-mapping core** (the
+part that defines the new `safety` + admin layers) was dry-run via the unit test
+and passes:
+
+> **Since updated.** The `transit_stops` layer and the final merge no longer go
+> through tippecanoe at all — they run entirely on `cargo` via
+> [`tile_build`](tile_build/), and both *were* exercised on this dev box. That
+> crate's PMTiles reader is additionally pinned against the real published
+> `v5-ca.pmtiles`: its header parses to the known values and its gzipped root
+> directory re-serializes byte-exactly. See `tile_build/tests/fixtures/README.md`.
 
 ```
 $ python3 scripts/maps/test/test_normalize.py
