@@ -627,6 +627,94 @@ fn hammer_every_query(pack: &MbPack<'_>) {
 }
 
 #[test]
+fn the_deferred_search_path_agrees_with_the_intersected_one() {
+    // The deferral path only activates for tokens whose posting lists run to
+    // millions, so no fixture-sized query can reach it -- which is why TWO bugs
+    // shipped there (MAX_POSTINGS_PER_TOKEN truncating common-word queries, and
+    // searchable_text omitting artist credits). Forcing the threshold to 0 sends
+    // every non-rarest token down that path, making it reachable here.
+    let built = build_fixture(BuildOptions::default());
+    let normal = MbPack::open(&built.bytes).expect("open");
+    let deferred = MbPack::open(&built.bytes).expect("open").with_posting_intersect_max(0);
+
+    let queries = [
+        "dark side of the moon",
+        "the dark side",
+        "pink floyd",
+        "björk homogenic",
+        "pink floyd feat björk",
+        "speak to me",
+        "the moon",
+        "various artists",
+        "untitled weird title",
+        "homogenic live",
+    ];
+    for q in queries {
+        // Both paths implement the same predicate; any divergence is a bug in one.
+        assert_eq!(
+            normal.search_release_groups(q, 25),
+            deferred.search_release_groups(q, 25),
+            "release-group search diverged between paths for {q:?}"
+        );
+        assert_eq!(
+            normal.search_artists(q, 25),
+            deferred.search_artists(q, 25),
+            "artist search diverged between paths for {q:?}"
+        );
+        assert_eq!(
+            normal.search_recordings(q, 25),
+            deferred.search_recordings(q, 25),
+            "recording search diverged between paths for {q:?}"
+        );
+    }
+}
+
+#[test]
+fn credit_only_matches_survive_the_deferred_path() {
+    // This is the exact bug the user found: the builder indexes artist credits, but
+    // the reader verified deferred tokens against title-only text, so a credit-only
+    // match was silently dropped -- only for tokens common enough to defer, which no
+    // fixture reached. With the threshold at 0, the fixture reaches it.
+    let built = build_fixture(BuildOptions::default());
+    let deferred = MbPack::open(&built.bytes).expect("open").with_posting_intersect_max(0);
+
+    // "björk" appears in no release-group TITLE in the fixture -- only in credits --
+    // and the second token forces the first down the deferred verification path.
+    let hits = deferred.search_release_groups("björk homogenic", 25);
+    let titles: Vec<String> = hits
+        .iter()
+        .map(|h| deferred.release_group(h.idx).unwrap().title.into_owned())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t == "Homogenic"),
+        "a credit-only term must survive deferred verification, got {titles:?}"
+    );
+
+    // Same for recordings, whose credits are attached per recording.
+    let hits = deferred.search_recordings("björk jóga", 25);
+    let found: Vec<String> = hits
+        .iter()
+        .map(|h| deferred.recording(h.idx).unwrap().title.into_owned())
+        .collect();
+    assert!(
+        found.iter().any(|t| t == "Jóga"),
+        "a credit-only term must survive deferred verification on recordings, got {found:?}"
+    );
+
+    // And a credit term combined with a title term from the SAME entity, where the
+    // credit is the deferred one.
+    let hits = deferred.search_release_groups("pink floyd echoes", 25);
+    let titles: Vec<String> = hits
+        .iter()
+        .map(|h| deferred.release_group(h.idx).unwrap().title.into_owned())
+        .collect();
+    assert!(
+        titles.iter().any(|t| t.starts_with("Echoes")),
+        "credit + title across the two paths must intersect, got {titles:?}"
+    );
+}
+
+#[test]
 fn truncated_pack_is_rejected_not_read() {
     let built = build_fixture(BuildOptions::default());
     for cut in [1usize, 64, 128, built.bytes.len() / 2, built.bytes.len() - 1] {

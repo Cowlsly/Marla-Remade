@@ -276,6 +276,8 @@ pub struct MbPack<'a> {
     flags: u32,
     dump_date: u32,
     string_blocks: u32,
+    /// See [`MbPack::with_posting_intersect_max`].
+    posting_intersect_max: u64,
 }
 
 impl fmt::Debug for MbPack<'_> {
@@ -354,7 +356,15 @@ impl<'a> MbPack<'a> {
             *slot = (off, len);
         }
 
-        let me = MbPack { bytes, dir, counts, flags, dump_date, string_blocks };
+        let me = MbPack {
+            bytes,
+            dir,
+            counts,
+            flags,
+            dump_date,
+            string_blocks,
+            posting_intersect_max: Self::POSTING_INTERSECT_MAX,
+        };
         if me.strings_compressed() {
             // The index needs one offset per block plus a trailing sentinel; without
             // it, no pool offset can be resolved at all.
@@ -443,6 +453,26 @@ impl<'a> MbPack<'a> {
     }
     pub fn strings_compressed(&self) -> bool {
         self.flags & pack::FLAG_STRINGS_COMPRESSED != 0
+    }
+
+    /// Override the posting-list size above which a query token is verified against
+    /// candidate text instead of intersected by postings.
+    ///
+    /// This exists to make the deferral path REACHABLE IN TESTS, and that is not a
+    /// convenience. Two bugs have shipped in that path — `MAX_POSTINGS_PER_TOKEN`
+    /// silently truncating common-word queries, and `searchable_text` omitting
+    /// artist credits so credit-only matches were dropped — and neither was
+    /// catchable, because the path only activates for tokens whose posting lists
+    /// exceed millions of entries and no synthetic fixture is that large. Setting
+    /// this to 0 forces every non-rarest token down the deferred path, so a
+    /// 12-track fixture can exercise the code that only real corpora otherwise
+    /// reach.
+    ///
+    /// Results MUST be identical either way: the two paths are two implementations
+    /// of the same predicate, and any divergence is a bug in one of them.
+    pub fn with_posting_intersect_max(mut self, max: u64) -> MbPack<'a> {
+        self.posting_intersect_max = max;
+        self
     }
 
     /// Section byte lengths, for a build report or a `/status` handler.
@@ -1136,7 +1166,7 @@ impl<'a> MbPack<'a> {
         // set is already small by the time we get there.
         let mut deferred: Vec<&str> = Vec::new();
         for (token, tlo, thi, cost) in expanded.iter().skip(1) {
-            if *cost > Self::POSTING_INTERSECT_MAX {
+            if *cost > self.posting_intersect_max {
                 deferred.push(token);
                 continue;
             }
