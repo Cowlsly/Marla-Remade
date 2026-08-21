@@ -4,7 +4,8 @@
 # table below): it is a std-only host binary with zero external dependencies, so
 # `cargo build` here resolves offline and never pulls the aarch64-android
 # toolchain or the app crates' lints. It emits a compact per-region transit
-# index consumed on-device by `maps/src/main/rust/src/transit.rs` (P11b).
+# index consumed on-device by `maps/src/main/rust/src/transit.rs` (P11b), plus a
+# `transit_stops` binary that emits the basemap stop layer as geojsonseq.
 [package]
 name = "gtfs_ingest"
 version = "0.1.0"
@@ -16,6 +17,12 @@ description = "GTFS -> compact on-device transit index for the Maps offline pack
 [[bin]]
 name = "gtfs_ingest"
 path = "src/main.rs"
+[lib]
+name = "gtfs_ingest"
+path = "src/lib.rs"
+[[bin]]
+name = "transit_stops"
+path = "src/bin/transit_stops.rs"
 
 [dependencies]
 

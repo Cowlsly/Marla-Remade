@@ -30,11 +30,10 @@
 //! each agency's official GTFS `.zip` — the same open data behind the P10
 //! online boards. See `scripts/maps/build_world_transit.sh`.
 
-mod gtfs;
-mod index;
-mod shapes;
-
-use index::FeedInput;
+use gtfs_ingest::gtfs;
+use gtfs_ingest::index;
+use gtfs_ingest::index::FeedInput;
+use gtfs_ingest::manifest::{read_manifest, parse_feed_spec, FeedSpec};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -51,7 +50,7 @@ fn main() -> ExitCode {
 
     // Collect (feed_name, gtfs_dir, motis_prefix) triples, from a manifest or
     // inline args.
-    let specs: Vec<(String, PathBuf, String)> = if args[3] == "--manifest" {
+    let specs: Vec<FeedSpec> = if args[3] == "--manifest" {
         let file = match args.get(4) {
             Some(f) => f,
             None => {
@@ -84,48 +83,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse `feed_name=dir`, `feed_name=dir=motis_prefix`, or a bare `dir` (name then
-/// defaults to the dir's base name, with no prefix).
-///
-/// The third field is the feed's Transitous id namespace, which composes into a
-/// MOTIS stop id in the pack. Two-field specs stay valid, so
-/// `build_world_transit.sh` is unaffected and its packs simply carry no ids.
-/// Fields split on `=`, so neither the directory nor the prefix may contain one.
-fn parse_feed_spec(s: &str) -> (String, PathBuf, String) {
-    let mut parts = s.splitn(3, '=');
-    match (parts.next(), parts.next()) {
-        (Some(name), Some(dir)) => (
-            name.to_string(),
-            PathBuf::from(dir),
-            parts.next().unwrap_or("").trim().to_string(),
-        ),
-        _ => {
-            let dir = PathBuf::from(s);
-            let name = dir
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| s.to_string());
-            (name, dir, String::new())
-        }
-    }
-}
-
-/// Read a manifest of feed-spec lines (`#` comments / blanks ignored).
-fn read_manifest(path: &Path) -> Result<Vec<(String, PathBuf, String)>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("cannot read manifest {}: {e}", path.display()))?;
-    let mut out = Vec::new();
-    for line in text.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        out.push(parse_feed_spec(line));
-    }
-    Ok(out)
-}
-
-fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf, String)]) -> Result<(), String> {
+fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String> {
     // Parse every feed up front so their CSVs outlive the FeedInput borrows.
     struct FeedTables {
         name: String,
@@ -292,47 +250,4 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_two_field_spec_carries_no_motis_prefix() {
-        // build_world_transit.sh emits these; its packs must keep building.
-        let (name, dir, prefix) = parse_feed_spec("sfmuni=/tmp/gtfs/sfmuni");
-        assert_eq!(name, "sfmuni");
-        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sfmuni"));
-        assert_eq!(prefix, "");
-    }
-
-    #[test]
-    fn a_three_field_spec_carries_the_motis_prefix() {
-        let (name, dir, prefix) =
-            parse_feed_spec("sf_bayarea=/tmp/gtfs/sf_bayarea=us-ca-SF-bayarea");
-        assert_eq!(name, "sf_bayarea");
-        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sf_bayarea"));
-        // The unmangled Transitous source name, which Get-SafeName destroys in
-        // the feed name beside it.
-        assert_eq!(prefix, "us-ca-SF-bayarea");
-    }
-
-    #[test]
-    fn a_bare_dir_names_itself() {
-        let (name, dir, prefix) = parse_feed_spec("/tmp/gtfs/sfmuni");
-        assert_eq!(name, "sfmuni");
-        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sfmuni"));
-        assert_eq!(prefix, "");
-    }
-
-    #[test]
-    fn a_windows_dir_survives_the_split() {
-        // Drive letters use `:`, not `=`, so they are not split points.
-        let (name, dir, prefix) =
-            parse_feed_spec(r"sf=C:\work\gtfs\sf=us-ca-SFMTA");
-        assert_eq!(name, "sf");
-        assert_eq!(dir, PathBuf::from(r"C:\work\gtfs\sf"));
-        assert_eq!(prefix, "us-ca-SFMTA");
-    }
 }
