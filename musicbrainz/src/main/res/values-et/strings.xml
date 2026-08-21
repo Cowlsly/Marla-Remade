@@ -47,4 +47,14 @@
     <string name="embed_cover_art_description">Salvesta kaanepildid allalaaditud failide sisse.</string>
     <string name="fetch_lyrics">Laulusõnad</string>
     <string name="fetch_lyrics_description">Otsi veebist sünkroonitud laulusõnad ka salvesta muusikafailidesse.</string>
+    <string name="download_source">Laadi alla teenusest</string>
+    <string name="tidal_account">Tidali kasutajakonto</string>
+    <string name="tidal_signed_out">Sa pole loginud sisse. Allalaadimiseks on kasutusel YouTube.</string>
+    <string name="tidal_sign_out">Logi välja</string>
+    <string name="tidal_sign_in">Logi sisse Tidalisse</string>
+    <string name="tidal_login_starting">Alustan sisselogimist…</string>
+    <string name="tidal_login_instructions">Sisselogimise lõpetamiseks ava alljärgnev link ja sisesta see kood.</string>
+    <string name="tidal_copy_code">Kopeeri kood</string>
+    <string name="tidal_open_browser">Ava veebibrauseris</string>
+    <string name="tidal_login_failed">Tidalisse sisselogimine ei õnnestunud.</string>
 </resources>
