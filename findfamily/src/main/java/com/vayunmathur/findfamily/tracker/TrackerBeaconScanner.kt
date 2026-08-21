@@ -44,6 +44,11 @@ class TrackerBeaconScanner(private val context: Context) {
                 val battery = if (serviceData.size > TrackerProtocol.EPOCH_ID_LEN) {
                     serviceData[TrackerProtocol.EPOCH_ID_LEN].toInt() and 0xFF
                 } else -1
+                Log.i(
+                    TAG,
+                    "sighting: epochId=${epochId.joinToString("") { "%02x".format(it) }} " +
+                        "battery=$battery rssi=${result.rssi}"
+                )
                 trySend(TrackerSighting(epochId, battery, result.rssi))
             }
 

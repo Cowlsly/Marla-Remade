@@ -347,8 +347,18 @@ class LocationTrackingService : Service(), SensorEventListener {
         trackerScanJob = serviceScope.launch {
             runCatching {
                 TrackerBeaconScanner(this@LocationTrackingService).sightings().collect { sighting ->
-                    val loc = lastKnownLocation ?: return@collect
-                    if (loc.accuracy > 100f) return@collect
+                    val loc = lastKnownLocation
+                    if (loc == null) {
+                        // Both of these drops used to be silent, which made a stalled
+                        // crowd-finding pipeline indistinguishable from one that was
+                        // never hearing the beacon at all.
+                        Log.i("FF-Tracker", "sighting dropped: no location fix yet")
+                        return@collect
+                    }
+                    if (loc.accuracy > 100f) {
+                        Log.i("FF-Tracker", "sighting dropped: accuracy ${loc.accuracy}m > 100m")
+                        return@collect
+                    }
                     val battery = runCatching {
                         bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY).toFloat()
                     }.getOrDefault(0f)
@@ -361,6 +371,7 @@ class LocationTrackingService : Service(), SensorEventListener {
                         battery,
                     )
                     runCatching { TrackerReporting.reportSighting(sighting, lv) }
+                        .onSuccess { if (!it) Log.i("FF-Tracker", "reportSighting returned false (epoch id unresolved or socket down)") }
                         .onFailure { Log.w("FF-Tracker", "reportSighting failed", it) }
                 }
             }.onFailure { Log.w("FF-Tracker", "tracker scan collect failed", it) }

@@ -73,6 +73,14 @@ static const struct bt_data pairing_ad[] = {
 };
 
 static struct bt_data beacon_ad[] = {
+	/*
+	 * The service UUID must be advertised as its own AD field, not just implied by the
+	 * service data below. Android's ScanFilter.setServiceUuid() matches against the
+	 * Service UUID AD types (0x06/0x07) and ignores service data, so a beacon carrying
+	 * only 0x21 is invisible to a filtered scan no matter how correct its payload is.
+	 * Costs 18 bytes, which extended advertising has room for.
+	 */
+	BT_DATA_BYTES(BT_DATA_UUID128_ALL, FF_UUID_BEACON_SVC),
 	BT_DATA(BT_DATA_SVC_DATA128, beacon_sd, sizeof(beacon_sd)),
 };
 

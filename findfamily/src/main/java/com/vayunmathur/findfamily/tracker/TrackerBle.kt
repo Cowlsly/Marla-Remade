@@ -16,6 +16,11 @@ import java.util.UUID
  * 0..100. The id rotates every [TrackerProtocol.EPOCH_SECONDS]; no static id is ever
  * broadcast.
  *
+ * The advertisement carries [SERVICE_UUID] **twice**: once as a Service UUID AD field
+ * and once as the UUID of the service data. Both are required — `ScanFilter.setServiceUuid`
+ * only matches the former, while `ScanRecord.getServiceData` only reads the latter, so a
+ * beacon that omits either is undiscoverable by the scanner in [TrackerBeaconScanner].
+ *
  * This AD structure does **not** fit a legacy advertisement: `Service Data — 128-bit
  * UUID` costs `1B length + 1B type + 16B UUID = 18B` of overhead, so with the 17-byte
  * payload above it is 35 bytes against the 31-byte legacy limit. The full 16-byte UUID
