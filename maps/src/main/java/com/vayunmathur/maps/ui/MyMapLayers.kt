@@ -84,6 +84,16 @@ fun MyMapLayers(
         }
     }
 
+    // Recreate every layer when the style JSON changes. This looks like a heavy-handed teardown
+    // — a theme flip only changes paint — but it is load-bearing, so do not remove it.
+    //
+    // maplibre-compose's `LayerManager` only exposes add/remove/move driven by composition
+    // structure; it has no "re-apply everything to the new style" path, and `SafeStyle.unload()`
+    // discards the old native style along with the layers that were added to it. If these
+    // composables stayed in composition across a style swap, `addLayer` would never be called
+    // again and all twelve overlays would silently disappear after the first theme flip.
+    //
+    // Verified against maplibre-compose 0.13.0's `StyleNode` / `LayerManager` / `SafeStyle`.
     key(styleJson) {
         var routeSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         var userSource by remember { mutableStateOf<GeoJsonSource?>(null) }

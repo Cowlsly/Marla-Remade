@@ -2,6 +2,7 @@ package com.vayunmathur.maps.ui.theme
 
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
+import com.vayunmathur.maps.BuildConfig
 
 /**
  * Colours for things drawn on the *tiles* rather than on the app's surfaces.
@@ -38,7 +39,6 @@ object BasemapPalette {
         Airstrip,
         Pedestrian,
         Pier,
-        LanduseOther,
         Buildings,
         Boundaries,
         Rail,
@@ -81,7 +81,6 @@ object BasemapPalette {
         Fill.Airstrip to Color(0xFF2B2D33),
         Fill.Pedestrian to Color(0xFF242229),
         Fill.Pier to Color(0xFF202225),
-        Fill.LanduseOther to Color(0xFF1F2126),
         Fill.Buildings to Color(0xFF22262C),
         Fill.Boundaries to Color(0xFF4A4F57),
         Fill.Rail to Color(0xFF3A3E45),
@@ -112,54 +111,121 @@ object BasemapPalette {
     fun label(role: Label): LabelColors = darkLabel.getValue(role)
 
     /**
-     * Which [Fill] a style layer id denotes.
+     * Every layer id in `assets/style.json`, mapped to its role.
      *
-     * Prefix and substring matching, carried over unchanged from the code this replaced.
-     * It is fragile — a renamed layer silently falls through to [Fill.Other] rather than
-     * failing — and gets replaced by an explicit id map in the basemap-correctness pass.
-     * Casing has to be tested before highway/major because `roads_highway_casing_early`
-     * contains both tokens.
+     * Explicit rather than prefix-matched. The prefix rules this replaced were order-dependent
+     * and silent: `roads_highway_casing_early` contains both "casing" and "highway", so casing
+     * had to be tested first, and any layer the style renamed would quietly fall through to
+     * [Fill.Other] and be recoloured wrong with nothing to indicate it. A missing id here is at
+     * least visible — see [fillRole].
      */
-    fun fillRole(id: String): Fill = when {
-        id == "background" || id == "earth" -> Fill.Background
-        id == "water" -> Fill.Water
-        id == "water_stream" || id == "water_river" -> Fill.Waterway
-        id == "landcover" -> Fill.Landcover
-        id == "landuse_park" -> Fill.Park
-        id == "landuse_urban_green" -> Fill.UrbanGreen
-        id == "landuse_hospital" -> Fill.Hospital
-        id == "landuse_industrial" -> Fill.Industrial
-        id == "landuse_school" -> Fill.School
-        id == "landuse_beach" -> Fill.Beach
-        id == "landuse_zoo" -> Fill.Zoo
-        id == "landuse_aerodrome" -> Fill.Aerodrome
-        id == "landuse_runway" -> Fill.Airstrip
-        id == "landuse_pedestrian" -> Fill.Pedestrian
-        id == "landuse_pier" -> Fill.Pier
-        id.startsWith("landuse") -> Fill.LanduseOther
-        id == "buildings" -> Fill.Buildings
-        id.startsWith("boundaries") -> Fill.Boundaries
-        id == "roads_rail" -> Fill.Rail
-        id.startsWith("roads_runway") || id.startsWith("roads_taxiway") -> Fill.Airstrip
-        id.contains("casing") -> Fill.RoadCasing
-        id.startsWith("roads_tunnels") -> Fill.RoadTunnel
-        id.contains("highway") || id.contains("major") || id.contains("link") -> Fill.RoadMajor
-        id.startsWith("roads") -> Fill.RoadMinor
-        else -> Fill.Other
+    private val fillRoles: Map<String, Fill> = buildMap {
+        put("background", Fill.Background)
+        put("earth", Fill.Background)
+        put("landcover", Fill.Landcover)
+        put("water", Fill.Water)
+        put("water_stream", Fill.Waterway)
+        put("water_river", Fill.Waterway)
+        put("buildings", Fill.Buildings)
+
+        put("landuse_park", Fill.Park)
+        put("landuse_urban_green", Fill.UrbanGreen)
+        put("landuse_hospital", Fill.Hospital)
+        put("landuse_industrial", Fill.Industrial)
+        put("landuse_school", Fill.School)
+        put("landuse_beach", Fill.Beach)
+        put("landuse_zoo", Fill.Zoo)
+        put("landuse_aerodrome", Fill.Aerodrome)
+        put("landuse_pedestrian", Fill.Pedestrian)
+        put("landuse_pier", Fill.Pier)
+
+        // Runways and taxiways are paved surfaces, not roads: same grey either way.
+        put("landuse_runway", Fill.Airstrip)
+        put("roads_runway", Fill.Airstrip)
+        put("roads_taxiway", Fill.Airstrip)
+
+        put("roads_rail", Fill.Rail)
+        put("roads_pier", Fill.Pier)
+
+        // Casings are the dark outline under a road, so they are darker than any road surface.
+        // Listed before the surfaces they sit under only for readability; the map has no order.
+        for (id in listOf(
+            "roads_minor_service_casing", "roads_minor_casing", "roads_link_casing",
+            "roads_major_casing_late", "roads_highway_casing_late",
+            "roads_major_casing_early", "roads_highway_casing_early",
+            "roads_tunnels_other_casing", "roads_tunnels_minor_casing",
+            "roads_tunnels_link_casing", "roads_tunnels_major_casing",
+            "roads_tunnels_highway_casing",
+            "roads_bridges_other_casing", "roads_bridges_link_casing",
+            "roads_bridges_minor_casing", "roads_bridges_major_casing",
+            "roads_bridges_highway_casing",
+        )) put(id, Fill.RoadCasing)
+
+        // Tunnels read as recessed, so they are dimmer than the same road at grade.
+        for (id in listOf(
+            "roads_tunnels_other", "roads_tunnels_minor", "roads_tunnels_link",
+            "roads_tunnels_major", "roads_tunnels_highway",
+        )) put(id, Fill.RoadTunnel)
+
+        // Bridges are at grade visually; they only differ by having a casing.
+        for (id in listOf(
+            "roads_link", "roads_major", "roads_highway",
+            "roads_bridges_link", "roads_bridges_major", "roads_bridges_highway",
+        )) put(id, Fill.RoadMajor)
+
+        for (id in listOf(
+            "roads_other", "roads_minor", "roads_minor_service", "roads_bridges_other",
+            "roads_bridges_minor",
+        )) put(id, Fill.RoadMinor)
+
+        put("boundaries", Fill.Boundaries)
+        put("boundaries_country", Fill.Boundaries)
+
+        // Symbol layers carry no fill; they are here so they resolve rather than warn.
+        for (id in listOf(
+            "address_label", "water_waterway_label", "roads_oneway", "roads_labels_minor",
+            "water_label_ocean", "earth_label_islands", "water_label_lakes", "roads_shields",
+            "roads_labels_major", "pois", "places_subplace", "places_region",
+            "places_locality", "places_country",
+        )) put(id, Fill.Other)
     }
 
-    /** Which [Label] a style layer id denotes. Same caveat as [fillRole]. */
-    fun labelRole(id: String): Label = when (id) {
-        "places_locality" -> Label.Locality
-        "places_country" -> Label.Country
-        "places_region" -> Label.Region
-        "places_subplace" -> Label.Subplace
-        "earth_label_islands" -> Label.Islands
-        "water_waterway_label", "water_label_ocean", "water_label_lakes" -> Label.Water
-        "roads_shields" -> Label.Shields
-        "roads_labels_major", "roads_labels_minor", "address_label" -> Label.Road
-        else -> Label.Other
+    private val labelRoles: Map<String, Label> = mapOf(
+        "places_locality" to Label.Locality,
+        "places_country" to Label.Country,
+        "places_region" to Label.Region,
+        "places_subplace" to Label.Subplace,
+        "earth_label_islands" to Label.Islands,
+        "water_waterway_label" to Label.Water,
+        "water_label_ocean" to Label.Water,
+        "water_label_lakes" to Label.Water,
+        "roads_shields" to Label.Shields,
+        "roads_labels_major" to Label.Road,
+        "roads_labels_minor" to Label.Road,
+        "address_label" to Label.Road,
+    )
+
+    /** Layer ids the palette knows about. Used by the test that keeps it in step with the asset. */
+    val knownLayerIds: Set<String> get() = fillRoles.keys
+
+    /**
+     * Which [Fill] a style layer id denotes.
+     *
+     * An unknown id falls back to [Fill.Other] so a style update cannot crash the map, but says
+     * so on a debug build: falling back silently is how a renamed layer ends up mis-coloured
+     * with no way to notice short of looking at the map.
+     */
+    fun fillRole(id: String): Fill = fillRoles[id] ?: run {
+        warnUnmatched(id)
+        Fill.Other
     }
+
+    /**
+     * Which [Label] a style layer id denotes.
+     *
+     * No warning here: most layers are not label layers, so "not found" is the common case.
+     */
+    fun labelRole(id: String): Label = labelRoles[id] ?: Label.Other
 
     /** Dark fill/line/background colour for a base style layer, as a style string. */
     fun darkFillHex(id: String): String = fill(fillRole(id)).toStyleHex()
@@ -167,4 +233,24 @@ object BasemapPalette {
     /** Dark `(text-color, text-halo-color)` for a label layer, as style strings. */
     fun darkLabelHex(id: String): Pair<String, String> =
         label(labelRole(id)).let { it.text.toStyleHex() to it.halo.toStyleHex() }
+
+    /**
+     * Complain once per unknown id on a debug build.
+     *
+     * Once, because this runs per layer per theme flip and a repeating log is a log nobody
+     * reads. Debug-only, because a release build shipping an updated style should degrade
+     * rather than spam.
+     */
+    private val warned = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    private fun warnUnmatched(id: String) {
+        if (!BuildConfig.DEBUG) return
+        if (warned.add(id)) {
+            android.util.Log.w(
+                "BasemapPalette",
+                "no role for style layer '$id'; it will be recoloured as Other. " +
+                    "Add it to BasemapPalette.fillRoles.",
+            )
+        }
+    }
 }

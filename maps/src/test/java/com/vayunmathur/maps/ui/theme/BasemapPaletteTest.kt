@@ -1,6 +1,11 @@
 package com.vayunmathur.maps.ui.theme
 
 import androidx.compose.ui.graphics.Color
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -122,5 +127,52 @@ class BasemapPaletteTest {
         assertEquals(BasemapPalette.Label.Water, BasemapPalette.labelRole("water_label_lakes"))
         assertEquals(BasemapPalette.Label.Road, BasemapPalette.labelRole("roads_labels_major"))
         assertEquals(BasemapPalette.Label.Other, BasemapPalette.labelRole("roads_oneway"))
+    }
+
+    /**
+     * The palette and the bundled style have to stay in step.
+     *
+     * `assets/style.json` is 3544 lines of vendored Protomaps output, and it gets replaced
+     * wholesale when the basemap is regenerated. A layer that appears or gets renamed would
+     * otherwise be recoloured as `Other` — visible on a dark map, and nowhere else.
+     *
+     * Reads the real asset rather than restating the id list, so the assertion cannot drift
+     * from the thing it is asserting about.
+     */
+    @Test
+    fun `every layer id in the bundled style has an explicit role`() {
+        val styleFile = File("src/main/assets/style.json")
+        assertTrue(styleFile.isFile, "style.json not found at ${styleFile.absolutePath}")
+
+        val ids = Json { ignoreUnknownKeys = true }
+            .parseToJsonElement(styleFile.readText())
+            .jsonObject["layers"]!!
+            .jsonArray
+            .map { it.jsonObject["id"]!!.jsonPrimitive.content }
+
+        assertTrue(ids.isNotEmpty(), "parsed no layers out of style.json")
+
+        val missing = ids.filterNot { it in BasemapPalette.knownLayerIds }
+        assertTrue(
+            missing.isEmpty(),
+            "style.json layers with no role in BasemapPalette: $missing",
+        )
+    }
+
+    /** The reverse direction: a role for a layer that no longer exists is dead weight. */
+    @Test
+    fun `the palette knows no layer ids the style does not have`() {
+        val styleFile = File("src/main/assets/style.json")
+        assertTrue(styleFile.isFile)
+
+        val ids = Json { ignoreUnknownKeys = true }
+            .parseToJsonElement(styleFile.readText())
+            .jsonObject["layers"]!!
+            .jsonArray
+            .map { it.jsonObject["id"]!!.jsonPrimitive.content }
+            .toSet()
+
+        val stale = BasemapPalette.knownLayerIds - ids
+        assertTrue(stale.isEmpty(), "BasemapPalette has roles for layers style.json dropped: $stale")
     }
 }
