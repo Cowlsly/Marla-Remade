@@ -1071,12 +1071,23 @@ impl<'a> MbPack<'a> {
         out
     }
 
-    /// The text a given entity is searched by.
+    /// The text a given entity is searched by. This MUST yield the same terms
+    /// `build.rs` emitted postings for: release groups and recordings are indexed
+    /// on title AND artist credit, so verifying against the title alone would
+    /// reject every credit-only match. It would do so only for queries expensive
+    /// enough to defer, which is to say only for common artists, and no
+    /// fixture-sized test can reach that threshold -- the same shape as the
+    /// `MAX_POSTINGS_PER_TOKEN` truncation this replaced.
+    ///
+    /// The newline is a term separator, so this is exactly the union of the two
+    /// texts' terms, not a third text with a seam term across the join.
     fn searchable_text(&self, kind: u32, idx: u32) -> Cow<'a, str> {
         match kind {
             KIND_ARTIST => self.artist(idx).map(|a| a.name),
-            KIND_RELEASE_GROUP => self.release_group(idx).map(|g| g.title),
-            _ => self.recording(idx).map(|r| r.title),
+            KIND_RELEASE_GROUP => {
+                self.release_group(idx).map(|g| Cow::Owned(format!("{}\n{}", g.title, g.credit)))
+            }
+            _ => self.recording(idx).map(|r| Cow::Owned(format!("{}\n{}", r.title, r.credit))),
         }
         .unwrap_or(Cow::Borrowed(""))
     }
@@ -1319,5 +1330,87 @@ mod tests {
             let r = RecordingRec { title_off: 0, dur_s: 0, credit_lo: lo, credit_hi: hi };
             assert_eq!(credit_of(&r), v, "credit {v}");
         }
+    }
+
+    /// Every posting must be verifiable against the entity's `searchable_text`.
+    ///
+    /// `search` defers any token whose posting list is too big to intersect and
+    /// checks it against that text instead, so a term the builder indexed but the
+    /// text does not yield is dropped from the results -- silently, and only for
+    /// tokens common enough to defer. Folding artist credits into the release-group
+    /// and recording indexes made "various artists" exactly such a token while
+    /// `searchable_text` still returned the title alone, which is the same failure
+    /// as the `MAX_POSTINGS_PER_TOKEN` truncation that preceded it: the fixture is
+    /// far too small to reach the threshold, so a query test cannot see it.
+    ///
+    /// White-box, and here rather than in `tests/round_trip.rs`, because
+    /// `searchable_text` is private and making it public to test it would be worse.
+    #[test]
+    fn every_posting_is_verifiable_against_its_entity_text() {
+        let dir = std::env::temp_dir().join(format!("mb_postings_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        crate::fixture::write_fixture(&dir).expect("write fixture");
+        let mut out = std::io::Cursor::new(Vec::new());
+        crate::build::build(
+            &crate::copy::Input::Dir(dir.clone()),
+            &mut out,
+            &crate::build::BuildOptions::default(),
+            &mut std::io::sink(),
+        )
+        .expect("build pack");
+        let _ = std::fs::remove_dir_all(&dir);
+        let bytes = out.into_inner();
+        let pack = MbPack::open(&bytes).expect("open pack");
+
+        let postings = pack.sec(pack::S_SEARCH_POSTINGS);
+        let mut buf: Vec<String> = Vec::new();
+        let mut checked = 0usize;
+        let mut credit_only = 0usize;
+        for t in 0..pack.term_count() {
+            let term = std::str::from_utf8(pack.term_bytes(t).expect("term")).expect("utf8");
+            let (Some((_, start)), Some((_, end))) = (pack.term_idx(t), pack.term_idx(t + 1))
+            else {
+                panic!("term {t} has no extents");
+            };
+            assert!(start <= end, "term {term:?} has a reversed posting range");
+            let mut pos = start as usize;
+            let n = read_uvarint(postings, &mut pos).expect("posting count");
+            let mut prev = 0u64;
+            for _ in 0..n {
+                prev += read_uvarint(postings, &mut pos).expect("posting delta");
+                let refv = prev as u32;
+                let (kind, idx) = (refv >> KIND_SHIFT, refv & IDX_MASK);
+                let text = pack.searchable_text(kind, idx);
+                buf.clear();
+                pack::search_terms(&text, &mut buf);
+                assert_eq!(
+                    MbPack::weight_in_terms(&buf, term),
+                    Some(2),
+                    "term {term:?} is indexed for kind {kind} entity {idx} but its \
+                     searchable_text {text:?} does not yield it, so any query that \
+                     defers {term:?} silently drops this entity"
+                );
+                if kind != pack::KIND_ARTIST {
+                    let title = match kind {
+                        pack::KIND_RELEASE_GROUP => pack.release_group(idx).unwrap().title,
+                        _ => pack.recording(idx).unwrap().title,
+                    };
+                    let mut tbuf = Vec::new();
+                    pack::search_terms(&title, &mut tbuf);
+                    if MbPack::weight_in_terms(&tbuf, term).is_none() {
+                        credit_only += 1;
+                    }
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 0, "the fixture must produce postings");
+        // Without credit-only postings the assertion above proves nothing: a
+        // title-only index satisfies it trivially.
+        assert!(
+            credit_only > 0,
+            "the fixture must contain postings that come from an artist credit and \
+             not from the title, or this test cannot fail"
+        );
     }
 }

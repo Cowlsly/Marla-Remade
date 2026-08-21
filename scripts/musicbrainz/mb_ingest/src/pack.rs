@@ -156,7 +156,14 @@
 //! 28 SEARCH_TERMS     NUL-terminated normalised search terms, sorted ascending.
 //! 29 SEARCH_POSTINGS  per term, a varint block: uvarint n, then n ascending
 //!                     Δ-varint entity refs. A ref is `kind << 30 | index` with
-//!                     kind 0 artist, 1 release group, 2 recording.
+//!                     kind 0 artist, 1 release group, 2 recording. Artists are
+//!                     indexed on their name; release groups and recordings on
+//!                     their title AND their artist-credit display string, so
+//!                     that an artist name finds their albums the way WS/2's
+//!                     `release-group?query=` does. The reader's
+//!                     `searchable_text` must reproduce the same term union: it
+//!                     verifies candidates against that text for tokens too
+//!                     common to intersect by posting list.
 //! 30 SEARCH_TERM_IDX  TermIdxRec[search_term_count + 1], 8 B: byte offset into
 //!                     SEARCH_TERMS and byte offset into SEARCH_POSTINGS. The
 //!                     trailing sentinel gives the last term's extents.
