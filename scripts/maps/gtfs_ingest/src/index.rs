@@ -122,10 +122,12 @@
 //!                        which falls back to `stop_id` only when `stop_code` is
 //!                        blank and so cannot be relied on.
 
-use crate::gtfs::{parse_gtfs_date, parse_gtfs_time, Csv, Shape};
+use crate::gtfs;
+use crate::gtfs::{parse_gtfs_date, Csv, Shape};
 use crate::shapes;
 use std::collections::HashMap;
 use std::io::Write;
+use std::path::Path;
 
 pub const MAGIC: u32 = 0x5452_4958; // "TRIX"
 pub const VERSION: u32 = 5;
@@ -329,17 +331,24 @@ impl ShapeBlobs {
     }
 }
 
+/// One `stop_times.txt` row reduced to what the index needs: 20 bytes, against
+/// the ~400 a `Csv` row costs and the 40 an `Option<f64>` dist and `i64`
+/// sequence used to. This is the hot struct — a world corpus has billions.
 struct StopTime {
+    seq: u32,
     stop_idx: u32,
-    seq: i64,
     arr: u32,
     dep: u32,
-    /// `shape_dist_traveled`, in the feed's own units. An ordering key only.
-    dist: Option<f64>,
+    /// `shape_dist_traveled` in the feed's own units, or NaN when absent. An
+    /// ordering key only, so `f32` loses nothing that matters.
+    dist: f32,
 }
 
 /// One input GTFS feed (already parsed). Multiple feeds merge into one pack;
 /// their GTFS ids are namespaced by feed so they never collide.
+///
+/// Holding `stop_times.txt` as a [`Csv`] costs roughly 10x the bytes of the file,
+/// so the host tool uses [`FeedDir`] instead and lets the builder stream it.
 pub struct FeedInput<'a> {
     pub name: String,
     /// Transitous id prefix for this feed (`us-ca-SF-bayarea`), used to compose
@@ -359,6 +368,77 @@ pub struct FeedInput<'a> {
     /// `shapes.txt` keyed by `shape_id`. Optional: without it every route in this
     /// feed falls back to stop-to-stop ride geometry on device.
     pub shapes: Option<&'a HashMap<String, Shape>>,
+}
+
+/// The same feed, but with `stop_times.txt` left on disk to be streamed out of
+/// `dir` rather than parsed into a [`Csv`] first. Everything else is small enough
+/// to hold.
+pub struct FeedDir<'a> {
+    pub name: String,
+    pub motis_prefix: String,
+    /// The unzipped GTFS directory holding `stop_times.txt`.
+    pub dir: &'a Path,
+    pub stops: &'a Csv,
+    pub routes: &'a Csv,
+    pub trips: &'a Csv,
+    pub calendar: Option<&'a Csv>,
+    pub calendar_dates: Option<&'a Csv>,
+    pub agency: Option<&'a Csv>,
+    pub shapes: Option<&'a HashMap<String, Shape>>,
+}
+
+/// Where a feed's `stop_times.txt` comes from.
+enum StopTimesSource<'a> {
+    Table(&'a Csv),
+    Dir(&'a Path),
+}
+
+/// The parts of a feed [`IndexBuilder::add`] needs, from either input form.
+struct FeedView<'a> {
+    name: &'a str,
+    motis_prefix: &'a str,
+    stops: &'a Csv,
+    routes: &'a Csv,
+    trips: &'a Csv,
+    calendar: Option<&'a Csv>,
+    calendar_dates: Option<&'a Csv>,
+    agency: Option<&'a Csv>,
+    shapes: Option<&'a HashMap<String, Shape>>,
+    stop_times: StopTimesSource<'a>,
+}
+
+impl<'a> From<&'a FeedInput<'a>> for FeedView<'a> {
+    fn from(f: &'a FeedInput<'a>) -> FeedView<'a> {
+        FeedView {
+            name: &f.name,
+            motis_prefix: &f.motis_prefix,
+            stops: f.stops,
+            routes: f.routes,
+            trips: f.trips,
+            calendar: f.calendar,
+            calendar_dates: f.calendar_dates,
+            agency: f.agency,
+            shapes: f.shapes,
+            stop_times: StopTimesSource::Table(f.stop_times),
+        }
+    }
+}
+
+impl<'a> From<&'a FeedDir<'a>> for FeedView<'a> {
+    fn from(f: &'a FeedDir<'a>) -> FeedView<'a> {
+        FeedView {
+            name: &f.name,
+            motis_prefix: &f.motis_prefix,
+            stops: f.stops,
+            routes: f.routes,
+            trips: f.trips,
+            calendar: f.calendar,
+            calendar_dates: f.calendar_dates,
+            agency: f.agency,
+            shapes: f.shapes,
+            stop_times: StopTimesSource::Dir(f.dir),
+        }
+    }
 }
 
 /// Summary counts reported to the caller / manifest.
@@ -426,7 +506,7 @@ struct BuiltTrip {
     /// references no usable shape.
     shape_key: u32,
     /// `shape_dist_traveled` per pattern stop, when every stop has one.
-    stop_dists: Option<Vec<f64>>,
+    stop_dists: Option<Vec<f32>>,
 }
 
 /// Build the full index blob from one or more GTFS feeds. `pack_name` is stored
@@ -473,18 +553,19 @@ struct TripMeta {
 
 /// Accumulates GTFS feeds into one merged pack.
 ///
-/// Feeds go in one at a time through [`IndexBuilder::add_feed`], which both
-/// ingests a feed **and finalizes it**: its routes, trips, profiles, shapes and
-/// stop→route lists are serialized before the next feed is touched, so nothing
-/// per-feed survives the feed boundary. That is legal because a route never
-/// references a stop outside its own feed (`stop_id_to_idx` is per-feed), which
-/// `add_feed` asserts.
+/// Feeds go in one at a time through [`IndexBuilder::add_feed`] (or
+/// [`IndexBuilder::add_feed_dir`], which streams `stop_times.txt`), and each call
+/// both ingests a feed **and finalizes it**: its routes, trips, profiles, shapes
+/// and stop→route lists are serialized before the next feed is touched, so
+/// nothing per-feed survives the feed boundary. That is legal because a route
+/// never references a stop outside its own feed (`stop_id_to_idx` is per-feed),
+/// which `add` asserts.
 ///
 /// What crosses a boundary is only the pack itself — the section buffers, the
 /// string pool, the profile and shape tables — plus `stop_lat`/`stop_lon`,
 /// services and exceptions, which the transfers, both grids and the bbox need
 /// once every feed is in.
-struct IndexBuilder {
+pub struct IndexBuilder {
     pool: StringPool,
     /// STRINGS offset of the pack name, for the header.
     pack_name_off: u32,
@@ -536,7 +617,9 @@ struct IndexBuilder {
 }
 
 impl IndexBuilder {
-    fn new(pack_name: &str) -> IndexBuilder {
+    /// `pack_name` is stored in the string pool and surfaced to the on-device
+    /// planner as a fallback.
+    pub fn new(pack_name: &str) -> IndexBuilder {
         let mut pool = StringPool::new();
         let pack_name_off = pool.intern(pack_name);
         IndexBuilder {
@@ -590,7 +673,40 @@ impl IndexBuilder {
         i
     }
 
-    fn add_feed(&mut self, feed: &FeedInput) -> Result<(), String> {
+    /// Ingest and finalize one feed whose tables are all already parsed.
+    pub fn add_feed(&mut self, feed: &FeedInput) -> Result<(), String> {
+        self.add(&feed.into())
+    }
+
+    /// Ingest and finalize one feed, streaming its `stop_times.txt` off disk.
+    pub fn add_feed_dir(&mut self, feed: &FeedDir) -> Result<(), String> {
+        self.add(&feed.into())
+    }
+
+    /// Bytes currently held in the sections, for progress reporting: this is
+    /// what the finished pack will be, so it is the number to watch.
+    pub fn section_bytes(&self) -> usize {
+        self.pool.bytes.len()
+            + self.profiles.bytes.len()
+            + self.shape_blobs.bytes.len()
+            + self.sec_stops.len()
+            + self.sec_stop_gtfs_id.len()
+            + self.sec_routes.len()
+            + self.sec_route_stops.len()
+            + self.sec_route_trips.len()
+            + self.sec_route_shape_idx.len()
+            + self.sec_route_stop_shape.len()
+            + self.sec_stop_routes.len()
+            + self.sec_stop_routes_idx.len()
+            + self.sec_stop_route_pos.len()
+    }
+
+    /// `(stops, routes, trips)` accumulated so far.
+    pub fn counts(&self) -> (usize, usize, usize) {
+        (self.stop_lat.len(), self.route_count, self.trip_total)
+    }
+
+    fn add(&mut self, feed: &FeedView) -> Result<(), String> {
         let feed_idx = self.feed_name_offs.len() as u32;
         let feed_stop_start = self.stop_lat.len() as u32;
         let feed_exc_start = self.exceptions.len();
@@ -683,30 +799,55 @@ impl IndexBuilder {
 
         // --- stop_times grouped by trip (this feed) ---
         let mut trip_stoptimes: HashMap<String, Vec<StopTime>> = HashMap::new();
-        for row in &feed.stop_times.rows {
-            let trip_id = feed.stop_times.get(row, "trip_id");
-            if trip_id.is_empty() {
-                continue;
-            }
-            let stop_id = feed.stop_times.get(row, "stop_id");
-            let stop_idx = match stop_id_to_idx.get(stop_id) {
+        let mut collect = |row: gtfs::StopTimeRow| {
+            let stop_idx = match stop_id_to_idx.get(row.stop_id) {
                 Some(&i) => i,
-                None => continue,
+                None => return,
             };
-            let seq: i64 = feed.stop_times.get(row, "stop_sequence").trim().parse().unwrap_or(0);
-            let dep = parse_gtfs_time(feed.stop_times.get(row, "departure_time"));
-            let arr = parse_gtfs_time(feed.stop_times.get(row, "arrival_time"));
-            let (arr, dep) = match (arr, dep) {
-                (Some(a), Some(d)) => (a, d),
-                (Some(a), None) => (a, a),
-                (None, Some(d)) => (d, d),
-                (None, None) => continue,
-            };
-            let dist = feed.stop_times.get(row, "shape_dist_traveled").trim().parse::<f64>().ok();
-            trip_stoptimes
-                .entry(trip_id.to_string())
-                .or_default()
-                .push(StopTime { stop_idx, seq, arr, dep, dist });
+            trip_stoptimes.entry(row.trip_id.to_string()).or_default().push(StopTime {
+                seq: row.seq,
+                stop_idx,
+                arr: row.arr,
+                dep: row.dep,
+                dist: row.dist,
+            });
+        };
+        match feed.stop_times {
+            StopTimesSource::Table(csv) => {
+                for row in &csv.rows {
+                    let trip_id = csv.get(row, "trip_id");
+                    if trip_id.is_empty() {
+                        continue;
+                    }
+                    let Some((arr, dep)) = gtfs::stop_time_pair(
+                        csv.get(row, "arrival_time"),
+                        csv.get(row, "departure_time"),
+                    ) else {
+                        continue;
+                    };
+                    collect(gtfs::StopTimeRow {
+                        trip_id,
+                        stop_id: csv.get(row, "stop_id"),
+                        seq: csv.get(row, "stop_sequence").trim().parse().unwrap_or(0),
+                        arr,
+                        dep,
+                        dist: csv
+                            .get(row, "shape_dist_traveled")
+                            .trim()
+                            .parse()
+                            .unwrap_or(f32::NAN),
+                    });
+                }
+            }
+            StopTimesSource::Dir(dir) => {
+                gtfs::stream_stop_times(dir, collect).ok_or_else(|| {
+                    format!(
+                        "feed '{}' ({}) missing required GTFS file: stop_times.txt",
+                        feed.name,
+                        dir.display()
+                    )
+                })?;
+            }
         }
 
         // --- Services (calendar.txt) namespaced by feed ---
@@ -830,7 +971,12 @@ impl IndexBuilder {
                 start_time: sts.first().map(|s| s.dep).unwrap_or(0),
                 stoptimes: sts.iter().map(|s| (s.arr, s.dep)).collect(),
                 shape_key,
-                stop_dists: sts.iter().map(|s| s.dist).collect::<Option<Vec<f64>>>(),
+                // Present only when every stop in the pattern carries one, which
+                // is what `shapes::fit` requires before it trusts the key.
+                stop_dists: sts
+                    .iter()
+                    .map(|s| (!s.dist.is_nan()).then_some(s.dist))
+                    .collect::<Option<Vec<f32>>>(),
             });
             raptor_routes[route_idx].trips.push(built_trips.len() - 1);
         }
@@ -992,7 +1138,7 @@ impl IndexBuilder {
     }
 
     /// Serialize the sections that need every feed, and write the pack to `out`.
-    fn finish_to(self, out: &mut impl Write) -> Result<BuildStats, String> {
+    pub fn finish_to(self, out: &mut impl Write) -> Result<BuildStats, String> {
         let IndexBuilder {
             pool,
             pack_name_off,
@@ -1374,12 +1520,20 @@ mod tests {
         Reader, SEC_FEED_MOTIS_PREFIX, SEC_SHAPE_COORDS, SEC_STOP_GTFS_ID,
     };
 
+    /// 20 bytes per `stop_times.txt` row is the whole point of the streaming
+    /// loader — a world corpus has billions of them, and the old `Csv` +
+    /// `Option<f64>` representation cost ~400 and 40.
+    #[test]
+    fn a_stop_time_stays_twenty_bytes() {
+        assert_eq!(std::mem::size_of::<StopTime>(), 20);
+    }
+
     fn agency(tz: &str) -> Csv {
         parse_csv(&format!("agency_id,agency_name,agency_timezone\nA,Agency,{tz}\n"))
     }
 
     /// `(shape_id, points as (lat, lon), optional shape_dist_traveled)`.
-    type ShapeSpec<'a> = (&'a str, Vec<(f64, f64)>, Option<Vec<f64>>);
+    type ShapeSpec<'a> = (&'a str, Vec<(f64, f64)>, Option<Vec<f32>>);
 
     fn shape_map(entries: Vec<ShapeSpec>) -> HashMap<String, Shape> {
         entries

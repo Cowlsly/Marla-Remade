@@ -32,7 +32,7 @@
 
 use gtfs_ingest::gtfs;
 use gtfs_ingest::index;
-use gtfs_ingest::index::FeedInput;
+use gtfs_ingest::index::FeedDir;
 use gtfs_ingest::manifest::{read_manifest, parse_feed_spec, FeedSpec};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -85,22 +85,22 @@ fn main() -> ExitCode {
 }
 
 fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String> {
-    // Parse every feed up front so their CSVs outlive the FeedInput borrows.
-    struct FeedTables {
-        name: String,
-        motis_prefix: String,
-        stops: gtfs::Csv,
-        routes: gtfs::Csv,
-        trips: gtfs::Csv,
-        stop_times: gtfs::Csv,
-        calendar: Option<gtfs::Csv>,
-        calendar_dates: Option<gtfs::Csv>,
-        agency: Option<gtfs::Csv>,
-        shapes: Option<std::collections::HashMap<String, gtfs::Shape>>,
-    }
+    std::fs::create_dir_all(out_dir)
+        .map_err(|e| format!("cannot create out dir {}: {e}", out_dir.display()))?;
+    let index_path = out_dir.join(format!("{pack_name}.transit"));
+    // Straight to disk through a BufWriter: the pack is 1.5-4 GB for a world
+    // build, and holding a second copy of it in a `Vec` to then `fs::write` was
+    // pure overhead.
+    let file = std::fs::File::create(&index_path)
+        .map_err(|e| format!("cannot create {}: {e}", index_path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
 
-    let mut tables: Vec<FeedTables> = Vec::with_capacity(specs.len());
-    for (name, dir, motis_prefix) in specs {
+    // One feed at a time, each dropped before the next is read. Parsing all of
+    // them up front is what made a world build need ~400 GB: a feed's tables cost
+    // several times the feed on disk, and the builder only needs one feed's worth
+    // at once.
+    let mut builder = index::IndexBuilder::new(pack_name);
+    for (n, (name, dir, motis_prefix)) in specs.iter().enumerate() {
         let require = |file: &str| -> Result<gtfs::Csv, String> {
             gtfs::read_table(dir, file).ok_or_else(|| {
                 format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
@@ -109,7 +109,6 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
         let stops = require("stops.txt")?;
         let routes = require("routes.txt")?;
         let trips = require("trips.txt")?;
-        let stop_times = require("stop_times.txt")?;
         let calendar = gtfs::read_table(dir, "calendar.txt");
         let calendar_dates = gtfs::read_table(dir, "calendar_dates.txt");
         let agency = gtfs::read_table(dir, "agency.txt");
@@ -136,47 +135,31 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
                  the device will route it in its own local time"
             );
         }
-        eprintln!("gtfs_ingest: parsed feed '{name}' ({})", dir.display());
-        tables.push(FeedTables {
+        builder.add_feed_dir(&FeedDir {
             name: name.clone(),
             motis_prefix: motis_prefix.clone(),
-            stops,
-            routes,
-            trips,
-            stop_times,
-            calendar,
-            calendar_dates,
-            agency,
-            shapes,
-        });
+            dir,
+            stops: &stops,
+            routes: &routes,
+            trips: &trips,
+            calendar: calendar.as_ref(),
+            calendar_dates: calendar_dates.as_ref(),
+            agency: agency.as_ref(),
+            shapes: shapes.as_ref(),
+        })?;
+        // Per feed, so a regression in the size or count curve shows at feed 200
+        // rather than at hour six.
+        let (stops_so_far, routes_so_far, trips_so_far) = builder.counts();
+        eprintln!(
+            "gtfs_ingest: [{}/{}] {name}: {:.1} MiB of sections, {stops_so_far} stops, \
+             {routes_so_far} routes, {trips_so_far} trips",
+            n + 1,
+            specs.len(),
+            builder.section_bytes() as f64 / (1024.0 * 1024.0),
+        );
     }
 
-    let feeds: Vec<FeedInput> = tables
-        .iter()
-        .map(|t| FeedInput {
-            name: t.name.clone(),
-            motis_prefix: t.motis_prefix.clone(),
-            stops: &t.stops,
-            routes: &t.routes,
-            trips: &t.trips,
-            stop_times: &t.stop_times,
-            calendar: t.calendar.as_ref(),
-            calendar_dates: t.calendar_dates.as_ref(),
-            agency: t.agency.as_ref(),
-            shapes: t.shapes.as_ref(),
-        })
-        .collect();
-
-    std::fs::create_dir_all(out_dir)
-        .map_err(|e| format!("cannot create out dir {}: {e}", out_dir.display()))?;
-    let index_path = out_dir.join(format!("{pack_name}.transit"));
-    // Straight to disk through a BufWriter: the pack is 1.5-4 GB for a world
-    // build, and holding a second copy of it in a `Vec` to then `fs::write` was
-    // pure overhead.
-    let file = std::fs::File::create(&index_path)
-        .map_err(|e| format!("cannot create {}: {e}", index_path.display()))?;
-    let mut writer = std::io::BufWriter::new(file);
-    let stats = index::build_index_to(pack_name, &feeds, &mut writer)?;
+    let stats = builder.finish_to(&mut writer)?;
     writer
         .flush()
         .map_err(|e| format!("cannot finish writing {}: {e}", index_path.display()))?;
