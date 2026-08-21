@@ -132,6 +132,29 @@ pub fn parse_gtfs_date(s: &str) -> Option<u32> {
     s.parse().ok()
 }
 
+/// Parse a `stop_lat`/`stop_lon` pair, rejecting anything that is not a finite
+/// coordinate inside the WGS84 ranges.
+///
+/// The range check is not pedantry: `(lat * 1e7) as i32` **saturates**, so a feed
+/// with `stop_lat = 500` yields `i32::MAX` rather than an error. One such row sets
+/// a whole pack's bbox to `i32::MAX`, at which point the device's `covers()` adds
+/// its 5.5 km margin to that, overflows, and concludes the pack covers *nothing*.
+/// A single bad stop in one of 1272 feeds could therefore disable transit routing
+/// for the entire pack.
+///
+/// Returns degrees, not `e7`, because callers disagree on rounding — the index
+/// truncates and `transit_stops` rounds — and neither may change.
+pub fn parse_lat_lon(lat: &str, lon: &str) -> Option<(f64, f64)> {
+    let lat: f64 = lat.trim().parse().ok()?;
+    let lon: f64 = lon.trim().parse().ok()?;
+    // A range `contains` is false for NaN and for both infinities, so this
+    // subsumes the finiteness check.
+    if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+        return None;
+    }
+    Some((lat, lon))
+}
+
 /// GTFS lets a `stop_times.txt` row give only one of arrival/departure; the
 /// missing one means "no dwell here". A row with neither is unusable.
 pub fn stop_time_pair(arrival: &str, departure: &str) -> Option<(u32, u32)> {
@@ -336,13 +359,8 @@ pub fn read_shapes(dir: &Path) -> Option<HashMap<String, Shape>> {
         if id.is_empty() {
             continue;
         }
-        let lat: f64 = match get(c_lat).parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let lon: f64 = match get(c_lon).parse() {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Some((lat, lon)) = parse_lat_lon(get(c_lat), get(c_lon)) else {
+            continue;
         };
         let seq: u32 = get(c_seq).parse().unwrap_or(0);
         let dist = c_dist.map_or(f64::NAN, |i| get(i).parse().unwrap_or(f64::NAN));
@@ -377,6 +395,33 @@ pub fn read_shapes(dir: &Path) -> Option<HashMap<String, Shape>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A coordinate outside the WGS84 ranges must be rejected, not cast: the cast
+    /// saturates, so one bad row would put `i32::MAX` in the pack's bbox and the
+    /// device's `covers()` would then overflow its margin and match nothing.
+    #[test]
+    fn an_out_of_range_coordinate_is_rejected_rather_than_saturated() {
+        assert_eq!(parse_lat_lon("37.7", "-122.4"), Some((37.7, -122.4)));
+        assert_eq!(parse_lat_lon(" 37.7 ", " -122.4 "), Some((37.7, -122.4)));
+        assert_eq!(parse_lat_lon("-90", "180"), Some((-90.0, 180.0)));
+        for (lat, lon) in [
+            ("500", "0"),
+            ("0", "500"),
+            ("-91", "0"),
+            ("0", "180.5"),
+            ("nan", "0"),
+            ("inf", "0"),
+            ("", "0"),
+            ("abc", "0"),
+        ] {
+            assert_eq!(parse_lat_lon(lat, lon), None, "{lat},{lon} must not be accepted");
+        }
+        // Why rejecting matters: past ~±214 degrees the e7 cast saturates instead
+        // of wrapping, so the bad value lands in the bbox as the largest possible
+        // one. (A value like -91 stays in range for an i32 — still nonsense, but
+        // it is the saturating case that breaks the device.)
+        assert_eq!((500.0f64 * 1e7) as i32, i32::MAX);
+    }
 
     /// The `shapes.txt` intermediate is one of the two structures a world build
     /// has billions of, so its size is part of the contract, not an accident.

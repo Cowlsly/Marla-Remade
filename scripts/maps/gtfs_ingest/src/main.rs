@@ -180,6 +180,7 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
          \"routes\": {routes},\n  \"trips\": {trips},\n  \"profiles\": {profiles},\n  \
          \"transfers\": {transfers},\n  \"shaped_routes\": {shaped},\n  \
          \"dropped_shape_routes\": {dropped},\n  \
+         \"dropped_stops_bad_coord\": {bad_coord},\n  \
          \"bbox_e7\": [{min_lat}, {min_lon}, {max_lat}, {max_lon}],\n  \
          \"section_bytes\": {{\n{sections}\n  }}\n}}\n",
         pack = json_str(pack_name),
@@ -194,6 +195,7 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
         transfers = stats.transfers,
         shaped = stats.shaped_routes,
         dropped = stats.dropped_shape_routes,
+        bad_coord = stats.dropped_stops_bad_coord,
         min_lat = stats.min_lat_e7,
         min_lon = stats.min_lon_e7,
         max_lat = stats.max_lat_e7,
@@ -221,6 +223,15 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
          {} with more than one shape_id",
         stats.shaped_routes, stats.routes, stats.dropped_shape_routes, stats.multi_shape_routes,
     );
+    if stats.dropped_stops_bad_coord > 0 {
+        // Loud, because a coordinate outside the WGS84 ranges would otherwise
+        // saturate into the bbox and break the device's coverage test.
+        eprintln!(
+            "gtfs_ingest: warning: dropped {} stops with a missing or out-of-range \
+             stop_lat/stop_lon",
+            stats.dropped_stops_bad_coord,
+        );
+    }
     Ok(())
 }
 

@@ -461,6 +461,10 @@ pub struct BuildStats {
     pub multi_shape_routes: usize,
     /// Routes whose shape failed validation and fell back to stop-to-stop.
     pub dropped_shape_routes: usize,
+    /// Stops dropped because `stop_lat`/`stop_lon` was missing, unparseable or
+    /// outside the WGS84 ranges. A non-zero count is a data-quality signal, not
+    /// a build error.
+    pub dropped_stops_bad_coord: usize,
 }
 
 fn append_u32(v: &mut Vec<u8>, x: u32) {
@@ -606,6 +610,7 @@ pub struct IndexBuilder {
     shaped_routes: usize,
     multi_shape_routes: usize,
     dropped_shape_routes: usize,
+    dropped_stops_bad_coord: usize,
 }
 
 impl IndexBuilder {
@@ -649,6 +654,7 @@ impl IndexBuilder {
             shaped_routes: 0,
             multi_shape_routes: 0,
             dropped_shape_routes: 0,
+            dropped_stops_bad_coord: 0,
         }
     }
 
@@ -720,11 +726,14 @@ impl IndexBuilder {
             if id.is_empty() {
                 continue;
             }
-            let lat: f64 = feed.stops.get(row, "stop_lat").trim().parse().unwrap_or(f64::NAN);
-            let lon: f64 = feed.stops.get(row, "stop_lon").trim().parse().unwrap_or(f64::NAN);
-            if lat.is_nan() || lon.is_nan() {
+            // Out-of-range coordinates are dropped, not clamped: see
+            // `gtfs::parse_lat_lon` for what one bad row does to the bbox.
+            let Some((lat, lon)) =
+                gtfs::parse_lat_lon(feed.stops.get(row, "stop_lat"), feed.stops.get(row, "stop_lon"))
+            else {
+                self.dropped_stops_bad_coord += 1;
                 continue;
-            }
+            };
             let lat_e7 = (lat * 1e7) as i32;
             let lon_e7 = (lon * 1e7) as i32;
             let name = feed.stops.get(row, "stop_name");
@@ -1166,6 +1175,7 @@ impl IndexBuilder {
             shaped_routes,
             multi_shape_routes,
             dropped_shape_routes,
+            dropped_stops_bad_coord,
         } = self;
         let stop_count = stop_lat.len();
         if stop_count == 0 {
@@ -1461,6 +1471,7 @@ impl IndexBuilder {
             shaped_routes,
             multi_shape_routes,
             dropped_shape_routes,
+            dropped_stops_bad_coord,
         })
     }
 

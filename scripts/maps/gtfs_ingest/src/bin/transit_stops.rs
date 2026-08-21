@@ -146,17 +146,11 @@ fn run(geojson: &Path, specs: &[FeedSpec]) -> Result<(), String> {
             // A stop no trip ever calls at is not boardable, and includes the
             // unserved parent stations GTFS feeds carry alongside their platforms.
             let Some(&route_type) = stop_route_type.get(id) else { continue };
-            let lat: f64 = match stops_csv.get(row, "stop_lat").trim().parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            let lon: f64 = match stops_csv.get(row, "stop_lon").trim().parse() {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if !lat.is_finite() || !lon.is_finite() {
+            let Some((lat, lon)) =
+                gtfs::parse_lat_lon(stops_csv.get(row, "stop_lat"), stops_csv.get(row, "stop_lon"))
+            else {
                 continue;
-            }
+            };
             let stop_name = stops_csv.get(row, "stop_name").trim();
             let motis_id = if motis_prefix.is_empty() {
                 String::new()
