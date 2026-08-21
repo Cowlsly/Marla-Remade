@@ -68,4 +68,13 @@
     <string name="cast_notification_text_mirroring">Mirroring your screen</string>
     <string name="cast_notification_text_failed">Could not start mirroring</string>
     <string name="cast_notification_action_stop">Stop</string>
+
+    <!-- The picker another app launches, and the permission it needs to. The permission's label and
+         description are what the system shows in the app's permission list, so they have to read as
+         something a user can decide about rather than as an API name. -->
+    <string name="cast_stream_content_permission_label">Stream content to a television</string>
+    <string name="cast_stream_content_permission_desc">Allows an app to send its own video and audio to a television you have paired with MA Cast, without pairing separately or seeing your network.</string>
+    <string name="cast_picker_title">Cast %1$s to</string>
+    <string name="cast_picker_title_generic">Choose a television</string>
+    <string name="cast_picker_cancel">Cancel</string>
 </resources>

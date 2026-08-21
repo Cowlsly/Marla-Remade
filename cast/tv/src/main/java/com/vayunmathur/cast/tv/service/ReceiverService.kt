@@ -127,7 +127,7 @@ class ReceiverService : Service() {
     private fun statusText(phase: ReceiverPhase): String = when (phase) {
         is ReceiverPhase.Pairing -> getString(R.string.tv_notification_text_pairing)
         is ReceiverPhase.Mirroring ->
-            getString(R.string.tv_notification_text_mirroring, phase.senderName)
+            getString(R.string.tv_notification_text_mirroring, phase.sourceName)
         else -> getString(R.string.tv_notification_text_idle)
     }
 

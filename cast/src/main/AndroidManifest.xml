@@ -32,6 +32,18 @@
 
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
+    <!-- What another app needs to hand us a Surface and a PCM pipe. Signature-level, so only apps
+         signed with the Modern Apps key can bind: that is the only enforcement available, because a
+         Messenger service's Handler dispatch loses the Binder calling identity before the message is
+         read. The sending app's *name* therefore never crosses that channel - CastPickerActivity
+         resolves it from callingPackage, which the framework establishes. Label and description are
+         declared because this is what the system shows in the caller's permission list. -->
+    <permission
+        android:name="com.vayunmathur.cast.permission.STREAM_CONTENT"
+        android:label="@string/cast_stream_content_permission_label"
+        android:description="@string/cast_stream_content_permission_desc"
+        android:protectionLevel="signature" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -67,12 +79,32 @@
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
+        <!-- Where another app's user picks a TV, and the only place callingPackage is available.
+             Launched for a result by CastPickerContract; permission-gated like the service. -->
+        <activity
+            android:name=".platform.CastPickerActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:permission="com.vayunmathur.cast.permission.STREAM_CONTENT"
+            android:theme="@style/Theme.General" />
+
         <!-- Holds the cast channel and the screen-capture projection up while the app is not in
              front, so backgrounding the app does not stop mirroring. -->
         <service
             android:name=".service.CastService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|mediaPlayback" />
+
+        <!-- The SDK's session channel. Exported because that is the point, and not a foreground
+             service: CastService already owns that role, and an app-content session needs
+             mediaPlayback only, which its enterForeground(withProjection = false) already claims.
+             Unbinding is what ends a session, so the binding is the session's lifetime. -->
+        <service
+            android:name=".service.ContentCastService"
+            android:exported="true"
+            android:permission="com.vayunmathur.cast.permission.STREAM_CONTENT" />
 
         <service
             android:name=".platform.mirror.MirrorTileService"

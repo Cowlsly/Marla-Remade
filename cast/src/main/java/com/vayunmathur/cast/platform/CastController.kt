@@ -2,7 +2,9 @@ package com.vayunmathur.cast.platform
 
 import android.content.Context
 import android.media.projection.MediaProjection
+import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.view.Surface
 import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastDevice
 import com.vayunmathur.cast.domain.ClientFailure
@@ -15,13 +17,14 @@ import com.vayunmathur.cast.platform.mirror.MirrorDegradation
 import com.vayunmathur.cast.platform.mirror.MirrorEngine
 import com.vayunmathur.cast.platform.mirror.MirrorGeometry
 import com.vayunmathur.cast.platform.mirror.MirrorPreferences
+import com.vayunmathur.cast.platform.mirror.MirrorSource
 import com.vayunmathur.cast.platform.mirror.MirrorStopReason
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
-import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.StreamingSession
 import com.vayunmathur.cast.service.CastService
 import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.sdk.cast.CastContract
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,8 +36,32 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 private const val TAG = "CastController"
+
+/** What [CastController.startContentSession] managed. */
+sealed interface ContentSessionResult {
+
+    /**
+     * Live. [surface] is the encoder's input surface and [audioWriteEnd] the PCM pipe, both of which
+     * are the caller's to hand to the SDK client - and [audioWriteEnd] is the caller's to close once it
+     * has been sent.
+     *
+     * The geometry is what the TV and this phone's encoder actually agreed, not what was asked for.
+     */
+    class Started(
+        val surface: Surface,
+        val audioWriteEnd: ParcelFileDescriptor?,
+        val width: Int,
+        val height: Int,
+        val frameRate: Int,
+        val receiverName: String,
+    ) : ContentSessionResult
+
+    /** [reason] is one of `CastContract`'s `REASON_` values, ready to send straight back. */
+    class Failed(val reason: Int) : ContentSessionResult
+}
 
 /**
  * The single owner of the live session.
@@ -87,6 +114,34 @@ object CastController {
     private val _isConnecting = MutableStateFlow(false)
     val isConnecting: StateFlow<Boolean> = _isConnecting.asStateFlow()
 
+    /**
+     * Whether the session being opened should go on to ask for capture consent.
+     *
+     * Remembered from [connect] because a code pairing returns to the user and comes back through
+     * [submitPairCode], which would otherwise have to assume - and assuming "yes" is what would put the
+     * screen-capture dialog in front of an app that launched the picker to send its own content.
+     */
+    private var pendingMirror: Boolean = true
+
+    /**
+     * Notified when an SDK session ends for a reason the app did not ask for.
+     *
+     * Set by `ContentCastService` for the life of one session and cleared as it ends, so there is
+     * exactly one at a time - which matches the one session this object holds. A callback rather than a
+     * flow because there is nothing to observe when it is absent, and a reason has to reach the client
+     * once rather than be a current value.
+     */
+    var onContentSessionEnded: ((Int) -> Unit)? = null
+
+    /**
+     * The name of the app that last completed `CastPickerActivity`, resolved from its
+     * `callingPackage`.
+     *
+     * Kept here rather than passed through the IPC on purpose: a self-reported label would be a lie an
+     * app could tell, and the TV displays this. Empty means screen mirroring.
+     */
+    var contentAppLabel: String = ""
+
     fun discovery(context: Context): CastDiscoveryManager =
         discoveryManager ?: CastDiscoveryManager(context.applicationContext)
             .also { discoveryManager = it }
@@ -115,6 +170,7 @@ object CastController {
         val live = phase != ClientPhase.Idle && phase != ClientPhase.Failed
         if (_device.value?.id == device.id && live) return
         val appContext = context.applicationContext
+        pendingMirror = thenMirror
         scope.launch {
             teardown()
             _device.value = device
@@ -188,7 +244,7 @@ object CastController {
             val device = _device.value ?: return@launch
             when (val outcome = mutex.withLock { activeClient.enterCode(code) }) {
                 is HandshakeOutcome.Paired ->
-                    onPaired(appContext, device, activeClient, outcome.deviceKey, thenMirror = true)
+                    onPaired(appContext, device, activeClient, outcome.deviceKey, pendingMirror)
                 is HandshakeOutcome.NeedsCode -> _sessionState.update {
                     it.copy(
                         phase = ClientPhase.AwaitingCode,
@@ -257,6 +313,10 @@ object CastController {
                 projection.stop()
                 return@launch
             }
+            // The screen and an app's content are mutually exclusive - there is one session, one
+            // encoder and one socket - so whichever was running loses, with the SDK client told why
+            // rather than left drawing into a dead surface.
+            endContentSession(CastContract.REASON_PREEMPTED)
             stopEngine()
             _mirrorPhase.value = MirrorPhase.Negotiating
             _degradation.value = MirrorDegradation()
@@ -265,11 +325,7 @@ object CastController {
             // The frame size is chosen from the TV's own reported limits, and it is the phone's real
             // aspect ratio: the receiver letterboxes, so none of the encoded frame is wasted on bars.
             val geometry = MirrorGeometry.forDisplay(appContext, activeClient.limits)
-            val frameRate = minOf(
-                StreamConstants.VIDEO_MAX_FRAME_RATE,
-                activeClient.limits?.maxFrameRate?.takeIf { it > 0 }
-                    ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
-            )
+            val frameRate = MirrorGeometry.frameRateFor(activeClient.limits)
             val outcome = mutex.withLock {
                 activeClient.configureStream(
                     width = geometry.width,
@@ -293,7 +349,7 @@ object CastController {
 
             val newEngine = MirrorEngine(
                 context = appContext,
-                projection = projection,
+                source = MirrorSource.Screen(projection),
                 receiverHost = device.host,
                 negotiation = ready.negotiation,
                 geometry = geometry,
@@ -307,17 +363,7 @@ object CastController {
                 _sessionState.update {
                     it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
                 }
-                // Only now is the control exchange finished, so the watch loop can become the socket's
-                // single reader. A TV that goes away is then noticed at once rather than only when UDP
-                // starts failing.
-                watchJob = scope.launch {
-                    activeClient.awaitEnd()
-                    Log.i(TAG, "the control channel closed")
-                    // Cleared first: teardown cancels watchJob, and this coroutine *is* watchJob.
-                    watchJob = null
-                    teardown()
-                    CastService.stop(appContext)
-                }
+                startWatch(appContext, activeClient)
             } else {
                 // start() already called onStopped, which set the message and the phase; all that is
                 // left is to make sure nothing keeps holding the screen.
@@ -327,9 +373,120 @@ object CastController {
         }
     }
 
+    /**
+     * Stream another app's content instead of the screen.
+     *
+     * The second entry point beside [startMirroring], and the only one `:sdk:cast` reaches. Requires a
+     * TV already connected and paired - which is what `CastPickerActivity` is for - because there is
+     * nothing an SDK caller could do about a pair code, and the picker is also what establishes the
+     * [appLabel] the TV displays.
+     *
+     * Suspends until the stream is live or has failed, so the service can answer
+     * `MSG_SESSION_READY` with real numbers rather than a promise. Screen mirroring and this remain
+     * mutually exclusive; the single [engine] is what enforces it.
+     */
+    suspend fun startContentSession(
+        context: Context,
+        width: Int,
+        height: Int,
+        wantAudio: Boolean,
+        appLabel: String,
+    ): ContentSessionResult = withContext(Dispatchers.IO) {
+        val appContext = context.applicationContext
+        val activeClient = client
+        val device = _device.value
+        val phase = _sessionState.value.phase
+        if (activeClient == null || device == null ||
+            (phase != ClientPhase.Paired && phase != ClientPhase.Streaming)
+        ) {
+            Log.w(TAG, "asked for an app-content session with no paired TV")
+            return@withContext ContentSessionResult.Failed(CastContract.REASON_NO_SESSION)
+        }
+        endContentSession(CastContract.REASON_PREEMPTED)
+        stopEngine()
+        _mirrorPhase.value = MirrorPhase.Negotiating
+        _degradation.value = MirrorDegradation()
+        _failure.value = null
+
+        val geometry = MirrorGeometry.forContent(width, height, activeClient.limits)
+        val frameRate = MirrorGeometry.frameRateFor(activeClient.limits)
+        val outcome = mutex.withLock {
+            activeClient.configureStream(
+                width = geometry.width,
+                height = geometry.height,
+                frameRate = frameRate,
+                bitRate = geometry.bitRate,
+                audio = wantAudio,
+                video = true,
+                appLabel = appLabel,
+            )
+        }
+        val ready = outcome as? HandshakeOutcome.Ready
+        if (ready == null) {
+            Log.w(TAG, "the TV would not agree an app-content stream: $outcome")
+            _mirrorPhase.value = MirrorPhase.Failed
+            _failure.value = appContext.getString(R.string.cast_mirror_negotiation_failed)
+            return@withContext ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+
+        val newEngine = MirrorEngine(
+            context = appContext,
+            source = MirrorSource.Content(appLabel = appLabel, wantAudio = wantAudio),
+            receiverHost = device.host,
+            negotiation = ready.negotiation,
+            geometry = geometry,
+            frameRate = frameRate,
+            onDegraded = { _degradation.value = it },
+            onStopped = { reason -> onEngineStopped(appContext, reason) },
+        ).apply { hexDump = verboseStreamLogging }
+        engine = newEngine
+        // No surface means there is nowhere for the app to draw, which for an SDK session is the whole
+        // point - unlike mirroring, it cannot usefully degrade to audio only.
+        val surface = if (newEngine.start()) newEngine.contentSurface else null
+        if (surface == null) {
+            newEngine.stop()
+            engine = null
+            _mirrorPhase.value = MirrorPhase.Failed
+            return@withContext ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+        _mirrorPhase.value = MirrorPhase.Mirroring
+        _sessionState.update {
+            it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
+        }
+        startWatch(appContext, activeClient)
+        ContentSessionResult.Started(
+            surface = surface,
+            audioWriteEnd = newEngine.audioWriteEnd,
+            width = geometry.width,
+            height = geometry.height,
+            frameRate = frameRate,
+            receiverName = activeClient.receiverName ?: device.friendlyName,
+        )
+    }
+
+    /**
+     * Become the control socket's single reader, now the exchange is finished.
+     *
+     * **Not started any earlier.** [MirrorClient.awaitEnd] reads the socket, and `configureStream` has
+     * a request/response to do on it - a second reader would consume the `STREAM_READY` that
+     * negotiation is waiting for. Until this starts, a dead TV surfaces as a failed `configureStream`,
+     * which is just as prompt.
+     */
+    private fun startWatch(appContext: Context, activeClient: MirrorClient) {
+        watchJob = scope.launch {
+            activeClient.awaitEnd()
+            Log.i(TAG, "the control channel closed")
+            // Cleared first: teardown cancels watchJob, and this coroutine *is* watchJob.
+            watchJob = null
+            teardown()
+            CastService.stop(appContext)
+        }
+    }
+
     fun stopMirroring(context: Context) {
         val appContext = context.applicationContext
         scope.launch {
+            endContentSession(CastContract.REASON_CLIENT_CLOSED)
             stopEngine()
             _mirrorPhase.value = MirrorPhase.Idle
             _sessionState.update {
@@ -367,12 +524,25 @@ object CastController {
             },
         )
         _mirrorPhase.value = MirrorPhase.Failed
+        endContentSession(CastContract.REASON_FAILED)
         CastService.stopMirroring(context)
     }
 
     private fun stopEngine() {
         engine?.stop()
         engine = null
+    }
+
+    /**
+     * Tell an SDK client its session is over, once.
+     *
+     * Cleared as it fires, so the client hears exactly one reason: a teardown runs through several of
+     * these paths and a client told twice would react to the second after it had already cleaned up.
+     */
+    private fun endContentSession(reason: Int) {
+        val notify = onContentSessionEnded ?: return
+        onContentSessionEnded = null
+        notify(reason)
     }
 
     /**
@@ -388,6 +558,7 @@ object CastController {
      */
     private suspend fun teardown(keepFailure: Boolean = false) {
         watchJob?.cancel()
+        endContentSession(CastContract.REASON_RECEIVER_GONE)
         stopEngine()
         socket?.close()
         mutex.withLock {

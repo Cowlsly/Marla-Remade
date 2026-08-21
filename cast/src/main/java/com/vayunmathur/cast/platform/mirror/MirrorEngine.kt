@@ -1,8 +1,9 @@
 package com.vayunmathur.cast.platform.mirror
 
 import android.content.Context
-import android.media.projection.MediaProjection
+import android.os.ParcelFileDescriptor
 import android.util.Log
+import android.view.Surface
 import com.vayunmathur.cast.network.CastUdpTransport
 import com.vayunmathur.cast.protocol.NegotiatedStream
 import com.vayunmathur.cast.protocol.Negotiation
@@ -48,6 +49,12 @@ enum class MirrorStopReason { Udp, NoEncoders, ReceiverGone }
  * byte layout, [StreamSender] does the per-stream work. This class is the part that cannot be
  * unit-tested, so it is kept to the wiring and two loops.
  *
+ * [source] is the only thing that differs between mirroring the screen and streaming another app's
+ * content: with [MirrorSource.Screen] a `VirtualDisplay` writes into the encoder's input surface and
+ * `AudioPlaybackCapture` supplies the PCM; with [MirrorSource.Content] the input surface is **handed
+ * out** through [contentSurface] and the PCM arrives through [audioWriteEnd]'s pipe. Everything after
+ * that point - the same [VideoEncoder], the same [StreamSender], the same RTCP loop - is shared.
+ *
  * [receiverHost] is passed in because `STREAM_READY` carries only a port; the address is the one the
  * control channel is already talking to.
  *
@@ -57,7 +64,7 @@ enum class MirrorStopReason { Udp, NoEncoders, ReceiverGone }
  */
 class MirrorEngine(
     context: Context,
-    private val projection: MediaProjection,
+    private val source: MirrorSource,
     private val receiverHost: String,
     private val negotiation: Negotiation,
     private val geometry: CaptureGeometry,
@@ -84,7 +91,27 @@ class MirrorEngine(
     private var transport: CastUdpTransport? = null
     private var capture: ScreenCapture? = null
     private var videoEncoder: VideoEncoder? = null
-    private var audioEncoder: AudioEncoder? = null
+    private var audioEncoder: AudioStream? = null
+
+    /**
+     * The encoder's input surface, for a [MirrorSource.Content] session to draw into. Null for
+     * screen mirroring, where a `VirtualDisplay` already owns it.
+     *
+     * Valid only between a successful [start] and [stop]: [VideoEncoder.release] releases it, which is
+     * correct - the client holds its own Binder-duplicated copy and must not release that one.
+     */
+    var contentSurface: Surface? = null
+        private set
+
+    /**
+     * The write end of the PCM pipe, for a [MirrorSource.Content] session that asked for audio.
+     *
+     * **The caller must close it once it has been sent.** A `ParcelFileDescriptor` is duplicated by
+     * the Binder transaction, so keeping this copy open would hold the pipe open from our side and the
+     * read end would never see the client stop writing.
+     */
+    var audioWriteEnd: ParcelFileDescriptor? = null
+        private set
 
     /**
      * Hex-dump every packet, and log throughput once a second.
@@ -125,7 +152,6 @@ class MirrorEngine(
     }
 
     private fun startVideo(stream: NegotiatedStream, udp: CastUdpTransport): Boolean {
-        val screen = ScreenCapture(projection)
         val encoder = VideoEncoder(
             width = geometry.width,
             height = geometry.height,
@@ -134,18 +160,30 @@ class MirrorEngine(
         )
         if (!encoder.start()) return false
         val surface = encoder.inputSurface
-        if (surface == null || !screen.start(surface, geometry)) {
+        if (surface == null) {
             encoder.release()
-            screen.release()
             return false
+        }
+        // The one branch: mirror the screen into the surface, or hand it to whoever asked for it.
+        when (source) {
+            is MirrorSource.Screen -> {
+                val screen = ScreenCapture(source.projection)
+                if (!screen.start(surface, geometry)) {
+                    encoder.release()
+                    screen.release()
+                    return false
+                }
+                capture = screen
+            }
+            is MirrorSource.Content -> contentSurface = surface
         }
         Log.i(
             TAG,
-            "mirroring at ${geometry.width}x${geometry.height} " +
-                "@ ${geometry.bitRate / 1_000_000.0} Mbit/s",
+            "streaming ${geometry.width}x${geometry.height} " +
+                "@ ${geometry.bitRate / 1_000_000.0} Mbit/s" +
+                if (source.appLabel.isEmpty()) "" else " from ${source.appLabel}",
         )
         videoEncoder = encoder
-        capture = screen
         val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Video] = sender
         videoJob = scope.launch {
@@ -162,8 +200,26 @@ class MirrorEngine(
     }
 
     private fun startAudio(stream: NegotiatedStream, udp: CastUdpTransport): Boolean {
-        val encoder = AudioEncoder(projection)
-        if (!encoder.start()) return false
+        val encoder = when (source) {
+            is MirrorSource.Screen -> AudioEncoder(source.projection)
+            is MirrorSource.Content -> {
+                if (!source.wantAudio) return false
+                val pipe = try {
+                    ParcelFileDescriptor.createPipe()
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not create the PCM pipe", e)
+                    return false
+                }
+                audioWriteEnd = pipe[1]
+                PcmAudioEncoder(pipe[0])
+            }
+        }
+        if (!encoder.start()) {
+            encoder.release()
+            runCatching { audioWriteEnd?.close() }
+            audioWriteEnd = null
+            return false
+        }
         audioEncoder = encoder
         val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Audio] = sender
@@ -307,10 +363,14 @@ class MirrorEngine(
         videoEncoder?.release()
         audioEncoder?.release()
         transport?.close()
+        // Only our own copy; the client's Binder-duplicated one is closed when the client goes away.
+        runCatching { audioWriteEnd?.close() }
         capture = null
         videoEncoder = null
         audioEncoder = null
         transport = null
+        contentSurface = null
+        audioWriteEnd = null
         senders.clear()
         scope.cancel()
     }

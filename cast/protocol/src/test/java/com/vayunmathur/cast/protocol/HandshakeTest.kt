@@ -90,6 +90,19 @@ class HandshakeTest {
                 audioSsrc = 1_234,
                 videoSsrc = 50_002,
             ),
+            // Screen mirroring leaves the label empty; an SDK session names the app. Both have to
+            // survive the round trip, and the empty case is the one `encodeDefaults` could eat.
+            StreamConfig(
+                width = 1920,
+                height = 1080,
+                frameRate = 60,
+                bitRate = 12_000_000,
+                audio = true,
+                video = true,
+                audioSsrc = 1_235,
+                videoSsrc = 50_003,
+                appLabel = "YouPipe",
+            ),
             StreamReady(udpPort = 47_505, audioSsrc = 4_321, videoSsrc = 50_009),
             Bye(reason = "user stopped"),
         )

@@ -30,7 +30,25 @@ sealed interface ReceiverPhase {
         val senderName: String,
         val width: Int,
         val height: Int,
-    ) : ReceiverPhase
+        /**
+         * The name of the app the frames are coming from, or empty when the phone is mirroring its
+         * screen.
+         *
+         * Comes from `StreamConfig.appLabel`, which `:cast` fills in from the `callingPackage` the
+         * framework attaches to its picker - never from anything the streaming app asserted about
+         * itself.
+         */
+        val appLabel: String = "",
+    ) : ReceiverPhase {
+        /**
+         * Who to name on screen: the app if there is one, otherwise the phone.
+         *
+         * "Receiving from YouPipe" is more use than "Receiving from Pixel 9" when it is YouPipe's
+         * video on screen and not the phone's, and the phone's name is still the right answer for
+         * screen mirroring.
+         */
+        val sourceName: String get() = appLabel.ifBlank { senderName }
+    }
 
     /** Something the user has to know about, already a sentence rather than a code. */
     data class Failed(val reason: ReceiverFailure) : ReceiverPhase

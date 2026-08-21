@@ -390,7 +390,14 @@ object ReceiverController {
             return
         }
         _state.update {
-            it.copy(phase = ReceiverPhase.Mirroring(senderName, config.width, config.height))
+            it.copy(
+                phase = ReceiverPhase.Mirroring(
+                    senderName = senderName,
+                    width = config.width,
+                    height = config.height,
+                    appLabel = config.appLabel,
+                ),
+            )
         }
         Log.i(
             TAG,

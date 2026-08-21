@@ -11,7 +11,7 @@ import kotlinx.serialization.json.Json
  * that disagree about the wire format are a bug to fix, not a compatibility matrix to maintain -
  * both halves ship from this repo at the same version.
  */
-const val PROTOCOL_VERSION = 1
+const val PROTOCOL_VERSION = 2
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -162,6 +162,15 @@ data class StreamConfig(
     val video: Boolean,
     val audioSsrc: Long,
     val videoSsrc: Long,
+    /**
+     * The name of the app whose content this is, or empty for screen mirroring.
+     *
+     * The receiver shows it instead of the phone's name, so "Receiving from YouPipe" rather than
+     * "Receiving from Pixel 9". Never self-reported by the streaming app: `:cast` resolves it from the
+     * `callingPackage` the framework attaches to its picker Activity, so it is an identity the sender
+     * could not have forged.
+     */
+    val appLabel: String = "",
 ) : ControlMessage
 
 /** Where to send it, and which SSRCs the feedback will come from. */

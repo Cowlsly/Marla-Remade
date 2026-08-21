@@ -202,6 +202,9 @@ class MirrorClient(
      *
      * [width] and [height] are the phone's own choice within the TV's reported limits: it sends its
      * native aspect ratio and the TV letterboxes, which is the whole reason for owning the receiver.
+     *
+     * [appLabel] is empty for screen mirroring and the streaming app's name for an SDK session; the TV
+     * shows it instead of the phone's name.
      */
     fun configureStream(
         width: Int,
@@ -210,6 +213,7 @@ class MirrorClient(
         bitRate: Int,
         audio: Boolean,
         video: Boolean,
+        appLabel: String = "",
     ): HandshakeOutcome {
         val sessionKeys = keys ?: return protocolFailure()
         val random = SecureRandom()
@@ -222,6 +226,7 @@ class MirrorClient(
             video = video,
             audioSsrc = random.ssrc(StreamConstants.AUDIO_SSRC_MIN, StreamConstants.AUDIO_SSRC_MAX),
             videoSsrc = random.ssrc(StreamConstants.VIDEO_SSRC_MIN, StreamConstants.VIDEO_SSRC_MAX),
+            appLabel = appLabel,
         )
         socket.send(config)
         val ready = socket.receive()?.message as? StreamReady

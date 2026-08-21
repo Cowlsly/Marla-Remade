@@ -18,6 +18,7 @@ import com.vayunmathur.cast.tv.platform.ReceiverUiState
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /**
  * The idle and pairing screen: the whole of this app's UI.
@@ -35,6 +36,7 @@ fun ReceiverContent(state: ReceiverUiState, modifier: Modifier = Modifier) {
     AppScaffold(
         title = stringResource(R.string.app_name),
         modifier = modifier,
+        scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
         Column(
             modifier = Modifier.fillMaxSize().padding(padding).padding(48.dp),
@@ -88,7 +90,7 @@ fun ReceiverContent(state: ReceiverUiState, modifier: Modifier = Modifier) {
                 // The mirror has its own full-screen Activity, so this is only ever seen for the
                 // moment between the stream starting and that Activity coming up.
                 is ReceiverPhase.Mirroring ->
-                    Headline(stringResource(R.string.tv_mirroring, phase.senderName))
+                    Headline(stringResource(R.string.tv_mirroring, phase.sourceName))
 
                 is ReceiverPhase.Failed -> Headline(
                     stringResource(

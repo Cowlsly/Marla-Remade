@@ -50,6 +50,10 @@ object MirrorGeometry {
     /** openscreen's `kDefaultVideoMinBitRate`, as a floor. */
     private const val MIN_BITRATE = 300_000
 
+    /** What an app gets if it asks for nonsense; 720p is a size every decoder takes. */
+    private const val DEFAULT_CONTENT_WIDTH = 1280
+    private const val DEFAULT_CONTENT_HEIGHT = 720
+
     /**
      * The frame to send to a TV that reported [limits].
      *
@@ -70,14 +74,8 @@ object MirrorGeometry {
         // outright rather than rounding for you.
         val (width, height) = EncoderSupport.clampToEncoder(fittedWidth, fittedHeight)
 
-        val frameRate = minOf(
-            StreamConstants.VIDEO_MAX_FRAME_RATE,
-            limits?.maxFrameRate?.takeIf { it > 0 } ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
-        )
-        var bitRate = (width.toLong() * height * frameRate * BITS_PER_PIXEL)
-            .toLong()
-            .coerceAtLeast(MIN_BITRATE.toLong())
-        limits?.maxBitRate?.takeIf { it > 0 }?.let { bitRate = minOf(bitRate, it.toLong()) }
+        val frameRate = frameRateFor(limits)
+        val bitRate = bitRateFor(width, height, frameRate, limits)
 
         Log.i(
             TAG,
@@ -90,8 +88,55 @@ object MirrorGeometry {
             // The phone's own density, so text scales the way it does on the screen rather than being
             // rendered for a notional tablet.
             densityDpi = metrics.densityDpi.takeIf { it > 0 } ?: DisplayMetrics.DENSITY_DEFAULT,
-            bitRate = bitRate.toInt(),
+            bitRate = bitRate,
         )
+    }
+
+    /**
+     * The frame to send for an app that asked for [requestedWidth] x [requestedHeight].
+     *
+     * Same clamping as [forDisplay], different starting point: an SDK session's shape is the content's
+     * own - a 16:9 video, not the phone's screen - and the app is told what it actually got, because an
+     * app that laid out for the size it asked for would be stretched.
+     *
+     * No density: nothing renders a `VirtualDisplay` here, the client draws into the surface directly.
+     */
+    fun forContent(
+        requestedWidth: Int,
+        requestedHeight: Int,
+        limits: DecoderLimits? = null,
+    ): CaptureGeometry {
+        val safeWidth = requestedWidth.takeIf { it > 0 } ?: DEFAULT_CONTENT_WIDTH
+        val safeHeight = requestedHeight.takeIf { it > 0 } ?: DEFAULT_CONTENT_HEIGHT
+        val (fittedWidth, fittedHeight) = fitWithin(safeWidth, safeHeight, limits)
+        val (width, height) = EncoderSupport.clampToEncoder(fittedWidth, fittedHeight)
+        val frameRate = frameRateFor(limits)
+        val bitRate = bitRateFor(width, height, frameRate, limits)
+        Log.i(
+            TAG,
+            "app content: asked for ${safeWidth}x$safeHeight, sending ${width}x$height " +
+                "@ ${frameRate}fps at ${bitRate / 1_000_000.0} Mbit/s",
+        )
+        return CaptureGeometry(
+            width = width,
+            height = height,
+            densityDpi = DisplayMetrics.DENSITY_DEFAULT,
+            bitRate = bitRate,
+        )
+    }
+
+    /** The TV's cap, or ours, whichever is lower. */
+    fun frameRateFor(limits: DecoderLimits?): Int = minOf(
+        StreamConstants.VIDEO_MAX_FRAME_RATE,
+        limits?.maxFrameRate?.takeIf { it > 0 } ?: StreamConstants.VIDEO_MAX_FRAME_RATE,
+    )
+
+    private fun bitRateFor(width: Int, height: Int, frameRate: Int, limits: DecoderLimits?): Int {
+        var bitRate = (width.toLong() * height * frameRate * BITS_PER_PIXEL)
+            .toLong()
+            .coerceAtLeast(MIN_BITRATE.toLong())
+        limits?.maxBitRate?.takeIf { it > 0 }?.let { bitRate = minOf(bitRate, it.toLong()) }
+        return bitRate.toInt()
     }
 
     /**
