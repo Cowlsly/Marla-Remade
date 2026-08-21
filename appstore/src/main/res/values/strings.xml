@@ -73,10 +73,8 @@
     <string name="updates_notification_body">Open the App Store to review and install them.</string>
     <string name="updates_channel_name">App updates</string>
     <string name="updates_channel_description">Tells you when apps you installed here have a newer version.</string>
-    <string name="setting_background_updates_title">Install updates in the background</string>
-    <string name="setting_background_updates_summary">Update apps this store already installed without asking each time. First-time installs still ask for confirmation.</string>
     <string name="setting_auto_install_updates_title">Automatically install updates</string>
-    <string name="setting_auto_install_updates_summary">Check for and install updates on their own, with no tap. Only applies to apps this store installed and can update silently; everything else still just notifies you.</string>
+    <string name="setting_auto_install_updates_summary">Install updates as soon as they are found, with no tap. When off, updates wait until you tap Update. Either way apps this store installed update without asking each time; anything else just notifies you.</string>
     <plurals name="updates_count">
         <item quantity="one">%1$d update available</item>
         <item quantity="other">%1$d updates available</item>

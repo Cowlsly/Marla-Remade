@@ -55,12 +55,7 @@ class AppStoreViewModel(
     private val accrescent = AccrescentRepository(context, db)
     private val installedRepo = InstalledAppsRepository(context)
     private val settings = SettingsRepository(context, viewModelScope)
-    private val installer = InstallCoordinator(context, db, play, accrescent, { ownSigningCertificates }) {
-        settings.backgroundUpdateInstall.value
-    }
-
-    /** On-by-default: updates to store-owned apps install without a per-app prompt. */
-    val backgroundUpdateInstall: StateFlow<Boolean> = settings.backgroundUpdateInstall
+    private val installer = InstallCoordinator(context, db, play, accrescent) { ownSigningCertificates }
 
     /** Off-by-default: the periodic check may also download and install updates unattended. */
     val autoInstallUpdates: StateFlow<Boolean> = settings.autoInstallUpdates
@@ -800,20 +795,15 @@ class AppStoreViewModel(
 
     override fun updateAll() {
         viewModelScope.launch {
-            // Sequential on purpose: when background install is off PackageInstaller shows a
-            // confirmation dialog per app on most devices, and firing them concurrently
-            // buries the user in prompts.
+            // Sequential on purpose: updates this store isn't the update owner of still get a
+            // system confirmation dialog, and firing them concurrently buries the user in
+            // prompts.
             for (app in updates.value) {
                 installer.install(app)
             }
             delay(INSTALL_SETTLE_MS)
             installedRepo.refresh()
         }
-    }
-
-    /** Turn silent background installation of updates on or off. */
-    fun setBackgroundUpdateInstall(enabled: Boolean) {
-        viewModelScope.launch { settings.setBackgroundUpdateInstall(enabled) }
     }
 
     /** Turn fully unattended (no-tap) background update installation on or off. */

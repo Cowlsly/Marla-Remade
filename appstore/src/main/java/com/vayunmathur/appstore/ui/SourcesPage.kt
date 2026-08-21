@@ -27,7 +27,6 @@ import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.SettingsDivider
 import com.vayunmathur.library.ui.SettingsSwitchRow
 import com.vayunmathur.library.ui.Text
 import java.text.SimpleDateFormat
@@ -46,7 +45,6 @@ fun SourcesPage(
 ) {
     val repos by viewModel.repos.collectAsState()
     val home by viewModel.home.collectAsState()
-    val backgroundUpdateInstall by viewModel.backgroundUpdateInstall.collectAsState()
     val autoInstallUpdates by viewModel.autoInstallUpdates.collectAsState()
     val fdroid = repos.find { it.url == DefaultRepos.FDROID.url }
 
@@ -85,22 +83,12 @@ fun SourcesPage(
         }
 
         Card(Modifier.fillMaxWidth()) {
-            Column {
-                SettingsSwitchRow(
-                    title = stringResource(R.string.setting_background_updates_title),
-                    supportingText = stringResource(R.string.setting_background_updates_summary),
-                    checked = backgroundUpdateInstall,
-                    onCheckedChange = { viewModel.setBackgroundUpdateInstall(it) },
-                )
-                SettingsDivider()
-                SettingsSwitchRow(
-                    title = stringResource(R.string.setting_auto_install_updates_title),
-                    supportingText = stringResource(R.string.setting_auto_install_updates_summary),
-                    checked = autoInstallUpdates && backgroundUpdateInstall,
-                    enabled = backgroundUpdateInstall,
-                    onCheckedChange = { viewModel.setAutoInstallUpdates(it) },
-                )
-            }
+            SettingsSwitchRow(
+                title = stringResource(R.string.setting_auto_install_updates_title),
+                supportingText = stringResource(R.string.setting_auto_install_updates_summary),
+                checked = autoInstallUpdates,
+                onCheckedChange = { viewModel.setAutoInstallUpdates(it) },
+            )
         }
 
         SourceCard(

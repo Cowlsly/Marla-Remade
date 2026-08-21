@@ -112,6 +112,4 @@
     <string name="store_rule_precheck_title">Verificato prima che Android lo veda</string>
     <string name="store_rule_precheck_detail">Tutto viene verificato prima che il download raggiunga il programma di installazione di sistema. I file rifiutati vengono eliminati.</string>
     <string name="store_rule_fail_blocks_title">Una verifica fallita blocca, una mancante avvisa</string>
-    <string name="setting_background_updates_title">Installa aggiornamenti in background</string>
-    <string name="setting_background_updates_summary">Aggiorna le app già installate da questo store senza chiederlo ogni volta. Le prime installazioni continuano a richiedere conferma.</string>
 </resources>

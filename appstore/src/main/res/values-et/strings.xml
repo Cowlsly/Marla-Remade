@@ -47,8 +47,6 @@
     <string name="action_check_again">Kontrolli uuesti</string>
     <string name="all_apps_up_to_date">Kõik on uuendatud</string>
     <string name="updates_empty_message">Tarkvarahoidlaid kontrollitakse WiFi ühenduse puhul taustal kord kaheteist tunni jooksul.</string>
-    <string name="setting_background_updates_title">Paigalda uuendused taustal</string>
-    <string name="setting_background_updates_summary">Uuenda selle rakendusepoe poolt paigaldatud rakenduste uuendused automaatselt ilma küsimata. Esimesel paigaldusel küsitakse alati kinnitust.</string>
     <string name="install_blocked">%1$s oli blokeeritud: %2$s</string>
     <string name="install_failed">„%1$s“ rakenduse paigaldamine ei õnnestunud</string>
     <string name="share_app_text">%1$s - %2$s</string>

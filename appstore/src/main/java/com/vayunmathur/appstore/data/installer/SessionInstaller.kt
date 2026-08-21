@@ -22,12 +22,6 @@ import java.io.File
  */
 class SessionInstaller(
     private val context: Context,
-    /**
-     * Whether updates to packages this store already owns may install without a per-app
-     * system prompt. Read at commit time so a toggle change takes effect on the next
-     * install without rebuilding the installer.
-     */
-    private val backgroundUpdateInstall: () -> Boolean = { false },
 ) {
 
     companion object {
@@ -97,10 +91,7 @@ class SessionInstaller(
                 // USER_ACTION_NOT_REQUIRED when this app is the target's update owner, and
                 // a first-time install of a package owned by someone else would prompt
                 // anyway. First installs keep the confirmation dialog unconditionally.
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-                    backgroundUpdateInstall() &&
-                    isInstalled(packageName)
-                ) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && isInstalled(packageName)) {
                     setRequireUserAction(PackageInstaller.SessionParams.USER_ACTION_NOT_REQUIRED)
                 }
                 setInstallLocation(android.content.pm.PackageInfo.INSTALL_LOCATION_AUTO)

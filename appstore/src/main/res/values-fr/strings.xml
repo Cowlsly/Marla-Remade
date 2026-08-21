@@ -158,8 +158,6 @@
     <string name="updates_notification_body">Ouvrez le Magasin pour les consulter et les installer.</string>
     <string name="nav_home">Accueil</string>
     <string name="trust_modern_apps_check_index_signed">L’index du dépôt est signé et vérifié à l’aide de la clé épinglée propre à ce magasin</string>
-    <string name="setting_background_updates_title">Installer les mises à jour en arrière-plan</string>
-    <string name="setting_background_updates_summary">Mettre à jour les applications déjà installées par ce magasin sans demander de confirmation à chaque fois. Les premières installations nécessitent toujours une confirmation.</string>
     <string name="source_chip_grapheneos">GrapheneOS</string>
     <string name="section_sandboxed_google_play">Google Play en bac à sable</string>
     <string name="section_sandboxed_google_play_subtitle">Les composants Google Play comme applications ordinaires, sans privilèges</string>

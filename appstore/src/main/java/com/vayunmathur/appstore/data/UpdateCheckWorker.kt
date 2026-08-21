@@ -46,9 +46,9 @@ import java.util.concurrent.TimeUnit
  *
  * If the user has opted in to unattended updates ([SettingsRepository.autoInstallUpdates]),
  * it also downloads and installs — as a foreground service — the updates it can apply
- * silently: packages this store is the installer or update owner of, on API 31+ with
- * background installation enabled. Everything it can't install without a prompt is left to
- * the notification, exactly as before. Auto-install is off by default.
+ * silently: packages this store is the installer or update owner of, on API 31+. Everything
+ * it can't install without a prompt is left to the notification, exactly as before.
+ * Auto-install is off by default.
  */
 class UpdateCheckWorker(
     private val context: Context,
@@ -103,13 +103,8 @@ class UpdateCheckWorker(
 
         val settings = SettingsRepository(context, scope)
         val autoInstall = settings.readAutoInstallUpdates()
-        // Unattended installs are only safe when they will not raise a dialog: silent
-        // install requires API 31+ and the background-install toggle. Below that, or with it
-        // off, fall back to notify-only regardless of the auto-install choice.
-        val silentCapable = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
-            settings.readBackgroundUpdateInstall()
 
-        if (autoInstall && silentCapable && updates.isNotEmpty()) {
+        if (autoInstall && updates.isNotEmpty()) {
             val eligible = updates.filter { canSilentlyUpdate(it.packageName) }
             if (eligible.isNotEmpty()) {
                 autoInstall(eligible, db, play, accrescent)
@@ -177,13 +172,12 @@ class UpdateCheckWorker(
         }
     }
 
-    /**
+/**
      * Download and silently install a set of updates, promoting the worker to a foreground
      * service for the duration so the OS doesn't kill it mid-install.
      *
-     * Passes `backgroundUpdateInstall = { true }` because [canSilentlyUpdate] has already
-     * confirmed each package will install without a prompt; the caller only reaches here
-     * when the user's silent-install toggle is on.
+     * [canSilentlyUpdate] has already confirmed each package will install without a prompt,
+     * so nothing here can surface a dialog with the user absent.
      */
     private suspend fun autoInstall(
         apps: List<UnifiedApp>,
@@ -198,7 +192,6 @@ class UpdateCheckWorker(
             play = play,
             accrescent = accrescent,
             ownSigningCertificates = { ApkCertificates.selfSigners(context) },
-            backgroundUpdateInstall = { true },
         )
         var installed = 0
         for (app in apps) {

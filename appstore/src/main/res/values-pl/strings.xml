@@ -59,8 +59,6 @@
     <string name="updates_notification_body">Otwórz App Store, aby je przejrzeć i zainstalować.</string>
     <string name="updates_channel_name">Aktualizacje aplikacji</string>
     <string name="updates_channel_description">Informuje, czy aplikacje zainstalowane tutaj mają nowszą wersję.</string>
-    <string name="setting_background_updates_title">Zainstaluj aktualizacje w tle</string>
-    <string name="setting_background_updates_summary">Aktualizuj aplikacje, które ten sklep już zainstalował, bez pytania za każdym razem. Przy pierwszej instalacji nadal pojawia się prośba o potwierdzenie.</string>
     <string name="action_install">Instaluj</string>
     <string name="action_update">Aktualizacja</string>
     <string name="action_dismiss">Odrzuć</string>

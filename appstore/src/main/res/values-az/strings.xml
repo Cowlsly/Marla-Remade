@@ -61,8 +61,6 @@
     <string name="updates_notification_body">Onları nəzərdən keçirmək və quraşdırmaq üçün App Store-u açın.</string>
     <string name="updates_channel_name">Tətbiq yeniləmələri</string>
     <string name="updates_channel_description">Burada quraşdırdığınız tətbiqlərin daha yeni versiyası olduqda sizə xəbər verir.</string>
-    <string name="setting_background_updates_title">Yeniləmələri arxa fonda quraşdırın</string>
-    <string name="setting_background_updates_summary">Bu mağazadan quraşdırılmış tətbiqləri hər dəfə sorğu olmadan yeniləyin. İlk dəfə quraşdırılanlar üçün isə hələ də təsdiq tələb olunur.</string>
     <string name="setting_auto_install_updates_title">Yeniləmələri avtomatik quraşdırın</string>
     <string name="setting_auto_install_updates_summary">Heç bir əlavə hərəkət tələb olunmadan yeniləmələri avtomatik yoxlayır və quraşdırır. Bu funksiya yalnız həmin mağaza vasitəsilə quraşdırılmış və səssiz şəkildə yenilənə bilən tətbiqlərə şamil edilir; digər tətbiqlər üçün isə sadəcə bildiriş verilir.</string>
     <plurals name="updates_count">

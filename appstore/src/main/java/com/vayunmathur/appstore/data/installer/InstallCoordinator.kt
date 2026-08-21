@@ -55,9 +55,8 @@ class InstallCoordinator(
     private val play: PlayRepository,
     private val accrescent: AccrescentRepository,
     private val ownSigningCertificates: () -> Set<String>,
-    backgroundUpdateInstall: () -> Boolean = { false },
 ) {
-    private val sessionInstaller = SessionInstaller(context, backgroundUpdateInstall)
+    private val sessionInstaller = SessionInstaller(context)
     private val playDownloader = PlayDownloader(context)
 
     private val _stages = MutableStateFlow<Map<String, InstallStage>>(emptyMap())
