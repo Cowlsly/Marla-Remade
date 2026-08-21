@@ -81,4 +81,5 @@
     <string name="cut_n"><xliff:g id="count" example="3">%1$d</xliff:g> objekt(i) on lõigatud</string>
     <string name="ready_to_paste"><xliff:g id="count" example="3">%1$d</xliff:g> objekt(i) on valmis asetamiseks</string>
     <string name="create_failed">Faili või kausta loomine ei õnnestunud</string>
+    <string name="zip_too_large_to_extract">Fail on lahtipakkimiseks liiga suur: vajalik oleks <xliff:g id="needed" example="4.2 GB">%1$s</xliff:g>, kuid on vaid <xliff:g id="available" example="1.1 GB">%2$s</xliff:g></string>
 </resources>
