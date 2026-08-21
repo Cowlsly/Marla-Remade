@@ -3,13 +3,16 @@ import android.app.Application
 import android.hardware.SensorManager
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiDataSource
 import com.vayunmathur.maps.data.google.GooglePoiInfo
 import com.vayunmathur.maps.data.google.WebReviewsFetcher
+import com.vayunmathur.maps.data.parse
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.flow.*
+import kotlinx.coroutines.withContext
 import org.maplibre.spatialk.geojson.Position
 
 class SelectedFeatureViewModel(application: Application): AndroidViewModel(application) {
@@ -100,6 +103,19 @@ class SelectedFeatureViewModel(application: Application): AndroidViewModel(appli
     fun stashRouteSelection() {
         (_selectedFeature.value as? SpecificFeature.Route)?.let { _inactiveNavigation.value = it }
     }
+
+    /**
+     * Resolve the first basemap place label that parses, or null.
+     *
+     * Lives here rather than in the tap handler because `parse` may make a Wikidata round-trip
+     * per candidate. `queryRenderedFeatures` returns one feature per layer, so stopping at the
+     * first success is what keeps a tap from doing every round-trip serially — and doing any of
+     * them on the caller's thread is what made the gesture handler a hundred lines long.
+     */
+    suspend fun resolveAdminLabel(candidates: List<Feature1>): SpecificFeature? =
+        withContext(Dispatchers.IO) {
+            candidates.firstNotNullOfOrNull { raw -> runCatching { parse(raw) }.getOrNull() }
+        }
 
     /**
      * Keyless Google Maps enrichment (rating, reviews, hours, photos, price,

@@ -72,6 +72,8 @@ import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.PoiIndex
+import com.vayunmathur.maps.ui.map.MapFeaturePicker
+import com.vayunmathur.maps.ui.map.MapHit
 import com.vayunmathur.maps.ui.theme.BasemapPalette
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
@@ -124,14 +126,14 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
     // Parking memory (P9): the single active parking spot (pin + recall).
     val parkingSpot by parkingViewModel.active.collectAsState()
-    var showParkingSheet by remember { mutableStateOf(false) }
+    var showParkingSheet by retain { mutableStateOf(false) }
 
     // Map-layer visibility toggles (P6 layers sheet, persisted via DataStore).
     val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
     val satelliteEnabled by settingsViewModel.satelliteLayer.collectAsState()
     val safetyEnabled by settingsViewModel.safetyLayer.collectAsState()
     val transitEnabled by settingsViewModel.transitLayer.collectAsState()
-    var showLayersSheet by remember { mutableStateOf(false) }
+    var showLayersSheet by retain { mutableStateOf(false) }
 
     // Effective map palette (P14): resolve the P6 Map-theme setting against the
     // OS dark mode using the same rule DynamicTheme applies (a null override =
@@ -156,7 +158,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // Active browse-category POI filter (P29): when set, the on-map `ma_pois`
     // layer is filtered to this category's OSM types (see MaPoisLayer). null =
     // no filter (all POIs shown). Toggled by the CategoryChips row below.
-    var selectedCategory by remember { mutableStateOf<MapCategory?>(null) }
+    var selectedCategory by retain { mutableStateOf<MapCategory?>(null) }
 
     // TEST: default to San Francisco at z14 so the native ma_pois POIs are
     // visible on cold start.
@@ -213,15 +215,20 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
     // --- NAVIGATION SESSION ---
     val navState by com.vayunmathur.maps.util.NavigationSessionManager.state.collectAsState()
+    // Collected, not read off a field: a recalculation swaps the route mid-session, and reading
+    // it as a plain property meant this screen kept drawing the OLD route's steps against the
+    // new progress until something else happened to recompose.
+    val navSession by com.vayunmathur.maps.util.NavigationSessionManager.session.collectAsState()
     val isNavigating = navState !is com.vayunmathur.maps.util.NavigationSessionManager.NavState.Idle
-    var autoFollow by remember { mutableStateOf(true) }
+    var autoFollow by retain { mutableStateOf(true) }
     // North-up vs heading-up during navigation (Vela onCompassTap idea).
-    var navNorthUp by remember { mutableStateOf(false) }
+    var navNorthUp by retain { mutableStateOf(false) }
     // Posted speed limit under the puck (P5b maxspeed overlay; null when the
-    // tileset is unhosted or the road has no limit).
-    var postedLimit by remember { mutableStateOf<com.vayunmathur.maps.data.PostedLimit?>(null) }
+    // tileset is unhosted or the road has no limit). Retained so a rotation does not blank
+    // the sign until the next GPS fix arrives; it is re-queried on the following one.
+    var postedLimit by retain { mutableStateOf<com.vayunmathur.maps.data.PostedLimit?>(null) }
     var lastProgrammaticMoveMs by remember { mutableStateOf(0L) }
-    val activeRoute = com.vayunmathur.maps.util.NavigationSessionManager.currentRoute
+    val activeRoute = navSession.route
     val navProgress = (navState as? com.vayunmathur.maps.util.NavigationSessionManager.NavState.Navigating)?.progress
 
     // --- UI & BOTTOM SHEET STATE ---
@@ -416,90 +423,41 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                         onMapClick = { latLng, offset ->
                             coroutineScope.launch {
                                 val projection = camera.projection
-                                // Give pin taps a tolerance box (~22dp radius)
-                                // around the touch point so tapping NEAR a small
-                                // POI glyph still selects it, instead of only
-                                // registering on a pixel-exact hit.
-                                val pad = MapChromeMetrics.hitSlop
-                                val hitBox = DpRect(offset.x - pad, offset.y - pad, offset.x + pad, offset.y + pad)
-                                // Parking pin (P9): tapping the saved car spot
-                                // opens the parking sheet instead of selecting a
-                                // place.
-                                val parkingHit = projection?.queryRenderedFeatures(
-                                    hitBox,
-                                    setOf(PARKING_PIN_LAYER_ID)
-                                )?.isNotEmpty() == true
-                                if (parkingHit) {
-                                    showParkingSheet = true
-                                    return@launch
-                                }
+                                val picker = MapFeaturePicker(
+                                    source = { box, layerIds ->
+                                        projection?.queryRenderedFeatures(box, layerIds) ?: emptyList()
+                                    },
+                                    transitEnabled = transitEnabled,
+                                )
 
-                                // Transit stop (P10): tapping a stop opens its
-                                // live departure board instead of selecting a
-                                // place. Only hit-tested while the layer is on.
-                                if (transitEnabled) {
-                                    val stopHit = projection?.queryRenderedFeatures(
-                                        hitBox,
-                                        setOf(TRANSIT_STOP_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toTransitStop() }
-                                    if (stopHit != null) {
-                                        transitViewModel.openStop(stopHit)
+                                when (val hit = picker.pickPin(offset)) {
+                                    MapHit.Parking -> {
+                                        showParkingSheet = true
                                         return@launch
                                     }
-                                }
-
-                                // Hit-test the search-result pins first, then the
-                                // ambient offline POI pins — a POI tap selects the
-                                // place (name + coord) as a GenericPlace so
-                                // SelectedFeatureViewModel.currentPoiInfo fetches
-                                // the Google rich details and GooglePoiEnrichment
-                                // renders.
-                                val pinHit = projection?.queryRenderedFeatures(
-                                    hitBox,
-                                    setOf(SEARCH_RESULT_LAYER_ID)
-                                )?.firstNotNullOfOrNull { it.toSelectedSearchResult() }
-                                    ?: projection?.queryRenderedFeatures(
-                                        hitBox,
-                                        setOf(SAVED_PLACE_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedSavedPlace() }
-                                    ?: projection?.queryRenderedFeatures(
-                                        hitBox,
-                                        setOf(FAMILY_LOCATION_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedFamilyMember() }
-                                    ?: projection?.queryRenderedFeatures(
-                                        hitBox,
-                                        setOf(MA_POIS_LAYER_ID)
-                                    )?.firstNotNullOfOrNull { it.toSelectedMaPoi() }
-                                if (pinHit != null) {
-                                    viewModel.stashRouteSelection()
-                                    viewModel.set(pinHit)
-                                    sheetState.partialExpand()
-                                    return@launch
+                                    is MapHit.Stop -> {
+                                        transitViewModel.openStop(hit.stop)
+                                        return@launch
+                                    }
+                                    is MapHit.Place -> {
+                                        viewModel.stashRouteSelection()
+                                        viewModel.set(hit.feature)
+                                        sheetState.partialExpand()
+                                        return@launch
+                                    }
+                                    null -> Unit
                                 }
 
                                 // Otherwise fall back to basemap admin labels
                                 // (country/region/city). Native POIs are suppressed
                                 // and the amenity-DB enrichment path is gone.
-                                val features = projection?.queryRenderedFeatures(
-                                    offset,
-                                    setOf("places_country", "places_region", "places_locality").flatMap {
-                                        listOf("${it}_base", "${it}_hybrid")
-                                    }.toSet()
-                                ) ?: emptyList()
-                                // parse() may do a Wikidata round-trip per
-                                // feature; queryRenderedFeatures returns one
-                                // Feature PER LAYER at the tap point, so stop at
-                                // the first parseable hit instead of doing every
-                                // round-trip serially in the foreground.
-                                val firstFeature = withContext(Dispatchers.IO) {
-                                    features.firstNotNullOfOrNull { raw ->
-                                        runCatching { parse(raw) }.getOrNull()
-                                    }
-                                }
-
-                                if (firstFeature != null) {
+                                //
+                                // Resolving a label may do a Wikidata round-trip, so it belongs
+                                // to the ViewModel rather than to this gesture handler.
+                                val labelFeature = viewModel.resolveAdminLabel(picker.pickAdminLabels(offset))
+                                if (labelFeature != null) {
                                     viewModel.stashRouteSelection()
-                                    viewModel.set(firstFeature)
+                                    viewModel.set(labelFeature)
                                     sheetState.partialExpand()
                                     return@launch
                                 }
@@ -694,7 +652,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                     postedLimit = postedLimit,
                     northUp = navNorthUp,
                     onToggleNorthUp = { navNorthUp = !navNorthUp },
-                    destinationName = com.vayunmathur.maps.util.NavigationSessionManager.destinationName,
+                    destinationName = navSession.destinationName,
                     darkBasemap = darkMap,
                 )
 

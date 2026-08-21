@@ -103,7 +103,7 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
     // ----------------------------------------------------------------
 
     private fun pushCameraAndOverlay(state: NavState) {
-        renderer.setRoute(NavigationSessionManager.currentRoute?.polyline ?: emptyList())
+        renderer.setRoute(NavigationSessionManager.session.value.route?.polyline ?: emptyList())
         val progress = (state as? NavState.Navigating)?.progress
         if (progress != null) {
             renderer.setPuck(progress.snappedPosition)
@@ -148,7 +148,7 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
     }
 
     private fun buildRoutingInfo(progress: NavigationProgress): RoutingInfo? {
-        val steps = NavigationSessionManager.currentRoute?.step ?: return null
+        val steps = NavigationSessionManager.session.value.route?.step ?: return null
         val info = RoutingInfo.Builder()
         // The maneuver the driver is approaching is the START of the next step;
         // distanceToNextManeuver counts down to it (matches NavigationTts).
@@ -164,7 +164,7 @@ class NavMapScreen(carContext: CarContext) : Screen(carContext) {
             }
         } else {
             // On the final step: point at the destination.
-            val destName = NavigationSessionManager.destinationName
+            val destName = NavigationSessionManager.session.value.destinationName
                 ?: carContext.getString(R.string.nav_default_destination)
             val dest = Step.Builder(destName)
                 .setManeuver(Maneuver.Builder(Maneuver.TYPE_DESTINATION).build())

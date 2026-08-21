@@ -74,17 +74,40 @@ object NavigationSessionManager {
     private val _state: MutableStateFlow<NavState> = MutableStateFlow(NavState.Idle)
     val state: StateFlow<NavState> = _state.asStateFlow()
 
+    /**
+     * What is being navigated, as opposed to how it is going.
+     *
+     * Deliberately a sibling of [NavState] rather than fields on its variants: route, mode and
+     * destination are orthogonal to the state machine, so folding them in would make every
+     * transition re-copy them — and a transition that forgets to is exactly the bug this fixes.
+     *
+     * A [StateFlow] because these were plain `@Volatile var`s read straight from composition,
+     * which Compose cannot observe. A post-recalculation route swap therefore did not
+     * recompose, and the UI kept drawing the OLD route's steps against the new progress.
+     *
+     * No Compose or lifecycle dependency, so the process-global lifetime this object
+     * deliberately has is unchanged, and it stays safe to read from the background service.
+     */
+    data class NavSession(
+        val route: RouteService.Route? = null,
+        val travelMode: TravelMode? = null,
+        val destinationName: String? = null,
+    )
+
+    private val _session = MutableStateFlow(NavSession())
+    val session: StateFlow<NavSession> = _session.asStateFlow()
+
     /** Travel mode for the active session (or last session). Used by UI/notification. */
-    @Volatile var travelMode: TravelMode? = null
-        private set
+    @Deprecated("Read session.value.travelMode, or collect session for a snapshot-correct read.")
+    val travelMode: TravelMode? get() = _session.value.travelMode
 
     /** Human-readable destination shown in the notification. */
-    @Volatile var destinationName: String? = null
-        private set
+    @Deprecated("Read session.value.destinationName, or collect session.")
+    val destinationName: String? get() = _session.value.destinationName
 
     /** The active route (snapshot used by UI for step list / polyline split). */
-    @Volatile var currentRoute: RouteService.Route? = null
-        private set
+    @Deprecated("Read session.value.route, or collect session.")
+    val currentRoute: RouteService.Route? get() = _session.value.route
 
     private val initialized = AtomicBoolean(false)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -136,9 +159,9 @@ object NavigationSessionManager {
             return
         }
         Log.i(TAG, "start(mode=$mode, label=$destinationLabel, steps=${route.step.size}, dist=${route.distanceMeters})")
-        currentRoute = route
-        travelMode = mode
-        destinationName = destinationLabel
+        // One emission, so an observer never sees a route from this session paired with a
+        // destination from the last one.
+        _session.value = NavSession(route = route, travelMode = mode, destinationName = destinationLabel)
         this.destination = destination
         polylineIndex = PolylineIndex(route)
         lastSegmentIndex = 0
@@ -161,9 +184,7 @@ object NavigationSessionManager {
         // for stop-without-service-teardown paths.
         NavigationTts.reset()
         polylineIndex = null
-        currentRoute = null
-        travelMode = null
-        destinationName = null
+        _session.value = NavSession()
         destination = null
         lastSegmentIndex = 0
         offRouteSinceMs = null
@@ -299,7 +320,7 @@ object NavigationSessionManager {
         // trip (tunnels, GPS drift inside a vehicle), and a recalc would
         // replace the planned transit route with a walking route mid-trip.
         val now = System.currentTimeMillis()
-        if (travelMode != TravelMode.TRANSIT && snap.distanceOffRoute > OFF_ROUTE_THRESHOLD_M) {
+        if (_session.value.travelMode != TravelMode.TRANSIT && snap.distanceOffRoute > OFF_ROUTE_THRESHOLD_M) {
             val since = offRouteSinceMs ?: run {
                 offRouteSinceMs = now
                 now
@@ -329,7 +350,7 @@ object NavigationSessionManager {
 
     private fun triggerRecalculate(from: Position) {
         val dest = destination ?: return
-        val mode = travelMode ?: return
+        val mode = _session.value.travelMode ?: return
         Log.i(TAG, "off-route; recalculating from $from to $dest (attempt ${recalcAttempts + 1})")
         _state.value = NavState.Recalculating
         recalcAttempts++
@@ -347,7 +368,7 @@ object NavigationSessionManager {
                     position = from,
                 )
                 val toFeature = SpecificFeature.GenericPlace(
-                    name = destinationName ?: "Destination",
+                    name = _session.value.destinationName ?: "Destination",
                     phone = null,
                     website = null,
                     openingHours = null,
@@ -380,7 +401,7 @@ object NavigationSessionManager {
             }
 
             // Swap in the new polyline. Reset state for the new shape.
-            currentRoute = newRoute
+            _session.value = _session.value.copy(route = newRoute)
             polylineIndex = PolylineIndex(newRoute)
             lastSegmentIndex = 0
             offRouteSinceMs = null

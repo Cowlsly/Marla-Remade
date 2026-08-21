@@ -112,7 +112,7 @@ class NavigationService : Service() {
     private fun handleState(state: NavigationSessionManager.NavState) {
         when (state) {
             is NavigationSessionManager.NavState.Navigating -> {
-                val route = NavigationSessionManager.currentRoute
+                val route = NavigationSessionManager.session.value.route
                 if (route != null && voiceGuidanceEnabled()) {
                     NavigationTts.onProgressUpdate(state.progress, route.step)
                 }
@@ -202,8 +202,8 @@ class NavigationService : Service() {
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
 
-        val mode = NavigationSessionManager.travelMode
-        val destLabel = NavigationSessionManager.destinationName ?: getString(R.string.nav_default_destination)
+        val mode = NavigationSessionManager.session.value.travelMode
+        val destLabel = NavigationSessionManager.session.value.destinationName ?: getString(R.string.nav_default_destination)
 
         val (title, content, progressPercent, smallIcon) = describe(state, mode, destLabel)
 
@@ -267,7 +267,7 @@ class NavigationService : Service() {
                 val percent = (p.fractionComplete * 100).roundToInt().coerceIn(0, 100)
                 val distRemaining = formatDistance(p.distanceRemaining)
                 val etaText = formatEta(p.etaEpochMs)
-                val route = NavigationSessionManager.currentRoute
+                val route = NavigationSessionManager.session.value.route
                 val currentStep = route?.step?.getOrNull(p.currentStepIndex)
                 when (mode) {
                     TravelMode.DRIVE -> {
