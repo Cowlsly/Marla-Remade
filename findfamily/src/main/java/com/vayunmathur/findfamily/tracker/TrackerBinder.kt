@@ -27,11 +27,18 @@ object TrackerBinder {
     /**
      * Bind [device] as a new tracker named [name].
      *
-     * Steps: generate an ML-KEM/ML-DSA keypair (public bundle stored on the `User`
-     * row, private bundle kept owner-only in [TrackerStore]); generate a 32-byte
-     * beacon secret; create the `User(kind = TRACKER)` row; register the tracker on
-     * the server so finders can resolve it; write the provisioning blob to the
-     * device. Returns true iff the GATT provisioning write succeeds.
+     * Steps: generate an ML-KEM/ML-DSA keypair and a 32-byte beacon secret, provision the
+     * device over GATT, and only then persist anything — the private bundle and secret in
+     * [TrackerStore], the `User(kind = TRACKER)` row, and the server-side registration.
+     * Returns true iff the GATT provisioning write succeeds.
+     *
+     * The provisioning write comes first deliberately. Persisting up front meant every
+     * failed bind left an orphan tracker in the family list and orphan secrets in
+     * DataStore, which is how a handful of retries turned into a list full of trackers
+     * that were never really bound. The cost of this order is a narrow window where a
+     * crash between the write and the persist leaves a provisioned device the app doesn't
+     * know about; that recovers by long-pressing the button and binding again, which is a
+     * far better failure mode.
      */
     suspend fun bind(context: Context, name: String, device: BluetoothDevice): Boolean =
         withContext(Dispatchers.IO) {
@@ -44,6 +51,11 @@ object TrackerBinder {
                 val privateBundle = decodeB64(keys.privateBundleB64)
                 val secret = ByteArray(TrackerProtocol.SECRET_LEN).also { SecureRandom().nextBytes(it) }
                 val trackerId = Random.nextLong(from = 1, until = Long.MAX_VALUE)
+
+                if (!TrackerProvisioner(context).provision(device, trackerId, secret)) {
+                    Log.w(TAG, "provisioning write failed; not persisting tracker $trackerId")
+                    return@runCatching false
+                }
 
                 store.save(trackerId, secret, privateBundle, device.address)
                 repository.upsertUser(
@@ -63,8 +75,7 @@ object TrackerBinder {
                 // Best-effort: registration self-heals on the next heartbeat if the
                 // socket is momentarily down (see pollTrackerReports).
                 runCatching { Networking.registerTracker(trackerId, secret, publicBundle) }
-
-                TrackerProvisioner(context).provision(device, trackerId, secret)
+                true
             }.onFailure { Log.w(TAG, "bind failed", it) }.getOrDefault(false)
         }
 
