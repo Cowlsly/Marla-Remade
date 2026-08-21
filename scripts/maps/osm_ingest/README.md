@@ -1,12 +1,13 @@
 # osm_ingest
 
 Host-side Rust tools that turn an OpenStreetMap `.osm.pbf` extract into the
-Maps app's offline artifacts. Two binaries share one library:
+Maps app's offline artifacts. Three binaries share one library:
 
 | Binary | Replaces | Emits |
 |---|---|---|
 | `road_graph` | `scripts/maps/generator.cpp` | `metadata.bin`, `nodes.bin`, `edges.bin`, `lanes.bin`, `road_names.bin` |
 | `poi_extract` | `scripts/maps/poi_extract.cpp` | `<name>.geojsonseq`, `poi_names.bin`, `poi_index.bin` |
+| `osm_extract` | `osmium tags-filter \| osmium export \| normalize_*.py` | one `<layer>.geojsonseq` per baked vector layer |
 
 ## Why Rust (LANGUAGE RULE)
 
@@ -36,11 +37,69 @@ cargo run --release --bin road_graph -- california-latest.osm.pbf --out map_data
 # POI layer side files + the geojsonseq tippecanoe consumes
 cargo run --release --bin poi_extract -- california-latest.osm.pbf \
     --geojson pois.geojsonseq --names poi_names.bin --index poi_index.bin
+
+# One baked vector layer, with the bbox clip done inline (no osmium extract)
+cargo run --release --bin osm_extract -- california-latest.osm.pbf \
+    --layer safety --out safety.geojsonseq --bbox -122.6,37.2,-121.7,37.9
 ```
 
 From Windows, `scripts/maps/build_graph.ps1` wraps the road-graph build in one
-command. `scripts/maps/run_generator.sh` and `scripts/maps/build_pois_layer.sh`
-call these binaries for the full pipelines.
+command and `scripts/maps/build_all.ps1` chains every cargo-only stage.
+`scripts/maps/build_all.sh` and the per-layer `build_*_layer.sh` scripts call
+these binaries for the full pipelines.
+
+## `osm_extract` and the vector layers
+
+One 3-pass driver ([`src/extract.rs`](src/extract.rs)) for every baked layer,
+with each layer's schema in its own module. Supported today: `safety`
+([`src/safety.rs`](src/safety.rs)).
+
+Three pieces are shared:
+
+* [`src/geojson.rs`](src/geojson.rs) — the writer. Reproduces
+  `json.dumps(..., separators=(",", ":"), ensure_ascii=False)`: no whitespace,
+  fixed key order, UTF-8 passthrough.
+* [`src/bbox.rs`](src/bbox.rs) — the `osmium extract -b` equivalent, reproducing
+  osmium's `complete_ways` strategy (any vertex inside keeps the whole element).
+  Containment is compared in 1e-7 **integers**, not degrees, because
+  `-1_226_000_000 * 1e-7` lands a hair west of `-122.6` and would drop a node
+  sitting exactly on its own box edge.
+* [`src/select.rs`](src/select.rs) — the `osmium tags-filter` equivalent, as a
+  cheap pre-filter. Tag lookup is a linear scan, so screening on three keys
+  before the classifier reads ten is worth doing at planet scale.
+
+### Pass ordering
+
+A PBF stores nodes before the ways that reference them, so any layer needing way
+or relation geometry has to traverse **relations, then ways, then nodes** —
+relations decide which ways matter, ways decide which node coordinates matter,
+nodes supply them. Only the passes a layer needs are run; `safety` is node-based,
+so it runs one.
+
+When the way and relation layers land, their node coordinates must be stored the
+way `poi_build.rs` does it — a sorted `Vec` of needed ids plus an index-aligned
+coordinate array, looked up by `binary_search`, 16 bytes per *needed* node — and
+**not** the way `graph_build.rs` does it. That module's bitset is sized from
+`BITSET_SIZE = 20e9`, i.e. 2.5 GB keyed by raw node id, and peaks around 10 GB on
+California.
+
+### The Python normalisers are still the contract of record
+
+Each `normalize_*.py` stays in the tree until its layer is ported, and the layer
+script keeps an `--engine legacy` so both can be run over the same PBF and diffed
+with `scripts/maps/test/diff_geojsonseq.py`. For `safety` the two agree exactly:
+same properties, same order, same coordinates.
+
+The two rules easiest to break in that port, both pinned by tests in
+`src/safety.rs`:
+
+* `enforcement=maxspeed` is checked **before** the `man_made=surveillance`
+  branch. A camera tagged both ways is a speed camera, and swapping the order
+  silently reclassifies every enforcement camera.
+* The ALPR heuristic is **asymmetric**: `surveillance:type` matches by substring
+  (real values include `ALPR;camera`), `camera:type` matches by exact equality
+  (it is an enumerated field, and a substring rule would corrupt it), and
+  `operator`/`manufacturer` match `flock` by substring.
 
 ## Output contracts
 

@@ -36,6 +36,7 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use crate::geojson::json_escape;
 use crate::names::NamePool;
 use crate::osm::{self, visit_block, Element, MEMBER_WAY};
 use crate::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
@@ -455,22 +456,6 @@ fn write_outputs(
     Ok((pois.len(), unique, bytes))
 }
 
-/// Escape a name for a JSON string. UTF-8 bytes pass through verbatim; only the
-/// JSON-mandatory escapes and C0 controls are rewritten.
-fn json_escape(s: &[u8], out: &mut Vec<u8>) {
-    for &c in s {
-        match c {
-            b'"' => out.extend_from_slice(b"\\\""),
-            b'\\' => out.extend_from_slice(b"\\\\"),
-            b'\n' => out.extend_from_slice(b"\\n"),
-            b'\r' => out.extend_from_slice(b"\\r"),
-            b'\t' => out.extend_from_slice(b"\\t"),
-            c if c < 0x20 => out.extend_from_slice(format!("\\u{c:04x}").as_bytes()),
-            c => out.push(c),
-        }
-    }
-}
-
 fn create(path: &Path) -> Result<File> {
     File::create(path).map_err(|e| Error(format!("cannot write {}: {e}", path.display())))
 }
@@ -690,19 +675,6 @@ mod tests {
                 "{a} differs between runs"
             );
         }
-    }
-
-    #[test]
-    fn json_escapes_only_what_it_must() {
-        let mut out = Vec::new();
-        json_escape("Ben \"B\" \\ Jerry\n\tCafé".as_bytes(), &mut out);
-        assert_eq!(
-            String::from_utf8(out).unwrap(),
-            "Ben \\\"B\\\" \\\\ Jerry\\n\\tCafé"
-        );
-        let mut out = Vec::new();
-        json_escape(&[0x01, 0x1f], &mut out);
-        assert_eq!(String::from_utf8(out).unwrap(), "\\u0001\\u001f");
     }
 
     #[test]

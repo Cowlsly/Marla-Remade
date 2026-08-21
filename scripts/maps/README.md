@@ -168,11 +168,11 @@ mutually consistent (same POI set, same coordinates). See
 | `run_generator.sh` | **Deprecated** thin wrapper over `build_all.sh` (graph + pois + publish) |
 | `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
-| `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
+| `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
-| `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files) and `road_graph` (routing graph). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
+| `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
@@ -180,7 +180,7 @@ mutually consistent (same POI set, same coordinates). See
 | `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
 | `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**: `tile_points` (tile a point geojsonseq), `tile_join` (merge archives) and `pmtiles_dump` (canonical text dump, for the differential harness). Container layout documented in `src/pmtiles.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
-| `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
+| `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
 | `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested) |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
@@ -270,19 +270,22 @@ here is Rust and Python):
 
 * **cargo** (https://rustup.rs) — and for a growing share of the pipeline, the
   *only* thing needed. It builds:
-  * [`osm_ingest`](osm_ingest/) — the `ma_pois` extractor and the routing graph.
+  * [`osm_ingest`](osm_ingest/) — the `ma_pois` extractor, the routing graph, and
+    `osm_extract` for the baked vector layers.
     No C/C++ toolchain and no libosmium: it reads `.osm.pbf` natively.
   * [`gtfs_ingest`](gtfs_ingest/) — the on-device `.transit` pack and the
     `transit_stops` basemap layer.
   * [`tile_build`](tile_build/) — MVT and PMTiles v3 read/write, which **replaces
     tippecanoe and tile-join**. The final merge and the `transit_stops` layer both
     go through it, so they run on **Windows**.
-* **tippecanoe** ≥ 2.x — still required by the safety, maxspeed, transit_lines,
-  ma_pois and admin layer scripts, which pipe GeoJSON through it. The merge no
-  longer uses its `tile-join`.
-* **osmium-tool** (`osmium`) — still required by those same OSM-derived layers.
-* **GDAL** (`ogr2ogr`) — transit_lines only.
-* **python3** (stdlib only) — the `normalize_*.py` schema mappers.
+* **tippecanoe** ≥ 2.x — still required by the maxspeed, transit_lines and admin
+  layer scripts, which pipe GeoJSON through it. The merge no longer uses its
+  `tile-join`, and `safety` and `ma_pois` no longer use it at all.
+* **osmium-tool** (`osmium`) — still required by those same OSM-derived layers, and
+  by any `--bbox` run of `build_all.sh` (which clips once for every stage).
+* **GDAL** (`ogr2ogr`) — transit_lines and admin only.
+* **python3** (stdlib only) — the remaining `normalize_*.py` schema mappers, the
+  schema unit test, and the differential harness.
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
 * Base reuse mode only: `curl`, and `go-pmtiles` (`pmtiles`) if using `--bbox`
@@ -290,12 +293,17 @@ here is Rust and Python):
 ### What builds on Windows
 
 Everything that is cargo-only: the routing graph (`build_graph.ps1`), the POI
-layer and its side files, the offline transit pack (`build_ca_transit.ps1`), the
-`transit_stops` layer (`build_transit_stops_layer.ps1`) and the final merge
-(`tile_join`). `build_all.ps1` chains those. The OSM-derived vector layers
-(safety, maxspeed, transit_lines, admin) still need tippecanoe + osmium + python3
-+ GDAL and therefore a Linux box or WSL, which is why the Windows tiles stage
-composites onto a `-BaseArchive` instead of building a complete `v5.pmtiles`.
+layer and its side files, the `safety` layer, the offline transit pack
+(`build_ca_transit.ps1`), the `transit_stops` layer
+(`build_transit_stops_layer.ps1`) and the final merge (`tile_join`).
+`build_all.ps1` chains those. The remaining OSM-derived vector layers (maxspeed,
+transit_lines, admin) still need tippecanoe + osmium + python3 + GDAL and
+therefore a Linux box or WSL, which is why the Windows tiles stage composites onto
+a `-BaseArchive` instead of building a complete `v5.pmtiles`.
+
+That is why `tile_build` exists rather than shelling out to tippecanoe: there is
+no Windows path for it (see the note at `build_graph.ps1:29`), which would
+otherwise have left `transit_stops` unbuildable on the dev box.
 
 That is why `tile_build` exists rather than shelling out to tippecanoe: there is
 no Windows path for it (see the note at `build_graph.ps1:29`), which would
@@ -345,7 +353,28 @@ unlike the per-layer scripts, the routing graph honours it too. That needs
 
 Per-layer `--engine rust|legacy` flags exist for every layer so a ported layer can
 be rolled back with one flag. Asking for an engine that has not landed is an
-error, never a silent fall-back.
+error, never a silent fall-back. `safety` and `ma_pois` default to `rust`; the
+rest still default to `legacy`.
+
+> **Validate a flipped engine before trusting it.** Each layer that moves to Rust
+> has unit tests mirroring the Python normaliser's assertions, but those pin the
+> schema, not the extraction over real data. Run both engines over the same PBF
+> and diff them before publishing:
+>
+> ```bash
+> ./build_safety_layer.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
+>     --engine legacy --out /tmp/safety-legacy.pmtiles \
+>     --geojson-out /tmp/safety-legacy.geojsonseq
+> ./build_safety_layer.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
+>     --engine rust --out /tmp/safety-rust.pmtiles \
+>     --geojson-out /tmp/safety-rust.geojsonseq
+> python3 test/diff_geojsonseq.py /tmp/safety-legacy.geojsonseq /tmp/safety-rust.geojsonseq
+> python3 test/diff_pmtiles.py    /tmp/safety-legacy.pmtiles    /tmp/safety-rust.pmtiles
+> ```
+>
+> The extraction diff must be clean: properties exactly, point geometry exactly.
+> The tile diff is allowed a feature-count delta (see
+> [Caveats](#caveats--known-limitations) §3).
 
 ### 1. Dry run (single metro — validates safety + border layers)
 

@@ -2,8 +2,9 @@
 #
 # Replaces the former `scripts/maps/generator.cpp` (road graph) and
 # `scripts/maps/poi_extract.cpp` (POI layer), which needed g++ + libosmium and
-# therefore WSL. This crate reads `.osm.pbf` natively, so both tools run on
-# Windows.
+# therefore WSL, plus the `osmium tags-filter | osmium export | normalize_*.py`
+# chain that built the baked vector layers. This crate reads `.osm.pbf` natively,
+# so all three tools run on Windows.
 #
 # Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
 # table below), exactly like `scripts/maps/gtfs_ingest`: it is a host binary, so
@@ -17,7 +18,7 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "GPL-2.0-only"
-description = "OSM .osm.pbf -> Maps routing graph + POI side files (replaces the libosmium C++ tools)"
+description = "OSM .osm.pbf -> Maps routing graph, POI side files and baked vector layers"
 
 [lib]
 name = "osm_ingest"
@@ -30,6 +31,10 @@ path = "src/bin/road_graph.rs"
 [[bin]]
 name = "poi_extract"
 path = "src/bin/poi_extract.rs"
+
+[[bin]]
+name = "osm_extract"
+path = "src/bin/osm_extract.rs"
 
 [dependencies]
 # Pure-Rust inflate. We only ever DECOMPRESS the zlib blobs inside a .osm.pbf,

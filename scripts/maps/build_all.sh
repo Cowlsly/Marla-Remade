@@ -61,7 +61,8 @@ set -euo pipefail
 #     --dry-run           print what each stage would run; change nothing
 #   Engines, per layer, so a ported layer rolls back with a flag
 #     --engine-base E     rust|legacy    (default legacy)
-#     --engine-safety E   rust|legacy    (default legacy)
+#     --engine-safety E   rust|legacy    (default rust: osm_extract + tile_points,
+#                                         no osmium/tippecanoe/python3)
 #     --engine-maxspeed E rust|legacy    (default legacy)
 #     --engine-transit-lines E           (default legacy)
 #     --engine-admin E    rust|legacy    (default legacy)
@@ -100,7 +101,7 @@ DRY_RUN=0
 PUBLISH=0
 PUBLISH_DRY_RUN=0
 ENGINE_BASE="legacy"
-ENGINE_SAFETY="legacy"
+ENGINE_SAFETY="rust"
 ENGINE_MAXSPEED="legacy"
 ENGINE_TRANSIT_LINES="legacy"
 ENGINE_ADMIN="legacy"
@@ -135,7 +136,7 @@ while [[ $# -gt 0 ]]; do
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,77p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,78p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -159,7 +160,7 @@ engine_check() {
     fi
 }
 engine_check base           "$ENGINE_BASE"           0
-engine_check safety         "$ENGINE_SAFETY"         0
+engine_check safety         "$ENGINE_SAFETY"         1
 engine_check maxspeed       "$ENGINE_MAXSPEED"       0
 engine_check transit-lines  "$ENGINE_TRANSIT_LINES"  0
 engine_check admin          "$ENGINE_ADMIN"          0

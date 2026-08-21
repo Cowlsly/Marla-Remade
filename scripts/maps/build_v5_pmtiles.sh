@@ -59,10 +59,10 @@ set -euo pipefail
 #   --extra-layer F   fold an already-built .pmtiles into the final merge
 #                     (repeatable). Lets a caller that built a layer itself skip
 #                     the matching step here instead of building it twice.
-#   --engine-base E       rust|legacy per-layer engine (all default legacy; a
-#   --engine-safety E     `rust` value is rejected until that layer is ported,
-#   --engine-maxspeed E   so a rollback is one flag and never a silent no-op)
-#   --engine-transit-lines E
+#   --engine-base E       rust|legacy per-layer engine. `safety` defaults to rust
+#   --engine-safety E     (cargo-only); the rest default to legacy, and asking for
+#   --engine-maxspeed E   rust before a layer is ported is an error rather than a
+#   --engine-transit-lines E  silent no-op, so a rollback is always one flag.
 #   --engine-admin E
 #   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
@@ -93,7 +93,7 @@ BASE_AREA="planet"
 BASE_SOURCE=""
 EXTRA_LAYERS=()
 ENGINE_BASE="legacy"
-ENGINE_SAFETY="legacy"
+ENGINE_SAFETY="rust"
 ENGINE_MAXSPEED="legacy"
 ENGINE_TRANSIT_LINES="legacy"
 ENGINE_ADMIN="legacy"
@@ -158,7 +158,7 @@ engine_check() {
     fi
 }
 engine_check base          "$ENGINE_BASE"          0
-engine_check safety        "$ENGINE_SAFETY"        0
+engine_check safety        "$ENGINE_SAFETY"        1
 engine_check maxspeed      "$ENGINE_MAXSPEED"      0
 engine_check transit-lines "$ENGINE_TRANSIT_LINES" 0
 engine_check admin         "$ENGINE_ADMIN"         0
@@ -200,7 +200,7 @@ INPUTS+=("$BASE")
 # --- 2. safety ---
 if [[ "$SKIP_SAFETY" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for safety layer (or --skip-safety)" >&2; exit 1; }
-    SAFETY_ARGS=(--pbf "$PBF" --out "$WORK/safety.pmtiles")
+    SAFETY_ARGS=(--pbf "$PBF" --out "$WORK/safety.pmtiles" --engine "$ENGINE_SAFETY")
     [[ -n "$BBOX" ]] && SAFETY_ARGS+=(--bbox "$BBOX")
     run "$HERE/build_safety_layer.sh" "${SAFETY_ARGS[@]}"
     INPUTS+=("$WORK/safety.pmtiles")

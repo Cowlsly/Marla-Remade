@@ -289,10 +289,13 @@ pub fn primitive_block() -> Vec<u8> {
 
 /// The `Blob` message wrapping the fixture's `PrimitiveBlock`.
 pub fn sample_data_blob() -> Vec<u8> {
-    let payload = primitive_block();
+    data_blob(&primitive_block())
+}
+
+fn data_blob(payload: &[u8]) -> Vec<u8> {
     let mut blob = Vec::new();
     varint_field(2, payload.len() as u64, &mut blob); // raw_size
-    bytes_field(3, &zlib_store(&payload), &mut blob); // zlib_data
+    bytes_field(3, &zlib_store(payload), &mut blob); // zlib_data
     blob
 }
 
@@ -308,6 +311,10 @@ fn framed(kind: &str, blob: &[u8], out: &mut Vec<u8>) {
 /// A complete `.osm.pbf`: one `OSMHeader` blob (which every reader must skip)
 /// followed by one `OSMData` blob.
 pub fn sample_pbf() -> Vec<u8> {
+    pbf_from_block(&primitive_block())
+}
+
+fn pbf_from_block(block: &[u8]) -> Vec<u8> {
     let mut header_block = Vec::new();
     bytes_field(4, b"OsmSchema-V0.6", &mut header_block);
     bytes_field(4, b"DenseNodes", &mut header_block);
@@ -318,19 +325,140 @@ pub fn sample_pbf() -> Vec<u8> {
 
     let mut out = Vec::new();
     framed("OSMHeader", &header_blob, &mut out);
-    framed("OSMData", &sample_data_blob(), &mut out);
+    framed("OSMData", &data_blob(block), &mut out);
     out
 }
 
 /// Write the fixture to a unique temp directory and return the path plus the
 /// directory (which the caller may use for outputs).
 pub fn write_sample(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    write_pbf(tag, &sample_pbf())
+}
+
+fn write_pbf(tag: &str, bytes: &[u8]) -> (std::path::PathBuf, std::path::PathBuf) {
     let dir = std::env::temp_dir().join(format!("osm_ingest_{tag}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("sample.osm.pbf");
-    std::fs::write(&path, sample_pbf()).unwrap();
+    std::fs::write(&path, bytes).unwrap();
     (path, dir)
+}
+
+// ---- the vector-layer fixture --------------------------------------------
+//
+// A SECOND fixture rather than more features in the one above. The road-graph and
+// POI tests assert exact counts against it (`ways.len() == 3`, `records == 3`,
+// `NODE_COUNT`), so every addition there ripples into four modules' tests and
+// makes each of them slightly less about what it is testing. The vector layers
+// need different elements anyway.
+
+/// `highway=speed_camera` with a direction.
+pub const CAMERA_NODE_ID: i64 = 1001;
+/// `man_made=surveillance` + `surveillance:type=ALPR` + a Flock operator, so it
+/// hits the ALPR branch by two independent signals.
+pub const ALPR_NODE_ID: i64 = 1003;
+pub const STOP_SIGN_NODE_ID: i64 = 1006;
+pub const SIGNALS_NODE_ID: i64 = 1007;
+/// A named cafe: tagged, but not road furniture. The negative control.
+pub const LAYERS_CAFE_NODE_ID: i64 = 1008;
+
+/// One node in the vector-layer fixture: `(id, lat_e7, lon_e7, tags)`.
+type FixtureNode = (i64, i32, i32, Vec<(u32, u32)>);
+
+/// Dense-node group for an arbitrary node list. Ids must ascend, as they do in a
+/// real PBF.
+fn dense_group(nodes: &[FixtureNode]) -> Vec<u8> {
+    let mut keys_vals: Vec<u32> = Vec::new();
+    for (_, _, _, tags) in nodes {
+        for (k, v) in tags {
+            keys_vals.push(*k);
+            keys_vals.push(*v);
+        }
+        keys_vals.push(ST_EMPTY);
+    }
+    let mut out = Vec::new();
+    packed_delta(1, &nodes.iter().map(|n| n.0).collect::<Vec<_>>(), &mut out);
+    packed_delta(8, &nodes.iter().map(|n| n.1 as i64).collect::<Vec<_>>(), &mut out);
+    packed_delta(9, &nodes.iter().map(|n| n.2 as i64).collect::<Vec<_>>(), &mut out);
+    packed_u32(10, &keys_vals, &mut out);
+    out
+}
+
+/// The `PrimitiveBlock` for the vector-layer fixture. All nodes sit in San
+/// Francisco, around 37.77N 122.41W, so a plausible `--bbox` includes them and an
+/// Atlantic one does not.
+pub fn layers_block() -> Vec<u8> {
+    let mut st = StringTable::new();
+
+    let k_highway = st.id("highway");
+    let k_man_made = st.id("man_made");
+    let k_surveillance_type = st.id("surveillance:type");
+    let k_operator = st.id("operator");
+    let k_direction = st.id("direction");
+    let k_amenity = st.id("amenity");
+    let k_name = st.id("name");
+
+    let v_speed_camera = st.id("speed_camera");
+    let v_surveillance = st.id("surveillance");
+    let v_alpr = st.id("ALPR");
+    let v_flock = st.id("Flock Safety");
+    let v_forward = st.id("forward");
+    let v_stop = st.id("stop");
+    let v_traffic_signals = st.id("traffic_signals");
+    let v_cafe = st.id("cafe");
+    let v_corner_cafe = st.id("Corner Cafe");
+
+    let nodes: Vec<FixtureNode> = vec![
+        (
+            CAMERA_NODE_ID,
+            377_749_000,
+            -1_224_194_000,
+            vec![(k_highway, v_speed_camera), (k_direction, v_forward)],
+        ),
+        (
+            ALPR_NODE_ID,
+            377_770_000,
+            -1_224_170_000,
+            vec![
+                (k_man_made, v_surveillance),
+                (k_surveillance_type, v_alpr),
+                (k_operator, v_flock),
+            ],
+        ),
+        (
+            STOP_SIGN_NODE_ID,
+            377_800_000,
+            -1_224_150_000,
+            vec![(k_highway, v_stop)],
+        ),
+        (
+            SIGNALS_NODE_ID,
+            377_810_000,
+            -1_224_140_000,
+            vec![(k_highway, v_traffic_signals)],
+        ),
+        (
+            LAYERS_CAFE_NODE_ID,
+            377_820_000,
+            -1_224_130_000,
+            vec![(k_amenity, v_cafe), (k_name, v_corner_cafe)],
+        ),
+    ];
+    let dense = dense_group(&nodes);
+
+    let mut node_group = Vec::new();
+    bytes_field(2, &dense, &mut node_group);
+
+    let mut block = Vec::new();
+    bytes_field(1, &st.encode(), &mut block);
+    bytes_field(2, &node_group, &mut block);
+    varint_field(17, 100, &mut block); // granularity
+    block
+}
+
+/// Write the vector-layer fixture to a unique temp directory.
+pub fn write_layers_sample(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    write_pbf(tag, &pbf_from_block(&layers_block()))
 }
 
 #[cfg(test)]
