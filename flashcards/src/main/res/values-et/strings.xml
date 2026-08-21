@@ -41,4 +41,23 @@
     <string name="template_name">Malli nimi</string>
     <string name="template_front">Esikülje mall</string>
     <string name="template_back">Tagakülje mall</string>
+    <string name="note_type_summary">%1$d välja · %2$d malli · %3$d märget</string>
+    <string name="export_collection_hint">Jaga kõiki sähvikupakke Anki .apkg failina</string>
+    <string name="show_answer">Näita vastust</string>
+    <string name="grade_again">Uuesti</string>
+    <string name="grade_hard">Raske</string>
+    <string name="grade_good">Hea</string>
+    <string name="grade_easy">Lihtne</string>
+    <string name="theme_system">Süsteemi kujundus</string>
+    <string name="theme_light">Hele kujundus</string>
+    <string name="theme_dark">Tume kujundus</string>
+    <string name="reminder_channel_name">Vaata meeldetuletused üle</string>
+    <string name="reminder_channel_description">Igapäevane meeldetuletus, kui sähvikud vajavad õppimist</string>
+    <string name="reminder_title">On aeg õppimiseks</string>
+    <string name="start">Alusta</string>
+    <string name="deleted">Kustutatud</string>
+    <string name="undo">Võta tegevus tagasi</string>
+    <string name="done">Valmis</string>
+    <string name="suspend">Lükka edasi</string>
+    <string name="unsuspend">Lõpeta edasilükkamine</string>
 </resources>
