@@ -1,66 +1,35 @@
 package com.vayunmathur.musicbrainz.network.api
 
 import com.vayunmathur.library.network.NetworkClient
-import kotlinx.serialization.Serializable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import java.io.IOException
-import java.net.HttpURLConnection
 import java.net.URLEncoder
 
-/** The 503 body the server sends when it has no catalogue to answer from. */
-@Serializable
-internal data class NotReadyBody(
-    val error: String = "",
-    val state: String = "",
-    val progress: Float? = null,
-    val detail: String? = null,
-    /** Whether waiting and asking again will ever produce a catalogue. */
-    val retryable: Boolean? = null,
-)
-
 /**
- * The server has a catalogue to serve, but not yet: either the data pack was never
- * imported or an import is still running. The server signals both as HTTP 503 with an
- * `{"error":"not_ready"}` body, and reserves other statuses for genuine faults.
+ * Client for the MusicBrainz WS/2 API.
  *
- * Kept apart from an ordinary failure because the user can do nothing about it and it is not
- * a fault at their end.
+ * MusicBrainz allows one request per second per client and blocks callers that ignore
+ * that, so every request funnels through [gate]. It also rejects requests without an
+ * identifying User-Agent, which is why [USER_AGENT] names the app and links the source.
  *
- * [reason] is the server's own explanation, carried only for [ABSENT] - a catalogue that is
- * absent may never arrive, and [BUILDING] needs no explanation because it resolves on its own.
- *
- * [retryable] is the server's word on whether asking again will ever help, and it is NOT the
- * same question as whether a catalogue is absent: a first boot before the scheduler has run,
- * and a failed build queued for the next check, are both absent yet worth retrying, while a
- * host that cannot fit a build never will be. It is reported rather than inferred because only
- * the server knows which of those it is.
- */
-class CatalogueNotReadyException(
-    message: String,
-    val state: String? = null,
-    val reason: String? = null,
-    val retryable: Boolean = true,
-) : IOException(message) {
-    companion object {
-        const val ABSENT = "absent"
-        const val BUILDING = "building"
-    }
-}
-
-/**
- * Client for the self-hosted MusicBrainz mirror.
- *
- * The mirror speaks WS/2's URL grammar and JSON shapes, so the requests below are the same
- * ones the public API takes. What it does not have is the public API's one-request-per-second
- * limit, so requests go straight out and callers are free to run them concurrently.
+ * That one request per second is a hard ceiling, so the app's job is to spend it well:
+ * deduplication and caching live above this object, in
+ * [com.vayunmathur.musicbrainz.domain.cache.ResponseCache].
  */
 object MusicBrainzApi {
 
-    private const val BASE = "https://api.vayunmathur.com/api/mb/ws/2"
-
-    /** Named so the mirror's own logs can tell this client apart from anything else. */
+    private const val BASE = "https://musicbrainz.org/ws/2"
     private const val USER_AGENT =
         "ModernAppsMusicBrainz/1.0 ( https://ma.vayunmathur.com/apps/musicbrainz )"
+
+    /** A little over a second, so clock jitter cannot round two requests into one second. */
+    internal const val MIN_REQUEST_SPACING_MS = 1_100L
+
+    private val rateLimit = Mutex()
+    private var lastRequestAt = 0L
 
     private val headers = mapOf(
         "User-Agent" to USER_AGENT,
@@ -73,11 +42,10 @@ object MusicBrainzApi {
      * applies to a key that is ABSENT - a `null` on one of the non-nullable fields would
      * otherwise turn one unset value into a blank screen.
      *
-     * The server guarantees it never emits `null` anywhere, enforced on its side by
-     * `skip_serializing_if` plus a test, so this is defence in depth rather than something the
-     * current contract relies on. It is here because the failure it prevents is invisible
-     * until it happens against the live server, and `MbTrack.id` - the field the catalogue
-     * stopped carrying - is the one most likely to arrive that way if the guarantee ever slips.
+     * WS/2 does emit `null` for absent values rather than omitting the key, so this is load
+     * bearing rather than defensive. It can only turn a decode that would have thrown into one
+     * that succeeds with the declared default, so it cannot change how a response that already
+     * decodes is read.
      *
      * Internal rather than private so `MusicBrainzModelsTest` decodes through the real
      * configuration instead of a copy of it.
@@ -91,38 +59,38 @@ object MusicBrainzApi {
     /**
      * The failure for a non-2xx status, or null when the response is fine.
      *
-     * 503 is the server saying it has no catalogue loaded yet, which is a wait rather than a
-     * fault. The server uses 503 EXCLUSIVELY for that and 500 exclusively for a real failure,
-     * with no overlap, so the STATUS alone decides which kind of failure this is. The body is
-     * parsed only to carry the server's explanation through to the screen, and a body that does
-     * not parse costs nothing but that explanation.
-     *
-     * Split out from [get] so `MusicBrainzApiErrorTest` can pin the mapping without a server;
-     * it is the one place the contract with the server is encoded.
+     * Split out from [get] so `MusicBrainzApiErrorTest` can pin the mapping without a server.
+     * WS/2 answers 503 when a client outruns the rate limit, which [gate] exists to prevent;
+     * it is reported like any other failure because there is nothing extra for the user to do
+     * about it.
      */
-    internal fun failureFor(status: Int, body: String): IOException? = when {
-        status == HttpURLConnection.HTTP_UNAVAILABLE -> {
-            val parsed = runCatching { json.decodeFromString<NotReadyBody>(body) }.getOrNull()
-            val reason = parsed?.detail?.ifBlank { null }
-                ?.takeIf { parsed.state == CatalogueNotReadyException.ABSENT }
-            CatalogueNotReadyException(
-                message = "HTTP 503: ${body.take(200)}",
-                state = parsed?.state?.ifBlank { null },
-                reason = reason,
-                // Falls back to inferring it from the reason when the server does not say, so a
-                // body without the field behaves as it did before the field existed rather than
-                // offering a retry that cannot work.
-                retryable = parsed?.retryable ?: (reason == null),
-            )
-        }
-        status in 200..299 -> null
-        else -> IOException("HTTP $status: ${body.take(500)}")
+    internal fun failureFor(status: Int, body: String): IOException? =
+        if (status in 200..299) null else IOException("HTTP $status: ${body.take(500)}")
+
+    /**
+     * How long to wait before sending, given when the last request was SENT.
+     *
+     * Pure and internal so `RateLimitTest` can pin the spacing rule without a clock or a
+     * network.
+     */
+    internal fun waitBeforeSending(now: Long, sentAt: Long): Long =
+        (MIN_REQUEST_SPACING_MS - (now - sentAt)).coerceAtLeast(0L)
+
+    /** Serialises requests and spaces them out so the shared rate limit is respected. */
+    private suspend fun <T> gate(block: suspend () -> T): T = rateLimit.withLock {
+        delay(waitBeforeSending(System.currentTimeMillis(), lastRequestAt))
+        // Stamped before the call rather than after it. The limit is on how often requests are
+        // SENT, so the cooldown belongs alongside the round trip, not after it: stamping on
+        // completion charged every caller the spacing PLUS the latency, which roughly doubled
+        // the cost of each request and made a two-request screen take seconds.
+        lastRequestAt = System.currentTimeMillis()
+        block()
     }
 
-    private suspend inline fun <reified T> get(path: String): T {
+    private suspend inline fun <reified T> get(path: String): T = gate {
         val response = NetworkClient.performRequest("$BASE/$path", headers = headers)
         failureFor(response.status, response.body)?.let { throw it }
-        return json.decodeFromString<T>(response.body)
+        json.decodeFromString<T>(response.body)
     }
 
     private fun encode(value: String): String = URLEncoder.encode(value, "UTF-8")
