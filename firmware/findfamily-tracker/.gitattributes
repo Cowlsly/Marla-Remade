@@ -1,0 +1,10 @@
+# The rest of this repo has mixed line endings with core.autocrlf=false, so a
+# global text=auto would renormalise the whole Kotlin/Rust tree the next time
+# anyone touched it (see rules/line-endings.md). Scope it to this directory only:
+# Zephyr/CMake tooling and the arm-none-eabi toolchain want LF.
+* text=auto eol=lf
+
+*.bin binary
+*.elf binary
+*.hex binary
+*.uf2 binary
