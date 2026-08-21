@@ -15,9 +15,20 @@ import kotlinx.serialization.Serializable
  *    [com.vayunmathur.library.network.NetworkClient] JSON is
  *    `ignoreUnknownKeys`, so a MOTIS schema change degrades to nulls rather
  *    than throwing (mirrors the Google-scrape null-safety convention).
+ *
+ * Only `GET /api/v1/stoptimes` is still called. `/api/v1/map/stops` was replaced
+ * by the baked `transit_stops` basemap layer (stops are static data) and
+ * `/api/v1/plan` by the on-device RAPTOR planner, so their DTOs are gone.
  */
 
-/** A transit stop drawn on the map and tapped to open its departure board. */
+/**
+ * A transit stop drawn on the map and tapped to open its departure board.
+ *
+ * [id] is the MOTIS/Transitous stop id baked into the `transit_stops` tile layer,
+ * which is what the realtime board queries. A stop from a feed whose Transitous
+ * source name the build did not know has none and falls back to its name, so the
+ * offline board still opens but no live delays arrive.
+ */
 data class TransitStop(
     val id: String,
     val name: String,
@@ -52,15 +63,6 @@ data class Departure(
 )
 
 // --- MOTIS v1 wire DTOs ----------------------------------------------------
-
-/** Response of `GET /api/v1/map/stops` — the stops within a viewport box. */
-@Serializable
-data class MotisMapStop(
-    val id: String,
-    val name: String = "",
-    val lat: Double,
-    val lon: Double,
-)
 
 /** Response of `GET /api/v1/stoptimes` — the live board for one stop. */
 @Serializable

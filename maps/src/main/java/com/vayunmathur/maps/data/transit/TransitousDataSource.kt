@@ -10,27 +10,27 @@ import java.time.OffsetDateTime
 /**
  * Online public-transit data source (P10) backed by **Transitous** — a free,
  * community-hosted aggregation of open GTFS / GTFS-RT feeds — via its **MOTIS**
- * REST API. Two calls are exposed:
+ * REST API. One call is exposed:
  *
- *  - [stopsInBbox] — nearby stops for the current viewport (`/api/v1/map/stops`,
- *    the same endpoint the MOTIS web map uses to draw stop dots), for the
- *    overlay layer.
  *  - [departures] — the live board for one stop (`/api/v1/stoptimes`): route
  *    short name, headsign, scheduled + realtime time, delay, platform.
+ *
+ * This is the ONLY endpoint left, and the only genuinely realtime thing in the
+ * system. Stops used to come from `/api/v1/map/stops` per viewport; they are
+ * static data, so they are now baked into the basemap as the `transit_stops`
+ * layer, along with the MOTIS stop id this endpoint needs. Journey planning used
+ * to fall back to `/api/v1/plan`; the on-device RAPTOR planner is now the only
+ * planner.
  *
  * Design mirrors [com.vayunmathur.maps.data.google.GooglePoiDiscovery]:
  *  - an `object` singleton, all network on [Dispatchers.IO];
  *  - **never throws** — every public call returns empty on any failure so a
  *    flaky feed or a MOTIS schema drift degrades gracefully;
- *  - **brief caching**: stops are cached per rounded viewport (they rarely
- *    change); departures are cached per stop for only [DEPARTURES_TTL_MS] since
- *    they are live.
- *
- * ONLINE-ONLY (P11 adds offline transit from bundled GTFS). Routing is
- * untouched — this is a read-only board.
+ *  - **brief caching**: departures are cached per stop for only
+ *    [DEPARTURES_TTL_MS] since they are live.
  *
  * NOTE (on-device): the live MOTIS fetch needs a device/emulator with network
- * and cannot be exercised at compile time; the endpoints/parse below are
+ * and cannot be exercised at compile time; the endpoint/parse below is
  * verified by shape only.
  */
 object TransitousDataSource {
@@ -40,16 +40,13 @@ object TransitousDataSource {
     /** Cap departures requested per board so a busy hub stays scrollable. */
     private const val DEPARTURE_COUNT = 30
 
-    /** Cap stops per viewport so a dense metro area doesn't flood the overlay. */
-    private const val MAX_STOPS = 200
-
     /** Departures are live — cache only very briefly to smooth refresh taps. */
     private const val DEPARTURES_TTL_MS = 20_000L
 
     /**
      * How long a *failed* fetch is remembered. Distinct from (and far shorter
-     * than) the success TTLs: one offline attempt used to poison the departures
-     * cache for the full 20 s and the stops cache indefinitely.
+     * than) the success TTL: one offline attempt used to poison the departures
+     * cache for the full 20 s.
      */
     private const val FAILURE_TTL_MS = 3_000L
 
@@ -68,36 +65,9 @@ object TransitousDataSource {
             System.currentTimeMillis() - at < if (ok) okTtlMs else FAILURE_TTL_MS
     }
 
-    // Stops LRU keyed on the rounded viewport box (stops are static-ish).
-    private data class BboxKey(val minLat: Double, val minLon: Double, val maxLat: Double, val maxLon: Double)
-    private val stopsCache = object : LinkedHashMap<BboxKey, Cached<List<TransitStop>>>(16, 0.75f, true) {
-        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<BboxKey, Cached<List<TransitStop>>>) = size > 32
-    }
-
     // Departures cache keyed on stop id, with a short TTL (live data).
     private val departuresCache = object : LinkedHashMap<String, Cached<List<Departure>>>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Cached<List<Departure>>>) = size > 32
-    }
-
-    /**
-     * Stops within the viewport box. Never throws — returns an empty list on any
-     * failure. LRU-cached on the box rounded to ~100 m so small pans reuse the
-     * previous fetch; a failed fetch is only remembered for [FAILURE_TTL_MS].
-     */
-    suspend fun stopsInBbox(
-        minLat: Double,
-        minLon: Double,
-        maxLat: Double,
-        maxLon: Double,
-    ): List<TransitStop> {
-        val key = BboxKey(round3(minLat), round3(minLon), round3(maxLat), round3(maxLon))
-        synchronized(stopsCache) {
-            stopsCache[key]?.let { if (it.isFresh(Long.MAX_VALUE)) return it.value }
-        }
-        val fetched = runCatching { fetchStops(minLat, minLon, maxLat, maxLon) }
-        val stops = fetched.getOrDefault(emptyList())
-        synchronized(stopsCache) { stopsCache[key] = Cached(stops, fetched.isSuccess) }
-        return stops
     }
 
     /**
@@ -115,41 +85,6 @@ object TransitousDataSource {
         val deps = fetched.getOrDefault(emptyList())
         synchronized(departuresCache) { departuresCache[stopId] = Cached(deps, fetched.isSuccess) }
         return deps
-    }
-
-    /**
-     * Live board for the MOTIS stop nearest `(lat, lon)`. MOTIS stop ids share no
-     * namespace with the baked `.transit` pack, so the offline planner locates a
-     * stop's realtime data by proximity — the same trick
-     * [com.vayunmathur.maps.util.TransitStopsViewModel.openNearestStop] uses.
-     * Empty when nothing is near or the fetch fails.
-     */
-    suspend fun departuresNear(lat: Double, lon: Double): List<Departure> {
-        // ~1.1 km search box, then the closest stop within it.
-        val d = 0.01
-        val nearest = stopsInBbox(lat - d, lon - d, lat + d, lon + d).minByOrNull { s ->
-            val dLat = s.lat - lat
-            val dLon = s.lon - lon
-            dLat * dLat + dLon * dLon
-        } ?: return emptyList()
-        return departures(nearest.id)
-    }
-
-    private suspend fun fetchStops(
-        minLat: Double,
-        minLon: Double,
-        maxLat: Double,
-        maxLon: Double,
-    ): List<TransitStop> = withContext(Dispatchers.IO) {
-        // MOTIS map/stops takes the box corners as "lat,lon" min/max pairs.
-        val url = "$BASE_URL/api/v1/map/stops" +
-            "?min=${enc("$minLat,$minLon")}&max=${enc("$maxLat,$maxLon")}"
-        val stops: List<MotisMapStop> = NetworkClient.getJson(url, REQUEST_HEADERS, useSystemTrust = true)
-        stops.asSequence()
-            .map { TransitStop(id = it.id, name = it.name.ifBlank { it.id }, lat = it.lat, lon = it.lon) }
-            .distinctBy { it.id }
-            .take(MAX_STOPS)
-            .toList()
     }
 
     private suspend fun fetchDepartures(stopId: String): List<Departure> = withContext(Dispatchers.IO) {
@@ -190,6 +125,5 @@ object TransitousDataSource {
             .getOrNull()
     }
 
-    private fun round3(v: Double): Double = Math.round(v * 1000.0) / 1000.0
     private fun enc(s: String): String = URLEncoder.encode(s, "UTF-8")
 }

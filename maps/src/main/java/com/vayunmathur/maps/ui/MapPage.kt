@@ -79,7 +79,6 @@ import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -143,7 +142,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
 
     // Public transit (P10): nearby stops overlay + live departure board. Stops
     // are only fetched/drawn while the Transit layer is on.
-    val transitStops by transitViewModel.stops.collectAsState()
     val selectedTransitStop by transitViewModel.selected.collectAsState()
     val departuresState by transitViewModel.departures.collectAsState()
 
@@ -163,25 +161,6 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     // TEST: default to San Francisco at z14 so the native ma_pois POIs are
     // visible on cold start.
     val camera = rememberCameraState(CameraPosition(target = Position(-122.4194, 37.7749), zoom = 14.0))
-
-    LaunchedEffect(camera.position, transitEnabled) {
-        if (camera.position.zoom >= 11.0) {
-            delay(300) // Debounce idle-driven overlay refresh
-            val projection = camera.projection
-            if (projection != null) {
-                val bbox = projection.queryVisibleBoundingBox()
-                // Ambient POIs (P29) are now rendered NATIVELY from the baked
-                // `ma_pois` PMTiles source-layer (see MaPoisLayer in MyMapLayers),
-                // so no per-viewport offline-index query is needed here. PoiIndex
-                // is still used for offline SEARCH only.
-                // Refresh nearby transit stops (P10) only while the layer is on
-                // (VM debounces + caches; wide views clear the overlay).
-                if (transitEnabled) {
-                    transitViewModel.onViewport(bbox.north, bbox.east, bbox.south, bbox.west)
-                }
-            }
-        }
-    }
 
     // Offline POI SEARCH index (poi_index.bin / poi_names.bin, P27). Ambient POI
     // rendering is now native from the baked `ma_pois` PMTiles source-layer (see
@@ -576,7 +555,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, transitStops, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types)
                     }
                 }
 

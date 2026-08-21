@@ -183,6 +183,12 @@ pub struct TransitLeg {
     pub dist_m: f64,
     /// Flat `[lon, lat, lon, lat, ...]` polyline through the leg's stops.
     pub coords: Vec<f64>,
+    /// MOTIS/Transitous ids of the ride's board and alight stops (v5 packs only;
+    /// empty otherwise, and empty for non-ride legs). The realtime overlay asks
+    /// `/stoptimes` about these directly, which is what removed the old
+    /// coordinate-to-id round trip through `/map/stops`.
+    pub board_stop_motis_id: String,
+    pub alight_stop_motis_id: String,
 }
 
 /// What keeps an index's bytes alive: an mmap of the pack file in production, or
@@ -718,6 +724,15 @@ impl TransitIndex {
         None
     }
 
+    /// MOTIS id of the stop nearest `(lat, lon)`, for a caller that must name a
+    /// stop before it knows which one it wants — the departure board fetches its
+    /// realtime overlay before running the board query. Local lookup, no network.
+    pub fn nearest_stop_motis_id(&self, lat: f64, lon: f64) -> Option<String> {
+        const NEAREST_MAX_M: f64 = 400.0;
+        let (stop, _) = self.nearest_stop(lat, lon, NEAREST_MAX_M)?;
+        self.motis_stop_id(stop)
+    }
+
     /// IANA timezone of the feed covering `(lat, lon)`, resolved via the nearest
     /// stop and one of the routes serving it. Stops carry no `feed_idx` — only
     /// `RouteRec` does — so the route hop is required. Empty when nothing is
@@ -1169,6 +1184,9 @@ pub fn plan(
                 stop_count: 0,
                 dist_m: access_d,
                 coords: vec![from_lon, from_lat, flon, flat],
+                // Walk legs carry no realtime, so they need no MOTIS ids.
+                board_stop_motis_id: String::new(),
+                alight_stop_motis_id: String::new(),
             },
         );
     }
@@ -1188,6 +1206,8 @@ pub fn plan(
             stop_count: 0,
             dist_m: egress_d,
             coords: vec![elon, elat, to_lon, to_lat],
+            board_stop_motis_id: String::new(),
+            alight_stop_motis_id: String::new(),
         });
     }
 
@@ -1223,6 +1243,11 @@ fn insert_wait_legs(legs: Vec<TransitLeg>, dep_secs: u32) -> Vec<TransitLeg> {
                 stop_count: 0,
                 dist_m: 0.0,
                 coords: Vec::new(),
+                // A wait happens at the following ride's board stop, whose id that
+                // ride already carries; duplicating it here would double the
+                // overlay's fetch for one stop.
+                board_stop_motis_id: String::new(),
+                alight_stop_motis_id: String::new(),
             });
         }
         out.push(leg);
@@ -1544,6 +1569,8 @@ fn make_transit_leg(
         stop_count: (count - 1).max(0),
         dist_m: dist,
         coords,
+        board_stop_motis_id: idx.motis_stop_id(board_stop).unwrap_or_default(),
+        alight_stop_motis_id: idx.motis_stop_id(alight_stop).unwrap_or_default(),
     }
 }
 
@@ -1569,6 +1596,8 @@ fn make_walk_leg(
         stop_count: 0,
         dist_m: dist_m(flat, flon, tlat, tlon),
         coords: vec![flon, flat, tlon, tlat],
+        board_stop_motis_id: String::new(),
+        alight_stop_motis_id: String::new(),
     }
 }
 

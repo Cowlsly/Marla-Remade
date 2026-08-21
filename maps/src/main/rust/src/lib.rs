@@ -201,7 +201,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;III)V";
+    // MUST match the descriptor at the transit call site below: one ctor, two
+    // callers. The trailing two Strings are the ride's MOTIS board/alight ids.
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;)V";
 
     let array = match env.new_object_array(steps.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
@@ -258,6 +260,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
                 JValue::Int(0),
                 JValue::Int(0),
                 JValue::Int(0),
+                // No MOTIS stop ids on a road-graph step.
+                JValue::Object(&JObject::null()),
+                JValue::Object(&JObject::null()),
             ],
         ) {
             Ok(o) => o,
@@ -537,7 +542,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         Ok(c) => c,
         Err(_) => return null,
     };
-    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;III)V";
+    // MUST match the descriptor at the driving call site above: one ctor, two
+    // callers. The trailing two Strings are the ride's MOTIS board/alight ids.
+    let ctor = "(ILjava/lang/String;JJ[DDZLjava/lang/String;Ljava/lang/String;Ljava/lang/String;I[ILjava/lang/String;IIILjava/lang/String;Ljava/lang/String;)V";
     let array = match env.new_object_array(legs.len() as i32, &class, JObject::null()) {
         Ok(a) => a,
         Err(_) => return null,
@@ -581,6 +588,18 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         } else {
             JObject::null()
         };
+        // Only a ride carries realtime, so only a ride carries stop ids. Empty on
+        // a pre-v5 pack, which leaves the overlay with nothing to ask about.
+        let jboard = if is_transit {
+            opt_str(&mut env, &leg.board_stop_motis_id)
+        } else {
+            JObject::null()
+        };
+        let jalight = if is_transit {
+            opt_str(&mut env, &leg.alight_stop_motis_id)
+        } else {
+            JObject::null()
+        };
 
         // Every leg's duration comes from RAPTOR's own times. A walk leg's
         // `dist_m` may have been redrawn along the road graph, which is longer
@@ -621,6 +640,8 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
                 JValue::Int(leg.route_color as i32),
                 JValue::Int(leg.dep_secs as i32),
                 JValue::Int(leg.arr_secs as i32),
+                JValue::Object(&jboard),
+                JValue::Object(&jalight),
             ],
         ) {
             Ok(o) => o,
@@ -806,6 +827,55 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getFeedTimez
     match env.new_string(&tz) {
         Ok(s) => s.into_raw(),
         Err(_) => null,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JNI: nearestStopMotisIdNative (MOTIS id of the stop nearest a coordinate)
+// ---------------------------------------------------------------------------
+
+/// MOTIS/Transitous stop id (e.g. `us-ca-SF-bayarea_901201`) of the stop nearest
+/// `(lat, lon)` in `<base_path>/<feed>.transit`, from the v5 `FEED_MOTIS_PREFIX` +
+/// `STOP_GTFS_ID` sections. Returns null when the pack is absent, predates v5,
+/// doesn't cover the point, or its feed's Transitous source name was unknown at
+/// build time.
+///
+/// Exists because the departure board fetches its realtime overlay *before* it
+/// knows which stop the board is for, so it needs to name the stop up front. A
+/// local lookup, no network — which is the whole point of baking the id.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_nearestStopMotisIdNative<
+    'local,
+>(
+    mut env: JNIEnv<'local>,
+    _thiz: JObject<'local>,
+    base_path: JString<'local>,
+    feed: JString<'local>,
+    lat: jdouble,
+    lon: jdouble,
+) -> jstring {
+    let null = std::ptr::null_mut();
+    let base: String = match env.get_string(&base_path) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let feed_name: String = match env.get_string(&feed) {
+        Ok(s) => s.into(),
+        Err(_) => return null,
+    };
+    let index = match transit::TransitIndex::load(&base, &feed_name) {
+        Some(i) => i,
+        None => return null,
+    };
+    if !index.covers(lat, lon) {
+        return null;
+    }
+    match index.nearest_stop_motis_id(lat, lon) {
+        Some(id) => match env.new_string(&id) {
+            Ok(s) => s.into_raw(),
+            Err(_) => null,
+        },
+        None => null,
     }
 }
 
@@ -1005,6 +1075,8 @@ mod tests {
             stop_count: 0,
             dist_m,
             coords,
+            board_stop_motis_id: String::new(),
+            alight_stop_motis_id: String::new(),
         }
     }
 

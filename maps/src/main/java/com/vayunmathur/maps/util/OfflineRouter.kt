@@ -8,6 +8,7 @@ import com.vayunmathur.library.util.ConnectivityMonitor
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.transit.Departure
+import com.vayunmathur.maps.data.transit.TransitStop
 import com.vayunmathur.maps.data.transit.TransitousDataSource
 import java.io.File
 import java.io.OutputStream
@@ -169,6 +170,23 @@ object OfflineRouter {
             lat: Double,
             lon: Double
     ): String?
+
+    /**
+     * MOTIS/Transitous id of the stop nearest `(lat, lon)` in the baked v5 pack,
+     * or null when the pack is absent, predates v5, doesn't cover the point, or
+     * its feed's Transitous source name was unknown at build time.
+     *
+     * A purely local lookup. It exists because the departure board fetches its
+     * realtime overlay before it knows which stop the board is for, so it has to
+     * name the stop up front — and since `/api/v1/map/stops` is gone, there is no
+     * longer any network way to turn a coordinate into a MOTIS id.
+     */
+    private external fun nearestStopMotisIdNative(
+            basePath: String,
+            feed: String,
+            lat: Double,
+            lon: Double
+    ): String?
     private external fun updateTrafficNative(
             edgeIds: LongArray,
             speeds: ByteArray,
@@ -283,6 +301,15 @@ object OfflineRouter {
             val depSecs: Int,
             /** Arrival, seconds since feed-local midnight (0 when unknown). */
             val arrSecs: Int,
+            /**
+             * MOTIS/Transitous id of the ride's board stop, baked into the v5
+             * pack. Null on a walk/wait leg, on a pre-v5 pack, or when the feed's
+             * Transitous source name was unknown at build time — in which case the
+             * realtime overlay simply has nothing to ask about for this leg.
+             */
+            val boardStopId: String?,
+            /** MOTIS/Transitous id of the ride's alight stop. See [boardStopId]. */
+            val alightStopId: String?,
     )
 
     /** One offline scheduled departure from the baked `.transit` index. */
@@ -475,38 +502,48 @@ object OfflineRouter {
     }
 
     /**
-     * Board and alight coordinates of every ride in a planned journey. A ride
-     * leg's geometry runs through its stops, so the first and last points are
-     * exactly the two stops whose realtime we need.
+     * Board and alight stops of every ride in a planned journey, as
+     * `(position, MOTIS id)`.
+     *
+     * The id is baked into the v5 pack, which is what lets the overlay name a stop
+     * to `/stoptimes` directly. A leg whose pack predates v5, or whose feed's
+     * Transitous source name the build did not know, carries no id and is dropped:
+     * without one there is no way to ask about it now that the `/map/stops`
+     * proximity lookup is gone, and it simply stays schedule-only.
      */
-    private fun journeyStops(steps: Array<RawStep>): List<Position> =
+    private fun journeyStops(steps: Array<RawStep>): List<Pair<Position, String>> =
             steps.filter { it.isTransit && it.geometry.size >= 4 }
                     .flatMap { s ->
                         val g = s.geometry
-                        listOf(
-                                Position(g[0], g[1]),
-                                Position(g[g.size - 2], g[g.size - 1]),
+                        listOfNotNull(
+                                s.boardStopId?.ifBlank { null }
+                                        ?.let { Position(g[0], g[1]) to it },
+                                s.alightStopId?.ifBlank { null }
+                                        ?.let { Position(g[g.size - 2], g[g.size - 1]) to it },
                         )
                     }
-                    .distinct()
+                    .distinctBy { it.second }
 
     /**
      * Fetch MOTIS boards for [stops] concurrently and flatten them into an
-     * [Overlay]. Returns [Overlay.EMPTY] when the device is offline — without
-     * that gate every offline plan would pay a full HTTP timeout per stop before
-     * `runCatching` swallowed it.
+     * [Overlay]. Each stop is named by its baked MOTIS id, so this is one
+     * `/stoptimes` call per stop with no proximity round-trip.
+     *
+     * Returns [Overlay.EMPTY] when the device is offline — without that gate every
+     * offline plan would pay a full HTTP timeout per stop before `runCatching`
+     * swallowed it.
      */
     private suspend fun realtimeOverlay(
             context: Context,
-            stops: List<Position>,
+            stops: List<Pair<Position, String>>,
             clock: TransitClock,
     ): Overlay {
         if (stops.isEmpty() || !ConnectivityMonitor.isOnline(context)) return Overlay.EMPTY
         val boards = coroutineScope {
-            stops.map { p ->
+            stops.map { (p, motisId) ->
                 async(Dispatchers.IO) {
                     p to runCatching {
-                        TransitousDataSource.departuresNear(p.latitude, p.longitude)
+                        TransitousDataSource.departures(motisId)
                     }.getOrDefault(emptyList())
                 }
             }.awaitAll()
@@ -530,6 +567,37 @@ object OfflineRouter {
         }
         if (routes.isEmpty()) return Overlay.EMPTY
         return Overlay(coords.toDoubleArray(), routes.toTypedArray(), times.toIntArray())
+    }
+
+    /**
+     * The stop nearest `(lat, lon)` from the baked `*.transit` packs, as a
+     * [TransitStop] whose id is the MOTIS/Transitous id so the realtime board can
+     * query it. Null when no pack covers the point.
+     *
+     * Reached from a tapped station POI, which carries no stop id of its own. This
+     * is a purely local lookup — `/api/v1/map/stops`, which used to answer
+     * "what stop is here", is gone.
+     */
+    suspend fun nearestStop(
+            context: Context,
+            lat: Double,
+            lon: Double,
+    ): TransitStop? = withContext(Dispatchers.Default) {
+        if (!isInitialized) initialize(context)
+        val base = basePath ?: return@withContext null
+        val feeds = File(base)
+                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
+                ?.map { it.name.removeSuffix(".transit") }
+                ?: emptyList()
+        for (feed in feeds) {
+            val id = runCatching {
+                nearestStopMotisIdNative(base, feed, lat, lon)
+            }.getOrNull()?.ifBlank { null } ?: continue
+            // The board resolves its own stop from the coordinate, so the name is
+            // only a label until it loads; the MOTIS id is the part that matters.
+            return@withContext TransitStop(id = id, name = id, lat = lat, lon = lon)
+        }
+        null
     }
 
     /**
@@ -558,7 +626,25 @@ object OfflineRouter {
             val clock = transitClock(
                     runCatching { getFeedTimezoneNative(base, feed, lat, lon) }.getOrNull()
             )
-            val overlay = realtimeOverlay(context, listOf(Position(lon, lat)), clock)
+            // The board is fetched before we know which stop it is for, so name the
+            // stop up front from the pack. No pack id (pre-v5, or a feed whose
+            // Transitous source name the build did not know) means no realtime, and
+            // the board stays schedule-only.
+            //
+            // Only the nearest stop's board is fetched, even though the offline
+            // board aggregates co-located platforms within 150 m. That is
+            // deliberate: the Rust overlay matches a delay to a stop within 60 m,
+            // tight enough that adjacent platforms don't collide, so a neighbouring
+            // platform's realtime could not be attributed anyway without carrying
+            // per-stop coordinates back out of the board.
+            val motisId = runCatching {
+                nearestStopMotisIdNative(base, feed, lat, lon)
+            }.getOrNull()?.ifBlank { null }
+            val overlay = if (motisId == null) {
+                Overlay.EMPTY
+            } else {
+                realtimeOverlay(context, listOf(Position(lon, lat) to motisId), clock)
+            }
             val raw = try {
                 getStopDeparturesNative(
                         base, feed, lat, lon,
