@@ -1041,6 +1041,24 @@ pub fn search_terms(s: &str, out: &mut Vec<String>) {
     }
 }
 
+/// The terms an entity contributes to the search index.
+///
+/// **This is the ONE definition, called by both the builder and the reader's
+/// verification path.** It exists because having two implementations of "what text
+/// does this entity contribute" *was* a shipped bug: `build.rs` indexed title AND
+/// artist credit while the reader's verifier read the title alone, so credit-only
+/// matches were silently dropped for any token common enough to be deferred. A test
+/// can only catch a divergence that has already happened; a single function makes
+/// the divergence impossible to express.
+///
+/// `credit` is empty for entities that have none (artists are indexed on name
+/// only, which is what WS/2 does).
+pub fn indexable_terms(primary: &str, credit: &str, out: &mut Vec<String>) {
+    out.clear();
+    search_terms(primary, out);
+    search_terms(credit, out);
+}
+
 fn fold_char(c: char) -> char {
     match c {
         'à'..='å' | 'À'..='Å' => 'a',

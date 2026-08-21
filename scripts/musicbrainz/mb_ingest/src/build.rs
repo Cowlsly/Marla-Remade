@@ -476,18 +476,21 @@ fn credit_sym_of(credit_syms: &[Sym], credit_id: u32) -> Sym {
     credit_syms.get(credit_id as usize).copied().unwrap_or(SYM_EMPTY)
 }
 
-/// Tokenise `text` and spill one posting per term. The term must already be in
-/// `terms` from the dictionary pass.
+/// Tokenise an entity's indexable text and spill one posting per term.
+///
+/// The terms come from `pack::indexable_terms`, which the reader's verification
+/// path also calls. That sharing is the point: two implementations of "what does
+/// this entity contribute to the index" is precisely the bug that shipped.
 fn emit_postings(
-    text: &str,
+    primary: &str,
+    credit: &str,
     refv: u32,
     terms: &StringPool,
     ranks: &[u32],
     buf: &mut Vec<String>,
     spill: &mut PostingSpill,
 ) -> io::Result<()> {
-    buf.clear();
-    search_terms(text, buf);
+    pack::indexable_terms(primary, credit, buf);
     for t in buf.iter() {
         let Some(sym) = terms.lookup(t) else {
             return Err(other_err(format!(
@@ -1474,6 +1477,7 @@ pub fn build<W: Write + Seek>(
             let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
             emit_postings(
                 &text,
+                "",
                 (pack::KIND_ARTIST << pack::KIND_SHIFT) | i as u32,
                 &terms,
                 &term_ranks,
@@ -1484,35 +1488,40 @@ pub fn build<W: Write + Seek>(
         for (i, &sym) in rg_title_syms.iter().enumerate() {
             check_searchable(i as u32)?;
             let refv = (pack::KIND_RELEASE_GROUP << pack::KIND_SHIFT) | i as u32;
-            let text = String::from_utf8_lossy(pool.get(sym)).into_owned();
-            emit_postings(&text, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
-            // Its artist credit, so "radiohead" finds Radiohead's albums. Duplicate
-            // (term, entity) pairs between title and credit dedup at emit time.
-            let csym = rg_credit_syms[i];
-            if csym != SYM_EMPTY {
-                let ctext = String::from_utf8_lossy(pool.get(csym)).into_owned();
-                emit_postings(&ctext, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
-            }
+            let title = String::from_utf8_lossy(pool.get(sym)).into_owned();
+            let credit = match rg_credit_syms[i] {
+                SYM_EMPTY => String::new(),
+                csym => String::from_utf8_lossy(pool.get(csym)).into_owned(),
+            };
+            emit_postings(
+                &title,
+                &credit,
+                refv,
+                &terms,
+                &term_ranks,
+                &mut terms_buf,
+                &mut post_spill,
+            )?;
         }
         if opts.include_recording_search {
             for (i, id) in rec_order.iter().enumerate() {
                 check_searchable(i as u32)?;
                 let refv = (pack::KIND_RECORDING << pack::KIND_SHIFT) | i as u32;
-                let text =
+                let title =
                     String::from_utf8_lossy(pool.get(rec_title[*id as usize])).into_owned();
-                emit_postings(&text, refv, &terms, &term_ranks, &mut terms_buf, &mut post_spill)?;
-                let csym = credit_sym_of(&credit_syms, rec_credit[*id as usize]);
-                if csym != SYM_EMPTY {
-                    let ctext = String::from_utf8_lossy(pool.get(csym)).into_owned();
-                    emit_postings(
-                        &ctext,
-                        refv,
-                        &terms,
-                        &term_ranks,
-                        &mut terms_buf,
-                        &mut post_spill,
-                    )?;
-                }
+                let credit = match credit_sym_of(&credit_syms, rec_credit[*id as usize]) {
+                    SYM_EMPTY => String::new(),
+                    csym => String::from_utf8_lossy(pool.get(csym)).into_owned(),
+                };
+                emit_postings(
+                    &title,
+                    &credit,
+                    refv,
+                    &terms,
+                    &term_ranks,
+                    &mut terms_buf,
+                    &mut post_spill,
+                )?;
             }
         }
     }

@@ -1101,25 +1101,27 @@ impl<'a> MbPack<'a> {
         out
     }
 
-    /// The text a given entity is searched by. This MUST yield the same terms
-    /// `build.rs` emitted postings for: release groups and recordings are indexed
-    /// on title AND artist credit, so verifying against the title alone would
-    /// reject every credit-only match. It would do so only for queries expensive
-    /// enough to defer, which is to say only for common artists, and no
-    /// fixture-sized test can reach that threshold -- the same shape as the
-    /// `MAX_POSTINGS_PER_TOKEN` truncation this replaced.
-    ///
-    /// The newline is a term separator, so this is exactly the union of the two
-    /// texts' terms, not a third text with a seam term across the join.
-    fn searchable_text(&self, kind: u32, idx: u32) -> Cow<'a, str> {
-        match kind {
-            KIND_ARTIST => self.artist(idx).map(|a| a.name),
-            KIND_RELEASE_GROUP => {
-                self.release_group(idx).map(|g| Cow::Owned(format!("{}\n{}", g.title, g.credit)))
-            }
-            _ => self.recording(idx).map(|r| Cow::Owned(format!("{}\n{}", r.title, r.credit))),
-        }
-        .unwrap_or(Cow::Borrowed(""))
+    /// The terms this entity contributes to the index, via the ONE shared
+    /// definition in `pack::indexable_terms`. The builder calls the same function,
+    /// so the verifier cannot disagree with the index about what was indexed --
+    /// which it did, once, and silently.
+    fn indexed_terms_of(&self, kind: u32, idx: u32, out: &mut Vec<String>) {
+        let empty = Cow::Borrowed("");
+        let (primary, credit) = match kind {
+            KIND_ARTIST => (
+                self.artist(idx).map(|a| a.name).unwrap_or(Cow::Borrowed("")),
+                empty,
+            ),
+            KIND_RELEASE_GROUP => match self.release_group(idx) {
+                Some(g) => (g.title, g.credit),
+                None => (Cow::Borrowed(""), empty),
+            },
+            _ => match self.recording(idx) {
+                Some(r) => (r.title, r.credit),
+                None => (Cow::Borrowed(""), empty),
+            },
+        };
+        pack::indexable_terms(&primary, &credit, out);
     }
 
     /// Above this many postings, a token is verified against candidates' text
@@ -1190,9 +1192,7 @@ impl<'a> MbPack<'a> {
             let mut buf: Vec<String> = Vec::new();
             let mut next: HashMap<u32, u32> = HashMap::with_capacity(cands.len());
             for (&idx, &w) in cands.iter() {
-                let text = self.searchable_text(kind, idx);
-                buf.clear();
-                pack::search_terms(&text, &mut buf);
+                self.indexed_terms_of(kind, idx, &mut buf);
                 let mut total = w;
                 let mut all = true;
                 for token in &deferred {
@@ -1410,14 +1410,12 @@ mod tests {
                 prev += read_uvarint(postings, &mut pos).expect("posting delta");
                 let refv = prev as u32;
                 let (kind, idx) = (refv >> KIND_SHIFT, refv & IDX_MASK);
-                let text = pack.searchable_text(kind, idx);
-                buf.clear();
-                pack::search_terms(&text, &mut buf);
+                pack.indexed_terms_of(kind, idx, &mut buf);
                 assert_eq!(
                     MbPack::weight_in_terms(&buf, term),
                     Some(2),
                     "term {term:?} is indexed for kind {kind} entity {idx} but its \
-                     searchable_text {text:?} does not yield it, so any query that \
+                     indexed_terms_of yields {buf:?}, so any query that \
                      defers {term:?} silently drops this entity"
                 );
                 if kind != pack::KIND_ARTIST {
