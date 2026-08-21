@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -173,7 +174,7 @@ private fun DepartureRow(dep: Departure, now: Long) {
                     stringResource(R.string.transit_cancelled),
                     style = MaterialTheme.typography.labelMedium,
                     fontWeight = FontWeight.Bold,
-                    color = DELAY_LATE,
+                    color = MaterialTheme.colorScheme.error,
                 )
             } else {
                 Text(
@@ -202,15 +203,19 @@ private fun countdownText(target: Long, now: Long): String {
     else stringResource(R.string.transit_minutes, minutes)
 }
 
-private val DELAY_ON_TIME = Color(0xFF2E7D32)
-private val DELAY_SLIGHT = Color(0xFFF9A825)
-private val DELAY_LATE = Color(0xFFC62828)
-
-/** On-time/early → green, 1–4 min late → amber, ≥5 late → red. */
+/**
+ * On-time/early → muted, 1–4 min late → tertiary, ≥5 late → error.
+ *
+ * Scheme-derived, not fixed: these sit on the sheet's own surface rather than on the tiles,
+ * so they are ordinary UI text and should follow the theme. "On time" is deliberately the
+ * quiet one — it is the expected case, and colouring it green made every board look alarming.
+ */
+@Composable
+@ReadOnlyComposable
 private fun delayColor(delayMinutes: Int): Color = when {
-    delayMinutes <= 0 -> DELAY_ON_TIME
-    delayMinutes < 5 -> DELAY_SLIGHT
-    else -> DELAY_LATE
+    delayMinutes <= 0 -> MaterialTheme.colorScheme.onSurfaceVariant
+    delayMinutes < 5 -> MaterialTheme.colorScheme.tertiary
+    else -> MaterialTheme.colorScheme.error
 }
 
 /** A once-per-15s ticker that reports the current epoch millis to [onTick]. */

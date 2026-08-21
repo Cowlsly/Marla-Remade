@@ -20,6 +20,7 @@ import com.vayunmathur.library.ui.PrimaryTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.verticalShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue

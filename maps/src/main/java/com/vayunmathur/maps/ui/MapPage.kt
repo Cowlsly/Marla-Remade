@@ -31,6 +31,7 @@ import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.verticalShape
 import com.vayunmathur.library.ui.CompassCalibrationBanner
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
@@ -77,6 +78,7 @@ import com.vayunmathur.maps.util.GooglePoiMapViewModel
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.PoiIndex
+import com.vayunmathur.maps.ui.theme.BasemapPalette
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -555,7 +557,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                             ClickResult.Pass
                         }
                 ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types)
+                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types, darkBasemap = darkMap)
                     }
                 }
 
@@ -887,8 +889,8 @@ fun patchStyleForHybrid(
  */
 private fun darkenPaint(id: String, paint: JsonObject?): JsonObject? {
     if (paint == null) return null
-    val base = darkBaseColor(id)
-    val (text, halo) = darkTextColors(id)
+    val base = BasemapPalette.darkFillHex(id)
+    val (text, halo) = BasemapPalette.darkLabelHex(id)
     return buildJsonObject {
         paint.forEach { (k, v) ->
             when (k) {
@@ -899,55 +901,4 @@ private fun darkenPaint(id: String, paint: JsonObject?): JsonObject? {
             }
         }
     }
-}
-
-/**
- * Dark fill/line/background colour for a base Protomaps layer. Keyed by layer id
- * (the style's ids are stable), falling through prefix/substring rules for the
- * many road variants. Casing colours must be matched before the highway/major
- * rules because e.g. `roads_highway_casing_early` contains both tokens.
- */
-private fun darkBaseColor(id: String): String = when {
-    id == "background" || id == "earth" -> "#1b1d22"
-    id == "water" -> "#0d1b2a"
-    id == "water_stream" || id == "water_river" -> "#24455f"
-    id == "landcover" -> "#1f2a22"
-    id == "landuse_park" -> "#1e2b20"
-    id == "landuse_urban_green" -> "#23362a"
-    id == "landuse_hospital" -> "#2b2528"
-    id == "landuse_industrial" -> "#20262b"
-    id == "landuse_school" -> "#282520"
-    id == "landuse_beach" -> "#2c2a22"
-    id == "landuse_zoo" -> "#213030"
-    id == "landuse_aerodrome" -> "#212228"
-    id == "landuse_runway" -> "#2b2d33"
-    id == "landuse_pedestrian" -> "#242229"
-    id == "landuse_pier" -> "#202225"
-    id.startsWith("landuse") -> "#1f2126"
-    id == "buildings" -> "#22262c"
-    id.startsWith("boundaries") -> "#4a4f57"
-    id == "roads_rail" -> "#3a3e45"
-    id.startsWith("roads_runway") || id.startsWith("roads_taxiway") -> "#2b2d33"
-    id.contains("casing") -> "#111318"
-    id.startsWith("roads_tunnels") -> "#2b2e35"
-    id.contains("highway") || id.contains("major") || id.contains("link") -> "#464b54"
-    id.startsWith("roads") -> "#34383f"
-    else -> "#26282e"
-}
-
-/**
- * Dark (text-color, text-halo-color) for a label/POI symbol layer: light text on
- * a near-black halo so labels stay legible over the dark basemap. Water labels
- * keep a blue tint over the dark-navy water.
- */
-private fun darkTextColors(id: String): Pair<String, String> = when (id) {
-    "places_locality" -> "#e4e8ee" to "#101216"
-    "places_country" -> "#9aa0aa" to "#101216"
-    "places_region" -> "#80868f" to "#101216"
-    "places_subplace" -> "#b0b6c0" to "#101216"
-    "earth_label_islands" -> "#9aa0aa" to "#101216"
-    "water_waterway_label", "water_label_ocean", "water_label_lakes" -> "#6f8fce" to "#0d1b2a"
-    "roads_shields" -> "#c8ccd4" to "#101216"
-    "roads_labels_major", "roads_labels_minor", "address_label" -> "#b8bdc6" to "#101216"
-    else -> "#c9ced6" to "#101216"
 }

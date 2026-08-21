@@ -10,9 +10,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GoogleTrafficSource
+import com.vayunmathur.maps.ui.theme.MapTokens
+import com.vayunmathur.maps.ui.theme.mapTokens
+import com.vayunmathur.maps.ui.theme.toStyleHex
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.OfflineRouter
 import com.vayunmathur.maps.util.RouteService
@@ -65,8 +69,12 @@ fun MyMapLayers(
     safetyEnabled: Boolean = false,
     transitEnabled: Boolean = false,
     poiFilterTypes: Set<Int>? = null,
+    // Which basemap palette is in play. Not derivable from [styleJson]: the recolour has
+    // already been baked into it by the time it arrives here.
+    darkBasemap: Boolean = false,
 ) {
     val context = LocalContext.current
+    val tokens = remember(darkBasemap) { mapTokens(darkBasemap) }
 
     LaunchedEffect(Unit) {
         // OfflineRouter.initialize does asset-listing I/O — push to IO. The
@@ -140,7 +148,7 @@ fun MyMapLayers(
         // stops). Harmless no-op while the layer is absent (until v5 is
         // regenerated with it).
         if (transitEnabled) {
-            TransitLinesLayer(adminSource)
+            TransitLinesLayer(adminSource, tokens)
         }
 
         // Ambient POI overlay (P29): rendered NATIVELY from the baked `ma_pois`
@@ -195,8 +203,11 @@ fun MyMapLayers(
             org.maplibre.compose.layers.CircleLayer(
                 "user-location-dot",
                 src,
-                color = const(Color(0xFF0E35F1)),
+                color = const(MaterialTheme.colorScheme.primary),
                 radius = const(8.dp),
+                // The casing ring stays white on purpose. It is what keeps the puck
+                // findable when the wallpaper accent happens to land near the basemap's
+                // own colours, or over satellite imagery, which has no palette at all.
                 strokeColor = const(Color.White),
                 strokeWidth = const(2.dp)
             )
@@ -208,7 +219,7 @@ fun MyMapLayers(
                 iconRotate = feature["bearing"].cast(),
                 iconRotationAlignment = const(org.maplibre.compose.expressions.value.IconRotationAlignment.Map),
                 iconSize = const(0.6f),
-                iconColor = const(Color(0xFF0E35F1))
+                iconColor = const(MaterialTheme.colorScheme.primary)
             )
         }
 
@@ -235,7 +246,7 @@ fun MyMapLayers(
                         ) {
                             if (route is RouteService.Route) {
                                 val features: List<Feature1> = buildRouteFeatures(
-                                    route, navProgress
+                                    route, navProgress, tokens
                                 )
                                 routeSource.setData(
                                     GeoJsonData.Features(FeatureCollection(features))
@@ -268,16 +279,16 @@ fun MyMapLayers(
  */
 @Composable
 @MaplibreComposable
-private fun TransitLinesLayer(source: VectorSource) {
+private fun TransitLinesLayer(source: VectorSource, tokens: MapTokens) {
     // Fallback palette keyed on `kind` when the feature has no `colour`.
     val byKind = switch(
         feature["kind"].cast<StringValue>(),
-        case("subway", const(Color(0xFF0055A4))),      // metro blue
-        case("light_rail", const(Color(0xFF00843D))),  // green
-        case("tram", const(Color(0xFFE4002B))),        // red
-        case("monorail", const(Color(0xFF6A1B9A))),    // purple
-        case("train", const(Color(0xFF455A64))),       // slate
-        fallback = const(Color(0xFF616161)),           // rail / unknown grey
+        case("subway", const(tokens.transitMode.subway)),
+        case("light_rail", const(tokens.transitMode.lightRail)),
+        case("tram", const(tokens.transitMode.tram)),
+        case("monorail", const(tokens.transitMode.monorail)),
+        case("train", const(tokens.transitMode.train)),
+        fallback = const(tokens.transitMode.rail),
     )
     // Prefer the baked `colour` attribute; coalesce falls back to [byKind] when
     // it's missing/unparseable.
@@ -323,37 +334,35 @@ private fun AdminHighlight(
     value: String,
 ) {
     val match = feature[key].cast<StringValue>() eq const(value)
+    val highlight = MaterialTheme.colorScheme.secondary
     FillLayer(
         "admin-highlight-fill",
         source,
         sourceLayer = sourceLayer,
         filter = match,
-        color = const(Color.Red.copy(alpha = 0.12f)),
+        color = const(highlight.copy(alpha = 0.12f)),
     )
     LineLayer(
         "admin-highlight-outline",
         source,
         sourceLayer = sourceLayer,
         filter = match,
-        color = const(Color.Red),
+        color = const(highlight),
         width = const(3.dp),
     )
 }
-
-/** Fallback when a transit line reports no colour of its own. */
-private const val TRANSIT_FALLBACK = "#FF0000"
 
 /**
  * Compute the per-step `route-color` for the static (non-navigating) case.
  * Driving uses traffic-aware red/amber/green, transit uses the line's own colour,
  * walk/bike fall through to a single blue.
  */
-private fun staticColorFor(step: RouteService.Step): String {
+private fun staticColorFor(step: RouteService.Step, tokens: MapTokens): String {
     return when (step.travelMode) {
         RouteService.TravelMode.DRIVE -> when {
-            step.speedRatio < 0.5 -> "#F44336" // Red
-            step.speedRatio < 0.9 -> "#FFC107" // Amber/Yellow
-            else -> "#4CAF50"                  // Green
+            step.speedRatio < 0.5 -> tokens.traffic.jam.toStyleHex()
+            step.speedRatio < 0.9 -> tokens.traffic.slow.toStyleHex()
+            else -> tokens.traffic.free.toStyleHex()
         }
         // The colour the pack (or MOTIS) reported for this route, which is what
         // the step-list badge already shows. This used to re-derive the colour
@@ -361,13 +370,11 @@ private fun staticColorFor(step: RouteService.Step): String {
         // in the APK — so every downloaded pack fell through to the fallback and
         // the whole map drew red while the badges were correct.
         RouteService.TravelMode.TRANSIT ->
-            step.transitDetails?.transitLine?.color?.ifBlank { null } ?: TRANSIT_FALLBACK
-        else -> "#1710F1"
+            step.transitDetails?.transitLine?.color?.ifBlank { null }
+                ?: tokens.routeTransitFallback.toStyleHex()
+        else -> tokens.routeInert.toStyleHex()
     }
 }
-
-/** Color shown for the portion of the route the user has already traveled. */
-private const val TRAVELED_GRAY = "#9E9E9E"
 
 /**
  * Build the GeoJSON `Feature` list for the route polyline.
@@ -391,12 +398,14 @@ private const val TRAVELED_GRAY = "#9E9E9E"
 private fun buildRouteFeatures(
     route: RouteService.Route,
     navProgress: com.vayunmathur.maps.util.NavigationProgress?,
+    tokens: MapTokens,
 ): List<Feature1> {
+    val traveledGray = tokens.traffic.traveled.toStyleHex()
     if (navProgress == null) {
         return route.step.filter { it.polyline.size >= 2 }.map { step ->
             Feature1(
                 LineString(step.polyline),
-                JsonObject(mapOf("route-color" to JsonPrimitive(staticColorFor(step))))
+                JsonObject(mapOf("route-color" to JsonPrimitive(staticColorFor(step, tokens))))
             )
         }
     }
@@ -419,14 +428,14 @@ private fun buildRouteFeatures(
         }
         val first = cursor
         val last = (first + stepLen - 1).coerceAtMost(route.polyline.size - 1)
-        val color = staticColorFor(step)
+        val color = staticColorFor(step, tokens)
 
         when {
             stepIdx < currentStepIdx -> {
                 // Entirely behind: gray.
                 out += Feature1(
                     LineString(step.polyline),
-                    JsonObject(mapOf("route-color" to JsonPrimitive(TRAVELED_GRAY)))
+                    JsonObject(mapOf("route-color" to JsonPrimitive(traveledGray)))
                 )
             }
             stepIdx > currentStepIdx -> {
@@ -451,7 +460,7 @@ private fun buildRouteFeatures(
                 // Snap fell on a later step. Treat the whole step as behind.
                 out += Feature1(
                     LineString(step.polyline),
-                    JsonObject(mapOf("route-color" to JsonPrimitive(TRAVELED_GRAY)))
+                    JsonObject(mapOf("route-color" to JsonPrimitive(traveledGray)))
                 )
             }
             else -> {
@@ -466,7 +475,7 @@ private fun buildRouteFeatures(
                 if (behindVertices.size >= 2) {
                     out += Feature1(
                         LineString(behindVertices),
-                        JsonObject(mapOf("route-color" to JsonPrimitive(TRAVELED_GRAY)))
+                        JsonObject(mapOf("route-color" to JsonPrimitive(traveledGray)))
                     )
                 }
                 // Ahead portion: snapped position, then remaining vertices.

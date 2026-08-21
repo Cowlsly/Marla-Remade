@@ -19,6 +19,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.verticalShape
 import com.vayunmathur.library.ui.IconCall
 import com.vayunmathur.library.ui.IconDirections
 import com.vayunmathur.library.ui.IconDirectionsWalk
@@ -377,12 +378,6 @@ private fun OsmHours(openingHours: OpeningHours) {
             }
         }
     }
-}
-
-fun verticalShape(index: Int, count: Int): RoundedCornerShape {
-    val top = if (index == 0) 12.dp else 0.dp
-    val bottom = if (index == count - 1) 12.dp else 0.dp
-    return RoundedCornerShape(top, top, bottom, bottom)
 }
 
 @Composable

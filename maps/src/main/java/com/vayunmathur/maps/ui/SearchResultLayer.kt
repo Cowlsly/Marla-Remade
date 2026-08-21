@@ -10,6 +10,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.string
@@ -69,7 +70,7 @@ fun SearchResultLayer(results: List<SearchResult>) {
         CircleLayer(
             SEARCH_RESULT_DOT_LAYER_ID,
             src,
-            color = const(Color(0xFFEA4335)),
+            color = const(MaterialTheme.colorScheme.primary),
             radius = interpolate(
                 linear(), zoom(),
                 11 to const(5.dp),

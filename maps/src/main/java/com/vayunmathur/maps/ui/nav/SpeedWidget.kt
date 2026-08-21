@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.data.PostedLimit
+import com.vayunmathur.maps.ui.theme.SpeedSign
 import com.vayunmathur.maps.util.isImperialUnits
 import kotlin.math.roundToInt
 
@@ -58,7 +59,7 @@ fun SpeedWidget(
             Modifier
                 .shadow(4.dp, CircleShape)
                 .background(
-                    if (over) Color(0xFFD32F2F) else MaterialTheme.colorScheme.surface,
+                    if (over) SpeedSign.ring else MaterialTheme.colorScheme.surface,
                     CircleShape,
                 )
                 .size(64.dp),
@@ -79,13 +80,15 @@ fun SpeedWidget(
             }
         }
 
-        // Posted-limit sign (only when we have a limit).
+        // Posted-limit sign (only when we have a limit). White disc, red ring, near-black
+        // numerals in BOTH themes: this is a reproduction of a legal road sign, and there is
+        // no dark-mode variant of one. The speed pill beside it does follow the theme.
         if (limitValue != null) {
             Box(
                 Modifier
                     .shadow(4.dp, CircleShape)
-                    .background(Color.White, CircleShape)
-                    .border(4.dp, Color(0xFFD32F2F), CircleShape)
+                    .background(SpeedSign.disc, CircleShape)
+                    .border(4.dp, SpeedSign.ring, CircleShape)
                     .size(56.dp),
                 contentAlignment = Alignment.Center,
             ) {
@@ -93,7 +96,7 @@ fun SpeedWidget(
                     limitValue.toString(),
                     fontSize = 20.sp,
                     fontWeight = FontWeight.Bold,
-                    color = Color(0xFF111111),
+                    color = SpeedSign.ink,
                 )
             }
         }
