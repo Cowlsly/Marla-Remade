@@ -20,6 +20,13 @@ sealed interface SpecificFeature {
     data class Admin0Label(@SerialName("iso3166_1") val iso: String, val wikipedia: String, val name: String) : SpecificFeature
     @Serializable
     data class Admin1Label(@SerialName("iso3166_2") val iso: String, val wikipedia: String, val name: String) : SpecificFeature
+    /**
+     * A city / town. Unlike the country and region labels there is no ISO code to
+     * key on — the baked `admin_city` layer carries only `name` / `name_en` — so
+     * the border highlight matches on the name instead.
+     */
+    @Serializable
+    data class Admin2Label(val wikipedia: String, val name: String) : SpecificFeature
     @Serializable
     data class Restaurant(override val name: String, val phone: String?, val website: String?, val menu: String?, val openingHours: OpeningHours?,
                           override val position: Position): RoutableFeature
@@ -39,7 +46,7 @@ fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
  *
  * Amenities are now Google-only (rendered on the custom overlay layer and tapped
  * there — see GooglePoiLayer), so this no longer reads the amenities DB: it only
- * handles the country/region admin labels (Wikidata-backed). Everything else
+ * handles the country/region/city admin labels (Wikidata-backed). Everything else
  * returns null, since native POIs are suppressed in the style.
  */
 suspend fun parse(feature: Feature1): SpecificFeature? {
@@ -63,6 +70,15 @@ suspend fun parse(feature: Feature1): SpecificFeature? {
             val wikipediaUrl = wiki.getWikipedia() ?: return null
             val name = properties.string("name:en") ?: properties.string("name") ?: return null
             SpecificFeature.Admin1Label(iso, wikipediaUrl, name)
+        }
+        "locality" -> {
+            // No ISO lookup: a city has no ISO 3166 code, so the Wikidata round
+            // trip is only for the article URL.
+            val wikidataId = properties.string("wikidata") ?: return null
+            val wiki = try { Wikidata.get(wikidataId) } catch (_: Exception) { return null }
+            val wikipediaUrl = wiki.getWikipedia() ?: return null
+            val name = properties.string("name:en") ?: properties.string("name") ?: return null
+            SpecificFeature.Admin2Label(wikipediaUrl, name)
         }
         else -> null
     }

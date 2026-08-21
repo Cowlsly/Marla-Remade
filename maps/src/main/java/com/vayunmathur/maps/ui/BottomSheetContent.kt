@@ -19,6 +19,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.PrimaryTabRow
 import com.vayunmathur.library.ui.Tab
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -60,18 +61,12 @@ fun BottomSheetContent(
     navState: NavigationSessionManager.NavState = NavigationSessionManager.NavState.Idle,
 ) {
     when (selectedFeature) {
-        is SpecificFeature.Admin0Label -> {
-            Column {
-                Text(selectedFeature.name, style = MaterialTheme.typography.titleLarge)
-                Text(selectedFeature.wikipedia, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
-        is SpecificFeature.Admin1Label -> {
-            Column {
-                Text(selectedFeature.name, style = MaterialTheme.typography.titleLarge)
-                Text(selectedFeature.wikipedia, style = MaterialTheme.typography.bodyMedium)
-            }
-        }
+        is SpecificFeature.Admin0Label ->
+            AdminLabelHeader(selectedFeature.name, selectedFeature.wikipedia)
+        is SpecificFeature.Admin1Label ->
+            AdminLabelHeader(selectedFeature.name, selectedFeature.wikipedia)
+        is SpecificFeature.Admin2Label ->
+            AdminLabelHeader(selectedFeature.name, selectedFeature.wikipedia)
         is SpecificFeature.Restaurant -> {
             Column {
                 PlaceSheet(viewModel, savedPlacesViewModel, inactiveNavigation, selectedFeature) {
@@ -119,6 +114,28 @@ fun BottomSheetContent(
             }
         }
         else -> Unit
+    }
+}
+
+/**
+ * Header for a tapped country / state / city label: the name, with a button to its
+ * Wikipedia article pinned to the trailing edge.
+ *
+ * The article URL is deliberately not rendered. It used to be the subtitle, where
+ * it read as noise and — being plain text — could not actually be opened.
+ */
+@Composable
+private fun AdminLabelHeader(name: String, wikipedia: String) {
+    val context = LocalContext.current
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+        Text(
+            name,
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.weight(1f),
+        )
+        TextButton(onClick = { goto(context, wikipedia) }) {
+            Text(stringResource(R.string.wikipedia))
+        }
     }
 }
 

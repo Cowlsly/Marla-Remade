@@ -221,6 +221,10 @@ fun MyMapLayers(
                     // Region/state highlight: filter admin_region by iso_3166_2
                     // (the key CountryMap.getAdmin1 matched on the FGB).
                     AdminHighlight(adminSource, "admin_region", "iso_3166_2", selectedFeature.iso)
+                is SpecificFeature.Admin2Label ->
+                    // City highlight: admin_city carries no ISO code, so match the
+                    // English name — the same value parse() read off the label.
+                    AdminHighlight(adminSource, "admin_city", "name_en", selectedFeature.name)
                 is SpecificFeature.Route -> {
                     if (route != null) {
                         LaunchedEffect(
