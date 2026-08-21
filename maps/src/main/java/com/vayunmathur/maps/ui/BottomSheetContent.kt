@@ -12,6 +12,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.ListItem
@@ -19,6 +20,7 @@ import com.vayunmathur.library.ui.LoadingState
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.PrimaryTabRow
 import com.vayunmathur.library.ui.Tab
+import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.verticalShape
@@ -169,19 +171,32 @@ fun RouteSheet(
     modifier: Modifier = Modifier,
 ) {
     Column(modifier) {
-        PrimaryTabRow(route.entries.indexOfFirst { it.key == selectedRouteType }) {
-            route.entries.forEach {
-                Tab(
-                    selectedRouteType == it.key,
-                    { setSelectedRouteType(it.key) }) {
-                    val label = when(it.key) {
-                        RouteService.TravelMode.WALK -> stringResource(R.string.travel_mode_walk)
-                        RouteService.TravelMode.BICYCLE -> stringResource(R.string.travel_mode_bicycle)
-                        RouteService.TravelMode.DRIVE -> stringResource(R.string.travel_mode_drive)
-                        RouteService.TravelMode.TRANSIT -> stringResource(R.string.travel_mode_transit)
-                    }
-                    Text(label)
+        // A connected ButtonGroup rather than a tab row: these are four short choices about one
+        // thing, which reads as a single segmented control. A tab row implies four pages, and it
+        // sat above content that is the same shape for every mode.
+        //
+        // Labels are resolved before the group because ButtonGroupScope's builder is a plain
+        // lambda, not a composable one — `stringResource` cannot be called inside it.
+        val modeLabels = route.keys.associateWith { mode ->
+            stringResource(
+                when (mode) {
+                    RouteService.TravelMode.WALK -> R.string.travel_mode_walk
+                    RouteService.TravelMode.BICYCLE -> R.string.travel_mode_bicycle
+                    RouteService.TravelMode.DRIVE -> R.string.travel_mode_drive
+                    RouteService.TravelMode.TRANSIT -> R.string.travel_mode_transit
                 }
+            )
+        }
+        ButtonGroup(
+            modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.sm),
+        ) {
+            route.keys.forEach { mode ->
+                toggleableItem(
+                    checked = selectedRouteType == mode,
+                    label = modeLabels.getValue(mode),
+                    onCheckedChange = { setSelectedRouteType(mode) },
+                    weight = 1f,
+                )
             }
         }
         val routeForMode = route[selectedRouteType]

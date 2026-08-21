@@ -109,6 +109,7 @@ typealias TabPosition = androidx.compose.material3.TabPosition
 typealias ExposedDropdownMenuBoxScope = androidx.compose.material3.ExposedDropdownMenuBoxScope
 typealias SingleChoiceSegmentedButtonRowScope = androidx.compose.material3.SingleChoiceSegmentedButtonRowScope
 typealias FloatingActionButtonMenuScope = androidx.compose.material3.FloatingActionButtonMenuScope
+typealias ButtonGroupScope = androidx.compose.material3.ButtonGroupScope
 typealias ToggleFloatingActionButtonScope = androidx.compose.material3.ToggleFloatingActionButtonScope
 
 // --- Composition locals (re-exported as vals; cannot be typealiased) ---

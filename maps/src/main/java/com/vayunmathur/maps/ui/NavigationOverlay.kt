@@ -42,6 +42,7 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.SmallFloatingActionButton
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.R
+import com.vayunmathur.library.ui.ConfirmDialog
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.maps.data.PostedLimit
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
@@ -54,6 +55,7 @@ import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.RouteService
 import com.vayunmathur.maps.util.formatDistance
 import com.vayunmathur.maps.util.formatEta
+import com.vayunmathur.library.ui.R as UiR
 
 /**
  * Full-screen overlay drawn on top of [MaplibreMap] while navigation is
@@ -83,6 +85,21 @@ fun NavigationOverlay(
     if (navState is NavigationSessionManager.NavState.Idle) return
 
     var showSteps by remember { mutableStateOf(false) }
+    // Ending a trip discards the route and stops guidance, and the button sat one tap away from
+    // a driver's thumb with no confirmation at all.
+    var confirmEndTrip by remember { mutableStateOf(false) }
+
+    if (confirmEndTrip) {
+        ConfirmDialog(
+            title = stringResource(R.string.nav_end_confirm_title),
+            message = stringResource(R.string.nav_end_confirm_message),
+            confirmLabel = stringResource(R.string.nav_action_end),
+            dismissLabel = stringResource(UiR.string.cancel),
+            destructive = true,
+            onConfirm = onEndTrip,
+            onDismiss = { confirmEndTrip = false },
+        )
+    }
 
     Box(modifier.fillMaxSize()) {
         // ---- Top maneuver banner / status ----
@@ -181,7 +198,7 @@ fun NavigationOverlay(
             is NavigationSessionManager.NavState.Navigating -> {
                 EtaStrip(
                     progress = navState.progress,
-                    onEndTrip = onEndTrip,
+                    onEndTrip = { confirmEndTrip = true },
                     onToggleSteps = { showSteps = !showSteps },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
@@ -224,12 +241,12 @@ private fun StatusCard(
 ) {
     Card(
         modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.largeIncreased,
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(text, fontWeight = FontWeight.Medium)
+        Column(Modifier.padding(Spacing.lg)) {
+            Text(text, style = MaterialTheme.typography.titleMediumEmphasized)
             if (showProgress) {
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.sm))
                 LinearProgressIndicator(Modifier.fillMaxWidth())
             }
         }
@@ -249,22 +266,25 @@ private fun EtaStrip(
 
     Card(
         modifier = modifier,
-        shape = RoundedCornerShape(topStart = 16.dp, topEnd = 16.dp),
+        shape = MaterialTheme.shapes.extraLargeIncreased.copy(
+            bottomStart = androidx.compose.foundation.shape.CornerSize(0.dp),
+            bottomEnd = androidx.compose.foundation.shape.CornerSize(0.dp),
+        ),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface,
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow,
         ),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 16.dp, vertical = 12.dp),
+                .padding(horizontal = Spacing.lg, vertical = Spacing.md),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Column(Modifier.weight(1f)) {
-                Text(etaText, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(etaText, style = MaterialTheme.typography.titleLargeEmphasized)
                 Text(
                     stringResource(R.string.min, remainingMinutes, remainingDistance),
-                    fontSize = 14.sp,
+                    style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }

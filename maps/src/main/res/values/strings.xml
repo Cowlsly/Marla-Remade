@@ -260,6 +260,10 @@
     <string name="nav_status_failed">Navigation stopped</string>
     <!-- Button: End navigation. Verb. -->
     <string name="nav_action_end">End</string>
+    <!-- NavigationOverlay: title of the confirmation shown before ending a trip -->
+    <string name="nav_end_confirm_title">End this trip?</string>
+    <!-- NavigationOverlay: body of the end-trip confirmation -->
+    <string name="nav_end_confirm_message">Turn-by-turn guidance will stop.</string>
     <!-- Button: Recenter map on user location. Verb. -->
     <string name="nav_action_recenter">Recenter</string>
     <!-- Header for the full turn-by-turn step list sheet. -->

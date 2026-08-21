@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.ui.iconContent
@@ -53,39 +54,40 @@ fun ManeuverBanner(
     Card(
         modifier = modifier
             .fillMaxWidth()
-            .shadow(8.dp, RoundedCornerShape(16.dp)),
-        shape = RoundedCornerShape(16.dp),
+            .shadow(8.dp, MaterialTheme.shapes.extraLarge),
+        shape = MaterialTheme.shapes.extraLarge,
         colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.primaryContainer,
             contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
         ),
     ) {
-        Column(Modifier.padding(16.dp)) {
+        Column(Modifier.padding(Spacing.lg)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (primaryIcon != null) {
                     primaryIcon(Modifier.size(56.dp), MaterialTheme.colorScheme.onPrimaryContainer)
-                    Spacer(Modifier.width(16.dp))
+                    Spacer(Modifier.width(Spacing.lg))
                 }
                 Column(Modifier.weight(1f)) {
-                    Text(distanceText, fontSize = 28.sp, fontWeight = FontWeight.Bold)
+                    // The distance to the next turn is the one thing a driver reads at a
+                    // glance, so it gets the emphasized headline role rather than a bold body.
+                    Text(distanceText, style = MaterialTheme.typography.headlineMediumEmphasized)
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         if (shield != null) {
                             RouteShield(shield)
-                            Spacer(Modifier.width(8.dp))
+                            Spacer(Modifier.width(Spacing.sm))
                         }
                         Text(
                             primaryInstruction,
-                            fontSize = 16.sp,
-                            fontWeight = FontWeight.Medium,
+                            style = MaterialTheme.typography.titleMedium,
                             modifier = Modifier.weight(1f, fill = false),
                         )
                     }
                     val secondary = steps.getOrNull(progress.currentStepIndex + 2)
                     if (nextStep != null && secondary != null) {
-                        Spacer(Modifier.height(4.dp))
+                        Spacer(Modifier.height(Spacing.xs))
                         Text(
                             stringResource(R.string.then, secondary.navInstruction.instructions),
-                            fontSize = 12.sp,
+                            style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.7f),
                         )
                     }

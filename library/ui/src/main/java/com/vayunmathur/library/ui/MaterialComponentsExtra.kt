@@ -288,3 +288,36 @@ fun NavigationSuiteScaffold(
 ) = androidx.compose.material3.adaptive.navigationsuite.NavigationSuiteScaffold(
     navigationSuiteItems = navigationSuiteItems, modifier = modifier, layoutType = layoutType, content = content,
 )
+
+// --- Expressive button group ---
+/**
+ * A connected row of buttons that behave as one control.
+ *
+ * The Expressive replacement for a tab row when the choices are actions or short icon-led
+ * options: the group reads as a single object, and pressing a member animates its neighbours
+ * aside rather than sliding an indicator. Use [ButtonGroupScope.toggleableItem] for a
+ * single-select group and [ButtonGroupScope.clickableItem] for a row of actions.
+ *
+ * [overflowIndicator] is what shows when the items do not fit; it defaults to a "more" button
+ * that opens them as a menu. Defaulted rather than required because every caller wants the same
+ * thing, but not omitted — a group with no indicator silently drops whatever overflows.
+ */
+@Composable
+fun ButtonGroup(
+    modifier: Modifier = Modifier,
+    horizontalArrangement: androidx.compose.foundation.layout.Arrangement.Horizontal =
+        androidx.compose.foundation.layout.Arrangement.spacedBy(
+            androidx.compose.material3.ButtonGroupDefaults.ConnectedSpaceBetween
+        ),
+    overflowIndicator: @Composable (androidx.compose.material3.ButtonGroupMenuState) -> Unit = { state ->
+        FilledTonalIconButton(onClick = { if (state.isShowing) state.dismiss() else state.show() }) {
+            IconMoreVert()
+        }
+    },
+    content: ButtonGroupScope.() -> Unit,
+) = androidx.compose.material3.ButtonGroup(
+    overflowIndicator = overflowIndicator,
+    modifier = modifier,
+    horizontalArrangement = horizontalArrangement,
+    content = content,
+)

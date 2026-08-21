@@ -11,7 +11,9 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.FilterChipDefaults
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.rememberHaptics
 import com.vayunmathur.maps.R
 import com.vayunmathur.maps.util.PoiCategories
 
@@ -49,9 +51,10 @@ fun CategoryChips(
     modifier: Modifier = Modifier,
     selected: MapCategory? = null,
 ) {
+    val haptics = rememberHaptics()
     Row(
         modifier = modifier.horizontalScroll(rememberScrollState()),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        horizontalArrangement = Arrangement.spacedBy(Spacing.sm),
     ) {
         // Material's unselected filter chip has a *transparent* container. On the
         // browse screen these float directly over the map, where that leaves the
@@ -63,7 +66,12 @@ fun CategoryChips(
         MAP_CATEGORIES.forEach { category ->
             FilterChip(
                 selected = category == selected,
-                onClick = { onCategory(category) },
+                onClick = {
+                    // A chip tap changes what is drawn on the map, not what page you are on, so
+                    // the confirmation is the only feedback that the tap landed.
+                    haptics.confirm()
+                    onCategory(category)
+                },
                 label = { Text(stringResource(category.labelRes)) },
                 colors = colors,
             )
