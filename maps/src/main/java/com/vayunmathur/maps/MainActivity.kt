@@ -87,8 +87,6 @@ class MainActivity : ComponentActivity() {
                     Triple("https://data.vayunmathur.com/road_names.bin", "road_names.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/nodes.bin", "nodes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/edges.bin", "edges.bin", getString(R.string.downloading_road_data)),
-                    Triple("https://data.vayunmathur.com/transit_voyages.bin", "transit_voyages.bin", getString(R.string.downloading_road_data)),
-                    Triple("https://data.vayunmathur.com/transit_attributes.bin", "transit_attributes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/lanes.bin", "lanes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/poi_index.bin", "poi_index.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/poi_names.bin", "poi_names.bin", getString(R.string.downloading_poi_data)),
