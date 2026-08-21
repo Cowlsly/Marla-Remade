@@ -354,7 +354,8 @@ object OfflineRouter {
 
     /**
      * Plan a route for any [mode]. TRANSIT goes to the on-device RAPTOR planner
-     * (falling back to the online MOTIS planner); every other mode goes to the
+     * and nowhere else — there is no online routing fallback, so a journey the
+     * pack cannot plan yields no transit route. Every other mode goes to the
      * road graph via [getRouteMulti].
      *
      * This is the **only** correct entry point for a caller whose mode is not a
@@ -376,11 +377,6 @@ object OfflineRouter {
         val start = positions.first()
         val end = positions.last()
         getTransitRouteOffline(context, start, end)
-                ?: if (ConnectivityMonitor.isOnline(context)) {
-                    TransitousDataSource.planRoute(start, end)
-                } else {
-                    null
-                }
     }
 
     /**
