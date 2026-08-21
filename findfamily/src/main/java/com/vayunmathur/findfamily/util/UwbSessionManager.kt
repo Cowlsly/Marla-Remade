@@ -13,6 +13,9 @@ import android.os.Build
 import android.util.Log
 import androidx.annotation.RequiresApi
 import com.vayunmathur.findfamily.data.FindFamilyRepository
+import com.vayunmathur.findfamily.data.UserKind
+import com.vayunmathur.findfamily.tracker.TrackerStore
+import com.vayunmathur.findfamily.tracker.TrackerUwbGatt
 import com.vayunmathur.findfamily.uwb.RangingSample
 import com.vayunmathur.findfamily.uwb.UwbAccessoryProtocol
 import com.vayunmathur.findfamily.uwb.UwbBytes
@@ -21,10 +24,12 @@ import com.vayunmathur.findfamily.uwb.UwbEnvelope
 import com.vayunmathur.findfamily.uwb.UwbEnvelopeKind
 import com.vayunmathur.findfamily.uwb.UwbHandshake
 import com.vayunmathur.findfamily.uwb.UwbInbox
+import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -104,6 +109,13 @@ object UwbSessionManager {
     private var currentSessionId: String? = null
 
     /**
+     * True while the current session is a find against a custom tracker. Trackers aren't
+     * on the WebSocket, so the envelope handshake (REQUEST/ACK/CANCEL) is skipped entirely
+     * for them; params go over GATT instead (see [TrackerUwbGatt]).
+     */
+    private var currentPeerIsTracker: Boolean = false
+
+    /**
      * Wire up the manager. No-op on devices below API 36. Safe to call
      * multiple times — only the first call has effect.
      */
@@ -165,6 +177,10 @@ object UwbSessionManager {
             if (peerUser == null) {
                 _state.value = UwbSessionState.Failed("Unknown peer")
                 stopLocal()
+                return@launch
+            }
+            if (peerUser.kind == UserKind.TRACKER) {
+                beginTrackerFind(peerUserId)
                 return@launch
             }
             if (peerUser.platform == "ios") {
@@ -298,6 +314,36 @@ object UwbSessionManager {
         }
     }
 
+    /**
+     * Tracker find: the peer is a bound UWB tracker, not a phone. There is no envelope
+     * handshake — the tracker isn't on the WebSocket at all — so we hand it the session
+     * params over BLE GATT and range straight away. The STS key and the tracker's UWB
+     * address come from the bind-time beacon secret on both ends.
+     */
+    @RequiresApi(Build.VERSION_CODES.BAKLAVA)
+    private suspend fun beginTrackerFind(trackerUserId: Long) {
+        currentPeerIsTracker = true
+        val store = TrackerStore(DataStoreUtils.getInstance(appContext))
+        val secret = store.secret(trackerUserId)
+        val bleAddress = store.bleAddress(trackerUserId)
+        if (secret == null || bleAddress == null) {
+            Log.w(TAG, "beginTrackerFind: tracker $trackerUserId has no stored secret/address")
+            _state.value = UwbSessionState.Failed("This tracker isn't bound on this device")
+            stopLocal()
+            return
+        }
+        val ctrl = UwbController(appContext)
+        controller = ctrl
+        _state.value = UwbSessionState.WaitingForPeer
+        val stream = TrackerUwbGatt.startRanging(appContext, ctrl, bleAddress, secret)
+        if (stream == null) {
+            _state.value = UwbSessionState.Failed("Could not reach tracker")
+            stopLocal()
+            return
+        }
+        collectRangingStream(stream)
+    }
+
     // -----------------------------------------------------------------
     // Responder path (REQUEST envelope arrived — auto-accept in background)
     // -----------------------------------------------------------------
@@ -424,18 +470,25 @@ object UwbSessionManager {
         channelNumber: Int,
         preambleIndex: Int,
     ) {
+        collectRangingStream(
+            ctrl.stream(
+                role = role,
+                localAddress = localAddress,
+                peerAddress = peerAddress,
+                sessionId = sessionId,
+                sessionKey = sessionKey,
+                channelNumber = channelNumber,
+                preambleIndex = preambleIndex,
+            )
+        )
+    }
+
+    /** Drive an already-opened ranging [stream] into the UI state machine. */
+    private fun collectRangingStream(stream: Flow<RangingSample>) {
         streamJob?.cancel()
         streamJob = scope.launch {
             try {
-                ctrl.stream(
-                    role = role,
-                    localAddress = localAddress,
-                    peerAddress = peerAddress,
-                    sessionId = sessionId,
-                    sessionKey = sessionKey,
-                    channelNumber = channelNumber,
-                    preambleIndex = preambleIndex,
-                ).collect { sample ->
+                stream.collect { sample ->
                     _state.value = if (sample.peerDisconnected) {
                         UwbSessionState.PeerDisconnected
                     } else {
@@ -452,12 +505,13 @@ object UwbSessionManager {
 
     /**
      * User-initiated stop. Sends a CANCEL envelope to the peer so its UI can
-     * exit too, then tears down the local UWB scope.
+     * exit too, then tears down the local UWB scope. Trackers get no CANCEL —
+     * they have no server-side identity to route one to.
      */
     fun stop() {
         val sessionId = currentSessionId
         val peerId = _peerUserId.value
-        if (sessionId != null && peerId != null) {
+        if (!currentPeerIsTracker && sessionId != null && peerId != null) {
             scope.launch {
                 publish(
                     UwbEnvelope(
@@ -500,6 +554,7 @@ object UwbSessionManager {
         if (isSupportedSdk) controller?.stop()
         controller = null
         currentSessionId = null
+        currentPeerIsTracker = false
         _peerUserId.value = null
         _state.value = UwbSessionState.Idle
     }

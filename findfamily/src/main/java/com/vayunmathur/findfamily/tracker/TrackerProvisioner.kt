@@ -64,17 +64,30 @@ class TrackerProvisioner(private val context: Context) {
 
     /**
      * Connect to [device], discover services, and write the provisioning blob
-     * `[8B trackerUserId BE][32B secret]` to [TrackerBle.PROVISION_CHARACTERISTIC_UUID].
-     * Returns true iff the characteristic write reports success.
+     * `[8B trackerUserId BE][32B secret][8B unixSeconds BE]` to
+     * [TrackerBle.PROVISION_CHARACTERISTIC_UUID]. Returns true iff the characteristic
+     * write reports success.
+     *
+     * The trailing timestamp is the tracker's only source of wall-clock time: it has no
+     * battery-backed RTC, and epoch ids are a function of `unix_seconds / 900`, so an
+     * unsynced tracker would beacon ids outside the owner's
+     * [TrackerProtocol.recentEpochIds] search window and resolve to nothing.
      */
     @SuppressLint("MissingPermission")
     @Suppress("DEPRECATION")
-    suspend fun provision(device: BluetoothDevice, trackerUserId: Long, secret: ByteArray): Boolean =
+    suspend fun provision(
+        device: BluetoothDevice,
+        trackerUserId: Long,
+        secret: ByteArray,
+        nowMs: Long = System.currentTimeMillis(),
+    ): Boolean =
         suspendCancellableCoroutine { cont ->
             require(secret.size == TrackerProtocol.SECRET_LEN) { "secret must be ${TrackerProtocol.SECRET_LEN} bytes" }
-            val blob = ByteArray(8 + secret.size)
+            val blob = ByteArray(TrackerBle.PROVISION_BLOB_LEN)
             for (i in 0 until 8) blob[i] = (trackerUserId.toULong() shr (56 - i * 8)).toByte()
             secret.copyInto(blob, 8)
+            val unixSeconds = (nowMs / 1000L).toULong()
+            for (i in 0 until 8) blob[8 + secret.size + i] = (unixSeconds shr (56 - i * 8)).toByte()
 
             val resumed = AtomicBoolean(false)
             var gatt: BluetoothGatt? = null

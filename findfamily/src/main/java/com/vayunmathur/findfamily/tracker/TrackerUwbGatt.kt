@@ -1,5 +1,23 @@
 package com.vayunmathur.findfamily.tracker
 
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCallback
+import android.bluetooth.BluetoothGattCharacteristic
+import android.bluetooth.BluetoothManager
+import android.bluetooth.BluetoothProfile
+import android.content.Context
+import android.os.Build
+import android.util.Log
+import androidx.annotation.RequiresApi
+import com.vayunmathur.findfamily.uwb.RangingSample
+import com.vayunmathur.findfamily.uwb.UwbController
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.suspendCancellableCoroutine
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlin.coroutines.resume
+
 /**
  * Phone-native **FiRa UWB precision finding** to a bound tracker, over BLE GATT.
  *
@@ -10,11 +28,14 @@ package com.vayunmathur.findfamily.tracker
  * to the tracker over [TrackerBle.UWB_SESSION_CHARACTERISTIC_UUID] instead of the
  * WebSocket `UwbEnvelope`.
  *
- * The wire encoding below is complete and testable; [startRanging] is a documented
- * seam (like `UwbAccessoryProtocol`) because the GATT write + the firmware's FiRa
- * responder session can only be exercised against real DW3110 hardware.
+ * The phone is the **controller/initiator** and the tracker the controlee/responder.
+ * Neither the STS key nor the tracker's UWB address is transmitted — both sides derive
+ * them from the bind-time beacon secret ([TrackerUwbKeys]), so the unbonded GATT link
+ * carries nothing an attacker could use to range against someone else's tracker.
  */
 object TrackerUwbGatt {
+
+    private const val TAG = "TrackerUwbGatt"
 
     /** FiRa session params handed to the tracker for one ranging session. */
     data class SessionParams(
@@ -44,13 +65,120 @@ object TrackerUwbGatt {
     }
 
     /**
-     * Begin a UWB ranging session to a bound tracker. Requires: (a) writing
-     * [encodeSessionParams] to the tracker over GATT, and (b) the DW3110 firmware
-     * starting a matching FiRa responder session. Both need hardware, so this is a
-     * seam for the on-device implementation phase.
+     * Begin a UWB ranging session to the bound tracker at [bleAddress], whose beacon
+     * [secret] the owner holds. Opens GATT, writes [encodeSessionParams] so the tracker
+     * starts a matching FiRa responder session, and returns the ranging stream.
+     *
+     * Returns null if the tracker can't be reached or the write fails. [ctrl] is
+     * single-use — `UwbController.stop()` shuts down its executor — so pass a fresh
+     * instance per find.
      */
-    fun startRanging(): Nothing = throw NotImplementedError(
-        "Phone↔tracker FiRa ranging over BLE GATT is not wired yet. " +
-            "See TrackerUwbGatt.kt and the DW3110 firmware FiRa-responder contract."
-    )
+    @RequiresApi(Build.VERSION_CODES.BAKLAVA)
+    suspend fun startRanging(
+        context: Context,
+        ctrl: UwbController,
+        bleAddress: String,
+        secret: ByteArray,
+    ): Flow<RangingSample>? {
+        val info = ctrl.openController().getOrElse {
+            Log.e(TAG, "openController failed", it)
+            return null
+        }
+        val params = SessionParams(
+            localAddress = info.localAddress,
+            sessionId = info.sessionId,
+            channelNumber = info.channelNumber,
+            preambleIndex = info.preambleIndex,
+        )
+        if (!writeSessionParams(context, bleAddress, encodeSessionParams(params))) {
+            Log.w(TAG, "could not hand session params to tracker at $bleAddress")
+            return null
+        }
+        // Both ends derive these from the beacon secret rather than exchanging them.
+        return ctrl.stream(
+            role = UwbController.Role.Initiator,
+            localAddress = info.localAddress,
+            peerAddress = TrackerUwbKeys.uwbAddress(secret),
+            sessionId = info.sessionId,
+            sessionKey = TrackerUwbKeys.stsKey(secret, info.sessionId),
+            channelNumber = info.channelNumber,
+            preambleIndex = info.preambleIndex,
+        )
+    }
+
+    /**
+     * Connect to the tracker at [bleAddress] and write [value] to
+     * [TrackerBle.UWB_SESSION_CHARACTERISTIC_UUID]. Returns true iff the write reports
+     * success. Mirrors [TrackerProvisioner]'s GATT round-trip; failures surface as false
+     * rather than throwing.
+     */
+    @SuppressLint("MissingPermission")
+    @Suppress("DEPRECATION")
+    private suspend fun writeSessionParams(
+        context: Context,
+        bleAddress: String,
+        value: ByteArray,
+    ): Boolean = suspendCancellableCoroutine { cont ->
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val device = try {
+            manager?.adapter?.getRemoteDevice(bleAddress)
+        } catch (e: Exception) {
+            Log.w(TAG, "getRemoteDevice($bleAddress) failed", e); null
+        }
+        if (device == null) { cont.resume(false); return@suspendCancellableCoroutine }
+
+        val resumed = AtomicBoolean(false)
+        var gatt: BluetoothGatt? = null
+        fun finish(result: Boolean) {
+            if (resumed.compareAndSet(false, true)) {
+                runCatching { gatt?.disconnect() }
+                runCatching { gatt?.close() }
+                if (cont.isActive) cont.resume(result)
+            }
+        }
+
+        val callback = object : BluetoothGattCallback() {
+            override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
+                if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    runCatching { g.discoverServices() }
+                } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    finish(false)
+                }
+            }
+
+            override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
+                if (status != BluetoothGatt.GATT_SUCCESS) { finish(false); return }
+                val ch = g.getService(TrackerBle.UNPROVISIONED_SERVICE_UUID)
+                    ?.getCharacteristic(TrackerBle.UWB_SESSION_CHARACTERISTIC_UUID)
+                if (ch == null) { finish(false); return }
+                val ok = try {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        g.writeCharacteristic(
+                            ch, value, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+                        ) == BluetoothGatt.GATT_SUCCESS
+                    } else {
+                        ch.value = value
+                        g.writeCharacteristic(ch)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "writeCharacteristic failed", e); false
+                }
+                if (!ok) finish(false)
+            }
+
+            @Deprecated("compat shim for API < 33")
+            override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+                finish(status == BluetoothGatt.GATT_SUCCESS)
+            }
+        }
+
+        gatt = try {
+            device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
+        } catch (e: Exception) {
+            Log.w(TAG, "connectGatt failed", e); null
+        }
+        if (gatt == null) { finish(false); return@suspendCancellableCoroutine }
+
+        cont.invokeOnCancellation { finish(false) }
+    }
 }

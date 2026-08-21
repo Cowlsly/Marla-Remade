@@ -45,7 +45,7 @@ object TrackerBinder {
                 val secret = ByteArray(TrackerProtocol.SECRET_LEN).also { SecureRandom().nextBytes(it) }
                 val trackerId = Random.nextLong(from = 1, until = Long.MAX_VALUE)
 
-                store.save(trackerId, secret, privateBundle)
+                store.save(trackerId, secret, privateBundle, device.address)
                 repository.upsertUser(
                     User(
                         name = name,

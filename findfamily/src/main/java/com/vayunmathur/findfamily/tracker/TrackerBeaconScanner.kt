@@ -57,6 +57,11 @@ class TrackerBeaconScanner(private val context: Context) {
             .build()
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_POWER)
+            // The beacon is a BLE 5 extended advertisement — 17B of service data under a
+            // 128-bit UUID doesn't fit the 31-byte legacy limit (see TrackerBle). The
+            // default legacy-only filter would drop it entirely. setLegacy(false) reports
+            // both legacy and extended results, so pairing-mode discovery is unaffected.
+            .setLegacy(false)
             .build()
 
         try {
