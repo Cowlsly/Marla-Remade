@@ -11,6 +11,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalInspectionMode
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconMic
 import com.vayunmathur.library.ui.rememberPermissionRequest
@@ -30,8 +31,10 @@ import com.vayunmathur.library.ui.rememberPermissionRequest
 @Composable
 fun VoiceSearchButton(onResult: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
-    // Hide the mic when the device has no recognition service to bind.
-    if (!SpeechRecognizer.isRecognitionAvailable(context)) return
+    // Hide the mic when the device has no recognition service to bind. Layoutlib has none
+    // and `isRecognitionAvailable` throws there rather than returning false, so the
+    // short-circuit has to come first for previews to render.
+    if (LocalInspectionMode.current || !SpeechRecognizer.isRecognitionAvailable(context)) return
 
     val recognizer = remember { SpeechRecognizer.createSpeechRecognizer(context) }
     DisposableEffect(recognizer) {
