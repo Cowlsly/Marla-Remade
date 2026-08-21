@@ -44,7 +44,7 @@ fun GameBoardScreen(state: SolitaireUiState, mode: GameMode, actions: SolitaireA
         title = modeName,
         actions = {
             Text(timeText, style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
-            Text("{stringResource(R.string.moves)}: moveCount", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
+            Text("${stringResource(R.string.moves)}: $moveCount", style = MaterialTheme.typography.titleMedium, modifier = Modifier.padding(end = 16.dp))
         }
     ) { innerPadding ->
         Box(Modifier.fillMaxSize()) {
