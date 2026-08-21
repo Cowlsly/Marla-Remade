@@ -10,11 +10,17 @@
 //!     decode-only reader; write half is new.
 //!   * [`mvt`] — vector tile 2.1 decode/encode. Geometry stays as raw command
 //!     integers, so lines and polygons pass through without a clipper.
+//!   * [`gz`] — gzip framing over `miniz_oxide`'s raw DEFLATE, which PMTiles needs
+//!     for both its directories and its tiles.
+//!   * [`pmtiles`] — the v3 container, read and write, including Hilbert tile ids
+//!     and the root/leaf directory split.
 //!
 //! Verified against the published `v5-ca.pmtiles` during development: its header,
 //! gzipped root directory and gzipped leaf directories all decode with byte-exact
 //! payload consumption, and a real tile's layers decode to the same names,
 //! extents and feature counts tippecanoe wrote.
 
+pub mod gz;
 pub mod mvt;
+pub mod pmtiles;
 pub mod proto;
