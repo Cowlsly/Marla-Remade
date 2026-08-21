@@ -1,11 +1,35 @@
 //! Mapbox Vector Tile 2.1 codec — decode, edit, re-encode.
 //!
-//! Enough of the spec to composite tilesets. Geometry is kept as the **raw
-//! command-integer stream** rather than decoded into rings, because the tile-join
-//! step only ever has to move features between tiles, never reshape them: our own
-//! writer emits points, while the base tileset's lines and polygons must pass
-//! through untouched. Keeping them opaque means no clipper, no winding-order
-//! rules, and no way to corrupt geometry we do not understand.
+//! ## The geometry contract, and how it changed
+//!
+//! [`Feature::geometry`] is the **raw command-integer stream**, never a decoded
+//! ring. That is deliberate and it has not changed: [`crate::tiling::merge_tiles`]
+//! only ever moves features between tiles, so carrying the stream through verbatim
+//! means a re-encode cannot corrupt geometry we did not produce. That opaque path
+//! is what makes the composite lossless, and it is load-bearing for the base
+//! tileset's lines and polygons.
+//!
+//! What changed is that this module now also **builds and reads** those streams,
+//! for the layers we tile ourselves: [`encode_points`], [`encode_lines`] and
+//! [`encode_polygons`] on the way in, and [`decode_points`], [`decode_lines`] and
+//! [`decode_polygons`] on the way out. The encoders sit *beside* the passthrough
+//! rather than replacing it — a feature either came from a stream we are copying,
+//! or from vertices we are encoding, and the two never meet.
+//!
+//! ## Polygon winding order
+//!
+//! The spec states it as signed area, not as a direction: applying the surveyor's
+//! formula to a ring, an **exterior ring must come out positive and an interior
+//! ring negative**. (Equivalently: clockwise and counter-clockwise on screen,
+//! since tile `y` grows downward — which is why quoting the direction instead of
+//! the sign is such a reliable way to get it backwards.)
+//!
+//! [`encode_polygons`] therefore computes [`signed_area`] and reverses the ring
+//! when the sign is wrong, rather than trusting the caller. Input rings arrive from
+//! a clipper and a simplifier, neither of which preserves orientation, so trusting
+//! them would produce holes that render as fill and fills that render as holes.
+//!
+//! ## Property dictionaries
 //!
 //! Properties *are* decoded, since re-encoding rebuilds each layer's key/value
 //! dictionaries. A re-encode is therefore semantically identical but not
@@ -389,6 +413,249 @@ pub fn decode_points(geometry: &[u32]) -> Option<Vec<(i32, i32)>> {
     Some(out)
 }
 
+/// Twice the signed area of a ring, by the surveyor's (shoelace) formula.
+///
+/// Doubled and kept as an integer so there is no division and no rounding: only
+/// the **sign** decides winding order, and only zero decides degeneracy, so the
+/// factor of two is irrelevant and dropping it would introduce a rounding step
+/// into a decision that must be exact.
+///
+/// Per the MVT spec, a positive result means an exterior ring and a negative one
+/// an interior ring. An explicit closing vertex is optional: the sum wraps from
+/// the last vertex to the first either way, and a repeated vertex contributes
+/// nothing.
+///
+/// `i64` throughout: two `i32` spans multiply to 62 bits, and a ring long enough
+/// to overflow the accumulator would need more vertices than a tile can hold.
+pub fn signed_area(ring: &[(i32, i32)]) -> i64 {
+    let n = ring.len();
+    if n < 3 {
+        return 0;
+    }
+    let mut sum = 0i64;
+    for i in 0..n {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % n];
+        sum += x1 as i64 * y2 as i64 - x2 as i64 * y1 as i64;
+    }
+    sum
+}
+
+/// Build the geometry stream for a line layer.
+///
+/// Each part is `MoveTo(1)` then `LineTo(n-1)`, with zigzagged deltas and the
+/// cursor carried across parts, as the spec requires. Parts with fewer than two
+/// distinct vertices are skipped: a `LineTo(0)` is illegal, and a lone `MoveTo`
+/// would encode a point inside a line layer.
+pub fn encode_lines(lines: &[Vec<(i32, i32)>]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let (mut cx, mut cy) = (0i32, 0i32);
+    for line in lines {
+        if line.len() < 2 {
+            continue;
+        }
+        out.push(command(CMD_MOVE_TO, 1));
+        push_delta(&mut out, line[0], &mut cx, &mut cy);
+        out.push(command(CMD_LINE_TO, (line.len() - 1) as u32));
+        for p in &line[1..] {
+            push_delta(&mut out, *p, &mut cx, &mut cy);
+        }
+    }
+    out
+}
+
+/// One polygon: its exterior ring first, then its holes.
+pub type PolygonRings = Vec<Vec<(i32, i32)>>;
+
+/// Build the geometry stream for a polygon layer.
+///
+/// Per polygon, the exterior ring comes first and its holes follow, each as
+/// `MoveTo(1)`, `LineTo(n-1)`, `ClosePath`. Three things this function does that
+/// the caller must not have to think about:
+///
+/// * **Closure is implicit.** `ClosePath` re-draws the edge back to the ring's
+///   start, so an explicit closing vertex is stripped. Leaving it in emits a
+///   zero-length segment, and some renderers treat that as a degenerate ring.
+/// * **Orientation is derived, not trusted.** [`signed_area`] decides, and the ring
+///   is reversed when the sign is wrong. The clipper and the simplifier upstream do
+///   not preserve orientation, so the input's own winding means nothing.
+/// * **Zero-area rings are dropped.** They cannot be oriented, and a hole with no
+///   area is invisible at best.
+///
+/// A polygon whose exterior ring is dropped is dropped entirely, holes included: a
+/// hole with nothing around it renders as solid fill.
+pub fn encode_polygons(polygons: &[PolygonRings]) -> Vec<u32> {
+    let mut out = Vec::new();
+    let (mut cx, mut cy) = (0i32, 0i32);
+    for rings in polygons {
+        // Held back until the exterior is known good, so a dropped exterior takes
+        // its holes with it instead of emitting orphans.
+        let mut staged: Vec<Vec<(i32, i32)>> = Vec::with_capacity(rings.len());
+        for (i, ring) in rings.iter().enumerate() {
+            let mut open = ring.as_slice();
+            while open.len() > 1 && open.first() == open.last() {
+                open = &open[..open.len() - 1];
+            }
+            if open.len() < 3 {
+                if i == 0 {
+                    staged.clear();
+                    break;
+                }
+                continue;
+            }
+            let area = signed_area(open);
+            if area == 0 {
+                if i == 0 {
+                    staged.clear();
+                    break;
+                }
+                continue;
+            }
+            // Exterior positive, interior negative, per the spec.
+            let want_positive = i == 0;
+            let mut ring: Vec<(i32, i32)> = open.to_vec();
+            if (area > 0) != want_positive {
+                ring.reverse();
+            }
+            staged.push(ring);
+        }
+        for ring in &staged {
+            out.push(command(CMD_MOVE_TO, 1));
+            push_delta(&mut out, ring[0], &mut cx, &mut cy);
+            out.push(command(CMD_LINE_TO, (ring.len() - 1) as u32));
+            for p in &ring[1..] {
+                push_delta(&mut out, *p, &mut cx, &mut cy);
+            }
+            out.push(command(CMD_CLOSE_PATH, 1));
+            // ClosePath moves the cursor back to the ring's start, so the next
+            // ring's MoveTo delta is measured from there, not from the last vertex.
+            cx = ring[0].0;
+            cy = ring[0].1;
+        }
+    }
+    out
+}
+
+#[inline]
+fn push_delta(out: &mut Vec<u32>, (x, y): (i32, i32), cx: &mut i32, cy: &mut i32) {
+    out.push(proto::zigzag_encode((x - *cx) as i64) as u32);
+    out.push(proto::zigzag_encode((y - *cy) as i64) as u32);
+    *cx = x;
+    *cy = y;
+}
+
+/// Decode a line layer's geometry stream. `None` on anything that is not a
+/// sequence of `MoveTo(1)` + `LineTo(n)` parts.
+pub fn decode_lines(geometry: &[u32]) -> Option<Vec<Vec<(i32, i32)>>> {
+    let mut out: Vec<Vec<(i32, i32)>> = Vec::new();
+    let mut cursor = Cursor::new(geometry);
+    while let Some((cmd, count)) = cursor.next_command() {
+        match cmd {
+            CMD_MOVE_TO => {
+                if count != 1 {
+                    return None;
+                }
+                out.push(vec![cursor.next_point()?]);
+            }
+            CMD_LINE_TO => {
+                let line = out.last_mut()?;
+                if count == 0 {
+                    return None;
+                }
+                for _ in 0..count {
+                    line.push(cursor.next_point()?);
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Decode a polygon layer's geometry stream into `[polygon][ring][vertex]`, with
+/// each ring closed explicitly.
+///
+/// Rings are grouped into polygons by orientation, as the spec prescribes: a
+/// positive-area ring starts a new polygon and negative-area rings attach to the
+/// one before them. A stream that opens with a hole is rejected rather than
+/// guessed at.
+pub fn decode_polygons(geometry: &[u32]) -> Option<Vec<PolygonRings>> {
+    let mut out: Vec<PolygonRings> = Vec::new();
+    let mut current: Vec<(i32, i32)> = Vec::new();
+    let mut cursor = Cursor::new(geometry);
+    while let Some((cmd, count)) = cursor.next_command() {
+        match cmd {
+            CMD_MOVE_TO => {
+                if count != 1 || !current.is_empty() {
+                    return None;
+                }
+                current.push(cursor.next_point()?);
+            }
+            CMD_LINE_TO => {
+                if current.is_empty() || count == 0 {
+                    return None;
+                }
+                for _ in 0..count {
+                    current.push(cursor.next_point()?);
+                }
+            }
+            CMD_CLOSE_PATH => {
+                if count != 1 || current.len() < 3 {
+                    return None;
+                }
+                let ring = std::mem::take(&mut current);
+                // ClosePath returns the cursor to the ring's start.
+                cursor.set(ring[0]);
+                let positive = signed_area(&ring) > 0;
+                let mut closed = ring;
+                closed.push(closed[0]);
+                if positive {
+                    out.push(vec![closed]);
+                } else {
+                    out.last_mut()?.push(closed);
+                }
+            }
+            _ => return None,
+        }
+    }
+    // An unterminated ring means a truncated stream.
+    current.is_empty().then_some(out)
+}
+
+/// Walks a command stream, carrying the delta cursor.
+struct Cursor<'a> {
+    geometry: &'a [u32],
+    i: usize,
+    x: i32,
+    y: i32,
+}
+
+impl<'a> Cursor<'a> {
+    fn new(geometry: &'a [u32]) -> Cursor<'a> {
+        Cursor { geometry, i: 0, x: 0, y: 0 }
+    }
+
+    fn next_command(&mut self) -> Option<(u32, u32)> {
+        let v = *self.geometry.get(self.i)?;
+        self.i += 1;
+        Some(command_parts(v))
+    }
+
+    fn next_point(&mut self) -> Option<(i32, i32)> {
+        let dx = *self.geometry.get(self.i)?;
+        let dy = *self.geometry.get(self.i + 1)?;
+        self.i += 2;
+        self.x = self.x.wrapping_add(proto::zigzag_decode(dx as u64) as i32);
+        self.y = self.y.wrapping_add(proto::zigzag_decode(dy as u64) as i32);
+        Some((self.x, self.y))
+    }
+
+    fn set(&mut self, (x, y): (i32, i32)) {
+        self.x = x;
+        self.y = y;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -592,5 +859,374 @@ mod tests {
     fn a_truncated_real_tile_errors_rather_than_panicking() {
         // Range requests and partial writes both produce these.
         assert!(Tile::decode(&REAL_TILE[..REAL_TILE.len() / 2]).is_err());
+    }
+
+    // --- signed area -------------------------------------------------------
+
+    #[test]
+    fn signed_area_is_positive_for_the_specs_exterior_winding() {
+        // MVT states the rule as a sign, not a direction: exterior rings are
+        // positive under the surveyor's formula. In tile space, where y grows
+        // downward, that is clockwise on screen -- top-right, bottom-right,
+        // bottom-left, top-left. Quoting the direction instead of the sign is a
+        // reliable way to get this backwards, which is why the encoder tests below
+        // assert on the sign.
+        let clockwise_on_screen = [(10, 0), (10, 10), (0, 10), (0, 0)];
+        assert_eq!(signed_area(&clockwise_on_screen), 200);
+        let mut other = clockwise_on_screen.to_vec();
+        other.reverse();
+        assert_eq!(signed_area(&other), -200);
+    }
+
+    #[test]
+    fn signed_area_ignores_an_explicit_closing_vertex() {
+        let open = [(10, 0), (10, 10), (0, 10), (0, 0)];
+        let mut closed = open.to_vec();
+        closed.push(open[0]);
+        assert_eq!(signed_area(&open), signed_area(&closed));
+        // Twice the area of a 10x10 square.
+        assert_eq!(signed_area(&open).abs(), 200);
+    }
+
+    #[test]
+    fn signed_area_is_zero_for_anything_that_encloses_nothing() {
+        assert_eq!(signed_area(&[]), 0);
+        assert_eq!(signed_area(&[(1, 1)]), 0);
+        assert_eq!(signed_area(&[(0, 0), (5, 5)]), 0);
+        // Collinear.
+        assert_eq!(signed_area(&[(0, 0), (5, 0), (10, 0)]), 0);
+        // A degenerate out-and-back.
+        assert_eq!(signed_area(&[(0, 0), (10, 0), (0, 0)]), 0);
+    }
+
+    #[test]
+    fn signed_area_does_not_overflow_at_the_coordinate_extremes() {
+        // Two i32 spans multiply to 62 bits, so the accumulator must be i64.
+        let big = i32::MAX;
+        let a = signed_area(&[(0, 0), (big, 0), (big, big), (0, big)]);
+        assert!(a != 0 && a.abs() > i32::MAX as i64, "{a}");
+    }
+
+    // --- line encoding -----------------------------------------------------
+
+    fn line_roundtrip(lines: Vec<Vec<(i32, i32)>>) {
+        let encoded = encode_lines(&lines);
+        let decoded = decode_lines(&encoded).expect("our own output must decode");
+        assert_eq!(decoded, lines);
+    }
+
+    #[test]
+    fn a_line_round_trips() {
+        line_roundtrip(vec![vec![(0, 0), (100, 0), (100, 100)]]);
+        // Negative deltas, and a doubling-back.
+        line_roundtrip(vec![vec![(500, 500), (0, 0), (500, 500), (-50, 20)]]);
+        // Multiple parts share one cursor, which is where an off-by-one in the
+        // delta chain would show up.
+        line_roundtrip(vec![
+            vec![(0, 0), (10, 10)],
+            vec![(4000, 4000), (4090, 4000)],
+            vec![(-5, -5), (0, 0), (5, 5)],
+        ]);
+    }
+
+    #[test]
+    fn the_line_command_stream_has_the_shape_the_spec_requires() {
+        let g = encode_lines(&[vec![(3, 6), (8, 12), (20, 34)]]);
+        // MoveTo(1), one point, LineTo(2), two points.
+        assert_eq!(command_parts(g[0]), (CMD_MOVE_TO, 1));
+        assert_eq!(command_parts(g[3]), (CMD_LINE_TO, 2));
+        assert_eq!(g.len(), 1 + 2 + 1 + 4);
+        // First point is an absolute-from-origin delta.
+        assert_eq!(proto::zigzag_decode(g[1] as u64), 3);
+        assert_eq!(proto::zigzag_decode(g[2] as u64), 6);
+        // Second is relative to the first.
+        assert_eq!(proto::zigzag_decode(g[4] as u64), 5);
+        assert_eq!(proto::zigzag_decode(g[5] as u64), 6);
+    }
+
+    #[test]
+    fn a_degenerate_line_part_is_skipped_not_emitted() {
+        // A lone MoveTo would encode a point inside a line layer, and LineTo(0) is
+        // illegal outright.
+        assert!(encode_lines(&[vec![]]).is_empty());
+        assert!(encode_lines(&[vec![(1, 1)]]).is_empty());
+        // The valid parts around it still come through.
+        let g = encode_lines(&[vec![(1, 1)], vec![(0, 0), (5, 5)], vec![]]);
+        assert_eq!(decode_lines(&g).unwrap(), vec![vec![(0, 0), (5, 5)]]);
+    }
+
+    #[test]
+    fn decode_lines_rejects_streams_that_are_not_lines() {
+        // A multipoint MoveTo(3).
+        assert!(decode_lines(&encode_points(&[(1, 1), (2, 2), (3, 3)])).is_none());
+        // A LineTo with no preceding MoveTo.
+        assert!(decode_lines(&[command(CMD_LINE_TO, 1), 2, 2]).is_none());
+        // A ClosePath belongs to a polygon.
+        assert!(decode_lines(&[command(CMD_MOVE_TO, 1), 2, 2, command(CMD_CLOSE_PATH, 1)]).is_none());
+        // Truncated payload.
+        assert!(decode_lines(&[command(CMD_MOVE_TO, 1), 2]).is_none());
+        assert!(decode_lines(&[command(CMD_MOVE_TO, 1), 2, 2, command(CMD_LINE_TO, 2), 1, 1]).is_none());
+        // Empty is a valid empty geometry, not an error.
+        assert_eq!(decode_lines(&[]), Some(vec![]));
+    }
+
+    // --- polygon encoding: orientation, closure, holes ---------------------
+
+    /// The unit square as an exterior ring, positive area.
+    fn ext() -> Vec<(i32, i32)> {
+        vec![(0, 0), (0, 100), (100, 100), (100, 0), (0, 0)]
+    }
+
+    /// A smaller square inside it, given in the *same* direction as `ext` -- so the
+    /// encoder has to flip it.
+    fn hole() -> Vec<(i32, i32)> {
+        vec![(20, 20), (20, 80), (80, 80), (80, 20), (20, 20)]
+    }
+
+    #[test]
+    fn the_encoder_derives_orientation_rather_than_trusting_the_input() {
+        // Both rings arrive wound the same way. The clipper and the simplifier
+        // upstream do not preserve orientation, so the input's winding means
+        // nothing and the encoder must fix both.
+        let g = encode_polygons(&[vec![ext(), hole()]]);
+        let decoded = decode_polygons(&g).expect("our own output must decode");
+        assert_eq!(decoded.len(), 1, "one polygon: {decoded:?}");
+        assert_eq!(decoded[0].len(), 2, "exterior plus one hole");
+        assert!(signed_area(&decoded[0][0]) > 0, "exterior must be positive");
+        assert!(signed_area(&decoded[0][1]) < 0, "interior must be negative");
+
+        // And the same when the input is wound the other way round.
+        let mut e = ext();
+        e.reverse();
+        let mut h = hole();
+        h.reverse();
+        let decoded = decode_polygons(&encode_polygons(&[vec![e, h]])).unwrap();
+        assert!(signed_area(&decoded[0][0]) > 0);
+        assert!(signed_area(&decoded[0][1]) < 0);
+    }
+
+    #[test]
+    fn every_ring_is_terminated_by_close_path_and_holes_follow_their_exterior() {
+        let g = encode_polygons(&[vec![ext(), hole()]]);
+        let mut commands = Vec::new();
+        let mut i = 0;
+        while i < g.len() {
+            let (cmd, count) = command_parts(g[i]);
+            commands.push(cmd);
+            i += 1 + if cmd == CMD_CLOSE_PATH { 0 } else { count as usize * 2 };
+        }
+        assert_eq!(
+            commands,
+            vec![
+                CMD_MOVE_TO, CMD_LINE_TO, CMD_CLOSE_PATH, // exterior
+                CMD_MOVE_TO, CMD_LINE_TO, CMD_CLOSE_PATH, // its hole
+            ]
+        );
+    }
+
+    #[test]
+    fn the_explicit_closing_vertex_is_stripped_because_close_path_implies_it() {
+        // Same square, once closed and once not: the streams must be identical.
+        let mut open = ext();
+        open.pop();
+        assert_eq!(encode_polygons(&[vec![ext()]]), encode_polygons(&[vec![open]]));
+        // 4 corners: MoveTo(1) + 2 + LineTo(3) + 6 + ClosePath = 11 integers. A
+        // retained closing vertex would make it LineTo(4) and 13.
+        assert_eq!(encode_polygons(&[vec![ext()]]).len(), 11);
+        // A ring closed several times over is still stripped to its corners.
+        let mut twice = ext();
+        twice.push((0, 0));
+        assert_eq!(encode_polygons(&[vec![twice]]).len(), 11);
+    }
+
+    #[test]
+    fn a_polygon_round_trips_with_its_rings_closed() {
+        let decoded = decode_polygons(&encode_polygons(&[vec![ext(), hole()]])).unwrap();
+        for ring in &decoded[0] {
+            assert_eq!(ring.first(), ring.last(), "decode re-closes every ring");
+            assert!(ring.len() >= 4);
+        }
+        // Geometry is preserved up to orientation and rotation of the vertex list.
+        assert_eq!(signed_area(&decoded[0][0]).abs(), signed_area(&ext()).abs());
+        assert_eq!(signed_area(&decoded[0][1]).abs(), signed_area(&hole()).abs());
+    }
+
+    #[test]
+    fn several_polygons_are_grouped_by_orientation_on_the_way_back() {
+        let far = vec![
+            vec![(1000, 1000), (1000, 1100), (1100, 1100), (1100, 1000), (1000, 1000)],
+            vec![(1020, 1020), (1020, 1080), (1080, 1080), (1080, 1020), (1020, 1020)],
+        ];
+        let g = encode_polygons(&[vec![ext(), hole()], far]);
+        let decoded = decode_polygons(&g).unwrap();
+        assert_eq!(decoded.len(), 2, "two polygons: {decoded:?}");
+        assert_eq!(decoded[0].len(), 2);
+        assert_eq!(decoded[1].len(), 2);
+        for poly in &decoded {
+            assert!(signed_area(&poly[0]) > 0);
+            assert!(signed_area(&poly[1]) < 0);
+        }
+    }
+
+    #[test]
+    fn a_zero_area_or_too_short_ring_is_dropped() {
+        // Collinear, so it cannot be oriented.
+        assert!(encode_polygons(&[vec![vec![(0, 0), (5, 0), (10, 0), (0, 0)]]]).is_empty());
+        assert!(encode_polygons(&[vec![vec![(0, 0), (5, 5)]]]).is_empty());
+        assert!(encode_polygons(&[vec![vec![]]]).is_empty());
+        // A degenerate hole is dropped, the exterior kept.
+        let g = encode_polygons(&[vec![ext(), vec![(5, 5), (6, 5), (7, 5), (5, 5)]]]);
+        let decoded = decode_polygons(&g).unwrap();
+        assert_eq!(decoded[0].len(), 1, "exterior only");
+    }
+
+    #[test]
+    fn losing_the_exterior_ring_drops_its_holes_too() {
+        // A hole with nothing around it renders as solid fill in the layer's
+        // colour, which is worse than the feature being absent.
+        let g = encode_polygons(&[vec![vec![(0, 0), (5, 0), (10, 0), (0, 0)], hole()]]);
+        assert!(g.is_empty(), "{g:?}");
+        // The polygon after it is unaffected.
+        let g = encode_polygons(&[
+            vec![vec![(0, 0), (5, 0), (10, 0)], hole()],
+            vec![ext()],
+        ]);
+        assert_eq!(decode_polygons(&g).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn close_path_resets_the_cursor_to_the_rings_start() {
+        // The spec says ClosePath returns the cursor to the ring's first vertex, so
+        // the next ring's MoveTo delta is measured from there. Getting this wrong
+        // puts every ring after the first in the wrong place, which the round trip
+        // is the only thing that catches.
+        let a = vec![(0, 0), (0, 10), (10, 10), (10, 0), (0, 0)];
+        let b = vec![(500, 500), (500, 510), (510, 510), (510, 500), (500, 500)];
+        let decoded = decode_polygons(&encode_polygons(&[vec![a.clone()], vec![b.clone()]])).unwrap();
+        assert_eq!(decoded.len(), 2);
+        let corners = |ring: &[(i32, i32)]| {
+            let mut c: Vec<(i32, i32)> = ring[..ring.len() - 1].to_vec();
+            c.sort_unstable();
+            c
+        };
+        assert_eq!(corners(&decoded[0][0]), corners(&a));
+        assert_eq!(corners(&decoded[1][0]), corners(&b));
+    }
+
+    #[test]
+    fn decode_polygons_rejects_malformed_streams() {
+        // Opens with a hole: there is nothing to attach it to, and guessing would
+        // silently turn a hole into a fill.
+        let ring = [(20, 80), (80, 80), (80, 20), (20, 20)];
+        assert!(signed_area(&ring) < 0, "a hole by area, not by intent");
+        let mut g = vec![command(CMD_MOVE_TO, 1)];
+        let (mut cx, mut cy) = (0i32, 0i32);
+        push_delta(&mut g, ring[0], &mut cx, &mut cy);
+        g.push(command(CMD_LINE_TO, 3));
+        for p in &ring[1..] {
+            push_delta(&mut g, *p, &mut cx, &mut cy);
+        }
+        g.push(command(CMD_CLOSE_PATH, 1));
+        assert!(decode_polygons(&g).is_none(), "a leading hole is rejected");
+
+        // Unterminated ring (no ClosePath).
+        assert!(decode_polygons(&[command(CMD_MOVE_TO, 1), 2, 2, command(CMD_LINE_TO, 2), 1, 1, 1, 1]).is_none());
+        // ClosePath with too few vertices.
+        assert!(decode_polygons(&[command(CMD_MOVE_TO, 1), 2, 2, command(CMD_CLOSE_PATH, 1)]).is_none());
+        // A second MoveTo before the ring is closed.
+        assert!(decode_polygons(&[command(CMD_MOVE_TO, 1), 2, 2, command(CMD_MOVE_TO, 1), 2, 2]).is_none());
+        assert_eq!(decode_polygons(&[]), Some(vec![]));
+    }
+
+    #[test]
+    fn the_decoders_do_not_confuse_each_others_geometry() {
+        let points = encode_points(&[(1, 1), (2, 2)]);
+        let lines = encode_lines(&[vec![(0, 0), (10, 10)]]);
+        let polys = encode_polygons(&[vec![ext()]]);
+        assert!(decode_points(&points).is_some());
+        assert!(decode_points(&lines).is_none());
+        assert!(decode_points(&polys).is_none());
+        assert!(decode_lines(&points).is_none());
+        assert!(decode_lines(&lines).is_some());
+        assert!(decode_lines(&polys).is_none());
+        assert!(decode_polygons(&points).is_none());
+        // A line stream has no ClosePath, so it decodes as no polygons at all
+        // rather than as a bogus one.
+        assert_eq!(decode_polygons(&lines), None);
+        assert!(decode_polygons(&polys).is_some());
+    }
+
+    // --- golden byte fixture ----------------------------------------------
+
+    #[test]
+    fn a_line_and_polygon_tile_encodes_to_exactly_these_bytes() {
+        // A golden fixture, computed by hand from the wire layout in the module
+        // docs. It pins the whole encode path -- field numbers, field order, packed
+        // geometry, the property dictionaries -- so a change anywhere in it has to
+        // be deliberate rather than incidental.
+        let mut roads = Layer::new("roads");
+        roads.features.push(Feature {
+            id: None,
+            geom_type: GeomType::LineString,
+            geometry: encode_lines(&[vec![(0, 0), (2, 4)]]),
+            props: vec![("kind".to_string(), Value::String("rail".into()))],
+        });
+        let body = Tile { layers: vec![roads] }.encode();
+
+        // layer message:
+        //   1 name  "roads"                     0a 05 72 6f 61 64 73
+        //   2 feature:
+        //        2 tags   [0, 0]                12 02 00 00
+        //        3 type   2 (LineString)        18 02
+        //        4 geom   [9, 0, 0, 10, 4, 8]   22 06 09 00 00 0a 04 08
+        //   3 keys  "kind"                      1a 04 6b 69 6e 64
+        //   4 values { 1: "rail" }              22 06 0a 04 72 61 69 6c
+        //   5 extent 4096                       28 80 20
+        //  15 version 2                         78 02
+        #[rustfmt::skip]
+        let layer: Vec<u8> = vec![
+            0x0a, 0x05, b'r', b'o', b'a', b'd', b's',
+            0x12, 0x0e,
+                0x12, 0x02, 0x00, 0x00,
+                0x18, 0x02,
+                0x22, 0x06, 0x09, 0x00, 0x00, 0x0a, 0x04, 0x08,
+            0x1a, 0x04, b'k', b'i', b'n', b'd',
+            0x22, 0x06, 0x0a, 0x04, b'r', b'a', b'i', b'l',
+            0x28, 0x80, 0x20,
+            0x78, 0x02,
+        ];
+        let mut expected: Vec<u8> = vec![0x1a, layer.len() as u8];
+        expected.extend_from_slice(&layer);
+        assert_eq!(body, expected, "encoded {body:02x?}");
+
+        // And it reads back as what it claims to be.
+        let tile = Tile::decode(&body).unwrap();
+        let f = &tile.layer("roads").unwrap().features[0];
+        assert_eq!(f.geom_type, GeomType::LineString);
+        assert_eq!(decode_lines(&f.geometry).unwrap(), vec![vec![(0, 0), (2, 4)]]);
+        assert_eq!(f.get("kind"), Some(&Value::String("rail".into())));
+    }
+
+    #[test]
+    fn a_polygon_features_geometry_survives_a_tile_round_trip() {
+        // The encoders feed Feature::geometry, which the tile codec treats as
+        // opaque -- so the two halves have to agree on the stream, and this is what
+        // proves they do end to end.
+        let mut admin = Layer::new("admin_city");
+        admin.features.push(Feature {
+            id: Some(7),
+            geom_type: GeomType::Polygon,
+            geometry: encode_polygons(&[vec![ext(), hole()]]),
+            props: vec![("name".to_string(), Value::String("Oakland".into()))],
+        });
+        let tile = Tile::decode(&Tile { layers: vec![admin] }.encode()).unwrap();
+        let f = &tile.layer("admin_city").unwrap().features[0];
+        assert_eq!(f.id, Some(7));
+        assert_eq!(f.geom_type, GeomType::Polygon);
+        let rings = decode_polygons(&f.geometry).unwrap();
+        assert_eq!(rings.len(), 1);
+        assert_eq!(rings[0].len(), 2);
+        assert!(signed_area(&rings[0][0]) > 0);
+        assert!(signed_area(&rings[0][1]) < 0);
     }
 }

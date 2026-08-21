@@ -1,11 +1,13 @@
 //! Tile a point layer, and merge tilesets — the `tippecanoe` and `tile-join`
 //! replacements.
 //!
-//! Only points are *generated*: `transit_stops` is the layer we build, and a point
-//! needs no clipping, simplification or winding-order handling. Lines and polygons
-//! are only ever *carried through* by [`merge_tiles`], which never looks inside a
-//! geometry stream.
+//! Points need no clipping, simplification or winding-order handling, so this
+//! module stays as simple as a point layer allows. The geometry core that lines and
+//! polygons need lives in [`crate::geom`], [`crate::clip`] and
+//! [`crate::simplify`]; [`merge_tiles`] still never looks inside a geometry stream,
+//! which is what makes a composite lossless.
 
+use crate::geom::project;
 use crate::mvt::{self, Feature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
 use crate::pmtiles::{self, Archive, Builder};
 use crate::proto::Result;
@@ -17,20 +19,6 @@ pub struct Point {
     pub lon: f64,
     pub lat: f64,
     pub props: Vec<(String, Value)>,
-}
-
-/// Web-Mercator project a lon/lat to fractional tile coordinates at `z`.
-///
-/// Latitude is clamped to the Mercator limit: the projection diverges at the
-/// poles, and a feed with a `0,0`-style placeholder stop would otherwise produce
-/// an infinity.
-fn project(lon: f64, lat: f64, z: u8) -> (f64, f64) {
-    let n = (1u64 << z) as f64;
-    let lat = lat.clamp(-85.051_128_78, 85.051_128_78);
-    let x = (lon.clamp(-180.0, 180.0) + 180.0) / 360.0 * n;
-    let s = lat.to_radians().sin();
-    let y = (0.5 - (((1.0 + s) / (1.0 - s)).ln()) / (4.0 * std::f64::consts::PI)) * n;
-    (x, y)
 }
 
 /// Bucket points into tiles for one zoom and encode each as an MVT.
@@ -201,22 +189,6 @@ mod tests {
             lat,
             props: vec![("name".to_string(), Value::String(name.to_string()))],
         }
-    }
-
-    #[test]
-    fn projection_anchors_are_right() {
-        // z0: the whole world is one tile, and 0,0 sits at its centre.
-        let (x, y) = project(0.0, 0.0, 0);
-        assert!((x - 0.5).abs() < 1e-9, "lon 0 -> x 0.5, got {x}");
-        assert!((y - 0.5).abs() < 1e-9, "lat 0 -> y 0.5, got {y}");
-        // The antimeridian and the Mercator top corner.
-        let (x, _) = project(-180.0, 0.0, 0);
-        assert!(x.abs() < 1e-9);
-        let (_, y) = project(0.0, 85.051_128_78, 0);
-        assert!(y.abs() < 1e-6, "Mercator top -> y 0, got {y}");
-        // A pole must clamp rather than diverge.
-        let (_, y) = project(0.0, 90.0, 4);
-        assert!(y.is_finite(), "lat 90 must clamp, got {y}");
     }
 
     #[test]
