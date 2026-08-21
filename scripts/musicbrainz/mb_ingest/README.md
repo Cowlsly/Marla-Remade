@@ -151,11 +151,19 @@ numbers from a completed run, not projections. `MB` means 10⁶ bytes.
 | CSR indexes, `MEDIA`, `CREDITS`, buckets | 168.0 |
 | **total, tier B** | **2 655.0** |
 
-**2,655,030,016 bytes = 2.655 GB**, built in **6.9 minutes** with a peak RSS of
-**2.64 GB**. Byte-for-byte reproducible: two consecutive runs over the full
-catalogue produce the identical SHA256.
+**2,801,472,608 bytes = 2.801 GB**, built in 6.9 min on Windows / 10m48s under WSL2
+(the difference is reading 14.9 GB of tables over `/mnt/c` at 205 MB/s, not the
+build). **Peak `RssAnon` on Linux: 2.85 GB** (see below).
+
+SHA256 `5beccbf5ab267643b4adeefb12d373c4dc6ff4a49f847e3e7854f3e29920d170` for the
+Linux build of `5f243c765`. Byte-for-byte reproducibility was proven on two
+consecutive Windows runs of an earlier commit; it has **not** been re-proven for
+this commit, and cross-platform byte-identity is unverified.
 
 ### Where the +145 MB over projection went
+
+This compares the projection (2,510 MB) against the first measured pack
+(2,655 MB), before artist-credit terms were folded into the search indexes.
 
 | section | projected | measured | delta |
 |---|---|---|---|
@@ -174,6 +182,21 @@ distinct-recording-title fraction is 49.9%, not 40%. `TRACKS` came in 39 MB
 *under* projection, so the inline-override design paid off more than claimed.
 `CREDITS` is sized to max `artist_credit` id (5,083,674) rather than live rows
 (3,830,114), a 1.33x id gap.
+
+### Then artist-credit terms were folded in: +146 MB
+
+| section | before | after |
+|---|---|---|
+| `SEARCH_POSTINGS` | 299.0 MB | **444.5 MB** |
+| `SEARCH_TERMS` | 51.5 MB | **52.1 MB** |
+| `SEARCH_TERM_IDX` | 34.7 MB | **35.0 MB** |
+| postings | 157,118,254 | **266,307,161** |
+| **pack total** | 2,655,030,016 B | **2,801,472,608 B** |
+
+Almost all of it is the recording half: a credit attached to each of 39.88 M
+recordings is where the 109 M extra postings come from. Release groups alone
+would have cost ~20 MB. Peak memory is unaffected — the postings are spilled and
+streamed, so this costs pack size only.
 
 Row counts in the pack: 2,962,348 artists / 4,468,998 release groups /
 5,714,674 releases / 6,274,550 media / 57,404,909 tracks / 39,881,298 recordings
@@ -223,10 +246,31 @@ Tier A (add track MBIDs) would be ~3.57 GB.
 
 ## Where the memory goes
 
-Peak RSS is the binding constraint, not wall time: the ingest runs in-process
-alongside the live server on a box with 5-7 GB free. **Measured peak is 2.64 GB**,
-down from 6.14 GB on the first real run. Measured per phase, by timestamping every
-phase and sampling RSS from outside the process:
+Peak memory is the binding constraint: the ingest runs in-process alongside the
+live server on a box with 5-7 GB free, and the target is stated on **anonymous**
+memory because that is what causes OOM kills — clean file-backed pages cost query
+latency, not availability.
+
+**Measured on real Linux (WSL2), polling `/proc/<pid>/status` every 200 ms:**
+
+    max RssAnon    2.85 GB     <-- the figure the target is stated on
+    max RssFile    0.00 GB
+    max RssShmem   0.00 GB
+    VmHWM          2.85 GB
+
+The build is effectively **all anonymous** — buffered reads go through the page
+cache without entering process RSS, and no old pack is mapped during a first
+build. `max(RssAnon+RssFile+RssShmem) / VmHWM = 1.000`, so the sampling interval
+did not miss the spike. Nothing swapped.
+
+Note that Windows `WorkingSetSize` for the same build reads **2.64 GB** — *lower*
+than Linux `RssAnon`. A Windows figure is not an upper bound on Linux anonymous
+memory (different allocator: glibc retains freed memory in per-thread arenas), so
+do not substitute one for the other.
+
+Getting there took cutting 6.14 GB to 2.85 GB, and the itemisation is what made it
+possible — the peak was **accumulation**, not one allocation, because nothing was
+freed between pass 2 and the write phase:
 
 | phase | peak RSS | delta |
 |---|---|---|
@@ -299,12 +343,12 @@ Also given up, deliberately:
   "The Dark Side of the Moon"; "loitude" does not find "Solitude". Query words
   are ANDed. Measured latency on the full catalogue: 0.1-0.9 ms typical,
   19 ms worst seen.
-* **each index covers only that entity's own title or name, not related fields.**
-  `search_release_groups("radiohead ok computer")` finds tribute albums whose
-  *titles* contain "radiohead", not Radiohead's *OK Computer* — the artist is a
-  separate field. MusicBrainz's Lucene searches across fields; this does not.
-  Folding artist-credit terms into the RG and recording indexes is a build-side
-  change costing roughly +40 MB of postings.
+* **artist-credit terms ARE indexed** for release groups and recordings, so
+  "radiohead" in the albums tab finds Radiohead's albums — parity with WS/2's
+  `release-group?query=`, which matches artist names. This costs **146 MB**
+  (+109 M postings), almost all of it from attaching credits to 39.88 M
+  recordings; release groups alone would be ~20 MB. Artist search remains
+  name-only, which is what WS/2 does.
 * durations are **seconds, not milliseconds** — the UI renders m:ss, Tidal
   matching uses a ±3 s tolerance and LRCLIB takes seconds.
 * strings are `Cow<'a, str>`: owned when the pool is compressed, borrowed when
