@@ -268,8 +268,7 @@ impl ProfileTable {
         let (arr0, dep0) = sts[0];
         write_uvarint(&mut self.scratch, dep0.saturating_sub(arr0) as u64);
         let mut prev_dep = dep0;
-        for k in 1..n {
-            let (arr, dep) = sts[k];
+        for &(arr, dep) in &sts[1..] {
             write_uvarint(&mut self.scratch, arr.saturating_sub(prev_dep) as u64);
             write_uvarint(&mut self.scratch, dep.saturating_sub(arr) as u64);
             prev_dep = dep;
@@ -509,31 +508,24 @@ struct BuiltTrip {
     stop_dists: Option<Vec<f64>>,
 }
 
-/// Build the full index blob from one or more GTFS feeds. `pack_name` is stored
-/// in the string pool and surfaced to the on-device planner as a fallback.
+/// Build the whole pack in memory from feeds whose tables are already parsed.
+/// `pack_name` is stored in the string pool and surfaced to the on-device planner
+/// as a fallback.
 ///
-/// Buffers the whole pack in memory; prefer [`build_index_to`] for anything
-/// larger than a test corpus.
+/// Convenience for tests and small corpora. The host tool drives
+/// [`IndexBuilder`] directly instead, one feed at a time, so it never holds more
+/// than one feed's tables — or a second copy of the pack.
 pub fn build_index(
     pack_name: &str,
     feeds: &[FeedInput],
 ) -> Result<(Vec<u8>, BuildStats), String> {
-    let mut blob = Vec::new();
-    let stats = build_index_to(pack_name, feeds, &mut blob)?;
-    Ok((blob, stats))
-}
-
-/// Build the index straight into `out` (a `BufWriter<File>` in the host tool).
-pub fn build_index_to(
-    pack_name: &str,
-    feeds: &[FeedInput],
-    out: &mut impl Write,
-) -> Result<BuildStats, String> {
     let mut builder = IndexBuilder::new(pack_name);
     for feed in feeds {
         builder.add_feed(feed)?;
     }
-    builder.finish_to(out)
+    let mut blob = Vec::new();
+    let stats = builder.finish_to(&mut blob)?;
+    Ok((blob, stats))
 }
 
 /// One GTFS route's own fields, before its trips are grouped into patterns.
@@ -710,7 +702,7 @@ impl IndexBuilder {
         let feed_idx = self.feed_name_offs.len() as u32;
         let feed_stop_start = self.stop_lat.len() as u32;
         let feed_exc_start = self.exceptions.len();
-        self.feed_name_offs.push(self.pool.intern(&feed.name));
+        self.feed_name_offs.push(self.pool.intern(feed.name));
         // Per-feed IANA timezone. Dedup in the pool means one shared
         // "America/Los_Angeles" no matter how many feeds use it.
         let tz = feed
