@@ -6,17 +6,24 @@
 //!               [--minzoom N] [--maxzoom N]
 //!
 //! Input is one GeoJSON `Feature` per line with `Point` geometry, exactly what
-//! `gtfs_ingest`'s `transit_stops` binary and `osm_ingest`'s `poi_extract` emit.
-//! Only `Point` features are accepted; anything else is counted and skipped, since
-//! this tool deliberately has no clipper.
+//! `gtfs_ingest`'s `transit_stops` binary and `osm_ingest`'s `poi_extract` and
+//! `osm_extract` emit. Only `Point` features are accepted; anything else is counted
+//! and skipped.
+//!
+//! Unlike `tile_lines` and `tile_polygons` this has no per-tile byte budget: a
+//! point layer's size is bounded by the number of pins the operator chose to bake,
+//! and thinning it silently would change what the app can find rather than only how
+//! it looks. It is also the path the published archives were built with, so it
+//! stays as it is.
 
 use std::process::ExitCode;
-use tile_build::mvt::Value;
+use tile_build::geojson;
+use tile_build::geom::Geometry;
 use tile_build::tiling::{build_point_archive, Point};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    let mut geojson = None;
+    let mut geojson_path = None;
     let mut out = None;
     let mut layer = None;
     let mut minzoom = 11u8;
@@ -27,7 +34,7 @@ fn main() -> ExitCode {
         let take = |i: usize| args.get(i + 1).cloned();
         match args[i].as_str() {
             "--geojson" => {
-                geojson = take(i);
+                geojson_path = take(i);
                 i += 2;
             }
             "--out" => {
@@ -58,7 +65,7 @@ fn main() -> ExitCode {
         }
     }
 
-    let (Some(geojson), Some(out), Some(layer)) = (geojson, out, layer) else {
+    let (Some(geojson_path), Some(out), Some(layer)) = (geojson_path, out, layer) else {
         eprintln!("tile_points: --geojson, --out and --layer are all required");
         usage();
         return ExitCode::from(2);
@@ -68,10 +75,10 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let text = match std::fs::read_to_string(&geojson) {
+    let text = match std::fs::read_to_string(&geojson_path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("tile_points: cannot read {geojson}: {e}");
+            eprintln!("tile_points: cannot read {geojson_path}: {e}");
             return ExitCode::FAILURE;
         }
     };
@@ -83,8 +90,8 @@ fn main() -> ExitCode {
         if line.is_empty() {
             continue;
         }
-        match parse_point_feature(line) {
-            Some(p) => points.push(p),
+        match parse_point(line) {
+            Some(p) => points.extend(p),
             None => {
                 skipped += 1;
                 if skipped <= 5 {
@@ -97,7 +104,7 @@ fn main() -> ExitCode {
         eprintln!("tile_points: ... and {} more skipped line(s)", skipped - 5);
     }
     if points.is_empty() {
-        eprintln!("tile_points: no point features in {geojson}");
+        eprintln!("tile_points: no point features in {geojson_path}");
         return ExitCode::FAILURE;
     }
 
@@ -125,143 +132,39 @@ fn usage() {
     eprintln!("                   [--minzoom N] [--maxzoom N]");
 }
 
-/// Minimal GeoJSON `Feature`/`Point` reader for the one-line-per-feature shape our
-/// own emitters produce. Deliberately not a general GeoJSON parser: it needs no
-/// serde dependency, which is what keeps this crate resolving offline.
-fn parse_point_feature(line: &str) -> Option<Point> {
-    let coords = extract_after(line, "\"coordinates\":[")?;
-    let close = coords.find(']')?;
-    let mut nums = coords[..close].split(',');
-    let lon: f64 = nums.next()?.trim().parse().ok()?;
-    let lat: f64 = nums.next()?.trim().parse().ok()?;
-    if !line.contains("\"Point\"") {
+/// One line's points, or `None` when the line is not point geometry.
+///
+/// A `MultiPoint` becomes several points sharing one property set, which is what
+/// a point layer means by it.
+fn parse_point(line: &str) -> Option<Vec<Point>> {
+    let f = geojson::parse_feature(line)?;
+    let Geometry::Points(coords) = f.geometry else {
+        return None;
+    };
+    if coords.is_empty() {
         return None;
     }
-
-    let mut props = Vec::new();
-    if let Some(rest) = extract_after(line, "\"properties\":{") {
-        let end = rest.rfind('}').unwrap_or(rest.len());
-        props = parse_props(&rest[..end]);
-    }
-    Some(Point { lon, lat, props })
-}
-
-fn extract_after<'a>(hay: &'a str, needle: &str) -> Option<&'a str> {
-    hay.find(needle).map(|i| &hay[i + needle.len()..])
-}
-
-/// Parse a flat JSON object body into properties. Strings and numbers only, which
-/// is all our emitters write.
-fn parse_props(body: &str) -> Vec<(String, Value)> {
-    let mut out = Vec::new();
-    let b = body.as_bytes();
-    let mut i = 0usize;
-    while i < b.len() {
-        // Key.
-        while i < b.len() && b[i] != b'"' {
-            i += 1;
-        }
-        if i >= b.len() {
-            break;
-        }
-        i += 1;
-        let ks = i;
-        while i < b.len() && b[i] != b'"' {
-            if b[i] == b'\\' {
-                i += 1;
-            }
-            i += 1;
-        }
-        if i >= b.len() {
-            break;
-        }
-        let key = unescape(&body[ks..i]);
-        i += 1;
-        while i < b.len() && b[i] != b':' {
-            i += 1;
-        }
-        i += 1;
-        while i < b.len() && (b[i] as char).is_whitespace() {
-            i += 1;
-        }
-        if i >= b.len() {
-            break;
-        }
-        // Value: string or number.
-        if b[i] == b'"' {
-            i += 1;
-            let vs = i;
-            while i < b.len() && b[i] != b'"' {
-                if b[i] == b'\\' {
-                    i += 1;
-                }
-                i += 1;
-            }
-            if i > b.len() {
-                break;
-            }
-            out.push((key, Value::String(unescape(&body[vs..i.min(body.len())]))));
-            i += 1;
-        } else {
-            let vs = i;
-            while i < b.len() && b[i] != b',' && b[i] != b'}' {
-                i += 1;
-            }
-            let raw = body[vs..i].trim();
-            if let Ok(u) = raw.parse::<u64>() {
-                out.push((key, Value::Uint(u)));
-            } else if let Ok(f) = raw.parse::<f64>() {
-                out.push((key, Value::Double(f)));
-            } else if raw == "true" || raw == "false" {
-                out.push((key, Value::Bool(raw == "true")));
-            }
-        }
-        while i < b.len() && b[i] != b',' {
-            i += 1;
-        }
-        i += 1;
-    }
-    out
-}
-
-fn unescape(s: &str) -> String {
-    if !s.contains('\\') {
-        return s.to_string();
-    }
-    let mut out = String::with_capacity(s.len());
-    let mut it = s.chars();
-    while let Some(c) = it.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match it.next() {
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('u') => {
-                let hex: String = it.by_ref().take(4).collect();
-                if let Some(ch) =
-                    u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
-                {
-                    out.push(ch);
-                }
-            }
-            Some(other) => out.push(other),
-            None => break,
-        }
-    }
-    out
+    Some(
+        coords
+            .into_iter()
+            .map(|(lon, lat)| Point { lon, lat, props: f.props.clone() })
+            .collect(),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tile_build::mvt::Value;
+
+    fn one(line: &str) -> Option<Point> {
+        parse_point(line).map(|mut v| v.remove(0))
+    }
 
     #[test]
     fn parses_what_transit_stops_emits() {
         let line = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.3968000,37.7929000]},"properties":{"name":"Embarcadero","motis_id":"us-ca-SF-bayarea_901201","route_type":1}}"#;
-        let p = parse_point_feature(line).expect("a point feature");
+        let p = one(line).expect("a point feature");
         assert!((p.lon - -122.3968).abs() < 1e-9);
         assert!((p.lat - 37.7929).abs() < 1e-9);
         assert_eq!(
@@ -277,7 +180,7 @@ mod tests {
     #[test]
     fn parses_a_feature_with_no_motis_id() {
         let line = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[-1.5,2.5]},"properties":{"name":"Ferry Building","route_type":0}}"#;
-        let p = parse_point_feature(line).unwrap();
+        let p = one(line).unwrap();
         assert_eq!(p.props.len(), 2);
         assert!(p.props.iter().all(|(k, _)| k != "motis_id"));
     }
@@ -285,20 +188,38 @@ mod tests {
     #[test]
     fn handles_escapes_in_names() {
         let line = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[0,0]},"properties":{"name":"A\"B\\C","route_type":3}}"#;
-        let p = parse_point_feature(line).unwrap();
+        let p = one(line).unwrap();
         assert_eq!(p.props[0].1, Value::String("A\"B\\C".into()));
+    }
+
+    #[test]
+    fn parses_what_osm_extract_emits_for_the_safety_layer() {
+        let line = r#"{"type":"Feature","geometry":{"type":"Point","coordinates":[-122.4194000,37.7749000]},"properties":{"kind":"speed_camera","direction":"forward","osm_id":"node/1001"}}"#;
+        let p = one(line).unwrap();
+        assert_eq!(p.props[0].1, Value::String("speed_camera".into()));
+        assert_eq!(p.props[2].1, Value::String("node/1001".into()));
+    }
+
+    #[test]
+    fn a_multipoint_becomes_several_points_sharing_one_property_set() {
+        let line = r#"{"type":"Feature","geometry":{"type":"MultiPoint","coordinates":[[0,0],[1,1]]},"properties":{"name":"Pair"}}"#;
+        let pts = parse_point(line).unwrap();
+        assert_eq!(pts.len(), 2);
+        assert_eq!(pts[0].props, pts[1].props);
     }
 
     #[test]
     fn rejects_non_point_geometry() {
         let line = r#"{"type":"Feature","geometry":{"type":"LineString","coordinates":[[0,0],[1,1]]},"properties":{}}"#;
-        assert!(parse_point_feature(line).is_none(), "no clipper, so lines are refused");
+        assert!(one(line).is_none(), "a point layer takes points");
+        let line = r#"{"type":"Feature","geometry":{"type":"Polygon","coordinates":[[[0,0],[1,0],[1,1],[0,0]]]},"properties":{}}"#;
+        assert!(one(line).is_none());
     }
 
     #[test]
     fn rejects_junk() {
-        assert!(parse_point_feature("").is_none());
-        assert!(parse_point_feature("not json").is_none());
-        assert!(parse_point_feature(r#"{"type":"Feature"}"#).is_none());
+        assert!(one("").is_none());
+        assert!(one("not json").is_none());
+        assert!(one(r#"{"type":"Feature"}"#).is_none());
     }
 }

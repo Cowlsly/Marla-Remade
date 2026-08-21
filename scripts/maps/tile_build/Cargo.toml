@@ -29,6 +29,12 @@ path = "src/lib.rs"
 name = "tile_points"
 path = "src/bin/tile_points.rs"
 [[bin]]
+name = "tile_lines"
+path = "src/bin/tile_lines.rs"
+[[bin]]
+name = "tile_polygons"
+path = "src/bin/tile_polygons.rs"
+[[bin]]
 name = "tile_join"
 path = "src/bin/tile_join.rs"
 [[bin]]

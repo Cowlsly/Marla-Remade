@@ -16,19 +16,24 @@
 //!     for both its directories and its tiles.
 //!   * [`pmtiles`] — the v3 container, read and write, including Hilbert tile ids
 //!     and the root/leaf directory split.
+//!   * [`geojson`] — the GeoJSONSeq reader the tilers share. Hand-rolled, not
+//!     serde: `miniz_oxide` being the only dependency is what lets this crate
+//!     build offline.
 //!   * [`geom`] — projection, bounds, tile ranges and quantisation: lon/lat in,
 //!     integer tile coordinates out.
 //!   * [`clip`] — Liang-Barsky for lines, Sutherland-Hodgman for polygons, against
 //!     a tile's buffered rect.
 //!   * [`simplify`] — Douglas-Peucker in integer tile coordinates.
+//!   * [`pyramid`] — the tile pyramid driver and the drop policy.
 //!   * [`tiling`] — bucket points into tiles, and merge tilesets.
 //!
 //! [`geom`], [`clip`] and [`simplify`] compose in one fixed order; [`geom`]'s module
 //! docs give the pipeline.
 //!
-//! Three binaries sit on top: `tile_points` (the `tippecanoe` replacement for point
-//! layers), `tile_join` (the `tile-join` replacement) and `pmtiles_dump` (a
-//! canonical text dump, for the differential harness).
+//! Five binaries sit on top: `tile_points`, `tile_lines` and `tile_polygons` (the
+//! `tippecanoe` replacements, one per geometry kind), `tile_join` (the `tile-join`
+//! replacement) and `pmtiles_dump` (a canonical text dump, for the differential
+//! harness).
 //!
 //! Verified against the published `v5-ca.pmtiles` during development: its header,
 //! gzipped root directory and gzipped leaf directories all decode with byte-exact
@@ -40,13 +45,16 @@
 //! `--extend-zooms-if-still-dropping` can push an archive past its own maximum
 //! zoom; we implement a deterministic policy and a fixed max zoom instead. Tests
 //! assert our own invariants — ring closure, winding order, Douglas-Peucker
-//! monotonicity, a PMTiles round trip — never equality with tippecanoe.
+//! monotonicity, a PMTiles round trip — never equality with tippecanoe. See
+//! [`pyramid`] for the policy and its consequences.
 
 pub mod clip;
+pub mod geojson;
 pub mod geom;
 pub mod gz;
 pub mod mvt;
 pub mod pmtiles;
 pub mod proto;
+pub mod pyramid;
 pub mod simplify;
 pub mod tiling;

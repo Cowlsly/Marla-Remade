@@ -178,7 +178,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
 | `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
-| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**. Bins: `tile_points` (tile a point geojsonseq), `tile_join` (merge archives), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs` |
+| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
@@ -215,23 +215,39 @@ which change on a different clock and from a different source.
 
 ### 3. Output is not byte-identical to tippecanoe, by design
 
-`--drop-densest-as-needed` is a lossy per-tile heuristic, and
-`--extend-zooms-if-still-dropping` can push an archive *past* its own
-`--maximum-zoom`. Our tilers implement a deterministic, documented drop policy
-and a fixed max zoom instead. Consequences:
+`--drop-densest-as-needed` is a lossy per-tile heuristic whose result depends on
+the order tippecanoe happened to visit features. Our tilers use a deterministic
+policy instead, documented in `tile_build/src/pyramid.rs`:
 
-* Per-tile feature counts differ. `test/diff_pmtiles.py --max-feature-delta`
-  is the explicit budget for that; the flag exists so the divergence has a number
-  rather than being unbounded.
+* Features in a tile are put in a **stable importance order** — largest bounding
+  box first, ties broken by input index — and the largest prefix that fits the
+  gzipped byte budget (500 KB by default, `--max-tile-bytes`) is kept, found by
+  binary search. A prefix, so the kept set is always the top-k, never a scattered
+  subset.
+* If even one feature does not fit, that one is kept anyway and the tile is
+  **reported as over budget**. An empty tile is a hole in the map; an oversized one
+  is merely slow.
+* Every run prints a per-zoom table: tiles, placements, kept, dropped, largest tile.
+
+Consequences:
+
+* Per-tile feature counts differ from tippecanoe's. `test/diff_pmtiles.py
+  --max-feature-delta` is the explicit budget for that; the flag exists so the
+  divergence has a number rather than being unbounded.
 * Tests assert **our own invariants** (ring closure, winding order,
-  Douglas-Peucker monotonicity, PMTiles round-trip), never equality with
+  Douglas-Peucker monotonicity, PMTiles round trip), never equality with
   tippecanoe.
 * An MVT re-encode rebuilds each layer's key/value dictionaries in first-use
   order, so even an untouched tile can come back a few bytes different. Compare
   the decoded model, which is what the spec defines.
-* `--detect-shared-borders` is not reproduced. Adjacent admin polygons are
-  simplified independently, so at low zoom a shared border can show a hairline
-  gap or overlap. Noted rather than papered over.
+* **`--extend-zooms-if-still-dropping` is deliberately not reproduced.** It can
+  push an archive *past* its own `--maximum-zoom`, so the advertised zoom range
+  stops being a fact about the contents. Here `--maxzoom` is exactly the deepest
+  zoom present.
+* **`--detect-shared-borders` is not implemented.** Adjacent admin polygons are
+  simplified independently, so two countries sharing a border can end up with
+  slightly different vertex sets along it — visible at low zoom as a hairline gap
+  or overlap. Reproducing it needs a shared topology pass across features.
 
 ### 4. World transit is a large step up in cost
 
