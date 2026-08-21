@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconMap
 import com.vayunmathur.library.ui.Icon
@@ -207,7 +206,7 @@ fun MetricGraphSheet(
                             .offset(x = clampedX)
                             .widthIn(min = labelWidth),
                         color = MaterialTheme.colorScheme.surfaceContainerHighest,
-                        shape = RoundedCornerShape(8.dp),
+                        shape = MaterialTheme.shapes.small,
                         tonalElevation = 2.dp,
                     ) {
                         Column(

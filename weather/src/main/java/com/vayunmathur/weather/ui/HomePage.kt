@@ -22,6 +22,7 @@ import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DrawerState
 import com.vayunmathur.library.ui.DrawerValue
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.ModalDrawerSheet
 import com.vayunmathur.library.ui.ModalNavigationDrawer
@@ -265,7 +266,7 @@ private fun ForecastColumn(
                     if (error != null) {
                         Text(error, color = MaterialTheme.colorScheme.error)
                     } else {
-                        CircularProgressIndicator()
+                        LoadingIndicator()
                     }
                 }
                 return@Column

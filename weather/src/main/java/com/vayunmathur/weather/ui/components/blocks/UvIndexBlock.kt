@@ -92,7 +92,7 @@ fun UvIndexBlock(uvIndex: Double?) {
         }
         Text(
             text = v?.toString() ?: "—",
-            style = MaterialTheme.typography.displayMedium,
+            style = MaterialTheme.typography.displayMediumEmphasized,
             modifier = Modifier.align(Alignment.Center).offset(y = 4.dp),
             color = MaterialTheme.colorScheme.onSurface,
         )

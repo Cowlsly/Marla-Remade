@@ -47,7 +47,7 @@ fun VisibilityBlock(current: Current, useMiles: Boolean = false) {
         }
         Text(
             text = value.toString(),
-            style = MaterialTheme.typography.displayMedium,
+            style = MaterialTheme.typography.displayMediumEmphasized,
             modifier = Modifier.align(Alignment.Center).offset(y = 8.dp),
             color = MaterialTheme.colorScheme.onSurface,
         )

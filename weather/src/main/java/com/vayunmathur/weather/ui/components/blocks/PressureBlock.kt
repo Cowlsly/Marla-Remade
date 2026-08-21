@@ -72,7 +72,7 @@ fun PressureBlock(current: Current, pressureUnit: PressureUnit) {
         }
         Text(
             text = valueText,
-            style = MaterialTheme.typography.displaySmall,
+            style = MaterialTheme.typography.displaySmallEmphasized,
             modifier = Modifier.align(Alignment.Center).offset(y = 10.dp),
             color = MaterialTheme.colorScheme.onSurface,
         )

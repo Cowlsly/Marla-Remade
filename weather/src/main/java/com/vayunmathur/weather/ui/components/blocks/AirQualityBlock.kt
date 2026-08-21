@@ -45,7 +45,7 @@ fun AirQualityBlock(air: AirQualityCurrent?) {
                 modifier = Modifier.fillMaxWidth(),
                 textAlign = TextAlign.End,
                 color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.displayMedium,
+                style = MaterialTheme.typography.displayMediumEmphasized,
             )
             LinearProgressIndicator(
                 progress = { progress },

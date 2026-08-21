@@ -62,8 +62,7 @@ fun CurrentWeatherCard(
             Text(
                 text = stringResource(condition.label),
                 color = MaterialTheme.colorScheme.onSurface,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.titleLargeEmphasized,
             )
         }
         Text(
@@ -76,8 +75,7 @@ fun CurrentWeatherCard(
             Text(
                 text = stringResource(R.string.feels_like, formatTemperatureCompact(apparentTemperature, tempUnit)),
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Medium,
+                style = MaterialTheme.typography.titleLargeEmphasized,
             )
         }
         Spacer(Modifier.height(6.dp))

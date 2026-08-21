@@ -55,7 +55,7 @@ fun WindBlock(current: Current, unit: WindUnit) {
             Row(verticalAlignment = Alignment.Bottom) {
                 Text(
                     text = windText.substringBefore(' '),
-                    style = MaterialTheme.typography.displayMedium,
+                    style = MaterialTheme.typography.displayMediumEmphasized,
                     modifier = Modifier.alignByBaseline(),
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,

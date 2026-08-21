@@ -58,7 +58,7 @@ fun HumidityBlock(current: Current, tempUnit: TemperatureUnit) {
             modifier = Modifier
                 .align(Alignment.CenterStart)
                 .padding(horizontal = 12.dp),
-            style = MaterialTheme.typography.displayMedium,
+            style = MaterialTheme.typography.displayMediumEmphasized,
             color = MaterialTheme.colorScheme.onSurface,
         )
         Box(Modifier.align(Alignment.BottomStart)) {

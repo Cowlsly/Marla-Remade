@@ -6,7 +6,6 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconMyLocation
 import com.vayunmathur.library.ui.Icon
@@ -53,7 +52,7 @@ fun LocationItem(
     val contentColor =
         if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
         else MaterialTheme.colorScheme.onSurface
-    val shape = if (isSelected) RoundedCornerShape(28.dp) else CircleShape
+    val shape = if (isSelected) MaterialTheme.shapes.extraLarge else CircleShape
 
     val condition = currentWeatherCode?.let { weatherConditionForCode(it) } ?: WeatherCondition.Unknown
 

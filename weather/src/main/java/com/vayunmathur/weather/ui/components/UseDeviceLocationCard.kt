@@ -4,13 +4,12 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.IconMyLocation
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.ListItem
 import com.vayunmathur.library.ui.ListItemDefaults
+import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
@@ -33,9 +32,9 @@ import androidx.compose.ui.res.stringResource
 @Composable
 fun UseDeviceLocationCard(onClick: () -> Unit, isLoading: Boolean = false) {
     Surface(
-        modifier = Modifier.clip(RoundedCornerShape(28.dp)),
+        modifier = Modifier.clip(MaterialTheme.shapes.extraLarge),
         onClick = onClick,
-        shape = RoundedCornerShape(28.dp),
+        shape = MaterialTheme.shapes.extraLarge,
         color = MaterialTheme.colorScheme.surfaceBright,
     ) {
         ListItem(
@@ -48,7 +47,7 @@ fun UseDeviceLocationCard(onClick: () -> Unit, isLoading: Boolean = false) {
                     contentAlignment = Alignment.Center,
                 ) {
                     if (isLoading) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp))
+                        LoadingIndicator(modifier = Modifier.size(24.dp))
                     } else {
                         IconMyLocation(
                             tint = MaterialTheme.colorScheme.onSurface,

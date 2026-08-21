@@ -41,7 +41,7 @@ fun CloudCoverBlock(current: Current) {
         }
         Text(
             text = "$pct%",
-            style = MaterialTheme.typography.displayMedium,
+            style = MaterialTheme.typography.displayMediumEmphasized,
             modifier = Modifier.align(Alignment.Center).offset(y = 8.dp),
             color = MaterialTheme.colorScheme.onSurface,
         )

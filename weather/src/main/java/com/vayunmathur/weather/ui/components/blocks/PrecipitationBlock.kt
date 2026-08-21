@@ -51,7 +51,7 @@ fun PrecipitationBlock(
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text(
                     text = value,
-                    style = MaterialTheme.typography.displayMedium,
+                    style = MaterialTheme.typography.displayMediumEmphasized,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                 )

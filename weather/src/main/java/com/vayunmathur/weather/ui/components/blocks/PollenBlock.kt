@@ -49,7 +49,7 @@ fun PollenBlock(air: AirQualityCurrent?) {
         }
         Text(
             text = "$level/4",
-            style = MaterialTheme.typography.displayMedium,
+            style = MaterialTheme.typography.displayMediumEmphasized,
             modifier = Modifier.align(Alignment.Center).offset(y = 4.dp),
             color = MaterialTheme.colorScheme.onSurface,
         )

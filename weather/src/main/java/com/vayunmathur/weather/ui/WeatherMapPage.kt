@@ -341,7 +341,7 @@ fun WeatherMapPage(
                 .navigationBarsPadding()
                 .padding(12.dp),
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.94f),
-            shape = RoundedCornerShape(16.dp),
+            shape = MaterialTheme.shapes.largeIncreased,
             tonalElevation = 3.dp,
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
