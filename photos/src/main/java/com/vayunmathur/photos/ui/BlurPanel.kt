@@ -1,15 +1,12 @@
 package com.vayunmathur.photos.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
@@ -34,17 +31,12 @@ fun BlurPanel(
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .padding(8.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        ButtonGroup(Modifier.fillMaxWidth()) {
             BlurMode.entries.forEach { mode ->
-                FilterChip(
-                    selected = blurParams.mode == mode,
-                    onClick = { onBlurChanged(blurParams.copy(mode = mode)) },
-                    label = { Text(mode.name, fontSize = 12.sp) },
+                toggleableItem(
+                    checked = blurParams.mode == mode,
+                    label = mode.name,
+                    onCheckedChange = { onBlurChanged(blurParams.copy(mode = mode)) },
                 )
             }
         }

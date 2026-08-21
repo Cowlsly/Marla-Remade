@@ -12,7 +12,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Surface
@@ -94,12 +94,9 @@ fun LevelsPanel(levels: LevelsAdjustment, onChange: (LevelsAdjustment) -> Unit) 
 @Composable
 fun ColorBalancePanel(balance: ColorBalanceAdjustment, onChange: (ColorBalanceAdjustment) -> Unit) = PanelColumn {
     var range by remember { mutableStateOf(0) } // 0 shadows, 1 mid, 2 high
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    ButtonGroup(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
         listOf("Shadows", "Midtones", "Highlights").forEachIndexed { i, label ->
-            FilterChip(selected = range == i, onClick = { range = i }, label = { Text(label, fontSize = 12.sp) })
+            toggleableItem(checked = range == i, label = label, onCheckedChange = { range = i })
         }
     }
     val rc = when (range) { 0 -> balance.shadowsRedCyan; 1 -> balance.midRedCyan; else -> balance.highRedCyan }
@@ -220,11 +217,8 @@ fun FiltersPanel(onAddFx: (com.vayunmathur.photos.data.LayerAdjustment) -> Unit)
     var radius by remember { mutableFloatStateOf(2f) }
     var angle by remember { mutableFloatStateOf(0f) }
     val tools = listOf("Sharpen", "Gaussian", "Motion", "Radial", "Spin", "Noise", "Find Edges", "Emboss")
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        tools.forEach { t -> FilterChip(selected = tool == t, onClick = { tool = t }, label = { Text(t, fontSize = 12.sp) }) }
+    ButtonGroup(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
+        tools.forEach { t -> toggleableItem(checked = tool == t, label = t, onCheckedChange = { tool = t }) }
     }
     when (tool) {
         "Sharpen" -> {
@@ -287,15 +281,12 @@ fun PhotoFilterPanel(adj: PhotoFilterAdj, onChange: (PhotoFilterAdj) -> Unit) = 
         "Green" to 0xFF00A651.toInt(),
         "Blue" to 0xFF2E5CFF.toInt(),
     )
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    ButtonGroup(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
         presets.forEach { (name, color) ->
-            FilterChip(
-                selected = adj.color == color,
-                onClick = { onChange(adj.copy(color = color)) },
-                label = { Text(name, fontSize = 12.sp) },
+            toggleableItem(
+                checked = adj.color == color,
+                label = name,
+                onCheckedChange = { onChange(adj.copy(color = color)) },
             )
         }
     }
@@ -304,15 +295,12 @@ fun PhotoFilterPanel(adj: PhotoFilterAdj, onChange: (PhotoFilterAdj) -> Unit) = 
 
 @Composable
 fun SelectiveColorPanel(adj: SelectiveColorAdj, onChange: (SelectiveColorAdj) -> Unit) = PanelColumn {
-    Row(
-        modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
+    ButtonGroup(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
         SelectiveColorRange.entries.forEach { range ->
-            FilterChip(
-                selected = adj.range == range,
-                onClick = { onChange(adj.copy(range = range)) },
-                label = { Text(range.name, fontSize = 12.sp) },
+            toggleableItem(
+                checked = adj.range == range,
+                label = range.name,
+                onCheckedChange = { onChange(adj.copy(range = range)) },
             )
         }
     }

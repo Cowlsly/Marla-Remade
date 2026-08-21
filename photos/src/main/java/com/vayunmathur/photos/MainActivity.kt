@@ -21,7 +21,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import com.vayunmathur.library.util.AppMessages
 import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.IconGroup
 import com.vayunmathur.library.ui.IconLock
 import com.vayunmathur.library.ui.IconMap
@@ -320,7 +320,7 @@ private fun SecureFolderEntry(
             )
         }
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
+            LoadingIndicator()
         }
     } else {
         SecureFolderPage(backStack, vaultPassword!!, secureFolderViewModel)

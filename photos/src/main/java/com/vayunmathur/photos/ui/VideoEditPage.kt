@@ -55,7 +55,7 @@ import androidx.media3.ui.compose.PlayerSurface
 import androidx.media3.ui.compose.SURFACE_TYPE_TEXTURE_VIEW
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconContentCut
@@ -115,7 +115,7 @@ fun VideoEditPage(vm: VideoEditViewModel, id: Long, uri: String?) {
     val currentPhoto = photo
     if (currentPhoto == null) {
         Box(Modifier.fillMaxSize().background(Color.Black), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator()
+            LoadingIndicator()
         }
         return
     }
@@ -559,9 +559,9 @@ private fun ExportProgressDialog(progress: Float, onCancel: () -> Unit) {
         text = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 if (progress > 0f) {
-                    CircularProgressIndicator(progress = { progress })
+                    LoadingIndicator(progress = { progress })
                 } else {
-                    CircularProgressIndicator()
+                    LoadingIndicator()
                 }
                 Spacer(Modifier.width(16.dp))
                 Text("${(progress * 100).toInt()}%")

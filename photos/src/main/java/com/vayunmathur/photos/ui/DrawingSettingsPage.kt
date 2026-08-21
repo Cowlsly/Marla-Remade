@@ -73,7 +73,7 @@ fun DrawingSettingsPage(
         modifier = Modifier
             .fillMaxWidth()
             .padding(16.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.large,
         color = MaterialTheme.colorScheme.surfaceContainerHigh
     ) {
         Column(modifier = Modifier.padding(16.dp)) {

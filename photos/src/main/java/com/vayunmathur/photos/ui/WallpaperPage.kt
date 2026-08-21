@@ -54,6 +54,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.LoadingIndicator
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.IconNavigation
 import com.vayunmathur.library.ui.MaterialTheme
@@ -186,7 +187,7 @@ fun WallpaperPage(
                 when {
                     loadState == WallpaperLoadState.Loading ||
                         (bitmap == null && loadState == WallpaperLoadState.Idle) -> {
-                        CircularProgressIndicator(
+                        LoadingIndicator(
                             modifier = Modifier.size(48.dp),
                             color = Color.White,
                         )

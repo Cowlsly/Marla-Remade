@@ -3,15 +3,12 @@ package com.vayunmathur.photos.ui
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
@@ -56,17 +53,12 @@ fun CurvesPanel(
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .padding(8.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        ButtonGroup(Modifier.fillMaxWidth()) {
             CurveChannel.entries.forEach { channel ->
-                FilterChip(
-                    selected = selectedChannel == channel,
-                    onClick = { onChannelSelected(channel) },
-                    label = { Text(channel.name, fontSize = 12.sp) },
+                toggleableItem(
+                    checked = selectedChannel == channel,
+                    label = channel.name,
+                    onCheckedChange = { onChannelSelected(channel) },
                 )
             }
         }

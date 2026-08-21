@@ -2,16 +2,14 @@ package com.vayunmathur.photos.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import com.vayunmathur.library.ui.FilterChip
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Surface
@@ -44,17 +42,12 @@ fun SelectiveEditPanel(
             .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
             .padding(8.dp),
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .horizontalScroll(rememberScrollState()),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
+        ButtonGroup(Modifier.fillMaxWidth()) {
             MaskType.entries.forEach { type ->
-                FilterChip(
-                    selected = mask.type == type,
-                    onClick = { onMaskChanged(mask.copy(type = type)) },
-                    label = { Text(type.name, fontSize = 12.sp) },
+                toggleableItem(
+                    checked = mask.type == type,
+                    label = type.name,
+                    onCheckedChange = { onMaskChanged(mask.copy(type = type)) },
                 )
             }
         }
