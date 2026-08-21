@@ -7,8 +7,11 @@
 //!   gtfs_ingest <out_dir> <pack_name> --manifest <file>  # feeds from a file
 //!
 //! Each `<feed>` is either `feed_name=gtfs_dir` or just `gtfs_dir` (the feed name
-//! is then the directory's base name). A manifest file lists one `feed_name=dir`
-//! per line (blank lines and `#` comments allowed). `gtfs_dir` is an UNZIPPED
+//! is then the directory's base name). An optional third field,
+//! `feed_name=gtfs_dir=motis_prefix`, gives the feed's Transitous id namespace
+//! (e.g. `us-ca-SF-bayarea`) so the pack can carry MOTIS stop ids; without it the
+//! device simply reports none. A manifest file lists one such spec per line
+//! (blank lines and `#` comments allowed). `gtfs_dir` is an UNZIPPED
 //! GTFS feed directory (containing `stops.txt`, `routes.txt`, `trips.txt`,
 //! `stop_times.txt`, and optionally `agency.txt` / `calendar.txt` /
 //! `calendar_dates.txt` / `shapes.txt`).
@@ -40,14 +43,15 @@ fn main() -> ExitCode {
     if args.len() < 4 {
         eprintln!("usage: gtfs_ingest <out_dir> <pack_name> <feed>...");
         eprintln!("       gtfs_ingest <out_dir> <pack_name> --manifest <file>");
-        eprintln!("  <feed> = feed_name=gtfs_dir  |  gtfs_dir");
+        eprintln!("  <feed> = feed_name=gtfs_dir[=motis_prefix]  |  gtfs_dir");
         return ExitCode::from(2);
     }
     let out_dir = PathBuf::from(&args[1]);
     let pack_name = args[2].clone();
 
-    // Collect (feed_name, gtfs_dir) pairs, from a manifest or inline args.
-    let specs: Vec<(String, PathBuf)> = if args[3] == "--manifest" {
+    // Collect (feed_name, gtfs_dir, motis_prefix) triples, from a manifest or
+    // inline args.
+    let specs: Vec<(String, PathBuf, String)> = if args[3] == "--manifest" {
         let file = match args.get(4) {
             Some(f) => f,
             None => {
@@ -80,22 +84,34 @@ fn main() -> ExitCode {
     }
 }
 
-/// Parse `feed_name=dir` or `dir` (name defaults to the dir's base name).
-fn parse_feed_spec(s: &str) -> (String, PathBuf) {
-    if let Some((name, dir)) = s.split_once('=') {
-        (name.to_string(), PathBuf::from(dir))
-    } else {
-        let dir = PathBuf::from(s);
-        let name = dir
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| s.to_string());
-        (name, dir)
+/// Parse `feed_name=dir`, `feed_name=dir=motis_prefix`, or a bare `dir` (name then
+/// defaults to the dir's base name, with no prefix).
+///
+/// The third field is the feed's Transitous id namespace, which composes into a
+/// MOTIS stop id in the pack. Two-field specs stay valid, so
+/// `build_world_transit.sh` is unaffected and its packs simply carry no ids.
+/// Fields split on `=`, so neither the directory nor the prefix may contain one.
+fn parse_feed_spec(s: &str) -> (String, PathBuf, String) {
+    let mut parts = s.splitn(3, '=');
+    match (parts.next(), parts.next()) {
+        (Some(name), Some(dir)) => (
+            name.to_string(),
+            PathBuf::from(dir),
+            parts.next().unwrap_or("").trim().to_string(),
+        ),
+        _ => {
+            let dir = PathBuf::from(s);
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| s.to_string());
+            (name, dir, String::new())
+        }
     }
 }
 
-/// Read a manifest of `feed_name=dir` lines (`#` comments / blanks ignored).
-fn read_manifest(path: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+/// Read a manifest of feed-spec lines (`#` comments / blanks ignored).
+fn read_manifest(path: &Path) -> Result<Vec<(String, PathBuf, String)>, String> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| format!("cannot read manifest {}: {e}", path.display()))?;
     let mut out = Vec::new();
@@ -109,10 +125,11 @@ fn read_manifest(path: &Path) -> Result<Vec<(String, PathBuf)>, String> {
     Ok(out)
 }
 
-fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(), String> {
+fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf, String)]) -> Result<(), String> {
     // Parse every feed up front so their CSVs outlive the FeedInput borrows.
     struct FeedTables {
         name: String,
+        motis_prefix: String,
         stops: gtfs::Csv,
         routes: gtfs::Csv,
         trips: gtfs::Csv,
@@ -124,7 +141,7 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
     }
 
     let mut tables: Vec<FeedTables> = Vec::with_capacity(specs.len());
-    for (name, dir) in specs {
+    for (name, dir, motis_prefix) in specs {
         let require = |file: &str| -> Result<gtfs::Csv, String> {
             gtfs::read_table(dir, file).ok_or_else(|| {
                 format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
@@ -163,6 +180,7 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         eprintln!("gtfs_ingest: parsed feed '{name}' ({})", dir.display());
         tables.push(FeedTables {
             name: name.clone(),
+            motis_prefix: motis_prefix.clone(),
             stops,
             routes,
             trips,
@@ -178,9 +196,7 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         .iter()
         .map(|t| FeedInput {
             name: t.name.clone(),
-            // Phase 3 plumbs the real Transitous source name through the manifest;
-            // empty writes NONE, which makes the device accessor return None.
-            motis_prefix: String::new(),
+            motis_prefix: t.motis_prefix.clone(),
             stops: &t.stops,
             routes: &t.routes,
             trips: &t.trips,
@@ -276,4 +292,47 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_two_field_spec_carries_no_motis_prefix() {
+        // build_world_transit.sh emits these; its packs must keep building.
+        let (name, dir, prefix) = parse_feed_spec("sfmuni=/tmp/gtfs/sfmuni");
+        assert_eq!(name, "sfmuni");
+        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sfmuni"));
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn a_three_field_spec_carries_the_motis_prefix() {
+        let (name, dir, prefix) =
+            parse_feed_spec("sf_bayarea=/tmp/gtfs/sf_bayarea=us-ca-SF-bayarea");
+        assert_eq!(name, "sf_bayarea");
+        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sf_bayarea"));
+        // The unmangled Transitous source name, which Get-SafeName destroys in
+        // the feed name beside it.
+        assert_eq!(prefix, "us-ca-SF-bayarea");
+    }
+
+    #[test]
+    fn a_bare_dir_names_itself() {
+        let (name, dir, prefix) = parse_feed_spec("/tmp/gtfs/sfmuni");
+        assert_eq!(name, "sfmuni");
+        assert_eq!(dir, PathBuf::from("/tmp/gtfs/sfmuni"));
+        assert_eq!(prefix, "");
+    }
+
+    #[test]
+    fn a_windows_dir_survives_the_split() {
+        // Drive letters use `:`, not `=`, so they are not split points.
+        let (name, dir, prefix) =
+            parse_feed_spec(r"sf=C:\work\gtfs\sf=us-ca-SFMTA");
+        assert_eq!(name, "sf");
+        assert_eq!(dir, PathBuf::from(r"C:\work\gtfs\sf"));
+        assert_eq!(prefix, "us-ca-SFMTA");
+    }
 }

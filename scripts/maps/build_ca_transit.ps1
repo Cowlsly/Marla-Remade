@@ -61,7 +61,9 @@ if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
 }
 
 # A feed name safe for a filename and for the on-device string pool, where it is
-# the per-route provenance label.
+# the per-route provenance label. Lossy on purpose, so the ORIGINAL source name is
+# kept alongside it (`Source`) for the MOTIS id namespace, which needs the exact
+# spelling: `SF-bayarea` collapses to `sf_bayarea` here and cannot be recovered.
 function Get-SafeName([string]$s) {
     ($s.ToLowerInvariant() -replace '[^a-z0-9]+', '_').Trim('_')
 }
@@ -174,7 +176,7 @@ foreach ($s in $sources) {
         $skipped.Add([pscustomobject]@{ Name = $name; Why = "URL is a realtime endpoint" })
         continue
     }
-    $resolved.Add([pscustomobject]@{ Name = Get-SafeName $name; Url = $url; Via = $note })
+    $resolved.Add([pscustomobject]@{ Name = Get-SafeName $name; Source = $name; Url = $url; Via = $note })
 }
 
 # Two sources can resolve to the same zip (an agency listed twice, or an
@@ -239,10 +241,23 @@ $results | Where-Object { $_.Status -notin @("ok", "cached") } |
     ForEach-Object { Write-Output ("    FAILED {0,-30} {1}" -f $_.Name, $_.Status) }
 if ($good.Count -eq 0) { throw "every feed failed to download - nothing to build" }
 
-# The ingest tool takes `feed_name=dir` lines, one per feed.
+# The ingest tool takes `feed_name=dir=motis_prefix` lines, one per feed. The
+# third field is the feed's Transitous id namespace: a MOTIS stop id is
+# `<registry file>-<source name>_<gtfs stop_id>` (e.g. us-ca-SF-bayarea_901201),
+# so baking the prefix lets the device name a stop for the realtime /stoptimes
+# overlay without a /map/stops lookup. It must be the unmangled `Source`.
+#
+# Written from $resolved rather than from the directories on disk, which is what
+# carries `Source` through -- and also means a stale feed left in the work dir by
+# an earlier run with a different -Region or -Limit is no longer picked up.
 $manifest = Join-Path $Work "feeds.manifest"
-$lines = foreach ($d in Get-ChildItem $gtfsRoot -Directory) {
-    if (Test-Path (Join-Path $d.FullName "stops.txt")) { "$($d.Name)=$($d.FullName)" }
+$usable = @{}
+$good | ForEach-Object { $usable[$_.Name] = $true }
+$lines = foreach ($item in $resolved) {
+    if (-not $usable.ContainsKey($item.Name)) { continue }
+    $dir = Join-Path $gtfsRoot $item.Name
+    if (-not (Test-Path (Join-Path $dir "stops.txt"))) { continue }
+    "$($item.Name)=$dir=$Region-$($item.Source)"
 }
 Set-Content -Path $manifest -Value $lines -Encoding utf8
 Write-Host "  wrote $($lines.Count) feeds to $manifest"
