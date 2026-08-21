@@ -49,13 +49,14 @@ class TidalAudioSource(context: Context) : AudioSource {
     /**
      * Walks down the quality ladder until a stream comes back that can actually be decoded.
      *
-     * There is no quality setting any more: everything is re-encoded to a fixed-bitrate Opus
-     * file, so the only thing worth asking for is the best stream available. Tidal already
-     * downgrades server-side when the subscription or the track cannot serve the ask and
-     * reports what it really returned, so the first rung usually succeeds. The ladder only
-     * matters when `playbackInfo` itself fails, or when the manifest that comes back is
-     * encrypted or DRM-protected and [TidalManifest] rejects it - a hi-res tier is the most
-     * likely to be protected, and dropping a rung is better than losing the download.
+     * The ladder is capped at `HIGH`, so the lossless and hi-res tiers are never requested.
+     * Everything is re-encoded to a fixed-bitrate Opus file afterwards, and the tiers above
+     * `HIGH` cost far more bandwidth than that re-encode can preserve. Tidal downgrades
+     * server-side when the subscription or the track cannot serve the ask and reports what it
+     * really returned, so the first rung usually succeeds. The remaining rung matters when
+     * `playbackInfo` itself fails, or when the manifest that comes back is encrypted or
+     * DRM-protected and [TidalManifest] rejects it - dropping a rung is better than losing
+     * the download.
      */
     private suspend fun bestStream(trackId: Int, token: String, country: String): TidalStream? {
         for (quality in QUALITY_LADDER) {
@@ -122,7 +123,11 @@ class TidalAudioSource(context: Context) : AudioSource {
     )
 
     private companion object {
-        /** Tidal's own `audioquality` values, best first. */
-        val QUALITY_LADDER = listOf("HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW")
+        /**
+         * Tidal's own `audioquality` values, best first, capped at `HIGH`.
+         *
+         * `HIGH` is AAC in an m4a container, so downloads never come back as FLAC.
+         */
+        val QUALITY_LADDER = listOf("HIGH", "LOW")
     }
 }
