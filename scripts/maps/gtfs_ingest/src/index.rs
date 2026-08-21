@@ -1,9 +1,18 @@
 //! Build the compact **world** transit index from parsed GTFS tables (possibly
 //! merged from many feeds) and serialize it to the on-disk `.transit` format.
 //!
-//! ON-DISK FORMAT v4 ("TRX2", little-endian, mmap-friendly, read via
+//! ON-DISK FORMAT v5 ("TRX2", little-endian, mmap-friendly, read via
 //! `read_unaligned` on device). THIS LAYOUT MUST STAY IN SYNC WITH
 //! `maps/src/main/rust/src/transit.rs`.
+//!
+//! v5 is v4 plus two purely additive sections (23-24) that let the device name a
+//! stop in Transitous/MOTIS's own id space without a network round-trip, which is
+//! what keeps the realtime `/stoptimes` overlay working now that the
+//! `/map/stops` coordinate-to-id lookup is gone. A MOTIS stop id is
+//! `<registry-file>-<source name>_<gtfs stop_id>`, so it is composed on device
+//! from a per-feed prefix and the raw `stop_id`. They are parallel `u32` STRINGS
+//! offsets rather than new `StopRec` fields because `StopRec` is a packed 16-byte
+//! stride indexed by arithmetic — widening it would invalidate every older pack.
 //!
 //! v4 is v3 plus three purely additive sections (20-22) carrying GTFS
 //! `shapes.txt` geometry, so a ride leg draws the path the vehicle actually
@@ -33,7 +42,7 @@
 //!     one pack without id collisions (ids are namespaced per feed at build).
 //!
 //! Header (80 bytes; all u32/i32 little-endian):
-//!   u32 magic (MAGIC), u32 version (VERSION=4), u32 section_count,
+//!   u32 magic (MAGIC), u32 version (VERSION=5), u32 section_count,
 //!   u32 stop_count, u32 route_count, u32 trip_count, u32 service_count,
 //!   u32 profile_count, u32 feed_count, u32 grid_cell_count, u32 feed_name_off,
 //!   i32 min_lat_e7, i32 min_lon_e7, i32 max_lat_e7, i32 max_lon_e7,
@@ -103,15 +112,24 @@
 //!                        vertex index within its route's shape (NONE when the
 //!                        route has none). Non-decreasing within a route, so the
 //!                        device can slice `shape[vertex(board)..=vertex(alight)]`.
+//!  23  FEED_MOTIS_PREFIX u32[feed_count] STRINGS offsets holding each feed's
+//!                        Transitous id prefix (`us-ca-SF-bayarea`), or NONE when
+//!                        the build did not know it. Interned, so the prefix costs
+//!                        one pool entry shared by every stop in that feed.
+//!  24  STOP_GTFS_ID    u32[stop_count] STRINGS offsets holding each stop's raw
+//!                        GTFS `stop_id`. Joined to the prefix with `_` to form a
+//!                        MOTIS stop id. Kept separate from `StopRec.code_off`,
+//!                        which falls back to `stop_id` only when `stop_code` is
+//!                        blank and so cannot be relied on.
 
 use crate::gtfs::{parse_gtfs_date, parse_gtfs_time, Csv, Shape};
 use crate::shapes;
 use std::collections::HashMap;
 
 pub const MAGIC: u32 = 0x5452_4958; // "TRIX"
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 pub const NONE: u32 = 0xFFFF_FFFF;
-pub const SECTION_COUNT: usize = 23;
+pub const SECTION_COUNT: usize = 25;
 pub const HEADER_LEN: usize = 80;
 
 const MAX_TRANSFER_M: f64 = 400.0;
@@ -179,6 +197,11 @@ struct StopTime {
 /// their GTFS ids are namespaced by feed so they never collide.
 pub struct FeedInput<'a> {
     pub name: String,
+    /// Transitous id prefix for this feed (`us-ca-SF-bayarea`), used to compose
+    /// MOTIS stop ids on device. Empty when the caller does not know it (the
+    /// world build mangles feed names), which writes NONE and makes the device
+    /// accessor return `None`.
+    pub motis_prefix: String,
     pub stops: &'a Csv,
     pub routes: &'a Csv,
     pub trips: &'a Csv,
@@ -290,6 +313,8 @@ pub fn build_index(
     let mut stop_lon: Vec<i32> = Vec::new();
     let mut stop_name_off: Vec<u32> = Vec::new();
     let mut stop_code_off: Vec<u32> = Vec::new();
+    // Raw GTFS `stop_id` per stop, for composing MOTIS ids on device (v5).
+    let mut stop_gtfs_id_off: Vec<u32> = Vec::new();
     let (mut min_lat, mut min_lon) = (i32::MAX, i32::MAX);
     let (mut max_lat, mut max_lon) = (i32::MIN, i32::MIN);
 
@@ -302,6 +327,7 @@ pub fn build_index(
 
     let mut feed_name_offs: Vec<u32> = Vec::new();
     let mut feed_tz_offs: Vec<u32> = Vec::new();
+    let mut feed_motis_prefix_offs: Vec<u32> = Vec::new();
     let mut raptor_routes: Vec<RaptorRoute> = Vec::new();
     let mut built_trips: Vec<BuiltTrip> = Vec::new();
     // `shapes.txt` polylines from every feed, keyed "feed|shape_id" so ids from
@@ -318,6 +344,8 @@ pub fn build_index(
             .and_then(|a| a.rows.first().map(|row| a.get(row, "agency_timezone").trim()))
             .unwrap_or("");
         feed_tz_offs.push(pool.intern(tz));
+        // Interned once per feed, so every stop's MOTIS id shares this entry.
+        feed_motis_prefix_offs.push(pool.intern(feed.motis_prefix.trim()));
 
         // --- Stops (this feed) -> global indices ---
         let mut stop_id_to_idx: HashMap<String, u32> = HashMap::new();
@@ -341,6 +369,9 @@ pub fn build_index(
             stop_lon.push(lon_e7);
             stop_name_off.push(pool.intern(name));
             stop_code_off.push(pool.intern(if code.is_empty() { id } else { code }));
+            // Interned explicitly: `code_off` above falls back to `stop_id` only
+            // when `stop_code` is blank, so it cannot stand in for the real id.
+            stop_gtfs_id_off.push(pool.intern(id));
             min_lat = min_lat.min(lat_e7);
             min_lon = min_lon.min(lon_e7);
             max_lat = max_lat.max(lat_e7);
@@ -874,6 +905,14 @@ pub fn build_index(
     for &off in &feed_tz_offs {
         append_u32(&mut sec_feed_tz, off);
     }
+    let mut sec_feed_motis_prefix = Vec::with_capacity(feed_motis_prefix_offs.len() * 4);
+    for &off in &feed_motis_prefix_offs {
+        append_u32(&mut sec_feed_motis_prefix, off);
+    }
+    let mut sec_stop_gtfs_id = Vec::with_capacity(stop_gtfs_id_off.len() * 4);
+    for &off in &stop_gtfs_id_off {
+        append_u32(&mut sec_stop_gtfs_id, off);
+    }
 
     // --- Assemble file: header + directory + aligned sections ---
     let section_names: [&'static str; SECTION_COUNT] = [
@@ -900,6 +939,8 @@ pub fn build_index(
         "SHAPE_COORDS",
         "ROUTE_SHAPE_IDX",
         "ROUTE_STOP_SHAPE",
+        "FEED_MOTIS_PREFIX",
+        "STOP_GTFS_ID",
     ];
     let sections: [&[u8]; SECTION_COUNT] = [
         &pool.bytes,
@@ -925,6 +966,8 @@ pub fn build_index(
         &sec_shape_coords,
         &sec_route_shape_idx,
         &sec_route_stop_shape,
+        &sec_feed_motis_prefix,
+        &sec_stop_gtfs_id,
     ];
 
     let dir_len = SECTION_COUNT * 16;
@@ -1121,6 +1164,14 @@ mod tests {
         fn feed_tz(&self, feed_idx: u32) -> String {
             let s = self.sec_bytes(17);
             self.read_str(ru32(s, feed_idx as usize * 4))
+        }
+        fn feed_motis_prefix(&self, feed_idx: u32) -> String {
+            let s = self.sec_bytes(23);
+            self.read_str(ru32(s, feed_idx as usize * 4))
+        }
+        fn stop_gtfs_id(&self, stop_idx: u32) -> String {
+            let s = self.sec_bytes(24);
+            self.read_str(ru32(s, stop_idx as usize * 4))
         }
         /// (service_idx, date, added) exceptions for one service, via the CSR.
         fn service_exceptions(&self, service_idx: u32) -> Vec<(u32, u32, u32)> {
@@ -1361,6 +1412,7 @@ mod tests {
         let feeds = vec![
             FeedInput {
                 name: "sfmuni".to_string(),
+                motis_prefix: "us-ca-SFMTA".to_string(),
                 stops: &as_,
                 routes: &ar,
                 trips: &at,
@@ -1372,6 +1424,9 @@ mod tests {
             },
             FeedInput {
                 name: "actransit".to_string(),
+                // Left empty on purpose: a feed whose MOTIS prefix the build does
+                // not know must still produce a valid pack.
+                motis_prefix: String::new(),
                 stops: &bs,
                 routes: &br,
                 trips: &bt,
@@ -1403,6 +1458,20 @@ mod tests {
         // v3: per-feed IANA timezone from agency.txt.
         assert_eq!(r.feed_tz(0), "America/Los_Angeles");
         assert_eq!(r.feed_tz(1), "America/New_York");
+        // v5: the Transitous prefix and raw stop_ids that compose a MOTIS stop id.
+        assert_eq!(r.feed_motis_prefix(0), "us-ca-SFMTA");
+        assert_eq!(r.feed_motis_prefix(1), "", "a feed with no known prefix writes NONE");
+        // Feed A's stops come first, so 0..3 are its stop_ids. These are the raw
+        // `stop_id` column, NOT `stop_code` ("A1"), which STOPS.code_off holds.
+        assert_eq!(r.stop_gtfs_id(0), "S1");
+        assert_eq!(r.stop_gtfs_id(1), "S2");
+        assert_eq!(r.stop_gtfs_id(2), "S3");
+        assert_ne!(
+            r.sec_bytes(23).len(),
+            0,
+            "FEED_MOTIS_PREFIX must be populated so the manifest proves v5 landed"
+        );
+        assert_eq!(r.sec_bytes(24).len(), 5 * 4, "STOP_GTFS_ID is u32[stop_count]");
 
         // Route 0 = feed A's N-Judah. Decode its trips + profile.
         let rec0 = r.route(0);
@@ -1542,6 +1611,7 @@ mod tests {
     ) -> Vec<FeedInput<'a>> {
         vec![FeedInput {
             name: "sfmuni".to_string(),
+            motis_prefix: "us-ca-SFMTA".to_string(),
             stops: &t.0,
             routes: &t.1,
             trips: &t.2,

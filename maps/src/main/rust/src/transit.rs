@@ -1,9 +1,15 @@
 //! On-device transit index loader + RAPTOR journey planner (P11b / world pack).
 //!
 //! Consumes the compact `.transit` index produced by the host tool
-//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout (format v4 "TRX2") is
+//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout (format v5 "TRX2") is
 //! documented at the top of that tool's `src/index.rs` and MUST stay in sync
 //! with the section constants and record accessors here.
+//!
+//! v5 adds two sections (23-24) holding a per-feed Transitous id prefix and each
+//! stop's raw GTFS `stop_id`, which compose into a MOTIS stop id
+//! (`us-ca-SF-bayarea_901201`). That is what lets the realtime `/stoptimes`
+//! overlay name a stop without the `/map/stops` coordinate lookup. v3 and v4
+//! packs are still accepted and simply report no MOTIS ids.
 //!
 //! v4 adds three sections (20-22) carrying GTFS `shapes.txt` geometry, so a ride
 //! leg draws the vehicle's real path instead of a line through its stops. v3
@@ -32,7 +38,7 @@ use std::collections::HashMap;
 // --- Format constants (mirror scripts/maps/gtfs_ingest/src/index.rs) ---
 const MAGIC: u32 = 0x5452_4958; // "TRIX"
 /// Newest format this reader understands.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 /// Oldest format still accepted. Reading both means an app update and a pack
 /// rebuild can land in either order without offline transit silently degrading
 /// to the online planner in between.
@@ -40,8 +46,8 @@ const VERSION_MIN: u32 = 3;
 pub const NONE: u32 = 0xFFFF_FFFF;
 const HEADER_LEN: usize = 80;
 /// Section count of the newest format. The section directory is sized to this
-/// and a v3 pack simply leaves the trailing entries empty.
-const SECTION_COUNT: usize = 23;
+/// and an older pack simply leaves the trailing entries empty.
+const SECTION_COUNT: usize = 25;
 const SECTION_COUNT_V3: usize = 20;
 
 const SEC_STRINGS: usize = 0;
@@ -67,6 +73,8 @@ const SEC_STOP_ROUTE_POS: usize = 19;
 const SEC_SHAPE_COORDS: usize = 20;
 const SEC_ROUTE_SHAPE_IDX: usize = 21;
 const SEC_ROUTE_STOP_SHAPE: usize = 22;
+const SEC_FEED_MOTIS_PREFIX: usize = 23;
+const SEC_STOP_GTFS_ID: usize = 24;
 
 const WALK_SPEED_M_S: f64 = 1.33;
 /// Access/egress radius: how far we will walk to the first / from the last stop.
@@ -251,10 +259,10 @@ impl TransitIndex {
     }
 
     /// Validate the TRX2 header + section directory. A pack whose version this
-    /// build does not know is rejected here, which is what lets the Kotlin side
-    /// fall back to the online planner instead of misreading it. Versions
+    /// build does not know is rejected here, which is what lets the caller treat
+    /// offline transit as unavailable rather than misread it. Versions
     /// `VERSION_MIN..=VERSION` are all accepted; the directory is sized from the
-    /// header's own `section_count`, so a v3 pack loads with the v4-only
+    /// header's own `section_count`, so an older pack loads with the newer
     /// sections left empty and every read of them gated on a non-zero length.
     fn parse(backing: Backing) -> Option<TransitIndex> {
         if backing.len() < HEADER_LEN {
@@ -651,6 +659,63 @@ impl TransitIndex {
         }
         let off = unsafe { read_at::<u32>(self.sec_ptr(SEC_FEED_TZ), feed_idx as usize) };
         self.read_str(off)
+    }
+
+    /// Transitous id prefix of feed `feed_idx` (`us-ca-SF-bayarea`), or `None` on
+    /// a pre-v5 pack or a feed whose prefix the build did not know.
+    fn feed_motis_prefix_of(&self, feed_idx: u32) -> Option<String> {
+        if feed_idx >= self.feed_count {
+            return None;
+        }
+        // v3/v4 packs carry no such section; its length is the version gate.
+        if self.sec[SEC_FEED_MOTIS_PREFIX].1 < (self.feed_count as usize) * 4 {
+            return None;
+        }
+        let off =
+            unsafe { read_at::<u32>(self.sec_ptr(SEC_FEED_MOTIS_PREFIX), feed_idx as usize) };
+        if off == NONE {
+            return None;
+        }
+        let prefix = self.read_str(off);
+        if prefix.is_empty() {
+            None
+        } else {
+            Some(prefix)
+        }
+    }
+
+    /// MOTIS/Transitous stop id for `stop_idx`, composed as
+    /// `<feed prefix>_<gtfs stop_id>` (e.g. `us-ca-SF-bayarea_901201`). This is
+    /// what the realtime overlay passes to `/stoptimes`, so it replaces the
+    /// coordinate-to-id round trip through `/map/stops`.
+    ///
+    /// `None` on a pre-v5 pack, or when the feed's prefix was unknown at build
+    /// time. `StopRec` carries no `feed_idx` — only `RouteRec` does — so the feed
+    /// is resolved through a route serving the stop, as [`Self::timezone_at`] does.
+    pub fn motis_stop_id(&self, stop_idx: u32) -> Option<String> {
+        if stop_idx >= self.stop_count {
+            return None;
+        }
+        if self.sec[SEC_STOP_GTFS_ID].1 < (self.stop_count as usize) * 4 {
+            return None;
+        }
+        let id_off =
+            unsafe { read_at::<u32>(self.sec_ptr(SEC_STOP_GTFS_ID), stop_idx as usize) };
+        if id_off == NONE {
+            return None;
+        }
+        let gtfs_id = self.read_str(id_off);
+        if gtfs_id.is_empty() {
+            return None;
+        }
+        let (rs, re) = self.stop_routes_range(stop_idx);
+        for i in rs..re {
+            let feed_idx = self.route(self.stop_route(i)).feed_idx;
+            if let Some(prefix) = self.feed_motis_prefix_of(feed_idx) {
+                return Some(format!("{prefix}_{gtfs_id}"));
+            }
+        }
+        None
     }
 
     /// IANA timezone of the feed covering `(lat, lon)`, resolved via the nearest
@@ -1533,6 +1598,8 @@ mod tests {
         lon: f64,
         name: &'static str,
         code: &'static str,
+        /// Raw GTFS `stop_id`, baked into v5's STOP_GTFS_ID section.
+        gtfs_id: &'static str,
     }
 
     struct Trip {
@@ -1574,8 +1641,9 @@ mod tests {
         services: Vec<Service>,
         /// `(service_idx, yyyymmdd, added)`, in any order.
         exceptions: Vec<(u32, u32, u32)>,
-        /// `(feed name, IANA timezone)`.
-        feeds: Vec<(&'static str, &'static str)>,
+        /// `(feed name, IANA timezone, Transitous MOTIS prefix)`. An empty prefix
+        /// reproduces a feed whose id space the build could not derive.
+        feeds: Vec<(&'static str, &'static str, &'static str)>,
     }
 
     #[derive(Default)]
@@ -1627,14 +1695,15 @@ mod tests {
 
     impl Pack {
         /// Serialize to a TRX2 blob at `version`. Overridable so both a
-        /// stale-pack rejection and the v3-still-parses guard can be tested;
-        /// below v4 the shape sections are omitted entirely.
+        /// stale-pack rejection and the older-format guards can be tested; below
+        /// v4 the shape sections are omitted, below v5 the MOTIS id sections are.
         fn build_with_version(&self, version: u32) -> Vec<u8> {
             let mut pool = Pool::new();
             let pack_name_off = pool.intern("testpack");
 
             let n_stops = self.stops.len();
             let mut sec_stops = Vec::new();
+            let mut sec_stop_gtfs_id = Vec::new();
             let (mut min_lat, mut min_lon) = (i32::MAX, i32::MAX);
             let (mut max_lat, mut max_lon) = (i32::MIN, i32::MIN);
             let lat_e7: Vec<i32> = self.stops.iter().map(|s| (s.lat * 1e7) as i32).collect();
@@ -1652,6 +1721,8 @@ mod tests {
                 let c = pool.intern(s.code);
                 u32b(&mut sec_stops, n);
                 u32b(&mut sec_stops, c);
+                let g = pool.intern(s.gtfs_id);
+                u32b(&mut sec_stop_gtfs_id, g);
             }
 
             // Profiles, deduplicated by encoded body exactly as the writer does.
@@ -1858,11 +1929,14 @@ mod tests {
 
             let mut sec_feeds = Vec::new();
             let mut sec_feed_tz = Vec::new();
-            for &(name, tz) in &self.feeds {
+            let mut sec_feed_motis_prefix = Vec::new();
+            for &(name, tz, motis) in &self.feeds {
                 let n = pool.intern(name);
                 let t = pool.intern(tz);
+                let m = pool.intern(motis);
                 u32b(&mut sec_feeds, n);
                 u32b(&mut sec_feed_tz, t);
+                u32b(&mut sec_feed_motis_prefix, m);
             }
 
             let mut sections: Vec<&[u8]> = vec![
@@ -1894,6 +1968,11 @@ mod tests {
                 sections.push(&shape_bytes);
                 sections.push(&sec_route_shape_idx);
                 sections.push(&sec_route_stop_shape);
+            }
+            // Likewise the MOTIS id sections exist only from v5.
+            if version >= 5 {
+                sections.push(&sec_feed_motis_prefix);
+                sections.push(&sec_stop_gtfs_id);
             }
             let section_count = sections.len();
 
@@ -1953,9 +2032,9 @@ mod tests {
     fn one_route_pack() -> Pack {
         Pack {
             stops: vec![
-                Stop { lat: 37.700, lon: -122.400, name: "Alpha", code: "A1" },
-                Stop { lat: 37.710, lon: -122.400, name: "Beta", code: "B2" },
-                Stop { lat: 37.720, lon: -122.400, name: "Gamma", code: "C3" },
+                Stop { lat: 37.700, lon: -122.400, name: "Alpha", code: "A1", gtfs_id: "901201" },
+                Stop { lat: 37.710, lon: -122.400, name: "Beta", code: "B2", gtfs_id: "901202" },
+                Stop { lat: 37.720, lon: -122.400, name: "Gamma", code: "C3", gtfs_id: "901203" },
             ],
             routes: vec![Route {
                 name: "N",
@@ -1981,7 +2060,7 @@ mod tests {
             }],
             services: vec![weekdays()],
             exceptions: Vec::new(),
-            feeds: vec![("sfmuni", "America/Los_Angeles")],
+            feeds: vec![("sfmuni", "America/Los_Angeles", "us-ca-SFMTA")],
         }
     }
 
@@ -2310,10 +2389,10 @@ mod tests {
         // Two feeds in two zones, far enough apart that the grid separates them.
         let pack = Pack {
             stops: vec![
-                Stop { lat: 37.700, lon: -122.400, name: "West1", code: "W1" },
-                Stop { lat: 37.710, lon: -122.400, name: "West2", code: "W2" },
-                Stop { lat: 40.700, lon: -74.000, name: "East1", code: "E1" },
-                Stop { lat: 40.710, lon: -74.000, name: "East2", code: "E2" },
+                Stop { lat: 37.700, lon: -122.400, name: "West1", code: "W1", gtfs_id: "W001" },
+                Stop { lat: 37.710, lon: -122.400, name: "West2", code: "W2", gtfs_id: "W002" },
+                Stop { lat: 40.700, lon: -74.000, name: "East1", code: "E1", gtfs_id: "E001" },
+                Stop { lat: 40.710, lon: -74.000, name: "East2", code: "E2", gtfs_id: "E002" },
             ],
             routes: vec![
                 Route {
@@ -2348,8 +2427,8 @@ mod tests {
             services: vec![weekdays()],
             exceptions: Vec::new(),
             feeds: vec![
-                ("sfmuni", "America/Los_Angeles"),
-                ("mta", "America/New_York"),
+                ("sfmuni", "America/Los_Angeles", "us-ca-SFMTA"),
+                ("mta", "America/New_York", "us-ny-MTA"),
             ],
         };
         let idx = pack.index();
@@ -2370,8 +2449,8 @@ mod tests {
 
     #[test]
     fn a_v3_pack_still_parses_and_plans() {
-        // The rollout guard: a device on the v4 reader must keep serving offline
-        // transit from a v3 pack instead of silently falling back to MOTIS.
+        // The rollout guard: a device on the newest reader must keep serving
+        // offline transit from a v3 pack rather than rejecting it.
         let pack = shaped_route_pack();
         let idx = TransitIndex::from_bytes(pack.build_with_version(VERSION_MIN))
             .expect("a v3 pack still loads");
@@ -2383,6 +2462,39 @@ mod tests {
             6,
             "v3 carries no shape sections, so the ride draws one vertex per stop"
         );
+    }
+
+    #[test]
+    fn a_v5_pack_composes_motis_stop_ids() {
+        let idx = one_route_pack().index();
+        // <feed prefix>_<raw gtfs stop_id>, the id `/stoptimes` expects. Note it is
+        // the stop_id and not `code` ("A1"), which is a different GTFS column.
+        assert_eq!(idx.motis_stop_id(0).as_deref(), Some("us-ca-SFMTA_901201"));
+        assert_eq!(idx.motis_stop_id(2).as_deref(), Some("us-ca-SFMTA_901203"));
+        // Out of range rather than a panic or a bogus id.
+        assert_eq!(idx.motis_stop_id(99), None);
+    }
+
+    #[test]
+    fn pre_v5_packs_report_no_motis_stop_id() {
+        // The two id sections are absent, so the accessor must degrade to None
+        // instead of reading whatever follows the shape sections.
+        let pack = one_route_pack();
+        for version in [VERSION_MIN, 4] {
+            let idx = TransitIndex::from_bytes(pack.build_with_version(version))
+                .expect("an older pack still loads");
+            assert_eq!(idx.motis_stop_id(0), None, "v{version} carries no MOTIS ids");
+        }
+    }
+
+    #[test]
+    fn a_feed_with_no_known_prefix_reports_no_motis_stop_id() {
+        // build_world_transit.sh mangles feed names, so its packs cannot name a
+        // Transitous source; those stops must simply have no id.
+        let mut pack = one_route_pack();
+        pack.feeds = vec![("sfmuni", "America/Los_Angeles", "")];
+        let idx = pack.index();
+        assert_eq!(idx.motis_stop_id(0), None);
     }
 
     #[test]

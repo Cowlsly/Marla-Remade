@@ -178,6 +178,9 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[(String, PathBuf)]) -> Result<(
         .iter()
         .map(|t| FeedInput {
             name: t.name.clone(),
+            // Phase 3 plumbs the real Transitous source name through the manifest;
+            // empty writes NONE, which makes the device accessor return None.
+            motis_prefix: String::new(),
             stops: &t.stops,
             routes: &t.routes,
             trips: &t.trips,
