@@ -11,7 +11,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -61,13 +60,13 @@ fun AlarmRingingScreen(
                 Button(
                     onClick = onDismiss,
                     modifier = Modifier.fillMaxWidth().height(96.dp),
-                    shape = RoundedCornerShape(28.dp),
+                    shape = MaterialTheme.shapes.extraLarge,
                     colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary, contentColor = MaterialTheme.colorScheme.onPrimary),
                     elevation = ButtonDefaults.buttonElevation(defaultElevation = 8.dp)
                 ) {
                     Text(text = stringResource(R.string.button_stop), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.ExtraBold)
                 }
-                FilledTonalButton(onClick = onSnooze, modifier = Modifier.fillMaxWidth().height(64.dp), shape = RoundedCornerShape(28.dp)) {
+                FilledTonalButton(onClick = onSnooze, modifier = Modifier.fillMaxWidth().height(64.dp), shape = MaterialTheme.shapes.extraLarge) {
                     IconPause(); Spacer(modifier = Modifier.width(8.dp)); Text(text = stringResource(R.string.button_snooze), style = MaterialTheme.typography.titleMedium)
                 }
             }

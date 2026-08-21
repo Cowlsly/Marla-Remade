@@ -12,7 +12,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -33,6 +32,7 @@ import com.vayunmathur.clock.platform.StopwatchUiState
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FloatingActionButton
 import com.vayunmathur.library.ui.HorizontalDivider
+import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconPause
 import com.vayunmathur.library.ui.IconPlay
 import com.vayunmathur.library.ui.IconRestartAlt
@@ -41,6 +41,7 @@ import com.vayunmathur.library.ui.LazyListScaffold
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.VerticalFloatingToolbar
 import kotlin.time.Duration.Companion.seconds
 
 /**
@@ -62,15 +63,22 @@ fun StopwatchScreen(backStack: com.vayunmathur.library.util.NavBackStack<com.vay
     }
 
     LazyListScaffold(floatingActionButton = {
-        Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+        // Lap and reset are peers of start/stop, not separate decisions, so they share the
+        // stopwatch's one control surface rather than stacking as three loose FABs. A toolbar
+        // rather than a FAB menu because lap is timed to whatever the user is measuring and
+        // cannot afford an expand tap first.
+        VerticalFloatingToolbar(
+            floatingActionButton = {
+                FloatingActionButton({ actions.toggleStopwatch() }) {
+                    if(isRunning) IconPause() else IconPlay()
+                }
+            },
+        ) {
             if(isRunning) {
-                FloatingActionButton({ actions.addLap() }) { IconTimer() }
+                IconButton({ actions.addLap() }) { IconTimer() }
             }
             if(countingTime > 0.seconds) {
-                FloatingActionButton(onClick = { actions.resetStopwatch() }) { IconRestartAlt() }
-            }
-            FloatingActionButton({ actions.toggleStopwatch() }) {
-                if(isRunning) IconPause() else IconPlay()
+                IconButton({ actions.resetStopwatch() }) { IconRestartAlt() }
             }
         }
     }, horizontalPadding = 16.dp) {
@@ -115,7 +123,7 @@ fun StopwatchScreen(backStack: com.vayunmathur.library.util.NavBackStack<com.vay
         item {
             Surface(
                 modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(12.dp),
+                shape = MaterialTheme.shapes.large,
                 color = MaterialTheme.colorScheme.surfaceContainer
             ) {
                 Column {
