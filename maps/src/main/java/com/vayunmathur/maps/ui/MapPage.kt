@@ -254,9 +254,9 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
     LaunchedEffect(Unit) {
         // Restore-on-recompose: raise the sheet if something is already selected —
         // unless a deep link / auto-select is about to open the compact PANE instead
-        // (handled by the pendingFocus effect below), so we don't full-expand first.
+        // (handled by the pendingFocus effect below).
         if (selectedFeature != null && viewModel.pendingFocus.value == null) {
-            sheetState.expand()
+            sheetState.partialExpand()
         }
     }
 
@@ -378,7 +378,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         Column(Modifier.padding(horizontal = 16.dp).padding(top = 8.dp)) {
             BottomSheetContent(viewModel, selectedFeature, { viewModel.set(it) }, route, selectedRouteType, { selectedRouteType = it }, inactiveNavigation, savedPlacesViewModel, transitViewModel, navState)
         }
-    }, Modifier, sheetState, 170.dp) { paddingValues ->
+    }, Modifier, sheetState, 170.dp, contentKey = listOf(selectedFeature, selectedRouteType)) { paddingValues ->
         AppScaffold(
             title = {
                 // Search bar lives IN the top app bar (Google-Maps style).
@@ -527,16 +527,16 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         selectedFeature as SpecificFeature.Route
                                     )
                                     viewModel.set(pinHit)
-                                    sheetState.expand()
+                                    sheetState.partialExpand()
                                     return@launch
                                 }
 
                                 // Otherwise fall back to basemap admin labels
-                                // (country/region). Native POIs are suppressed
+                                // (country/region/city). Native POIs are suppressed
                                 // and the amenity-DB enrichment path is gone.
                                 val features = projection?.queryRenderedFeatures(
                                     offset,
-                                    setOf("places_country", "places_region").flatMap {
+                                    setOf("places_country", "places_region", "places_locality").flatMap {
                                         listOf("${it}_base", "${it}_hybrid")
                                     }.toSet()
                                 ) ?: emptyList()
@@ -556,7 +556,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                         selectedFeature as SpecificFeature.Route
                                     )
                                     viewModel.set(firstFeature)
-                                    sheetState.expand()
+                                    sheetState.partialExpand()
                                     return@launch
                                 }
 
@@ -569,7 +569,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                             selectedFeature as SpecificFeature.Route
                                         )
                                         viewModel.set(place)
-                                        coroutineScope.launch { sheetState.expand() }
+                                        coroutineScope.launch { sheetState.partialExpand() }
                                     }
                                 }
                             }
@@ -796,7 +796,7 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
                                 }
                                 viewModel.set(SpecificFeature.Route(listOf(null, feature)))
                                 showParkingSheet = false
-                                coroutineScope.launch { sheetState.expand() }
+                                coroutineScope.launch { sheetState.partialExpand() }
                             },
                             onNoteChange = { parkingViewModel.updateNote(it) },
                         )

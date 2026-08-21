@@ -58,6 +58,14 @@ import kotlinx.coroutines.launch
  * and [Animatable.updateBounds] makes a fling decay stop there too, so
  * "the user cannot dismiss this sheet" is enforced by construction rather than by
  * vetoing state changes after the fact.
+ *
+ * The upper bound is the lesser of the space available and the sheet content's
+ * own height, so a sheet holding two lines of text does not stretch to fill the
+ * window. Content height is learned by observation — whenever the content
+ * measures shorter than the height it was offered, that shorter height becomes
+ * the ceiling — because the content typically ends in a `LazyColumn`, whose
+ * intrinsic height cannot be queried. The observation is discarded via
+ * [resetContentCap] when the host swaps in different content.
  */
 @Stable
 class FreeHeightSheetState(private val initialValue: SheetValue) {
@@ -66,6 +74,10 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
 
     private var peekPx = 0f
     private var expandedPx = 0f
+    /** Space the host can give the sheet, before the content ceiling applies. */
+    private var availablePx = 0f
+    /** Tallest the content has been seen to need. [Float.MAX_VALUE] = not yet known. */
+    private var contentCapPx = Float.MAX_VALUE
     /**
      * False until the host has measured itself and the bounds mean anything. A
      * snapshot state, because a programmatic [expand] can arrive before the first
@@ -86,8 +98,8 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
      * the current height stay consistent with what is on screen.
      */
     internal suspend fun onMeasured(peek: Float, expanded: Float) {
-        peekPx = peek
-        expandedPx = expanded.coerceAtLeast(peek)
+        availablePx = expanded
+        applyBounds(peek)
         if (!measured) {
             offset.snapTo(
                 when (initialValue) {
@@ -105,6 +117,45 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
             // back inside the new bounds here.
             armBounds()
         }
+    }
+
+    /**
+     * Derive [expandedPx] and [peekPx] from the available space and the content
+     * ceiling. The peek is clamped rather than used as a floor: content shorter
+     * than the peek should shrink the sheet, not leave dead space below it.
+     */
+    private fun applyBounds(peek: Float) {
+        expandedPx = availablePx.coerceAtMost(contentCapPx).coerceAtLeast(0f)
+        peekPx = peek.coerceAtMost(expandedPx)
+    }
+
+    /**
+     * Report what the sheet content actually measured when offered `offered`
+     * pixels. Slack means the content is fully visible and needs no more room, so
+     * `measured` becomes the new ceiling; filling the offer says nothing about how
+     * much taller it might be, so the ceiling is left alone and re-probed as the
+     * user drags further up.
+     */
+    internal fun onContentHeight(contentHeight: Float, offered: Float, scope: CoroutineScope) {
+        if (!measured || contentHeight <= 0f || contentHeight >= offered) return
+        if (contentHeight == contentCapPx) return
+        contentCapPx = contentHeight
+        applyBounds(peekPx)
+        if (offset.value > expandedPx) {
+            scope.launch { offset.snapTo(expandedPx) }
+        }
+        armBounds()
+    }
+
+    /**
+     * Forget the learned content ceiling, so the next layout re-probes it. The
+     * host calls this when it swaps in different content, which may well be
+     * taller than whatever the last content settled on.
+     */
+    internal fun resetContentCap(peek: Float) {
+        contentCapPx = Float.MAX_VALUE
+        applyBounds(peek)
+        armBounds()
     }
 
     private suspend fun awaitMeasured() {
@@ -200,9 +251,18 @@ fun rememberFreeHeightSheetState(
  * `LazyColumn` — measured at full height, so its scroll extent would be wrong and
  * the nested-scroll edge detection below would misfire.
  *
+ * The height is a maximum, not an exact size: content shorter than the sheet's
+ * current height shrinks the sheet to fit rather than leaving blank surface below
+ * it, and that shorter height also becomes the ceiling a drag can reach.
+ *
  * @param sheetPeekHeight visible sheet content height when collapsed, above the
- *   navigation bar. Also the bottom padding handed to [content], so a collapsed
- *   sheet never covers anything [content] pins to the bottom.
+ *   navigation bar. This is the resting height the sheet opens at, so it should be
+ *   tall enough to show the content's header. Also the bottom padding handed to
+ *   [content], so a collapsed sheet never covers anything [content] pins to the
+ *   bottom. Content shorter than this shrinks the sheet below it.
+ * @param contentKey identifies what [sheetContent] is currently showing. When it
+ *   changes, the learned content-height ceiling is discarded so taller content is
+ *   not trapped at the previous content's height.
  */
 @Composable
 fun FreeHeightBottomSheetScaffold(
@@ -211,6 +271,7 @@ fun FreeHeightBottomSheetScaffold(
     state: FreeHeightSheetState = rememberFreeHeightSheetState(),
     sheetPeekHeight: Dp = BottomSheetDefaults.SheetPeekHeight,
     sheetContainerColor: Color = BottomSheetDefaults.ContainerColor,
+    contentKey: Any? = null,
     content: @Composable (PaddingValues) -> Unit,
 ) {
     val density = LocalDensity.current
@@ -227,6 +288,10 @@ fun FreeHeightBottomSheetScaffold(
             state.onMeasured(peekPx.toFloat(), (containerHeightPx - statusBarPx).toFloat())
         }
     }
+
+    // New content may well be taller than whatever the last content settled at, so
+    // the learned ceiling cannot carry over.
+    LaunchedEffect(contentKey, peekPx) { state.resetContentCap(peekPx.toFloat()) }
 
     val scope = rememberCoroutineScope()
     val nestedScroll = remember(state, scope) { sheetNestedScroll(state, scope) }
@@ -266,14 +331,17 @@ fun FreeHeightBottomSheetScaffold(
         val width = constraints.maxWidth
         val height = constraints.maxHeight
         // Read in the layout phase, so a drag remeasures without recomposing.
-        val sheetHeight = state.offsetPx.toInt().coerceIn(0, height)
+        val offered = state.offsetPx.toInt().coerceIn(0, height)
         val body = measurables[0].measure(constraints)
+        // A maximum, not an exact height: a short sheet wraps its content instead of
+        // padding itself out with blank surface.
         val sheet = measurables[1].measure(
-            constraints.copy(minHeight = sheetHeight, maxHeight = sheetHeight),
+            constraints.copy(minHeight = 0, maxHeight = offered),
         )
+        state.onContentHeight(sheet.height.toFloat(), offered.toFloat(), scope)
         layout(width, height) {
             body.place(0, 0)
-            sheet.place(0, height - sheetHeight)
+            sheet.place(0, height - sheet.height)
         }
     }
 }
