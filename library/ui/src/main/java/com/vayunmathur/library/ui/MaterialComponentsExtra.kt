@@ -176,6 +176,31 @@ fun FloatingActionButtonMenuScope.FloatingActionButtonMenuItem(
     modifier: Modifier = Modifier,
 ) = Material3FloatingActionButtonMenuItem(onClick = onClick, text = text, icon = icon, modifier = modifier)
 
+// --- Expressive floating toolbar ---
+/**
+ * A floating container of related actions, with one of them promoted to a FAB.
+ *
+ * For a screen whose controls are a set rather than a single action: three separate floating
+ * buttons stacked in a Column read as three unrelated decisions, while a toolbar reads as one
+ * control surface with a primary action attached. Unlike [FloatingActionButtonMenu] nothing is
+ * hidden behind an expand tap, so it suits actions that must stay one tap away.
+ *
+ * [expanded] controls whether [content] is shown beside the [floatingActionButton] or collapsed
+ * away to leave just the FAB; pass a constant `true` for a toolbar that is always open.
+ */
+@Composable
+fun VerticalFloatingToolbar(
+    floatingActionButton: @Composable () -> Unit,
+    modifier: Modifier = Modifier,
+    expanded: Boolean = true,
+    content: @Composable ColumnScope.() -> Unit,
+) = androidx.compose.material3.VerticalFloatingToolbar(
+    expanded = expanded,
+    floatingActionButton = floatingActionButton,
+    modifier = modifier,
+    content = content,
+)
+
 // --- Short navigation bar (expressive) ---
 @Composable
 fun ShortNavigationBar(
