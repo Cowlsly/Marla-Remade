@@ -4,6 +4,7 @@ package com.vayunmathur.web.platform
 
 import kotlin.uuid.Uuid
 import android.content.Context
+import android.content.pm.PackageManager
 import android.net.Uri
 import android.util.Log
 import androidx.compose.runtime.getValue
@@ -22,7 +23,9 @@ import com.vayunmathur.web.data.SitePermission
 import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.data.ShieldSetting
 import com.vayunmathur.web.data.StorageInfo
+import androidx.core.content.ContextCompat
 import com.vayunmathur.web.domain.EffectiveShields
+import com.vayunmathur.web.domain.LocalNetwork
 import com.vayunmathur.web.domain.ShieldLevel
 import com.vayunmathur.web.domain.ShieldsSettings
 import com.vayunmathur.web.platform.shields.FarblingConfig
@@ -47,6 +50,7 @@ private const val P_SHIELD_TRACKERS = "web_shield_trackers"
 private const val P_SHIELD_COSMETIC = "web_shield_cosmetic"
 private const val P_SHIELD_FINGERPRINT = "web_shield_fingerprint"
 private const val P_SHIELD_HTTPS = "web_shield_https"
+private const val P_LOCAL_NETWORK_DENIED = "web_local_network_denied"
 
 data class PermissionPrompt(
     val id: String = Uuid.random().toString(),
@@ -73,6 +77,10 @@ class WebViewModel(
 
     companion object {
         const val DEFAULT_WINDOW_ID = "main"
+
+        /** Asked at most once per process, however many windows are open. */
+        @Volatile
+        private var localNetworkAsked = false
     }
 
     // Persistence keys are namespaced per window; the default window keeps the legacy keys for back-compat.
@@ -151,6 +159,13 @@ class WebViewModel(
     var pendingGeolocationPrompt by mutableStateOf<Triple<String, () -> Unit, () -> Unit>?>(null)
         private set
 
+    /** The LAN host whose page needs [WebPermissions.LOCAL_NETWORK] before it can load. */
+    var pendingLocalNetworkHost by mutableStateOf<String?>(null)
+        private set
+
+    /** A previous denial, remembered across process death so we stop asking. */
+    private var localNetworkDenied = false
+
     var pendingFileChooser by mutableStateOf<Pair<android.webkit.ValueCallback<Array<Uri>>, android.webkit.WebChromeClient.FileChooserParams>?>(null)
         private set
 
@@ -180,6 +195,7 @@ class WebViewModel(
                     val js = sp.getBoolean(P_JS_ENABLED, true)
                     val blockThird = sp.getBoolean(P_BLOCK_THIRD_PARTY, false)
                     val desktop = sp.getBoolean(P_DESKTOP_MODE, false)
+                    val lanDenied = sp.getBoolean(P_LOCAL_NETWORK_DENIED, false)
                     val defaults = ShieldsSettings.AGGRESSIVE_DEFAULTS
                     val savedShields = ShieldsSettings(
                         level = sp.getString(P_SHIELD_LEVEL, null)
@@ -197,6 +213,7 @@ class WebViewModel(
                         jsEnabled = js
                         blockThirdPartyCookies = blockThird
                         desktopMode = desktop
+                        localNetworkDenied = lanDenied
 
                         // Capture any tabs that were already created (e.g., from an external intent arriving before restore finishes)
                         val preExisting = tabs.toList()
@@ -461,8 +478,44 @@ class WebViewModel(
     fun navigateActiveTab(input: String) {
         val active = activeTab ?: return
         val dest = BrowserUtils.toNavigationUrl(input, searchEngine)
+        noteNavigation(dest)
         onTabUrlChange(active.id, dest)
         omniboxFocused = false
+    }
+
+    // ---- Local network permission ----
+
+    /**
+     * Raises [pendingLocalNetworkHost] when [url] is a LAN address we cannot reach yet.
+     *
+     * Called from the omnibox (so the prompt lands before the first request in the common
+     * typed-URL case) and from `onPageStarted` as the catch-all, since
+     * `shouldOverrideUrlLoading` never fires for a programmatic `loadUrl`, a redirect or a
+     * session restore.
+     *
+     * Classification is syntactic only — this runs on the main thread and must never do DNS.
+     */
+    fun noteNavigation(url: String) {
+        val permission = WebPermissions.LOCAL_NETWORK ?: return
+        if (localNetworkAsked || localNetworkDenied || pendingLocalNetworkHost != null) return
+        val host = LocalNetwork.hostOf(url)
+        if (host.isEmpty() || !LocalNetwork.isLanHostSyntactic(host)) return
+        if (ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED) return
+        pendingLocalNetworkHost = host
+    }
+
+    /** Dismisses the prompt. A denial is remembered so LAN pages stop nagging. */
+    fun clearLocalNetworkPrompt(denied: Boolean) {
+        pendingLocalNetworkHost = null
+        localNetworkAsked = true
+        if (!denied) return
+        localNetworkDenied = true
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching {
+                context.getSharedPreferences("web_prefs", Context.MODE_PRIVATE)
+                    .edit().putBoolean(P_LOCAL_NETWORK_DENIED, true).apply()
+            }.onFailure { Log.e(TAG, "persist local network denial failed", it) }
+        }
     }
 
     fun recordHistoryVisit(url: String, title: String) {

@@ -48,6 +48,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.vayunmathur.library.ui.ExternalIntents
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
@@ -83,6 +84,7 @@ import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
 import com.vayunmathur.web.platform.BrowserUtils
 import com.vayunmathur.web.platform.PwaHelper
 import com.vayunmathur.web.platform.PwaInfo
+import com.vayunmathur.web.platform.WebPermissions
 import com.vayunmathur.web.platform.WebViewModel
 import com.vayunmathur.web.platform.isNewTab
 
@@ -121,6 +123,14 @@ fun BrowserPage(
     }
     val singleDocLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         viewModel.deliverFileChooserResult(uri?.let { arrayOf(it) })
+    }
+
+    // A conditional remember, but the condition is the SDK level: constant for the process.
+    // Below API 36 there is no permission to ask for and the prompt never appears.
+    val localNetworkRequest = WebPermissions.LOCAL_NETWORK?.let { permission ->
+        rememberPermissionRequest(permission) { granted ->
+            viewModel.clearLocalNetworkPrompt(denied = !granted)
+        }
     }
 
     var showMenu by remember { mutableStateOf(false) }
@@ -475,6 +485,17 @@ fun BrowserPage(
                 origin = origin,
                 onAllow = { viewModel.grantGeolocation(origin) },
                 onDeny = { viewModel.denyGeolocation() }
+            )
+        }
+
+        viewModel.pendingLocalNetworkHost?.let { host ->
+            LocalNetworkPromptSheet(
+                host = host,
+                // Tap-gated: rememberPermissionRequest opens system settings on a
+                // denial-without-rationale, so launching this automatically would eject a
+                // permanently-denied user out of the app on every LAN page load.
+                onAllow = { localNetworkRequest?.invoke() },
+                onDeny = { viewModel.clearLocalNetworkPrompt(denied = true) },
             )
         }
 

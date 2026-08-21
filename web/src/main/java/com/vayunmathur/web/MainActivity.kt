@@ -21,6 +21,7 @@ import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.util.OfflineAware
 import com.vayunmathur.web.data.WebRepository
 import com.vayunmathur.web.platform.shields.ShieldsEngine
+import com.vayunmathur.web.platform.shields.ShieldsServiceWorkerClient
 import com.vayunmathur.web.platform.WebViewModel
 import com.vayunmathur.web.platform.WebViewModelFactory
 import kotlinx.coroutines.Dispatchers
@@ -40,6 +41,8 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         // Parses ~8 MB of filter lists off the main thread. Shields fail open until it lands.
         lifecycleScope.launch { ShieldsEngine.load(applicationContext) }
+        // Before any WebView exists: service-worker fetches bypass the WebViewClient entirely.
+        ShieldsServiceWorkerClient.registerOnce(applicationContext)
 
         // Each task (window) carries its own window id + incognito flag so it keeps an independent tab set.
         val windowId = intent?.getStringExtra(EXTRA_WINDOW_ID) ?: WebViewModel.DEFAULT_WINDOW_ID

@@ -42,11 +42,20 @@ import com.vayunmathur.library.ui.rememberMultiplePermissionRequest
 import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.web.platform.shields.FarblingConfig
 import com.vayunmathur.web.platform.shields.ShieldsEngine
+import com.vayunmathur.web.platform.shields.ShieldsServiceWorkerClient
 import com.vayunmathur.web.platform.shields.ShieldsWebViewClient
 import com.vayunmathur.web.ui.applySystemDarkMode
 import com.vayunmathur.web.domain.EffectiveShields
 import com.vayunmathur.web.domain.ShieldsSettings
 
+/**
+ * A pinned installed site, running in its own task with no browser chrome.
+ *
+ * The cleartext gate applies here as everywhere, but there is no local-network prompt: PWAs
+ * install from https origins and have no omnibox, and the permission is app-wide so granting it
+ * once in the browser covers them. The seam is a PWA installed from a LAN origin — it gets
+ * blocked with no in-PWA way to grant.
+ */
 class PwaActivity : ComponentActivity() {
 
     companion object {
@@ -63,6 +72,8 @@ class PwaActivity : ComponentActivity() {
         // Installed sites get the same shields as the browser; loading is a no-op if the
         // engine is already up in this process.
         lifecycleScope.launch { ShieldsEngine.load(applicationContext) }
+        // A pinned shortcut can be the process entry point without MainActivity ever running.
+        ShieldsServiceWorkerClient.registerOnce(applicationContext)
         handleIntent(intent)
         setContent {
             DynamicTheme {

@@ -233,7 +233,12 @@ fun WebViewBrowser(
                     override fun onPageStarted(view: WebView, url: String?, favicon: Bitmap?) {
                         super.onPageStarted(view, url, favicon)
                         viewModel.resetBlockedCount(tabId)
-                        url?.let { viewModel.onTabUrlChange(tabId, it) }
+                        url?.let {
+                            viewModel.onTabUrlChange(tabId, it)
+                            // Catch-all for the loads shouldOverrideUrlLoading never sees:
+                            // programmatic loadUrl, redirects and session restore.
+                            viewModel.noteNavigation(it)
+                        }
                         viewModel.onTabCanGoBack(tabId, view.canGoBack())
                         viewModel.onTabCanGoForward(tabId, view.canGoForward())
                     }

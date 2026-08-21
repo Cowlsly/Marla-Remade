@@ -118,4 +118,8 @@
     <string name="copy_link">Copy link</string>
     <string name="open_in_new_tab">Open in new tab</string>
     <string name="link_copied">Link copied</string>
+    <string name="cleartext_blocked_title">Insecure connection blocked</string>
+    <string name="cleartext_blocked_message">%1$s was requested over plain HTTP. Unencrypted connections are only allowed to devices on your local network.</string>
+    <string name="local_network_title">Allow local network access?</string>
+    <string name="local_network_message">%1$s looks like a device on your network. Android needs local network permission before this page can load.</string>
 </resources>

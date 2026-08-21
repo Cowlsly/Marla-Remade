@@ -110,6 +110,21 @@ internal fun GeolocationPromptSheet(
 }
 
 @Composable
+internal fun LocalNetworkPromptSheet(
+    host: String,
+    onAllow: () -> Unit,
+    onDeny: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDeny,
+        title = { Text(stringResource(R.string.local_network_title)) },
+        text = { Text(stringResource(R.string.local_network_message, host)) },
+        confirmButton = { TextButton(onClick = onAllow) { Text(stringResource(R.string.allow)) } },
+        dismissButton = { TextButton(onClick = onDeny) { Text(stringResource(R.string.block)) } }
+    )
+}
+
+@Composable
 internal fun FileChooserSheet(
     mimeTypes: List<String>,
     onFiles: (Array<Uri>?) -> Unit,

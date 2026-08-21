@@ -1,6 +1,7 @@
 package com.vayunmathur.web.platform
 
 import android.net.Uri
+import com.vayunmathur.web.domain.LocalNetwork
 import kotlinx.serialization.Serializable
 
 @Serializable
@@ -53,6 +54,10 @@ enum class SitePermissionType(val key: String, val displayName: String) {
 }
 
 object BrowserUtils {
+    // Deliberately requires a dot (or localhost, or a dotted quad): loosening this to accept
+    // dotless hosts so `router` navigates would turn every one-word search - `weather`,
+    // `kotlin` - into a failed navigation. `nas.local` and `192.168.1.1:8080` already match,
+    // and `http://router` works through the explicit-scheme path below.
     private val URL_LIKE = Regex(
         "^(https?://)?([a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}|localhost|\\d{1,3}(\\.\\d{1,3}){3})(:\\d+)?(/.*)?$"
     )
@@ -76,7 +81,10 @@ object BrowserUtils {
         if (trimmed.isEmpty()) return searchEngine.homepage
         if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) return trimmed
         if (looksLikeUrl(trimmed)) {
-            return if (trimmed.startsWith("http")) trimmed else "https://$trimmed"
+            // LAN targets are nearly all plain http and have no publicly trusted certificate,
+            // so defaulting them to https would fail before the page ever loaded.
+            val lan = LocalNetwork.isLanHostSyntactic(LocalNetwork.hostOf(trimmed))
+            return if (lan) "http://$trimmed" else "https://$trimmed"
         }
         return searchEngine.buildQueryUrl(trimmed)
     }

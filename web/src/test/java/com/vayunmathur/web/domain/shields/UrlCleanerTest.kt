@@ -78,6 +78,25 @@ class UrlCleanerTest {
     }
 
     @Test
+    fun `does not upgrade LAN hosts`() {
+        assertNull(UrlCleaner.httpsUpgrade("http://nas.local/"))
+        assertNull(UrlCleaner.httpsUpgrade("http://192.168.1.1/"))
+        assertNull(UrlCleaner.httpsUpgrade("http://router/"))
+        assertNull(UrlCleaner.httpsUpgrade("http://[::1]:3000/"))
+    }
+
+    @Test
+    fun `does not upgrade public bare IPs either`() {
+        // Not LAN, but still has no certificate a public CA would issue.
+        assertNull(UrlCleaner.httpsUpgrade("http://1.2.3.4/"))
+    }
+
+    @Test
+    fun `still upgrades ordinary public hosts`() {
+        assertEquals("https://example.com/", UrlCleaner.httpsUpgrade("http://example.com/"))
+    }
+
+    @Test
     fun `upgrades hosts that only look numeric`() {
         assertEquals("https://1.2.3.4.example.com/", UrlCleaner.httpsUpgrade("http://1.2.3.4.example.com/"))
     }

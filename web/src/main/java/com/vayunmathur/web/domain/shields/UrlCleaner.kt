@@ -1,5 +1,7 @@
 package com.vayunmathur.web.domain.shields
 
+import com.vayunmathur.web.domain.LocalNetwork
+
 /**
  * Brave's query-parameter stripping and HTTPS upgrading for top-level navigations.
  *
@@ -66,28 +68,17 @@ object UrlCleaner {
      * The `https://` form of an `http://` [url], or null when it is already secure or is
      * an address HTTPS cannot serve.
      *
-     * localhost and bare IPs are left alone: they have no publicly trusted certificate and
-     * upgrading them breaks local development servers, which is also Brave's behaviour.
+     * Bare IPs and LAN hosts are left alone: they have no publicly trusted certificate and
+     * upgrading them breaks local development servers, which is also Brave's behaviour. Both
+     * clauses are needed — a public bare IP like `1.2.3.4` is not LAN but still has no valid
+     * cert, and `nas.local` is LAN but not an IP.
      */
     fun httpsUpgrade(url: String): String? {
         if (!url.startsWith("http://", ignoreCase = true)) return null
-        val host = hostOf(url)
-        if (host.isEmpty() || host == "localhost" || host.endsWith(".localhost")) return null
-        if (isIpLiteral(host)) return null
+        val host = LocalNetwork.hostOf(url)
+        if (host.isEmpty()) return null
+        if (LocalNetwork.isIpLiteral(host)) return null
+        if (LocalNetwork.isLanHostSyntactic(host)) return null
         return "https://" + url.substring("http://".length)
-    }
-
-    private fun hostOf(url: String): String {
-        val afterScheme = url.substringAfter("://", "")
-        val authority = afterScheme.substringBefore('/').substringBefore('?').substringBefore('#')
-        return authority.substringAfter('@').substringBefore(':').lowercase()
-    }
-
-    private fun isIpLiteral(host: String): Boolean {
-        if (host.startsWith("[")) return true // IPv6
-        val octets = host.split('.')
-        return octets.size == 4 && octets.all { part ->
-            part.isNotEmpty() && part.all { it.isDigit() } && part.toInt() <= 255
-        }
     }
 }

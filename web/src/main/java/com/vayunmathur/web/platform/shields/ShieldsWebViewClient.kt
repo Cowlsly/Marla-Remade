@@ -14,19 +14,12 @@ import androidx.webkit.WebMessageCompat
 import androidx.webkit.WebViewCompat
 import androidx.webkit.WebViewFeature
 import com.vayunmathur.web.domain.EffectiveShields
-import com.vayunmathur.web.domain.shields.ResourceTypes
 import com.vayunmathur.web.domain.shields.UrlCleaner
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.io.ByteArrayInputStream
-import java.util.Base64
 import kotlin.random.Random
 
 private const val TAG = "ShieldsWebViewClient"
-
-/** Empty bodies returned for blocked requests, by resource type. */
-private val EMPTY_GIF: ByteArray = Base64.getDecoder()
-    .decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
 
 @Serializable
 private data class CosmeticQuery(
@@ -41,6 +34,9 @@ private data class CosmeticQuery(
  * Subclasses add the host's own navigation and title plumbing; everything shields-related
  * lives here so `WebViewBrowser` and `PwaActivity` cannot drift apart. Subclasses that
  * override [onPageStarted] or [shouldOverrideUrlLoading] **must** call through to super.
+ *
+ * Request filtering itself is [ShieldsRequestFilter], which service workers share; this class
+ * only owns the [pageUrl] a `WebResourceRequest` cannot tell us.
  *
  * @param shieldsFor resolved shields for a host, consulted per request
  * @param onBlocked  called on the render thread each time a request is blocked
@@ -94,60 +90,8 @@ open class ShieldsWebViewClient(
     // ---------------------------------------------------------------- network
 
     override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
-        val url = request.url.toString()
-        val scheme = request.url.scheme?.lowercase()
-        if (scheme != "http" && scheme != "https") return null
-
-        if (request.isForMainFrame) {
-            pageUrl = url
-            return null
-        }
-
-        val source = pageUrl.ifEmpty { url }
-        val shields = shieldsFor(hostOf(source))
-        if (!shields.blockTrackers) return null
-
-        val type = ResourceTypes.of(url, isMainFrame = false, headers = request.requestHeaders)
-        val result = ShieldsEngine.check(url, source, type) ?: return null
-        if (!result.blocked) return null
-
-        onBlocked(source, url)
-        return result.redirect?.let { dataUrlResponse(it) } ?: emptyResponse(type)
-    }
-
-    /**
-     * An empty 200 rather than a failure: a blocked script that 404s can send a page down
-     * an error path, whereas an empty body usually just no-ops. The content type has to
-     * match what the element expected or the browser logs a MIME error and, for images,
-     * shows a broken-image placeholder.
-     */
-    private fun emptyResponse(type: String): WebResourceResponse {
-        val (mime, body) = when (type) {
-            "image" -> "image/gif" to EMPTY_GIF
-            "script" -> "application/javascript" to ByteArray(0)
-            "stylesheet" -> "text/css" to ByteArray(0)
-            "media" -> "video/mp4" to ByteArray(0)
-            "xmlhttprequest" -> "application/json" to ByteArray(0)
-            "subdocument" -> "text/html" to ByteArray(0)
-            else -> "text/plain" to ByteArray(0)
-        }
-        return WebResourceResponse(mime, "utf-8", 200, "OK", emptyMap(), ByteArrayInputStream(body))
-    }
-
-    /** Serves the body of a `$redirect` rule, which the engine hands back as a data URL. */
-    private fun dataUrlResponse(dataUrl: String): WebResourceResponse? = try {
-        val header = dataUrl.substringBefore(',', "")
-        val payload = dataUrl.substringAfter(',', "")
-        val mime = header.removePrefix("data:").substringBefore(';').ifEmpty { "text/plain" }
-        val bytes = if (header.endsWith(";base64")) {
-            Base64.getDecoder().decode(payload)
-        } else {
-            Uri.decode(payload).toByteArray()
-        }
-        WebResourceResponse(mime, "utf-8", 200, "OK", emptyMap(), ByteArrayInputStream(bytes))
-    } catch (e: Exception) {
-        Log.w(TAG, "malformed redirect resource", e)
-        null
+        if (request.isForMainFrame) pageUrl = request.url.toString()
+        return ShieldsRequestFilter.intercept(context, request, pageUrl, shieldsFor, onBlocked)
     }
 
     // ------------------------------------------------------------- navigation
