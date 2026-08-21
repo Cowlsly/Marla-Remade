@@ -4,10 +4,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.tooling.preview.Preview
 import com.android.tools.screenshot.PreviewTest
 import com.vayunmathur.cast.domain.CastDevice
-import com.vayunmathur.cast.domain.CastPlayerState
 import com.vayunmathur.cast.platform.CastActions
 import com.vayunmathur.cast.platform.CastConnection
-import com.vayunmathur.cast.platform.CastSource
 import com.vayunmathur.cast.platform.CastUiState
 import com.vayunmathur.library.ui.DynamicTheme
 
@@ -23,6 +21,14 @@ private val LivingRoomTv = CastDevice(
     capabilities = 1,
 )
 
+private val WholeHome = CastDevice(
+    id = "c07e15",
+    friendlyName = "Whole home",
+    host = "192.168.1.60",
+    model = "Speaker group",
+    capabilities = 1 shl 5,
+)
+
 private val Receivers = listOf(
     LivingRoomTv,
     CastDevice(
@@ -32,20 +38,14 @@ private val Receivers = listOf(
         model = "Google Nest Mini",
         capabilities = 4,
     ),
-    CastDevice(
-        id = "c07e15",
-        friendlyName = "Whole home",
-        host = "192.168.1.60",
-        model = "Speaker group",
-        capabilities = 1 shl 5,
-    ),
+    WholeHome,
 )
 
 /**
  * Store-listing screenshots.
  *
- * Driven through [CastContent], which is stateless by design, so no socket, no mDNS browse and
- * no local HTTP server has to exist for these to render - none of which Layoutlib could provide.
+ * Driven through [CastContent], which is stateless by design, so no socket and no mDNS browse has
+ * to exist for these to render - neither of which Layoutlib could provide.
  *
  * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but is
  * not collected as a screenshot test. They must also be class members rather than top-level
@@ -66,18 +66,15 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "2-picked", device = PHONE, showSystemUi = true)
+    @Preview(name = "2-connecting", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview2Picked() {
+    fun Preview2Connecting() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
-                    pendingSource = CastSource.LocalFile(
-                        uri = "content://media/external/video/media/2041",
-                        label = "holiday-2024.mp4",
-                        mimeType = "video/mp4",
-                    ),
+                    connectedDevice = LivingRoomTv,
+                    connection = CastConnection.Connecting,
                 ),
                 actions = CastActions.Noop,
             )
@@ -85,19 +82,15 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "3-playing", device = PHONE, showSystemUi = true)
+    @Preview(name = "3-connected-tv", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview3Playing() {
+    fun Preview3ConnectedTv() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
                     connectedDevice = LivingRoomTv,
                     connection = CastConnection.Connected,
-                    playerState = CastPlayerState.Playing,
-                    title = "holiday-2024.mp4",
-                    positionSec = 184.0,
-                    durationSec = 742.0,
                     volumeLevel = 0.55,
                 ),
                 actions = CastActions.Noop,
@@ -106,19 +99,17 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "4-paused", device = PHONE, showSystemUi = true)
+    @Preview(name = "4-connected-group", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview4Paused() {
+    fun Preview4ConnectedGroup() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
-                    connectedDevice = LivingRoomTv,
+                    connectedDevice = WholeHome,
                     connection = CastConnection.Connected,
-                    playerState = CastPlayerState.Paused,
-                    title = "Sur les toits de Paris",
-                    positionSec = 96.0,
-                    durationSec = 305.0,
+                    // A group has no screen, so only audio can go to it.
+                    audioOnly = true,
                     volumeLevel = 0.3,
                     muted = true,
                 ),

@@ -15,13 +15,8 @@ import com.vayunmathur.cast.platform.CastViewModel
 @Composable
 fun CastScreen(viewModel: CastViewModel) {
     val state by viewModel.uiState.collectAsState()
-    // OpenDocument, not GetContent: it returns a URI the app can read for as long as it holds
-    // it, which is what the local HTTP server needs, and it needs no storage permission.
-    val picker = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument(),
-    ) { uri -> if (uri != null) viewModel.pickLocalFile(uri.toString()) }
     // Asked for plainly and never insisted on: without it the session still works, it just
-    // loses the notification that is the only way to stop casting from outside the app.
+    // loses the notification that is the only way to stop mirroring from outside the app.
     val notifications = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
     ) { }
@@ -36,9 +31,5 @@ fun CastScreen(viewModel: CastViewModel) {
         viewModel.startScan()
         onDispose { viewModel.stopScan() }
     }
-    CastContent(
-        state = state,
-        actions = viewModel,
-        onPickFile = { picker.launch(arrayOf("video/*", "audio/*", "image/*")) },
-    )
+    CastContent(state = state, actions = viewModel)
 }

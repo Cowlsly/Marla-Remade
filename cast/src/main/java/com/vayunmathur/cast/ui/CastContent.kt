@@ -29,19 +29,16 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 
 /**
- * The whole app: pick a device, pick something to cast, control it.
+ * The whole app: pick a device to mirror to.
  *
  * Stateless - state in, [CastActions] out - so the store-listing screenshots can render it from
- * a `@Preview`. [onPickFile] is separate from the actions interface because opening the system
- * document picker needs an `ActivityResultLauncher`, which only a composition inside an Activity
- * can own; a preview passes an empty lambda.
+ * a `@Preview`.
  */
 @Composable
 fun CastContent(
     state: CastUiState,
     actions: CastActions,
     modifier: Modifier = Modifier,
-    onPickFile: () -> Unit = {},
 ) {
     AppScaffold(
         title = stringResource(R.string.cast_devices_title),
@@ -61,10 +58,6 @@ fun CastContent(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (state.connection == CastConnection.Connected) {
-                item { CastNowPlayingCard(state, actions) }
-            }
-            item { CastSourceCard(state, actions, onPickFile) }
             item { SectionHeader(state, actions) }
             if (state.localNetworkBlocked) {
                 item { LocalNetworkBlocked(actions) }
@@ -95,18 +88,34 @@ private fun SectionHeader(state: CastUiState, actions: CastActions) {
             )
             CastConnection.Connected -> Column {
                 Text(
-                    stringResource(R.string.cast_connected_to, connected?.friendlyName ?: ""),
+                    stringResource(
+                        if (state.audioOnly) {
+                            R.string.cast_connected_audio_only
+                        } else {
+                            R.string.cast_connected_to
+                        },
+                        connected?.friendlyName ?: "",
+                    ),
                     style = MaterialTheme.typography.titleSmall,
                 )
                 TextButton(onClick = actions::disconnect) {
                     Text(stringResource(R.string.cast_disconnect))
                 }
             }
-            CastConnection.Failed -> Text(
-                stringResource(R.string.cast_load_failed),
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.error,
-            )
+            CastConnection.Failed -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(
+                    state.failure ?: stringResource(R.string.cast_launch_failed),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
+                // Tapping the device row again also retries, but a refusal leaves the row looking
+                // unchanged, so there has to be something obvious to press.
+                if (connected != null) {
+                    TextButton(onClick = { actions.connect(connected) }) {
+                        Text(stringResource(R.string.cast_retry))
+                    }
+                }
+            }
             CastConnection.Disconnected -> Text(
                 stringResource(R.string.cast_devices_heading),
                 style = MaterialTheme.typography.titleSmall,

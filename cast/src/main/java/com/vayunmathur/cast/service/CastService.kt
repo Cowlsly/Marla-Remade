@@ -14,7 +14,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
 import com.vayunmathur.cast.MainActivity
 import com.vayunmathur.cast.R
-import com.vayunmathur.cast.domain.CastPlayerState
+import com.vayunmathur.cast.domain.CastPhase
 import com.vayunmathur.cast.platform.CastController
 import com.vayunmathur.library.util.ensureNotificationChannel
 import kotlinx.coroutines.CoroutineScope
@@ -37,14 +37,14 @@ private const val NOTIF_ID = 4201
 /**
  * Keeps the cast session alive while the app is not in front.
  *
- * A lifecycle host with no session state of its own: [CastController] owns the socket, the file
- * server and the session, so this can be started and stopped freely. `START_NOT_STICKY` rather
- * than sticky, because a restarted service has nothing to restore - the TLS channel died with
- * the process and the receiver has already dropped it.
+ * A lifecycle host with no session state of its own: [CastController] owns the socket and the
+ * session, so this can be started and stopped freely. `START_NOT_STICKY` rather than sticky,
+ * because a restarted service has nothing to restore - the TLS channel died with the process and
+ * the receiver has already dropped it.
  *
  * The foreground type is `mediaPlayback`, which is what Android's own documentation lists for
  * casting. `dataSync` is unusable: Android 15 caps it at six cumulative hours per 24 h and then
- * calls `onTimeout()`, which for a long film would stop the service part-way through.
+ * calls `onTimeout()`.
  */
 class CastService : Service() {
 
@@ -82,11 +82,16 @@ class CastService : Service() {
                     .combine(CastController.sessionState) { device, state -> device to state }
                     .collect { (device, state) ->
                         if (device == null) return@collect
-                        val text = state.title ?: when (state.playerState) {
-                            CastPlayerState.Playing -> getString(R.string.cast_state_playing)
-                            CastPlayerState.Paused -> getString(R.string.cast_state_paused)
-                            CastPlayerState.Buffering -> getString(R.string.cast_state_buffering)
-                            CastPlayerState.Idle -> getString(R.string.cast_notification_text_idle)
+                        val text = when (state.phase) {
+                            CastPhase.Launching ->
+                                getString(R.string.cast_notification_text_connecting)
+                            CastPhase.Ready -> getString(R.string.cast_notification_text_ready)
+                            // Not the raw LAUNCH_ERROR reason: those are wire constants, and the
+                            // screen is where the explanation belongs.
+                            CastPhase.Failed -> getString(R.string.cast_notification_text_failed)
+                            // The receiver app exited on its own - the channel is still up, so
+                            // this is a real resting state rather than a transient one.
+                            CastPhase.Idle -> getString(R.string.cast_notification_text_idle)
                         }
                         getSystemService<NotificationManager>()
                             ?.notify(NOTIF_ID, buildNotification(device.friendlyName, text))
@@ -115,7 +120,7 @@ class CastService : Service() {
         val device = CastController.device.value
         val notification = buildNotification(
             device?.friendlyName ?: getString(R.string.app_name),
-            getString(R.string.cast_notification_text_idle),
+            getString(R.string.cast_notification_text_connecting),
         )
         try {
             if (Build.VERSION.SDK_INT >= 34) {

@@ -6,12 +6,18 @@ import kotlin.test.assertFalse
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
-private const val TRANSPORT_ID = "web-5"
+private const val TRANSPORT_ID = "691b2c09-797c-4699-adf3-3f7f4d781448"
 
+/**
+ * A real RECEIVER_STATUS from a Google TV, captured during the Phase 0 spike.
+ *
+ * Note `transportId` equals `sessionId` and both are UUIDs - the media receiver used `web-N`, so
+ * this shape is what the join logic actually has to cope with.
+ */
 private val RECEIVER_STATUS_RUNNING = """
     {"type":"RECEIVER_STATUS","requestId":1,"status":{
-      "applications":[{"appId":"CC1AD845","displayName":"Default Media Receiver",
-        "sessionId":"S1","statusText":"Ready To Cast","transportId":"$TRANSPORT_ID"}],
+      "applications":[{"appId":"674A0243","displayName":"Android Mirroring",
+        "sessionId":"$TRANSPORT_ID","statusText":"Mirroring","transportId":"$TRANSPORT_ID"}],
       "volume":{"level":0.4,"muted":false}}}
 """.trimIndent()
 
@@ -22,41 +28,38 @@ private val RECEIVER_STATUS_IDLE = """
       "volume":{"level":0.4,"muted":false}}}
 """.trimIndent()
 
-private val MEDIA_STATUS_PLAYING = """
-    {"type":"MEDIA_STATUS","requestId":0,"status":[{"mediaSessionId":7,
-      "playerState":"PLAYING","currentTime":12.5,
-      "media":{"contentId":"http://192.168.1.9:41234/x","contentType":"video/mp4",
-        "streamType":"BUFFERED","duration":300.0,
-        "metadata":{"metadataType":0,"title":"Clip"}}}]}
+/** A real ANSWER from a TV, kept as the shape Phase 2 has to parse. */
+private val ANSWER_TV = """
+    {"answer":{"display":{"dimensions":{"frameRate":"60","height":2160,"width":3840},
+      "scaling":"sender"},"sendIndexes":[0,1],"ssrcs":[20002,50002],"udpPort":47505},
+      "result":"ok","seqNum":2,"type":"ANSWER"}
 """.trimIndent()
-
-/** The periodic status the receiver sends after the first one: no `media` object. */
-private val MEDIA_STATUS_TICK = """
-    {"type":"MEDIA_STATUS","status":[{"mediaSessionId":7,"playerState":"PLAYING",
-      "currentTime":19.0}]}
-""".trimIndent()
-
-private fun media(url: String, title: String? = null) = CastMediaInformation(
-    contentId = url,
-    contentType = "video/mp4",
-    metadata = title?.let { CastMediaMetadata(title = it) },
-)
 
 private fun CastFrame.type(): String =
     CastJson.decodeFromString<CastEnvelope>(payload).type
 
 class CastSessionTest {
 
-    /** Drives a session to the point where media commands are legal. */
-    private fun readySession(): CastSession = CastSession().apply {
+    private fun session(appId: String = MirroringAppIds.AUDIO_VIDEO) = CastSession(appId)
+
+    /** Drives a session to the point where the app is joined and addressable. */
+    private fun readySession(): CastSession = session().apply {
         open()
         onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING)
-        onMessage(CastNamespaces.MEDIA, MEDIA_STATUS_PLAYING)
     }
 
     @Test
-    fun `open connects to the platform receiver and launches the default media receiver`() {
-        val frames = CastSession().open()
+    fun `a device with a screen gets the audio-video app id and a speaker the audio-only one`() {
+        // Not a preference: Phase 0 established that a receiver refuses the wrong one at LAUNCH,
+        // with NOT_FOUND for audio-only against a TV and SYSTEM_ERROR for A/V against a speaker.
+        assertEquals(MirroringAppIds.AUDIO_VIDEO, MirroringAppIds.forKind(CastDeviceKind.Tv))
+        assertEquals(MirroringAppIds.AUDIO_ONLY, MirroringAppIds.forKind(CastDeviceKind.Speaker))
+        assertEquals(MirroringAppIds.AUDIO_ONLY, MirroringAppIds.forKind(CastDeviceKind.Group))
+    }
+
+    @Test
+    fun `open connects to the platform receiver and launches the app it was given`() {
+        val frames = session(MirroringAppIds.AUDIO_ONLY).open()
         assertEquals(2, frames.size)
         assertEquals(CastNamespaces.CONNECTION, frames[0].namespace)
         assertEquals(RECEIVER_ID, frames[0].destinationId)
@@ -64,14 +67,27 @@ class CastSessionTest {
         assertEquals(CastNamespaces.RECEIVER, frames[1].namespace)
         assertEquals(RECEIVER_ID, frames[1].destinationId)
         assertEquals("LAUNCH", frames[1].type())
-        assertTrue(frames[1].payload.contains(DEFAULT_MEDIA_RECEIVER_APP_ID))
+        assertTrue(frames[1].payload.contains(MirroringAppIds.AUDIO_ONLY))
+    }
+
+    @Test
+    fun `a receiver status for a different app id is not joined`() {
+        // The audio-only receiver running on a device we asked for A/V is somebody else's
+        // session, and joining it would address frames at an app that cannot use them.
+        val session = session(MirroringAppIds.AUDIO_VIDEO)
+        session.open()
+        assertEquals(
+            emptyList(),
+            session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_IDLE),
+        )
+        assertNull(session.state.transportId)
     }
 
     @Test
     fun `request ids start at one and never repeat`() {
         // Zero means "no response expected", so it must never be handed out, and a repeat
         // would make two responses indistinguishable.
-        val session = CastSession()
+        val session = session()
         val ids = listOf(
             session.allocateRequestId(),
             session.allocateRequestId(),
@@ -82,15 +98,15 @@ class CastSessionTest {
 
     @Test
     fun `receiver status names the transport and the session joins it`() {
-        val session = CastSession()
+        val session = session()
         session.open()
         val frames = session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING)
         assertEquals(CastPhase.Ready, session.state.phase)
-        assertEquals("S1", session.state.sessionId)
+        assertEquals(TRANSPORT_ID, session.state.sessionId)
         assertEquals(TRANSPORT_ID, session.state.transportId)
         assertEquals(0.4, session.state.volumeLevel)
-        // The second CONNECT, to the app rather than to receiver-0. Without it every media
-        // command is dropped with no error.
+        // The second CONNECT, to the app rather than to receiver-0. Without it every frame on
+        // the webrtc namespace is dropped with no error.
         assertEquals(1, frames.size)
         assertEquals(CastNamespaces.CONNECTION, frames[0].namespace)
         assertEquals(TRANSPORT_ID, frames[0].destinationId)
@@ -99,9 +115,7 @@ class CastSessionTest {
 
     @Test
     fun `a repeated receiver status does not rejoin`() {
-        val session = CastSession()
-        session.open()
-        session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING)
+        val session = readySession()
         assertEquals(
             emptyList(),
             session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING),
@@ -109,85 +123,11 @@ class CastSessionTest {
     }
 
     @Test
-    fun `a load before the app is ready is held and replayed on join`() {
-        val session = CastSession()
-        session.open()
-        // The user picks a file while LAUNCH is still in flight. Rejecting this would make
-        // "pick a device" and "pick a file" order-dependent for no reason.
-        assertEquals(emptyList(), session.load(media("http://h/v.mp4", "Held")))
-        val frames = session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING)
-        assertEquals(listOf("CONNECT", "LOAD"), frames.map { it.type() })
-        val load = frames[1]
-        assertEquals(CastNamespaces.MEDIA, load.namespace)
-        assertEquals(TRANSPORT_ID, load.destinationId)
-        assertTrue(load.payload.contains("http://h/v.mp4"))
-        assertTrue(load.payload.contains("\"sessionId\":\"S1\""))
-    }
-
-    @Test
-    fun `a load while ready goes straight out`() {
-        val session = CastSession()
-        session.open()
-        session.onMessage(CastNamespaces.RECEIVER, RECEIVER_STATUS_RUNNING)
-        val frames = session.load(media("http://h/v.mp4"))
-        assertEquals(listOf("LOAD"), frames.map { it.type() })
-        assertEquals(CastPlayerState.Buffering, session.state.playerState)
-    }
-
-    @Test
     fun `ping is answered with pong`() {
-        val frames = CastSession().onMessage(CastNamespaces.HEARTBEAT, """{"type":"PING"}""")
+        val frames = session().onMessage(CastNamespaces.HEARTBEAT, """{"type":"PING"}""")
         assertEquals(1, frames.size)
         assertEquals("PONG", frames[0].type())
         assertEquals(CastNamespaces.HEARTBEAT, frames[0].namespace)
-    }
-
-    @Test
-    fun `media status supplies the media session id that commands need`() {
-        val session = readySession()
-        assertEquals(7, session.state.mediaSessionId)
-        assertEquals(CastPlayerState.Playing, session.state.playerState)
-        assertEquals(12.5, session.state.currentTimeSec)
-        assertEquals(300.0, session.state.durationSec)
-        assertEquals("Clip", session.state.title)
-        val pause = session.pause().single()
-        assertEquals(CastNamespaces.MEDIA, pause.namespace)
-        assertEquals(TRANSPORT_ID, pause.destinationId)
-        assertTrue(pause.payload.contains("\"mediaSessionId\":7"))
-    }
-
-    @Test
-    fun `a periodic status without a media object keeps the title and duration`() {
-        val session = readySession()
-        session.onMessage(CastNamespaces.MEDIA, MEDIA_STATUS_TICK)
-        assertEquals(19.0, session.state.currentTimeSec)
-        assertEquals("Clip", session.state.title)
-        assertEquals(300.0, session.state.durationSec)
-    }
-
-    @Test
-    fun `an empty media status clears what is playing`() {
-        val session = readySession()
-        session.onMessage(CastNamespaces.MEDIA, """{"type":"MEDIA_STATUS","status":[]}""")
-        assertNull(session.state.mediaSessionId)
-        assertNull(session.state.title)
-        assertEquals(CastPlayerState.Idle, session.state.playerState)
-    }
-
-    @Test
-    fun `media commands are dropped when there is nothing to command`() {
-        val session = CastSession()
-        assertEquals(emptyList(), session.play())
-        assertEquals(emptyList(), session.seek(10.0))
-    }
-
-    @Test
-    fun `seek moves the reported position without waiting for the receiver`() {
-        val session = readySession()
-        val seek = session.seek(42.0).single()
-        assertEquals("SEEK", seek.type())
-        assertTrue(seek.payload.contains("\"currentTime\":42.0"))
-        assertEquals(42.0, session.state.currentTimeSec)
     }
 
     @Test
@@ -223,14 +163,16 @@ class CastSessionTest {
 
     @Test
     fun `a launch error reports the receiver's reason`() {
-        val session = CastSession()
+        // NOT_FOUND is what a TV answers when asked for the audio-only receiver, and
+        // SYSTEM_ERROR is what a speaker answers when asked for the A/V one.
+        val session = session()
         session.open()
         session.onMessage(
             CastNamespaces.RECEIVER,
-            """{"type":"LAUNCH_ERROR","requestId":1,"reason":"CANCELLED"}""",
+            """{"type":"LAUNCH_ERROR","requestId":1,"reason":"NOT_FOUND"}""",
         )
         assertEquals(CastPhase.Failed, session.state.phase)
-        assertEquals("CANCELLED", session.state.failure)
+        assertEquals("NOT_FOUND", session.state.failure)
     }
 
     @Test
@@ -255,7 +197,21 @@ class CastSessionTest {
     @Test
     fun `an unparseable payload is ignored`() {
         val session = readySession()
-        assertEquals(emptyList(), session.onMessage(CastNamespaces.MEDIA, "not json"))
-        assertEquals(CastPlayerState.Playing, session.state.playerState)
+        assertEquals(emptyList(), session.onMessage(CastNamespaces.RECEIVER, "not json"))
+        assertEquals(CastPhase.Ready, session.state.phase)
+    }
+
+    @Test
+    fun `a namespace with no branch is ignored`() {
+        // A speaker emits com.google.cast.multizone continuously, and the webrtc namespace has
+        // no handler until there is a streaming session to hand it to. Neither may disturb the
+        // control plane.
+        val session = readySession()
+        assertEquals(
+            emptyList(),
+            session.onMessage("urn:x-cast:com.google.cast.multizone", """{"type":"WHATEVER"}"""),
+        )
+        assertEquals(emptyList(), session.onMessage(CastNamespaces.WEBRTC, ANSWER_TV))
+        assertEquals(CastPhase.Ready, session.state.phase)
     }
 }

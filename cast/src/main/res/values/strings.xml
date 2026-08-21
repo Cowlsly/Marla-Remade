@@ -13,35 +13,24 @@
     <string name="cast_disconnect">Disconnect</string>
     <string name="cast_connecting_to">Connecting to %1$s.</string>
     <string name="cast_connected_to">Connected to %1$s</string>
+    <string name="cast_connected_audio_only">Connected to %1$s \u2014 audio only</string>
     <string name="cast_connect_failed">Could not connect to %1$s</string>
 
-    <!-- Source picker -->
-    <string name="cast_pick_file">Choose a file</string>
-    <string name="cast_cast_url">Cast a link</string>
-    <string name="cast_url_hint">https://example.com/video.mp4</string>
-    <string name="cast_url_invalid">Enter an http or https link</string>
-    <string name="cast_start">Cast</string>
-
-    <!-- Phase 0 spike: throwaway, deleted in Phase 1 -->
-    <string name="cast_spike_heading">Mirroring spike</string>
-    <string name="cast_spike_needs_device">Tap a device above first. Results appear in logcat under CastController.</string>
-    <string name="cast_spike_launch">Launch %1$s</string>
-
-    <!-- Now playing -->
-    <string name="cast_nothing_playing">Nothing playing</string>
-    <string name="cast_load_failed">The device could not play that</string>
-    <string name="cast_server_failed">Could not serve the file to the device</string>
-
-    <!-- Player states -->
-    <string name="cast_state_buffering">Buffering</string>
-    <string name="cast_state_playing">Playing</string>
-    <string name="cast_state_paused">Paused</string>
-    <string name="cast_state_idle">Idle</string>
+    <!-- Launch failures. The receiver answers with a wire constant (NOT_FOUND when a device does
+         not host the receiver we asked for, SYSTEM_ERROR when it cannot run it); these are what
+         gets shown instead. -->
+    <string name="cast_launch_unsupported">This device cannot be mirrored to</string>
+    <string name="cast_launch_cancelled">The device declined the request</string>
+    <string name="cast_launch_failed">Could not start mirroring on this device</string>
+    <string name="cast_retry">Try again</string>
 
     <!-- Foreground service -->
     <string name="cast_notification_channel_name">Casting</string>
     <string name="cast_notification_channel_desc">Shown while a cast session is open</string>
     <string name="cast_notification_title">Casting to %1$s</string>
-    <string name="cast_notification_text_idle">Session open</string>
+    <string name="cast_notification_text_connecting">Connecting</string>
+    <string name="cast_notification_text_ready">Ready to mirror</string>
+    <string name="cast_notification_text_idle">Not mirroring</string>
+    <string name="cast_notification_text_failed">Could not start mirroring</string>
     <string name="cast_notification_action_stop">Stop</string>
 </resources>
