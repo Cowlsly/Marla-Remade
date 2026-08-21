@@ -264,7 +264,9 @@ Write-Host "  wrote $($lines.Count) feeds to $manifest"
 
 Write-Host "[5/5] Merging into $PackName.transit"
 $ingestManifest = Join-Path $PSScriptRoot "gtfs_ingest\Cargo.toml"
-cargo run --release --quiet --manifest-path $ingestManifest -- $Out $PackName --manifest $manifest
+# --bin is required: the crate also carries `transit_stops` (the basemap stop
+# layer), so a bare `cargo run` cannot choose.
+cargo run --release --quiet --manifest-path $ingestManifest --bin gtfs_ingest -- $Out $PackName --manifest $manifest
 if ($LASTEXITCODE -ne 0) { throw "gtfs_ingest failed with exit code $LASTEXITCODE" }
 
 $packPath = Join-Path $Out "$PackName.transit"
