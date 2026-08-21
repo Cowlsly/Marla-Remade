@@ -54,6 +54,17 @@ set -euo pipefail
 #   --base-mode M     build|reuse (passed to build_base_layers.sh; default reuse)
 #   --base-jar FILE   protomaps basemap jar (base-mode build)
 #   --base-area A     planetiler area name/path (base-mode build; default planet)
+#   --base-source URL published archive to reuse (base-mode reuse; default is
+#                     build_base_layers.sh's own)
+#   --extra-layer F   fold an already-built .pmtiles into the final merge
+#                     (repeatable). Lets a caller that built a layer itself skip
+#                     the matching step here instead of building it twice.
+#   --engine-base E       rust|legacy per-layer engine (all default legacy; a
+#   --engine-safety E     `rust` value is rejected until that layer is ported,
+#   --engine-maxspeed E   so a rollback is one flag and never a silent no-op)
+#   --engine-transit-lines E
+#   --engine-admin E
+#   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
 #   --skip-maxspeed   omit maxspeed layer
@@ -79,6 +90,14 @@ BBOX=""
 BASE_MODE="reuse"
 BASE_JAR=""
 BASE_AREA="planet"
+BASE_SOURCE=""
+EXTRA_LAYERS=()
+ENGINE_BASE="legacy"
+ENGINE_SAFETY="legacy"
+ENGINE_MAXSPEED="legacy"
+ENGINE_TRANSIT_LINES="legacy"
+ENGINE_ADMIN="legacy"
+DRY_RUN=0
 SKIP_BASE=0
 SKIP_SAFETY=0
 SKIP_MAXSPEED=0
@@ -100,6 +119,14 @@ while [[ $# -gt 0 ]]; do
         --base-mode) BASE_MODE="$2"; shift 2 ;;
         --base-jar) BASE_JAR="$2"; shift 2 ;;
         --base-area) BASE_AREA="$2"; shift 2 ;;
+        --base-source) BASE_SOURCE="$2"; shift 2 ;;
+        --extra-layer) EXTRA_LAYERS+=("$2"); shift 2 ;;
+        --engine-base) ENGINE_BASE="$2"; shift 2 ;;
+        --engine-safety) ENGINE_SAFETY="$2"; shift 2 ;;
+        --engine-maxspeed) ENGINE_MAXSPEED="$2"; shift 2 ;;
+        --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
+        --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
+        --dry-run) DRY_RUN=1; shift ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
         --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
@@ -111,13 +138,48 @@ while [[ $# -gt 0 ]]; do
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,72p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,83p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
+# Every layer keeps a rust|legacy switch even before it has a rust path, so the
+# superscript can pass one uniformly. Asking for an unported engine is an error
+# rather than a silent fall-back to legacy.
+engine_check() {
+    local layer="$1" engine="$2" ported="$3"
+    case "$engine" in
+        legacy|rust) : ;;
+        *) echo "ERROR: --engine-$layer must be rust|legacy (got '$engine')" >&2; exit 1 ;;
+    esac
+    if [[ "$engine" == "rust" && "$ported" != "1" ]]; then
+        echo "ERROR: --engine-$layer rust is not implemented yet; use legacy" >&2
+        exit 1
+    fi
+}
+engine_check base          "$ENGINE_BASE"          0
+engine_check safety        "$ENGINE_SAFETY"        0
+engine_check maxspeed      "$ENGINE_MAXSPEED"      0
+engine_check transit-lines "$ENGINE_TRANSIT_LINES" 0
+engine_check admin         "$ENGINE_ADMIN"         0
+
+run() {
+    if [[ "$DRY_RUN" == "1" ]]; then
+        printf '[dry-run]'
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+    "$@"
+}
+
 command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
 mkdir -p "$WORK"
+
+# Hoisted out of the POIs branch: the summary block below reads it too, and
+# leaving it branch-local meant `set -u` only spared us because both sites happen
+# to share the same guard.
+OUTDIR="$(cd "$(dirname "$OUT")" && pwd)"
 
 INPUTS=()
 
@@ -129,8 +191,9 @@ if [[ "$SKIP_BASE" == "1" ]]; then
 else
     BASE_ARGS=(--mode "$BASE_MODE" --out "$BASE")
     [[ -n "$BBOX" ]] && BASE_ARGS+=(--bbox "$BBOX")
+    [[ -n "$BASE_SOURCE" ]] && BASE_ARGS+=(--source "$BASE_SOURCE")
     [[ "$BASE_MODE" == "build" ]] && BASE_ARGS+=(--jar "$BASE_JAR" --area "$BASE_AREA")
-    "$HERE/build_base_layers.sh" "${BASE_ARGS[@]}"
+    run "$HERE/build_base_layers.sh" "${BASE_ARGS[@]}"
 fi
 INPUTS+=("$BASE")
 
@@ -139,7 +202,7 @@ if [[ "$SKIP_SAFETY" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for safety layer (or --skip-safety)" >&2; exit 1; }
     SAFETY_ARGS=(--pbf "$PBF" --out "$WORK/safety.pmtiles")
     [[ -n "$BBOX" ]] && SAFETY_ARGS+=(--bbox "$BBOX")
-    "$HERE/build_safety_layer.sh" "${SAFETY_ARGS[@]}"
+    run "$HERE/build_safety_layer.sh" "${SAFETY_ARGS[@]}"
     INPUTS+=("$WORK/safety.pmtiles")
 fi
 
@@ -148,7 +211,7 @@ if [[ "$SKIP_MAXSPEED" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for maxspeed layer (or --skip-maxspeed)" >&2; exit 1; }
     MS_ARGS=(--pbf "$PBF" --out "$WORK/maxspeed.pmtiles")
     [[ -n "$BBOX" ]] && MS_ARGS+=(--bbox "$BBOX")
-    "$HERE/build_maxspeed_layer.sh" "${MS_ARGS[@]}"
+    run "$HERE/build_maxspeed_layer.sh" "${MS_ARGS[@]}"
     INPUTS+=("$WORK/maxspeed.pmtiles")
 fi
 
@@ -157,18 +220,17 @@ if [[ "$SKIP_TRANSIT_LINES" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for transit_lines layer (or --skip-transit-lines)" >&2; exit 1; }
     TL_ARGS=(--pbf "$PBF" --out "$WORK/transit_lines.pmtiles")
     [[ -n "$BBOX" ]] && TL_ARGS+=(--bbox "$BBOX")
-    "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
+    run "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
     INPUTS+=("$WORK/transit_lines.pmtiles")
 fi
 
 # --- 5. ma_pois (our baked OSM POI layer + poi_names.bin/poi_index.bin) ---
 if [[ "$SKIP_POIS" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for ma_pois layer (or --skip-pois)" >&2; exit 1; }
-    OUTDIR="$(cd "$(dirname "$OUT")" && pwd)"
     POIS_ARGS=(--pbf "$PBF" --out "$WORK/ma_pois.pmtiles" \
         --names-out "$OUTDIR/poi_names.bin" --index-out "$OUTDIR/poi_index.bin")
     [[ -n "$BBOX" ]] && POIS_ARGS+=(--bbox "$BBOX")
-    "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
+    run "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
     INPUTS+=("$WORK/ma_pois.pmtiles")
 fi
 
@@ -178,7 +240,7 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     [[ -n "$PBF" ]] && ADMIN_ARGS+=(--pbf "$PBF")
     [[ -n "$BBOX" ]] && ADMIN_ARGS+=(--bbox "$BBOX")
     [[ -z "$PBF" ]] && ADMIN_ARGS+=(--no-city)
-    "$HERE/build_admin_layers.sh" "${ADMIN_ARGS[@]}"
+    run "$HERE/build_admin_layers.sh" "${ADMIN_ARGS[@]}"
     for l in admin_country admin_region admin_city; do
         [[ -f "$WORK/admin/$l.pmtiles" ]] && INPUTS+=("$WORK/admin/$l.pmtiles")
     done
@@ -192,21 +254,38 @@ if [[ "$SKIP_TRANSIT_STOPS" == "0" ]]; then
         # that never asked for stops.
         echo "[v5] no --gtfs-manifest given; skipping transit_stops layer" >&2
     else
-        "$HERE/build_transit_stops_layer.sh" \
+        run "$HERE/build_transit_stops_layer.sh" \
             --manifest "$GTFS_MANIFEST" \
             --out "$WORK/transit_stops.pmtiles" \
             --workdir "$WORK/transit_stops"
         INPUTS+=("$WORK/transit_stops.pmtiles")
     fi
 fi
+
+# --- 7b. layers the caller already built ---
+# Last in, so an --extra-layer wins a name collision with anything above it.
+for f in ${EXTRA_LAYERS[@]+"${EXTRA_LAYERS[@]}"}; do
+    if [[ -f "$f" || "$DRY_RUN" == "1" ]]; then
+        INPUTS+=("$f")
+    else
+        echo "ERROR: --extra-layer not found: $f" >&2
+        exit 1
+    fi
+done
+
 # --- 8. merge ---
 echo "[v5] merging ${#INPUTS[@]} source(s) -> $OUT"
 printf '  + %s\n' "${INPUTS[@]}"
 # Our own tile_join, not tippecanoe's: it unions each tile's layers and carries
 # line/polygon geometry through untouched, and needs no tippecanoe install. Later
 # inputs win a layer-name collision, so a rebuilt overlay replaces a stale copy.
-cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
+run cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
     --bin tile_join -- --out "$OUT" "${INPUTS[@]}"
+
+if [[ "$DRY_RUN" == "1" ]]; then
+    echo "[dry-run] stopping before the summary; nothing was built"
+    exit 0
+fi
 
 SIZE="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo '?')"
 echo "[v5] done: $OUT (${SIZE} bytes)"
@@ -237,4 +316,6 @@ else
     echo "Then P13 updates style.json url -> pmtiles://https://data.vayunmathur.com/v5.pmtiles"
 fi
 
+# Intermediates are never deleted, by design -- they are what makes a re-run cheap.
+# --keep-work only silences this reminder.
 [[ "$KEEP_WORK" == "1" ]] || echo "(intermediates kept in $WORK; pass --keep-work to silence)"

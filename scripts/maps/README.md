@@ -163,26 +163,103 @@ mutually consistent (same POI set, same coordinates). See
 
 | File | Purpose |
 |---|---|
-| `build_v5_pmtiles.sh` | **Top-level orchestrator**: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
+| `build_all.sh` | **The superscript**: one command from `.osm.pbf` + GTFS to all 9 runtime artifacts, with per-stage stamps and a `manifest.txt` of sizes and SHA-256s. Chains graph → pois → transit → tiles |
+| `build_all.ps1` | **Windows twin** of the above. Stages graph/pois/transit are complete; the tiles stage composites only the cargo-only layers onto a `-BaseArchive` (see [Caveats](#caveats--known-limitations)) |
+| `run_generator.sh` | **Deprecated** thin wrapper over `build_all.sh` (graph + pois + publish) |
+| `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
-| `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → tippecanoe → `ma_pois.pmtiles` |
+| `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
 | `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files) and `road_graph` (routing graph). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
 | `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
-| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**: `tile_points` (tile a point geojsonseq) and `tile_join` (merge archives). Container layout documented in `src/pmtiles.rs` |
-| `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
+| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**: `tile_points` (tile a point geojsonseq), `tile_join` (merge archives) and `pmtiles_dump` (canonical text dump, for the differential harness). Container layout documented in `src/pmtiles.rs` |
+| `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
 | `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested) |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
+| `test/diff_geojsonseq.py` | **Differential harness**, extraction half: diffs a legacy GeoJSONSeq against a Rust one. Properties exact, points exact, lines/polygons within an epsilon |
+| `test/diff_pmtiles.py` | **Differential harness**, tiling half: diffs a tippecanoe archive against ours via `pmtiles_dump` — layer presence, property key sets, extent, geometry mix, and feature counts against a stated drop budget |
 | `test/fixtures/*` | Tiny sample inputs for the test |
+
+---
+
+## Caveats & known limitations
+
+These are structural, not bugs waiting to be fixed. Read them before assuming a
+build is reproducible or cargo-only.
+
+### 1. Planetiler cannot be ported
+
+`build_base_layers.sh --mode build` runs Java 21 plus the Protomaps basemap jar.
+Nothing here replaces it, so **`--base-mode build` is the one documented Java
+exception** and it fails loudly when `java` is absent rather than silently
+falling back. The default is `--base-mode reuse`, which fetches a published
+archive with `curl` (plus `go-pmtiles` today for a `--bbox` extract).
+
+### 2. Natural Earth is a third input
+
+`admin_country` and `admin_region` come from `ne_10m_admin_0_countries` and
+`ne_10m_admin_1_states_provinces`. They are **not derivable from OSM**, so the
+default is to carry those two layers forward from the published archive rather
+than rebuild them. "OSM + GTFS only" therefore holds for every layer that
+actually changes between builds; it does not hold for national and state borders,
+which change on a different clock and from a different source.
+
+### 3. Output is not byte-identical to tippecanoe, by design
+
+`--drop-densest-as-needed` is a lossy per-tile heuristic, and
+`--extend-zooms-if-still-dropping` can push an archive *past* its own
+`--maximum-zoom`. Our tilers implement a deterministic, documented drop policy
+and a fixed max zoom instead. Consequences:
+
+* Per-tile feature counts differ. `test/diff_pmtiles.py --max-feature-delta`
+  is the explicit budget for that; the flag exists so the divergence has a number
+  rather than being unbounded.
+* Tests assert **our own invariants** (ring closure, winding order,
+  Douglas-Peucker monotonicity, PMTiles round-trip), never equality with
+  tippecanoe.
+* An MVT re-encode rebuilds each layer's key/value dictionaries in first-use
+  order, so even an untouched tile can come back a few bytes different. Compare
+  the decoded model, which is what the spec defines.
+* `--detect-shared-borders` is not reproduced. Adjacent admin polygons are
+  simplified independently, so at low zoom a shared border can show a hairline
+  gap or overlap. Noted rather than papered over.
+
+### 4. World transit is a large step up in cost
+
+Today's `world.transit` is built from `.url` fields alone, which silently drops
+most US feeds — 38 of California's 49 sources — because they are referenced by
+`transitland-atlas-id` with no URL. Resolving those references the way
+`build_ca_transit.ps1` does turns 27 feeds and 18 MB into hundreds of feeds and
+many GB of downloads. **A `--region` filter is mandatory** for staging: validate
+on California, then a few regions, then the world.
+
+The two producers also differ in what they can emit. Only the DMFR-resolving
+path knows each feed's original source name, so only it can write the three-field
+manifest that gives stops their MOTIS ids — and without those, live delays cannot
+be matched to a stop.
+
+### 5. Credential env vars are not uniform
+
+`publish_r2.sh` reads `R2_ENDPOINT` / `R2_ACCESS_KEY_ID` /
+`R2_SECRET_ACCESS_KEY`. `vendor_pmtiles.sh` also accepts the `AWS_*` pair. The
+deprecated `run_generator.sh` used `R2_ACCESS_KEY` / `R2_SECRET_KEY` and now
+bridges them onto the first set.
+
+### 6. Intermediates are never deleted
+
+`build_v5_pmtiles.sh` keeps everything under `--workdir`, and
+`build_admin_layers.sh` leaves its `admin_*.geojsonseq` in `--outdir`. That is
+what makes a re-run cheap. `--keep-work` only silences the reminder; it does not
+change the behaviour.
 
 ---
 
@@ -212,11 +289,13 @@ here is Rust and Python):
 
 ### What builds on Windows
 
-Everything that is cargo-only: the routing graph (`build_graph.ps1`), the offline
-transit pack (`build_ca_transit.ps1`), the `transit_stops` layer
-(`build_transit_stops_layer.ps1`) and the final merge (`tile_join`). The
-OSM-derived vector layers still need tippecanoe + osmium and therefore a Linux
-box or WSL.
+Everything that is cargo-only: the routing graph (`build_graph.ps1`), the POI
+layer and its side files, the offline transit pack (`build_ca_transit.ps1`), the
+`transit_stops` layer (`build_transit_stops_layer.ps1`) and the final merge
+(`tile_join`). `build_all.ps1` chains those. The OSM-derived vector layers
+(safety, maxspeed, transit_lines, admin) still need tippecanoe + osmium + python3
++ GDAL and therefore a Linux box or WSL, which is why the Windows tiles stage
+composites onto a `-BaseArchive` instead of building a complete `v5.pmtiles`.
 
 That is why `tile_build` exists rather than shelling out to tippecanoe: there is
 no Windows path for it (see the note at `build_graph.ps1:29`), which would
@@ -241,6 +320,32 @@ The **dry-run test** needs only `python3`.
 ---
 
 ## Run commands
+
+### 0. Everything, in one command
+
+`build_all.sh` is the entry point. It builds all 9 artifacts in dependency order,
+stamps each stage so a re-run is cheap, and writes a `manifest.txt` of sizes and
+SHA-256s that should be identical across two runs of the same inputs.
+
+```bash
+# see the plan without touching anything
+./build_all.sh --pbf norcal-latest.osm.pbf --bbox -122.6,37.2,-121.7,37.9 --dry-run
+
+# a metro build, fetching the PBF and resolving one GTFS region
+./build_all.sh --geofabrik north-america/us/california \
+    --gtfs-region 'us-ca' --out-dir ./ca_build --out ./ca_build/v5-ca.pmtiles
+
+# then publish all 9
+./build_all.sh <same args> --publish
+```
+
+The `--bbox` clip happens **once**, up front, and is shared by every stage — so
+unlike the per-layer scripts, the routing graph honours it too. That needs
+`osmium`.
+
+Per-layer `--engine rust|legacy` flags exist for every layer so a ported layer can
+be rolled back with one flag. Asking for an engine that has not landed is an
+error, never a silent fall-back.
 
 ### 1. Dry run (single metro — validates safety + border layers)
 
@@ -561,6 +666,12 @@ planner over the separate `.transit` index (`gtfs_ingest`, real GTFS timetables)
 so `TravelMode.PUBLIC_TRANSIT` in the road graph now means *walking* — it is only
 reached for a journey's access/egress/transfer legs. Dropping the duplicated
 nodes is also the single biggest size win in this pipeline.
+
+The two download entries outlived their producer, though: `MainActivity`'s
+`InitialDownloadChecker` kept fetching `transit_voyages.bin` (290 MB) and
+`transit_attributes.bin` (122 MB) long after the generator that wrote them was
+deleted, and nothing in the app parsed either. They have now been removed, taking
+412 MB off a cold start and the download list from 10 entries to 8.
 
 ### How the app obtains it — download-size implications
 

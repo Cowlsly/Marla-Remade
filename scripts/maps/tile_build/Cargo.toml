@@ -31,6 +31,9 @@ path = "src/bin/tile_points.rs"
 [[bin]]
 name = "tile_join"
 path = "src/bin/tile_join.rs"
+[[bin]]
+name = "pmtiles_dump"
+path = "src/bin/pmtiles_dump.rs"
 [dependencies]
 miniz_oxide = "0.8"
 [profile.release]

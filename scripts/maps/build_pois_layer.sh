@@ -33,14 +33,18 @@ set -euo pipefail
 #   --names-out FILE  Output name table (default: poi_names.bin)
 #   --index-out FILE  Output record index (default: poi_index.bin)
 #   --bbox BOX        Optional "minlon,minlat,maxlon,maxlat" metro extract (dry runs)
-#   --minzoom N       tippecanoe minzoom (default 12)
-#   --maxzoom N       tippecanoe maxzoom (default 16)
+#   --minzoom N       tiler minzoom (default 12)
+#   --maxzoom N       tiler maxzoom (default 16)
+#   --engine E        rust|legacy tiler (default rust). `rust` is tile_build's
+#                     tile_points, so no tippecanoe install is needed; `legacy`
+#                     is tippecanoe. The GeoJSON is Rust-produced either way, so
+#                     this layer never needed tippecanoe in the first place.
 #   --keep-tmp        Don't delete intermediate files
 #
-# Tools required: cargo, osmium (osmium-tool), tippecanoe. The two side files can
-# also be built on their own, on any platform, with:
+# Tools required: cargo. Additionally osmium (osmium-tool) only for --bbox, and
+# tippecanoe only for --engine legacy. The two side files can also be built on
+# their own, on any platform, with:
 #   cargo run --release --manifest-path osm_ingest/Cargo.toml --bin poi_extract -- ...
-# only the .pmtiles step needs tippecanoe/osmium.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
@@ -50,6 +54,7 @@ INDEX_OUT="poi_index.bin"
 BBOX=""
 MINZOOM=12
 MAXZOOM=16
+ENGINE="rust"
 KEEP_TMP=0
 
 while [[ $# -gt 0 ]]; do
@@ -61,17 +66,28 @@ while [[ $# -gt 0 ]]; do
         --bbox) BBOX="$2"; shift 2 ;;
         --minzoom) MINZOOM="$2"; shift 2 ;;
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
+        --engine) ENGINE="$2"; shift 2 ;;
         --keep-tmp) KEEP_TMP=1; shift ;;
-        -h|--help) sed -n '4,45p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,47p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
 [[ -n "$PBF" ]] || { echo "ERROR: --pbf required" >&2; exit 1; }
 [[ -f "$PBF" ]] || { echo "ERROR: pbf not found: $PBF" >&2; exit 1; }
-command -v cargo      >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
-command -v osmium     >/dev/null || { echo "ERROR: osmium-tool not installed" >&2; exit 1; }
-command -v tippecanoe >/dev/null || { echo "ERROR: tippecanoe not installed" >&2; exit 1; }
+case "$ENGINE" in
+    rust|legacy) : ;;
+    *) echo "ERROR: --engine must be rust|legacy (got '$ENGINE')" >&2; exit 1 ;;
+esac
+command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
+# Only demanded where actually used, so the default rust path runs on a box with
+# neither osmium nor tippecanoe installed.
+if [[ -n "$BBOX" ]]; then
+    command -v osmium >/dev/null || { echo "ERROR: --bbox needs osmium-tool" >&2; exit 1; }
+fi
+if [[ "$ENGINE" == "legacy" ]]; then
+    command -v tippecanoe >/dev/null || { echo "ERROR: --engine legacy needs tippecanoe" >&2; exit 1; }
+fi
 
 TMP="$(mktemp -d)"
 cleanup() { [[ "$KEEP_TMP" == "1" ]] || rm -rf "$TMP"; }
@@ -95,14 +111,24 @@ FEATURES="$(wc -l < "$TMP/ma_pois.geojsonseq" | tr -d ' ')"
 echo "[ma_pois] $FEATURES POI feature(s)"
 [[ "$FEATURES" -gt 0 ]] || echo "[ma_pois] WARNING: 0 features — check bbox/extract"
 
-echo "[ma_pois] tiling -> $OUT (z$MINZOOM-$MAXZOOM)"
-tippecanoe --force \
-    -o "$OUT" \
-    -l ma_pois \
-    --minimum-zoom="$MINZOOM" \
-    --maximum-zoom="$MAXZOOM" \
-    --drop-densest-as-needed \
-    --extend-zooms-if-still-dropping \
-    "$TMP/ma_pois.geojsonseq"
+echo "[ma_pois] tiling -> $OUT (z$MINZOOM-$MAXZOOM, engine: $ENGINE)"
+if [[ "$ENGINE" == "rust" ]]; then
+    cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
+        --bin tile_points -- \
+        --geojson "$TMP/ma_pois.geojsonseq" \
+        --out "$OUT" \
+        --layer ma_pois \
+        --minzoom "$MINZOOM" \
+        --maxzoom "$MAXZOOM"
+else
+    tippecanoe --force \
+        -o "$OUT" \
+        -l ma_pois \
+        --minimum-zoom="$MINZOOM" \
+        --maximum-zoom="$MAXZOOM" \
+        --drop-densest-as-needed \
+        --extend-zooms-if-still-dropping \
+        "$TMP/ma_pois.geojsonseq"
+fi
 
 echo "[ma_pois] done: $OUT + $NAMES_OUT + $INDEX_OUT"
