@@ -172,9 +172,9 @@ mutually consistent (same POI set, same coordinates). See
 | `build_maxspeed_layer.sh` | **`--engine rust`** (default): `osm_extract` → geojsonseq → `tile_lines`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe |
 | `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
-| `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
+| `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer, with its own boundary ring assembler in `src/rings.rs`). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
-| `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
+| `build_admin_layers.sh` | `admin_city`: **`--engine-city rust`** (default) is `osm_extract`'s own ring assembler → `tile_polygons`, cargo-only; `legacy` is osmium → `normalize_admin.py` → tippecanoe. `admin_country`/`admin_region`: Natural Earth → `normalize_admin.py` → tippecanoe, with **no rust engine** — OSM cannot supply them. `--only-city` builds the one admin layer a cargo-only box can |
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
 | `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
@@ -183,7 +183,7 @@ mutually consistent (same POI set, same coordinates). See
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/maxspeed.rs`; kept as the contract of record and as `--engine legacy` |
 | `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/transit_lines.rs`; kept as the contract of record and as `--engine legacy` |
-| `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
+| `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested). Still the **only** producer for `admin_country`/`admin_region`; the city level is superseded by `osm_ingest/src/admin.rs` |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
 | `test/diff_geojsonseq.py` | **Differential harness**, extraction half: diffs a legacy GeoJSONSeq against a Rust one. Properties exact, points exact, lines/polygons within an epsilon |
 | `test/diff_pmtiles.py` | **Differential harness**, tiling half: diffs a tippecanoe archive against ours via `pmtiles_dump` — layer presence, property key sets, extent, geometry mix, and feature counts against a stated drop budget |
@@ -207,11 +207,27 @@ archive with `curl` (plus `go-pmtiles` today for a `--bbox` extract).
 ### 2. Natural Earth is a third input
 
 `admin_country` and `admin_region` come from `ne_10m_admin_0_countries` and
-`ne_10m_admin_1_states_provinces`. They are **not derivable from OSM**, so the
-default is to carry those two layers forward from the published archive rather
-than rebuild them. "OSM + GTFS only" therefore holds for every layer that
-actually changes between builds; it does not hold for national and state borders,
-which change on a different clock and from a different source.
+`ne_10m_admin_1_states_provinces`. They are **not derivable from OSM**, so those two
+layers have no rust engine and are not going to get one from this pipeline: they
+still need `ogr2ogr`, `tippecanoe` and `python3`, and the default is to carry them
+forward from the published archive rather than rebuild them at all.
+
+`admin_city` is different — OSM is the only source for it, Natural Earth has no
+cities — and it is fully ported: `osm_extract` assembles the boundary relations'
+member ways into rings itself (`osm_ingest/src/rings.rs`) and `tile_polygons` tiles
+them. `build_admin_layers.sh --only-city` builds just that one, which is the one
+admin layer a cargo-only box can do.
+
+So "OSM + GTFS only" holds for every layer that actually changes between builds; it
+does not hold for national and state borders, which change on a different clock and
+from a different source.
+
+**Two things the ring assembler does that are worth knowing.** A ring that will not
+close — a member missing from the extract, a genuine tagging error — is **dropped and
+reported**, not emitted open, because an open ring renders as a wedge of fill
+reaching to wherever the renderer chose to close it. And a ring with an unresolvable
+vertex is dropped whole, where a *line* with one keeps its remaining vertices:
+bridging a gap in an area changes what is inside it.
 
 ### 3. Output is not byte-identical to tippecanoe, by design
 
@@ -315,30 +331,32 @@ here is Rust and Python):
   * [`tile_build`](tile_build/) — MVT and PMTiles v3 read/write, which **replaces
     tippecanoe and tile-join**. The final merge and the `transit_stops` layer both
     go through it, so they run on **Windows**.
-* **tippecanoe** ≥ 2.x — now only the admin layer scripts, and any
+* **tippecanoe** ≥ 2.x — now only `admin_country`/`admin_region`, and any
   `--engine legacy` run. The merge does not use its `tile-join`, and `safety`,
-  `maxspeed`, `transit_lines` and `ma_pois` do not use it at all.
-* **osmium-tool** (`osmium`) — the admin layer and `--engine legacy`, plus any
-  `--bbox` run of `build_all.sh` (which clips once for every stage).
-* **GDAL** (`ogr2ogr`) — the admin layer, and `transit_lines --engine legacy`. The
-  rust `transit_lines` engine reads route relations out of the PBF directly, so it
-  needs no GDAL at all.
-* **python3** (stdlib only) — `normalize_admin.py`, the superseded normalisers kept
-  for `--engine legacy`, the schema unit test, and the differential harness.
+  `maxspeed`, `transit_lines`, `admin_city` and `ma_pois` do not use it at all.
+* **osmium-tool** (`osmium`) — `--engine legacy` runs, plus any `--bbox` run of
+  `build_all.sh` (which clips once for every stage).
+* **GDAL** (`ogr2ogr`) — `admin_country`/`admin_region`, and
+  `transit_lines --engine legacy`. The rust engines read relations out of the PBF
+  directly, so they need no GDAL at all.
+* **python3** (stdlib only) — `normalize_admin.py` for the two Natural Earth levels,
+  the superseded normalisers kept for `--engine legacy`, the schema unit test, and
+  the differential harness.
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
 * Base reuse mode only: `curl`, and `go-pmtiles` (`pmtiles`) if using `--bbox`
 
 ### What builds on Windows
 
-Everything that is cargo-only, which is now every layer except `admin`: the routing
-graph (`build_graph.ps1`), the POI layer and its side files, `safety`, `maxspeed`,
-`transit_lines`, the offline transit pack (`build_ca_transit.ps1`), the
-`transit_stops` layer (`build_transit_stops_layer.ps1`) and the final merge
-(`tile_join`). `build_all.ps1` chains those. Only the admin layers still need
-tippecanoe + osmium + python3 + GDAL, and the Planetiler base build still needs
-Java — which is why the Windows tiles stage composites onto a `-BaseArchive`
-instead of building a complete `v5.pmtiles`.
+Everything that is cargo-only, which is now every layer except `admin_country` and
+`admin_region`: the routing graph (`build_graph.ps1`), the POI layer and its side
+files, `safety`, `maxspeed`, `transit_lines`, `admin_city`, the offline transit pack
+(`build_ca_transit.ps1`), the `transit_stops` layer
+(`build_transit_stops_layer.ps1`) and the final merge (`tile_join`).
+`build_all.ps1` chains those. The two Natural Earth levels need ogr2ogr +
+tippecanoe + python3, and the Planetiler base build needs Java — which is why the
+Windows tiles stage composites onto a `-BaseArchive` instead of building a complete
+`v5.pmtiles`.
 
 That is why `tile_build` exists rather than shelling out to tippecanoe: there is
 no Windows path for it (see the note at `build_graph.ps1:29`), which would
@@ -392,8 +410,9 @@ unlike the per-layer scripts, the routing graph honours it too. That needs
 
 Per-layer `--engine rust|legacy` flags exist for every layer so a ported layer can
 be rolled back with one flag. Asking for an engine that has not landed is an
-error, never a silent fall-back. `safety`, `maxspeed`, `transit_lines` and
-`ma_pois` default to `rust`; `base` and `admin` still default to `legacy`.
+error, never a silent fall-back. `safety`, `maxspeed`, `transit_lines`,
+`admin-city` and `ma_pois` default to `rust`; `base` and `admin` (meaning the two
+Natural Earth levels) still default to `legacy`.
 
 > **Validate a flipped engine before trusting it.** Each ported layer has unit
 > tests mirroring the Python normaliser's assertions, but those pin the schema, not

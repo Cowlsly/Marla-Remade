@@ -66,7 +66,11 @@ set -euo pipefail
 #     --engine-maxspeed E rust|legacy    (default rust: osm_extract + tile_lines)
 #     --engine-transit-lines E           (default rust: ways AND route relations
 #                                         read straight from the PBF, no GDAL)
-#     --engine-admin E    rust|legacy    (default legacy)
+#     --engine-admin E    rust|legacy    (default legacy: admin_country and
+#                                         admin_region come from Natural Earth,
+#                                         which OSM cannot supply)
+#     --engine-admin-city E              (default rust: osm_extract's own ring
+#                                         assembler + tile_polygons)
 #     --engine-pois E     rust|legacy    (default rust: tile_points, no tippecanoe)
 #   Publishing
 #     --publish           upload every built artifact via publish_r2.sh
@@ -106,6 +110,7 @@ ENGINE_SAFETY="rust"
 ENGINE_MAXSPEED="rust"
 ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
+ENGINE_ADMIN_CITY="rust"
 ENGINE_POIS="rust"
 
 while [[ $# -gt 0 ]]; do
@@ -136,8 +141,9 @@ while [[ $# -gt 0 ]]; do
         --engine-maxspeed) ENGINE_MAXSPEED="$2"; shift 2 ;;
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
+        --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,79p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,83p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -165,6 +171,7 @@ engine_check safety         "$ENGINE_SAFETY"         1
 engine_check maxspeed       "$ENGINE_MAXSPEED"       1
 engine_check transit-lines  "$ENGINE_TRANSIT_LINES"  1
 engine_check admin          "$ENGINE_ADMIN"          0
+engine_check admin-city     "$ENGINE_ADMIN_CITY"     1
 engine_check pois           "$ENGINE_POIS"           1
 
 command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
@@ -331,7 +338,8 @@ if want_stage tiles; then
                   --engine-safety "$ENGINE_SAFETY"
                   --engine-maxspeed "$ENGINE_MAXSPEED"
                   --engine-transit-lines "$ENGINE_TRANSIT_LINES"
-                  --engine-admin "$ENGINE_ADMIN")
+                  --engine-admin "$ENGINE_ADMIN"
+                  --engine-admin-city "$ENGINE_ADMIN_CITY")
         [[ "$DRY_RUN" == "1" ]] && V5_ARGS+=(--dry-run)
         "$HERE/build_v5_pmtiles.sh" "${V5_ARGS[@]}"
         mark_done tiles

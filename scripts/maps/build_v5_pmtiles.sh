@@ -59,11 +59,13 @@ set -euo pipefail
 #   --extra-layer F   fold an already-built .pmtiles into the final merge
 #                     (repeatable). Lets a caller that built a layer itself skip
 #                     the matching step here instead of building it twice.
-#   --engine-base E       rust|legacy per-layer engine. `safety`, `maxspeed` and
-#   --engine-safety E     `transit_lines` default to rust (cargo-only); the rest
-#   --engine-maxspeed E   default to legacy, and asking for rust before a layer is
-#   --engine-transit-lines E  ported is an error rather than a silent no-op, so a
-#   --engine-admin E          rollback is always one flag.
+#   --engine-base E       rust|legacy per-layer engine. `safety`, `maxspeed`,
+#   --engine-safety E     `transit_lines` and `admin-city` default to rust
+#   --engine-maxspeed E   (cargo-only); the rest default to legacy, and asking for
+#   --engine-transit-lines E  rust before a layer is ported is an error rather than
+#   --engine-admin E          a silent no-op, so a rollback is always one flag.
+#   --engine-admin-city E     `admin-country`/`admin-region` come from Natural
+#                             Earth and will never have a rust engine.
 #   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
@@ -97,6 +99,7 @@ ENGINE_SAFETY="rust"
 ENGINE_MAXSPEED="rust"
 ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
+ENGINE_ADMIN_CITY="rust"
 DRY_RUN=0
 SKIP_BASE=0
 SKIP_SAFETY=0
@@ -126,6 +129,7 @@ while [[ $# -gt 0 ]]; do
         --engine-maxspeed) ENGINE_MAXSPEED="$2"; shift 2 ;;
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
+        --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
@@ -138,7 +142,7 @@ while [[ $# -gt 0 ]]; do
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,83p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,85p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -162,6 +166,7 @@ engine_check safety        "$ENGINE_SAFETY"        1
 engine_check maxspeed      "$ENGINE_MAXSPEED"      1
 engine_check transit-lines "$ENGINE_TRANSIT_LINES" 1
 engine_check admin         "$ENGINE_ADMIN"         0
+engine_check admin-city    "$ENGINE_ADMIN_CITY"    1
 
 run() {
     if [[ "$DRY_RUN" == "1" ]]; then
@@ -236,7 +241,7 @@ fi
 
 # --- 6. admin ---
 if [[ "$SKIP_ADMIN" == "0" ]]; then
-    ADMIN_ARGS=(--outdir "$WORK/admin")
+    ADMIN_ARGS=(--outdir "$WORK/admin" --engine-city "$ENGINE_ADMIN_CITY")
     [[ -n "$PBF" ]] && ADMIN_ARGS+=(--pbf "$PBF")
     [[ -n "$BBOX" ]] && ADMIN_ARGS+=(--bbox "$BBOX")
     [[ -z "$PBF" ]] && ADMIN_ARGS+=(--no-city)

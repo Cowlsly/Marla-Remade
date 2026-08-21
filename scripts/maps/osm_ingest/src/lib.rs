@@ -16,6 +16,7 @@
 //! plus a pure-Rust inflate — makes them native on every platform the app is
 //! built on, and the third never had a Windows path at all.
 
+pub mod admin;
 pub mod bbox;
 pub mod extract;
 pub mod geojson;
@@ -27,6 +28,7 @@ pub mod par;
 pub mod pbf;
 pub mod poi_build;
 pub mod proto;
+pub mod rings;
 pub mod safety;
 pub mod select;
 pub mod spatial;

@@ -35,12 +35,14 @@ use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
+use crate::admin::{self, AdminTags};
 use crate::bbox::{self, BBox};
 use crate::geojson::{self, Coord, Feature, Geometry};
 use crate::maxspeed::{self, MaxspeedTags};
 use crate::osm::{visit_block, Element, Member, MEMBER_WAY};
 use crate::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
 use crate::proto::{Error, Result};
+use crate::rings::{self, MemberWay, RingStats};
 use crate::safety::{self, Kind, SafetyTags};
 use crate::select::Select;
 use crate::transit_lines::{self, TransitTags};
@@ -50,6 +52,7 @@ pub enum Layer {
     Safety,
     Maxspeed,
     TransitLines,
+    AdminCity,
 }
 
 impl Layer {
@@ -58,6 +61,7 @@ impl Layer {
             "safety" => Ok(Layer::Safety),
             "maxspeed" => Ok(Layer::Maxspeed),
             "transit_lines" => Ok(Layer::TransitLines),
+            "admin_city" => Ok(Layer::AdminCity),
             other => Err(format!(
                 "unknown --layer '{other}'; supported: {}",
                 Layer::names().join(", ")
@@ -66,7 +70,7 @@ impl Layer {
     }
 
     pub fn names() -> Vec<&'static str> {
-        vec!["safety", "maxspeed", "transit_lines"]
+        vec!["safety", "maxspeed", "transit_lines", "admin_city"]
     }
 
     pub fn name(self) -> &'static str {
@@ -74,6 +78,7 @@ impl Layer {
             Layer::Safety => "safety",
             Layer::Maxspeed => "maxspeed",
             Layer::TransitLines => "transit_lines",
+            Layer::AdminCity => "admin_city",
         }
     }
 }
@@ -108,6 +113,7 @@ pub fn build(input: &Path, out: &Path, opts: &Options) -> Result<Stats> {
         Layer::Safety => build_safety(input, &blobs, out, opts),
         Layer::Maxspeed => build_maxspeed(input, &blobs, out, opts),
         Layer::TransitLines => build_transit_lines(input, &blobs, out, opts),
+        Layer::AdminCity => build_admin_city(input, &blobs, out, opts),
     }
 }
 
@@ -729,6 +735,226 @@ fn transit_way_blob(
     Ok(kinds)
 }
 
+// --- admin_city -----------------------------------------------------------
+
+/// One `admin_level=8` boundary relation, with its member ways and tags copied out.
+struct AdminRow {
+    id: i64,
+    name: Option<String>,
+    name_en: Option<String>,
+    /// `(way id, is_outer)` in member order.
+    members: Vec<(i64, bool)>,
+}
+
+#[derive(Default)]
+struct AdminWayPass {
+    /// `(way id, its refs)` for ways a boundary relation claimed.
+    wanted: Vec<(i64, Vec<i64>)>,
+}
+
+fn build_admin_city(
+    input: &Path,
+    blobs: &[pbf::BlobLoc],
+    out: &Path,
+    opts: &Options,
+) -> Result<Stats> {
+    let select = Select::parse(&admin::FILTERS)?;
+
+    // Pass 1: relations, which decide which ways matter.
+    let (chunks, blob_kinds) = pbf::run_pass(
+        input,
+        blobs,
+        None,
+        KIND_RELATIONS,
+        "Pass 1: relations",
+        Vec::<AdminRow>::new,
+        |state: &mut Vec<AdminRow>, block| admin_relation_blob(state, block, &select),
+    )?;
+    let mut rows: Vec<AdminRow> = Vec::new();
+    for chunk in chunks {
+        rows.extend(chunk);
+    }
+    let mut wanted_ways: Vec<i64> = rows.iter().flat_map(|r| r.members.iter().map(|m| m.0)).collect();
+    wanted_ways.sort_unstable();
+    wanted_ways.dedup();
+    println!(
+        "{} admin_level=8 relation(s), {} member way(s)",
+        rows.len(),
+        wanted_ways.len()
+    );
+
+    // Pass 2: the member ways' node refs, IN ORDER. Nothing sorts or dedups them:
+    // vertex order is the geometry. See the `rings` module docs.
+    let (chunks, _) = pbf::run_pass(
+        input,
+        blobs,
+        Some(&blob_kinds),
+        KIND_WAYS,
+        "Pass 2: ways",
+        AdminWayPass::default,
+        |state, block| admin_way_blob(state, block, &wanted_ways),
+    )?;
+    let mut member_refs: HashMap<i64, Vec<i64>> = HashMap::new();
+    for chunk in chunks {
+        member_refs.extend(chunk.wanted);
+    }
+
+    // Pass 3: node coordinates.
+    let table = NodeLocations::new(
+        member_refs.values().flat_map(|r| r.iter().copied()).collect(),
+    );
+    println!("{} node location(s) needed", table.len());
+    let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 3: nodes", table)?;
+
+    let locate = |id: i64| -> Option<Coord> {
+        table
+            .get(id)
+            .map(|(lat_e7, lon_e7)| (lon_e7 as f64 * 1e-7, lat_e7 as f64 * 1e-7))
+    };
+
+    let mut lines: Vec<LineFeature> = Vec::new();
+    let mut stats = RingStats::default();
+    let mut outside_bbox = 0usize;
+    let mut no_geometry = 0usize;
+    for row in &rows {
+        let members: Vec<MemberWay> = row
+            .members
+            .iter()
+            .filter_map(|(way, outer)| {
+                member_refs.get(way).map(|refs| MemberWay {
+                    refs: refs.clone(),
+                    outer: *outer,
+                })
+            })
+            .collect();
+        let polygons = rings::assemble(&members, locate, &mut stats);
+        if polygons.is_empty() {
+            no_geometry += 1;
+            continue;
+        }
+        if !parts_touch_bbox(
+            &polygons.iter().flatten().cloned().collect::<Vec<_>>(),
+            opts.bbox.as_ref(),
+        ) {
+            outside_bbox += 1;
+            continue;
+        }
+        // A relation with one ring is a Polygon; several are a MultiPolygon. Both
+        // are what `keep_geometry` accepted, and the tiler takes either.
+        let geometry = if polygons.len() == 1 {
+            Geometry::Polygon(polygons.into_iter().next().expect("non-empty"))
+        } else {
+            Geometry::MultiPolygon(polygons)
+        };
+        let t = AdminTags {
+            name: row.name.as_deref(),
+            name_en_tag: row.name_en.as_deref(),
+            ..Default::default()
+        };
+        let Some(f) = admin::feature(&t, geometry, row.id) else {
+            continue;
+        };
+        lines.push(LineFeature {
+            sort: ("relation", row.id),
+            rendered: render(&f),
+        });
+    }
+
+    let written = write_lines(out, lines)?;
+    println!(
+        "Wrote {written} admin_city feature(s) to {} ({} outer, {} inner ring(s))",
+        out.display(),
+        stats.outer_rings,
+        stats.inner_rings
+    );
+    // Loud, because an unclosed ring is a data problem the operator can act on --
+    // usually a member missing from the extract.
+    if stats.unclosed > 0 || stats.orphan_inner > 0 || no_geometry > 0 {
+        println!(
+            "{} ring(s) would not close, {} orphan hole(s) dropped, {} relation(s) yielded no geometry",
+            stats.unclosed, stats.orphan_inner, no_geometry
+        );
+    }
+    if outside_bbox > 0 {
+        println!("{outside_bbox} feature(s) dropped by --bbox");
+    }
+    Ok(Stats {
+        features: written,
+        from_nodes: 0,
+        from_ways: 0,
+        from_relations: written,
+        outside_bbox,
+    })
+}
+
+fn admin_relation_blob(
+    state: &mut Vec<AdminRow>,
+    block: &pbf::PrimitiveBlock,
+    select: &Select,
+) -> Result<u8> {
+    let mut kinds = 0u8;
+    visit_block(block, KIND_RELATIONS, &mut kinds, &mut |el: Element| {
+        if let Element::Relation(r) = el {
+            if !select.matches(|k| r.tags.get_str(k)) {
+                return Ok(());
+            }
+            let t = AdminTags {
+                boundary: r.tags.get_str("boundary"),
+                admin_level: r.tags.get_str("admin_level"),
+                name_en_tag: r.tags.get_str("name:en"),
+                name: r.tags.get_str("name"),
+                type_: r.tags.get_str("type"),
+            };
+            if !admin::is_city(&t) {
+                return Ok(());
+            }
+            // An empty role means outer, per the OSM boundary convention: most real
+            // members are unroled, and treating them as holes would leave nearly
+            // every boundary with no exterior at all.
+            let members: Vec<(i64, bool)> = r
+                .members
+                .iter()
+                .filter(|m: &&Member| m.kind == MEMBER_WAY)
+                .filter_map(|m| match m.role {
+                    b"outer" | b"" => Some((m.id, true)),
+                    b"inner" => Some((m.id, false)),
+                    // Anything else (`label`, `admin_centre`, a subarea) is not part
+                    // of the edge.
+                    _ => None,
+                })
+                .collect();
+            if members.is_empty() {
+                return Ok(());
+            }
+            state.push(AdminRow {
+                id: r.id,
+                name: t.name.map(str::to_string),
+                name_en: t.name_en_tag.map(str::to_string),
+                members,
+            });
+        }
+        Ok(())
+    })?;
+    Ok(kinds)
+}
+
+fn admin_way_blob(
+    state: &mut AdminWayPass,
+    block: &pbf::PrimitiveBlock,
+    wanted: &[i64],
+) -> Result<u8> {
+    let mut kinds = 0u8;
+    visit_block(block, KIND_WAYS, &mut kinds, &mut |el: Element| {
+        if let Element::Way(w) = el {
+            if w.refs.len() >= 2 && wanted.binary_search(&w.id).is_ok() {
+                state.wanted.push((w.id, w.refs.to_vec()));
+            }
+        }
+        Ok(())
+    })?;
+    Ok(kinds)
+}
+
 // --- shared output --------------------------------------------------------
 
 /// A rendered feature plus the key it sorts on.
@@ -1094,6 +1320,82 @@ mod tests {
         // lon/lat order, as GeoJSON wants.
         assert!((line[0].0 - -122.0).abs() < 1e-9);
         assert!((line[0].1 - 37.0).abs() < 1e-9);
+    }
+
+    // --- admin_city -------------------------------------------------------
+
+    #[test]
+    fn assembles_an_admin_city_boundary_from_its_member_ways() {
+        let (lines, stats) = extract_layer("extract_admin", Layer::AdminCity);
+        // Only the admin_level=8 relation. The county at level 6 is dropped.
+        assert_eq!(stats.features, 1, "{lines:?}");
+        assert_eq!((stats.from_relations, stats.from_ways), (1, 0));
+
+        let f = &lines[0];
+        assert!(f.contains("\"admin_level\":8"), "a number, not a string: {f}");
+        assert!(f.contains("\"name\":\"Oakland\""), "{f}");
+        assert!(f.contains("\"osm_id\":\"relation/9101\""), "{f}");
+        // No name:en on the fixture, and the city level has no fallback to `name`.
+        assert!(!f.contains("name_en"), "{f}");
+        assert!(!lines.iter().any(|l| l.contains("Alameda County")));
+    }
+
+    #[test]
+    fn an_admin_outer_ring_is_stitched_and_its_hole_is_kept() {
+        let (lines, _) = extract_layer("extract_admin_rings", Layer::AdminCity);
+        let f = &lines[0];
+        // One outer ring plus one hole: a Polygon, not a MultiPolygon.
+        assert!(f.contains("\"type\":\"Polygon\""), "{f}");
+        // Two rings means one `]],[[` separator between them.
+        assert_eq!(f.matches("]],[[").count(), 1, "exterior plus one hole: {f}");
+
+        // The exterior came from two ways -- one roled `outer`, one unroled, and one
+        // of them traversed backwards -- so all four corners must be present and the
+        // ring must close on the corner it started from.
+        let at = f.find("\"coordinates\":[[").unwrap() + "\"coordinates\":[".len();
+        let end = at + f[at..].find("]],").unwrap() + 1;
+        let outer = &f[at..end];
+        for corner in [
+            "[-122.4000000,37.8000000]",
+            "[-122.3600000,37.8000000]",
+            "[-122.3600000,37.8400000]",
+            "[-122.4000000,37.8400000]",
+        ] {
+            assert!(outer.contains(corner), "missing outer corner {corner}: {outer}");
+        }
+        assert_eq!(outer.matches("[-122.4000000,37.8000000]").count(), 2, "closed: {outer}");
+
+        // The hole is the second ring, and is inside the first.
+        let hole = &f[end..];
+        assert!(hole.contains("[-122.3900000,37.8100000]"), "{hole}");
+    }
+
+    #[test]
+    fn admin_city_is_deterministic_and_bbox_filtered() {
+        let (pbf_path, dir) = testpbf::write_layers_sample("det_admin");
+        let run = |suffix: &str| {
+            let out = dir.join(format!("admin{suffix}.geojsonseq"));
+            build(
+                &pbf_path,
+                &out,
+                &Options { layer: Layer::AdminCity, bbox: None },
+            )
+            .unwrap();
+            std::fs::read(out).unwrap()
+        };
+        assert_eq!(run("a"), run("b"));
+
+        let stats = build(
+            &pbf_path,
+            &dir.join("empty.geojsonseq"),
+            &Options {
+                layer: Layer::AdminCity,
+                bbox: Some(BBox::parse("-30,20,-20,30").unwrap()),
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.features, 0);
+        assert_eq!(stats.outside_bbox, 1);
     }
 
     #[test]

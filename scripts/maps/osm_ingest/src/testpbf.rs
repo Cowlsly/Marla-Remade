@@ -379,9 +379,32 @@ pub const PLATFORM_WAY_ID: i64 = 5003;
 pub const ROUTE_RELATION_ID: i64 = 9001;
 /// `type=route` + `route=bus`, which this layer drops.
 pub const BUS_RELATION_ID: i64 = 9002;
+/// `type=boundary` + `boundary=administrative` + `admin_level=8`, with an outer
+/// ring split across two ways and one inner ring (a hole).
+pub const ADMIN_CITY_RELATION_ID: i64 = 9101;
+/// The same, but `admin_level=6`: a county, which the city layer drops.
+pub const ADMIN_COUNTY_RELATION_ID: i64 = 9102;
+
+/// Way ids the admin boundary is assembled from.
+pub const ADMIN_OUTER_WAY_A: i64 = 7001;
+pub const ADMIN_OUTER_WAY_B: i64 = 7002;
+pub const ADMIN_INNER_WAY: i64 = 7003;
 
 /// Node ids the vector-layer fixture's ways are built from.
 const WAY_NODE_IDS: [i64; 6] = [2001, 2002, 2003, 2004, 2005, 2006];
+
+/// The admin boundary's outer ring corners, then its hole's corners. A 0.04-degree
+/// square near the other fixture geometry, with a 0.01-degree hole inside it.
+const ADMIN_NODES: [(i64, i32, i32); 8] = [
+    (2101, 378_000_000, -1_224_000_000),
+    (2102, 378_000_000, -1_223_600_000),
+    (2103, 378_400_000, -1_223_600_000),
+    (2104, 378_400_000, -1_224_000_000),
+    (2111, 378_100_000, -1_223_900_000),
+    (2112, 378_100_000, -1_223_800_000),
+    (2113, 378_200_000, -1_223_800_000),
+    (2114, 378_200_000, -1_223_900_000),
+];
 
 /// One node in the vector-layer fixture: `(id, lat_e7, lon_e7, tags)`.
 type FixtureNode = (i64, i32, i32, Vec<(u32, u32)>);
@@ -425,6 +448,8 @@ pub fn layers_block() -> Vec<u8> {
     let k_route = st.id("route");
     let k_ref = st.id("ref");
     let k_colour = st.id("colour");
+    let k_boundary = st.id("boundary");
+    let k_admin_level = st.id("admin_level");
 
     let v_speed_camera = st.id("speed_camera");
     let v_surveillance = st.id("surveillance");
@@ -451,6 +476,14 @@ pub fn layers_block() -> Vec<u8> {
     let v_red_line = st.id("Red Line");
     let v_red = st.id("Red");
     let v_da291c = st.id("#DA291C");
+    let v_boundary = st.id("boundary");
+    let v_administrative = st.id("administrative");
+    let v_eight = st.id("8");
+    let v_six = st.id("6");
+    let v_oakland = st.id("Oakland");
+    let v_alameda = st.id("Alameda County");
+    let role_outer = st.id("outer");
+    let role_inner = st.id("inner");
     // An empty member role is string-table index 0, per the PBF spec.
     let role_empty = ST_EMPTY;
 
@@ -498,6 +531,10 @@ pub fn layers_block() -> Vec<u8> {
         (WAY_NODE_IDS[4], 377_920_000, -1_224_100_000, vec![]),
         (WAY_NODE_IDS[5], 377_930_000, -1_224_100_000, vec![]),
     ];
+    let mut nodes = nodes;
+    for (id, lat, lon) in ADMIN_NODES {
+        nodes.push((id, lat, lon, vec![]));
+    }
     let dense = dense_group(&nodes);
 
     let ways = [
@@ -537,6 +574,12 @@ pub fn layers_block() -> Vec<u8> {
         ),
         // A platform is not a line.
         way(PLATFORM_WAY_ID, &[(k_railway, v_platform)], &WAY_NODE_IDS[..2]),
+        // admin_city: the outer ring split across two ways, so the assembler has to
+        // stitch them, and one of them is reversed so it has to flip one too.
+        way(ADMIN_OUTER_WAY_A, &[], &[2101, 2102, 2103]),
+        way(ADMIN_OUTER_WAY_B, &[], &[2101, 2104, 2103]),
+        // The hole, closed on its own.
+        way(ADMIN_INNER_WAY, &[], &[2111, 2112, 2113, 2114, 2111]),
     ];
 
     let rels = [
@@ -561,6 +604,34 @@ pub fn layers_block() -> Vec<u8> {
             BUS_RELATION_ID,
             &[(k_type, v_route), (k_route, v_bus)],
             &[(RAILWAY_WAY_ID, role_empty, 1)],
+        ),
+        // An admin_level=8 boundary. One member is unroled, which the OSM boundary
+        // convention says is outer -- the case that matters most, since most real
+        // members are unroled.
+        relation(
+            ADMIN_CITY_RELATION_ID,
+            &[
+                (k_type, v_boundary),
+                (k_boundary, v_administrative),
+                (k_admin_level, v_eight),
+                (k_name, v_oakland),
+            ],
+            &[
+                (ADMIN_OUTER_WAY_A, role_outer, 1),
+                (ADMIN_OUTER_WAY_B, role_empty, 1),
+                (ADMIN_INNER_WAY, role_inner, 1),
+            ],
+        ),
+        // A county: same shape, wrong level.
+        relation(
+            ADMIN_COUNTY_RELATION_ID,
+            &[
+                (k_type, v_boundary),
+                (k_boundary, v_administrative),
+                (k_admin_level, v_six),
+                (k_name, v_alameda),
+            ],
+            &[(ADMIN_OUTER_WAY_A, role_outer, 1), (ADMIN_OUTER_WAY_B, role_empty, 1)],
         ),
     ];
 
