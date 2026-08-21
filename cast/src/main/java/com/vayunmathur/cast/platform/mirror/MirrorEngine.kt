@@ -249,7 +249,7 @@ class MirrorEngine(
     private fun handleFeedback(packet: ByteArray) {
         for (stream in negotiation.streams) {
             val sender = senders[stream.kind] ?: continue
-            val feedback = CastRtcp.parseFeedback(
+            val feedback = CastRtcp.parse(
                 packet = packet,
                 receiverSsrc = stream.receiverSsrc,
                 senderSsrc = stream.senderSsrc,
@@ -261,13 +261,17 @@ class MirrorEngine(
                     TAG,
                     "${stream.kind} feedback checkpoint=${feedback.checkpoint} " +
                         "nacks=${feedback.nacks.size} acks=${feedback.ackedFrames.size} " +
-                        "playoutDelay=${feedback.playoutDelayMs}",
+                        "pli=${feedback.pictureLoss} playoutDelay=${feedback.playoutDelayMs}",
                 )
             }
             val recovery = session.onFeedback(feedback)
             sender.retransmit(recovery.retransmissions)
-            if (recovery.needsKeyFrame && stream.kind == StreamKind.Video) {
-                Log.i(TAG, "receiver fell behind the retransmit buffer; forcing a key frame")
+            if (stream.kind == StreamKind.Video &&
+                (recovery.needsKeyFrame || feedback.pictureLoss)
+            ) {
+                // Either the receiver asked outright (PLI) or it has fallen further behind than the
+                // retransmit buffer can repair. A key frame is the only way out of both.
+                Log.i(TAG, "key frame requested (pli=${feedback.pictureLoss})")
                 videoEncoder?.requestKeyFrame()
             }
             return
