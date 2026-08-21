@@ -66,6 +66,12 @@ set -euo pipefail
 #   --engine-admin E          a silent no-op, so a rollback is always one flag.
 #   --engine-admin-city E     `admin-country`/`admin-region` come from Natural
 #                             Earth and will never have a rust engine.
+#   --admin-reuse SRC Carry admin_country and admin_region forward from an existing
+#                     archive (a local .pmtiles or a URL) with pmtiles_extract,
+#                     instead of rebuilding them from Natural Earth. Those two are
+#                     the only layers that still need ogr2ogr and python3, so with
+#                     this and --base-mode reuse the whole tile build is cargo-only
+#                     apart from curl.
 #   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
@@ -100,6 +106,7 @@ ENGINE_MAXSPEED="rust"
 ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 ENGINE_ADMIN_CITY="rust"
+ADMIN_REUSE=""
 DRY_RUN=0
 SKIP_BASE=0
 SKIP_SAFETY=0
@@ -130,6 +137,7 @@ while [[ $# -gt 0 ]]; do
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
+        --admin-reuse) ADMIN_REUSE="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
@@ -142,7 +150,7 @@ while [[ $# -gt 0 ]]; do
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,85p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,91p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -245,10 +253,36 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     [[ -n "$PBF" ]] && ADMIN_ARGS+=(--pbf "$PBF")
     [[ -n "$BBOX" ]] && ADMIN_ARGS+=(--bbox "$BBOX")
     [[ -z "$PBF" ]] && ADMIN_ARGS+=(--no-city)
+    # With --admin-reuse, the Natural Earth levels are lifted out of an existing
+    # archive rather than rebuilt, so build_admin_layers.sh only has to do the one
+    # level OSM can supply -- and therefore needs no ogr2ogr, tippecanoe or python3.
+    [[ -n "$ADMIN_REUSE" ]] && ADMIN_ARGS+=(--only-city)
     run "$HERE/build_admin_layers.sh" "${ADMIN_ARGS[@]}"
     for l in admin_country admin_region admin_city; do
         [[ -f "$WORK/admin/$l.pmtiles" ]] && INPUTS+=("$WORK/admin/$l.pmtiles")
     done
+
+    if [[ -n "$ADMIN_REUSE" ]]; then
+        SRC="$ADMIN_REUSE"
+        if [[ "$ADMIN_REUSE" == http://* || "$ADMIN_REUSE" == https://* ]]; then
+            SRC="$WORK/admin/reuse_source.pmtiles"
+            mkdir -p "$WORK/admin"
+            if [[ -f "$SRC" ]]; then
+                echo "[v5] reusing already-downloaded $SRC"
+            else
+                echo "[v5] downloading $ADMIN_REUSE for the admin lift"
+                run curl -fL --retry 3 -o "$SRC.partial" "$ADMIN_REUSE"
+                run mv "$SRC.partial" "$SRC"
+            fi
+        fi
+        echo "[v5] lifting admin_country + admin_region out of $SRC"
+        # One archive holding both, so the merge gains one input rather than two.
+        run cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
+            --bin pmtiles_extract -- "$SRC" \
+            --out "$WORK/admin/admin_reused.pmtiles" \
+            --layer admin_country --layer admin_region
+        INPUTS+=("$WORK/admin/admin_reused.pmtiles")
+    fi
 fi
 
 # --- 7. transit_stops (GTFS stop pins; cargo-only, takes GTFS dirs not --pbf) ---

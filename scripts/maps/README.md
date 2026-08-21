@@ -167,7 +167,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_all.ps1` | **Windows twin** of the above. Stages graph/pois/transit are complete; the tiles stage composites only the cargo-only layers onto a `-BaseArchive` (see [Caveats](#caveats--known-limitations)) |
 | `run_generator.sh` | **Deprecated** thin wrapper over `build_all.sh` (graph + pois + publish) |
 | `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
-| `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
+| `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse a published archive). A `--bbox` reuse extract now uses our own `pmtiles_extract`; `--extractor go-pmtiles` is still accepted, and is the only practical way to clip the 137 GB planet base |
 | `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
 | `build_maxspeed_layer.sh` | **`--engine rust`** (default): `osm_extract` → geojsonseq → `tile_lines`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe |
 | `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe |
@@ -178,7 +178,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
 | `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
-| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
+| `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe, tile-join and go-pmtiles**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_extract` (subset by bbox, zoom and layer — the `go-pmtiles extract` replacement and the admin layer lift), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
 | `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/maxspeed.rs`; kept as the contract of record and as `--engine legacy` |
@@ -199,10 +199,34 @@ build is reproducible or cargo-only.
 ### 1. Planetiler cannot be ported
 
 `build_base_layers.sh --mode build` runs Java 21 plus the Protomaps basemap jar.
-Nothing here replaces it, so **`--base-mode build` is the one documented Java
-exception** and it fails loudly when `java` is absent rather than silently
-falling back. The default is `--base-mode reuse`, which fetches a published
-archive with `curl` (plus `go-pmtiles` today for a `--bbox` extract).
+Nothing here replaces it and nothing is going to: it is a large Java program
+*implementing* the Protomaps schema, and reimplementing it would mean owning that
+schema rather than consuming it. So **`--mode build` is the one documented Java
+exception** and it fails loudly with an explanation when `java` is absent, rather
+than quietly becoming a reuse. The default is `--mode reuse`, which needs no JVM.
+
+`--mode reuse` is otherwise cargo-only now. A `--bbox` extract used to shell out to
+`go-pmtiles`; it uses `pmtiles_extract` by default instead. One honest caveat: our
+extractor works on a **local** archive, so the whole thing has to come down first.
+That is fine for a metro base and hopeless for the 137 GB planet, which is why
+`--extractor go-pmtiles` remains — it range-requests only the tiles it wants.
+
+### A cargo-only tile build
+
+Putting the reuse paths together, a complete tile archive needs nothing but `cargo`
+and `curl`:
+
+```bash
+./build_all.sh --pbf california-latest.osm.pbf \
+    --base-mode reuse \
+    --admin-reuse https://data.vayunmathur.com/v5.pmtiles \
+    --gtfs-manifest feeds.manifest --out-dir ./build
+```
+
+`--admin-reuse` lifts `admin_country` and `admin_region` out of the published
+archive with `pmtiles_extract --layer`, which is what removes the last `ogr2ogr` and
+`python3` from the tile path. Those two layers change on Natural Earth's clock, not
+OSM's, so carrying them forward is the correct default rather than a shortcut.
 
 ### 2. Natural Earth is a third input
 

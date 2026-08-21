@@ -51,6 +51,12 @@ set -euo pipefail
 #     --work DIR          scratch + stamps (default <out-dir>/work)
 #     --base-archive URL  published archive to reuse for the base layers
 #                         (default: build_base_layers.sh's own)
+#     --admin-reuse SRC   carry admin_country and admin_region forward from an
+#                         existing archive (a local .pmtiles or a URL) instead of
+#                         rebuilding them from Natural Earth. Those two are the only
+#                         layers that still need ogr2ogr and python3, so with this
+#                         and --base-mode reuse the whole tile build is cargo-only
+#                         apart from curl.
 #     --base-mode M       build|reuse (default reuse; build needs java 21 + --base-jar)
 #     --base-jar FILE     protomaps basemap jar (--base-mode build only)
 #     --base-area A       planetiler area (--base-mode build only; default planet)
@@ -93,6 +99,7 @@ OUT_DIR="./build_all_out"
 OUT=""
 WORK=""
 BASE_ARCHIVE=""
+ADMIN_REUSE=""
 BASE_MODE="reuse"
 BASE_JAR=""
 BASE_AREA="planet"
@@ -124,6 +131,7 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --work) WORK="$2"; shift 2 ;;
         --base-archive) BASE_ARCHIVE="$2"; shift 2 ;;
+        --admin-reuse) ADMIN_REUSE="$2"; shift 2 ;;
         --base-mode) BASE_MODE="$2"; shift 2 ;;
         --base-jar) BASE_JAR="$2"; shift 2 ;;
         --base-area) BASE_AREA="$2"; shift 2 ;;
@@ -143,7 +151,7 @@ while [[ $# -gt 0 ]]; do
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,83p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,89p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -328,6 +336,7 @@ if want_stage tiles; then
             V5_ARGS+=(--skip-pois --extra-layer "$POIS_TILE")
         fi
         [[ -n "$BASE_ARCHIVE" ]] && V5_ARGS+=(--base-source "$BASE_ARCHIVE")
+        [[ -n "$ADMIN_REUSE" ]] && V5_ARGS+=(--admin-reuse "$ADMIN_REUSE")
         [[ "$BASE_MODE" == "build" ]] && V5_ARGS+=(--base-jar "$BASE_JAR" --base-area "$BASE_AREA")
         if [[ -f "$EFFECTIVE_GTFS_MANIFEST" ]]; then
             V5_ARGS+=(--gtfs-manifest "$EFFECTIVE_GTFS_MANIFEST")
