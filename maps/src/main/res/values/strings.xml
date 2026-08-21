@@ -23,6 +23,8 @@
     <string name="no_route_found">No route found</string>
     <!-- BottomSheet: Loading state while route is calculated -->
     <string name="generating_route">Generating Route…</string>
+    <!-- MapPage: shown while the basemap style is read and patched, before the map can draw -->
+    <string name="map_loading">Loading map…</string>
 
     <!-- SearchPage: Hint in search box for places and addresses -->
     <string name="search_nearby">Search places &amp; addresses…</string>

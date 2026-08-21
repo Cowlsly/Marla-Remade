@@ -1,283 +1,197 @@
 package com.vayunmathur.maps.ui
 
-import android.content.Context
-import android.util.Log
 import androidx.activity.compose.BackHandler
-import androidx.compose.animation.core.animateDpAsState
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBars
-import androidx.compose.foundation.layout.windowInsetsPadding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.RoundedCornerShape
-import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.IconDragHandle
-import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
-import com.vayunmathur.library.ui.Button
-import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.CardDefaults
-import com.vayunmathur.library.ui.verticalShape
-import com.vayunmathur.library.ui.CompassCalibrationBanner
-import com.vayunmathur.library.ui.ExperimentalMaterial3Api
-import com.vayunmathur.library.ui.FloatingActionButton
-import com.vayunmathur.library.ui.Icon
-import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.IconMyLocation
-import com.vayunmathur.library.ui.ListItem
-import com.vayunmathur.library.ui.ListItemDefaults
-import com.vayunmathur.library.ui.SheetValue
-import com.vayunmathur.library.ui.Text
-import com.vayunmathur.library.ui.rememberFreeHeightSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.key
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.retain.retain
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.DpRect
-import androidx.compose.ui.unit.dp
-import com.vayunmathur.library.R
-import com.vayunmathur.library.ui.IconClose
-import com.vayunmathur.library.ui.IconSearch
+import com.vayunmathur.library.ui.AppScaffold
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.FreeHeightBottomSheetScaffold
+import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconSettings
+import com.vayunmathur.library.ui.SheetValue
+import com.vayunmathur.library.ui.Spacing
+import com.vayunmathur.library.ui.rememberFreeHeightSheetState
+import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.maps.Route
 import com.vayunmathur.maps.data.SpecificFeature
-import com.vayunmathur.maps.data.parse
-import com.vayunmathur.maps.util.MapTileCache
-import com.vayunmathur.maps.util.RouteService
-import com.vayunmathur.maps.util.SavedPlacesViewModel
+import com.vayunmathur.maps.ui.map.LayerToggles
+import com.vayunmathur.maps.ui.map.MapBrowseHeader
+import com.vayunmathur.maps.ui.map.MapFabStack
+import com.vayunmathur.maps.ui.map.MapOverlay
+import com.vayunmathur.maps.ui.map.MapOverlays
+import com.vayunmathur.maps.ui.map.MapSearchBar
+import com.vayunmathur.maps.ui.map.MapSurface
+import com.vayunmathur.maps.ui.map.NavigationCameraFollow
+import com.vayunmathur.maps.ui.map.WaypointList
+import com.vayunmathur.maps.ui.map.mapSearchLabel
+import com.vayunmathur.maps.ui.map.rememberMapChromeState
+import com.vayunmathur.maps.ui.map.style.rememberMapStyle
+import com.vayunmathur.maps.ui.theme.MapChromeMetrics
 import com.vayunmathur.maps.util.MapSettingsViewModel
 import com.vayunmathur.maps.util.MapsSearchViewModel
+import com.vayunmathur.maps.util.NavigationSessionManager
 import com.vayunmathur.maps.util.PoiIndex
-import com.vayunmathur.maps.ui.map.MapFeaturePicker
-import com.vayunmathur.maps.ui.map.MapHit
-import com.vayunmathur.maps.ui.theme.BasemapPalette
-import com.vayunmathur.maps.ui.theme.MapChromeMetrics
+import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.visibleBoundsOrWorld
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.buildJsonArray
-import kotlinx.serialization.json.buildJsonObject
-import kotlinx.serialization.json.jsonArray
-import kotlinx.serialization.json.jsonObject
-import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.put
-import kotlinx.serialization.json.putJsonObject
 import org.maplibre.compose.camera.CameraPosition
 import org.maplibre.compose.camera.rememberCameraState
-import org.maplibre.compose.map.GestureOptions
-import org.maplibre.compose.map.MapOptions
-import org.maplibre.compose.map.MaplibreMap
-import org.maplibre.compose.map.OrnamentOptions
-import org.maplibre.compose.map.RenderOptions
-import org.maplibre.compose.style.BaseStyle
-import org.maplibre.compose.util.ClickResult
 import org.maplibre.spatialk.geojson.Position
-import com.vayunmathur.library.ui.ReorderableItem
-import com.vayunmathur.library.ui.draggableHandle
-import com.vayunmathur.library.ui.rememberMessenger
-import com.vayunmathur.library.ui.rememberReorderableLazyListState
 import com.vayunmathur.maps.R as MapsR
 
+/** Cold-start camera: San Francisco at z14, where the baked POIs are dense enough to see. */
+private val INITIAL_CAMERA = CameraPosition(target = Position(-122.4194, 37.7749), zoom = 14.0)
+
+/**
+ * The map screen.
+ *
+ * This composable is the wiring: it collects the ViewModel state, decides what the chrome should
+ * show, and hands each piece to a stateless component in [com.vayunmathur.maps.ui.map]. The
+ * pieces themselves — the search bar, the FAB stack, the sheets, the hit-test, the camera
+ * follow, the style patch — each live in their own file and none of them know about this one.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel, savedPlacesViewModel: SavedPlacesViewModel, searchViewModel: MapsSearchViewModel, settingsViewModel: MapSettingsViewModel, parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel, transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel) {
-    val selectedFeature by viewModel.selectedFeature.collectAsState()
+fun MapPage(
+    backStack: NavBackStack<Route>,
+    viewModel: SelectedFeatureViewModel,
+    savedPlacesViewModel: SavedPlacesViewModel,
+    searchViewModel: MapsSearchViewModel,
+    settingsViewModel: MapSettingsViewModel,
+    parkingViewModel: com.vayunmathur.maps.util.ParkingViewModel,
+    transitViewModel: com.vayunmathur.maps.util.TransitStopsViewModel,
+) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     val messenger = rememberMessenger()
     val noResultsMessage = stringResource(MapsR.string.no_results_found)
 
-    val savedHome by savedPlacesViewModel.home.collectAsState()
-    val savedWork by savedPlacesViewModel.work.collectAsState()
-    val savedList by savedPlacesViewModel.saved.collectAsState()
+    val chrome = rememberMapChromeState()
+    val camera = rememberCameraState(INITIAL_CAMERA)
 
-    // All saved places drawn as pins: Home, Work and the starred list, deduped.
-    val savedPins = remember(savedHome, savedWork, savedList) {
-        (listOfNotNull(savedHome, savedWork) + savedList).distinct()
-    }
-
-    // Parking memory (P9): the single active parking spot (pin + recall).
-    val parkingSpot by parkingViewModel.active.collectAsState()
-    var showParkingSheet by retain { mutableStateOf(false) }
-
-    // Map-layer visibility toggles (P6 layers sheet, persisted via DataStore).
-    val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
-    val satelliteEnabled by settingsViewModel.satelliteLayer.collectAsState()
-    val safetyEnabled by settingsViewModel.safetyLayer.collectAsState()
-    val transitEnabled by settingsViewModel.transitLayer.collectAsState()
-    var showLayersSheet by retain { mutableStateOf(false) }
-
-    // Effective map palette (P14): resolve the P6 Map-theme setting against the
-    // OS dark mode using the same rule DynamicTheme applies (a null override =
-    // follow the system). Drives the runtime dark recolor of the basemap below,
-    // so the map flips light<->dark together with the rest of the app chrome.
-    val themeMode by settingsViewModel.themeMode.collectAsState()
-    val darkMap = themeMode.darkOverride ?: isSystemInDarkTheme()
-
-    // Public transit (P10): nearby stops overlay + live departure board. Stops
-    // are only fetched/drawn while the Transit layer is on.
-    val selectedTransitStop by transitViewModel.selected.collectAsState()
-    val departuresState by transitViewModel.departures.collectAsState()
-
-    // Search-result pins (from the Google search page) drawn on the map.
-    val searchResults by searchViewModel.results.collectAsState()
-
-    // Live family-location pins (P18): the findfamily bound service is bound
-    // while this screen is composed (see rememberFamilyMembers' DisposableEffect)
-    // and pushes updates only while bound. Empty when findfamily is absent.
-    val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
-
-    // Active browse-category POI filter (P29): when set, the on-map `ma_pois`
-    // layer is filtered to this category's OSM types (see MaPoisLayer). null =
-    // no filter (all POIs shown). Toggled by the CategoryChips row below.
-    var selectedCategory by retain { mutableStateOf<MapCategory?>(null) }
-
-    // TEST: default to San Francisco at z14 so the native ma_pois POIs are
-    // visible on cold start.
-    val camera = rememberCameraState(CameraPosition(target = Position(-122.4194, 37.7749), zoom = 14.0))
-
-    // Offline POI SEARCH index (poi_index.bin / poi_names.bin, P27). Ambient POI
-    // rendering is now native from the baked `ma_pois` PMTiles source-layer (see
-    // MaPoisLayer), so this index is only used to answer offline search queries.
-    // Re-map the side files once the map is ready so a first-run download that
-    // landed AFTER PoiIndex.initialize first ran (and no-op'd because the files
-    // were absent) is picked up instead of staying poisoned. reload() is a cheap
-    // idempotent re-mmap. Google is still hit only on tap for rich details.
-    LaunchedEffect(Unit) {
-        withContext(Dispatchers.IO) { PoiIndex.reload(context) }
-    }
-
-    // Online-tiles-only: the basemap always streams live (offline zone tile
-    // packs were removed). Offline ROUTING still works via the downloaded graph.
-    val hybridUrl = MapTileCache.BASEMAP_PMTILES_URL
-
-    // Inside MapPage
-    var json by remember { mutableStateOf<String?>(null) }
-
-    // Read the style asset on Dispatchers.IO (file open), then the hybrid
-    // patch step is light enough to stay on the same coroutine. Re-runs on a
-    // theme change (darkMap) so the recolored style reloads and flips live.
-    LaunchedEffect(hybridUrl, darkMap) {
-        val updatedStyle = withContext<String>(Dispatchers.IO) {
-            val rawStyle = context.assets.open("style.json").bufferedReader().readText()
-            patchStyleForHybrid(
-                rawStyle,
-                MapTileCache.BASEMAP_PMTILES_URL,
-                hybridUrl,
-                darkMap,
-            )
-        }
-        Log.d(
-            "MapPage",
-            "style patched base=${MapTileCache.BASEMAP_PMTILES_URL} hybrid=$hybridUrl " +
-                "darkMap=$darkMap jsonLen=${updatedStyle.length}",
-        )
-        json = updatedStyle
-    }
-
-    // --- LOCATION & OSM INITIALIZATION ---
+    val selectedFeature by viewModel.selectedFeature.collectAsState()
+    val inactiveNavigation by viewModel.inactiveNavigation.collectAsState()
+    val route by viewModel.routes.collectAsState(null)
     val userPosition by viewModel.userPosition.collectAsState()
     val userBearing by viewModel.userBearing.collectAsState()
     val userHeadingAccuracy by viewModel.userHeadingAccuracy.collectAsState()
 
-    val inactiveNavigation by viewModel.inactiveNavigation.collectAsState()
+    val savedHome by savedPlacesViewModel.home.collectAsState()
+    val savedWork by savedPlacesViewModel.work.collectAsState()
+    val savedList by savedPlacesViewModel.saved.collectAsState()
+    // Home, Work and the starred list drawn as one pin set, deduped.
+    val savedPins = remember(savedHome, savedWork, savedList) {
+        (listOfNotNull(savedHome, savedWork) + savedList).distinct()
+    }
 
-    // --- ROUTE COMPUTATION ---
-    val route by viewModel.routes.collectAsState(null)
+    val parkingSpot by parkingViewModel.active.collectAsState()
+    val searchResults by searchViewModel.results.collectAsState()
+    val selectedTransitStop by transitViewModel.selected.collectAsState()
+    val departuresState by transitViewModel.departures.collectAsState()
 
-    // --- NAVIGATION SESSION ---
-    val navState by com.vayunmathur.maps.util.NavigationSessionManager.state.collectAsState()
+    // The findfamily service is bound only while this screen is composed, so this is empty when
+    // findfamily is absent.
+    val familyMembers by com.vayunmathur.maps.ipc.rememberFamilyMembers()
+
+    val trafficEnabled by settingsViewModel.trafficLayer.collectAsState()
+    val satelliteEnabled by settingsViewModel.satelliteLayer.collectAsState()
+    val safetyEnabled by settingsViewModel.safetyLayer.collectAsState()
+    val transitEnabled by settingsViewModel.transitLayer.collectAsState()
+
+    // Resolve the P6 map-theme setting against the OS the same way DynamicTheme does, so the map
+    // flips light/dark together with the rest of the chrome.
+    val themeMode by settingsViewModel.themeMode.collectAsState()
+    val darkMap = themeMode.darkOverride ?: isSystemInDarkTheme()
+    val mapStyle by rememberMapStyle(isDark = darkMap)
+
+    val navState by NavigationSessionManager.state.collectAsState()
     // Collected, not read off a field: a recalculation swaps the route mid-session, and reading
     // it as a plain property meant this screen kept drawing the OLD route's steps against the
     // new progress until something else happened to recompose.
-    val navSession by com.vayunmathur.maps.util.NavigationSessionManager.session.collectAsState()
-    val isNavigating = navState !is com.vayunmathur.maps.util.NavigationSessionManager.NavState.Idle
-    var autoFollow by retain { mutableStateOf(true) }
-    // North-up vs heading-up during navigation (Vela onCompassTap idea).
-    var navNorthUp by retain { mutableStateOf(false) }
-    // Posted speed limit under the puck (P5b maxspeed overlay; null when the
-    // tileset is unhosted or the road has no limit). Retained so a rotation does not blank
-    // the sign until the next GPS fix arrives; it is re-queried on the following one.
-    var postedLimit by retain { mutableStateOf<com.vayunmathur.maps.data.PostedLimit?>(null) }
-    var lastProgrammaticMoveMs by remember { mutableStateOf(0L) }
-    val activeRoute = navSession.route
-    val navProgress = (navState as? com.vayunmathur.maps.util.NavigationSessionManager.NavState.Navigating)?.progress
+    val navSession by NavigationSessionManager.session.collectAsState()
+    val isNavigating = navState !is NavigationSessionManager.NavState.Idle
+    val navProgress = (navState as? NavigationSessionManager.NavState.Navigating)?.progress
 
-    // --- UI & BOTTOM SHEET STATE ---
-    // A free-height sheet: it rests wherever the user leaves it. `Hidden` is
-    // reachable only through `hide()` — the drag and fling paths floor at the peek —
-    // so no latch is needed to keep the user from dismissing it.
     val sheetState = rememberFreeHeightSheetState(SheetValue.Hidden)
+    val browsing = selectedFeature == null && inactiveNavigation == null && !isNavigating
+
+    // Re-map the offline POI side files once the map is ready, so a first-run download that
+    // landed after PoiIndex.initialize first ran (and no-op'd) is picked up rather than staying
+    // poisoned. reload() is a cheap idempotent re-mmap.
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) { PoiIndex.reload(context) }
+    }
 
     LaunchedEffect(Unit) {
-        // Restore-on-recompose: raise the sheet if something is already selected —
-        // unless a deep link / auto-select is about to open the compact PANE instead
-        // (handled by the pendingFocus effect below).
+        // Raise the sheet if something is already selected — unless a deep link is about to open
+        // the compact pane instead, which the pendingFocus effect below handles.
         if (selectedFeature != null && viewModel.pendingFocus.value == null) {
             sheetState.partialExpand()
         }
     }
 
-    // Search auto-select (P17 contact address) + external geo:/maps deep links land
-    // here: fly to the place and open the Vela-style bottom PANE (partial/peek), not a
-    // full-screen sheet. A StateFlow-backed request survives a cold start, so a link
-    // that selected a place before the map composed still animates + peeks once ready.
+    // Contact-address auto-select and external geo:/maps deep links land here. A StateFlow-backed
+    // request survives a cold start, so a link that selected a place before the map composed
+    // still animates and peeks once it is ready.
     val pendingFocus by viewModel.pendingFocus.collectAsState()
     LaunchedEffect(pendingFocus) {
-        val req = pendingFocus ?: return@LaunchedEffect
+        val request = pendingFocus ?: return@LaunchedEffect
         camera.animateTo(
             camera.position.copy(
-                target = req.position,
-                zoom = req.zoom ?: maxOf(camera.position.zoom, 14.0),
+                target = request.position,
+                zoom = request.zoom ?: maxOf(camera.position.zoom, 14.0),
             )
         )
         sheetState.partialExpand()
         viewModel.consumeFocus()
     }
 
-    suspend fun hide() {
-        sheetState.hide()
+    // While navigating the in-screen overlay is the primary UI, so the sheet stays down.
+    LaunchedEffect(isNavigating) {
+        if (isNavigating) sheetState.hide()
     }
 
-    fun openSearch(query: String? = null) {
+    NavigationCameraFollow(camera, chrome, navProgress, isNavigating)
+
+    // Poll the posted limit under the puck. Inert until the maxspeed tileset is hosted.
+    LaunchedEffect(navProgress) {
+        val progress = navProgress
+        val projection = camera.projection
+        chrome.postedLimit = if (progress != null && projection != null) {
+            queryPostedLimit(projection, progress.snappedPosition)
+        } else {
+            null
+        }
+    }
+
+    fun openSearch(query: String? = null, waypointIndex: Int? = null) {
         val bbox = camera.visibleBoundsOrWorld()
         backStack.add(
-            Route.SearchPage(null, bbox.east, bbox.west, bbox.north, bbox.south, query)
+            Route.SearchPage(waypointIndex, bbox.east, bbox.west, bbox.north, bbox.south, query)
         )
     }
 
     BackHandler(selectedFeature != null) {
         coroutineScope.launch {
             viewModel.set(null)
-            hide()
+            sheetState.hide()
         }
     }
 
@@ -285,532 +199,202 @@ fun MapPage(backStack: NavBackStack<Route>, viewModel: SelectedFeatureViewModel,
         viewModel.setInactiveNavigation(null)
     }
 
-    var selectedRouteType by retain { mutableStateOf(RouteService.TravelMode.DRIVE) }
-
-    // --- RENDER ---
-    // While actively navigating we don't want the bottom sheet to slide up
-    // automatically; the in-screen overlay is the primary nav UI.
-    LaunchedEffect(isNavigating) {
-        if (isNavigating) {
-            hide()
-        }
-    }
-
-    // Camera follow: animate to snapped position / bearing whenever we get
-    // a new progress sample AND the user hasn't panned away.
-    LaunchedEffect(navProgress, autoFollow, navNorthUp) {
-        val p = navProgress ?: return@LaunchedEffect
-        if (!autoFollow) return@LaunchedEffect
-        lastProgrammaticMoveMs = System.currentTimeMillis()
-        camera.animateTo(
-            camera.position.copy(
-                target = p.snappedPosition,
-                bearing = if (navNorthUp) 0.0 else p.courseOverGround.toDouble(),
-                tilt = if (navNorthUp) 0.0 else 60.0,
-                zoom = 17.0,
-            ),
-            kotlin.time.Duration.parse("800ms"),
-        )
-    }
-
-    // Poll the posted speed limit under the puck from the maxspeed overlay
-    // (P5b). Inert (always null) until the maxspeed tileset is hosted.
-    LaunchedEffect(navProgress) {
-        val p = navProgress
-        val projection = camera.projection
-        postedLimit = if (p != null && projection != null) {
-            queryPostedLimit(projection, p.snappedPosition)
-        } else {
-            null
-        }
-    }
-
-    // Detect user-initiated camera moves: if isCameraMoving becomes true
-    // outside the ~1.2s window after our own animateTo, treat it as a pan
-    // and disable auto-follow until the user taps Recenter.
-    LaunchedEffect(camera.isCameraMoving, isNavigating) {
-        if (!isNavigating) return@LaunchedEffect
-        if (camera.isCameraMoving &&
-            System.currentTimeMillis() - lastProgrammaticMoveMs > 1_200
-        ) {
-            autoFollow = false
-        }
-    }
-
     FreeHeightBottomSheetScaffold({
-        Column(Modifier.padding(horizontal = 16.dp).padding(top = 8.dp)) {
-            BottomSheetContent(viewModel, selectedFeature, { viewModel.set(it) }, route, selectedRouteType, { selectedRouteType = it }, inactiveNavigation, savedPlacesViewModel, transitViewModel, navState)
+        Column(Modifier.padding(horizontal = Spacing.lg).padding(top = Spacing.sm)) {
+            BottomSheetContent(
+                viewModel,
+                selectedFeature,
+                { viewModel.set(it) },
+                route,
+                chrome.selectedRouteType,
+                { chrome.selectedRouteType = it },
+                inactiveNavigation,
+                savedPlacesViewModel,
+                transitViewModel,
+                navState,
+            )
         }
-    }, Modifier, sheetState, MapChromeMetrics.sheetPeekHeight, contentKey = listOf(selectedFeature, selectedRouteType)) { paddingValues ->
+    }, Modifier, sheetState, MapChromeMetrics.sheetPeekHeight, contentKey = listOf(selectedFeature, chrome.selectedRouteType)) { paddingValues ->
         AppScaffold(
             title = {
-                // Search bar lives IN the top app bar (Google-Maps style).
-                val searchName = if (selectedFeature is SpecificFeature.RoutableFeature) {
-                    (selectedFeature as SpecificFeature.RoutableFeature).name
-                } else {
-                    stringResource(MapsR.string.search_placeholder)
-                }
-                Card(shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.clickable { openSearch() }.padding(start = 12.dp),
-                    ) {
-                        IconSearch(Modifier.size(20.dp))
-                        Text(
-                            searchName,
-                            modifier = Modifier.weight(1f).padding(horizontal = 8.dp),
-                            maxLines = 1,
-                        )
-                        // Contact address shortcut (P17/P31): pick a contact's
-                        // postal address, GEOCODE it and open the resolved place
-                        // DIRECTLY (fly there + peek pane) — never through the
-                        // search box (no query prefill, no results list).
-                        ContactAddressButton(onAddress = { address ->
-                            val bbox = camera.visibleBoundsOrWorld()
-                            val nearLat = (bbox.north + bbox.south) / 2.0
-                            val nearLon = (bbox.east + bbox.west) / 2.0
-                            searchViewModel.resolveAndSelect(address, nearLat, nearLon) { place ->
-                                if (place != null) {
-                                    viewModel.stashRouteSelection()
-                                    // Fly to the resolved place + open the peek pane
-                                    // (Vela place-card), the same direct-open path as
-                                    // a geo:/maps deep link.
-                                    viewModel.selectAndFocus(
-                                        place,
-                                        zoom = maxOf(camera.position.zoom, 14.0),
-                                    )
-                                } else {
-                                    messenger.show(noResultsMessage)
-                                }
+                MapSearchBar(
+                    label = mapSearchLabel(
+                        (selectedFeature as? SpecificFeature.RoutableFeature)?.name
+                    ),
+                    onOpenSearch = { query -> openSearch(query) },
+                    onContactAddress = { address ->
+                        val bbox = camera.visibleBoundsOrWorld()
+                        searchViewModel.resolveAndSelect(
+                            address,
+                            (bbox.north + bbox.south) / 2.0,
+                            (bbox.east + bbox.west) / 2.0,
+                        ) { place ->
+                            if (place != null) {
+                                viewModel.stashRouteSelection()
+                                // Fly there and open the peek pane, the same direct-open path a
+                                // geo:/maps deep link takes.
+                                viewModel.selectAndFocus(
+                                    place,
+                                    zoom = maxOf(camera.position.zoom, 14.0),
+                                )
+                            } else {
+                                messenger.show(noResultsMessage)
                             }
-                        })
-                        // Voice search (P8): a transcript opens the search page
-                        // pre-filled, which runs the P3 Google search.
-                        VoiceSearchButton(onResult = { openSearch(it) })
-                    }
-                }
+                        }
+                    },
+                )
             },
             modifier = Modifier.padding(top = paddingValues.calculateTopPadding()),
             actions = {
-                IconButton({
-                    backStack.add(Route.SettingsPage)
-                }) {
-                    IconSettings()
-                }
+                IconButton({ backStack.add(Route.SettingsPage) }) { IconSettings() }
             },
         ) { innerPadding ->
             Box(Modifier.padding(innerPadding).fillMaxSize()) {
-                json?.let { json ->
-                    MaplibreMap(
-                        Modifier,
-                        BaseStyle.Json(json),
-                        camera,
-                        options = MapOptions(
-                            // TextureView (not the default SurfaceView): a
-                            // SurfaceView renders into a separate surface and goes
-                            // black + stops taking input after this composable is
-                            // disposed on push to SearchPage and recomposed on the
-                            // back-pop through Nav3's AnimatedContent transition
-                            // (it only repaints once a later recomposition forces a
-                            // relayout). TextureView draws in the normal view
-                            // hierarchy, so it composites + stays interactive across
-                            // the transition, restoring a live map immediately on
-                            // back.
-                            RenderOptions(renderMode = RenderOptions.RenderMode.TextureView),
-                            GestureOptions.Standard,
-                            OrnamentOptions.AllDisabled
-                        ),
-                        onMapClick = { latLng, offset ->
-                            coroutineScope.launch {
-                                val projection = camera.projection
-                                val picker = MapFeaturePicker(
-                                    source = { box, layerIds ->
-                                        projection?.queryRenderedFeatures(box, layerIds) ?: emptyList()
-                                    },
-                                    transitEnabled = transitEnabled,
-                                )
+                MapSurface(
+                    style = mapStyle,
+                    camera = camera,
+                    chrome = chrome,
+                    viewModel = viewModel,
+                    searchViewModel = searchViewModel,
+                    transitViewModel = transitViewModel,
+                    sheetState = sheetState,
+                    selectedFeature = selectedFeature,
+                    route = route?.get(chrome.selectedRouteType),
+                    userPosition = userPosition,
+                    userBearing = userBearing,
+                    navProgress = navProgress,
+                    searchResults = searchResults,
+                    savedPlaces = savedPins,
+                    parkingSpot = parkingSpot,
+                    familyMembers = familyMembers,
+                    trafficEnabled = trafficEnabled,
+                    satelliteEnabled = satelliteEnabled,
+                    safetyEnabled = safetyEnabled,
+                    transitEnabled = transitEnabled,
+                    darkBasemap = darkMap,
+                )
 
-                                when (val hit = picker.pickPin(offset)) {
-                                    MapHit.Parking -> {
-                                        showParkingSheet = true
-                                        return@launch
-                                    }
-                                    is MapHit.Stop -> {
-                                        transitViewModel.openStop(hit.stop)
-                                        return@launch
-                                    }
-                                    is MapHit.Place -> {
-                                        viewModel.stashRouteSelection()
-                                        viewModel.set(hit.feature)
-                                        sheetState.partialExpand()
-                                        return@launch
-                                    }
-                                    null -> Unit
-                                }
-
-                                // Otherwise fall back to basemap admin labels
-                                // (country/region/city). Native POIs are suppressed
-                                // and the amenity-DB enrichment path is gone.
-                                //
-                                // Resolving a label may do a Wikidata round-trip, so it belongs
-                                // to the ViewModel rather than to this gesture handler.
-                                val labelFeature = viewModel.resolveAdminLabel(picker.pickAdminLabels(offset))
-                                if (labelFeature != null) {
-                                    viewModel.stashRouteSelection()
-                                    viewModel.set(labelFeature)
-                                    sheetState.partialExpand()
-                                    return@launch
-                                }
-
-                                // Nothing hit: reverse-geocode the tapped point
-                                // ("what's here?"). Replaces the removed address
-                                // FTS geocoder — online-only (Decision D2).
-                                searchViewModel.reverseGeocode(latLng.latitude, latLng.longitude) { place ->
-                                    if (place != null) {
-                                        viewModel.stashRouteSelection()
-                                        viewModel.set(place)
-                                        coroutineScope.launch { sheetState.partialExpand() }
-                                    }
-                                }
-                            }
-                            ClickResult.Pass
-                        }
-                ) {
-                        MyMapLayers(selectedFeature, route?.get(selectedRouteType), json, userPosition, userBearing, navProgress, searchResults, savedPins, parkingSpot, familyMembers, trafficEnabled, satelliteEnabled, safetyEnabled, transitEnabled, poiFilterTypes = selectedCategory?.types, darkBasemap = darkMap)
-                    }
-                }
-
-                // ROUTE OVERLAY HEADERS
-                if(selectedFeature is SpecificFeature.Route || inactiveNavigation != null) {
-                    val routeFeature = (selectedFeature as? SpecificFeature.Route) ?: inactiveNavigation!!
-                    val listState = rememberLazyListState()
-                    val state = rememberReorderableLazyListState(listState, onMove = { from, to ->
-                        // swap their indices in the list
-                        val newList = routeFeature.waypoints.toMutableList()
-                        val temp = newList[from.index]
-                        newList[from.index] = newList[to.index]
-                        newList[to.index] = temp
-                        viewModel.set(routeFeature.copy(waypoints = newList))
-                    })
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.align(Alignment.TopCenter).padding(16.dp).fillMaxWidth()
-                    ) {
-                        itemsIndexed(routeFeature.waypoints, key = { idx, it -> it?.position?.toString()?:"" }) { idx, item ->
-                            ReorderableItem(reorderState = state, key = item?.position?.toString() ?: "") { isDragging ->
-
-                                val elevation by animateDpAsState(if (isDragging) 4.dp else 0.dp)
-
-                                Card(shape = verticalShape(idx, routeFeature.waypoints.size), elevation = CardDefaults.cardElevation(elevation)) {
-                                    ListItem({
-                                        Text(
-                                            item?.name
-                                                ?: stringResource(MapsR.string.your_location)
-                                        )
-                                    }, Modifier.clickable {
-                                        val bbox = camera.visibleBoundsOrWorld()
-                                        backStack.add(Route.SearchPage(idx,
-                                            bbox.east, bbox.west, bbox.north, bbox.south))
-                                    }, trailingContent = {
-                                        Row(verticalAlignment = Alignment.CenterVertically) {
-                                            if(idx > 0 && idx < routeFeature.waypoints.size - 1) {
-                                                IconButton({
-                                                    val newList = routeFeature.waypoints.toMutableList()
-                                                    newList.removeAt(idx)
-                                                    viewModel.set(routeFeature.copy(waypoints = newList))
-                                                }) {
-                                                    IconClose()
-                                                }
-                                            }
-                                            IconDragHandle(Modifier.draggableHandle(state, key = item?.position?.toString() ?: "", index = idx))
-                                        }
-                                    }, colors = ListItemDefaults.colors(Color.Transparent))
-                                }
-                            }
-                        }
-                    }
+                val routeFeature = (selectedFeature as? SpecificFeature.Route) ?: inactiveNavigation
+                if (routeFeature != null) {
+                    WaypointList(
+                        route = routeFeature,
+                        onReorder = { viewModel.set(it) },
+                        onEditWaypoint = { index -> openSearch(waypointIndex = index) },
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
                 } else {
-                    Column(Modifier.padding(16.dp).fillMaxWidth()) {
-                        // Quick category chips (Vela's browse CategoryChips):
-                        // tapping one FILTERS the on-map POIs to that category's
-                        // OSM types (toggle off by tapping the active chip) rather
-                        // than running a text search. (Home/Work quick-access slots
-                        // moved to the search page.)
-                        CategoryChips(
-                            onCategory = { cat ->
-                                selectedCategory = if (selectedCategory == cat) null else cat
-                            },
-                            selected = selectedCategory,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Spacer(Modifier.height(8.dp))
-                        // Compass calibration hint for the heading puck. Only show
-                        // when the heading is genuinely unreliable (UNRELIABLE/LOW);
-                        // MEDIUM is good enough and shouldn't nag the user.
-                        if (userHeadingAccuracy <= android.hardware.SensorManager.SENSOR_STATUS_ACCURACY_LOW) {
-                            CompassCalibrationBanner(userHeadingAccuracy)
-                        }
-                    }
+                    MapBrowseHeader(
+                        selectedCategory = chrome.selectedCategory,
+                        onCategory = { chrome.toggleCategory(it) },
+                        headingAccuracy = userHeadingAccuracy,
+                        modifier = Modifier.align(Alignment.TopCenter),
+                    )
                 }
 
-                // Browse map controls (Decision D6): a scale bar plus the FAB
-                // stack (my-location, layers, compass). Surfaced only while
-                // browsing — hidden during navigation (the nav overlay owns its
-                // own controls) and while a place/route is selected (the bottom
-                // sheet takes over the lower half of the screen).
-                if (selectedFeature == null && inactiveNavigation == null && !isNavigating) {
-                    MapScaleBar(
+                // Browse controls only: navigation owns its own, and a selected place hands the
+                // bottom half of the screen to the sheet.
+                if (browsing) {
+                    MapFabStack(
                         zoom = camera.position.zoom,
                         latitude = camera.position.target.latitude,
-                        modifier = Modifier
-                            .align(Alignment.BottomStart)
-                            .windowInsetsPadding(WindowInsets.systemBars)
-                            .padding(MapChromeMetrics.chromeMargin),
-                    )
-                    Column(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .windowInsetsPadding(WindowInsets.systemBars)
-                            .padding(MapChromeMetrics.chromeMargin),
-                        horizontalAlignment = Alignment.End,
-                        verticalArrangement = Arrangement.spacedBy(MapChromeMetrics.fabSpacing),
-                    ) {
-                        // Compass sits on top and only shows when the map is
-                        // rotated; layers in the middle; my-location is the
-                        // primary action, closest to the thumb.
-                        CompassButton(
-                            bearing = camera.position.bearing,
-                            onResetNorth = {
-                                coroutineScope.launch {
-                                    camera.animateTo(
-                                        camera.position.copy(bearing = 0.0, tilt = 0.0)
-                                    )
-                                }
-                            },
-                        )
-                        LayersButton(onClick = { showLayersSheet = true })
-                        // Parking memory (P9): with no saved spot, tap saves the
-                        // current location; with a saved spot, tap recenters on
-                        // it and opens the parking sheet ("find my car").
-                        FloatingActionButton(
-                            onClick = {
-                                val spot = parkingSpot
-                                if (spot == null) {
-                                    val p = userPosition
-                                    if (p.latitude != 0.0 || p.longitude != 0.0) {
-                                        parkingViewModel.saveParking(p.latitude, p.longitude)
-                                    }
-                                } else {
-                                    coroutineScope.launch {
-                                        camera.animateTo(
-                                            camera.position.copy(
-                                                target = Position(spot.lon, spot.lat),
-                                                zoom = maxOf(camera.position.zoom, 15.0),
-                                            )
-                                        )
-                                    }
-                                    showParkingSheet = true
-                                }
+                        bearing = camera.position.bearing,
+                        onResetNorth = {
+                            coroutineScope.launch {
+                                camera.animateTo(camera.position.copy(bearing = 0.0, tilt = 0.0))
                             }
-                        ) {
-                            Text(stringResource(MapsR.string.parking_pin_glyph))
-                        }
-                        FloatingActionButton(
-                            onClick = {
+                        },
+                        onLayers = { chrome.show(MapOverlay.Layers) },
+                        onParking = {
+                            val spot = parkingSpot
+                            if (spot == null) {
+                                val position = userPosition
+                                if (position.latitude != 0.0 || position.longitude != 0.0) {
+                                    parkingViewModel.saveParking(position.latitude, position.longitude)
+                                }
+                            } else {
                                 coroutineScope.launch {
                                     camera.animateTo(
                                         camera.position.copy(
-                                            target = userPosition,
+                                            target = Position(spot.lon, spot.lat),
                                             zoom = maxOf(camera.position.zoom, 15.0),
                                         )
                                     )
                                 }
+                                chrome.show(MapOverlay.Parking)
                             }
-                        ) {
-                            IconMyLocation()
-                        }
-                    }
+                        },
+                        onMyLocation = {
+                            coroutineScope.launch {
+                                camera.animateTo(
+                                    camera.position.copy(
+                                        target = userPosition,
+                                        zoom = maxOf(camera.position.zoom, 15.0),
+                                    )
+                                )
+                            }
+                        },
+                    )
                 }
 
-                // Live navigation overlay (top maneuver card, bottom ETA strip,
-                // recenter FAB, arrival card). Hidden when nav is Idle.
                 NavigationOverlay(
                     navState = navState,
-                    steps = activeRoute?.step ?: emptyList(),
-                    autoFollow = autoFollow,
-                    onRecenter = { autoFollow = true },
+                    steps = navSession.route?.step ?: emptyList(),
+                    autoFollow = chrome.autoFollow,
+                    onRecenter = { chrome.autoFollow = true },
                     onEndTrip = {
-                        com.vayunmathur.maps.util.NavigationSessionManager.stop()
-                        context.stopService(android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java))
-                        autoFollow = true
-                        navNorthUp = false
+                        stopNavigation(context)
+                        chrome.autoFollow = true
+                        chrome.northUp = false
                     },
-                    onDismissArrival = {
-                        com.vayunmathur.maps.util.NavigationSessionManager.stop()
-                        context.stopService(android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java))
-                    },
-                    postedLimit = postedLimit,
-                    northUp = navNorthUp,
-                    onToggleNorthUp = { navNorthUp = !navNorthUp },
+                    onDismissArrival = { stopNavigation(context) },
+                    postedLimit = chrome.postedLimit,
+                    northUp = chrome.northUp,
+                    onToggleNorthUp = { chrome.northUp = !chrome.northUp },
                     destinationName = navSession.destinationName,
                     darkBasemap = darkMap,
                 )
 
-                // Map-layers toggle sheet (P6), opened from the LayersButton.
-                if (showLayersSheet) {
-                    LayersSheet(
-                        onDismiss = { showLayersSheet = false },
-                        trafficEnabled = trafficEnabled,
-                        onTrafficChange = { settingsViewModel.setTrafficLayer(it) },
-                        satelliteEnabled = satelliteEnabled,
-                        onSatelliteChange = { settingsViewModel.setSatelliteLayer(it) },
-                        safetyEnabled = safetyEnabled,
-                        onSafetyChange = { settingsViewModel.setSafetyLayer(it) },
-                        transitEnabled = transitEnabled,
-                        onTransitChange = { settingsViewModel.setTransitLayer(it) },
-                    )
-                }
-
-                // Parking sheet (P9): saved time + note, clear, and directions
-                // back to the car through the existing routing path.
-                if (showParkingSheet) {
-                    parkingSpot?.let { spot ->
-                        ParkingSheet(
-                            spot = spot,
-                            onDismiss = { showParkingSheet = false },
-                            onClear = {
-                                parkingViewModel.clear()
-                                showParkingSheet = false
-                            },
-                            onDirections = {
-                                val feature = spot.toFeature(
-                                    context.getString(MapsR.string.parking_title)
-                                )
-                                viewModel.stashRouteSelection()
-                                viewModel.set(SpecificFeature.Route(listOf(null, feature)))
-                                showParkingSheet = false
-                                coroutineScope.launch { sheetState.partialExpand() }
-                            },
-                            onNoteChange = { parkingViewModel.updateNote(it) },
-                        )
-                    }
-                }
-
-                // Departure board (P10): opened by tapping a transit stop. Live
-                // board from Transitous (online-only); dismiss clears selection.
-                if (selectedTransitStop != null) {
-                    DeparturesSheet(
-                        state = departuresState,
-                        onDismiss = { transitViewModel.closeStop() },
-                        onRefresh = { transitViewModel.refresh() },
-                    )
-                }
+                MapOverlays(
+                    overlay = chrome.overlay,
+                    onDismiss = { chrome.dismissOverlay() },
+                    layers = LayerToggles(
+                        traffic = trafficEnabled,
+                        satellite = satelliteEnabled,
+                        safety = safetyEnabled,
+                        transit = transitEnabled,
+                        onTraffic = { settingsViewModel.setTrafficLayer(it) },
+                        onSatellite = { settingsViewModel.setSatelliteLayer(it) },
+                        onSafety = { settingsViewModel.setSafetyLayer(it) },
+                        onTransit = { settingsViewModel.setTransitLayer(it) },
+                    ),
+                    parkingSpot = parkingSpot,
+                    onClearParking = {
+                        parkingViewModel.clear()
+                        chrome.dismissOverlay()
+                    },
+                    onParkingDirections = {
+                        val spot = parkingSpot ?: return@MapOverlays
+                        val feature = spot.toFeature(context.getString(MapsR.string.parking_title))
+                        viewModel.stashRouteSelection()
+                        viewModel.set(SpecificFeature.Route(listOf(null, feature)))
+                        chrome.dismissOverlay()
+                        coroutineScope.launch { sheetState.partialExpand() }
+                    },
+                    onParkingNoteChange = { parkingViewModel.updateNote(it) },
+                    selectedStop = selectedTransitStop,
+                    departures = departuresState,
+                    onCloseStop = { transitViewModel.closeStop() },
+                    onRefreshDepartures = { transitViewModel.refresh() },
+                )
             }
         }
     }
 }
 
-// Native basemap layers suppressed at runtime — amenities are Google-only now
-// (custom overlay layer). Keeping this in code (vs editing style.json) makes it
-// OTA-swappable per Decision D1.
-private val SUPPRESSED_LAYERS = setOf("pois")
-
-fun patchStyleForHybrid(
-    jsonString: String,
-    baseLocalUrl: String,
-    hybridUrl: String,
-    dark: Boolean = false,
-): String {
-    val json = Json { ignoreUnknownKeys = true }
-    val root = json.parseToJsonElement(jsonString).jsonObject
-
-    val newSources = buildJsonObject {
-        putJsonObject("protomaps_base") {
-            put("type", "vector")
-            put("url", baseLocalUrl)
-            // The v5-ca base data stops at z15 but the merged pmtiles advertise
-            // maxzoom 16, so base layers vanish at z16 while the separate overlay
-            // sources (safety/maxspeed/transit_lines/admin) keep rendering. Cap the
-            // source at 15 so MapLibre OVERZOOMS z15 tiles past z15, keeping the
-            // base visible at max zoom.
-            put("maxzoom", 15)
-        }
-        putJsonObject("protomaps_hybrid") {
-            put("type", "vector")
-            put("url", hybridUrl)
-            put("maxzoom", 15)
-        }
-    }
-
-    val oldLayers = root["layers"]?.jsonArray ?: buildJsonArray {}
-    val newLayers = buildJsonArray {
-        oldLayers.forEach { layerElement ->
-            val layer = layerElement.jsonObject
-            val id = layer["id"]?.jsonPrimitive?.content ?: ""
-            val type = layer["type"]?.jsonPrimitive?.content ?: ""
-
-            // Suppress native basemap POIs at runtime (Decision D1) — amenities
-            // are Google-only now, rendered on the custom overlay layer. Dropping
-            // the source layer here (rather than editing style.json) keeps it
-            // OTA-swappable. Also drops the would-be _base/_hybrid variants.
-            if (id in SUPPRESSED_LAYERS) return@forEach
-
-            // Dark palette (P14): recolor the base Protomaps paint at runtime so
-            // we don't duplicate the 3544-line style.json. Only colour keys are
-            // swapped; width/opacity/dasharray expressions are preserved.
-            val darkPaint = if (dark) darkenPaint(id, layer["paint"] as? JsonObject) else null
-
-            if (type == "background") {
-                add(buildJsonObject {
-                    layer.forEach { (k, v) -> if (!(dark && k == "paint")) put(k, v) }
-                    if (darkPaint != null) put("paint", darkPaint)
-                })
-            } else {
-                // Zoom 0-7: Base Local
-                add(buildJsonObject {
-                    layer.forEach { (k, v) -> if (!(dark && k == "paint")) put(k, v) }
-                    if (darkPaint != null) put("paint", darkPaint)
-                    put("id", "${id}_base")
-                    put("source", "protomaps_base")
-                    put("maxzoom", 7)
-                })
-                // Zoom 7+: Hybrid (Local Only)
-                add(buildJsonObject {
-                    layer.forEach { (k, v) -> if (!(dark && k == "paint")) put(k, v) }
-                    if (darkPaint != null) put("paint", darkPaint)
-                    put("id", "${id}_hybrid")
-                    put("source", "protomaps_hybrid")
-                    put("minzoom", 7)
-                })
-            }
-        }
-    }
-
-    return buildJsonObject {
-        root.forEach { (k, v) -> if (k != "sources" && k != "layers") put(k, v) }
-        put("sources", newSources)
-        put("layers", newLayers)
-    }.toString()
-}
-
-/**
- * Rebuild a layer's `paint` for the dark palette (P14): copy every property
- * verbatim and only swap the colour keys, so zoom-driven width/opacity/dasharray
- * expressions keep working. `text-halo-width` etc. are left untouched. Layers
- * without a colour key (e.g. the icon-only `roads_oneway`) come back unchanged.
- */
-private fun darkenPaint(id: String, paint: JsonObject?): JsonObject? {
-    if (paint == null) return null
-    val base = BasemapPalette.darkFillHex(id)
-    val (text, halo) = BasemapPalette.darkLabelHex(id)
-    return buildJsonObject {
-        paint.forEach { (k, v) ->
-            when (k) {
-                "background-color", "fill-color", "line-color" -> put(k, base)
-                "text-color" -> put(k, text)
-                "text-halo-color" -> put(k, halo)
-                else -> put(k, v)
-            }
-        }
-    }
+/** End the session and stop the foreground service that outlives this screen. */
+private fun stopNavigation(context: android.content.Context) {
+    NavigationSessionManager.stop()
+    context.stopService(
+        android.content.Intent(context, com.vayunmathur.maps.util.NavigationService::class.java)
+    )
 }

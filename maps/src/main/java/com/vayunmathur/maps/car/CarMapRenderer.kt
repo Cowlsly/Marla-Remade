@@ -15,7 +15,7 @@ import android.view.Surface
 import androidx.car.app.CarContext
 import androidx.car.app.SurfaceCallback
 import androidx.car.app.SurfaceContainer
-import com.vayunmathur.maps.ui.patchStyleForHybrid
+import com.vayunmathur.maps.ui.map.style.patchStyleForHybrid
 import com.vayunmathur.maps.util.MapTileCache
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
