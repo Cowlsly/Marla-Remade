@@ -12,7 +12,7 @@ set -euo pipefail
 #
 # The ma_pois step ALSO emits two compact side files next to --out
 # (poi_names.bin + poi_index.bin) that the app mmaps for POI lookup — see
-# build_pois_layer.sh / poi_extract.cpp / README for the exact formats.
+# build_pois_layer.sh / osm_ingest / README for the exact formats.
 #
 # This single file REPLACES both:
 #   * https://data.vayunmathur.com/v4.pmtiles      (base tiles)

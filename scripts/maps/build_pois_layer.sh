@@ -18,8 +18,9 @@ set -euo pipefail
 #                       int32 lat_e7, int32 lon_e7, uint32 name_off, uint16 type
 #                     sorted by Morton (Z-order) key of (lat,lon)
 #
-# See poi_extract.cpp for the full TYPE MAP + the exact on-disk layouts, and the
-# README (`ma_pois` schema + file formats) for the app-side contract.
+# See scripts/maps/osm_ingest (src/poi_build.rs) for the full TYPE MAP + the exact
+# on-disk layouts, and the README (`ma_pois` schema + file formats) for the
+# app-side contract.
 #
 # Usage:
 #   ./build_pois_layer.sh --pbf planet.osm.pbf --out ma_pois.pmtiles
@@ -36,7 +37,10 @@ set -euo pipefail
 #   --maxzoom N       tippecanoe maxzoom (default 16)
 #   --keep-tmp        Don't delete intermediate files
 #
-# Tools required: g++ (C++17) + libosmium headers, osmium (osmium-tool), tippecanoe
+# Tools required: cargo, osmium (osmium-tool), tippecanoe. The two side files can
+# also be built on their own, on any platform, with:
+#   cargo run --release --manifest-path osm_ingest/Cargo.toml --bin poi_extract -- ...
+# only the .pmtiles step needs tippecanoe/osmium.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
@@ -58,24 +62,20 @@ while [[ $# -gt 0 ]]; do
         --minzoom) MINZOOM="$2"; shift 2 ;;
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
         --keep-tmp) KEEP_TMP=1; shift ;;
-        -h|--help) sed -n '4,40p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,45p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 
 [[ -n "$PBF" ]] || { echo "ERROR: --pbf required" >&2; exit 1; }
 [[ -f "$PBF" ]] || { echo "ERROR: pbf not found: $PBF" >&2; exit 1; }
-command -v g++        >/dev/null || { echo "ERROR: g++ not installed" >&2; exit 1; }
+command -v cargo      >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
 command -v osmium     >/dev/null || { echo "ERROR: osmium-tool not installed" >&2; exit 1; }
 command -v tippecanoe >/dev/null || { echo "ERROR: tippecanoe not installed" >&2; exit 1; }
 
 TMP="$(mktemp -d)"
 cleanup() { [[ "$KEEP_TMP" == "1" ]] || rm -rf "$TMP"; }
 trap cleanup EXIT
-
-echo "[ma_pois] compiling poi_extract"
-g++ -O3 -std=c++17 "$HERE/poi_extract.cpp" -o "$TMP/poi_extract" \
-    -lz -lexpat -lbz2 -pthread
 
 SRC="$PBF"
 if [[ -n "$BBOX" ]]; then
@@ -85,7 +85,8 @@ if [[ -n "$BBOX" ]]; then
 fi
 
 echo "[ma_pois] extracting POIs -> geojsonseq + $NAMES_OUT + $INDEX_OUT"
-"$TMP/poi_extract" "$SRC" \
+cargo run --release --manifest-path "$HERE/osm_ingest/Cargo.toml" --bin poi_extract -- \
+    "$SRC" \
     --geojson "$TMP/ma_pois.geojsonseq" \
     --names "$NAMES_OUT" \
     --index "$INDEX_OUT"

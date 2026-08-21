@@ -39,12 +39,12 @@ all from the same file.
   * `extract_pmtiles.sh` slices the world pmtiles into 64 Morton-grid
     `zone_$i.pmtiles` offline packs. Tiles stay **zoned** (a single global
     basemap is a ~137 GB download — see the size table below).
-  * `generator.cpp` + `run_generator.sh` build the **routing graph** as a
-    **single global graph** (`nodes.bin`, `edges.bin`, `transit_voyages.bin`,
-    `transit_attributes.bin`, `lanes.bin`, `metadata.bin`, `road_names.bin`)
-    with libosmium — see [Single global routing graph](#single-global-routing-graph-p16)
-    below. **This is the routing-graph generator that P11 edits for GTFS** — it
-    already has transit/GTFS scaffolding.
+  * `osm_ingest` + `run_generator.sh` build the **routing graph** as a
+    **single global graph** (`nodes.bin`, `edges.bin`, `lanes.bin`,
+    `metadata.bin`, `road_names.bin`) — see
+    [Single global routing graph](#single-global-routing-graph-p16)
+    below. It carries **roads only**; public-transit timetables live in the
+    separate `.transit` index built by `gtfs_ingest`.
 
 ---
 
@@ -96,7 +96,8 @@ lets POI **placement / name / type** come from OpenStreetMap instead of a
 runtime Google viewport scrape (Google is then hit only for rich details on
 tap). It deliberately does **not** reuse the base Protomaps `pois` layer (which
 the app suppresses). It is built by [`build_pois_layer.sh`](build_pois_layer.sh)
-(→ [`poi_extract.cpp`](poi_extract.cpp)) at zooms **z12–z16**. The same pass also
+(→ [`osm_ingest`](osm_ingest/)'s `poi_extract`) at zooms **z12–z16**. The same
+pass also
 emits two compact side files (`poi_names.bin` + `poi_index.bin`, formats below)
 so the app can mmap + binary-scan POIs; the layer and the side files are
 mutually consistent (same POI set, same coordinates). See
@@ -138,14 +139,15 @@ mutually consistent (same POI set, same coordinates). See
   (`amenity`/`shop`/`tourism`/`leisure`/`office`/`healthcare`) becomes a POI. The
   tag value maps to a stable **type number** (see the [POI type map](#poi-type-map));
   a recognised key with an unmapped value falls into the `255` = "other" bucket.
-  Way/relation geometry is reduced to a representative centroid (average of
-  outer-ring node locations) so every POI renders as a point. Requiring a `name`
-  naturally filters out unnamed street furniture (`amenity=bench`, etc.).
-  Extraction is a single **libosmium** pass (`poi_extract.cpp`, matching the
-  `generator.cpp` toolchain) — nodes are read directly and closed ways +
-  multipolygon relations are assembled into areas via osmium's
-  `MultipolygonManager`. The same pass emits the tile layer's geojsonseq AND the
-  two side files, so all three are mutually consistent.
+  Way/relation geometry is reduced to a representative centroid so every POI
+  renders as a point. Requiring a `name` naturally filters out unnamed street
+  furniture (`amenity=bench`, etc.).
+  Extraction is a single pass of [`osm_ingest`](osm_ingest/)'s `poi_extract`
+  (Rust, reads `.osm.pbf` natively) — nodes are read directly, closed ways use
+  their own node ring, and `type=multipolygon`/`boundary` relations use the node
+  locations of their `outer`-role member ways. The same pass emits the tile
+  layer's geojsonseq AND the two side files, so all three are mutually
+  consistent.
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
     `ne_10m_admin_1_states_provinces`). Chosen because the current `.fgb` are
@@ -166,8 +168,9 @@ mutually consistent (same POI set, same coordinates). See
 | `build_safety_layer.sh` | osmium → GeoJSON → `normalize_safety.py` → tippecanoe → `safety.pmtiles` |
 | `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
 | `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
-| `build_pois_layer.sh` | g++ `poi_extract.cpp` → geojsonseq + `poi_names.bin` + `poi_index.bin` → tippecanoe → `ma_pois.pmtiles` |
-| `poi_extract.cpp` | libosmium POI extractor: nodes + way/relation centroids → `ma_pois` geojsonseq + the two side files (full TYPE MAP + on-disk layouts in the file header) |
+| `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → tippecanoe → `ma_pois.pmtiles` |
+| `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files) and `road_graph` (routing graph). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
+| `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
 | `build_admin_layers.sh` | Natural Earth / OSM → `normalize_admin.py` → tippecanoe → `admin_*.pmtiles` |
 | `publish_r2.sh` | Upload built `.pmtiles` to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested) |
@@ -181,13 +184,17 @@ mutually consistent (same POI set, same coordinates). See
 
 ## Prerequisites (tools)
 
-Full build needs (all are existing off-the-shelf tools — no C++ authored here):
+Full build needs (all are existing off-the-shelf tools — the only code authored
+here is Rust and Python):
 
 * **tippecanoe** ≥ 2.x (provides `tippecanoe` + `tile-join`, both write `.pmtiles`)
 * **osmium-tool** (`osmium`)
 * **GDAL** (`ogr2ogr`)
-* **g++** (C++17) + **libosmium** headers — for the `ma_pois` extractor
-  (`poi_extract.cpp`) and the routing-graph `generator.cpp`
+* **cargo** (https://rustup.rs) — for the `ma_pois` extractor and the routing
+  graph, both in [`osm_ingest`](osm_ingest/). No C/C++ toolchain and no
+  libosmium: `osm_ingest` reads `.osm.pbf` natively, so the routing graph and the
+  two POI side files build on **Windows** as well (`build_graph.ps1`). Only the
+  `.pmtiles` steps still need tippecanoe/osmium.
 * **python3** (stdlib only)
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
@@ -337,7 +344,7 @@ to the `admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /
 from OpenStreetMap (baked here), so the app never scrapes a Google map viewport
 to discover POIs — Google is queried only for rich details when the user taps a
 POI. It is built by [`build_pois_layer.sh`](build_pois_layer.sh) →
-[`poi_extract.cpp`](poi_extract.cpp) and merged into `v5.pmtiles` by
+[`osm_ingest`](osm_ingest/)'s `poi_extract` and merged into `v5.pmtiles` by
 `build_v5_pmtiles.sh` (skip with `--skip-pois`). The **same** `poi_extract` pass
 emits two compact side files **next to `--out`** so the app can `mmap` +
 binary-scan POIs without opening the tileset:
@@ -363,8 +370,8 @@ AND a recognised POI key (`amenity`/`shop`/`tourism`/`leisure`/`office`/
 ### POI type map
 
 Stable POI type-number enum — **never renumber an existing value, only append**;
-`255` is the catch-all "other". Kept in sync with `poi_extract.cpp` (source of
-truth) and the app. Precedence when several keys are present:
+`255` is the catch-all "other". Kept in sync with `osm_ingest/src/tags.rs`
+(source of truth) and the app. Precedence when several keys are present:
 `amenity` → `shop` → `tourism` → `leisure` → `office` → `healthcare`.
 
 | # | type | example OSM tags |
@@ -451,7 +458,7 @@ POI, in the SAME order as the `ma_pois` features:
 
 `record_count = filesize(poi_index.bin) / 14`. Records are **sorted ascending by
 the 64-bit Z-order (Morton) key of (lat, lon)** — computed exactly as
-`generator.cpp`'s `latlng_to_spatial` (interleave the 32-bit normalized
+`osm_ingest`'s `latlng_to_spatial` (interleave the 32-bit normalized
 `x=(lon+180)/360`, `y=(lat+90)/180`) — giving spatial locality for range scans.
 The Morton key itself is **not** stored; the app recomputes it from `lat_e7`/
 `lon_e7` when needed. Both files are byte-for-byte reproducible for a given input.
@@ -474,24 +481,23 @@ struct PoiRecord {   // 14 bytes, little-endian
 ## Single global routing graph (P16)
 
 The offline **routing graph** is a **single global graph** — there is no
-per-zone splitting and no separate merge/compaction stage. `generator.cpp`
-emits, in one pass, exactly the on-disk layout the Rust router
+per-zone splitting and no separate merge/compaction stage. `osm_ingest`'s
+`road_graph` emits, in one pass, exactly the on-disk layout the Rust router
 (`maps/src/main/rust/src/graph.rs`) mmaps:
 
 | File | Contents | Consumed by (graph.rs) |
 |---|---|---|
-| `metadata.bin` | one `u64` node count | `load` |
+| `metadata.bin` | `u32 magic` (`"MARG"` = `0x4752414D`), `u32 version` (1), `u64 node count` — 16 B | `load` |
 | `nodes.bin` | `NodeMaster[node_count + 1]` (16 B: `i32 lat_e7`, `i32 lon_e7`, `u64 edge_ptr`), trailing sentinel | `node` / `get_node` |
 | `edges.bin` | `Edge[edge_count]` (14 B: `u32 target`, `u32 dist_mm`, `u32 name_offset`, `u8 type`, `u8 speed_limit`) | `edge` |
-| `transit_attributes.bin` | `TransitAttribute[node_count]` (8 B: `u32 stop_code_off`, `u32 feed_name_off`) | `get_node_transit_attr` |
-| `transit_voyages.bin` | compact per-edge schedules (see below) | `transit_voyage_at` / `transit_dep_u32` |
 | `lanes.bin` | `u64 offsets[edge_count + 1]` then a `u16` turn-mask blob | `edge_lane_masks` |
 | `road_names.bin` | NUL-terminated string pool | `road_name` |
 
 `intermediate.bin` (delta-encoded edge geometry) is **optional** and is not
 produced by this generator; `graph.rs` treats its absence gracefully and the
 router falls back to straight node-to-node segments. It can be added later
-without changing any of the files above.
+without changing any of the files above. When present it **is** length-validated
+against `edge_count`, since its offset array is sized from it.
 
 **Why single global (drop graph zoning):** the previous pipeline wrote per-zone
 `*_zone_N.bin` artifacts in a layout `graph.rs` could not load and relied on a
@@ -500,18 +506,32 @@ merge/compaction stage that never existed in the repo (the old un-checked-in
 final layout directly into the generator closes that gap: freshly generated
 road data is now loadable by the shipping router with no extra step.
 
-**Transit voyage compaction** (per transit edge, 4-byte slots starting at the
-`voyage_offset` stored in the edge's `dist_mm`, count in `speed_limit`):
+**Why `metadata.bin` has a magic + version.** The road graph is a directory of
+independent files with no cross-file checksum, so a partial or mixed-vintage
+update would previously have been read as a valid graph — `node_count` and
+`edge_count` would disagree with the actual files and the router would read out of
+bounds. The header makes that a clean rejection (`Graph::load` returns `None`).
+It was added when the road graph stopped carrying transit at all (see below),
+which changed both counts and so required every pack to be regenerated.
 
-```
-slot 0      u32  absolute departure of voyage 0 (10 ms units)
-slot 1      {u16 dep_delta = voyage 0 travel time (10 ms), u16 duration = 0}
-slot 1 + i  {u16 dep_delta = (dep_i − dep_{i-1}) seconds,
-             u16 duration  = voyage i travel time (10 ms)}   for i = 1..count-1
-```
+> **Update the app and the pack together.** The header protects a *new* reader
+> from an old pack, but it cannot protect an *old* reader from a new pack: a build
+> predating the header reads `metadata.bin` as a bare `u64 node_count`, so it takes
+> the magic and version as the count — `0x00000001_4752414D` = 5,491,540,301
+> instead of 35,857,253 — and then indexes `nodes.bin` far out of bounds. That is a
+> native `SIGSEGV` in `findRouteNative`, not a clean failure. Pushing a regenerated
+> pack to a device therefore also requires installing an app built from the same
+> vintage or newer.
 
-This mirrors the decoder in `maps/src/main/rust/src/geometry.rs`
-(`get_transit_edge_time_10ms`); keep the two in sync.
+**No transit in the road graph.** The generator used to synthesize fake 15-minute
+GTFS headways onto rail/bus ways and emit a `TRANSIT_FLAG` edge set, a
+`transit_voyages.bin` schedule blob, a `transit_attributes.bin` per-node table,
+and a **duplicated node per OSM node** so a road node and a transit node could
+coexist. All of that is gone: public transit is planned exclusively by the RAPTOR
+planner over the separate `.transit` index (`gtfs_ingest`, real GTFS timetables),
+so `TravelMode.PUBLIC_TRANSIT` in the road graph now means *walking* — it is only
+reached for a journey's access/egress/transfer legs. Dropping the duplicated
+nodes is also the single biggest size win in this pipeline.
 
 ### How the app obtains it — download-size implications
 
@@ -580,9 +600,43 @@ $ ./build_pois_layer.sh --pbf california-latest.osm.pbf \
 [ma_pois] tiling -> ma_pois.pmtiles (z12-16)
 ```
 
-Verified: `poi_extract.cpp` compiles clean; `ma_pois` appears in the tileset at
+Verified: `ma_pois` appears in the tileset at
 **z12–16** (and coexists with other layers after `tile-join` — a merge with
 `safety.pmtiles` lists both `ma_pois` and `safety`); each tiled feature carries
 `name`/`type`/`osm_id`; `poi_index.bin` records decode back to the exact
 `ma_pois` features (Morton-sorted); and POIs sharing a name resolve to the same
 `poi_names.bin` offset (212 shared offsets in the sample), confirming dedup.
+
+### Rust ingest port (replacing the libosmium C++)
+
+`generator.cpp` and `poi_extract.cpp` were replaced by
+[`osm_ingest`](osm_ingest/), which reads `.osm.pbf` natively (hand-rolled
+protobuf decoder + pure-Rust inflate) and therefore needs no g++, no libosmium
+and no WSL. Validated on the full 1.24 GB `california-latest.osm.pbf`, natively
+on Windows:
+
+```
+road_graph:   23007 blobs, 4,264,993 routable ways, 35,857,253 nodes,
+              74,340,356 edges, 323,441 unique names, LCC 35,358,417,
+              60,711 isolated stops reconnected                      ~19 s
+poi_extract:  284,216 POIs (172,448 node, 107,612 closed-way, 4,156 relation),
+              188,990 unique names                                    ~5 s
+```
+
+Verified: `metadata.bin` is the 16-byte `MARG`/v1/`node_count` header;
+`nodes.bin` is `node_count + 1` records with a sentinel whose `edge_ptr` equals
+`edge_count`; `edges.bin` is an exact multiple of 14; `lanes.bin` is
+`(edge_count + 1) × 8` offset bytes plus the `u16` blob; nodes and POI records
+are Morton-ordered. **Both tools are deterministic** — two runs on California
+produce byte-identical output for all eight files, which the C++ never did (it
+filled its node array from concurrent workers and interned names in
+thread-scheduling order).
+
+Also cross-checked against the C++ itself, built in WSL against libosmium 2.20,
+over a San Luis Obispo extract: identical `node_count` (88,666), `edge_count`
+(181,481), `lanes.bin` length, `road_names.bin` string set and out-degree
+sequence; identical edge `(type, speed, name)` groups with every `dist_mm` within
+12 mm; and every POI the C++ found present with the same `name`/`type`. The two
+intentional differences — coordinates 1.1 cm more accurate (the C++ truncated
+`lat_e7`) and relation centroids within ~3 m instead of assembled rings — are
+detailed in [`osm_ingest/README.md`](osm_ingest/README.md).

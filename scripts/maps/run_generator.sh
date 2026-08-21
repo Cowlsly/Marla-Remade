@@ -1,4 +1,5 @@
 #!/bin/bash
+set -o pipefail
 
 # --- CONFIGURATION ---
 # Load environment variables from .env file if it exists
@@ -15,6 +16,8 @@ ACCESS_KEY="${R2_ACCESS_KEY:-ACCESS_KEY_HERE}"
 SECRET_KEY="${R2_SECRET_KEY:-SECRET_KEY_HERE}"
 DEFAULT_PBF="california-latest.osm.pbf"
 DATA_DIR="map_data"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INGEST_DIR="$HERE/osm_ingest"
 
 # Helper to run commands with sudo only if available
 run_cmd() {
@@ -29,64 +32,55 @@ run_cmd() {
 INPUT_PBF="${1:-$DEFAULT_PBF}"
 
 # --- 1. SYSTEM DEPENDENCIES ---
-echo "[1/6] Installing system dependencies..."
-run_cmd dnf update
-run_cmd dnf install -y \
-    build-essential libosmium2-dev libsqlite3-dev \
-    libprotozero-dev libexpat1-dev zlib1g-dev libbz2-dev \
-    curl unzip wget
+# The graph builder is Rust (scripts/maps/osm_ingest) and reads .osm.pbf
+# natively, so there is no libosmium/g++/zlib toolchain to install any more --
+# only cargo, and the AWS CLI for the upload. On Windows use build_graph.ps1
+# instead; it runs the same builder without needing bash at all.
+echo "[1/5] Checking build tools..."
+command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
 
 # --- 2. AWS CLI INSTALLATION ---
 if ! command -v aws &> /dev/null; then
-    echo "[2/6] Installing AWS CLI v2..."
+    echo "[2/5] Installing AWS CLI v2..."
     curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
     unzip -q awscliv2.zip
     run_cmd ./aws/install
     rm -rf aws awscliv2.zip
 else
-    echo "[2/6] AWS CLI is already installed."
+    echo "[2/5] AWS CLI is already installed."
 fi
 
 # --- 3. DATA DOWNLOAD ---
 if [ ! -f "$INPUT_PBF" ]; then
-    echo "[3/6] $INPUT_PBF not found. Downloading California extract..."
+    echo "[3/5] $INPUT_PBF not found. Downloading California extract..."
     curl -OL "https://download.geofabrik.de/north-america/us/california-latest.osm.pbf"
 else
-    echo "[3/6] $INPUT_PBF already exists. Skipping download."
+    echo "[3/5] $INPUT_PBF already exists. Skipping download."
 fi
 
 # --- 4. CLOUDFLARE R2 CONFIGURATION ---
-echo "[4/6] Configuring credentials for R2..."
+echo "[4/5] Configuring credentials for R2..."
 aws configure set aws_access_key_id "$ACCESS_KEY" --profile r2
 aws configure set aws_secret_access_key "$SECRET_KEY" --profile r2
 aws configure set region auto --profile r2
 
-# --- 5. COMPILATION & EXECUTION ---
-if [ ! -f "generator.cpp" ]; then
-    echo "Error: generator.cpp not found in $(pwd)!"
-    exit 1
-fi
-
-echo "[5/6] Compiling and running generator..."
-g++ -O3 -std=c++17 generator.cpp -o generator -lsqlite3 -lexpat -lz -lbz2 -pthread
-
-if [ $? -eq 0 ]; then
-    echo "Preparing output directory: $DATA_DIR..."
-    mkdir -p "$DATA_DIR"
-    echo "Starting map generation for $INPUT_PBF..."
-    ./generator "$INPUT_PBF"
-else
-    echo "Compilation failed!"
+# --- 5. GRAPH BUILD ---
+# Must be gated: on failure the output files have already been truncated by the
+# builder, and syncing those to R2 would publish a partial graph over the live one.
+echo "[5/5] Building the routing graph..."
+if ! cargo run --release --manifest-path "$INGEST_DIR/Cargo.toml" --bin road_graph -- \
+        "$INPUT_PBF" --out "$DATA_DIR"; then
+    echo "ERROR: road_graph failed; not uploading anything." >&2
     exit 1
 fi
 
 # --- 6. AUTOMATED UPLOAD ---
-echo "[6/6] Uploading files to Cloudflare R2..."
+echo "Uploading files to Cloudflare R2..."
 
 # 6a. Upload the SINGLE GLOBAL routing graph (no per-zone artifacts).
 # These are exactly the files maps/src/main/rust/src/graph.rs mmaps from one
 # directory. The offline TILE packs (zone_*.pmtiles) and the P11 transit index
-# (zone_*.transit) are published separately (extract_pmtiles.sh / gtfs_ingest)
+# (world.transit) are published separately (extract_pmtiles.sh / gtfs_ingest)
 # and are intentionally NOT part of this graph upload.
 #
 # poi_names.bin / poi_index.bin are the P27 POI side files emitted by
@@ -104,8 +98,6 @@ aws s3 sync "$DATA_DIR" "s3://$BUCKET_NAME/" \
     --include "road_names.bin" \
     --include "nodes.bin" \
     --include "edges.bin" \
-    --include "transit_voyages.bin" \
-    --include "transit_attributes.bin" \
     --include "lanes.bin" \
     --include "poi_names.bin" \
     --include "poi_index.bin"

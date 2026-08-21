@@ -3,7 +3,8 @@ package com.vayunmathur.maps.util
 /**
  * Shared metadata for the OSM POI `type` enum baked into the v5 `ma_pois`
  * source-layer and the `poi_index.bin` side file (P27). The numbering is the
- * stable type map defined in `scripts/maps/README.md` / `poi_extract.cpp`
+ * stable type map defined in `scripts/maps/README.md` /
+ * `scripts/maps/osm_ingest/src/tags.rs`
  * (0..49 categories, 255 = "other"); never renumber, only append.
  *
  * Kept in one place so the map render ([com.vayunmathur.maps.ui.MaPoisLayer],

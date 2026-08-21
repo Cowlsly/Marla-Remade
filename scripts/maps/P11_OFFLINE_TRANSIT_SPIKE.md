@@ -16,6 +16,39 @@ artifacts committed. This document is the deliverable.
 > Net: the spike verdict (VIABLE) held, and the build tracked the plan. Consequently
 > the §1d gaps and several "blockers" in §4 are now addressed in code.
 
+> **SECOND UPDATE (legacy transit path deleted).** The pre-build machinery this
+> report describes in §2 no longer exists, so treat every file/line reference
+> below as **historical**. Specifically, all of the following were removed once the
+> RAPTOR planner was correct enough to be the only transit path:
+>
+> - `generator.cpp`'s **synthesized 15-minute headways**, its `transit.csv` input,
+>   the `TRANSIT_FLAG` edge set, `transit_voyages.bin`, `transit_attributes.bin`,
+>   the road↔transit transfer edges, and the **duplicated node per OSM node** the
+>   `transit_nodes_mask` created.
+> - `routing.rs`'s time-dependent transit A\* (the boarded-vs-not node "state" bit
+>   and the 2-state heap key), `geometry.rs::get_transit_edge_time_10ms`, and
+>   `graph.rs`'s voyage/attribute regions.
+> - **`present_feeds` end-to-end.** Its only consumer was the deleted
+>   "feed not present offline" degradation in `get_transit_edge_time_10ms`, so the
+>   whole switch went with it — including the JNI `init(basePath, presentFeeds[])`
+>   parameter. §2's framing of `present_feeds` as "exactly the switch P11 needs"
+>   did not survive contact with a real timetable engine: the RAPTOR index is
+>   discovered by bounding box per pack, which subsumes it.
+>
+> `TravelMode.PUBLIC_TRANSIT` in the road graph now means **walking** — it is only
+> reached for a journey's access/egress/transfer legs. Because the duplicated
+> nodes are gone, `node_count`/`edge_count` changed and every road pack must be
+> regenerated; `metadata.bin` gained a magic + version so a mixed-vintage pack
+> directory is rejected instead of misread.
+
+> **THIRD UPDATE (the C++ generator is gone).** `generator.cpp` and
+> `poi_extract.cpp`, described throughout §1a and §2, were replaced by
+> **`scripts/maps/osm_ingest`** (Rust; `road_graph` + `poi_extract` binaries). It
+> reads `.osm.pbf` natively, so the libosmium/`g++`/WSL toolchain those sections
+> describe no longer applies and every `generator.cpp:NNN` line reference below is
+> dead. The on-disk graph layout is unchanged. This completes §3c's "NO
+> hand-written C++" direction for the ingest side as well.
+
 **Scope of the spike (from task #144 / `VELA_PORT_PLAN.md` P11):** investigate
 offline transit routing from the SAME Transitous/GTFS data as the P10 boards —
 ingest per-region GTFS into the downloadable offline packs + an on-device

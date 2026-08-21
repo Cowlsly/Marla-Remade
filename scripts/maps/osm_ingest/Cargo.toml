@@ -1,0 +1,43 @@
+# Host-side OSM ingest tools for the Maps offline packs.
+#
+# Replaces the former `scripts/maps/generator.cpp` (road graph) and
+# `scripts/maps/poi_extract.cpp` (POI layer), which needed g++ + libosmium and
+# therefore WSL. This crate reads `.osm.pbf` natively, so both tools run on
+# Windows.
+#
+# Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
+# table below), exactly like `scripts/maps/gtfs_ingest`: it is a host binary, so
+# `cargo build` here never pulls the aarch64-android toolchain or the app
+# crates' lints. Its single dependency, `miniz_oxide`, is a pure-Rust
+# DECODE-ONLY inflate implementation already in the local registry cache (the
+# app's maps crate pulls it via flate2), so builds still resolve offline.
+[package]
+name = "osm_ingest"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "OSM .osm.pbf -> Maps routing graph + POI side files (replaces the libosmium C++ tools)"
+
+[lib]
+name = "osm_ingest"
+path = "src/lib.rs"
+
+[[bin]]
+name = "road_graph"
+path = "src/bin/road_graph.rs"
+
+[[bin]]
+name = "poi_extract"
+path = "src/bin/poi_extract.rs"
+
+[dependencies]
+# Pure-Rust inflate. We only ever DECOMPRESS the zlib blobs inside a .osm.pbf,
+# so a decode-only crate is enough and keeps the C toolchain out of the build.
+miniz_oxide = "0.8"
+
+[profile.release]
+opt-level = 3
+
+# Detach from the repo-root workspace so this host tool builds standalone/offline.
+[workspace]
