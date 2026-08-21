@@ -76,15 +76,24 @@ object MusicBrainzApi {
     internal fun waitBeforeSending(now: Long, sentAt: Long): Long =
         (MIN_REQUEST_SPACING_MS - (now - sentAt)).coerceAtLeast(0L)
 
-    /** Serialises requests and spaces them out so the shared rate limit is respected. */
-    private suspend fun <T> gate(block: suspend () -> T): T = rateLimit.withLock {
-        delay(waitBeforeSending(System.currentTimeMillis(), lastRequestAt))
-        // Stamped before the call rather than after it. The limit is on how often requests are
-        // SENT, so the cooldown belongs alongside the round trip, not after it: stamping on
-        // completion charged every caller the spacing PLUS the latency, which roughly doubled
-        // the cost of each request and made a two-request screen take seconds.
-        lastRequestAt = System.currentTimeMillis()
-        block()
+    /**
+     * Spaces requests out so the shared rate limit is respected.
+     *
+     * The lock covers only the wait and the stamp, not the round trip. The limit is on how
+     * often requests are SENT, so once a caller has claimed its slot the next one can start
+     * waiting for its own; holding the lock across `block()` charged every caller the spacing
+     * PLUS the latency of the request ahead of it, which serialised the deliberately
+     * overlapped `async` pairs in the view model and made a two-request screen cost seconds.
+     *
+     * Stamped before the call rather than after it, for the same reason: the cooldown belongs
+     * alongside the round trip, not after it.
+     */
+    private suspend fun <T> gate(block: suspend () -> T): T {
+        rateLimit.withLock {
+            delay(waitBeforeSending(System.currentTimeMillis(), lastRequestAt))
+            lastRequestAt = System.currentTimeMillis()
+        }
+        return block()
     }
 
     private suspend inline fun <reified T> get(path: String): T = gate {
