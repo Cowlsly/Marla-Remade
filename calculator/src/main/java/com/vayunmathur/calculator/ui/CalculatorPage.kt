@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -52,8 +51,8 @@ import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
+import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconHistory
@@ -111,7 +110,7 @@ private fun RowScope.KeyButton(key: Key, actions: CalculatorActions, second: Boo
             }
         },
         modifier = Modifier.weight(key.weight).height(50.dp).padding(2.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.largeIncreased,
         colors = colors,
         contentPadding = PaddingValues(0.dp),
     ) {
@@ -248,7 +247,7 @@ fun CalculatorScreen(
                 )
                 if (state.unitOptions.isNotEmpty()) {
                     Row(
-                        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(top = 8.dp),
+                        Modifier.fillMaxWidth().padding(top = 8.dp),
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
@@ -257,12 +256,18 @@ fun CalculatorScreen(
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                         )
-                        state.unitOptions.forEach { unit ->
-                            FilterChip(
-                                selected = unit == state.selectedUnit,
-                                onClick = { actions.selectOutputUnit(unit.token) },
-                                label = { Text(unit.symbol) },
-                            )
+                        // A ButtonGroup rather than a scrolling row of chips: picking the output
+                        // unit is one choice, so the options should read as one control. The group
+                        // moves anything that does not fit into its overflow menu, which is easier
+                        // to find than a chip scrolled off the right edge.
+                        ButtonGroup(Modifier.weight(1f)) {
+                            state.unitOptions.forEach { unit ->
+                                toggleableItem(
+                                    checked = unit == state.selectedUnit,
+                                    label = unit.symbol,
+                                    onCheckedChange = { actions.selectOutputUnit(unit.token) },
+                                )
+                            }
                         }
                     }
                 }
@@ -317,7 +322,7 @@ private fun RowScope.PickerKey(label: String, onClick: () -> Unit) {
     Button(
         onClick = onClick,
         modifier = Modifier.weight(1f).height(50.dp).padding(2.dp),
-        shape = RoundedCornerShape(16.dp),
+        shape = MaterialTheme.shapes.largeIncreased,
         colors = ButtonDefaults.textButtonColors(),
         contentPadding = PaddingValues(0.dp),
     ) {

@@ -53,7 +53,6 @@ import com.vayunmathur.calculator.util.GraphPoint
 import com.vayunmathur.calculator.util.formatResult
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.AssistChip
-import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconButton
@@ -63,6 +62,7 @@ import com.vayunmathur.library.ui.IconKeyboardArrowUp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.ToggleButton
 import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.floor
@@ -297,12 +297,11 @@ private fun FunctionRow(actions: GraphActions, fn: GraphFunction) {
                 ),
             )
         }
-        FilterChip(
-            selected = fn.polar,
-            onClick = { actions.togglePolar(fn.id) },
-            label = { Text(if (fn.polar) "r=" else "y=") },
+        ToggleButton(
+            checked = fn.polar,
+            onCheckedChange = { actions.togglePolar(fn.id) },
             modifier = Modifier.padding(end = 6.dp),
-        )
+        ) { Text(if (fn.polar) "r=" else "y=") }
         OutlinedTextField(
             value = fn.text,
             onValueChange = { actions.updateFunction(fn.id, it) },
