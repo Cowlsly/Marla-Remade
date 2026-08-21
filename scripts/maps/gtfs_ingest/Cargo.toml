@@ -26,6 +26,9 @@ path = "src/lib.rs"
 [[bin]]
 name = "transit_stops"
 path = "src/bin/transit_stops.rs"
+[[bin]]
+name = "resolve_feeds"
+path = "src/bin/resolve_feeds.rs"
 
 [dependencies]
 

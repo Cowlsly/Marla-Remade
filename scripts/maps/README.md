@@ -177,7 +177,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_admin_layers.sh` | `admin_city`: **`--engine-city rust`** (default) is `osm_extract`'s own ring assembler → `tile_polygons`, cargo-only; `legacy` is osmium → `normalize_admin.py` → tippecanoe. `admin_country`/`admin_region`: Natural Earth → `normalize_admin.py` → tippecanoe, with **no rust engine** — OSM cannot supply them. `--only-city` builds the one admin layer a cargo-only box can |
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
-| `gtfs_ingest/` | Rust GTFS crate (detached): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). TRX2 on-disk format documented in `src/index.rs` |
+| `gtfs_ingest/` | Rust GTFS crate (detached, **zero dependencies**): `gtfs_ingest` (the on-device `.transit` pack), `transit_stops` (the basemap stop layer) and `resolve_feeds` (resolves the Transitous registry against transitland-atlas into a download plan whose feeds carry MOTIS ids). TRX2 on-disk format documented in `src/index.rs`, the resolution rules in `src/registry.rs` |
 | `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe, tile-join and go-pmtiles**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_extract` (subset by bbox, zoom and layer — the `go-pmtiles extract` replacement and the admin layer lift), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
@@ -291,17 +291,33 @@ Consequences:
 
 ### 4. World transit is a large step up in cost
 
-Today's `world.transit` is built from `.url` fields alone, which silently drops
-most US feeds — 38 of California's 49 sources — because they are referenced by
-`transitland-atlas-id` with no URL. Resolving those references the way
-`build_ca_transit.ps1` does turns 27 feeds and 18 MB into hundreds of feeds and
-many GB of downloads. **A `--region` filter is mandatory** for staging: validate
-on California, then a few regions, then the world.
+`build_world_transit.sh` used to scrape `url` fields out of the registry, which
+silently dropped every source referenced only by `transitland-atlas-id` — **38 of
+California's 49**. Its feed names were positional (`us_ca_0`, `us_ca_1`, …), so its
+manifest was two-field, so nothing carried a **MOTIS prefix** — and without those,
+live delays cannot be matched to a stop.
 
-The two producers also differ in what they can emit. Only the DMFR-resolving
-path knows each feed's original source name, so only it can write the three-field
-manifest that gives stops their MOTIS ids — and without those, live delays cannot
-be matched to a stop.
+`gtfs_ingest`'s `resolve_feeds` now does the atlas resolution `build_ca_transit.ps1`
+pioneered, across every `feeds/*.json`, and emits the three-field manifest. Two
+rules in it are worth knowing, because both were bugs in the shell version:
+
+* **The atlas entry is resolved before any URL is chosen**, even when the registry
+  supplies a `url-override`. An agency is usually listed twice — once `spec: gtfs`,
+  once `spec: gtfs-rt` — and only the atlas entry distinguishes them. Trusting the
+  override first lets a realtime endpoint win the dedup and knock the real timetable
+  out of the build.
+* **Realtime detection looks at the URL path, not the whole URL**, and a `.zip` is
+  definitively static. The old `*realtime*` glob matched whole URLs, so Golden Gate
+  Transit's perfectly good schedule zip was thrown away for being served from
+  `realtime.goldengate.org`.
+
+The cost: hundreds of feeds and many GB of downloads, against the 18.9 MB pack the
+`.url`-only scrape produced. **`--region` and `--max-feeds` are how you stage it** —
+California first (known-good), then a few regions, then the world — and
+`--resolve-only` shows the plan without fetching a byte. Downloads are
+content-addressed on the URL rather than the feed name, because feed names shift
+when the registry updates and URLs do not, so a re-run with a different `--region`
+re-uses everything it already has.
 
 ### 5. Credential env vars are not uniform
 
