@@ -1,0 +1,47 @@
+# Copyright (c) 2026 Vayun Mathur
+# SPDX-License-Identifier: Apache-2.0
+
+config QORVO_UWB
+	bool "Qorvo DW3xxx / QM33 UWB stack"
+	select SPI
+	select GPIO
+	select POLL
+	# The stack's frame protection (CCM*, CMAC key derivation, ECB header IEs) runs on
+	# PSA via src/mcps_crypto_psa.c.
+	select PSA_CRYPTO
+	select PSA_WANT_KEY_TYPE_AES
+	select PSA_WANT_ALG_CMAC
+	select PSA_WANT_ALG_CCM
+	select PSA_WANT_ALG_ECB_NO_PADDING
+	select PSA_WANT_GENERATE_RANDOM
+	help
+	  Build the Qorvo DW3xxx driver, the Zephyr qosal/qhal backends and link the
+	  prebuilt FiRa uwbstack bundle. Requires the licensed DW3_QM33 SDK, which is
+	  not vendored here — point QORVO_SDK_DIR at an extracted copy. See
+	  firmware/qorvo-uwb/README.md.
+
+if QORVO_UWB
+
+config QORVO_UWB_SPI_FREQ_SLOW_HZ
+	int "SPI frequency used before the device is identified (Hz)"
+	default 4000000
+	help
+	  The DW3000 requires <= 7 MHz until it has left INIT state, per Qorvo's
+	  driver notes. 4 MHz is what the vendor SDK uses.
+
+config QORVO_UWB_SPI_FREQ_FAST_HZ
+	int "SPI frequency used once the device is up (Hz)"
+	default 32000000
+	help
+	  Capped by the SPIM peripheral: nRF52833's SPIM3 does 32 MHz, other
+	  instances only 8 MHz.
+
+config QORVO_UWB_LOG_LEVEL
+	int "Qorvo stack log level passed as CONFIG_QLOG_LEVEL"
+	default 2
+	range 0 4
+	help
+	  0=off 1=error 2=info 3=debug 4=trace. The Qorvo stack filters its own logs
+	  with this and routes them through the Zephyr logging backend.
+
+endif # QORVO_UWB

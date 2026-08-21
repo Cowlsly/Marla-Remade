@@ -6,11 +6,13 @@ menu "FindFamily tracker"
 config FF_TRACKER_UWB
 	bool "Build the UWB (FiRa responder) path"
 	default n
+	select QORVO_UWB
 	help
 	  Compile src/tracker_sts.c and src/tracker_uwb.c, which run a FiRa
 	  responder/controlee session on the DW3110. Off by default because it needs
-	  the licensed Qorvo DW3xxx driver, which is not vendored in this tree — the
-	  BLE crowd-finding image builds and flashes without it. See README.md.
+	  the licensed Qorvo DW3xxx SDK, which is not vendored in this repo — the BLE
+	  crowd-finding image builds and flashes without it. Point QORVO_SDK_DIR at an
+	  extracted copy to enable this. See README.md.
 
 config FF_TRACKER_BEACON_INTERVAL_MS
 	int "Beacon advertising interval (ms)"

@@ -1,0 +1,35 @@
+# Copyright (c) 2026 Vayun Mathur
+# SPDX-License-Identifier: Apache-2.0
+
+description: |
+  Qorvo DW3110 UWB transceiver on SPI.
+
+  No Zephyr driver binds to this node. It exists so the Qorvo uwbstack can resolve its
+  bus, chip select, IRQ and reset lines from the devicetree rather than from compile
+  definitions — see firmware/qorvo-uwb/src/qplatform_zephyr.c, which reads it with
+  DT_NODELABEL(dw3110).
+
+compatible: "qorvo,dw3110"
+
+include: spi-device.yaml
+
+properties:
+  irq-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Transceiver IRQ line, driven high by the DW3110 on an event. Active high with a
+      pull-down.
+
+  rstn-gpios:
+    type: phandle-array
+    required: true
+    description: |
+      Active-low reset. Must be open-drain: the DW3110's RSTn is not to be driven high,
+      only pulled low and released.
+
+  wakeup-gpios:
+    type: phandle-array
+    required: false
+    description: |
+      Wake line, asserted to bring the transceiver out of deep sleep before SPI access.

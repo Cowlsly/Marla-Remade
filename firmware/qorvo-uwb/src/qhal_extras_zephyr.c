@@ -1,0 +1,169 @@
+/*
+ * Remaining qhal pieces for Zephyr: transceiver power control, the RTC the stack times
+ * ranging blocks against, and flash persistence.
+ *
+ * The SDK's versions can't be used here:
+ *  - qhal/src/qm33/qpwr.c duplicates the SPI config and repeats the `dw35720` node-label
+ *    requirement and the `spi_config.cs->gpio` pointer dereference (see
+ *    qplatform_zephyr.c).
+ *  - qhal/src/qrtc.c and qpwr.c delegate to persistent_time / persistent_config, which
+ *    only have nrfx implementations. Those drive an nRF RTC instance directly, which on
+ *    Zephyr would contend with the kernel's own timer, so the RTC is implemented on
+ *    Zephyr's clock instead.
+ */
+#include <qerr.h>
+#include <qgpio.h>
+#include <qirq.h>
+#include <qpwr.h>
+#include <qrtc.h>
+#include <qspi.h>
+#include <qtime.h>
+
+#include <deca_device_api.h>
+
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/kernel.h>
+#include <zephyr/logging/log.h>
+
+LOG_MODULE_REGISTER(qorvo_qhal, CONFIG_QORVO_UWB_LOG_LEVEL);
+
+/* From qplatform_zephyr.c; carries the chip-select pin used for the wake pulse. */
+extern struct qspi_config qm33_qspi_config;
+
+/* Time the DW3000 needs CS held low to wake, and then to become responsive. */
+#define WAKEUP_CS_TOGGLE_US 400
+#define WAKEUP_DELAY_US 500
+
+/*
+ * The DW3000 powers up asleep. dwt_probe() calls the wakeup path during probing, which
+ * is what clears this.
+ */
+static bool uwb_sleeping = true;
+static bool lpm_enabled;
+
+/* ---- Transceiver power ------------------------------------------------- */
+
+enum qerr qpwr_uwb_sleep(void)
+{
+	int key = qirq_lock();
+
+	if (!uwb_sleeping) {
+		dwt_entersleep(DWT_DW_IDLE_RC);
+		uwb_sleeping = true;
+	}
+	qirq_unlock(key);
+	return QERR_SUCCESS;
+}
+
+enum qerr qpwr_uwb_wakeup(void)
+{
+	int key = qirq_lock();
+
+	if (uwb_sleeping) {
+		/*
+		 * Waking the DW3000 is a CS pulse, not an SPI transfer: hold CS low long
+		 * enough and the part comes up. Zephyr's SPI driver owns this pin, so it
+		 * is briefly driven by hand here and left deasserted afterwards.
+		 *
+		 * Driven through gpio_pin_set_dt rather than qgpio's OUTPUT_LOW/HIGH
+		 * flags: the devicetree marks cs-gpios GPIO_ACTIVE_LOW, so Zephyr inverts
+		 * logical levels for this pin and "output low" would idle it physically
+		 * high — the opposite of the pulse the part needs. Level 1 here means
+		 * asserted, i.e. physically low.
+		 */
+		const struct gpio_dt_spec *cs = qm33_qspi_config.cs_pin.dev;
+
+		if (cs != NULL) {
+			(void)gpio_pin_configure_dt(cs, GPIO_OUTPUT_ACTIVE);
+			qtime_usleep(WAKEUP_CS_TOGGLE_US);
+			(void)gpio_pin_set_dt(cs, 0);
+			qtime_usleep(WAKEUP_DELAY_US);
+		}
+		uwb_sleeping = false;
+	}
+	qirq_unlock(key);
+	return QERR_SUCCESS;
+}
+
+bool qpwr_uwb_is_sleeping(void)
+{
+	return uwb_sleeping;
+}
+
+void qpwr_enable_lpm(void)
+{
+	lpm_enabled = true;
+}
+
+void qpwr_disable_lpm(void)
+{
+	lpm_enabled = false;
+}
+
+bool qpwr_is_lpm_enabled(void)
+{
+	return lpm_enabled;
+}
+
+enum qerr qpwr_set_min_inactivity_s4(uint32_t time_ms)
+{
+	ARG_UNUSED(time_ms);
+	return QERR_ENOTSUP;
+}
+
+enum qerr qpwr_get_min_inactivity_s4(uint32_t *time_ms)
+{
+	ARG_UNUSED(time_ms);
+	return QERR_ENOTSUP;
+}
+
+/* ---- RTC -------------------------------------------------------------- */
+
+/*
+ * The stack uses this to convert between its own device time units and wall time when
+ * scheduling ranging blocks, so it needs to be monotonic and reasonably fine-grained
+ * rather than accurate in absolute terms. Zephyr's uptime is LFCLK-backed and keeps
+ * counting through sleep, which is what matters.
+ */
+int64_t qrtc_get_us(void)
+{
+	return (int64_t)k_ticks_to_us_floor64(k_uptime_ticks());
+}
+
+void qrtc_resync_rtc_systime(int64_t *rtc_us, uint32_t *systime)
+{
+	if (rtc_us) {
+		*rtc_us = qrtc_get_us();
+	}
+	if (systime) {
+		/*
+		 * "systime" is the DW3000's own 32-bit system-time counter. The driver
+		 * reads it directly, so there is nothing to correlate here beyond
+		 * reporting the current RTC; a deep-sleep-across-reset resync would need
+		 * the persistent_time machinery this deliberately does not use.
+		 */
+		*systime = 0;
+	}
+}
+
+void qrtc_update_rtc_systime(int64_t updated_rtc_us, uint32_t updated_systime)
+{
+	ARG_UNUSED(updated_rtc_us);
+	ARG_UNUSED(updated_systime);
+}
+
+/* ---- Flash ------------------------------------------------------------ */
+
+enum qerr qflash_write(uint32_t dst_addr, void *src_addr, uint32_t size)
+{
+	ARG_UNUSED(dst_addr);
+	ARG_UNUSED(src_addr);
+	ARG_UNUSED(size);
+	/*
+	 * Only reached by l1_config's "store calibration to persistent memory" path.
+	 * Per-unit antenna-delay calibration is not done here — the DWM3001CDK module
+	 * ships calibrated and l1_config_init(NULL) uses defaults — so there is nothing
+	 * to write back.
+	 */
+	return QERR_ENOTSUP;
+}

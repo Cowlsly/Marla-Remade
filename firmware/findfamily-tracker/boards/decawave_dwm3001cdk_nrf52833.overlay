@@ -1,0 +1,31 @@
+/*
+ * DWM3001CDK: expose the on-module DW3110 as an SPI child so the Qorvo stack can
+ * find its bus, chip select, IRQ and reset lines from the devicetree.
+ *
+ * Pin assignments are the DWM3001CDK's, taken from the vendor SDK's board config
+ * (Projects/FreeRTOS/<app>/DWM3001CDK/ProjectDefinition/uwb_stack_llhw.cmake):
+ *   SPI3  SCK P0.03, MOSI P0.08, MISO P0.29, CS P1.06   (already in the board dts)
+ *   IRQ   P1.02
+ *   RSTn  P0.25   open-drain: the DW3000 must never be driven high, only pulled low
+ *   WAKEUP P1.19  unused for now; the part is kept out of deep sleep
+ *
+ * `qorvo,dw3110` has no Zephyr driver behind it: the binding
+ * (firmware/qorvo-uwb/dts/bindings) exists only so DT_BUS()/GPIO_DT_SPEC_GET() resolve.
+ * The Qorvo stack reaches the bus itself, see firmware/qorvo-uwb/src/qplatform_zephyr.c.
+ */
+
+&spi3 {
+	status = "okay";
+
+	dw3110: dw3110@0 {
+		compatible = "qorvo,dw3110";
+		reg = <0>;
+		/* 8 MHz is the DW3000's safe rate until it leaves INIT state; the driver
+		 * raises it to CONFIG_QORVO_UWB_SPI_FREQ_FAST_HZ once identified. */
+		spi-max-frequency = <8000000>;
+		irq-gpios = <&gpio1 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
+		rstn-gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
+		wakeup-gpios = <&gpio1 19 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};

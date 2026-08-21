@@ -1,0 +1,7 @@
+name: qorvo-uwb
+build:
+  cmake: .
+  kconfig: Kconfig
+  settings:
+    # Exposes dts/bindings/qorvo,dw3110.yaml to the devicetree compiler.
+    dts_root: .

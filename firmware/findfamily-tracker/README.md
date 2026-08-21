@@ -134,18 +134,68 @@ otherwise look identical.
 
 ## UWB precision finding
 
-`src/tracker_sts.c` and `src/tracker_uwb.c` are **guarded by `CONFIG_FF_TRACKER_UWB`,
-default `n`, and have never been compiled.** They call into Qorvo's DW3xxx driver, which
-is licensed and not vendored here. To enable:
+`src/tracker_sts.c` and `src/tracker_uwb.c` build under `CONFIG_FF_TRACKER_UWB`, which
+needs the licensed Qorvo **DW3_QM33 SDK**. It is not vendored here; only the glue is, in
+`firmware/qorvo-uwb/` (a Zephyr module). Point two environment variables at an extracted
+copy and build with the `uwb.conf` fragment:
 
-1. Obtain the Qorvo DW3xxx driver / FiRa stack and add it as a Zephyr module (a `west.yml`
-   entry or `ZEPHYR_EXTRA_MODULES`), so `deca_device_api.h` is on the include path.
-2. Add a devicetree overlay binding the driver to `spi3` and the module's IRQ/RST/WAKEUP
-   lines. The board's `spi3` node already exists for the DW3000.
-3. Build with `-DCONFIG_FF_TRACKER_UWB=y`.
+```powershell
+$env:QORVO_SDK_DIR   = "C:/qorvo"        # contains Libs/uwb-stack
+$env:QORVO_DRIVER_DIR = "<...>/Drivers/API/Shared/dwt_uwb_driver"
 
-Expect this to need iteration. The uncertain part isn't the key derivation — that has
-fixed vectors on both sides — it's matching Android's `CONFIG_UNICAST_DS_TWR` against a
-hand-configured DW3110 responder: STS mode, RFRAME/packet format, and ranging-round and
-block timing all have to line up. That is exactly why it is staged behind BLE rather than
-blocking it.
+cd C:\ncs\v3.4.0
+nrfutil toolchain-manager launch --ncs-version v3.4.0 -- `
+  west build -b decawave_dwm3001cdk/nrf52833 -d C:/ncs/ff-uwb-build `
+  <repo>/firmware/findfamily-tracker --pristine `
+  -- "-DEXTRA_CONF_FILE=uwb.conf" `
+     "-DZEPHYR_EXTRA_MODULES=<repo>/firmware/qorvo-uwb"
+```
+
+Quote the `-D` arguments: PowerShell otherwise splits `uwb.conf` at the dot.
+
+### State: builds, links, runs — but the stack does not come up yet
+
+Verified on hardware:
+- the image builds and links clean (58% flash, 47% RAM) and BLE crowd-finding is
+  unaffected — the beacon keeps working in the UWB image;
+- the DW3110 answers a direct device-id read over SPI with **`0xdeca0302`**, logged at
+  startup. That clears the wiring, the `dw3110` devicetree node, chip-select handling and
+  the SPI mode.
+
+Not working: `qplatform_init()` returns `QERR_EADDRNOTAVAIL` (-1), so Qorvo's driver
+rejects the part even though the bus is demonstrably fine. The fault is somewhere in the
+glue below the driver rather than in the hardware — most likely `qspi_transceive` in
+`firmware/qorvo-uwb/src/qspi_zephyr.c` (chip-select framing across the driver's
+header-then-body transfers is the first thing to check) or the reset sequence in
+`qhal_extras_zephyr.c`. **No ranging has been attempted**, and nothing here should be
+taken as evidence that FiRa interop with the phone works.
+
+### What the glue replaces, and why
+
+Qorvo ships Zephyr backends but they cannot be used as they are:
+
+| Vendor file | Problem | Replacement |
+|---|---|---|
+| `qhal/src/zephyr/qspi.c` | every function returns `QERR_ENOTSUP` — a placeholder | `src/qspi_zephyr.c` |
+| `qhal/src/zephyr/qgpio.c` | defines `gpio_is_ready_dt`/`gpio_add_callback_dt`, which Zephyr now provides | `src/qgpio_zephyr.c` |
+| `qplatform/qm33_qhal_zephyr/qplatform.c` | treats `spi_config.cs` as a pointer (by value since Zephyr 3.5); requires a `dw35720` node label | `src/qplatform_zephyr.c` |
+| `qhal/src/qm33/qpwr.c`, `qhal/src/qrtc.c` | same, or route through `persistent_time`, which is nrfx-only | `src/qhal_extras_zephyr.c` |
+| `qosal/src/zephyr/qmalloc.c` | uses libc malloc, which collides with picolibc's in this build | `src/qmalloc_zephyr.c` (k_malloc) |
+| `Src/UWB/mcps_crypto.c` | built on Nordic's nrf_crypto, a second crypto provider | `src/mcps_crypto_psa.c` (PSA) |
+
+`include-compat/` additionally papers over qosal being written against Zephyr 3.1: the
+pre-3.0 unprefixed include paths, and the internal `log_msg2` logging symbols renamed in
+Zephyr 3.2. That directory is the most likely thing to break on an NCS upgrade.
+
+The vendor's DWM3001CDK calibration code (`platform_l1_config.c`) is compiled as-is — it
+reads this module's factory antenna delays and crystal trim out of the DW3110's OTP, and
+those values are what make ranging accurate.
+
+### Interop is still the open risk
+
+Even once the stack initialises, matching Android's `CONFIG_UNICAST_DS_TWR` against a
+hand-configured responder means aligning STS, RFRAME format, and ranging-round and block
+timing. Under static STS the timing parameters are configured identically on both ends
+rather than negotiated, so `SLOT_DURATION_RSTU`, `BLOCK_DURATION_MS` and
+`ROUND_DURATION_SLOTS` in `src/tracker_uwb.c` are the first things to vary if the phone
+will not range.
