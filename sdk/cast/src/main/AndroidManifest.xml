@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- CastContract.PERMISSION is declared by each consuming app, not here. :library depends on
+         :sdk:games and every app depends on :library, so a uses-permission in an SDK manifest ends
+         up requested by all ~50 apps in the repo. A <queries> entry is different: it only makes the
+         Cast package visible to a resolve, which is exactly what CastClient.support() needs. -->
+
+    <queries>
+        <package android:name="com.vayunmathur.cast" />
+    </queries>
+</manifest>
