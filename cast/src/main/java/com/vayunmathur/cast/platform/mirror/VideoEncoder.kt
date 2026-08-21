@@ -86,6 +86,17 @@ class VideoEncoder(
                     // One second. A receiver that joins or loses sync recovers at the next IDR, and
                     // the RTCP path can ask for one sooner when it actually needs it.
                     setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+                    // **Load-bearing for screen capture.** A VirtualDisplay only hands the encoder a
+                    // buffer when the screen content changes, so a phone sitting on a static screen
+                    // produces no frames at all - the stream simply stops, and a receiver watching a
+                    // stream that has stopped concludes the sender is gone and tears the session
+                    // down. This tells the encoder to re-emit the previous frame if nothing new has
+                    // arrived, which keeps a steady frame rate for free: an unchanged frame codes to
+                    // almost nothing.
+                    setLong(
+                        MediaFormat.KEY_REPEAT_PREVIOUS_FRAME_AFTER,
+                        1_000_000L / frameRate,
+                    )
                     setInteger(
                         MediaFormat.KEY_BITRATE_MODE,
                         android.media.MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR,

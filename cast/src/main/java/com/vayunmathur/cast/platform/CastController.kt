@@ -329,6 +329,7 @@ object CastController {
                 MirrorStopReason.Udp -> R.string.cast_mirror_udp_failed
                 MirrorStopReason.NoEncoders -> R.string.cast_mirror_no_encoder
                 MirrorStopReason.NoAudioForSpeaker -> R.string.cast_mirror_no_audio
+                MirrorStopReason.ReceiverGone -> R.string.cast_mirror_receiver_gone
             },
         )
         _mirrorPhase.value = MirrorPhase.Failed

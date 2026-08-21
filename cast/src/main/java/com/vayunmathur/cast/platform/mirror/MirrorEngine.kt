@@ -40,7 +40,7 @@ data class MirrorDegradation(
 )
 
 /** Why mirroring could not start, or stopped. */
-enum class MirrorStopReason { Udp, NoEncoders, NoAudioForSpeaker }
+enum class MirrorStopReason { Udp, NoEncoders, NoAudioForSpeaker, ReceiverGone }
 
 /**
  * The running mirror: capture and encode in, RTP out, RTCP back.
@@ -234,6 +234,14 @@ class MirrorEngine(
                 while (packet != null) {
                     handleFeedback(packet)
                     packet = udp.receive()
+                }
+                // A receiver whose port has gone unreachable is not coming back, and spinning at it
+                // forever hides the failure from the user behind a notification that says
+                // "Mirroring your screen".
+                if (udp.receiverGone) {
+                    Log.w(TAG, "the receiver stopped listening; ending the mirror")
+                    onStopped(MirrorStopReason.ReceiverGone)
+                    return@launch
                 }
                 delay(RTCP_POLL_MS)
             }

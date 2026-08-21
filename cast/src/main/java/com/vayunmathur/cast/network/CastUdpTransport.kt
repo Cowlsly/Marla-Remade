@@ -2,6 +2,7 @@ package com.vayunmathur.cast.network
 
 import android.util.Log
 import java.net.InetSocketAddress
+import java.net.PortUnreachableException
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 
@@ -39,6 +40,17 @@ class CastUdpTransport(private val host: String, private val port: Int) {
         false
     }
 
+    /**
+     * True once the receiver's port has answered ICMP "unreachable" repeatedly.
+     *
+     * On a connected datagram socket that surfaces as [PortUnreachableException] on *send*, which
+     * means the receiver closed or never bound its port - so it is a diagnosis, not a transient. One
+     * occurrence can happen before the receiver binds, hence the threshold.
+     */
+    val receiverGone: Boolean get() = unreachableCount >= UNREACHABLE_THRESHOLD
+
+    private var unreachableCount = 0
+
     fun send(packet: ByteArray): Boolean {
         val active = channel ?: return false
         if (hexDump) Log.i(TAG, "-> ${packet.size}B ${packet.toHexPreview()}")
@@ -46,7 +58,17 @@ class CastUdpTransport(private val host: String, private val port: Int) {
             // A non-blocking write can accept fewer bytes than offered when the send buffer is
             // full, which for a datagram socket means the packet did not go. Reporting it as sent
             // would inflate the sender report and skew the receiver's loss estimate.
-            active.write(ByteBuffer.wrap(packet)) == packet.size
+            val wrote = active.write(ByteBuffer.wrap(packet)) == packet.size
+            unreachableCount = 0
+            wrote
+        } catch (e: PortUnreachableException) {
+            // Counted rather than logged per packet: at 30 fps this would be thousands of identical
+            // stack traces, which buries whatever else the log had to say.
+            unreachableCount++
+            if (unreachableCount == UNREACHABLE_THRESHOLD) {
+                Log.w(TAG, "$host:$port is unreachable - the receiver closed its socket")
+            }
+            false
         } catch (e: Exception) {
             Log.w(TAG, "udp send failed", e)
             false
@@ -80,5 +102,8 @@ class CastUdpTransport(private val host: String, private val port: Int) {
 
     private companion object {
         const val MAX_DATAGRAM = 2048
+
+        /** One unreachable reply can precede the receiver binding; a run of them cannot. */
+        const val UNREACHABLE_THRESHOLD = 30
     }
 }

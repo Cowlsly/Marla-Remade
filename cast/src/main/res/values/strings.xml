@@ -44,6 +44,7 @@
     <string name="cast_mirror_udp_failed">Could not reach the device to send video</string>
     <string name="cast_mirror_no_encoder">This device has no usable screen encoder</string>
     <string name="cast_mirror_no_audio">Audio could not be captured, and this device can only play audio</string>
+    <string name="cast_mirror_receiver_gone">The device stopped accepting the stream</string>
 
     <!-- Quick Settings tile -->
     <string name="cast_tile_label">Mirror screen</string>
