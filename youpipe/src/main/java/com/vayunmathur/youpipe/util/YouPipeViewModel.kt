@@ -786,32 +786,16 @@ class YouPipeViewModel(
                         }
 
                         if (progVideoOnly.isNotEmpty() || sabrVideoOnly.isNotEmpty()) {
-                            // Combine progressive + SABR video-only. For same resolution+fps,
-                            // if vp9 and avc both exist, keep only vp9 (user request). This preserves
-                            // 60fps streams even when only avc has 60fps and vp9 has 30fps.
-                            // AV1 is kept as distinct codec. Do NOT filter >1080p.
-                            val combinedVideo = (
+                            // Combine progressive + SABR video-only, then keep exactly one stream
+                            // per resolution: highest fps wins, then best codec (av1 > vp9 > avc).
+                            // Do NOT filter >1080p.
+                            videoStreams = (
                                 progVideoOnly.map { it.toDomain() } +
                                     sabrVideoOnly.map { it.toSabrDomain(videoId) }
                                 )
-                                .groupBy { it.height to it.fps }
-                                .flatMap { (_, streamsAtResFps) ->
-                                    val hasVp9 = streamsAtResFps.any { it.codec == "vp9" }
-                                    val hasAvc = streamsAtResFps.any { it.codec == "avc" }
-                                    if (hasVp9 && hasAvc) {
-                                        streamsAtResFps.filter { it.codec != "avc" }
-                                    } else {
-                                        streamsAtResFps
-                                    }
-                                }
-                                // Keep different codec at same height/fps as distinct (e.g. av1 vs vp9 at 1080p60)
-                                .distinctBy { Triple(it.codec, it.height, it.fps) }
-                                .sortedWith(
-                                    compareByDescending<VideoStream> { it.height }
-                                        .thenByDescending { it.fps }
-                                        .thenByDescending { codecPriority(it.codec) }
-                                )
-                            videoStreams = combinedVideo
+                                .groupBy { it.height }
+                                .map { (_, streamsAtRes) -> streamsAtRes.maxWith(videoStreamPreference) }
+                                .sortedByDescending { it.height }
 
                             // Audio: opus only (F-Droid friendly, higher quality). Filter before sort.
                             val rawAudioCandidates = if (progAudio.isNotEmpty()) {
@@ -830,7 +814,9 @@ class YouPipeViewModel(
                                 )
                         } else {
                             videoStreams = ex.getVideoStreams().map { it.toDomain() }
-                                .sortedWith(compareByDescending { it.height })
+                                .groupBy { it.height }
+                                .map { (_, streamsAtRes) -> streamsAtRes.maxWith(videoStreamPreference) }
+                                .sortedByDescending { it.height }
                             audioStreams = emptyList()
                         }
                     } else {
@@ -1404,6 +1390,9 @@ fun youtubeLocalization(code: String): Localization =
 private fun codecPriority(codec: String): Int = when (codec) {
     "av1" -> 3; "vp9" -> 2; "avc" -> 1; else -> 0
 }
+
+private val videoStreamPreference: Comparator<VideoStream> =
+    compareBy<VideoStream> { it.fps }.thenBy { codecPriority(it.codec) }
 
 /** Factory for constructing [YouPipeViewModel] with the repository. */
 class YouPipeViewModelFactory(
