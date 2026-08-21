@@ -25,6 +25,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -112,6 +113,9 @@ private fun GraphCanvas(state: GraphUiState, actions: GraphActions, modifier: Mo
     // against the background whatever colour the curve happens to be.
     val markerTextColor = MaterialTheme.colorScheme.onSurface
     val textMeasurer = rememberTextMeasurer()
+    // Both gesture handlers are keyed on Unit so a pinch isn't torn down mid-gesture, which
+    // means they would otherwise capture the first composition's state forever.
+    val currentState by rememberUpdatedState(state)
 
     // Colour lookup for markers, and the localised kind names, resolved outside the draw scope.
     val colorOf = state.functions.associate { it.id to it.color }
@@ -134,38 +138,38 @@ private fun GraphCanvas(state: GraphUiState, actions: GraphActions, modifier: Mo
             .onSizeChanged { actions.setViewSize(it.width.toFloat(), it.height.toFloat()) }
             .pointerInput(Unit) {
                 detectTapGestures { offset ->
-                    val vp = state.viewport
-                    val gx = vp.centerX + (offset.x - size.width / 2) / vp.scale
-                    val gy = vp.centerY + (size.height / 2 - offset.y) / vp.scale
-                    actions.tapGraph(GraphPoint(gx, gy), TouchSlop.toPx() / vp.scale)
+                    val vp = currentState.viewport
+                    val w = size.width.toFloat()
+                    val h = size.height.toFloat()
+                    val point = GraphPoint(vp.graphX(offset.x, w), vp.graphY(offset.y, h))
+                    actions.tapGraph(point, TouchSlop.toPx() / vp.scale)
                 }
             }
             .pointerInput(Unit) {
                 detectTransformGestures { centroid, pan, zoom, _ ->
-                    val vp = state.viewport
-                    val newScale = (vp.scale * zoom).coerceIn(2.0, 400000.0)
-                    val gx = vp.centerX + (centroid.x - size.width / 2) / vp.scale
-                    val gy = vp.centerY + (size.height / 2 - centroid.y) / vp.scale
+                    val vp = currentState.viewport
                     actions.setViewport(
-                        centerX = gx - (centroid.x - size.width / 2) / newScale - pan.x / newScale,
-                        centerY = gy - (size.height / 2 - centroid.y) / newScale + pan.y / newScale,
-                        scale = newScale,
+                        vp.transformed(
+                            centroidX = centroid.x,
+                            centroidY = centroid.y,
+                            panX = pan.x,
+                            panY = pan.y,
+                            zoom = zoom,
+                            widthPx = size.width.toFloat(),
+                            heightPx = size.height.toFloat(),
+                        ),
                     )
                 }
             },
     ) {
         val w = size.width
         val h = size.height
-        val scale = state.viewport.scale
-        val cx = state.viewport.centerX
-        val cy = state.viewport.centerY
-        fun px(gx: Double) = ((gx - cx) * scale + w / 2).toFloat()
-        fun py(gy: Double) = (h / 2 - (gy - cy) * scale).toFloat()
+        val vp = state.viewport
+        val scale = vp.scale
+        fun px(gx: Double) = vp.screenX(gx, w)
+        fun py(gy: Double) = vp.screenY(gy, h)
 
-        val minX = cx - (w / 2) / scale
-        val maxX = cx + (w / 2) / scale
-        val minY = cy - (h / 2) / scale
-        val maxY = cy + (h / 2) / scale
+        val (minX, maxX, minY, maxY) = vp.bounds(w, h)
         val step = niceStep((w / 2) / scale)
 
         // ---- Grid + tick labels ----

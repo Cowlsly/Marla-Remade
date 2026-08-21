@@ -257,10 +257,10 @@ class CalculatorViewModel(application: Application) :
         viewHeightPx = heightPx
     }
 
-    override fun setViewport(centerX: Double, centerY: Double, scale: Double) {
-        this.centerX = centerX
-        this.centerY = centerY
-        this.scale = scale
+    override fun setViewport(viewport: GraphViewport) {
+        centerX = viewport.centerX
+        centerY = viewport.centerY
+        scale = viewport.scale
     }
 
     private fun dropMarkersFor(id: Long) = markers.removeAll { id in it.curveIds }
@@ -449,10 +449,7 @@ class CalculatorViewModel(application: Application) :
      */
     fun sampleCurves(widthPx: Float, heightPx: Float): List<SampledCurve> {
         if (widthPx <= 0f || heightPx <= 0f) return emptyList()
-        val xMin = centerX - (widthPx / 2) / scale
-        val xMax = centerX + (widthPx / 2) / scale
-        val yMin = centerY - (heightPx / 2) / scale
-        val yMax = centerY + (heightPx / 2) / scale
+        val (xMin, xMax, yMin, yMax) = GraphViewport(centerX, centerY, scale).bounds(widthPx, heightPx)
         return functions.filter { it.enabled && it.text.isNotBlank() }.mapNotNull { fn ->
             val expr = runCatching { Expression.parse(fn.text) }.getOrNull() ?: return@mapNotNull null
             GraphAnalysis.sample(fn.id, expr, fn.polar, angleMode, xMin, xMax, yMin, yMax, widthPx.toInt())

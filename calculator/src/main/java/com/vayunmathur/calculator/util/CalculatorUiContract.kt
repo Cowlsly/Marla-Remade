@@ -12,12 +12,68 @@ package com.vayunmathur.calculator.util
 /** One evaluated expression, kept for the history sheet. */
 data class HistoryEntry(val expression: String, val result: String)
 
-/** Where the graph is looking: centre in graph units, and pixels per unit. */
+/** How far the graph can be zoomed out and in, in pixels per unit. */
+private const val MinGraphScale = 2.0
+private const val MaxGraphScale = 400000.0
+
+/** The visible window in graph units. */
+data class GraphBounds(
+    val xMin: Double,
+    val xMax: Double,
+    val yMin: Double,
+    val yMax: Double,
+)
+
+/**
+ * Where the graph is looking: centre in graph units, and pixels per unit.
+ *
+ * Owns the screen<->graph transform so drawing, tap handling and analysis all share one
+ * definition of it. Kept free of Compose types so it stays a plain value type.
+ */
 data class GraphViewport(
     val centerX: Double = 0.0,
     val centerY: Double = 0.0,
     val scale: Double = 60.0,
-)
+) {
+    fun graphX(screenX: Float, widthPx: Float): Double = centerX + (screenX - widthPx / 2) / scale
+
+    fun graphY(screenY: Float, heightPx: Float): Double = centerY + (heightPx / 2 - screenY) / scale
+
+    fun screenX(graphX: Double, widthPx: Float): Float = ((graphX - centerX) * scale + widthPx / 2).toFloat()
+
+    fun screenY(graphY: Double, heightPx: Float): Float = (heightPx / 2 - (graphY - centerY) * scale).toFloat()
+
+    fun bounds(widthPx: Float, heightPx: Float): GraphBounds = GraphBounds(
+        xMin = graphX(0f, widthPx),
+        xMax = graphX(widthPx, widthPx),
+        yMin = graphY(heightPx, heightPx),
+        yMax = graphY(0f, heightPx),
+    )
+
+    /**
+     * The viewport after a transform gesture: zoom about the centroid, so the graph point
+     * under the fingers stays under them, then pan at the new scale.
+     */
+    fun transformed(
+        centroidX: Float,
+        centroidY: Float,
+        panX: Float,
+        panY: Float,
+        zoom: Float,
+        widthPx: Float,
+        heightPx: Float,
+    ): GraphViewport {
+        val newScale = (scale * zoom).coerceIn(MinGraphScale, MaxGraphScale)
+        // Reused only for its centre->centroid offset at the new scale.
+        val atNewScale = GraphViewport(scale = newScale)
+        return GraphViewport(
+            centerX = graphX(centroidX, widthPx) - atNewScale.graphX(centroidX, widthPx) - panX / newScale,
+            // Screen Y grows downward, so the pan is added rather than subtracted.
+            centerY = graphY(centroidY, heightPx) - atNewScale.graphY(centroidY, heightPx) + panY / newScale,
+            scale = newScale,
+        )
+    }
+}
 
 /** Everything the keypad screen draws. */
 data class CalculatorUiState(
@@ -84,7 +140,7 @@ interface GraphActions {
     fun setViewSize(widthPx: Float, heightPx: Float) {}
 
     /** Pan/zoom result from a transform gesture. */
-    fun setViewport(centerX: Double, centerY: Double, scale: Double) {}
+    fun setViewport(viewport: GraphViewport) {}
 
     /** Reveal or dismiss the notable point nearest [at], within [radius] graph units. */
     fun tapGraph(at: GraphPoint, radius: Double) {}
