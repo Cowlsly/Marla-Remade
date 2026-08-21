@@ -16,6 +16,8 @@ import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.HorizontalDivider
 import com.vayunmathur.library.ui.ListItem
+import com.vayunmathur.library.ui.EmptyState
+import com.vayunmathur.library.ui.LoadingState
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextField
@@ -44,6 +46,7 @@ import com.vayunmathur.maps.util.MapsSearchViewModel
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SearchActions
 import com.vayunmathur.maps.util.SearchResult
+import com.vayunmathur.maps.util.SearchPhase
 import com.vayunmathur.maps.util.SearchUiState
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 
@@ -69,6 +72,7 @@ fun SearchPage(
     val searchQuery by searchViewModel.query.collectAsState()
     val results by searchViewModel.results.collectAsState()
     val recents by searchViewModel.recents.collectAsState()
+    val searching by searchViewModel.searching.collectAsState()
     val savedHome by savedPlacesViewModel.home.collectAsState()
     val savedWork by savedPlacesViewModel.work.collectAsState()
 
@@ -138,7 +142,10 @@ fun SearchPage(
         }
     }
 
-    SearchScreen(SearchUiState(searchQuery, results, recents, savedHome, savedWork), actions)
+    SearchScreen(
+        SearchUiState(searchQuery, results, recents, savedHome, savedWork, searching),
+        actions,
+    )
 }
 
 /** The rendered half of [SearchPage]: query text in, results out, no ViewModel. */
@@ -199,28 +206,22 @@ fun SearchScreen(state: SearchUiState, actions: SearchActions) {
                 )
             }
             Box(modifier = Modifier.fillMaxSize()) {
-                when {
-                    state.query.length >= 2 && state.results.isEmpty() -> {
-                        Text(
-                            text = stringResource(R.string.no_results_found),
-                            modifier = Modifier.align(Alignment.Center),
-                            style = MaterialTheme.typography.bodyLarge
-                        )
-                    }
-                    state.query.length >= 2 -> {
-                        ResultsList(state.results, actions)
-                    }
-                    state.recents.isNotEmpty() -> {
-                        RecentsList(state.recents, actions)
-                    }
-                    else -> {
-                        Text(
-                            text = stringResource(R.string.type_to_search),
-                            modifier = Modifier.align(Alignment.Center),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                when (state.phase) {
+                    SearchPhase.Searching -> LoadingState(
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                    SearchPhase.Empty -> EmptyState(
+                        title = stringResource(R.string.no_results_found),
+                        modifier = Modifier.align(Alignment.Center),
+                    )
+                    SearchPhase.Results -> ResultsList(state.results, actions)
+                    SearchPhase.Recents -> RecentsList(state.recents, actions)
+                    SearchPhase.Idle -> Text(
+                        text = stringResource(R.string.type_to_search),
+                        modifier = Modifier.align(Alignment.Center),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
                 }
             }
         }

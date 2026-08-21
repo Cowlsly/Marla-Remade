@@ -24,7 +24,45 @@ data class SearchUiState(
     // the map browse overlay onto the search page. Null = slot not set yet.
     val savedHome: SavedPlace? = null,
     val savedWork: SavedPlace? = null,
-)
+    /** Whether a search is running. See [SearchPhase]. */
+    val searching: Boolean = false,
+) {
+    /**
+     * What the results area should show.
+     *
+     * Derived here rather than at the call site because the view used to work it out from
+     * `query.length >= 2 && results.isEmpty()`, which is equally true while a search is running
+     * and after it found nothing — so a running search rendered "No results found". Naming the
+     * phases makes the distinction impossible to collapse again, and makes the ordering
+     * (searching wins over empty) a property of the state instead of the order of `when` branches.
+     */
+    val phase: SearchPhase
+        get() = when {
+            query.length < 2 && recents.isNotEmpty() -> SearchPhase.Recents
+            query.length < 2 -> SearchPhase.Idle
+            searching -> SearchPhase.Searching
+            results.isEmpty() -> SearchPhase.Empty
+            else -> SearchPhase.Results
+        }
+}
+
+/** The five things the search results area can be showing. */
+enum class SearchPhase {
+    /** Nothing typed and nothing to suggest. */
+    Idle,
+
+    /** Nothing typed, but there are recent queries worth offering. */
+    Recents,
+
+    /** A search is in flight — including its debounce window. */
+    Searching,
+
+    /** The search finished and found nothing. */
+    Empty,
+
+    /** The search finished and found something. */
+    Results,
+}
 
 /**
  * Search callbacks. Every method has a no-op default so a preview can render the screen

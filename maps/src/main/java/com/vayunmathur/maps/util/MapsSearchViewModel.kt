@@ -69,6 +69,18 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
     private val _results = MutableStateFlow<List<SearchResult>>(emptyList())
     val results: StateFlow<List<SearchResult>> = _results.asStateFlow()
 
+    /**
+     * Whether a search is in flight.
+     *
+     * The view cannot infer this. "Query is long enough and results are empty" is true both
+     * while a search runs and after one comes back with nothing, and the search page read it as
+     * the second — so it showed "No results found" for the whole debounce plus the offline
+     * lookup plus the network round-trip, then replaced it with the results. Only the thing
+     * running the search knows which it is, so it is the thing that has to say.
+     */
+    private val _searching = MutableStateFlow(false)
+    val searching: StateFlow<Boolean> = _searching.asStateFlow()
+
     /** Recent queries, most-recent first, for the pre-search suggestions. */
     val recents: StateFlow<List<String>> = recentStore.recents
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), recentStore.current())
@@ -90,30 +102,41 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
         searchJob?.cancel()
         if (query.length < 2) {
             _results.value = emptyList()
+            _searching.value = false
             return
         }
+        // Set before the launch, not inside it: a coroutine does not necessarily start before
+        // the next recomposition, and a frame rendered in that gap is the bug all over again.
+        _searching.value = true
         searchJob = viewModelScope.launch {
-            delay(250)
-            // Try the offline OSM POI index first (P27): resolving a POI name
-            // locally avoids a Google call. Google stays the fallback (and
-            // handles addresses, which the POI index doesn't carry). Any offline
-            // failure (unmapped/poisoned index, decode error) is swallowed so the
-            // query still falls through to Google.
-            val app = getApplication<Application>()
-            val offline = withContext(Dispatchers.IO) {
-                runCatching {
-                    PoiIndex.initialize(app)
-                    PoiIndex.searchByName(query, nearLat, nearLon, limit = 20)
-                }.getOrDefault(emptyList())
+            try {
+                delay(250)
+                // Try the offline OSM POI index first (P27): resolving a POI name
+                // locally avoids a Google call. Google stays the fallback (and
+                // handles addresses, which the POI index doesn't carry). Any offline
+                // failure (unmapped/poisoned index, decode error) is swallowed so the
+                // query still falls through to Google.
+                val app = getApplication<Application>()
+                val offline = withContext(Dispatchers.IO) {
+                    runCatching {
+                        PoiIndex.initialize(app)
+                        PoiIndex.searchByName(query, nearLat, nearLon, limit = 20)
+                    }.getOrDefault(emptyList())
+                }
+                if (offline.isNotEmpty()) {
+                    _results.value = offline.map { it.toSearchResult() }
+                    return@launch
+                }
+                // GoogleSearchDataSource.search does its own Dispatchers.IO + never
+                // throws (empty list on any scrape/path failure).
+                _results.value = GoogleSearchDataSource.search(query, nearLat, nearLon)
+                    .map { it.toSearchResult() }
+            } finally {
+                // `finally` because cancellation is the normal exit: every keystroke cancels
+                // the previous job, and a cancelled search that never clears this flag leaves
+                // the spinner up forever.
+                _searching.value = false
             }
-            if (offline.isNotEmpty()) {
-                _results.value = offline.map { it.toSearchResult() }
-                return@launch
-            }
-            // GoogleSearchDataSource.search does its own Dispatchers.IO + never
-            // throws (empty list on any scrape/path failure).
-            _results.value = GoogleSearchDataSource.search(query, nearLat, nearLon)
-                .map { it.toSearchResult() }
         }
     }
 

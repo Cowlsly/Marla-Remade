@@ -86,6 +86,10 @@ class MetadataPreviews {
                         SearchResult("3", "Golden Gate Ferry Terminal", "Pier 1, San Francisco", 37.7936, -122.3927, "Ferry terminal"),
                         SearchResult("4", "Oakland Ferry Dock", "Clay St, Oakland", 37.7947, -122.2783, "Ferry terminal"),
                     ),
+                    // Explicitly not searching: with results present and this left at its
+                    // default the state would resolve to Results anyway, but the listing image
+                    // should not depend on that inference.
+                    searching = false,
                 ),
                 SearchActions.Noop,
             )

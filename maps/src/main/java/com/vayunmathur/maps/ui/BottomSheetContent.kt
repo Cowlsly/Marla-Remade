@@ -15,6 +15,7 @@ import com.vayunmathur.library.ui.ButtonDefaults
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.ListItem
+import com.vayunmathur.library.ui.LoadingState
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.PrimaryTabRow
 import com.vayunmathur.library.ui.Tab
@@ -109,11 +110,21 @@ fun BottomSheetContent(
             }
         }
         is SpecificFeature.Route -> {
-            if(route != null) {
+            val currentRoute = route
+            if (currentRoute != null) {
                 val userPosition by viewModel.userPosition.collectAsState()
-                RouteSheet(selectedFeature, route, selectedRouteType, setSelectedRouteType, navState, userPosition)
+                RouteSheet(selectedFeature, currentRoute, selectedRouteType, setSelectedRouteType, navState, userPosition)
+            } else {
+                // Routes arrive asynchronously and start out null, so this is the state right
+                // after asking for directions. It used to render nothing at all, inside a sheet
+                // whose peek height is fixed — so the user got a blank card and no reason to
+                // believe anything was happening. RouteSheet has a "generating" placeholder of
+                // its own, but it was unreachable from here.
+                LoadingState(message = stringResource(R.string.generating_route))
             }
         }
+        // `RoutableFeature` is an intermediate sealed interface, so this cannot be made
+        // exhaustive over the leaves; `else` covers null and any future subtype.
         else -> Unit
     }
 }

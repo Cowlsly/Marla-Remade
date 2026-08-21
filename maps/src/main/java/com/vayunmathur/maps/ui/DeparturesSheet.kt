@@ -25,7 +25,9 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.EmptyState
 import com.vayunmathur.library.ui.HorizontalDivider
+import com.vayunmathur.library.ui.LoadingState
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconRefresh
 import com.vayunmathur.library.ui.MaterialTheme
@@ -94,20 +96,17 @@ fun DeparturesSheet(
             Spacer(Modifier.height(8.dp))
 
             when (state) {
-                is DeparturesState.Loading, DeparturesState.Idle -> {
-                    Text(
-                        stringResource(R.string.transit_departures_loading),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                // Loading and Idle were collapsed into one branch, both showing "loading" —
+                // so a board that had not been asked for yet claimed to be fetching. Idle is
+                // only reachable transiently as the sheet opens, and showing nothing for that
+                // frame is more honest than showing a spinner for a request nobody made.
+                is DeparturesState.Loading -> LoadingState(
+                    message = stringResource(R.string.transit_departures_loading),
+                )
+                DeparturesState.Idle -> Unit
                 is DeparturesState.Loaded -> {
                     if (state.departures.isEmpty()) {
-                        Text(
-                            stringResource(R.string.transit_departures_none),
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
+                        EmptyState(title = stringResource(R.string.transit_departures_none))
                     } else {
                         DepartureList(state.departures, now)
                     }

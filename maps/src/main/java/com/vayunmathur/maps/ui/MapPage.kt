@@ -168,6 +168,12 @@ fun MapPage(
         if (isNavigating) sheetState.hide()
     }
 
+    // Nothing selected means the sheet has nothing to draw, and its peek height is fixed — so
+    // leaving it up would show a blank card rather than collapsing.
+    LaunchedEffect(selectedFeature) {
+        if (selectedFeature == null) sheetState.hide()
+    }
+
     NavigationCameraFollow(camera, chrome, navProgress, isNavigating)
 
     // Poll the posted limit under the puck. Inert until the maxspeed tileset is hosted.
