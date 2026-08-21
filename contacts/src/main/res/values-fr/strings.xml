@@ -101,4 +101,11 @@
     <string name="import_contacts_from_vcf_files">Importer des contacts depuis des fichiers .vcf</string>
     <string name="custom_label">Libellé personnalisé</string>
     <string name="enter_custom_label">Saisir un libellé personnalisé</string>
+    <string name="rename_account">Renommer le compte</string>
+    <string name="delete_account">Supprimer le compte</string>
+    <string name="delete_local_account_confirm">Supprimer ce compte et tous les contacts associés ? Cette action est irréversible.</string>
+    <string name="account_name_exists">Un compte portant le même nom existe déjà</string>
+    <string name="sim_limited_fields_hint">Seuls le nom, téléphone et courriel sont enregistrés pour les contacts sur la carte SIM.</string>
+    <string name="save_failed">Échec de l\'enregistrement</string>
+    <string name="importing">En cours d\'importation…</string>
 </resources>
