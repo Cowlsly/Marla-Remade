@@ -34,6 +34,7 @@ use gtfs_ingest::gtfs;
 use gtfs_ingest::index;
 use gtfs_ingest::index::FeedInput;
 use gtfs_ingest::manifest::{read_manifest, parse_feed_spec, FeedSpec};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -166,13 +167,20 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
         })
         .collect();
 
-    let (blob, stats) = index::build_index(pack_name, &feeds)?;
-
     std::fs::create_dir_all(out_dir)
         .map_err(|e| format!("cannot create out dir {}: {e}", out_dir.display()))?;
     let index_path = out_dir.join(format!("{pack_name}.transit"));
-    std::fs::write(&index_path, &blob)
-        .map_err(|e| format!("cannot write {}: {e}", index_path.display()))?;
+    // Straight to disk through a BufWriter: the pack is 1.5-4 GB for a world
+    // build, and holding a second copy of it in a `Vec` to then `fs::write` was
+    // pure overhead.
+    let file = std::fs::File::create(&index_path)
+        .map_err(|e| format!("cannot create {}: {e}", index_path.display()))?;
+    let mut writer = std::io::BufWriter::new(file);
+    let stats = index::build_index_to(pack_name, &feeds, &mut writer)?;
+    writer
+        .flush()
+        .map_err(|e| format!("cannot finish writing {}: {e}", index_path.display()))?;
+    drop(writer);
 
     // Manifest (hand-written JSON, no serde dep). Includes a per-section size
     // breakdown so the compression win (profiles vs the old stoptimes) is

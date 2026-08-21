@@ -13,8 +13,8 @@ edition = "2021"
 publish = false
 license = "GPL-2.0-only"
 description = "GTFS -> compact on-device transit index for the Maps offline packs"
-# The crate carries two binaries, so a bare `cargo run` would be ambiguous. Name
-# the pack builder as the default so existing callers keep working.
+# The crate carries several binaries, so a bare `cargo run` would be ambiguous.
+# Name the pack builder as the default so existing callers keep working.
 default-run = "gtfs_ingest"
 
 [[bin]]
@@ -29,6 +29,9 @@ path = "src/bin/transit_stops.rs"
 [[bin]]
 name = "resolve_feeds"
 path = "src/bin/resolve_feeds.rs"
+[[bin]]
+name = "transit_dump"
+path = "src/bin/transit_dump.rs"
 
 [dependencies]
 
