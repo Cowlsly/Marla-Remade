@@ -1,0 +1,33 @@
+# Host-side vector-tile build tools for the Maps basemap.
+#
+# Replaces `tippecanoe` and `tile-join`, which have no Windows path (see the note
+# at `build_graph.ps1:29`) and would otherwise leave the `transit_stops` layer
+# unbuildable on the dev box. This crate reads and writes MVT and PMTiles v3
+# natively, so the whole tile chain is cargo-only.
+#
+# Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
+# table below), exactly like `scripts/maps/gtfs_ingest` and
+# `scripts/maps/osm_ingest`: it is a host binary, so `cargo build` here never
+# pulls the aarch64-android toolchain or the app crates' lints. Its single
+# dependency, `miniz_oxide`, is pure Rust and already in the local registry cache
+# (osm_ingest and the app's maps crate both pull it), so builds resolve offline.
+#
+# NOTE: unlike osm_ingest, this crate needs miniz_oxide's DEFLATE side too --
+# PMTiles gzips both its directories and its tiles, so we compress as well as
+# decompress.
+[package]
+name = "tile_build"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "MVT + PMTiles v3 reader/writer for the Maps basemap (replaces tippecanoe/tile-join)"
+[lib]
+name = "tile_build"
+path = "src/lib.rs"
+[dependencies]
+miniz_oxide = "0.8"
+[profile.release]
+opt-level = 3
+# Detach from the repo-root workspace so this host tool builds standalone/offline.
+[workspace]
