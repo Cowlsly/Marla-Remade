@@ -13,37 +13,54 @@
 //! contractual — stop indices, grid cells, a route's stop pattern, a route's
 //! trips by start time — is dumped in that order, so a reordering shows up.
 //!
-//! Usage: `transit_dump <pack.transit> [out.txt]`  (stdout when `out.txt` is
-//! omitted). Output is one line per stop and one per trip, so it is much larger
-//! than the pack; it is meant for the small verification corpora, not `world`.
+//! Usage:
+//!   `transit_dump <pack.transit> [out.txt]`   full dump (stdout when omitted)
+//!   `transit_dump --at <lat>,<lon> <pack>`    one stop's departure board
+//!
+//! The full dump is one line per stop and one per trip, so it is much larger than
+//! the pack — meant for the small verification corpora, not `world`. `--at` is the
+//! spot check for a big pack: it answers "does this coordinate resolve to the
+//! right stop, do plausible routes depart it, and does it reach another agency's
+//! stops on foot" without materializing gigabytes of text.
 
 use gtfs_ingest::reader::{Reader, RouteRec};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufWriter, Write};
 use std::process::ExitCode;
 
+enum Cmd<'a> {
+    Dump { pack: &'a str, out: Option<&'a str> },
+    Probe { pack: &'a str, lat: f64, lon: f64 },
+}
+
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() < 2 || args.len() > 3 {
-        eprintln!("usage: transit_dump <pack.transit> [out.txt]");
-        return ExitCode::from(2);
-    }
-    let reader = match Reader::open(std::path::Path::new(&args[1])) {
-        Ok(r) => r,
+    let cmd = match parse_args(&args) {
+        Ok(c) => c,
         Err(e) => {
-            eprintln!("transit_dump: {e}");
-            return ExitCode::FAILURE;
+            eprintln!("transit_dump: {e}\n{USAGE}");
+            // 2 for "you invoked it wrong", 1 for "it ran and failed".
+            return ExitCode::from(2);
         }
     };
-    let result = match args.get(2) {
-        Some(path) => match std::fs::File::create(path) {
-            Ok(f) => dump(&reader, &mut BufWriter::new(f)),
-            Err(e) => Err(format!("cannot create {path}: {e}")),
-        },
-        None => {
-            let stdout = std::io::stdout();
-            dump(&reader, &mut BufWriter::new(stdout.lock()))
-        }
+    let result = match cmd {
+        Cmd::Probe { pack, lat, lon } => Reader::open(std::path::Path::new(pack))
+            .and_then(|r| {
+                let stdout = std::io::stdout();
+                probe(&r, lat, lon, &mut BufWriter::new(stdout.lock()))
+            }),
+        Cmd::Dump { pack, out } => Reader::open(std::path::Path::new(pack)).and_then(|r| {
+            match out {
+                Some(path) => match std::fs::File::create(path) {
+                    Ok(f) => dump(&r, &mut BufWriter::new(f)),
+                    Err(e) => Err(format!("cannot create {path}: {e}")),
+                },
+                None => {
+                    let stdout = std::io::stdout();
+                    dump(&r, &mut BufWriter::new(stdout.lock()))
+                }
+            }
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
@@ -52,6 +69,142 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+const USAGE: &str = "usage: transit_dump <pack.transit> [out.txt]\n       \
+                     transit_dump --at <lat>,<lon> <pack.transit>";
+
+fn parse_args(args: &[String]) -> Result<Cmd<'_>, String> {
+    match args.get(1).map(String::as_str) {
+        Some("--at") => {
+            let (at, pack) = match (args.get(2), args.get(3), args.len()) {
+                (Some(at), Some(pack), 4) => (at.as_str(), pack.as_str()),
+                _ => return Err("--at takes a lat,lon and one pack".to_string()),
+            };
+            let (lat, lon) =
+                at.split_once(',').ok_or_else(|| format!("--at wants lat,lon, got {at:?}"))?;
+            let lat: f64 = lat.trim().parse().map_err(|_| format!("bad latitude {lat:?}"))?;
+            let lon: f64 = lon.trim().parse().map_err(|_| format!("bad longitude {lon:?}"))?;
+            // Checked because the grid lookup clamps rather than rejects, so a
+            // transposed `lon,lat` would otherwise return a confidently wrong
+            // "nearest" stop instead of an error.
+            if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lon) {
+                return Err(format!("{lat},{lon} is not a lat,lon — are they the right way round?"));
+            }
+            Ok(Cmd::Probe { pack, lat, lon })
+        }
+        Some(pack) if args.len() <= 3 => {
+            Ok(Cmd::Dump { pack, out: args.get(2).map(String::as_str) })
+        }
+        _ => Err("expected a pack path".to_string()),
+    }
+}
+
+/// Seconds since service midnight as `HH:MM:SS`; hours may exceed 24, which is
+/// legal GTFS and means "after midnight on the service day".
+fn hms(secs: u32) -> String {
+    format!("{:02}:{:02}:{:02}", secs / 3600, (secs / 60) % 60, secs % 60)
+}
+
+/// Approximate ground distance in metres (equirectangular; fine at this range).
+fn metres(lat1: f64, lon1: f64, lat2: f64, lon2: f64) -> f64 {
+    let dlat = (lat2 - lat1) * 111_320.0;
+    let dlon = (lon2 - lon1) * 111_320.0 * ((lat1 + lat2) * 0.5).to_radians().cos();
+    (dlat * dlat + dlon * dlon).sqrt()
+}
+
+/// The nearest stop to `(lat, lon)` with every route that serves it, that route's
+/// departures *from this stop*, and the footpaths leading away from it.
+///
+/// `first`/`last` span every trip on the route regardless of calendar, so `svcs`
+/// reports how many distinct services those trips belong to — a route whose span
+/// looks odd is usually one mixing a weekday and a weekend calendar. At a route's
+/// terminus the profile's departure equals its arrival, which is marked rather
+/// than presented as a departure that never happens.
+fn probe(r: &Reader, lat: f64, lon: f64, out: &mut impl Write) -> Result<(), String> {
+    let stop = r
+        .nearest(lat, lon)
+        .ok_or_else(|| format!("no stop near {lat},{lon}; is it inside the pack's bbox?"))?;
+    let (min_lat, min_lon, max_lat, max_lon) = r.bbox();
+    let (slat, slon) = r.stop_ll(stop);
+    let mut w = |s: String| out.write_all(s.as_bytes()).map_err(|e| format!("write: {e}"));
+
+    w(format!(
+        "pack {:?} bbox {:.6},{:.6} .. {:.6},{:.6}\n",
+        r.pack_name(),
+        min_lat as f64 * 1e-7,
+        min_lon as f64 * 1e-7,
+        max_lat as f64 * 1e-7,
+        max_lon as f64 * 1e-7,
+    ))?;
+    // The distance matters: `nearest` searches only ±1 grid cell, exactly as the
+    // device does, so it answers with whatever it finds there — a coordinate well
+    // outside the transit area still resolves to *something*.
+    w(format!(
+        "nearest stop {stop} name={:?} gtfs={:?} code={:?} at {slat:.6},{slon:.6} ({:.0} m away)\n",
+        r.stop_name(stop),
+        r.stop_gtfs_id(stop),
+        r.stop_code(stop),
+        metres(lat, lon, slat, slon),
+    ))?;
+
+    // Which feed a stop belongs to is not stored; it is whichever feeds' routes
+    // serve it, which is also what makes a footpath between two feeds visible.
+    let feeds_of = |s: u32| -> Vec<String> {
+        let mut names: Vec<String> = r
+            .stop_routes(s)
+            .iter()
+            .map(|&(route, _)| r.feed_name(r.route(route).feed_idx))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        names.sort();
+        names
+    };
+
+    let mut routes = r.stop_routes(stop);
+    routes.sort_by_key(|&(route, _)| r.read_str(r.route(route).name_off));
+    for (route, pos) in routes {
+        let rec = r.route(route);
+        let trips = r.route_trips(&rec);
+        // The board is the departure at *this* stop, not the trip's start.
+        let mut deps: Vec<u32> = trips
+            .iter()
+            .map(|t| {
+                let prof = r.profile(t.profile_id);
+                (t.start_time as i64 + prof[pos as usize].1) as u32
+            })
+            .collect();
+        deps.sort_unstable();
+        let services: HashSet<u32> = trips.iter().map(|t| t.service_idx).collect();
+        w(format!(
+            "  route {:?} type={} feed={:?} pos={pos}/{}{} trips={} svcs={} first={} last={}\n",
+            r.read_str(rec.name_off),
+            rec.route_type,
+            r.feed_name(rec.feed_idx),
+            rec.n_stops,
+            if pos + 1 == rec.n_stops { " terminus" } else { "" },
+            deps.len(),
+            services.len(),
+            deps.first().copied().map_or("-".to_string(), hms),
+            deps.last().copied().map_or("-".to_string(), hms),
+        ))?;
+    }
+
+    let here = feeds_of(stop);
+    for (to, secs) in r.transfers(stop) {
+        let there = feeds_of(to);
+        // "cross-feed", not "cross-agency": one feed may carry several agencies,
+        // and only the feed is recorded per route.
+        let cross = !here.is_empty() && there.iter().any(|f| !here.contains(f));
+        w(format!(
+            "  footpath {secs}s -> stop {to} name={:?} feeds={:?}{}\n",
+            r.stop_name(to),
+            there,
+            if cross { "  [cross-feed]" } else { "" },
+        ))?;
+    }
+    out.flush().map_err(|e| format!("flush failed: {e}"))
 }
 
 fn dump(r: &Reader, out: &mut impl Write) -> Result<(), String> {

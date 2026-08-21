@@ -233,6 +233,19 @@ by dumping before, dumping after, and diffing. **Do not byte-diff packs.**
 `src/reader.rs` is the decoder it uses — deliberately a second implementation of
 the device reader, not shared code.
 
+A world dump would be ~10 GB of text, so a big pack is spot-checked instead:
+
+```sh
+transit_dump --at 37.7749,-122.4194 world.transit
+```
+
+which prints the bbox, the nearest stop to that coordinate (with how far away it
+actually is — `nearest` searches ±1 grid cell exactly as the device does, so it
+always answers with *something*), every route serving it with its first and last
+departure *from that stop*, and the footpaths leading away — flagging the ones
+that reach a different feed's stops, since cross-feed transfers working is the
+whole point of merging feeds into one pack.
+
 ## Building a regional pack
 
 `build_ca_transit.ps1` (repo root: `scripts/maps/`) builds a state-wide pack
