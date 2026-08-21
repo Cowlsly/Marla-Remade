@@ -100,6 +100,7 @@ include(":euicc")
 include(":backup")
 include(":share")
 include(":launcher")
+include(":cast")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

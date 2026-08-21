@@ -1,0 +1,47 @@
+<resources>
+    <string name="app_name">Cast</string>
+
+    <!-- Device list -->
+    <string name="cast_devices_title">Cast</string>
+    <string name="cast_devices_heading">Devices</string>
+    <string name="cast_searching">Searching for devices.</string>
+    <string name="cast_no_devices">No cast devices found</string>
+    <string name="cast_no_devices_hint">Make sure your Chromecast, Google TV or speaker is on the same Wi\u2011Fi network.</string>
+    <string name="cast_local_network_blocked">Local network access is off</string>
+    <string name="cast_local_network_blocked_hint">Android blocks discovering devices on your network until this app is allowed to. Grant local network access in system settings and try again.</string>
+    <string name="cast_open_settings">Open settings</string>
+    <string name="cast_disconnect">Disconnect</string>
+    <string name="cast_connecting_to">Connecting to %1$s.</string>
+    <string name="cast_connected_to">Connected to %1$s</string>
+    <string name="cast_connect_failed">Could not connect to %1$s</string>
+
+    <!-- Source picker -->
+    <string name="cast_pick_file">Choose a file</string>
+    <string name="cast_cast_url">Cast a link</string>
+    <string name="cast_url_hint">https://example.com/video.mp4</string>
+    <string name="cast_url_invalid">Enter an http or https link</string>
+    <string name="cast_start">Cast</string>
+
+    <!-- Phase 0 spike: throwaway, deleted in Phase 1 -->
+    <string name="cast_spike_heading">Mirroring spike</string>
+    <string name="cast_spike_needs_device">Tap a device above first. Results appear in logcat under CastController.</string>
+    <string name="cast_spike_launch">Launch %1$s</string>
+
+    <!-- Now playing -->
+    <string name="cast_nothing_playing">Nothing playing</string>
+    <string name="cast_load_failed">The device could not play that</string>
+    <string name="cast_server_failed">Could not serve the file to the device</string>
+
+    <!-- Player states -->
+    <string name="cast_state_buffering">Buffering</string>
+    <string name="cast_state_playing">Playing</string>
+    <string name="cast_state_paused">Paused</string>
+    <string name="cast_state_idle">Idle</string>
+
+    <!-- Foreground service -->
+    <string name="cast_notification_channel_name">Casting</string>
+    <string name="cast_notification_channel_desc">Shown while a cast session is open</string>
+    <string name="cast_notification_title">Casting to %1$s</string>
+    <string name="cast_notification_text_idle">Session open</string>
+    <string name="cast_notification_action_stop">Stop</string>
+</resources>

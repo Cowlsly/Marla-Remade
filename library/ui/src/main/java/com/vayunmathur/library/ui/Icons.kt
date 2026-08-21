@@ -118,6 +118,10 @@ import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.Cast
+import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.Speaker
+import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Cloud
 import androidx.compose.material.icons.filled.ContentCopy
@@ -351,6 +355,22 @@ fun IconVolumeOff(modifier: Modifier = Modifier, tint: Color = LocalContentColor
 @Composable
 fun IconVolumeUp(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.VolumeUp, "Audio on", modifier, tint)
+
+@Composable
+fun IconCast(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Cast, "Cast", modifier, tint)
+
+@Composable
+fun IconCastConnected(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.CastConnected, "Casting", modifier, tint)
+
+@Composable
+fun IconSpeaker(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Speaker, "Speaker", modifier, tint)
+
+@Composable
+fun IconTv(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Tv, "TV", modifier, tint)
 
 @Composable
 fun IconNavigation(navBack: () -> Unit) {

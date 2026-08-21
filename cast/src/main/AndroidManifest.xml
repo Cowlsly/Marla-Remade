@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Google Cast (CastV2) without Play Services or the Cast SDK: mDNS discovery of
+         _googlecast._tcp, a TLS socket to port 8009, and a local HTTP server so the
+         receiver can fetch a file the user picked. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <!-- Local Network Protections (Android 16+): without this NsdManager.discoverServices
+         throws SecurityException and every LAN socket is blocked, which would make the
+         device list silently empty and the cast socket unopenable. Everything this app
+         does is on the LAN, so it is not optional. -->
+    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
+
+    <!-- mediaPlayback rather than connectedDevice: the session this service holds open is a
+         playback session on the receiver, which is what Android's own docs list this type
+         for. Not dataSync - Android 15 caps that at 6 cumulative hours per 24h and then
+         calls onTimeout(), which for a long film would stop the service mid-playback (see
+         :vpn's manifest for the same reasoning first-hand). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Deliberately NO storage or media permissions. Local files are picked with
+         ACTION_OPEN_DOCUMENT or arrive as a share-sheet URI, and both grant access to
+         exactly the URI the user chose; the file is read through
+         ContentResolver.openFileDescriptor. -->
+
+    <uses-feature android:name="android.hardware.wifi" android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.General">
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.General">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- The share sheet's target. singleTop plus onNewIntent, rather than a second
+                 activity: the device picker is the whole app, so there is nothing a separate
+                 popup would show that this does not. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="video/*" />
+                <data android:mimeType="audio/*" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <!-- Holds the cast channel and the local file server up while the app is not in
+             front, so backgrounding the app does not stop playback. -->
+        <service
+            android:name=".service.CastService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+    </application>
+</manifest>
