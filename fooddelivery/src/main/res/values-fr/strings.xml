@@ -2,4 +2,5 @@
 <resources>
     <string name="email">E-mail</string>
     <string name="action_cancel">Annuler</string>
+    <string name="delete_account">Supprimer le compte</string>
 </resources>
