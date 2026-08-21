@@ -362,6 +362,27 @@ pub const SIGNALS_NODE_ID: i64 = 1007;
 /// A named cafe: tagged, but not road furniture. The negative control.
 pub const LAYERS_CAFE_NODE_ID: i64 = 1008;
 
+/// `highway=residential` + `maxspeed=25 mph`, the raw-string case.
+pub const MAXSPEED_WAY_ID: i64 = 3001;
+/// `highway=motorway` + `maxspeed=none`, which the graph's parser would collapse
+/// to 0 and this layer must keep verbatim.
+pub const MAXSPEED_NONE_WAY_ID: i64 = 3002;
+/// `highway=service` with no speed limit at all. The negative control.
+pub const NO_MAXSPEED_WAY_ID: i64 = 3003;
+/// `railway=subway`, a transit line in its own right.
+pub const RAILWAY_WAY_ID: i64 = 5001;
+/// `railway=narrow_gauge`, which folds into `rail`.
+pub const NARROW_GAUGE_WAY_ID: i64 = 5002;
+/// `railway=platform`, which is not a line. The negative control.
+pub const PLATFORM_WAY_ID: i64 = 5003;
+/// `type=route` + `route=subway`, with a colour and a ref, over two member ways.
+pub const ROUTE_RELATION_ID: i64 = 9001;
+/// `type=route` + `route=bus`, which this layer drops.
+pub const BUS_RELATION_ID: i64 = 9002;
+
+/// Node ids the vector-layer fixture's ways are built from.
+const WAY_NODE_IDS: [i64; 6] = [2001, 2002, 2003, 2004, 2005, 2006];
+
 /// One node in the vector-layer fixture: `(id, lat_e7, lon_e7, tags)`.
 type FixtureNode = (i64, i32, i32, Vec<(u32, u32)>);
 
@@ -397,6 +418,13 @@ pub fn layers_block() -> Vec<u8> {
     let k_direction = st.id("direction");
     let k_amenity = st.id("amenity");
     let k_name = st.id("name");
+    let k_maxspeed = st.id("maxspeed");
+    let k_maxspeed_forward = st.id("maxspeed:forward");
+    let k_railway = st.id("railway");
+    let k_type = st.id("type");
+    let k_route = st.id("route");
+    let k_ref = st.id("ref");
+    let k_colour = st.id("colour");
 
     let v_speed_camera = st.id("speed_camera");
     let v_surveillance = st.id("surveillance");
@@ -407,7 +435,26 @@ pub fn layers_block() -> Vec<u8> {
     let v_traffic_signals = st.id("traffic_signals");
     let v_cafe = st.id("cafe");
     let v_corner_cafe = st.id("Corner Cafe");
+    let v_residential = st.id("residential");
+    let v_motorway = st.id("motorway");
+    let v_service = st.id("service");
+    let v_25mph = st.id("25 mph");
+    let v_none = st.id("none");
+    let v_30mph = st.id("30 mph");
+    let v_main_st = st.id("Main St");
+    let v_subway = st.id("subway");
+    let v_narrow_gauge = st.id("narrow_gauge");
+    let v_platform = st.id("platform");
+    let v_market_st = st.id("Market St Subway");
+    let v_route = st.id("route");
+    let v_bus = st.id("bus");
+    let v_red_line = st.id("Red Line");
+    let v_red = st.id("Red");
+    let v_da291c = st.id("#DA291C");
+    // An empty member role is string-table index 0, per the PBF spec.
+    let role_empty = ST_EMPTY;
 
+    // Ids ascend, as they do in a real PBF.
     let nodes: Vec<FixtureNode> = vec![
         (
             CAMERA_NODE_ID,
@@ -443,15 +490,96 @@ pub fn layers_block() -> Vec<u8> {
             -1_224_130_000,
             vec![(k_amenity, v_cafe), (k_name, v_corner_cafe)],
         ),
+        // Untagged nodes the ways are built from, laid out along 37.79N.
+        (WAY_NODE_IDS[0], 377_900_000, -1_224_300_000, vec![]),
+        (WAY_NODE_IDS[1], 377_900_000, -1_224_200_000, vec![]),
+        (WAY_NODE_IDS[2], 377_900_000, -1_224_100_000, vec![]),
+        (WAY_NODE_IDS[3], 377_910_000, -1_224_100_000, vec![]),
+        (WAY_NODE_IDS[4], 377_920_000, -1_224_100_000, vec![]),
+        (WAY_NODE_IDS[5], 377_930_000, -1_224_100_000, vec![]),
     ];
     let dense = dense_group(&nodes);
 
+    let ways = [
+        // maxspeed: a raw "25 mph", with a highway and a name to carry.
+        way(
+            MAXSPEED_WAY_ID,
+            &[
+                (k_highway, v_residential),
+                (k_maxspeed, v_25mph),
+                (k_name, v_main_st),
+            ],
+            &WAY_NODE_IDS[..3],
+        ),
+        // maxspeed=none, plus a directional tag that must NOT win over it.
+        way(
+            MAXSPEED_NONE_WAY_ID,
+            &[
+                (k_highway, v_motorway),
+                (k_maxspeed, v_none),
+                (k_maxspeed_forward, v_30mph),
+            ],
+            &WAY_NODE_IDS[2..5],
+        ),
+        // No speed limit at all.
+        way(NO_MAXSPEED_WAY_ID, &[(k_highway, v_service)], &WAY_NODE_IDS[..2]),
+        // transit_lines: a subway way with a name, and a member of the route below.
+        way(
+            RAILWAY_WAY_ID,
+            &[(k_railway, v_subway), (k_name, v_market_st)],
+            &WAY_NODE_IDS[..3],
+        ),
+        // narrow_gauge folds into rail; also the route's second member.
+        way(
+            NARROW_GAUGE_WAY_ID,
+            &[(k_railway, v_narrow_gauge)],
+            &WAY_NODE_IDS[3..6],
+        ),
+        // A platform is not a line.
+        way(PLATFORM_WAY_ID, &[(k_railway, v_platform)], &WAY_NODE_IDS[..2]),
+    ];
+
+    let rels = [
+        // A route relation over two member ways, so its geometry is a genuine
+        // MultiLineString rather than a single part.
+        relation(
+            ROUTE_RELATION_ID,
+            &[
+                (k_type, v_route),
+                (k_route, v_subway),
+                (k_name, v_red_line),
+                (k_ref, v_red),
+                (k_colour, v_da291c),
+            ],
+            &[
+                (RAILWAY_WAY_ID, role_empty, 1),
+                (NARROW_GAUGE_WAY_ID, role_empty, 1),
+            ],
+        ),
+        // A bus route: this layer is the rail-like modes only.
+        relation(
+            BUS_RELATION_ID,
+            &[(k_type, v_route), (k_route, v_bus)],
+            &[(RAILWAY_WAY_ID, role_empty, 1)],
+        ),
+    ];
+
     let mut node_group = Vec::new();
     bytes_field(2, &dense, &mut node_group);
+    let mut way_group = Vec::new();
+    for w in &ways {
+        bytes_field(3, w, &mut way_group);
+    }
+    let mut rel_group = Vec::new();
+    for r in &rels {
+        bytes_field(4, r, &mut rel_group);
+    }
 
     let mut block = Vec::new();
     bytes_field(1, &st.encode(), &mut block);
     bytes_field(2, &node_group, &mut block);
+    bytes_field(2, &way_group, &mut block);
+    bytes_field(2, &rel_group, &mut block);
     varint_field(17, 100, &mut block); // granularity
     block
 }

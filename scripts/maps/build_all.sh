@@ -63,8 +63,9 @@ set -euo pipefail
 #     --engine-base E     rust|legacy    (default legacy)
 #     --engine-safety E   rust|legacy    (default rust: osm_extract + tile_points,
 #                                         no osmium/tippecanoe/python3)
-#     --engine-maxspeed E rust|legacy    (default legacy)
-#     --engine-transit-lines E           (default legacy)
+#     --engine-maxspeed E rust|legacy    (default rust: osm_extract + tile_lines)
+#     --engine-transit-lines E           (default rust: ways AND route relations
+#                                         read straight from the PBF, no GDAL)
 #     --engine-admin E    rust|legacy    (default legacy)
 #     --engine-pois E     rust|legacy    (default rust: tile_points, no tippecanoe)
 #   Publishing
@@ -102,8 +103,8 @@ PUBLISH=0
 PUBLISH_DRY_RUN=0
 ENGINE_BASE="legacy"
 ENGINE_SAFETY="rust"
-ENGINE_MAXSPEED="legacy"
-ENGINE_TRANSIT_LINES="legacy"
+ENGINE_MAXSPEED="rust"
+ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 ENGINE_POIS="rust"
 
@@ -136,7 +137,7 @@ while [[ $# -gt 0 ]]; do
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,78p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,79p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -161,8 +162,8 @@ engine_check() {
 }
 engine_check base           "$ENGINE_BASE"           0
 engine_check safety         "$ENGINE_SAFETY"         1
-engine_check maxspeed       "$ENGINE_MAXSPEED"       0
-engine_check transit-lines  "$ENGINE_TRANSIT_LINES"  0
+engine_check maxspeed       "$ENGINE_MAXSPEED"       1
+engine_check transit-lines  "$ENGINE_TRANSIT_LINES"  1
 engine_check admin          "$ENGINE_ADMIN"          0
 engine_check pois           "$ENGINE_POIS"           1
 

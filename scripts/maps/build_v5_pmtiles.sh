@@ -59,11 +59,11 @@ set -euo pipefail
 #   --extra-layer F   fold an already-built .pmtiles into the final merge
 #                     (repeatable). Lets a caller that built a layer itself skip
 #                     the matching step here instead of building it twice.
-#   --engine-base E       rust|legacy per-layer engine. `safety` defaults to rust
-#   --engine-safety E     (cargo-only); the rest default to legacy, and asking for
-#   --engine-maxspeed E   rust before a layer is ported is an error rather than a
-#   --engine-transit-lines E  silent no-op, so a rollback is always one flag.
-#   --engine-admin E
+#   --engine-base E       rust|legacy per-layer engine. `safety`, `maxspeed` and
+#   --engine-safety E     `transit_lines` default to rust (cargo-only); the rest
+#   --engine-maxspeed E   default to legacy, and asking for rust before a layer is
+#   --engine-transit-lines E  ported is an error rather than a silent no-op, so a
+#   --engine-admin E          rollback is always one flag.
 #   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
@@ -94,8 +94,8 @@ BASE_SOURCE=""
 EXTRA_LAYERS=()
 ENGINE_BASE="legacy"
 ENGINE_SAFETY="rust"
-ENGINE_MAXSPEED="legacy"
-ENGINE_TRANSIT_LINES="legacy"
+ENGINE_MAXSPEED="rust"
+ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 DRY_RUN=0
 SKIP_BASE=0
@@ -159,8 +159,8 @@ engine_check() {
 }
 engine_check base          "$ENGINE_BASE"          0
 engine_check safety        "$ENGINE_SAFETY"        1
-engine_check maxspeed      "$ENGINE_MAXSPEED"      0
-engine_check transit-lines "$ENGINE_TRANSIT_LINES" 0
+engine_check maxspeed      "$ENGINE_MAXSPEED"      1
+engine_check transit-lines "$ENGINE_TRANSIT_LINES" 1
 engine_check admin         "$ENGINE_ADMIN"         0
 
 run() {
@@ -209,7 +209,7 @@ fi
 # --- 3. maxspeed ---
 if [[ "$SKIP_MAXSPEED" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for maxspeed layer (or --skip-maxspeed)" >&2; exit 1; }
-    MS_ARGS=(--pbf "$PBF" --out "$WORK/maxspeed.pmtiles")
+    MS_ARGS=(--pbf "$PBF" --out "$WORK/maxspeed.pmtiles" --engine "$ENGINE_MAXSPEED")
     [[ -n "$BBOX" ]] && MS_ARGS+=(--bbox "$BBOX")
     run "$HERE/build_maxspeed_layer.sh" "${MS_ARGS[@]}"
     INPUTS+=("$WORK/maxspeed.pmtiles")
@@ -218,7 +218,7 @@ fi
 # --- 4. transit_lines ---
 if [[ "$SKIP_TRANSIT_LINES" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for transit_lines layer (or --skip-transit-lines)" >&2; exit 1; }
-    TL_ARGS=(--pbf "$PBF" --out "$WORK/transit_lines.pmtiles")
+    TL_ARGS=(--pbf "$PBF" --out "$WORK/transit_lines.pmtiles" --engine "$ENGINE_TRANSIT_LINES")
     [[ -n "$BBOX" ]] && TL_ARGS+=(--bbox "$BBOX")
     run "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
     INPUTS+=("$WORK/transit_lines.pmtiles")

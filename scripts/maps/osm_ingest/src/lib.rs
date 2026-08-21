@@ -20,6 +20,7 @@ pub mod bbox;
 pub mod extract;
 pub mod geojson;
 pub mod graph_build;
+pub mod maxspeed;
 pub mod names;
 pub mod osm;
 pub mod par;
@@ -30,6 +31,7 @@ pub mod safety;
 pub mod select;
 pub mod spatial;
 pub mod tags;
+pub mod transit_lines;
 
 #[cfg(test)]
 mod testpbf;

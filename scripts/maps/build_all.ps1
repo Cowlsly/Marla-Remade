@@ -4,13 +4,13 @@
 # artifacts, with every bytes-to-bytes transformation done by our own Rust crates
 # and only network I/O and process orchestration here.
 #
-# WHAT THIS TWIN CAN AND CANNOT DO. The layers that still go through osmium,
-# tippecanoe, GDAL and python3 (maxspeed, transit_lines, admin) have no Windows
-# path, and neither does the Planetiler base build. So the tiles stage here
-# composites only the cargo-only layers -- safety, ma_pois and transit_stops -- on
-# top of a base archive you point it at with -BaseArchive. It says so loudly
-# rather than quietly emitting an archive with layers missing. For a complete v5,
-# run build_all.sh under WSL. Stages graph, pois and transit are complete.
+# WHAT THIS TWIN CAN AND CANNOT DO. Only the `admin` layers still go through
+# osmium, tippecanoe, GDAL and python3, and the Planetiler base build still needs
+# Java. So the tiles stage here composites the cargo-only layers -- safety,
+# maxspeed, transit_lines, ma_pois and transit_stops -- on top of a base archive you
+# point it at with -BaseArchive. It says so loudly rather than quietly emitting an
+# archive with layers missing. For a complete v5, run build_all.sh under WSL.
+# Stages graph, pois and transit are complete.
 #
 # THE 9 ARTIFACTS, all landing in -OutDir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
@@ -66,6 +66,8 @@ param(
     # is refused until that layer is actually ported.
     [ValidateSet("rust", "legacy")] [string] $EnginePois = "rust",
     [ValidateSet("rust", "legacy")] [string] $EngineSafety = "rust",
+    [ValidateSet("rust", "legacy")] [string] $EngineMaxspeed = "rust",
+    [ValidateSet("rust", "legacy")] [string] $EngineTransitLines = "rust",
 
     # Publishing. Delegates to publish_r2.sh, which needs bash (WSL or Git Bash).
     [switch] $Publish,
@@ -127,6 +129,11 @@ if ($EnginePois -eq "legacy") {
 if ($EngineSafety -eq "legacy") {
     throw "-EngineSafety legacy needs osmium, tippecanoe and python3, none of which have a Windows path; use rust (the default), or build under WSL"
 }
+foreach ($pair in @(@("EngineMaxspeed", $EngineMaxspeed), @("EngineTransitLines", $EngineTransitLines))) {
+    if ($pair[1] -eq "legacy") {
+        throw "-$($pair[0]) legacy needs osmium, tippecanoe, python3 (and GDAL for transit_lines), none of which have a Windows path; use rust (the default), or build under WSL"
+    }
+}
 
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
@@ -165,6 +172,8 @@ if ($Geofabrik) {
 
 $PoisTile    = Join-Path $Work "ma_pois.pmtiles"
 $SafetyTile  = Join-Path $Work "safety.pmtiles"
+$MaxspeedTile = Join-Path $Work "maxspeed.pmtiles"
+$TransitLinesTile = Join-Path $Work "transit_lines.pmtiles"
 $StopsTile   = Join-Path $Work "transit_stops.pmtiles"
 $TransitWork = Join-Path $Work "transit"
 
@@ -251,8 +260,7 @@ if (Test-Stage "tiles") {
             throw @"
 the tiles stage needs -BaseArchive on Windows.
 
-Only safety, ma_pois and transit_stops are cargo-only today; maxspeed,
-transit_lines and admin still need osmium/tippecanoe/GDAL/python3, and the
+Only the admin layers still need osmium/tippecanoe/GDAL/python3, and the
 Planetiler base build needs Java. So this twin composites the cargo-only layers
 onto an existing archive rather than building one:
 
@@ -279,19 +287,26 @@ For a complete v5 with every layer, run build_all.sh under WSL.
             throw "-BaseArchive not found: $base"
         }
 
-        # safety is cargo-only: osm_extract reads the PBF directly and
-        # tile_points tiles it, so no osmium, tippecanoe or python3 is involved.
+        # safety, maxspeed and transit_lines are all cargo-only: osm_extract reads
+        # the PBF directly and the tile_build tilers tile it, so no osmium,
+        # tippecanoe, GDAL or python3 is involved.
         if ($Pbf) {
-            $safetyGeo = Join-Path $Work "safety.geojsonseq"
-            Write-Host "=== tiles: safety -> $SafetyTile ==="
-            Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
-                "--bin", "osm_extract", "--", $Pbf, "--layer", "safety", "--out", $safetyGeo)
-            Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
-                "--bin", "tile_points", "--",
-                "--geojson", $safetyGeo, "--out", $SafetyTile, "--layer", "safety",
-                "--minzoom", "10", "--maxzoom", "16")
+            foreach ($spec in @(
+                @{ Layer = "safety";        Tile = $SafetyTile;       Bin = "tile_points"; Min = 10; Max = 16 },
+                @{ Layer = "maxspeed";      Tile = $MaxspeedTile;     Bin = "tile_lines";  Min = 12; Max = 16 },
+                @{ Layer = "transit_lines"; Tile = $TransitLinesTile; Bin = "tile_lines";  Min = 9;  Max = 16 }
+            )) {
+                $geo = Join-Path $Work "$($spec.Layer).geojsonseq"
+                Write-Host "=== tiles: $($spec.Layer) -> $($spec.Tile) ==="
+                Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
+                    "--bin", "osm_extract", "--", $Pbf, "--layer", $spec.Layer, "--out", $geo)
+                Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
+                    "--bin", $spec.Bin, "--",
+                    "--geojson", $geo, "--out", $spec.Tile, "--layer", $spec.Layer,
+                    "--minzoom", "$($spec.Min)", "--maxzoom", "$($spec.Max)")
+            }
         } else {
-            Write-Warning "no -Pbf given; skipping the safety layer"
+            Write-Warning "no -Pbf given; skipping the safety, maxspeed and transit_lines layers"
         }
 
         # transit_stops needs the same feed manifest world.transit was built from,
@@ -312,14 +327,14 @@ For a complete v5 with every layer, run build_all.sh under WSL.
 
         # Later inputs win a layer-name collision, so the overlays go after base.
         $inputs = @($base)
-        foreach ($t in @($SafetyTile, $PoisTile, $StopsTile)) {
+        foreach ($t in @($SafetyTile, $MaxspeedTile, $TransitLinesTile, $PoisTile, $StopsTile)) {
             if ((Test-Path $t) -or $DryRun) { $inputs += $t }
         }
         Write-Host "=== tiles: merging $($inputs.Count) source(s) -> $Out ==="
         $inputs | ForEach-Object { Write-Host "  + $_" }
         Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $TileManifest,
             "--bin", "tile_join", "--", "--out", $Out) + $inputs)
-        Write-Warning "maxspeed, transit_lines and admin are NOT in $Out (they need osmium/tippecanoe/GDAL/python3 -- build under WSL for a complete archive)"
+        Write-Warning "the admin layers are NOT in $Out (they need osmium/tippecanoe/GDAL/python3 -- build under WSL for a complete archive)"
         Set-Stamp "tiles"
     }
 }

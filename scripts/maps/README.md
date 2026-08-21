@@ -169,8 +169,8 @@ mutually consistent (same POI set, same coordinates). See
 | `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse upstream `v4.pmtiles`) |
 | `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
-| `build_maxspeed_layer.sh` | osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe → `maxspeed.pmtiles` |
-| `build_transit_lines_layer.sh` | osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe → `transit_lines.pmtiles` |
+| `build_maxspeed_layer.sh` | **`--engine rust`** (default): `osm_extract` → geojsonseq → `tile_lines`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe |
+| `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
 | `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
@@ -181,8 +181,8 @@ mutually consistent (same POI set, same coordinates). See
 | `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe and tile-join**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
-| `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested) |
-| `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested) |
+| `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/maxspeed.rs`; kept as the contract of record and as `--engine legacy` |
+| `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/transit_lines.rs`; kept as the contract of record and as `--engine legacy` |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested) |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
 | `test/diff_geojsonseq.py` | **Differential harness**, extraction half: diffs a legacy GeoJSONSeq against a Rust one. Properties exact, points exact, lines/polygons within an epsilon |
@@ -277,6 +277,27 @@ bridges them onto the first set.
 what makes a re-run cheap. `--keep-work` only silences the reminder; it does not
 change the behaviour.
 
+### 7. `transit_lines` relation `osm_id` changed form
+
+The legacy chain got relation geometry from `ogr2ogr … multilinestrings`, whose
+`osm_id` field is a bare number, while railway ways came through `osmium export`
+as `way/5001`. The two sources disagreeing was an artefact of the toolchain rather
+than a decision, so the rust engine emits `<kind>/<id>` throughout and a relation
+is now `relation/9001`.
+
+This is the one schema difference the differential harness will report on a
+`transit_lines` run. Nothing in the app styles on `osm_id` — it is carried for
+dedup and debugging — but if you are diffing the two engines, expect it.
+
+### 8. The superseded Python normalisers are still in the tree
+
+`normalize_safety.py`, `normalize_maxspeed.py` and `normalize_transit_lines.py`
+have Rust replacements that the unit tests show agree with them, but they are kept,
+along with their assertions in `test/test_normalize.py`, because they **are** the
+`--engine legacy` path and therefore the only way to run the differential harness
+on real data. Delete each one once a full-region diff against its Rust engine is
+clean; deleting them sooner would remove the evidence that the port is right.
+
 ---
 
 ## Prerequisites (tools)
@@ -294,28 +315,30 @@ here is Rust and Python):
   * [`tile_build`](tile_build/) — MVT and PMTiles v3 read/write, which **replaces
     tippecanoe and tile-join**. The final merge and the `transit_stops` layer both
     go through it, so they run on **Windows**.
-* **tippecanoe** ≥ 2.x — still required by the maxspeed, transit_lines and admin
-  layer scripts, which pipe GeoJSON through it. The merge no longer uses its
-  `tile-join`, and `safety` and `ma_pois` no longer use it at all.
-* **osmium-tool** (`osmium`) — still required by those same OSM-derived layers, and
-  by any `--bbox` run of `build_all.sh` (which clips once for every stage).
-* **GDAL** (`ogr2ogr`) — transit_lines and admin only.
-* **python3** (stdlib only) — the remaining `normalize_*.py` schema mappers, the
-  schema unit test, and the differential harness.
+* **tippecanoe** ≥ 2.x — now only the admin layer scripts, and any
+  `--engine legacy` run. The merge does not use its `tile-join`, and `safety`,
+  `maxspeed`, `transit_lines` and `ma_pois` do not use it at all.
+* **osmium-tool** (`osmium`) — the admin layer and `--engine legacy`, plus any
+  `--bbox` run of `build_all.sh` (which clips once for every stage).
+* **GDAL** (`ogr2ogr`) — the admin layer, and `transit_lines --engine legacy`. The
+  rust `transit_lines` engine reads route relations out of the PBF directly, so it
+  needs no GDAL at all.
+* **python3** (stdlib only) — `normalize_admin.py`, the superseded normalisers kept
+  for `--engine legacy`, the schema unit test, and the differential harness.
 * Base build mode only: **Java 21** + the Protomaps basemap jar
   (build once from `github.com/protomaps/basemaps`, `tiles/` → `mvn package`)
 * Base reuse mode only: `curl`, and `go-pmtiles` (`pmtiles`) if using `--bbox`
 
 ### What builds on Windows
 
-Everything that is cargo-only: the routing graph (`build_graph.ps1`), the POI
-layer and its side files, the `safety` layer, the offline transit pack
-(`build_ca_transit.ps1`), the `transit_stops` layer
-(`build_transit_stops_layer.ps1`) and the final merge (`tile_join`).
-`build_all.ps1` chains those. The remaining OSM-derived vector layers (maxspeed,
-transit_lines, admin) still need tippecanoe + osmium + python3 + GDAL and
-therefore a Linux box or WSL, which is why the Windows tiles stage composites onto
-a `-BaseArchive` instead of building a complete `v5.pmtiles`.
+Everything that is cargo-only, which is now every layer except `admin`: the routing
+graph (`build_graph.ps1`), the POI layer and its side files, `safety`, `maxspeed`,
+`transit_lines`, the offline transit pack (`build_ca_transit.ps1`), the
+`transit_stops` layer (`build_transit_stops_layer.ps1`) and the final merge
+(`tile_join`). `build_all.ps1` chains those. Only the admin layers still need
+tippecanoe + osmium + python3 + GDAL, and the Planetiler base build still needs
+Java — which is why the Windows tiles stage composites onto a `-BaseArchive`
+instead of building a complete `v5.pmtiles`.
 
 That is why `tile_build` exists rather than shelling out to tippecanoe: there is
 no Windows path for it (see the note at `build_graph.ps1:29`), which would
@@ -369,28 +392,31 @@ unlike the per-layer scripts, the routing graph honours it too. That needs
 
 Per-layer `--engine rust|legacy` flags exist for every layer so a ported layer can
 be rolled back with one flag. Asking for an engine that has not landed is an
-error, never a silent fall-back. `safety` and `ma_pois` default to `rust`; the
-rest still default to `legacy`.
+error, never a silent fall-back. `safety`, `maxspeed`, `transit_lines` and
+`ma_pois` default to `rust`; `base` and `admin` still default to `legacy`.
 
-> **Validate a flipped engine before trusting it.** Each layer that moves to Rust
-> has unit tests mirroring the Python normaliser's assertions, but those pin the
-> schema, not the extraction over real data. Run both engines over the same PBF
-> and diff them before publishing:
+> **Validate a flipped engine before trusting it.** Each ported layer has unit
+> tests mirroring the Python normaliser's assertions, but those pin the schema, not
+> the extraction over real data. Run both engines over the same PBF and diff them
+> before publishing:
 >
 > ```bash
-> ./build_safety_layer.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
->     --engine legacy --out /tmp/safety-legacy.pmtiles \
->     --geojson-out /tmp/safety-legacy.geojsonseq
-> ./build_safety_layer.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
->     --engine rust --out /tmp/safety-rust.pmtiles \
->     --geojson-out /tmp/safety-rust.geojsonseq
-> python3 test/diff_geojsonseq.py /tmp/safety-legacy.geojsonseq /tmp/safety-rust.geojsonseq
-> python3 test/diff_pmtiles.py    /tmp/safety-legacy.pmtiles    /tmp/safety-rust.pmtiles
+> for engine in legacy rust; do
+>   ./build_maxspeed_layer.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
+>       --engine $engine --out /tmp/maxspeed-$engine.pmtiles \
+>       --geojson-out /tmp/maxspeed-$engine.geojsonseq
+> done
+> python3 test/diff_geojsonseq.py /tmp/maxspeed-legacy.geojsonseq /tmp/maxspeed-rust.geojsonseq
+> python3 test/diff_pmtiles.py    /tmp/maxspeed-legacy.pmtiles    /tmp/maxspeed-rust.pmtiles
 > ```
 >
-> The extraction diff must be clean: properties exactly, point geometry exactly.
-> The tile diff is allowed a feature-count delta (see
-> [Caveats](#caveats--known-limitations) §3).
+> The extraction diff must be clean: properties exactly, point geometry exactly,
+> line and polygon geometry within `--epsilon`. The tile diff is allowed a
+> feature-count delta (see [Caveats](#caveats--known-limitations) §3).
+>
+> One expected difference: `transit_lines` relation features now carry
+> `osm_id: "relation/9001"` where the GDAL path emitted a bare `9001`. Pass
+> `--ignore-prop osm_id` to look past it, or read [Caveats](#caveats--known-limitations) §7.
 
 ### 1. Dry run (single metro — validates safety + border layers)
 
