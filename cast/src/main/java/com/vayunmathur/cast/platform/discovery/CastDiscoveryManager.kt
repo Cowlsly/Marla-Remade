@@ -4,8 +4,8 @@ import android.content.Context
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.util.Log
-import com.vayunmathur.cast.domain.CAST_PORT
 import com.vayunmathur.cast.domain.CastDevice
+import com.vayunmathur.cast.protocol.MACAST_SERVICE_TYPE
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -16,33 +16,24 @@ import kotlinx.coroutines.flow.update
 
 private const val TAG = "CastDiscovery"
 
-/** Every Cast receiver - Chromecast, Google TV, Nest speaker - registers this service type. */
-const val CAST_SERVICE_TYPE = "_googlecast._tcp"
-
-/** Friendly name, e.g. "Living Room TV". The instance name is a UUID and unreadable. */
+/** Friendly name, e.g. "Living Room TV". */
 private const val TXT_FRIENDLY_NAME = "fn"
 
-/** Hardware model, e.g. "Chromecast Ultra". Shown as the list subtitle. */
-private const val TXT_MODEL = "md"
+/** The protocol version the receiver speaks. */
+private const val TXT_PROTOCOL_VERSION = "pv"
 
-/** The receiver's own UUID. Stable across renames, unlike the instance name. */
+/** The receiver's own stable id. Stable across renames, unlike the instance name. */
 private const val TXT_ID = "id"
 
-/** Capability bitmask; see [CastDevice.kind]. */
-private const val TXT_CAPABILITIES = "ca"
-
-/** Current status, e.g. "YouTube" or blank when idle. */
-private const val TXT_STATUS = "rs"
-
 /**
- * mDNS discovery of Cast receivers on the LAN.
+ * mDNS discovery of MA Cast receivers on the LAN.
  *
- * Browse-only - nothing is advertised, because a sender is not itself castable. Adapted from
- * `:share`'s `NsdDiscoveryManager`, including the Android 16 trap it documents: with Local
- * Network Protections, `discoverServices` throws `SecurityException` unless
- * `ACCESS_LOCAL_NETWORK` has been granted, and the failure is indistinguishable from "no
- * devices on this network" unless it is surfaced. [localNetworkBlocked] exists so the UI can
- * say which of the two happened instead of showing an empty list forever.
+ * Browse-only - nothing is advertised, because a phone is not itself castable. Retargeted from
+ * `_googlecast._tcp` to [MACAST_SERVICE_TYPE] rather than rewritten, because the shape was the part
+ * that was hard: the `callbackFlow` + `DiscoveryListener` pairing, `_devices.update {}` because resolve
+ * callbacks land on several threads, and above all [localNetworkBlocked] - on Android 16 a missing
+ * `ACCESS_LOCAL_NETWORK` grant makes `discoverServices` throw `SecurityException`, and that is
+ * otherwise indistinguishable from an empty network.
  */
 class CastDiscoveryManager(context: Context) {
 
@@ -59,7 +50,7 @@ class CastDiscoveryManager(context: Context) {
     val localNetworkBlocked: StateFlow<Boolean> = _localNetworkBlocked.asStateFlow()
 
     /**
-     * Browse [CAST_SERVICE_TYPE] and emit each resolved receiver.
+     * Browse [MACAST_SERVICE_TYPE] and emit each resolved receiver.
      *
      * Cancelling the collection stops the browse. Devices also accumulate in [devices], which
      * is what the list observes, so a caller that only wants the state can collect and drop.
@@ -115,7 +106,7 @@ class CastDiscoveryManager(context: Context) {
         }
         discoveryListener = listener
         try {
-            manager.discoverServices(CAST_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
+            manager.discoverServices(MACAST_SERVICE_TYPE, NsdManager.PROTOCOL_DNS_SD, listener)
         } catch (e: SecurityException) {
             // Android 16+ Local Network Protections. Nothing is wrong with the request; the
             // OS blocks mDNS outright until ACCESS_LOCAL_NETWORK is granted.
@@ -151,31 +142,28 @@ class CastDiscoveryManager(context: Context) {
     /**
      * Turn a resolved record into a [CastDevice], or null when it is not usable.
      *
-     * A host is mandatory - the whole point of resolving is to get one - but everything else
-     * has a sensible fallback, because a receiver with an odd TXT record is still castable.
+     * A host and a port are both mandatory - the receiver binds an ephemeral control port, so unlike
+     * Cast's fixed 8009 there is no sensible default to fall back to. The name has one, because a TV
+     * with an odd TXT record is still castable.
      */
     private fun toCastDevice(info: NsdServiceInfo): CastDevice? {
         val host = info.host?.hostAddress ?: return null
         val instance = info.serviceName ?: return null
-        val friendlyName = textAttribute(info, TXT_FRIENDLY_NAME)
-            ?: textAttribute(info, TXT_MODEL)
-            ?: instance
+        val port = info.port.takeIf { it > 0 } ?: return null
         return CastDevice(
             id = textAttribute(info, TXT_ID) ?: instance,
             instanceName = instance,
-            friendlyName = friendlyName,
+            friendlyName = textAttribute(info, TXT_FRIENDLY_NAME) ?: instance,
             host = host,
-            port = if (info.port > 0) info.port else CAST_PORT,
-            model = textAttribute(info, TXT_MODEL),
-            statusText = textAttribute(info, TXT_STATUS),
-            capabilities = textAttribute(info, TXT_CAPABILITIES)?.toIntOrNull() ?: 0,
+            port = port,
+            protocolVersion = textAttribute(info, TXT_PROTOCOL_VERSION)?.toIntOrNull() ?: 0,
         )
     }
 
     /**
      * Replace by [CastDevice.id] rather than append.
      *
-     * A receiver re-announces itself when its status text changes, and every announcement
+     * A receiver re-announces itself whenever its record changes, and every announcement
      * resolves, so appending would show the same TV three times.
      */
     private fun merge(current: List<CastDevice>, device: CastDevice): List<CastDevice> {

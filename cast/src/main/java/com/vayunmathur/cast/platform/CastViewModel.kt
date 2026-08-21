@@ -12,8 +12,8 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastDevice
-import com.vayunmathur.cast.domain.CastDeviceKind
-import com.vayunmathur.cast.domain.CastPhase
+import com.vayunmathur.cast.domain.ClientFailure
+import com.vayunmathur.cast.domain.ClientPhase
 import com.vayunmathur.cast.platform.mirror.MirrorConsentActivity
 import com.vayunmathur.library.ui.ExternalIntents
 import kotlinx.coroutines.Job
@@ -30,18 +30,17 @@ private const val TAG = "CastVM"
 /**
  * How long the toolbar reports "searching".
  *
- * mDNS keeps answering for as long as it is asked, so there is no point at which discovery is
- * genuinely finished; this is just how long a receiver on the network takes to answer, after
- * which a still-empty list means something is wrong rather than slow.
+ * mDNS keeps answering for as long as it is asked, so there is no point at which discovery is genuinely
+ * finished; this is just how long a receiver on the network takes to answer, after which a still-empty
+ * list means something is wrong rather than slow.
  */
 private const val SCAN_INDICATOR_MS = 6_000L
 
 /**
  * ViewModel for the Cast app.
  *
- * Owns no session state: [CastController] does, because the session outlives this ViewModel and
- * is shared with `CastService`. What lives here is what belongs to the screen - whether a scan is
- * running.
+ * Owns no session state: [CastController] does, because the session outlives this ViewModel and is
+ * shared with `CastService`. What lives here is what belongs to the screen - whether a scan is running.
  */
 class CastViewModel(application: Application) : AndroidViewModel(application), CastActions {
 
@@ -82,36 +81,34 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
             localNetworkBlocked = blocked,
             connectedDevice = device,
             connection = when {
-                session.phase == CastPhase.Failed -> CastConnection.Failed
+                session.phase == ClientPhase.Failed -> CastConnection.Failed
+                session.phase == ClientPhase.AwaitingCode -> CastConnection.AwaitingCode
                 connecting -> CastConnection.Connecting
-                device != null && session.phase == CastPhase.Ready -> CastConnection.Connected
+                device != null &&
+                    (session.phase == ClientPhase.Paired || session.phase == ClientPhase.Streaming) ->
+                    CastConnection.Connected
                 else -> CastConnection.Disconnected
             },
             mirrorPhase = phase,
-            // A speaker or a group has no screen, so only audio can go to it. Known from the
-            // mDNS capability bitmask before anything is negotiated, which is what lets the UI
-            // say "audio only" while the receiver is still being joined.
-            audioOnly = device != null && device.kind != CastDeviceKind.Tv,
+            pairAttemptsLeft = session.attemptsLeft,
+            pairCodeChanged = session.codeChanged,
             videoDegraded = degradation.videoUnavailable,
             audioDegraded = degradation.audioUnavailable,
-            volumeLevel = session.volumeLevel,
-            muted = session.muted,
-            // The pipeline's own message wins: it is more specific than a LAUNCH_ERROR reason.
+            // The pipeline's own message wins: it is more specific than a handshake failure.
             failure = mirrorFailure ?: failureMessage(session.failure),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CastUiState())
 
     override fun startScan() {
-        // Restart rather than ignore: the refresh button has to do something when the browse is
-        // already running, and a second collector on the same manager would double every device.
+        // Restart rather than ignore: the refresh button has to do something when the browse is already
+        // running, and a second collector on the same manager would double every device.
         scanJob?.cancel()
         _isScanning.value = true
         discovery.clear()
         scanJob = viewModelScope.launch {
-            // The browse itself keeps running for as long as the screen is open, so devices
-            // appear and disappear as they are switched on and off. Only the "searching"
-            // indicator is time-boxed - left on it would spin forever and the refresh button
-            // would never come back.
+            // The browse itself keeps running for as long as the screen is open, so devices appear and
+            // disappear as they are switched on and off. Only the "searching" indicator is time-boxed -
+            // left on it would spin forever and the refresh button would never come back.
             launch {
                 delay(SCAN_INDICATOR_MS)
                 _isScanning.value = false
@@ -135,10 +132,12 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
 
     override fun disconnect() = CastController.disconnect(appContext)
 
+    override fun submitPairCode(code: String) = CastController.submitPairCode(appContext, code)
+
     /**
      * Mirroring cannot be started from here directly: the screen-capture consent dialog needs an
-     * Activity to host it, and the token it returns is single-use, so the trampoline runs afresh
-     * every session.
+     * Activity to host it, and the token it returns is single-use, so the trampoline runs afresh every
+     * session.
      */
     override fun startMirroring() {
         ExternalIntents.launch(appContext, MirrorConsentActivity.intent(appContext))
@@ -146,28 +145,25 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
 
     override fun stopMirroring() = CastController.stopMirroring(appContext)
 
-    override fun setVolume(level: Double) = CastController.setVolume(level)
-
-    override fun setMuted(muted: Boolean) = CastController.setMuted(muted)
-
     /**
-     * Turn a `LAUNCH_ERROR` reason into something worth reading.
+     * Turn a handshake failure into something worth reading.
      *
-     * The reasons are wire constants and must not reach the screen. `NOT_FOUND` is what a TV
-     * answers when asked for the audio-only receiver and `SYSTEM_ERROR` is what a speaker answers
-     * when asked for the audio-video one, so in practice both mean "this device will not run what
-     * we asked it to" - which is the same sentence to a user either way.
+     * Shorter than it used to be, and that is the point: the Cast version had to translate `NOT_FOUND`
+     * and `SYSTEM_ERROR` from a receiver refusing an app id we had to guess at. Both ends are ours now,
+     * so the only failures left are real ones.
      */
-    private fun failureMessage(reason: String?): String? = when (reason) {
+    private fun failureMessage(reason: ClientFailure?): String? = when (reason) {
         null -> null
-        "NOT_FOUND", "INVALID_APP_ID" -> appContext.getString(R.string.cast_launch_unsupported)
-        "CANCELLED" -> appContext.getString(R.string.cast_launch_cancelled)
-        else -> appContext.getString(R.string.cast_launch_failed)
+        ClientFailure.Unreachable -> appContext.getString(R.string.cast_connect_lost)
+        ClientFailure.VersionMismatch -> appContext.getString(R.string.cast_version_mismatch)
+        ClientFailure.CodeRejected -> appContext.getString(R.string.cast_pair_rejected)
+        ClientFailure.StreamRefused -> appContext.getString(R.string.cast_mirror_negotiation_failed)
+        ClientFailure.Protocol -> appContext.getString(R.string.cast_protocol_error)
     }
 
     /**
-     * There is no intent for the local-network toggle itself, so this opens the app's own
-     * settings page, where the permission lives.
+     * There is no intent for the local-network toggle itself, so this opens the app's own settings page,
+     * where the permission lives.
      */
     override fun openLocalNetworkSettings() {
         val intent = Intent(

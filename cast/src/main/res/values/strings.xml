@@ -3,52 +3,57 @@
 
     <!-- Device list -->
     <string name="cast_devices_title">Cast</string>
-    <string name="cast_devices_heading">Devices</string>
-    <string name="cast_searching">Searching for devices.</string>
-    <string name="cast_no_devices">No cast devices found</string>
-    <string name="cast_no_devices_hint">Make sure your Chromecast, Google TV or speaker is on the same Wi\u2011Fi network.</string>
+    <string name="cast_devices_heading">Televisions</string>
+    <string name="cast_searching">Searching for televisions.</string>
+    <string name="cast_no_devices">No televisions found</string>
+    <string name="cast_no_devices_hint">Install MA Cast on your Android TV or Google TV and open it once. It only needs to be on the same Wi\u2011Fi network \u2014 neither device needs internet access.</string>
+    <string name="cast_device_subtitle">%1$s</string>
     <string name="cast_local_network_blocked">Local network access is off</string>
     <string name="cast_local_network_blocked_hint">Android blocks discovering devices on your network until this app is allowed to. Grant local network access in system settings and try again.</string>
     <string name="cast_open_settings">Open settings</string>
     <string name="cast_disconnect">Disconnect</string>
     <string name="cast_connecting_to">Connecting to %1$s.</string>
     <string name="cast_connected_to">Connected to %1$s</string>
-    <string name="cast_connected_audio_only">Connected to %1$s \u2014 audio only</string>
-    <string name="cast_connect_failed">Could not connect to %1$s</string>
-
-    <!-- Launch failures. The receiver answers with a wire constant (NOT_FOUND when a device does
-         not host the receiver we asked for, SYSTEM_ERROR when it cannot run it); these are what
-         gets shown instead. -->
-    <string name="cast_launch_unsupported">This device cannot be mirrored to</string>
-    <string name="cast_launch_cancelled">The device declined the request</string>
-    <string name="cast_launch_failed">Could not start mirroring on this device</string>
+    <string name="cast_connect_failed">Could not reach %1$s</string>
     <string name="cast_retry">Try again</string>
+
+    <!-- Pairing. The six digits are shown on the TV and typed here; they are bound to the
+         handshake transcript, which is what makes six digits enough. -->
+    <string name="cast_pairing_with">Pairing with %1$s</string>
+    <string name="cast_pair_title">Pair with %1$s</string>
+    <string name="cast_pair_hint">Your TV is showing a six\u2011digit code. Type it here to pair. You will only be asked once per TV.</string>
+    <string name="cast_pair_code_label">Code from your TV</string>
+    <string name="cast_pair_submit">Pair</string>
+    <plurals name="cast_pair_attempts">
+        <item quantity="one">Wrong code. %1$d attempt left.</item>
+        <item quantity="other">Wrong code. %1$d attempts left.</item>
+    </plurals>
+    <string name="cast_pair_new_code">Wrong code three times, so your TV is now showing a new one. Look again.</string>
+    <string name="cast_pair_rejected">Pairing was refused</string>
+
+    <!-- Session failures -->
+    <string name="cast_connect_lost">The connection to the TV was lost</string>
+    <string name="cast_version_mismatch">This TV is running a different version of MA Cast. Update both apps.</string>
+    <string name="cast_protocol_error">The TV did not answer the way it should</string>
 
     <!-- Mirroring -->
     <string name="cast_start_mirroring">Mirror my screen</string>
     <string name="cast_stop_mirroring">Stop mirroring</string>
     <string name="cast_status_ready">Ready to mirror</string>
-    <string name="cast_status_ready_audio">Ready to cast audio</string>
     <string name="cast_status_starting">Starting.</string>
     <string name="cast_status_mirroring">Mirroring your screen</string>
-    <string name="cast_status_casting_audio">Casting audio</string>
     <string name="cast_status_failed">Mirroring stopped</string>
-    <!-- An audio cast still shows a screen-capture dialog, because that is the only way Android
-         grants playback capture. Said plainly, or it looks like a bug. -->
-    <string name="cast_mirror_consent_note">Android asks to record the screen even for audio, because that is how it grants permission to capture what is playing.</string>
     <string name="cast_mirror_audio_degraded">Audio is unavailable, so only the picture is being sent. Apps that block audio capture, and devices without an Opus encoder, both cause this.</string>
     <string name="cast_mirror_video_degraded">Video is unavailable on this device, so only audio is being sent.</string>
     <string name="cast_mirror_unavailable">This device cannot capture the screen</string>
-    <string name="cast_mirror_no_streams">The device would not accept anything we can send</string>
-    <string name="cast_mirror_negotiation_failed">The device refused to start a stream</string>
-    <string name="cast_mirror_udp_failed">Could not reach the device to send video</string>
+    <string name="cast_mirror_negotiation_failed">The TV refused to start a stream</string>
+    <string name="cast_mirror_udp_failed">Could not reach the TV to send video</string>
     <string name="cast_mirror_no_encoder">This device has no usable screen encoder</string>
-    <string name="cast_mirror_no_audio">Audio could not be captured, and this device can only play audio</string>
-    <string name="cast_mirror_receiver_gone">The device stopped accepting the stream</string>
+    <string name="cast_mirror_receiver_gone">The TV stopped accepting the stream</string>
 
     <!-- Quick Settings tile -->
     <string name="cast_tile_label">Mirror screen</string>
-    <string name="cast_tile_no_target">Choose a device first</string>
+    <string name="cast_tile_no_target">Choose a TV first</string>
     <string name="cast_tile_starting">Starting.</string>
     <string name="cast_tile_mirroring">Mirroring</string>
 
@@ -57,10 +62,10 @@
     <string name="cast_notification_channel_desc">Shown while a cast session is open</string>
     <string name="cast_notification_title">Casting to %1$s</string>
     <string name="cast_notification_text_connecting">Connecting</string>
+    <string name="cast_notification_text_pairing">Waiting for the code on your TV</string>
     <string name="cast_notification_text_ready">Ready to mirror</string>
     <string name="cast_notification_text_starting">Starting</string>
     <string name="cast_notification_text_mirroring">Mirroring your screen</string>
-    <string name="cast_notification_text_idle">Not mirroring</string>
     <string name="cast_notification_text_failed">Could not start mirroring</string>
     <string name="cast_notification_action_stop">Stop</string>
 </resources>

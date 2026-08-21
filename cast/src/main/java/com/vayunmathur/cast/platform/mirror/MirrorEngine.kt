@@ -3,13 +3,12 @@ package com.vayunmathur.cast.platform.mirror
 import android.content.Context
 import android.media.projection.MediaProjection
 import android.util.Log
-import com.vayunmathur.cast.domain.streaming.CastRtcp
-import com.vayunmathur.cast.domain.streaming.NegotiatedStream
-import com.vayunmathur.cast.domain.streaming.Negotiation
-import com.vayunmathur.cast.domain.streaming.StreamKind
-import com.vayunmathur.cast.domain.streaming.StreamSelection
-import com.vayunmathur.cast.domain.streaming.StreamingSession
 import com.vayunmathur.cast.network.CastUdpTransport
+import com.vayunmathur.cast.protocol.NegotiatedStream
+import com.vayunmathur.cast.protocol.Negotiation
+import com.vayunmathur.cast.protocol.Rtcp
+import com.vayunmathur.cast.protocol.StreamKind
+import com.vayunmathur.cast.protocol.StreamingSession
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -40,21 +39,21 @@ data class MirrorDegradation(
 )
 
 /** Why mirroring could not start, or stopped. */
-enum class MirrorStopReason { Udp, NoEncoders, NoAudioForSpeaker, ReceiverGone }
+enum class MirrorStopReason { Udp, NoEncoders, ReceiverGone }
 
 /**
  * The running mirror: capture and encode in, RTP out, RTCP back.
  *
- * Holds no protocol knowledge - [StreamingSession] decides what to retransmit, [CastRtpPacketizer]
- * decides byte layout, [StreamSender] does the per-stream work. This class is the part that cannot
- * be unit-tested, so it is kept to the wiring and two loops.
+ * Holds no protocol knowledge - [StreamingSession] decides what to retransmit, `RtpPacketizer` decides
+ * byte layout, [StreamSender] does the per-stream work. This class is the part that cannot be
+ * unit-tested, so it is kept to the wiring and two loops.
  *
- * [receiverHost] is passed in because the ANSWER carries only a port; the address is the one the
+ * [receiverHost] is passed in because `STREAM_READY` carries only a port; the address is the one the
  * control channel is already talking to.
  *
  * The context is reduced to the application context on the way in: this is reachable from
- * `CastController`, which is an object, so holding the Service that started mirroring would outlive
- * it. Only `WindowManager` metrics are read from it, which the application context serves fine.
+ * `CastController`, which is an object, so holding the Service that started mirroring would outlive it.
+ * Only `WindowManager` metrics are read from it, which the application context serves fine.
  */
 class MirrorEngine(
     context: Context,
@@ -62,7 +61,8 @@ class MirrorEngine(
     private val receiverHost: String,
     private val negotiation: Negotiation,
     private val geometry: CaptureGeometry,
-    private val session: StreamingSession,
+    /** The negotiated frame rate, which is the TV's cap rather than a fixed 30. */
+    private val frameRate: Int,
     private val onDegraded: (MirrorDegradation) -> Unit,
     private val onStopped: (MirrorStopReason) -> Unit,
 ) {
@@ -112,14 +112,6 @@ class MirrorEngine(
         val videoUnavailable = videoStream != null && !startVideo(videoStream, udp)
         val audioUnavailable = audioStream != null && !startAudio(audioStream, udp)
 
-        // Stated degradation policy: a TV that lost audio still mirrors, with a notice; a speaker
-        // that lost audio has nothing left to send at all, so it refuses.
-        if (audioUnavailable && !negotiation.hasVideo) {
-            Log.w(TAG, "audio-only target but no audio pipeline")
-            stop()
-            onStopped(MirrorStopReason.NoAudioForSpeaker)
-            return false
-        }
         if (senders.isEmpty()) {
             stop()
             onStopped(MirrorStopReason.NoEncoders)
@@ -137,7 +129,7 @@ class MirrorEngine(
         val encoder = VideoEncoder(
             width = geometry.width,
             height = geometry.height,
-            frameRate = StreamSelection.VIDEO_MAX_FRAME_RATE,
+            frameRate = frameRate,
             bitRate = geometry.bitRate,
         )
         if (!encoder.start()) return false
@@ -154,7 +146,7 @@ class MirrorEngine(
         )
         videoEncoder = encoder
         capture = screen
-        val sender = StreamSender(stream, udp, session)
+        val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Video] = sender
         videoJob = scope.launch {
             while (isActive) {
@@ -173,7 +165,7 @@ class MirrorEngine(
         val encoder = AudioEncoder(projection)
         if (!encoder.start()) return false
         audioEncoder = encoder
-        val sender = StreamSender(stream, udp, session)
+        val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Audio] = sender
         audioJob = scope.launch {
             while (isActive) {
@@ -205,7 +197,7 @@ class MirrorEngine(
                         // Nothing has been sent yet, so there is no clock mapping to report.
                         if (stats.lastSentAtMillis == 0L) continue
                         udp.send(
-                            CastRtcp.senderReport(
+                            Rtcp.senderReport(
                                 senderSsrc = stream.senderSsrc,
                                 // Paired with the RTP timestamp captured at the same instant, not
                                 // with the current clock.
@@ -257,7 +249,7 @@ class MirrorEngine(
     private fun handleFeedback(packet: ByteArray) {
         for (stream in negotiation.streams) {
             val sender = senders[stream.kind] ?: continue
-            val feedback = CastRtcp.parse(
+            val feedback = Rtcp.parse(
                 packet = packet,
                 receiverSsrc = stream.receiverSsrc,
                 senderSsrc = stream.senderSsrc,
@@ -272,7 +264,7 @@ class MirrorEngine(
                         "pli=${feedback.pictureLoss} playoutDelay=${feedback.playoutDelayMs}",
                 )
             }
-            val recovery = session.onFeedback(feedback)
+            val recovery = sender.onFeedback(feedback)
             sender.retransmit(recovery.retransmissions)
             if (stream.kind == StreamKind.Video &&
                 (recovery.needsKeyFrame || feedback.pictureLoss)

@@ -17,20 +17,17 @@ import com.vayunmathur.cast.platform.MirrorPhase
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconScreenShare
-import com.vayunmathur.library.ui.IconVolumeOff
-import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
-import com.vayunmathur.library.ui.Slider
 import com.vayunmathur.library.ui.Text
 
 /**
  * Mirroring status and the one control that matters: start or stop.
  *
- * Replaces the media receiver's now-playing card. Volume stays because it is the receiver's own
- * volume and works whether or not anything is being mirrored.
+ * **No volume control any more.** Volume was the receiver's own, set over Cast's `receiver` namespace -
+ * a namespace that does not exist in a protocol we define, and one whose only other use was for
+ * speakers. A TV has its own remote.
  */
 @Composable
 fun CastMirrorStatusCard(
@@ -57,8 +54,8 @@ fun CastMirrorStatusCard(
                     CircularProgressIndicator()
                 }
             }
-            // Both degradations are worth saying out loud: a silent audio stream or a
-            // video-only cast otherwise just looks broken.
+            // Both degradations are worth saying out loud: a silent audio stream or a video-only cast
+            // otherwise just looks broken.
             if (state.audioDegraded) {
                 Notice(stringResource(R.string.cast_mirror_audio_degraded))
             }
@@ -86,7 +83,6 @@ fun CastMirrorStatusCard(
                     )
                 }
             }
-            VolumeRow(state, actions)
         }
     }
 }
@@ -104,29 +100,9 @@ private fun Notice(text: String, isError: Boolean = false) {
     )
 }
 
-@Composable
-private fun VolumeRow(state: CastUiState, actions: CastActions) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        IconButton(onClick = { actions.setMuted(!state.muted) }) {
-            if (state.muted) IconVolumeOff() else IconVolumeUp()
-        }
-        Slider(
-            value = state.volumeLevel.toFloat(),
-            onValueChange = { actions.setVolume(it.toDouble()) },
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
-
 private fun statusLabel(state: CastUiState): Int = when {
-    state.isMirroring && state.audioOnly -> R.string.cast_status_casting_audio
     state.isMirroring -> R.string.cast_status_mirroring
     state.mirrorPhase == MirrorPhase.Negotiating -> R.string.cast_status_starting
     state.mirrorPhase == MirrorPhase.Failed -> R.string.cast_status_failed
-    state.audioOnly -> R.string.cast_status_ready_audio
     else -> R.string.cast_status_ready
 }

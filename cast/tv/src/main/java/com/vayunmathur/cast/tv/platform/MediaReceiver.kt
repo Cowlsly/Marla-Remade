@@ -1,0 +1,148 @@
+package com.vayunmathur.cast.tv.platform
+
+import android.util.Log
+import com.vayunmathur.cast.protocol.DecodableFrame
+import com.vayunmathur.cast.protocol.Negotiation
+import com.vayunmathur.cast.protocol.ReceiverSession
+import com.vayunmathur.cast.protocol.StreamKind
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+
+private const val TAG = "MediaReceiver"
+
+/** Big enough for any RTP packet the sender emits, which is capped below the Ethernet MTU. */
+private const val MAX_DATAGRAM = 2048
+
+/**
+ * The UDP half of the receiver: datagrams in, decoded frames out, RTCP back.
+ *
+ * The mirror of `:cast`'s `MirrorEngine`, and kept just as thin: [ReceiverSession] decides what is
+ * decodable and what to ask for, [VideoDecoder] and [AudioPlayer] do the platform work, and this
+ * class is the socket plus one loop. That split is why the receiver's rules are unit-tested and this
+ * file is not.
+ *
+ * One socket for both streams and both directions, because that is what the sender expects: it
+ * connects a single datagram socket to the port in `STREAM_READY` and sends everything on it, so
+ * RTCP has to go back from the same port it arrived at or the sender's connected socket will not
+ * accept it.
+ */
+class MediaReceiver(
+    private val socket: DatagramSocket,
+    negotiation: Negotiation,
+    private val onVideo: (DecodableFrame) -> Unit,
+    private val onAudio: (DecodableFrame) -> Unit,
+    /** True while there is somewhere to draw. Video is dropped, not buffered, until there is. */
+    private val videoReady: () -> Boolean,
+) {
+
+    private val sessions = negotiation.streams.associate { it.kind to ReceiverSession(it) }
+
+    /** Where the sender's packets came from, which is where feedback goes back to. */
+    private var senderAddress: InetAddress? = null
+    private var senderPort: Int = 0
+
+    val port: Int get() = socket.localPort
+
+    init {
+        // Bounded so the loop can check for a stop request rather than parking for ever, and so a
+        // sender that dies is noticed instead of leaving a thread blocked in recv. This is also the
+        // feedback cadence: a timeout is what tells the caller to report.
+        socket.soTimeout = RECEIVE_TIMEOUT_MS
+    }
+
+    /**
+     * Block for one datagram and handle it.
+     *
+     * Returns false on a timeout, which the caller uses as its cue to send feedback and check whether
+     * it has been asked to stop - so the loop needs no separate timer.
+     */
+    fun pump(): Boolean {
+        val buffer = ByteArray(MAX_DATAGRAM)
+        val datagram = DatagramPacket(buffer, buffer.size)
+        try {
+            socket.receive(datagram)
+        } catch (_: java.net.SocketTimeoutException) {
+            return false
+        } catch (e: Exception) {
+            Log.w(TAG, "udp receive failed", e)
+            return false
+        }
+        senderAddress = datagram.address
+        senderPort = datagram.port
+        val bytes = buffer.copyOf(datagram.length)
+
+        // Routed by trying each stream: ReceiverSession itself checks the SSRC, so a datagram for the
+        // other half of the mirror costs one rejected parse rather than a duplicate of that logic
+        // here. Sender reports match neither and are handled after.
+        for ((kind, session) in sessions) {
+            // **Video is dropped before it reaches the session, not after.** The phone starts sending
+            // the moment STREAM_READY goes out and the Activity takes a few hundred ms to produce a
+            // surface, so the first key frame - the only one carrying SPS/PPS - usually arrives in that
+            // window. Letting the session consume it would advance its checkpoint and mark it
+            // synchronised, so no PLI would ever go out and the decoder would later be handed a bare
+            // IDR: a black screen with nothing logged, which is exactly the failure this protocol
+            // exists to make impossible. Dropping it here leaves the session unsynchronised, so its
+            // next feedback asks for a key frame and the sender prepends the parameter sets again.
+            if (kind == StreamKind.Video && !videoReady()) continue
+            val frames = session.onPacket(bytes)
+            if (frames.isEmpty()) continue
+            for (frame in frames) {
+                when (kind) {
+                    StreamKind.Video -> onVideo(frame)
+                    StreamKind.Audio -> onAudio(frame)
+                }
+            }
+            return true
+        }
+        // Not RTP for either stream. A sender report is the expected case; anything else is somebody
+        // else's traffic and is dropped without comment.
+        for (session in sessions.values) session.onSenderReport(bytes)
+        return true
+    }
+
+    /**
+     * Report on every stream.
+     *
+     * Sent even before anything has been decoded - that first report is a PLI, and it is what tells
+     * the sender to produce a key frame now rather than at its next scheduled one. Nothing goes out
+     * before the first datagram arrives, because until then there is no address to send it to.
+     */
+    fun sendFeedback() {
+        val address = senderAddress ?: return
+        for (session in sessions.values) {
+            val packet = session.feedback()
+            try {
+                socket.send(DatagramPacket(packet, packet.size, address, senderPort))
+            } catch (e: Exception) {
+                Log.w(TAG, "could not send feedback", e)
+                return
+            }
+        }
+    }
+
+    /**
+     * The line that has been missing all project: the receiver saying what it sees.
+     *
+     * The sender already logs packets sent and feedback received once a second. Reading the two
+     * together is the whole difference between "the TV is black" and knowing which end is unhappy.
+     */
+    fun throughputSummary(): String = sessions.entries.joinToString(" ") { (kind, session) ->
+        "$kind=${session.packetsReceived}pkt/${session.framesDelivered}frames" +
+            "/ignored=${session.packetsIgnored}/checkpoint=${session.checkpoint}"
+    }
+
+    fun close() {
+        runCatching { socket.close() }
+    }
+
+    private companion object {
+        /**
+         * Also the feedback interval, since a timeout is what triggers a report.
+         *
+         * 50 ms is well inside the 400 ms target playout delay, so a NACK still has time to be
+         * answered and played, and slow enough that reports are a rounding error next to the video.
+         */
+        const val RECEIVE_TIMEOUT_MS = 50
+    }
+}

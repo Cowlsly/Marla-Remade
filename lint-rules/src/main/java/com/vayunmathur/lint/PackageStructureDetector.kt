@@ -156,6 +156,17 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
             if (!packageName.startsWith("com.vayunmathur.")) return null
             val remainder = packageName.removePrefix("com.vayunmathur.")
             if (remainder.isEmpty()) return null
+            // An app module nested a level deeper is still an app, and its own roots are what the
+            // closed set applies to. Without this, `com.vayunmathur.cast.tv.platform` would be read
+            // as app `cast` with a root segment `tv`, which is not in the allow-list and never
+            // could be.
+            for (base in NESTED_APP_BASES) {
+                if (remainder == base) return Pair("com.vayunmathur.$base", null)
+                if (remainder.startsWith("$base.")) {
+                    val segment = remainder.removePrefix("$base.").substringBefore('.')
+                    return Pair("com.vayunmathur.$base", segment)
+                }
+            }
             val dot = remainder.indexOf('.')
             return if (dot == -1) {
                 Pair("com.vayunmathur.$remainder", null)
@@ -165,6 +176,16 @@ class PackageStructureDetector : Detector(), SourceCodeScanner {
                 Pair("com.vayunmathur.$app", segment)
             }
         }
+
+        /**
+         * App modules whose package is two segments deep rather than one.
+         *
+         * `:cast:tv` is a second app in the `:cast` family - the Android TV receiver the phone casts
+         * to - and it is nested because `common-conventions-app` derives the namespace from the
+         * Gradle path, so `com.vayunmathur.cast.tv` requires the path `:cast:tv`. It is a full app
+         * and holds itself to the same closed root set as any other.
+         */
+        private val NESTED_APP_BASES = listOf("cast.tv")
 
         // ---- root-file contracts (closed allow-list) ----
 

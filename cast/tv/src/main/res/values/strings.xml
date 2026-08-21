@@ -1,0 +1,37 @@
+<resources>
+    <string name="app_name">MA Cast</string>
+
+    <!-- Idle screen -->
+    <string name="tv_ready_title">Ready to receive</string>
+    <string name="tv_ready_hint">Open Cast on your phone and pick %1$s.</string>
+    <string name="tv_name_unknown">this TV</string>
+    <string name="tv_starting">Starting.</string>
+
+    <!-- The receiver could not advertise itself. Distinct from "nothing has connected yet",
+         because nothing about the phone or the network will fix it. -->
+    <string name="tv_local_network_blocked">Local network access is off</string>
+    <string name="tv_local_network_blocked_hint">Android blocks announcing this TV on your network until the app is allowed to. Grant local network access in Settings and reopen MA Cast.</string>
+
+    <!-- Pairing -->
+    <string name="tv_pair_title">Enter this code on your phone</string>
+    <string name="tv_pair_from">%1$s is asking to connect.</string>
+    <plurals name="tv_pair_attempts">
+        <item quantity="one">%1$d attempt left</item>
+        <item quantity="other">%1$d attempts left</item>
+    </plurals>
+    <string name="tv_pair_new_code">That code was wrong three times, so here is a new one.</string>
+    <string name="tv_paired">Connected to %1$s</string>
+
+    <!-- Mirroring -->
+    <string name="tv_mirroring">Receiving from %1$s</string>
+    <string name="tv_no_decoder">This TV has no usable H.264 decoder</string>
+    <string name="tv_stream_failed">The stream stopped</string>
+
+    <!-- Foreground service -->
+    <string name="tv_notification_channel_name">Receiving</string>
+    <string name="tv_notification_channel_desc">Shown while this TV is available to cast to</string>
+    <string name="tv_notification_title">MA Cast</string>
+    <string name="tv_notification_text_idle">Ready to receive</string>
+    <string name="tv_notification_text_pairing">Waiting for a pair code</string>
+    <string name="tv_notification_text_mirroring">Receiving from %1$s</string>
+</resources>

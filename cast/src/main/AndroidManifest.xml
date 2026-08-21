@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Google Cast (CastV2) without Play Services or the Cast SDK: mDNS discovery of
-         _googlecast._tcp, a TLS socket to port 8009 for the control plane, and UDP to the
-         port the receiver names in its ANSWER for the RTP stream. -->
+    <!-- MA Cast: mDNS discovery of _macast._tcp, a TCP socket to the port the TV advertises for
+         the control channel, and UDP to the port it names in STREAM_READY for the RTP stream.
+         Nothing here reaches past the local network - the TV is not required to have internet
+         access at all, which is why the Cast media path could not be used. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />

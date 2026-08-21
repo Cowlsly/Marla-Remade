@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  MA Cast (TV). Audited state: the ML-KEM device identity and the per-phone device keys.
+  Both are deliberately EXCLUDED from backup and device transfer.
+
+  A device key is what lets a phone connect without showing a pair code, and the identity is
+  what a phone seals the session secret to. Restoring either onto a different TV would let
+  that TV impersonate this one to an already-paired phone - silently, since the phone would
+  see no code. Re-pairing takes six digits and one press; the alternative is a trust
+  relationship the user never agreed to.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+    </device-transfer>
+</data-extraction-rules>

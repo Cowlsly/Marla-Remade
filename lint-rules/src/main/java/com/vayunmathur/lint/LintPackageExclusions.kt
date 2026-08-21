@@ -15,6 +15,9 @@ package com.vayunmathur.lint
  *  - `com.vayunmathur.e2ee`     — shared end-to-end-encryption library
  *      (`library/e2ee-p2p`); a flat crypto API package, not an app root.
  *  - `com.vayunmathur.sdk`      — shared SDK modules.
+ *  - `com.vayunmathur.cast.protocol` — the MA Cast wire format (`cast/protocol`), shared by the
+ *      phone and the TV app. A flat protocol package like `e2ee`, not an app root: it holds no
+ *      screens, and `protocol` is the module name rather than a package the app chose.
  *  - `com.vayunmathur.games`    — games use their own UI structure; the
  *      one-public-composable-per-file splits were deliberately deferred.
  *  - `com.vayunmathur.tools`    — internal tooling, not shipped apps.
@@ -26,6 +29,7 @@ object LintPackageExclusions {
         "com.vayunmathur.library",
         "com.vayunmathur.e2ee",
         "com.vayunmathur.sdk",
+        "com.vayunmathur.cast.protocol",
         "com.vayunmathur.games",
         "com.vayunmathur.tools",
         "com.vayunmathur.personal",

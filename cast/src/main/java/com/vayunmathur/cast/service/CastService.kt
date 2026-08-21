@@ -17,7 +17,7 @@ import androidx.core.content.IntentCompat
 import androidx.core.content.getSystemService
 import com.vayunmathur.cast.MainActivity
 import com.vayunmathur.cast.R
-import com.vayunmathur.cast.domain.CastPhase
+import com.vayunmathur.cast.domain.ClientPhase
 import com.vayunmathur.cast.platform.CastController
 import com.vayunmathur.cast.platform.MirrorPhase
 import com.vayunmathur.library.util.ensureNotificationChannel
@@ -229,15 +229,17 @@ class CastService : Service() {
         }
     }
 
-    private fun statusText(phase: CastPhase, mirror: MirrorPhase): String = when {
+    private fun statusText(phase: ClientPhase, mirror: MirrorPhase): String = when {
         mirror == MirrorPhase.Mirroring -> getString(R.string.cast_notification_text_mirroring)
         mirror == MirrorPhase.Negotiating -> getString(R.string.cast_notification_text_starting)
         mirror == MirrorPhase.Failed -> getString(R.string.cast_notification_text_failed)
-        phase == CastPhase.Launching -> getString(R.string.cast_notification_text_connecting)
-        phase == CastPhase.Ready -> getString(R.string.cast_notification_text_ready)
-        phase == CastPhase.Failed -> getString(R.string.cast_notification_text_failed)
-        // The receiver app exited on its own; the channel is still up, so this is a resting state.
-        else -> getString(R.string.cast_notification_text_idle)
+        phase == ClientPhase.Connecting -> getString(R.string.cast_notification_text_connecting)
+        // Worth its own line: the user has to walk over and read the TV, and a notification that just
+        // said "connecting" would not tell them that.
+        phase == ClientPhase.AwaitingCode -> getString(R.string.cast_notification_text_pairing)
+        phase == ClientPhase.Paired -> getString(R.string.cast_notification_text_ready)
+        phase == ClientPhase.Failed -> getString(R.string.cast_notification_text_failed)
+        else -> getString(R.string.cast_notification_text_ready)
     }
 
     private fun buildNotification(deviceName: String, text: String): Notification {

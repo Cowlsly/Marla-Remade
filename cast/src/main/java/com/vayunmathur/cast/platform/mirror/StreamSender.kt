@@ -1,13 +1,15 @@
 package com.vayunmathur.cast.platform.mirror
 
-import com.vayunmathur.cast.domain.streaming.CastCrypto
-import com.vayunmathur.cast.domain.streaming.CastRtpPacketizer
-import com.vayunmathur.cast.domain.streaming.EncryptedFrame
-import com.vayunmathur.cast.domain.streaming.FrameId
-import com.vayunmathur.cast.domain.streaming.NegotiatedStream
-import com.vayunmathur.cast.domain.streaming.Retransmission
-import com.vayunmathur.cast.domain.streaming.StreamingSession
 import com.vayunmathur.cast.network.CastUdpTransport
+import com.vayunmathur.cast.protocol.Crypto
+import com.vayunmathur.cast.protocol.EncryptedFrame
+import com.vayunmathur.cast.protocol.FrameId
+import com.vayunmathur.cast.protocol.NegotiatedStream
+import com.vayunmathur.cast.protocol.ReceiverFeedback
+import com.vayunmathur.cast.protocol.Recovery
+import com.vayunmathur.cast.protocol.Retransmission
+import com.vayunmathur.cast.protocol.RtpPacketizer
+import com.vayunmathur.cast.protocol.StreamingSession
 
 /**
  * One stream's send path: encrypt, packetize, count.
@@ -18,11 +20,18 @@ import com.vayunmathur.cast.network.CastUdpTransport
 class StreamSender(
     private val stream: NegotiatedStream,
     private val udp: CastUdpTransport,
+    /**
+     * This stream's own retransmit buffer.
+     *
+     * **One per stream, never shared.** Audio and video are independent frame-id sequences that both
+     * start at [FrameId.First], so a shared buffer would alias them - a NACK for video frame 5 would be
+     * answered with audio frame 5's bytes.
+     */
     private val session: StreamingSession,
 ) {
 
-    private val crypto = CastCrypto(stream.keys.key, stream.keys.ivMask)
-    private val packetizer = CastRtpPacketizer(stream.payloadType, stream.senderSsrc)
+    private val crypto = Crypto(stream.keys.key, stream.keys.ivMask)
+    private val packetizer = RtpPacketizer(stream.payloadType, stream.senderSsrc)
 
     /**
      * One send at a time.
@@ -57,16 +66,15 @@ class StreamSender(
         val rtpTimestamp = elapsedUs * stream.timebase / 1_000_000L
         val frameId = nextFrameId
         // A key frame references **itself**, and a delta frame its immediate predecessor. Both are
-        // load-bearing and neither is a free choice:
+        // load-bearing and neither is a free choice - and now that the receiver is ours as well, the
+        // second half of that pairing is enforced by [FrameAssembler] rather than hoped for:
         //
-        //  - `encoded_frame.h` is explicit that a frame needing nothing else to decode must set
-        //    referenced_frame_id == frame_id. Pointing a key frame at FrameId.Leader instead makes
-        //    the receiver wait for frame 255 forever and decode nothing at all - a black screen with
-        //    no error anywhere.
+        //  - A frame that needs nothing else to decode must set referencedFrameId == frameId.
+        //    Pointing a key frame at FrameId.Leader instead makes the receiver wait for frame 255
+        //    forever and decode nothing at all - a black screen with no error anywhere. That cost this
+        //    project an entire hardware session.
         //  - MediaCodec emits IPPP, where each P frame really does depend on the one before it, so
         //    naming any other frame misdescribes the bitstream.
-        //
-        // Chromium does exactly this in `media/cast/encoding/media_video_encoder_wrapper.cc`.
         val referenced = if (chunk.isKeyFrame) frameId else FrameId(frameId.value - 1)
         val frame = EncryptedFrame(
             frameId = frameId,
@@ -91,6 +99,9 @@ class StreamSender(
     fun retransmit(items: List<Retransmission>) = synchronized(lock) {
         for (item in items) emit(item.frame, item.packetIds)
     }
+
+    /** What this stream's own buffer says to do about one feedback packet. */
+    fun onFeedback(feedback: ReceiverFeedback): Recovery = session.onFeedback(feedback)
 
     /** [packetIds] null means every packet of the frame; otherwise only those listed. */
     private fun emit(frame: EncryptedFrame, packetIds: List<Int>?) {

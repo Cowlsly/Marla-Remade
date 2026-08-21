@@ -1,3 +1,3 @@
-Mirror your screen to your TV
-Mirror your screen to any Chromecast or Google TV on your Wi-Fi, or send just the audio to a Nest speaker or a speaker group, from the app or from a Quick Settings tile.
-Cast Streaming is implemented from scratch - mDNS discovery, a TLS control channel, and encrypted RTP over UDP - so there is no Google Play Services and no Cast SDK, and no storage permission either, because nothing is read from your device.
+Mirror your screen to your TV, with no internet needed
+Mirror your phone's screen to an Android TV or Google TV over your Wi-Fi, from the app or from a Quick Settings tile. Install the MA Cast receiver on the TV, type the six-digit code it shows once, and it connects silently from then on.
+Both halves of the protocol are here, which is what makes the rest possible: the TV reports what its decoder can actually take, so the phone sends its own screen shape at full resolution and the TV letterboxes it rather than the phone wasting most of the frame on black bars. The session is encrypted, the pairing code is bound to the handshake so it cannot be relayed by a device in the middle, and nothing contacts a server - neither device needs internet access at all.

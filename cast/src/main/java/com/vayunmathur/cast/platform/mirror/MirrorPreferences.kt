@@ -1,19 +1,22 @@
 package com.vayunmathur.cast.platform.mirror
 
-import android.content.Context
 import com.vayunmathur.cast.domain.CastDevice
+import android.content.Context
 import com.vayunmathur.library.util.DataStoreUtils
+import java.util.UUID
 
 /**
- * The chosen mirroring target, persisted so the Quick Settings tile can reconnect without waiting
- * for a full mDNS round trip.
+ * What the phone remembers between sessions: the chosen TV, this phone's id, and one device key per
+ * TV it has paired with.
  *
- * **Only the target is persisted, and deliberately not whether mirroring was on.** `:share` stores
- * an enabled flag and reconciles it after a reboot, but screen-capture consent is single-use and
- * unreplayable, so a flag saying "was mirroring" could never be acted on headlessly - it would only
- * let the tile lie about its state. Liveness therefore comes from the in-process session instead.
+ * **Only the target is persisted, and deliberately not whether mirroring was on.** `:share` stores an
+ * enabled flag and reconciles it after a reboot, but screen-capture consent is single-use and
+ * unreplayable, so a flag saying "was mirroring" could never be acted on headlessly - it would only let
+ * the tile lie about its state. Liveness therefore comes from the in-process session instead.
  *
- * Keys are namespaced `cast_*` because `DataStoreUtils` is one store shared across the app.
+ * A device key is what makes a second session pair silently, so losing one costs the user six digits
+ * and nothing more. Keys are namespaced `cast_*` because `DataStoreUtils` is one store shared across
+ * the app.
  */
 object MirrorPreferences {
 
@@ -21,24 +24,25 @@ object MirrorPreferences {
     private const val KEY_DEVICE_NAME = "cast_target_name"
     private const val KEY_DEVICE_HOST = "cast_target_host"
     private const val KEY_DEVICE_PORT = "cast_target_port"
-    private const val KEY_DEVICE_CAPABILITIES = "cast_target_capabilities"
+    private const val KEY_SENDER_ID = "cast_sender_id"
 
     /**
-     * The suspend getters, not the synchronous ones: the tile and the service both read this on a
-     * cold start, where the eagerly-mirrored snapshot has not hydrated yet and the synchronous
-     * variants would answer null for a target that is in fact stored.
+     * The suspend getters, not the synchronous ones: the tile and the service both read this on a cold
+     * start, where the eagerly-mirrored snapshot has not hydrated yet and the synchronous variants
+     * would answer null for a target that is in fact stored.
      */
     suspend fun target(context: Context): CastDevice? {
         val store = DataStoreUtils.getInstance(context)
         val id = store.getStringAwait(KEY_DEVICE_ID) ?: return null
         val host = store.getStringAwait(KEY_DEVICE_HOST) ?: return null
-        val name = store.getStringAwait(KEY_DEVICE_NAME) ?: host
+        // The receiver binds an ephemeral control port, so unlike Cast's fixed 8009 there is nothing
+        // to fall back to: without a stored port the target has to be rediscovered.
+        val port = store.getLongAwait(KEY_DEVICE_PORT)?.toInt() ?: return null
         return CastDevice(
             id = id,
-            friendlyName = name,
+            friendlyName = store.getStringAwait(KEY_DEVICE_NAME) ?: host,
             host = host,
-            port = store.getLongAwait(KEY_DEVICE_PORT)?.toInt() ?: CAST_DEFAULT_PORT,
-            capabilities = store.getLongAwait(KEY_DEVICE_CAPABILITIES)?.toInt() ?: 0,
+            port = port,
         )
     }
 
@@ -48,10 +52,30 @@ object MirrorPreferences {
         store.setString(KEY_DEVICE_NAME, device.friendlyName)
         store.setString(KEY_DEVICE_HOST, device.host)
         store.setLong(KEY_DEVICE_PORT, device.port.toLong())
-        // Kept because it is what decides audio-only, and the tile must know that before it can
-        // pick an app id - without it a speaker would be offered video and refused at LAUNCH.
-        store.setLong(KEY_DEVICE_CAPABILITIES, device.capabilities.toLong())
     }
-}
 
-private const val CAST_DEFAULT_PORT = 8009
+    /**
+     * A stable id for this phone, generated once.
+     *
+     * Deliberately **not** a hardware identifier: it only tells a TV whether to put a pair code on
+     * screen, so a random value is exactly as useful and reveals nothing about the device. Re-read
+     * after writing so two callers racing on a cold start agree on which id won.
+     */
+    suspend fun senderId(context: Context): String {
+        val store = DataStoreUtils.getInstance(context)
+        store.getStringAwait(KEY_SENDER_ID)?.let { return it }
+        val id = UUID.randomUUID().toString()
+        store.setString(KEY_SENDER_ID, id)
+        return store.getStringAwait(KEY_SENDER_ID) ?: id
+    }
+
+    /** The device key for [receiverId], or null when this TV has never been paired with. */
+    suspend fun deviceKey(context: Context, receiverId: String): ByteArray? =
+        DataStoreUtils.getInstance(context).getByteArrayAwait(deviceKeyName(receiverId))
+
+    suspend fun rememberDeviceKey(context: Context, receiverId: String, deviceKey: ByteArray) {
+        DataStoreUtils.getInstance(context).setByteArray(deviceKeyName(receiverId), deviceKey)
+    }
+
+    private fun deviceKeyName(receiverId: String): String = "cast_paired_$receiverId"
+}

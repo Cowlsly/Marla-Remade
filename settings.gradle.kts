@@ -101,6 +101,8 @@ include(":backup")
 include(":share")
 include(":launcher")
 include(":cast")
+include(":cast:protocol")
+include(":cast:tv")
 
 // Personal / private app modules live under personal/ (gitignored). Included only
 // when present so the public repo still configures without them.

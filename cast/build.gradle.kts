@@ -13,7 +13,10 @@ android {
     }
 }
 
-// No Rust crate, unlike :share. CastV2 needs a TLS client socket and the root Cargo.toml
-// forbids network stacks in Rust, so the socket has to be Kotlin either way - and once it
-// is, CastMessage's seven scalar protobuf fields are cheaper to hand-roll in Kotlin than
-// to bridge over JNI. See cast/src/main/java/.../network/CastMessageCodec.kt.
+dependencies {
+    // The wire format, shared verbatim with the TV receiver. Nothing here re-implements it.
+    implementation(project(":cast:protocol"))
+}
+
+// No Rust crate. The protocol module already reaches ML-KEM through :library:e2ee-p2p, and
+// everything left here is Android platform work: MediaProjection, MediaCodec, sockets.

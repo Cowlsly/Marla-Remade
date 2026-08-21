@@ -32,6 +32,8 @@ Every released and planned app is listed here:
 
 Though some apps may have exceptions, generally a 64-bit device running at least Android 12 is required.
 
+**Cast (Android TV receiver)** is the one app that is not for a phone: it runs on an Android TV or Google TV and is what the Cast app mirrors to. It is listed in the table below like any other app, but it will not appear on a phone's launcher and is not installable on one.
+
 **THE RECOMMENDED INSTALLATION METHOD IS MA APP STORE.** It is the most secure way to download MA apps. 
 
 **FOR F-DROID USERS, ADD THIS REPO TO YOUR CLIENT: [https://ma.vayunmathur.com/fdroid](https://ma.vayunmathur.com/fdroid)** (for faster updates and apps unavailable on the main repo)
@@ -44,6 +46,7 @@ Though some apps may have exceptions, generally a 64-bit device running at least
 | **Calendar** | [Homepage](https://ma.vayunmathur.com/apps/calendar) | [![MA Repo](https://img.shields.io/badge/MA_Repo-Download-green?logo=f-droid&style=flat-square)](https://f-droid.org/packages/com.vayunmathur.calendar/) | [![Obtainium](https://img.shields.io/badge/Obtainium-Download-purple?style=flat-square)](https://api.vayunmathur.com/obtainium-link?name=Calendar&packageName=com.vayunmathur.calendar&apk=calendar-release.apk) |
 | **Camera** | [Homepage](https://ma.vayunmathur.com/apps/camera) | [![MA Repo](https://img.shields.io/badge/MA_Repo-Download-green?logo=f-droid&style=flat-square)](https://f-droid.org/packages/com.vayunmathur.camera/) | [![Obtainium](https://img.shields.io/badge/Obtainium-Download-purple?style=flat-square)](https://api.vayunmathur.com/obtainium-link?name=Camera&packageName=com.vayunmathur.camera&apk=camera-release.apk) |
 | **Cast** | [Homepage](https://ma.vayunmathur.com/apps/cast) | In Progress | In Progress |
+| **Cast (Android TV receiver)** | [Homepage](https://ma.vayunmathur.com/apps/cast-tv) | In Progress | In Progress |
 | **Clock** | [Homepage](https://ma.vayunmathur.com/apps/clock) | [![MA Repo](https://img.shields.io/badge/MA_Repo-Download-green?logo=f-droid&style=flat-square)](https://f-droid.org/packages/com.vayunmathur.clock/) | [![Obtainium](https://img.shields.io/badge/Obtainium-Download-purple?style=flat-square)](https://api.vayunmathur.com/obtainium-link?name=Clock&packageName=com.vayunmathur.clock&apk=clock-release.apk) |
 | **Code** | [Homepage](https://ma.vayunmathur.com/apps/code) | [![MA Repo](https://img.shields.io/badge/MA_Repo-Download-green?logo=f-droid&style=flat-square)](https://f-droid.org/packages/com.vayunmathur.code/) | [![Obtainium](https://img.shields.io/badge/Obtainium-Download-purple?style=flat-square)](https://api.vayunmathur.com/obtainium-link?name=Code&packageName=com.vayunmathur.code&apk=code-release.apk) |
 | **Contacts** | [Homepage](https://ma.vayunmathur.com/apps/contacts) | [![MA Repo](https://img.shields.io/badge/MA_Repo-Download-green?logo=f-droid&style=flat-square)](https://f-droid.org/packages/com.vayunmathur.contacts/) | [![Obtainium](https://img.shields.io/badge/Obtainium-Download-purple?style=flat-square)](https://api.vayunmathur.com/obtainium-link?name=Contacts&packageName=com.vayunmathur.contacts&apk=contacts-release.apk) |

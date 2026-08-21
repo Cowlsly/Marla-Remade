@@ -17,41 +17,30 @@ private val LivingRoomTv = CastDevice(
     id = "3f1a9c",
     friendlyName = "Living Room TV",
     host = "192.168.1.42",
-    model = "Chromecast Ultra",
-    statusText = "Ready To Cast",
-    capabilities = 1,
-)
-
-private val WholeHome = CastDevice(
-    id = "c07e15",
-    friendlyName = "Whole home",
-    host = "192.168.1.60",
-    model = "Speaker group",
-    capabilities = 1 shl 5,
+    port = 41_337,
+    protocolVersion = 1,
 )
 
 private val Receivers = listOf(
     LivingRoomTv,
     CastDevice(
         id = "8b2d41",
-        friendlyName = "Kitchen speaker",
+        friendlyName = "Bedroom TV",
         host = "192.168.1.51",
-        model = "Google Nest Mini",
-        capabilities = 4,
+        port = 38_211,
+        protocolVersion = 1,
     ),
-    WholeHome,
 )
 
 /**
  * Store-listing screenshots.
  *
  * Driven through [CastContent], which is stateless by design, so no socket, no mDNS browse and no
- * screen-capture projection has to exist for these to render - none of which Layoutlib could
- * provide.
+ * screen-capture projection has to exist for these to render - none of which Layoutlib could provide.
  *
  * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but is not
- * collected as a screenshot test. They must also be class members rather than top-level functions,
- * and the listing order comes from the function names (Preview1., Preview2.).
+ * collected as a screenshot test. They must also be class members rather than top-level functions, and
+ * the listing order comes from the function names (Preview1., Preview2.).
  */
 class MetadataPreviews {
 
@@ -67,17 +56,18 @@ class MetadataPreviews {
         }
     }
 
+    /** The one screen that is new in MA Cast: six digits read off the TV, typed once per device. */
     @PreviewTest
-    @Preview(name = "2-ready", device = PHONE, showSystemUi = true)
+    @Preview(name = "2-pair", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview2Ready() {
+    fun Preview2Pair() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
                     connectedDevice = LivingRoomTv,
-                    connection = CastConnection.Connected,
-                    volumeLevel = 0.55,
+                    connection = CastConnection.AwaitingCode,
+                    pairAttemptsLeft = 3,
                 ),
                 actions = CastActions.Noop,
             )
@@ -85,17 +75,15 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "3-mirroring", device = PHONE, showSystemUi = true)
+    @Preview(name = "3-ready", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview3Mirroring() {
+    fun Preview3Ready() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
                     connectedDevice = LivingRoomTv,
                     connection = CastConnection.Connected,
-                    mirrorPhase = MirrorPhase.Mirroring,
-                    volumeLevel = 0.7,
                 ),
                 actions = CastActions.Noop,
             )
@@ -103,20 +91,16 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "4-audio-group", device = PHONE, showSystemUi = true)
+    @Preview(name = "4-mirroring", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview4AudioGroup() {
+    fun Preview4Mirroring() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
-                    connectedDevice = WholeHome,
+                    connectedDevice = LivingRoomTv,
                     connection = CastConnection.Connected,
                     mirrorPhase = MirrorPhase.Mirroring,
-                    // A group has no screen, so only audio goes to it - which is also why the
-                    // screen-capture explanation is on this one.
-                    audioOnly = true,
-                    volumeLevel = 0.3,
                 ),
                 actions = CastActions.Noop,
             )

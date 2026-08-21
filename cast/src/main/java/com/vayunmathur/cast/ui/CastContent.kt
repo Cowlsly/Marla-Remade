@@ -30,10 +30,10 @@ import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 
 /**
- * The whole app: pick a device to mirror to.
+ * The whole app: pick a TV, type the code it shows the first time, mirror.
  *
- * Stateless - state in, [CastActions] out - so the store-listing screenshots can render it from
- * a `@Preview`.
+ * Stateless - state in, [CastActions] out - so the store-listing screenshots can render it from a
+ * `@Preview`.
  */
 @Composable
 fun CastContent(
@@ -59,13 +59,14 @@ fun CastContent(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            if (state.connection == CastConnection.Connected ||
+            // The code comes first when it is wanted: nothing else on the screen can be acted on until
+            // it has been typed, so anything above it would just be in the way.
+            if (state.connection == CastConnection.AwaitingCode) {
+                item { CastPairCodeCard(state, actions) }
+            } else if (state.connection == CastConnection.Connected ||
                 state.mirrorPhase != MirrorPhase.Idle
             ) {
                 item { CastMirrorStatusCard(state, actions) }
-                if (state.audioOnly) {
-                    item { ConsentNote() }
-                }
             }
             item { SectionHeader(state, actions) }
             if (state.localNetworkBlocked) {
@@ -85,22 +86,6 @@ fun CastContent(
     }
 }
 
-/**
- * Why an audio-only cast still shows a screen-capture dialog.
- *
- * `AudioPlaybackCaptureConfiguration` requires a projection, so there is no way to capture playing
- * audio without asking to record the screen. Unexplained, it reads as a bug.
- */
-@Composable
-private fun ConsentNote() {
-    Text(
-        stringResource(R.string.cast_mirror_consent_note),
-        style = MaterialTheme.typography.bodySmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(horizontal = 4.dp),
-    )
-}
-
 @Composable
 private fun SectionHeader(state: CastUiState, actions: CastActions) {
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -111,16 +96,14 @@ private fun SectionHeader(state: CastUiState, actions: CastActions) {
                 stringResource(R.string.cast_connecting_to, connected?.friendlyName ?: ""),
                 style = MaterialTheme.typography.titleSmall,
             )
+            // The card above already explains itself, so the header only names the device.
+            CastConnection.AwaitingCode -> Text(
+                stringResource(R.string.cast_pairing_with, connected?.friendlyName ?: ""),
+                style = MaterialTheme.typography.titleSmall,
+            )
             CastConnection.Connected -> Column {
                 Text(
-                    stringResource(
-                        if (state.audioOnly) {
-                            R.string.cast_connected_audio_only
-                        } else {
-                            R.string.cast_connected_to
-                        },
-                        connected?.friendlyName ?: "",
-                    ),
+                    stringResource(R.string.cast_connected_to, connected?.friendlyName ?: ""),
                     style = MaterialTheme.typography.titleSmall,
                 )
                 TextButton(onClick = actions::disconnect) {
@@ -129,7 +112,7 @@ private fun SectionHeader(state: CastUiState, actions: CastActions) {
             }
             CastConnection.Failed -> Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(
-                    state.failure ?: stringResource(R.string.cast_launch_failed),
+                    state.failure ?: stringResource(R.string.cast_protocol_error),
                     style = MaterialTheme.typography.titleSmall,
                     color = MaterialTheme.colorScheme.error,
                 )
@@ -171,8 +154,8 @@ private fun NoDevices(state: CastUiState) {
 }
 
 /**
- * Android 16 refused the mDNS browse. Called out rather than folded into "no devices found",
- * because nothing about the network or the TV will fix it - only a permission will.
+ * Android 16 refused the mDNS browse. Called out rather than folded into "no devices found", because
+ * nothing about the network or the TV will fix it - only a permission will.
  */
 @Composable
 private fun LocalNetworkBlocked(actions: CastActions) {
