@@ -85,13 +85,13 @@ fn simplify_span(pts: &[(i32, i32)], lo: usize, hi: usize, keep: &mut Vec<usize>
     }
 }
 
-fn non_decreasing(v: &[f32]) -> bool {
+fn non_decreasing(v: &[f64]) -> bool {
     v.windows(2).all(|w| w[1] >= w[0])
 }
 
 /// Segment index whose `shape_dist_traveled` span contains `d`, searched from
 /// `from` onwards so the result can never step backwards along the shape.
-fn bracket(shape_dist: &[f32], d: f32, from: usize) -> usize {
+fn bracket(shape_dist: &[f64], d: f64, from: usize) -> usize {
     let last = shape_dist.len() - 2;
     let mut seg = from.min(last);
     while seg < last && shape_dist[seg + 1] < d {
@@ -104,7 +104,7 @@ fn bracket(shape_dist: &[f32], d: f32, from: usize) -> usize {
 /// `shape_dist_traveled` from `stop_times.txt`, used only when the shape carries
 /// it too. Returns `None` when the shape cannot be trusted for this pattern, in
 /// which case the caller stores no shape and the device draws stop-to-stop.
-pub fn fit(shape: &Shape, stops: &[(i32, i32)], stop_dists: Option<&[f32]>) -> Option<FittedShape> {
+pub fn fit(shape: &Shape, stops: &[(i32, i32)], stop_dists: Option<&[f64]>) -> Option<FittedShape> {
     let n = shape.lat_e7.len();
     if n < 2 || stops.len() < 2 {
         return None;
@@ -237,7 +237,7 @@ fn write_zigzag(v: &mut Vec<u8>, x: i64) {
 mod tests {
     use super::*;
 
-    fn shape(points: &[(f64, f64)], dist: Option<&[f32]>) -> Shape {
+    fn shape(points: &[(f64, f64)], dist: Option<&[f64]>) -> Shape {
         Shape {
             lat_e7: points.iter().map(|&(la, _)| (la * 1e7) as i32).collect(),
             lon_e7: points.iter().map(|&(_, lo)| (lo * 1e7) as i32).collect(),

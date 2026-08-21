@@ -331,7 +331,7 @@ impl ShapeBlobs {
     }
 }
 
-/// One `stop_times.txt` row reduced to what the index needs: 20 bytes, against
+/// One `stop_times.txt` row reduced to what the index needs: 24 bytes, against
 /// the ~400 a `Csv` row costs and the 40 an `Option<f64>` dist and `i64`
 /// sequence used to. This is the hot struct — a world corpus has billions.
 struct StopTime {
@@ -340,8 +340,8 @@ struct StopTime {
     arr: u32,
     dep: u32,
     /// `shape_dist_traveled` in the feed's own units, or NaN when absent. An
-    /// ordering key only, so `f32` loses nothing that matters.
-    dist: f32,
+    /// ordering key only; see [`Shape::dist`] for why it is still `f64`.
+    dist: f64,
 }
 
 /// One input GTFS feed (already parsed). Multiple feeds merge into one pack;
@@ -506,7 +506,7 @@ struct BuiltTrip {
     /// references no usable shape.
     shape_key: u32,
     /// `shape_dist_traveled` per pattern stop, when every stop has one.
-    stop_dists: Option<Vec<f32>>,
+    stop_dists: Option<Vec<f64>>,
 }
 
 /// Build the full index blob from one or more GTFS feeds. `pack_name` is stored
@@ -835,7 +835,7 @@ impl IndexBuilder {
                             .get(row, "shape_dist_traveled")
                             .trim()
                             .parse()
-                            .unwrap_or(f32::NAN),
+                            .unwrap_or(f64::NAN),
                     });
                 }
             }
@@ -976,7 +976,7 @@ impl IndexBuilder {
                 stop_dists: sts
                     .iter()
                     .map(|s| (!s.dist.is_nan()).then_some(s.dist))
-                    .collect::<Option<Vec<f32>>>(),
+                    .collect::<Option<Vec<f64>>>(),
             });
             raptor_routes[route_idx].trips.push(built_trips.len() - 1);
         }
@@ -1520,12 +1520,12 @@ mod tests {
         Reader, SEC_FEED_MOTIS_PREFIX, SEC_SHAPE_COORDS, SEC_STOP_GTFS_ID,
     };
 
-    /// 20 bytes per `stop_times.txt` row is the whole point of the streaming
+    /// 24 bytes per `stop_times.txt` row is the whole point of the streaming
     /// loader — a world corpus has billions of them, and the old `Csv` +
     /// `Option<f64>` representation cost ~400 and 40.
     #[test]
-    fn a_stop_time_stays_twenty_bytes() {
-        assert_eq!(std::mem::size_of::<StopTime>(), 20);
+    fn a_stop_time_stays_twentyfour_bytes() {
+        assert_eq!(std::mem::size_of::<StopTime>(), 24);
     }
 
     fn agency(tz: &str) -> Csv {
@@ -1533,7 +1533,7 @@ mod tests {
     }
 
     /// `(shape_id, points as (lat, lon), optional shape_dist_traveled)`.
-    type ShapeSpec<'a> = (&'a str, Vec<(f64, f64)>, Option<Vec<f32>>);
+    type ShapeSpec<'a> = (&'a str, Vec<(f64, f64)>, Option<Vec<f64>>);
 
     fn shape_map(entries: Vec<ShapeSpec>) -> HashMap<String, Shape> {
         entries

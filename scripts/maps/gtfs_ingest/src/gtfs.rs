@@ -10,6 +10,7 @@
 //! they are the two largest files in a feed, and a `Csv` would hold every
 //! coordinate and every time as a `String`.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
@@ -147,10 +148,15 @@ pub struct Shape {
     pub lat_e7: Vec<i32>,
     pub lon_e7: Vec<i32>,
     /// `shape_dist_traveled`, present only when *every* point carries one.
-    /// Feed-defined units (km, mi, ft, ...): only ever compared, never converted,
-    /// so `f32`'s ~7 significant digits are ample and halve what a big feed's
-    /// shapes cost to hold.
-    pub dist: Option<Vec<f32>>,
+    /// Feed-defined units (km, mi, ft, ...): only ever compared, never converted.
+    ///
+    /// Kept `f64` deliberately. It is only an ordering key, so `f32` looks safe —
+    /// but real feeds give it 8+ significant digits (`advance_transit` has metres
+    /// to 8 decimal places), and at that width `f32` collapses points a few
+    /// millimetres apart, flipping which segment a stop brackets onto. Measured on
+    /// 100 feeds that moved the fitted polyline of 0.3% of routes for a 4-byte
+    /// saving per row.
+    pub dist: Option<Vec<f64>>,
 }
 
 /// Split one CSV line into fields, honouring quotes and `""` escapes. Unlike
@@ -199,8 +205,9 @@ pub struct StopTimeRow<'a> {
     /// `shape_dist_traveled` in the feed's own units, an ordering key only, or
     /// NaN when the row carries none. A sentinel rather than an `Option` because
     /// this is the field that decides how big a `stop_times` row is, and there
-    /// are billions of them.
-    pub dist: f32,
+    /// are billions of them: `Option<f64>` would cost 16 bytes and push the row
+    /// from 24 to 32. See [`Shape::dist`] for why it is not an `f32`.
+    pub dist: f64,
 }
 
 /// Stream `dir/stop_times.txt`, calling `f` once per row that carries a trip id
@@ -225,8 +232,10 @@ pub fn stream_stop_times(dir: &Path, mut f: impl FnMut(StopTimeRow)) -> Option<(
     let header = split_line(header_line.trim_end_matches(['\n', '\r']));
     // Every column is optional, exactly as [`Csv::get`] treats a missing one: a
     // feed with no `stop_id` column yields no usable rows rather than an error.
+    // `rposition`, because `parse_csv` builds a map and so a repeated column name
+    // resolves to its last occurrence.
     let col = |name: &str| {
-        header.iter().position(|h| h.trim().trim_start_matches('\u{feff}') == name)
+        header.iter().rposition(|h| h.trim().trim_start_matches('\u{feff}') == name)
     };
     let (c_trip, c_stop) = (col("trip_id"), col("stop_id"));
     let (c_seq, c_arr, c_dep) =
@@ -238,37 +247,59 @@ pub fn stream_stop_times(dir: &Path, mut f: impl FnMut(StopTimeRow)) -> Option<(
         if reader.read_until(b'\n', &mut raw).ok()? == 0 {
             break;
         }
+        // A quoted field may contain a newline, which `read_until` splits in two.
+        // An odd number of quotes means the record is unfinished, so pull in more
+        // lines: `parse_csv` handles this by construction and the two paths have
+        // to agree, or one desyncs and mangles every row after it. (`"` is 0x22,
+        // which never occurs inside a multi-byte UTF-8 sequence.)
+        while raw.iter().filter(|&&b| b == b'"').count() % 2 == 1 {
+            if reader.read_until(b'\n', &mut raw).ok()? == 0 {
+                break;
+            }
+        }
         let line = String::from_utf8_lossy(&raw);
         let line = line.trim_end_matches(['\n', '\r']);
         if line.is_empty() {
             continue;
         }
-        let fields = split_line(line);
-        let get = |i: Option<usize>| i.and_then(|i| fields.get(i)).map(|s| s.trim()).unwrap_or("");
-        let trip_id = get(c_trip);
+        // `parse_csv` swallows every `\r` wherever it appears, so a stray one
+        // inside a field would leave the two paths with different ids — and an id
+        // that does not match `trips.txt` silently drops the trip.
+        let line: Cow<str> =
+            if line.contains('\r') { Cow::Owned(line.replace('\r', "")) } else { line.into() };
+        let fields = split_line(&line);
+        // `trip_id` and `stop_stop` are joined to `trips.txt` and `stops.txt`,
+        // whose ids come out of a `Csv` **untrimmed** — so trimming here would
+        // silently fail to match a feed that pads its ids, dropping every trip in
+        // it. Only the numeric fields are trimmed, exactly as the `Csv` path
+        // trims them at the point of parsing.
+        let field = |i: Option<usize>| {
+            i.and_then(|i| fields.get(i)).map(|s| s.as_str()).unwrap_or("")
+        };
+        let trip_id = field(c_trip);
         if trip_id.is_empty() {
             continue;
         }
-        let Some((arr, dep)) = stop_time_pair(get(c_arr), get(c_dep)) else {
+        let Some((arr, dep)) = stop_time_pair(field(c_arr), field(c_dep)) else {
             continue;
         };
         f(StopTimeRow {
             trip_id,
-            stop_id: get(c_stop),
-            seq: get(c_seq).parse().unwrap_or(0),
+            stop_id: field(c_stop),
+            seq: field(c_seq).trim().parse().unwrap_or(0),
             arr,
             dep,
-            dist: get(c_dist).parse().unwrap_or(f32::NAN),
+            dist: field(c_dist).trim().parse().unwrap_or(f64::NAN),
         });
     }
     Some(())
 }
 
 /// A `shapes.txt` row before ordering: `(sequence, lat_e7, lon_e7, dist)`, where
-/// `dist` is NaN when the row has none. 16 bytes rather than the 32 an
+/// `dist` is NaN when the row has none. 24 bytes rather than the 32 an
 /// `(i64, i32, i32, Option<f64>)` needs — this intermediate has exactly the
 /// defect the streaming loader exists to avoid.
-type RawShapePoint = (u32, i32, i32, f32);
+type RawShapePoint = (u32, i32, i32, f64);
 
 /// Stream `dir/shapes.txt` into one polyline per `shape_id`. Returns `None` when
 /// the file is absent (it is optional) or carries no usable columns.
@@ -314,7 +345,7 @@ pub fn read_shapes(dir: &Path) -> Option<HashMap<String, Shape>> {
             Err(_) => continue,
         };
         let seq: u32 = get(c_seq).parse().unwrap_or(0);
-        let dist = c_dist.map_or(f32::NAN, |i| get(i).parse().unwrap_or(f32::NAN));
+        let dist = c_dist.map_or(f64::NAN, |i| get(i).parse().unwrap_or(f64::NAN));
         acc.entry(id.to_string()).or_default().push((
             seq,
             (lat * 1e7) as i32,
@@ -350,8 +381,8 @@ mod tests {
     /// The `shapes.txt` intermediate is one of the two structures a world build
     /// has billions of, so its size is part of the contract, not an accident.
     #[test]
-    fn a_raw_shape_point_stays_sixteen_bytes() {
-        assert_eq!(std::mem::size_of::<RawShapePoint>(), 16);
+    fn a_raw_shape_point_stays_twentyfour_bytes() {
+        assert_eq!(std::mem::size_of::<RawShapePoint>(), 24);
     }
 
     /// The streaming loader must agree with the [`Csv`] path row for row: the
@@ -362,15 +393,22 @@ mod tests {
         // A BOM, a quoted comma, a blank line, each arrival/departure fallback,
         // an unparseable sequence, a row with no usable time, a row with no trip
         // id, and a row that simply stops early.
-        let text = "\u{feff}trip_id,stop_id,stop_sequence,arrival_time,departure_time,shape_dist_traveled\n\
-             T1,S1,1,08:00:00,08:00:05,0\n\
-             T1,\"S,2\",2,08:10:00,,1.5\n\
+        // A BOM, a quoted comma, a blank line, each arrival/departure fallback,
+        // an unparseable sequence, a row with no usable time, a row with no trip
+        // id, a row that simply stops early, padded ids, a quoted field with an
+        // embedded newline, and CRLF terminators.
+        let text = "\u{feff}trip_id,stop_id,stop_sequence,arrival_time,departure_time,shape_dist_traveled,stop_headsign\n\
+             T1,S1,1,08:00:00,08:00:05,0,\n\
+             T1,\"S,2\",2,08:10:00,,1.5,\n\
              \n\
-             T1,S3,3,,08:20:00,\n\
-             ,S4,4,08:30:00,08:30:00,9\n\
-             T2,S5,notanumber,25:10:00,25:10:00,\n\
-             T2,S6,6,,,7\n\
-             T2,S7\n";
+             T1,S3,3,,08:20:00,,\n\
+             ,S4,4,08:30:00,08:30:00,9,\n\
+             T2,S5,notanumber,25:10:00,25:10:00,,\n\
+             T2,S6,6,,,7,\n\
+             T2,S7\n\
+             T3 , S8 , 1 , 09:00:00 , 09:00:00 , 2 ,\n\
+             T4,S9,1,10:00:00,10:00:00,,\"two\nlines\"\n\
+             T4,S10,2,10:05:00,10:05:00,,plain\r\n";
 
         let dir = std::env::temp_dir()
             .join(format!("gtfs_ingest_stream_{}", std::process::id()));
@@ -379,7 +417,7 @@ mod tests {
 
         // NaN is the "no shape_dist_traveled" sentinel and compares unequal to
         // itself, so rows are compared by the dist's bits.
-        type Row = (String, String, u32, u32, u32, u32);
+        type Row = (String, String, u32, u32, u32, u64);
         let mut streamed: Vec<Row> = Vec::new();
         stream_stop_times(&dir, |r| {
             streamed.push((
@@ -416,7 +454,7 @@ mod tests {
                     csv.get(row, "shape_dist_traveled")
                         .trim()
                         .parse()
-                        .unwrap_or(f32::NAN)
+                        .unwrap_or(f64::NAN)
                         .to_bits(),
                 ))
             })
@@ -427,11 +465,23 @@ mod tests {
         // paths' agreement: T1/S1 keeps both times, "S,2" survives the quoted
         // comma with departure falling back to arrival, S3 arrives at its
         // departure, S4 has no trip, S5's sequence is unusable and its time is
-        // past midnight, and S6/S7 carry no time at all.
-        assert_eq!(streamed.len(), 4, "{streamed:?}");
-        assert_eq!(streamed[0], ("T1".into(), "S1".into(), 1, 28800, 28805, 0f32.to_bits()));
-        assert_eq!(streamed[1], ("T1".into(), "S,2".into(), 2, 29400, 29400, 1.5f32.to_bits()));
+        // past midnight, S6/S7 carry no time at all, T3's padded ids stay padded
+        // because that is how `trips.txt` and `stops.txt` will hold them, and T4's
+        // two rows survive a headsign that contains a newline.
+        assert_eq!(streamed.len(), 7, "{streamed:?}");
+        assert_eq!(streamed[0], ("T1".into(), "S1".into(), 1, 28800, 28805, 0f64.to_bits()));
+        assert_eq!(streamed[1], ("T1".into(), "S,2".into(), 2, 29400, 29400, 1.5f64.to_bits()));
         assert_eq!(streamed[2].3, 30000, "an absent arrival takes the departure");
-        assert_eq!(streamed[3], ("T2".into(), "S5".into(), 0, 90600, 90600, f32::NAN.to_bits()));
+        assert_eq!(streamed[3], ("T2".into(), "S5".into(), 0, 90600, 90600, f64::NAN.to_bits()));
+        assert_eq!(
+            streamed[4],
+            ("T3 ".into(), " S8 ".into(), 1, 32400, 32400, 2f64.to_bits()),
+            "ids must not be trimmed, or a feed that pads them loses every trip"
+        );
+        assert_eq!(
+            (streamed[5].1.as_str(), streamed[6].1.as_str()),
+            ("S9", "S10"),
+            "an embedded newline must not desync the rows after it"
+        );
     }
 }
