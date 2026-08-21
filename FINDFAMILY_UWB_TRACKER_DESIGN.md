@@ -5,7 +5,9 @@ tracker to its owner, and a global crowd-finding network so any phone running
 FindFamily can anonymously report a tracker's location back to its owner —
 plus phone-native UWB precision finding for the last few meters.
 
-Hardware target: **ESP32 / nRF52 MCU + Qorvo DW3000** (FiRa-capable UWB).
+Hardware target: **nRF52 MCU + Qorvo DW3000** (FiRa-capable UWB). The reference
+build is a **Qorvo DWM3001CDK** (nRF52833 + DW3110); firmware lives in
+`firmware/findfamily-tracker/`.
 
 ---
 
@@ -29,9 +31,11 @@ Server (`~/Documents/code/location_share_server`):
 - `src/handlers/findfamily.rs` — same opcodes 0x06–0x0B (TRACKER_REGISTER / RESOLVE / REPORT_PUT / REPORT_GET) with HMAC epoch-id, lazy TTL purge, unit tests.
 - `src/state.rs`, `src/main.rs` — `ff_trackers` + `ff_reports` maps.
 
-Remaining seams (need hardware/firmware): DW3110 FiRa responder + BLE GATT
-firmware; phone↔tracker UWB ranging (`TrackerUwbGatt.startRanging`); DULT
-anti-stalking detector.
+Remaining seams: DULT anti-stalking detector; and UWB ranging end to end — the
+phone side is written (`TrackerUwbGatt.startRanging`) and the firmware side
+(`src/tracker_uwb.c`) is written but **staged behind `CONFIG_FF_TRACKER_UWB`
+(default `n`) and never compiled**, because the licensed Qorvo DW3xxx driver is
+not vendored. BLE crowd-finding firmware is implemented and flashable.
 
 ---
 
@@ -40,7 +44,7 @@ anti-stalking detector.
 | Area | Decision | Rationale |
 |---|---|---|
 | Tracker identity | Model as `User(kind = TRACKER)` | Reuses map pins, Room DB, the E2E relay, and `processIncomingLocations` with near-zero UI churn — the whole app already keys on `userid`. |
-| Crowd-finding crypto | **Option B** — rotating per-epoch EC keys (AirTag-style) | Structurally prevents the server from building a movement history of any tracker; the correct anti-stalking posture for a network where *strangers* report your tracker. |
+| Crowd-finding crypto | **Rotating-hash + server-served ML-KEM key** | The originally locked "Option B" (rotating per-epoch EC keys, §5 below) was **not** what shipped. Option B hides the tracker from the server structurally; what shipped lets the server link a rotating id → tracker, which is a real weakening, accepted in exchange for reusing the existing PQC identity plumbing wholesale instead of adding an X25519 path to the app, the server and the firmware. Revisit if the threat model tightens. |
 | UWB | Phone-native **FiRa** ranging; **Android-only** OOB for v1 | The phone's UWB radio speaks FiRa; Android interop only needs matched session params exchanged out-of-band (no Apple MFi/NI needed yet). |
 | UWB hardware | **Qorvo DW3110** (DWM3000 module, built on DW3110) + own MCU + **Qorvo FiRa stack** | DW3110 is 802.15.4z with STS, channels 5 & 9 → real FiRa sessions that range with phones. RYUW122 as a *sealed module* runs proprietary AT-command ranging and can't interop with phones. |
 | Provisioning | **BLE GATT** | Same radio as the crowd-finding beacon; wireless binding. |
@@ -78,12 +82,19 @@ anti-stalking detector.
 To interop with an **iPhone**, an accessory must implement Apple's Nearby
 Interaction Accessory Protocol (the `UwbAccessoryProtocol.kt` stub) and, for a
 product, MFi. To interop with **Android**, the phone (FiRa **controller /
-initiator**) simply picks all session params (address, channel, preamble,
-session id, STS key) and hands them to the tracker (FiRa **controlee /
-responder**) over any side channel. FindFamily already generates exactly these
-params in `UwbController.openController()` and already exchanges them for
-phone↔phone over its WebSocket. For the tracker we deliver them over **BLE
-GATT** instead. This is meaningfully less work than a full MFi accessory.
+initiator**) picks the session params and hands them to the tracker (FiRa
+**controlee / responder**) over any side channel. FindFamily already generates
+exactly these params in `UwbController.openController()` and already exchanges
+them for phone↔phone over its WebSocket. For the tracker we deliver them over
+**BLE GATT** instead. This is meaningfully less work than a full MFi accessory.
+
+Two of those params are deliberately **not** handed over: the **STS key** and the
+tracker's **UWB address**. The GATT link to a tracker is unbonded and
+unencrypted, so a stranger standing nearby could write their own key and range
+against someone else's tracker. Both sides instead derive them from the bind-time
+beacon secret (`TrackerUwbKeys.kt` on the phone, `src/tracker_sts.c` in the
+firmware), and the per-find write carries only address, session id, channel and
+preamble — 8 bytes, useless without the secret.
 
 ---
 
@@ -117,10 +128,15 @@ renders through the existing `processIncomingLocations` path unchanged.
    - PQC keypair — reuse `Networking.generatePqcKeyPair()`,
    - 32-byte `beacon_secret`,
    - a long-term **UWB STS/session key** derived from `beacon_secret`.
-4. Phone writes over a GATT **provisioning characteristic**: `userid`,
-   `beacon_secret`, epoch config, UWB base params (channel/preamble + derived
-   STS key).
-5. Phone persists `User(kind = TRACKER)` + private bundle + secret.
+4. Phone writes over a GATT **provisioning characteristic** a
+   `[8B userid BE][32B beacon_secret][8B unix_seconds BE]` blob. The trailing
+   timestamp is the tracker's only source of wall-clock time — it has no
+   battery-backed RTC, and epoch ids are a function of `unix_seconds / 900`, so
+   without it the tracker beacons ids outside the owner's search window and
+   resolves to nothing. No UWB params are sent: channel and preamble come with each
+   find, and the STS key and UWB address are derived (§2).
+5. Phone persists `User(kind = TRACKER)` + private bundle + secret + the tracker's
+   BLE address (needed to re-open GATT for a UWB find).
 6. **Ownership = possession of the private key + secret.** Unbind requires the
    secret (anti-theft lock), so a found tracker can't be silently re-bound.
 
@@ -129,7 +145,15 @@ heavy crypto stays on phones.
 
 ---
 
-## 5. Crowd finding (goal b) — Option B, end to end
+## 5. Crowd finding (goal b) — as shipped
+
+> The per-epoch EC scheme described in this section is the **original Option B
+> design and is not what shipped**. What shipped is the rotating-hash scheme in
+> `TrackerProtocol.kt`: `epochId = HMAC-SHA256(beacon_secret, "fftrk1" ||
+> u64_be(epoch))[..16]`, with the location sealed to the tracker's ML-KEM public
+> bundle which the server serves to finders. This section is kept because the
+> privacy properties it describes are the ones to aim for if the scheme is
+> revisited (see §1).
 
 ### 5.1 Beacon (tracker)
 Every epoch (~15 min):
@@ -168,6 +192,22 @@ an owner.
 
 ---
 
+### 5.5 On-air format (as shipped)
+The advertisement carries `[16B epochId][1B battery%]` as **service data** under the
+128-bit beacon service UUID. That does **not** fit a legacy advertisement:
+`Service Data — 128-bit UUID` costs `1B length + 1B type + 16B UUID = 18B`, so with
+the 17-byte payload it is **35 bytes against the 31-byte legacy limit**. The full
+16-byte UUID has to be on air because the phone reads it back via
+`ScanRecord.getServiceData(ParcelUuid)`, so no legacy encoding works. The beacon is
+therefore a **BLE 5 extended advertisement** (secondary PHY 1M, connectable so the
+owner can still write UWB session params), and finder phones must scan with
+`ScanSettings.Builder().setLegacy(false)`.
+
+Pairing mode stays **legacy** — flags + a 128-bit service UUID is only 21 bytes — so
+discovery of an unprovisioned tracker works on default scan settings.
+
+---
+
 ## 6. UWB precision finding (owner, FiRa OOB)
 
 Owner-only, once near the tracker:
@@ -195,10 +235,15 @@ traveling with you"), aligned with the cross-industry DULT specification.
 
 ## 8. Firmware responsibilities (DW3110 + own MCU)
 
+Implemented in `firmware/findfamily-tracker/` (Zephyr / nRF Connect SDK):
+
 - BLE GATT server: provisioning characteristic + per-find UWB-session
-  characteristic.
-- BLE beacon: rotating `pub_epoch` per epoch (HKDF + EC mul).
-- Qorvo FiRa **responder / controlee** session on the DW3000.
+  characteristic (`src/tracker_ble.c`).
+- BLE beacon: rotating epoch id per epoch, HMAC-SHA256 via PSA Crypto so it is
+  byte-identical to the Kotlin and Rust sides (`src/tracker_epoch.c`).
+- NVS persistence of the provisioning blob and time base (`src/tracker_store.c`).
+- Qorvo FiRa **responder / controlee** session on the DW3000 — written but staged
+  behind `CONFIG_FF_TRACKER_UWB` (default `n`) (`src/tracker_uwb.c`).
 - **Critical-path risk**: a reliable FiRa responder with solid phone interop
   (STS / timing) is a multi-week embedded effort, and Qorvo stack access
   typically needs registration/NDA. The Android app-side work is comparatively

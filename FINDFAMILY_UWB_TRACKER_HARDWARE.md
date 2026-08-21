@@ -1,6 +1,17 @@
 # FindFamily Custom UWB Tracker — Hardware
 
-Companion to `FINDFAMILY_UWB_TRACKER_DESIGN.md`. Physical design for the DIY
+Companion to `FINDFAMILY_UWB_TRACKER_DESIGN.md`.
+
+> **The bench target is a Qorvo DWM3001CDK, not the custom board below.** The DWM3001C
+> module pairs a DW3110 with an **nRF52833**, whereas the BOM and pinmap in this document
+> specify a bare **nRF52840**. The two differ in ways that matter if you cross-read them:
+> the nRF52833 has 512 kB flash / 128 kB RAM against the nRF52840's 1 MB / 256 kB, and it
+> has **no USB peripheral**, so USB-DFU (§3 J1, §4) does not exist on the dev kit — it is
+> flashed over the on-board J-Link. Everything in §5 (the firmware contract) applies to
+> both; §1–§4 and §6–§10 describe the eventual custom board only. Firmware lives in
+> `firmware/findfamily-tracker/`.
+
+Physical design for the DIY
 tracker: **bare Qorvo DW3110 (UWB) + bare Nordic nRF52840 (MCU/BLE)**, small
 **LiPo + USB-C** charging, with a **piezo buzzer, pairing/mute button, and
 accelerometer**. Bare-chip path chosen deliberately — we own all RF and
@@ -8,7 +19,7 @@ regulatory work (see §7, §8).
 
 The firmware contract (BLE UUIDs, beacon/provisioning/UWB byte formats, epoch-id
 derivation) mirrors the app exactly — see `findfamily/.../tracker/TrackerBle.kt`,
-`TrackerProtocol.kt`, and `TrackerUwbGatt.kt`.
+`TrackerProtocol.kt`, `TrackerUwbKeys.kt`, and `TrackerUwbGatt.kt`.
 
 ---
 
@@ -139,18 +150,42 @@ service-data payload:
 `epochId = HMAC-SHA256(secret, "fftrk1" || u64_be(epoch))[..16]`,
 `epoch = unix_seconds / 900` (15-min rotation). Matches `TrackerProtocol`.
 
-**BLE binding (GATT)** — unprovisioned service `…2f01…`, characteristics:
+This must be sent as a **BLE 5 extended advertisement**: the AD structure is
+`1B length + 1B type + 16B UUID + 17B payload = 35 bytes`, past the 31-byte legacy
+limit, and the full UUID cannot be shortened because the phone looks the service data up
+by it. Pairing mode below stays legacy (21 bytes) so an unprovisioned tracker is
+discoverable with default scan settings. See `src/tracker_ble.c`.
+
+**BLE binding (GATT)** — service `…2f01…` (advertised only while unprovisioned;
+the characteristics stay registered for the device's life so the owner can write UWB
+params to a bound tracker), characteristics:
 - `…2f02…` (write): provisioning blob
   ```
-  [8B trackerUserId BE][32B beaconSecret]
+  [8B trackerUserId BE][32B beaconSecret][8B unixSeconds BE]
   ```
+  48 bytes; firmware also accepts the 40-byte form without the timestamp. The
+  timestamp is the tracker's only source of wall-clock time — there is no
+  battery-backed RTC, and without it `unix_seconds / 900` is unknowable, so the
+  tracker would beacon ids outside the owner's search window. Firmware keeps time as
+  `unix_at_provision + k_uptime_get()` and re-persists it once per epoch so a reset
+  costs one epoch of drift rather than the whole time base.
+
   On success: persist, stop advertising the unprovisioned service, start the
   rotating beacon.
 - `…2f03…` (write/notify): per-find FiRa params
   ```
   [2B phoneAddr][4B sessionId BE][1B channel][1B preamble]
   ```
-  STS/session key is derived on both ends from `beaconSecret` (not sent OTA).
+  The STS key **and the tracker's own 2-byte UWB address** are derived on both ends
+  from `beaconSecret` via HKDF-SHA256 and are not sent OTA — the GATT link is unbonded,
+  so anything on it could come from a stranger nearby:
+  ```
+  stsKey  = HKDF-SHA256(beaconSecret, info = "com.vayunmathur.findfamily/uwb-sts"  || u32_be(sessionId))[..8]
+  uwbAddr = HKDF-SHA256(beaconSecret, info = "com.vayunmathur.findfamily/uwb-addr")[..2]
+  ```
+  (salt = 32 zero bytes; reserved `0x0000`/`0xFFFF` addresses have their low byte set to
+  `0x01`.) Mirrored by `TrackerUwbKeys.kt` and `src/tracker_sts.c`; fixed vectors live in
+  `TrackerUwbKeysTest.kt`.
 
 **UWB (precision find)** — DW3110 runs a FiRa **responder/controlee** session
 with those params; phone is controller/initiator. See `TrackerUwbGatt.kt`.
