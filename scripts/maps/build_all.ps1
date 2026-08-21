@@ -297,7 +297,7 @@ For a complete v5 with every layer, run build_all.sh under WSL.
             foreach ($spec in @(
                 @{ Layer = "safety";        Tile = $SafetyTile;       Bin = "tile_points";   Min = 10; Max = 16; Extra = @() },
                 @{ Layer = "maxspeed";      Tile = $MaxspeedTile;     Bin = "tile_lines";    Min = 12; Max = 16; Extra = @() },
-                @{ Layer = "transit_lines"; Tile = $TransitLinesTile; Bin = "tile_lines";    Min = 9;  Max = 16; Extra = @() },
+                @{ Layer = "transit_lines"; Tile = $TransitLinesTile; Bin = "tile_lines";    Min = 8;  Max = 16; Extra = @() },
                 # Admin polygons must stay whole enough to reassemble for the
                 # dimming mask, so the per-tile byte budget is effectively lifted --
                 # the same reason the legacy path passed --no-tile-size-limit.
@@ -328,7 +328,7 @@ For a complete v5 with every layer, run build_all.sh under WSL.
             Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
                 "--bin", "tile_points", "--",
                 "--geojson", $stopsGeo, "--out", $StopsTile, "--layer", "transit_stops",
-                "--minzoom", "11", "--maxzoom", "14")
+                "--minzoom", "10", "--maxzoom", "14")
         } else {
             Write-Warning "no GTFS manifest available; skipping the transit_stops layer"
         }

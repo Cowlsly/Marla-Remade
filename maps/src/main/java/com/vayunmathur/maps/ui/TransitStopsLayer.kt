@@ -55,7 +55,7 @@ private val TRANSIT_FERRY_COLOR = Color(0xFF0277BD)
 
 /**
  * Draw the `transit_stops` source-layer: a [CircleLayer] dot with a [SymbolLayer]
- * glyph on top, from z11 up. Takes the SAME shared [VectorSource] the admin and
+ * glyph on top, from z10 up. Takes the SAME shared [VectorSource] the admin and
  * POI overlays use — a second source on the same PMTiles triggers a directory
  * parse error (see the note at [MaPoisLayer]).
  *
@@ -85,10 +85,13 @@ fun TransitStopsLayer(source: VectorSource) {
         TRANSIT_STOP_DOT_LAYER_ID,
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
-        minZoom = 11f,
+        minZoom = 10f,
         color = dotColor,
         radius = interpolate(
             linear(), zoom(),
+            // z10 is the archive floor; without a stop here the ramp clamps to its
+            // z12 value and the dots read far too heavy two zooms out.
+            10 to const(2.5.dp),
             12 to const(4.dp),
             15 to const(6.dp),
             18 to const(8.dp),
@@ -101,10 +104,11 @@ fun TransitStopsLayer(source: VectorSource) {
         TRANSIT_STOP_LAYER_ID,
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
-        minZoom = 11f,
+        minZoom = 10f,
         iconImage = image(marker),
         iconSize = interpolate(
             linear(), zoom(),
+            10 to const(0.22f),
             12 to const(0.35f),
             15 to const(0.5f),
             18 to const(0.65f),

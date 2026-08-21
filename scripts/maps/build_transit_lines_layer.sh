@@ -43,7 +43,7 @@ set -euo pipefail
 #   --pbf FILE     Input OSM .pbf (required)
 #   --out FILE     Output .pmtiles (default: transit_lines.pmtiles)
 #   --bbox BOX     Optional "minlon,minlat,maxlon,maxlat" metro extract (dry runs)
-#   --minzoom N    tiler minzoom (default 9)
+#   --minzoom N    tiler minzoom (default 8)
 #   --maxzoom N    tiler maxzoom (default 16)
 #   --engine E     rust|legacy (default rust)
 #   --geojson-out F  also keep the intermediate geojsonseq here (for the
@@ -58,7 +58,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
 OUT="transit_lines.pmtiles"
 BBOX=""
-MINZOOM=9
+MINZOOM=8
 MAXZOOM=16
 ENGINE="rust"
 GEOJSON_OUT=""

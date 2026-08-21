@@ -22,13 +22,13 @@ set -euo pipefail
 # Usage:
 #   ./build_transit_stops_layer.sh --manifest world_transit_work/feeds.manifest
 #   ./build_transit_stops_layer.sh --manifest m.txt --out transit_stops.pmtiles \
-#       --minzoom 11 --maxzoom 14
+#       --minzoom 10 --maxzoom 14
 #
 # Options:
 #   --manifest FILE   feeds.manifest: `name=dir[=motis_prefix]` per line (required)
 #   --out FILE        output .pmtiles (default transit_stops.pmtiles)
 #   --workdir DIR     scratch dir for the geojsonseq (default ./transit_stops_work)
-#   --minzoom N       default 11 (stops are denser than ma_pois, sparser than roads)
+#   --minzoom N       default 10 (stops are denser than ma_pois, sparser than roads)
 #   --maxzoom N       default 14
 #   --keep-work       keep the intermediate geojsonseq
 #
@@ -37,7 +37,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MANIFEST=""
 OUT="transit_stops.pmtiles"
 WORK="./transit_stops_work"
-MINZOOM=11
+MINZOOM=10
 MAXZOOM=14
 KEEP_WORK=0
 while [[ $# -gt 0 ]]; do

@@ -19,7 +19,7 @@
 # Usage:
 #   .\build_transit_stops_layer.ps1 -Manifest ca_transit_work\feeds.manifest
 #   .\build_transit_stops_layer.ps1 -Manifest m.txt -Out transit_stops.pmtiles `
-#       -MinZoom 11 -MaxZoom 14
+#       -MinZoom 10 -MaxZoom 14
 #
 # Requires: cargo (https://rustup.rs). Nothing else.
 [CmdletBinding()]
@@ -30,8 +30,8 @@ param(
     [string]$Out = "transit_stops.pmtiles",
     # Scratch dir for the intermediate geojsonseq.
     [string]$Work = "transit_stops_work",
-    # 11 because stops are denser than ma_pois (12) but far sparser than roads.
-    [int]$MinZoom = 11,
+    # 10 because stops are denser than ma_pois (12) but far sparser than roads.
+    [int]$MinZoom = 10,
     [int]$MaxZoom = 14,
     # Keep the intermediate geojsonseq for inspection.
     [switch]$KeepWork
