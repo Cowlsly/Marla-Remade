@@ -18,6 +18,7 @@ import com.vayunmathur.cast.R
 import com.vayunmathur.cast.platform.CastActions
 import com.vayunmathur.cast.platform.CastConnection
 import com.vayunmathur.cast.platform.CastUiState
+import com.vayunmathur.cast.platform.MirrorPhase
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -58,6 +59,14 @@ fun CastContent(
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            if (state.connection == CastConnection.Connected ||
+                state.mirrorPhase != MirrorPhase.Idle
+            ) {
+                item { CastMirrorStatusCard(state, actions) }
+                if (state.audioOnly) {
+                    item { ConsentNote() }
+                }
+            }
             item { SectionHeader(state, actions) }
             if (state.localNetworkBlocked) {
                 item { LocalNetworkBlocked(actions) }
@@ -74,6 +83,22 @@ fun CastContent(
             }
         }
     }
+}
+
+/**
+ * Why an audio-only cast still shows a screen-capture dialog.
+ *
+ * `AudioPlaybackCaptureConfiguration` requires a projection, so there is no way to capture playing
+ * audio without asking to record the screen. Unexplained, it reads as a bug.
+ */
+@Composable
+private fun ConsentNote() {
+    Text(
+        stringResource(R.string.cast_mirror_consent_note),
+        style = MaterialTheme.typography.bodySmall,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
 }
 
 @Composable

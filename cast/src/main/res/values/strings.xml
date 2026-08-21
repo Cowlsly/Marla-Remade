@@ -24,12 +24,41 @@
     <string name="cast_launch_failed">Could not start mirroring on this device</string>
     <string name="cast_retry">Try again</string>
 
+    <!-- Mirroring -->
+    <string name="cast_start_mirroring">Mirror my screen</string>
+    <string name="cast_stop_mirroring">Stop mirroring</string>
+    <string name="cast_status_ready">Ready to mirror</string>
+    <string name="cast_status_ready_audio">Ready to cast audio</string>
+    <string name="cast_status_starting">Starting.</string>
+    <string name="cast_status_mirroring">Mirroring your screen</string>
+    <string name="cast_status_casting_audio">Casting audio</string>
+    <string name="cast_status_failed">Mirroring stopped</string>
+    <!-- An audio cast still shows a screen-capture dialog, because that is the only way Android
+         grants playback capture. Said plainly, or it looks like a bug. -->
+    <string name="cast_mirror_consent_note">Android asks to record the screen even for audio, because that is how it grants permission to capture what is playing.</string>
+    <string name="cast_mirror_audio_degraded">Audio is unavailable, so only the picture is being sent. Apps that block audio capture, and devices without an Opus encoder, both cause this.</string>
+    <string name="cast_mirror_video_degraded">Video is unavailable on this device, so only audio is being sent.</string>
+    <string name="cast_mirror_unavailable">This device cannot capture the screen</string>
+    <string name="cast_mirror_no_streams">The device would not accept anything we can send</string>
+    <string name="cast_mirror_negotiation_failed">The device refused to start a stream</string>
+    <string name="cast_mirror_udp_failed">Could not reach the device to send video</string>
+    <string name="cast_mirror_no_encoder">This device has no usable screen encoder</string>
+    <string name="cast_mirror_no_audio">Audio could not be captured, and this device can only play audio</string>
+
+    <!-- Quick Settings tile -->
+    <string name="cast_tile_label">Mirror screen</string>
+    <string name="cast_tile_no_target">Choose a device first</string>
+    <string name="cast_tile_starting">Starting.</string>
+    <string name="cast_tile_mirroring">Mirroring</string>
+
     <!-- Foreground service -->
     <string name="cast_notification_channel_name">Casting</string>
     <string name="cast_notification_channel_desc">Shown while a cast session is open</string>
     <string name="cast_notification_title">Casting to %1$s</string>
     <string name="cast_notification_text_connecting">Connecting</string>
     <string name="cast_notification_text_ready">Ready to mirror</string>
+    <string name="cast_notification_text_starting">Starting</string>
+    <string name="cast_notification_text_mirroring">Mirroring your screen</string>
     <string name="cast_notification_text_idle">Not mirroring</string>
     <string name="cast_notification_text_failed">Could not start mirroring</string>
     <string name="cast_notification_action_stop">Stop</string>

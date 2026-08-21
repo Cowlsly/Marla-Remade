@@ -7,6 +7,7 @@ import com.vayunmathur.cast.domain.CastDevice
 import com.vayunmathur.cast.platform.CastActions
 import com.vayunmathur.cast.platform.CastConnection
 import com.vayunmathur.cast.platform.CastUiState
+import com.vayunmathur.cast.platform.MirrorPhase
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi - comfortably above the F-Droid minimum. */
@@ -44,12 +45,13 @@ private val Receivers = listOf(
 /**
  * Store-listing screenshots.
  *
- * Driven through [CastContent], which is stateless by design, so no socket and no mDNS browse has
- * to exist for these to render - neither of which Layoutlib could provide.
+ * Driven through [CastContent], which is stateless by design, so no socket, no mDNS browse and no
+ * screen-capture projection has to exist for these to render - none of which Layoutlib could
+ * provide.
  *
- * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but is
- * not collected as a screenshot test. They must also be class members rather than top-level
- * functions, and the listing order comes from the function names (Preview1., Preview2.).
+ * Each preview needs @PreviewTest as well as @Preview: @Preview alone renders in Studio but is not
+ * collected as a screenshot test. They must also be class members rather than top-level functions,
+ * and the listing order comes from the function names (Preview1., Preview2.).
  */
 class MetadataPreviews {
 
@@ -66,25 +68,9 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "2-connecting", device = PHONE, showSystemUi = true)
+    @Preview(name = "2-ready", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview2Connecting() {
-        DynamicTheme(darkTheme = true) {
-            CastContent(
-                state = CastUiState(
-                    devices = Receivers,
-                    connectedDevice = LivingRoomTv,
-                    connection = CastConnection.Connecting,
-                ),
-                actions = CastActions.Noop,
-            )
-        }
-    }
-
-    @PreviewTest
-    @Preview(name = "3-connected-tv", device = PHONE, showSystemUi = true)
-    @Composable
-    fun Preview3ConnectedTv() {
+    fun Preview2Ready() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
@@ -99,19 +85,38 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "4-connected-group", device = PHONE, showSystemUi = true)
+    @Preview(name = "3-mirroring", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview4ConnectedGroup() {
+    fun Preview3Mirroring() {
+        DynamicTheme(darkTheme = true) {
+            CastContent(
+                state = CastUiState(
+                    devices = Receivers,
+                    connectedDevice = LivingRoomTv,
+                    connection = CastConnection.Connected,
+                    mirrorPhase = MirrorPhase.Mirroring,
+                    volumeLevel = 0.7,
+                ),
+                actions = CastActions.Noop,
+            )
+        }
+    }
+
+    @PreviewTest
+    @Preview(name = "4-audio-group", device = PHONE, showSystemUi = true)
+    @Composable
+    fun Preview4AudioGroup() {
         DynamicTheme(darkTheme = true) {
             CastContent(
                 state = CastUiState(
                     devices = Receivers,
                     connectedDevice = WholeHome,
                     connection = CastConnection.Connected,
-                    // A group has no screen, so only audio can go to it.
+                    mirrorPhase = MirrorPhase.Mirroring,
+                    // A group has no screen, so only audio goes to it - which is also why the
+                    // screen-capture explanation is on this one.
                     audioOnly = true,
                     volumeLevel = 0.3,
-                    muted = true,
                 ),
                 actions = CastActions.Noop,
             )

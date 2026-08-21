@@ -49,6 +49,15 @@ class CastSession(private val appId: String) {
     var state: CastSessionState = CastSessionState()
         private set
 
+    /**
+     * Every `webrtc` payload, verbatim.
+     *
+     * The seam between the control plane and the streaming session: OFFER/ANSWER is a separate
+     * state machine, so this class routes those payloads out rather than growing to understand
+     * them. A callback rather than a `Log` call because this class has no Android imports.
+     */
+    var onWebrtcPayload: ((String) -> Unit)? = null
+
     private var nextRequestId = 1
 
     fun allocateRequestId(): Int = nextRequestId++
@@ -91,8 +100,23 @@ class CastSession(private val appId: String) {
                 emptyList()
             }
             CastNamespaces.RECEIVER -> onReceiverMessage(envelope, payload)
+            CastNamespaces.WEBRTC -> {
+                onWebrtcPayload?.invoke(payload)
+                emptyList()
+            }
             else -> emptyList()
         }
+    }
+
+    /**
+     * Address a payload to the running app on the `webrtc` namespace.
+     *
+     * Empty until the app is joined: a frame sent before the second CONNECT is dropped with no
+     * error, so an OFFER sent too early would simply never be answered.
+     */
+    fun webrtcFrame(payload: String): List<CastFrame> {
+        val transportId = state.transportId ?: return emptyList()
+        return listOf(CastFrame(CastNamespaces.WEBRTC, transportId, payload))
     }
 
     /**

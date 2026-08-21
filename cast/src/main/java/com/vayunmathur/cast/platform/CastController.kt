@@ -1,6 +1,8 @@
 package com.vayunmathur.cast.platform
 
 import android.content.Context
+import android.content.Intent
+import android.media.projection.MediaProjection
 import android.util.Log
 import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastDevice
@@ -9,8 +11,17 @@ import com.vayunmathur.cast.domain.CastPhase
 import com.vayunmathur.cast.domain.CastSession
 import com.vayunmathur.cast.domain.CastSessionState
 import com.vayunmathur.cast.domain.MirroringAppIds
+import com.vayunmathur.cast.domain.streaming.NegotiationFailure
+import com.vayunmathur.cast.domain.streaming.StreamSelection
+import com.vayunmathur.cast.domain.streaming.StreamingSession
+import com.vayunmathur.cast.domain.streaming.encode
+import com.vayunmathur.cast.domain.streaming.parseAnswer
 import com.vayunmathur.cast.network.CastChannel
 import com.vayunmathur.cast.platform.discovery.CastDiscoveryManager
+import com.vayunmathur.cast.platform.mirror.MirrorDegradation
+import com.vayunmathur.cast.platform.mirror.MirrorEngine
+import com.vayunmathur.cast.platform.mirror.MirrorPreferences
+import com.vayunmathur.cast.platform.mirror.MirrorStopReason
 import com.vayunmathur.cast.service.CastService
 import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.CancellationException
@@ -55,6 +66,25 @@ object CastController {
     private var session: CastSession? = null
     private var pumpJob: Job? = null
     private var heartbeatJob: Job? = null
+
+    /** The OFFER/ANSWER half, alive only while a mirror is being negotiated or run. */
+    private var streaming: StreamingSession? = null
+    private var engine: MirrorEngine? = null
+
+    private val _mirrorPhase = MutableStateFlow(MirrorPhase.Idle)
+    val mirrorPhase: StateFlow<MirrorPhase> = _mirrorPhase.asStateFlow()
+
+    private val _degradation = MutableStateFlow(MirrorDegradation())
+    val degradation: StateFlow<MirrorDegradation> = _degradation.asStateFlow()
+
+    /**
+     * Why mirroring failed, already a user-facing sentence.
+     *
+     * Separate from `CastSessionState.failure`, which is a raw `LAUNCH_ERROR` reason: these come
+     * from our own pipeline and there is no wire constant to translate.
+     */
+    private val _failure = MutableStateFlow<String?>(null)
+    val mirrorFailure: StateFlow<String?> = _failure.asStateFlow()
 
     private var discoveryManager: CastDiscoveryManager? = null
 
@@ -107,6 +137,8 @@ object CastController {
             }
             channel = newChannel
             session = newSession
+            // Whatever the user last tapped is the tile's target from now on.
+            MirrorPreferences.setTarget(appContext, device)
             startPump(appContext, newChannel, newSession)
             send(newChannel, newSession) { it.open() }
             heartbeatJob = scope.launch {
@@ -136,6 +168,110 @@ object CastController {
     }
 
     fun setVolume(level: Double) = act { it.setVolume(level) }
+
+    /**
+     * Begin mirroring with an already-granted projection.
+     *
+     * Called from [CastService] rather than from the UI, because the projection may only be
+     * obtained after the service is in the foreground - see `MirrorConsentActivity` for the full
+     * ordering constraint.
+     *
+     * The OFFER goes out only once the receiver app is joined; before that the `webrtc` namespace
+     * is not addressable and the frame would be dropped without an error.
+     */
+    fun startMirroring(context: Context, projection: MediaProjection) {
+        val appContext = context.applicationContext
+        scope.launch {
+            val activeChannel = channel
+            val activeSession = session
+            val device = _device.value
+            if (activeChannel == null || activeSession == null || device == null) {
+                Log.w(TAG, "asked to mirror with no session")
+                projection.stop()
+                return@launch
+            }
+            stopEngine()
+            _mirrorPhase.value = MirrorPhase.Negotiating
+            _degradation.value = MirrorDegradation()
+            _failure.value = null
+            val plan = StreamSelection.offer(device.kind)
+            val streamingSession = StreamingSession(plan)
+            streaming = streamingSession
+            // Fed by CastSession's webrtc route rather than parsed there: OFFER/ANSWER is its own
+            // state machine and the control plane has no business understanding it.
+            activeSession.onWebrtcPayload = { payload ->
+                onWebrtcPayload(appContext, payload, projection, device.host)
+            }
+            send(activeChannel, activeSession) {
+                it.webrtcFrame(plan.message(it.allocateRequestId()).encode())
+            }
+        }
+    }
+
+    fun stopMirroring(context: Context) {
+        val appContext = context.applicationContext
+        scope.launch {
+            stopEngine()
+            _mirrorPhase.value = MirrorPhase.Idle
+            CastService.stopMirroring(appContext)
+        }
+    }
+
+    private fun onWebrtcPayload(
+        context: Context,
+        payload: String,
+        projection: MediaProjection,
+        host: String,
+    ) {
+        val answer = parseAnswer(payload) ?: return
+        val streamingSession = streaming ?: return
+        scope.launch {
+            val failure = streamingSession.onAnswer(answer)
+            if (failure != null) {
+                Log.w(TAG, "the receiver would not agree a stream: $failure")
+                _mirrorPhase.value = MirrorPhase.Failed
+                _failure.value = context.getString(
+                    when (failure) {
+                        is NegotiationFailure.NoStreams -> R.string.cast_mirror_no_streams
+                        else -> R.string.cast_mirror_negotiation_failed
+                    },
+                )
+                projection.stop()
+                CastService.stopMirroring(context)
+                return@launch
+            }
+            val negotiation = streamingSession.negotiation ?: return@launch
+            val started = MirrorEngine(
+                context = context,
+                projection = projection,
+                receiverHost = host,
+                negotiation = negotiation,
+                session = streamingSession,
+                onDegraded = { _degradation.value = it },
+                onStopped = { reason -> onEngineStopped(context, reason) },
+            ).also { engine = it }.start()
+            _mirrorPhase.value = if (started) MirrorPhase.Mirroring else MirrorPhase.Failed
+        }
+    }
+
+    private fun onEngineStopped(context: Context, reason: MirrorStopReason) {
+        _failure.value = context.getString(
+            when (reason) {
+                MirrorStopReason.Udp -> R.string.cast_mirror_udp_failed
+                MirrorStopReason.NoEncoders -> R.string.cast_mirror_no_encoder
+                MirrorStopReason.NoAudioForSpeaker -> R.string.cast_mirror_no_audio
+            },
+        )
+        _mirrorPhase.value = MirrorPhase.Failed
+        CastService.stopMirroring(context)
+    }
+
+    private fun stopEngine() {
+        engine?.stop()
+        engine = null
+        streaming = null
+        session?.onWebrtcPayload = null
+    }
 
     fun setMuted(muted: Boolean) = act { it.setMuted(muted) }
 
@@ -216,6 +352,7 @@ object CastController {
     private suspend fun teardown() {
         pumpJob?.cancel()
         heartbeatJob?.cancel()
+        stopEngine()
         channel?.close()
         mutex.withLock {
             pumpJob = null
@@ -225,6 +362,9 @@ object CastController {
             _device.value = null
             _isConnecting.value = false
             _sessionState.value = CastSessionState()
+            _mirrorPhase.value = MirrorPhase.Idle
+            _degradation.value = MirrorDegradation()
+            _failure.value = null
         }
     }
 }

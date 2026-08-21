@@ -14,6 +14,7 @@ import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastDevice
 import com.vayunmathur.cast.domain.CastDeviceKind
 import com.vayunmathur.cast.domain.CastPhase
+import com.vayunmathur.cast.platform.mirror.MirrorConsentActivity
 import com.vayunmathur.library.ui.ExternalIntents
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -60,12 +61,21 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
         Triple(devices.sortedBy { it.friendlyName.lowercase() }, scanning, blocked)
     }
 
+    /** Combined here because `combine` takes at most five flows. */
+    private val mirrorState = combine(
+        CastController.mirrorPhase,
+        CastController.degradation,
+        CastController.mirrorFailure,
+    ) { phase, degradation, failure -> Triple(phase, degradation, failure) }
+
     val uiState: StateFlow<CastUiState> = combine(
         discoveryState,
         CastController.device,
         CastController.isConnecting,
         CastController.sessionState,
-    ) { (devices, scanning, blocked), device, connecting, session ->
+        mirrorState,
+    ) { (devices, scanning, blocked), device, connecting, session, mirror ->
+        val (phase, degradation, mirrorFailure) = mirror
         CastUiState(
             devices = devices,
             isScanning = scanning,
@@ -77,13 +87,17 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
                 device != null && session.phase == CastPhase.Ready -> CastConnection.Connected
                 else -> CastConnection.Disconnected
             },
+            mirrorPhase = phase,
             // A speaker or a group has no screen, so only audio can go to it. Known from the
             // mDNS capability bitmask before anything is negotiated, which is what lets the UI
             // say "audio only" while the receiver is still being joined.
             audioOnly = device != null && device.kind != CastDeviceKind.Tv,
+            videoDegraded = degradation.videoUnavailable,
+            audioDegraded = degradation.audioUnavailable,
             volumeLevel = session.volumeLevel,
             muted = session.muted,
-            failure = failureMessage(session.failure),
+            // The pipeline's own message wins: it is more specific than a LAUNCH_ERROR reason.
+            failure = mirrorFailure ?: failureMessage(session.failure),
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CastUiState())
 
@@ -120,6 +134,17 @@ class CastViewModel(application: Application) : AndroidViewModel(application), C
     override fun connect(device: CastDevice) = CastController.connect(appContext, device)
 
     override fun disconnect() = CastController.disconnect(appContext)
+
+    /**
+     * Mirroring cannot be started from here directly: the screen-capture consent dialog needs an
+     * Activity to host it, and the token it returns is single-use, so the trampoline runs afresh
+     * every session.
+     */
+    override fun startMirroring() {
+        ExternalIntents.launch(appContext, MirrorConsentActivity.intent(appContext))
+    }
+
+    override fun stopMirroring() = CastController.stopMirroring(appContext)
 
     override fun setVolume(level: Double) = CastController.setVolume(level)
 

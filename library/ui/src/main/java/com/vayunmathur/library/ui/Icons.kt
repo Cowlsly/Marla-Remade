@@ -120,6 +120,7 @@ import androidx.compose.material.icons.filled.CheckBox
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Cast
 import androidx.compose.material.icons.filled.CastConnected
+import androidx.compose.material.icons.filled.ScreenShare
 import androidx.compose.material.icons.filled.Speaker
 import androidx.compose.material.icons.filled.Tv
 import androidx.compose.material.icons.filled.Close
@@ -371,6 +372,10 @@ fun IconSpeaker(modifier: Modifier = Modifier, tint: Color = LocalContentColor.c
 @Composable
 fun IconTv(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Tv, "TV", modifier, tint)
+
+@Composable
+fun IconScreenShare(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.ScreenShare, "Share screen", modifier, tint)
 
 @Composable
 fun IconNavigation(navBack: () -> Unit) {

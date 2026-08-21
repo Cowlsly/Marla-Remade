@@ -7,15 +7,19 @@ import android.app.Service
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.media.projection.MediaProjection
+import android.media.projection.MediaProjectionManager
 import android.os.Build
 import android.os.IBinder
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.IntentCompat
 import androidx.core.content.getSystemService
 import com.vayunmathur.cast.MainActivity
 import com.vayunmathur.cast.R
 import com.vayunmathur.cast.domain.CastPhase
 import com.vayunmathur.cast.platform.CastController
+import com.vayunmathur.cast.platform.MirrorPhase
 import com.vayunmathur.library.util.ensureNotificationChannel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -35,16 +39,20 @@ private const val CHANNEL_ID = "cast_session"
 private const val NOTIF_ID = 4201
 
 /**
- * Keeps the cast session alive while the app is not in front.
+ * Keeps the cast session alive while the app is not in front, and owns the screen-capture
+ * projection.
  *
- * A lifecycle host with no session state of its own: [CastController] owns the socket and the
- * session, so this can be started and stopped freely. `START_NOT_STICKY` rather than sticky,
- * because a restarted service has nothing to restore - the TLS channel died with the process and
- * the receiver has already dropped it.
+ * The projection lives here rather than in the controller because of the Android 14+ ordering rule:
+ * a `mediaProjection`-typed foreground service must already be in the foreground *before*
+ * `getMediaProjection()` is called. So [onStartCommand] calls `startForeground` first, every time,
+ * and only then turns the consent token into a projection.
  *
- * The foreground type is `mediaPlayback`, which is what Android's own documentation lists for
- * casting. `dataSync` is unusable: Android 15 caps it at six cumulative hours per 24 h and then
- * calls `onTimeout()`.
+ * `START_NOT_STICKY` rather than sticky: a restarted service has nothing to restore. The TLS channel
+ * died with the process, the receiver has already dropped it, and the consent token was single-use.
+ *
+ * Stop always routes through [ACTION_STOP] rather than `stopService` from outside, so the three
+ * sources - the tile, the notification action and the system's own "Stop sharing" chip - all take
+ * the same path. That is `ShareReceiveController`'s discipline.
  */
 class CastService : Service() {
 
@@ -52,6 +60,21 @@ class CastService : Service() {
 
     /** Guards against a second onStartCommand registering the status collector twice. */
     private var collecting = false
+
+    private var projection: MediaProjection? = null
+
+    /**
+     * The system "Stop sharing" chip and a revoked projection both land here.
+     *
+     * Registered *before* `createVirtualDisplay`, which Android 14+ requires, and which also means
+     * this is the only reliable notice that the user stopped sharing from outside the app.
+     */
+    private val projectionCallback = object : MediaProjection.Callback() {
+        override fun onStop() {
+            Log.i(TAG, "the projection was stopped from outside the app")
+            CastController.stopMirroring(this@CastService)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -66,57 +89,104 @@ class CastService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        // Before anything else: this is started with startForegroundService, and the platform
-        // kills a process that does not honour that within a few seconds.
-        enterForeground()
-        if (intent?.action == ACTION_STOP) {
-            CastController.disconnect(this)
-            return START_NOT_STICKY
+        val isMirroring = intent?.action == ACTION_START_MIRRORING
+        // Before anything else: this is started with startForegroundService, and the platform kills
+        // a process that does not honour that within a few seconds.
+        enterForeground(withProjection = isMirroring)
+        when (intent?.action) {
+            ACTION_STOP -> {
+                CastController.disconnect(this)
+                return START_NOT_STICKY
+            }
+            ACTION_STOP_MIRRORING -> {
+                releaseProjection()
+                return START_NOT_STICKY
+            }
+            ACTION_START_MIRRORING -> startMirroringFrom(intent)
         }
         if (!collecting) {
             collecting = true
-            // One collector for the lifetime of the service, so the notification tracks what is
-            // playing instead of freezing on whatever was true when it started.
+            // One collector for the lifetime of the service, so the notification tracks the session
+            // instead of freezing on whatever was true when it started.
             scope.launch {
                 CastController.device
                     .combine(CastController.sessionState) { device, state -> device to state }
-                    .collect { (device, state) ->
+                    .combine(CastController.mirrorPhase) { pair, mirror -> Triple(pair.first, pair.second, mirror) }
+                    .collect { (device, state, mirror) ->
                         if (device == null) return@collect
-                        val text = when (state.phase) {
-                            CastPhase.Launching ->
-                                getString(R.string.cast_notification_text_connecting)
-                            CastPhase.Ready -> getString(R.string.cast_notification_text_ready)
-                            // Not the raw LAUNCH_ERROR reason: those are wire constants, and the
-                            // screen is where the explanation belongs.
-                            CastPhase.Failed -> getString(R.string.cast_notification_text_failed)
-                            // The receiver app exited on its own - the channel is still up, so
-                            // this is a real resting state rather than a transient one.
-                            CastPhase.Idle -> getString(R.string.cast_notification_text_idle)
-                        }
                         getSystemService<NotificationManager>()
-                            ?.notify(NOTIF_ID, buildNotification(device.friendlyName, text))
+                            ?.notify(
+                                NOTIF_ID,
+                                buildNotification(device.friendlyName, statusText(state.phase, mirror)),
+                            )
                     }
             }
         }
         return START_NOT_STICKY
     }
 
+    /**
+     * Turn the consent token into a projection, in the one order the platform allows.
+     *
+     * `startForeground` has already happened in [onStartCommand]; the callback is registered before
+     * anything is created from the projection, which Android 14+ enforces.
+     */
+    private fun startMirroringFrom(intent: Intent) {
+        val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, RESULT_CANCELED_FALLBACK)
+        val data = IntentCompat.getParcelableExtra(intent, EXTRA_RESULT_DATA, Intent::class.java)
+        if (data == null) {
+            Log.w(TAG, "no consent token in the mirroring request")
+            return
+        }
+        val manager = getSystemService<MediaProjectionManager>()
+        val granted = try {
+            manager?.getMediaProjection(resultCode, data)
+        } catch (e: Exception) {
+            // The usual cause is calling this before the service was genuinely in the foreground.
+            Log.w(TAG, "getMediaProjection refused", e)
+            null
+        }
+        if (granted == null) {
+            Log.w(TAG, "no projection")
+            return
+        }
+        releaseProjection()
+        granted.registerCallback(projectionCallback, null)
+        projection = granted
+        CastController.startMirroring(this, granted)
+    }
+
+    private fun releaseProjection() {
+        val active = projection ?: return
+        runCatching { active.unregisterCallback(projectionCallback) }
+        runCatching { active.stop() }
+        projection = null
+    }
+
     override fun onDestroy() {
         super.onDestroy()
+        releaseProjection()
         scope.cancel()
     }
 
     /**
-     * Android 15's cumulative-runtime timeout. `mediaPlayback` is not capped, so this should
-     * never fire; if a future platform version caps it anyway, tearing the session down cleanly
-     * beats being killed with a socket open.
+     * Android 15's cumulative-runtime timeout.
+     *
+     * Checked rather than assumed: the cap applies to `dataSync` and `mediaProcessing` only, so this
+     * should never fire for either type used here. Kept because if a future platform version does
+     * cap them, tearing the session down cleanly beats being killed with a socket open.
      */
     override fun onTimeout(startId: Int, fgsType: Int) {
         Log.w(TAG, "foreground service timed out (type $fgsType)")
         CastController.disconnect(this)
     }
 
-    private fun enterForeground() {
+    /**
+     * [withProjection] switches the declared type to `mediaProjection`, which is the type that has
+     * to be in force before `getMediaProjection()` is called. Until there is a projection to hold,
+     * `mediaPlayback` is the honest description and does not require one.
+     */
+    private fun enterForeground(withProjection: Boolean) {
         val device = CastController.device.value
         val notification = buildNotification(
             device?.friendlyName ?: getString(R.string.app_name),
@@ -124,11 +194,12 @@ class CastService : Service() {
         )
         try {
             if (Build.VERSION.SDK_INT >= 34) {
-                startForeground(
-                    NOTIF_ID,
-                    notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK,
-                )
+                val type = if (withProjection) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+                }
+                startForeground(NOTIF_ID, notification, type)
             } else {
                 @Suppress("DEPRECATION")
                 startForeground(NOTIF_ID, notification)
@@ -138,6 +209,17 @@ class CastService : Service() {
             // unaffected, it just will not survive the app being backgrounded.
             Log.w(TAG, "could not enter the foreground", e)
         }
+    }
+
+    private fun statusText(phase: CastPhase, mirror: MirrorPhase): String = when {
+        mirror == MirrorPhase.Mirroring -> getString(R.string.cast_notification_text_mirroring)
+        mirror == MirrorPhase.Negotiating -> getString(R.string.cast_notification_text_starting)
+        mirror == MirrorPhase.Failed -> getString(R.string.cast_notification_text_failed)
+        phase == CastPhase.Launching -> getString(R.string.cast_notification_text_connecting)
+        phase == CastPhase.Ready -> getString(R.string.cast_notification_text_ready)
+        phase == CastPhase.Failed -> getString(R.string.cast_notification_text_failed)
+        // The receiver app exited on its own; the channel is still up, so this is a resting state.
+        else -> getString(R.string.cast_notification_text_idle)
     }
 
     private fun buildNotification(deviceName: String, text: String): Notification {
@@ -166,8 +248,16 @@ class CastService : Service() {
     }
 
     companion object {
-        /** Ends the session from the notification's own action. */
+        /** Ends the whole session, from the notification's own action or the tile. */
         const val ACTION_STOP = "com.vayunmathur.cast.action.STOP"
+
+        private const val ACTION_START_MIRRORING = "com.vayunmathur.cast.action.START_MIRRORING"
+        private const val ACTION_STOP_MIRRORING = "com.vayunmathur.cast.action.STOP_MIRRORING"
+        private const val EXTRA_RESULT_CODE = "resultCode"
+        private const val EXTRA_RESULT_DATA = "resultData"
+
+        /** Not `Activity.RESULT_CANCELED` only to avoid depending on the activity class here. */
+        private const val RESULT_CANCELED_FALLBACK = 0
 
         fun start(context: Context) {
             launch(context, Intent(context, CastService::class.java))
@@ -175,6 +265,24 @@ class CastService : Service() {
 
         fun stop(context: Context) {
             context.stopService(Intent(context, CastService::class.java))
+        }
+
+        /** Called by `MirrorConsentActivity` with a freshly granted, single-use token. */
+        fun startMirroring(context: Context, resultCode: Int, data: Intent) {
+            launch(
+                context,
+                Intent(context, CastService::class.java)
+                    .setAction(ACTION_START_MIRRORING)
+                    .putExtra(EXTRA_RESULT_CODE, resultCode)
+                    .putExtra(EXTRA_RESULT_DATA, data),
+            )
+        }
+
+        fun stopMirroring(context: Context) {
+            launch(
+                context,
+                Intent(context, CastService::class.java).setAction(ACTION_STOP_MIRRORING),
+            )
         }
 
         private fun launch(context: Context, intent: Intent) {

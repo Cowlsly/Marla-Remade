@@ -2,7 +2,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <!-- Google Cast (CastV2) without Play Services or the Cast SDK: mDNS discovery of
-         _googlecast._tcp and a TLS socket to port 8009 for the control plane. -->
+         _googlecast._tcp, a TLS socket to port 8009 for the control plane, and UDP to the
+         port the receiver names in its ANSWER for the RTP stream. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
@@ -12,17 +13,21 @@
          does is on the LAN, so it is not optional. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
-    <!-- mediaPlayback rather than connectedDevice: the session this service holds open is a
-         playback session on the receiver, which is what Android's own docs list this type
-         for. Not dataSync - Android 15 caps that at 6 cumulative hours per 24h and then
-         calls onTimeout(), which for a long session would stop the service part-way through
-         (see :vpn's manifest for the same reasoning first-hand). -->
+    <!-- mediaProjection is the type that must be in force before getMediaProjection() is
+         called; mediaPlayback covers the window where a control channel is open but nothing
+         is being captured yet. Neither is subject to Android 15's cumulative-runtime cap,
+         which applies only to dataSync and mediaProcessing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- AudioRecord needs this even for playback capture, where no microphone is involved:
+         the permission gates the API, not the source. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <!-- Deliberately NO storage or media permissions: nothing is read from the device's
-         storage. -->
+         storage. Screen capture is granted per session by the system consent dialog rather
+         than by a manifest permission, and the token is single-use. -->
 
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
@@ -44,13 +49,42 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <!-- Without this filter the system ignores the tile's ACTIVITY meta-data, so a
+                 long-press on the tile would go nowhere. -->
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
+            </intent-filter>
         </activity>
 
-        <!-- Holds the cast channel up while the app is not in front, so backgrounding the app
-             does not stop mirroring. -->
+        <!-- The consent trampoline. Translucent and NOT android:noHistory: noHistory finishes an
+             activity as soon as it stops being visible, which is exactly what launching the system
+             consent dialog does, so the result callback would be dropped. -->
+        <activity
+            android:name=".platform.mirror.MirrorConsentActivity"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+
+        <!-- Holds the cast channel and the screen-capture projection up while the app is not in
+             front, so backgrounding the app does not stop mirroring. -->
         <service
             android:name=".service.CastService"
             android:exported="false"
-            android:foregroundServiceType="mediaPlayback" />
+            android:foregroundServiceType="mediaProjection|mediaPlayback" />
+
+        <service
+            android:name=".platform.mirror.MirrorTileService"
+            android:exported="true"
+            android:icon="@drawable/ic_tile_cast_mirror"
+            android:label="@string/cast_tile_label"
+            android:permission="android.permission.BIND_QUICK_SETTINGS_TILE">
+            <intent-filter>
+                <action android:name="android.service.quicksettings.action.QS_TILE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.service.quicksettings.ACTIVITY"
+                android:value="com.vayunmathur.cast.MainActivity" />
+        </service>
     </application>
 </manifest>
