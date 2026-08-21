@@ -20,6 +20,7 @@ import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
 import com.google.common.util.concurrent.Futures
 import com.google.common.util.concurrent.ListenableFuture
+import com.vayunmathur.youpipe.platform.CastAudioTap
 import com.vayunmathur.youpipe.util.sabr.LocalDomPoTokenProvider
 import com.vayunmathur.youpipe.util.sabr.SabrNgDashMediaSource
 import com.vayunmathur.youpipe.util.sabr.SabrNgSessionStore
@@ -179,6 +180,30 @@ class PlaybackService : MediaSessionService() {
         } catch (_: Exception) {}
 
         val renderersFactory = object : androidx.media3.exoplayer.DefaultRenderersFactory(this) {
+            /**
+             * Insert the cast PCM tap into the audio sink's processor chain.
+             *
+             * This is the hook the cast path needs: `CastAudioTap` sees the decoded samples on their
+             * way to the speaker, so casting does not have to re-decode anything. It costs nothing
+             * when no cast session is open - the tap has no output stream and drops the buffer - and
+             * local muting still works, because `volume` is applied in the sink *after* the chain, so
+             * the tap sees full-scale PCM either way.
+             */
+            override fun buildAudioSink(
+                context: android.content.Context,
+                enableFloatOutput: Boolean,
+                enableAudioTrackPlaybackParams: Boolean
+            ): androidx.media3.exoplayer.audio.AudioSink =
+                androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context)
+                    .setEnableFloatOutput(enableFloatOutput)
+                    .setEnableAudioTrackPlaybackParams(enableAudioTrackPlaybackParams)
+                    .setAudioProcessors(
+                        arrayOf(
+                            androidx.media3.exoplayer.audio.TeeAudioProcessor(CastAudioTap),
+                        )
+                    )
+                    .build()
+
             @OptIn(ExperimentalApi::class)
             override fun buildTextRenderers(
                 context: android.content.Context,

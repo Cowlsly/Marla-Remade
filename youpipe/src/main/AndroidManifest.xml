@@ -9,6 +9,15 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Casting is brokered through the installed Cast app, so nothing about the network is needed
+         here: MA Cast owns the sockets, the pairing and the encoders. Only this signature permission,
+         and visibility of the package so the capability probe can resolve it. -->
+    <uses-permission android:name="com.vayunmathur.cast.permission.STREAM_CONTENT" />
+
+    <queries>
+        <package android:name="com.vayunmathur.cast" />
+    </queries>
+
     <application
         android:name=".YouPipeApplication"
         android:allowBackup="true"

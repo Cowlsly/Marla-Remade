@@ -44,6 +44,19 @@ object ExternalIntents {
     fun openUrl(context: Context, url: String, failureMessage: String? = null): Boolean =
         launch(context, Intent(Intent.ACTION_VIEW, url.toUri()), failureMessage)
 
+    /**
+     * Open [packageName]'s store listing, so a missing app can be installed.
+     *
+     * `:appstore` claims the `market` scheme outright and turns `?id=` into a package, so this lands
+     * on that app's install page. Reports rather than throws when nothing handles it, like everything
+     * else here.
+     */
+    fun openAppListing(
+        context: Context,
+        packageName: String,
+        failureMessage: String? = null,
+    ): Boolean = openUrl(context, "market://details?id=$packageName", failureMessage)
+
     /** Open a file by content URI, granting read access to the receiving app. */
     fun openFile(
         context: Context,

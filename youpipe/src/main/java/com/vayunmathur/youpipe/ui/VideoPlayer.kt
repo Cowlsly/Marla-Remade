@@ -93,6 +93,7 @@ import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.data.HistoryVideo
 import com.vayunmathur.youpipe.findActivity
 import com.vayunmathur.youpipe.rememberIsInPipMode
+import com.vayunmathur.youpipe.platform.CastPlayback
 import com.vayunmathur.youpipe.util.PlaybackService
 import com.vayunmathur.youpipe.util.YouPipeViewModel
 import kotlinx.coroutines.delay
@@ -103,6 +104,15 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.activity.compose.rememberLauncherForActivityResult
+import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.IconCast
+import com.vayunmathur.library.ui.IconCastConnected
+import com.vayunmathur.library.ui.ExternalIntents
+import com.vayunmathur.library.util.AppMessages
+import com.vayunmathur.sdk.cast.CastClient
+import com.vayunmathur.sdk.cast.CastContract
+import com.vayunmathur.sdk.cast.CastPickerContract
 
 @OptIn(UnstableApi::class)
 @Composable
@@ -373,6 +383,53 @@ fun VideoPlayer(
     val isPipMode = rememberIsInPipMode()
     val scope = rememberCoroutineScope()
 
+    // ---- casting ----
+    // Cast state lives beside the transport state because that is where VideoPlayer keeps everything
+    // else about this one player - but in a singleton rather than a `remember`, since the PCM half of
+    // the session is produced inside PlaybackService's audio sink, which has no reference to any of
+    // this.
+    val castState by CastPlayback.state.collectAsState()
+    val isCasting = castState is CastPlayback.State.Casting
+    // Resolved here rather than inside the callbacks: reading resources off a Context in a composable
+    // misses configuration changes, and lint says so.
+    val castFailedMessage = stringResource(R.string.cast_failed)
+    val castInstallMessage = stringResource(R.string.cast_install_prompt)
+    val castUpdateMessage = stringResource(R.string.cast_update_prompt)
+    val castPicker = rememberLauncherForActivityResult(CastPickerContract()) { picked ->
+        if (!picked) {
+            // Backed out, or pairing failed. Nothing should change in the player.
+            CastPlayback.close()
+            return@rememberLauncherForActivityResult
+        }
+        scope.launch {
+            // 1080 tall in the video's own shape: the receiver letterboxes, so the aspect ratio is
+            // ours to choose, and Cast clamps whatever the TV cannot decode.
+            val requestedWidth = (CAST_REQUEST_HEIGHT * aspectRatio).toInt().coerceAtLeast(2)
+            if (CastPlayback.open(context, requestedWidth, CAST_REQUEST_HEIGHT) != null) {
+                AppMessages.show(castFailedMessage)
+            }
+        }
+    }
+    // Moving playback is one call. ExoPlayer keeps decoding and keeps its transport controls, so play,
+    // pause and seek still work and still control the remote picture; only the render target changes.
+    // Local audio is muted with volume rather than by stopping the renderer, because volume is applied
+    // in the sink *after* the processor chain - so CastAudioTap still sees full-scale PCM.
+    LaunchedEffect(controller, castState) {
+        val player = controller ?: return@LaunchedEffect
+        val casting = castState as? CastPlayback.State.Casting
+        if (casting != null) {
+            player.setVideoSurface(casting.surface)
+            player.volume = 0f
+        } else {
+            player.volume = 1f
+        }
+    }
+    DisposableEffect(Unit) {
+        // Leaving the video ends the cast: there is one video output and it cannot follow the user to
+        // another screen.
+        onDispose { CastPlayback.close() }
+    }
+
     // When paused, keep controls visible (no auto-hide). When playing resumes, re-show and start timer.
     LaunchedEffect(isPlaying) {
         if (isPlaying) {
@@ -387,7 +444,8 @@ fun VideoPlayer(
     LaunchedEffect(
         isControlsVisible, isPlaying, keepControlsVisible, isLocked, isDragging,
         isVideoMenuExpanded, isLanguageMenuExpanded, isCaptionMenuExpanded,
-        isSpeedMenuExpanded, isChapterMenuVisible, isPipMode, controlsInteractionTick
+        isSpeedMenuExpanded, isChapterMenuVisible, isPipMode, controlsInteractionTick,
+        isCasting
     ) {
         if (!isControlsVisible) return@LaunchedEffect
         if (keepControlsVisible) return@LaunchedEffect
@@ -396,6 +454,9 @@ fun VideoPlayer(
         if (isDragging) return@LaunchedEffect
         if (isVideoMenuExpanded || isLanguageMenuExpanded || isCaptionMenuExpanded || isSpeedMenuExpanded || isChapterMenuVisible) return@LaunchedEffect
         if (isPipMode) return@LaunchedEffect
+        // While casting there is no picture here to get out of the way of, and the only way to stop is
+        // a button in these controls.
+        if (isCasting) return@LaunchedEffect
         delay(CONTROLS_AUTO_HIDE_DELAY_MS)
         isControlsVisible = false
     }
@@ -472,11 +533,22 @@ fun VideoPlayer(
             Modifier.fillMaxHeight().aspectRatio(aspectRatio)
         }
         controller?.let { player ->
-            PlayerSurface(
-                player = player,
-                modifier = playerModifier.align(Alignment.Center),
-                surfaceType = SURFACE_TYPE_TEXTURE_VIEW
-            )
+            // While casting there is no local picture: there is one video output and it is the TV, which
+            // is also what the user expects to see when they have just cast something.
+            val casting = castState as? CastPlayback.State.Casting
+            if (casting != null) {
+                CastingPanel(
+                    receiverName = casting.receiverName,
+                    onStop = { CastPlayback.close() },
+                    modifier = Modifier.fillMaxSize(),
+                )
+            } else {
+                PlayerSurface(
+                    player = player,
+                    modifier = playerModifier.align(Alignment.Center),
+                    surfaceType = SURFACE_TYPE_TEXTURE_VIEW
+                )
+            }
         } ?: Box(modifier = Modifier.fillMaxSize().background(Color.Black))
 
         if (cues.isNotEmpty()) {
@@ -581,6 +653,38 @@ fun VideoPlayer(
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    // Always visible, whether or not Cast is installed: an icon that appears only when
+                    // it would work is an icon nobody discovers.
+                    IconButton(
+                        onClick = {
+                            controlsInteractionTick++
+                            when (CastPlayback.support(context)) {
+                                CastClient.Support.NOT_INSTALLED -> {
+                                    AppMessages.show(castInstallMessage)
+                                    ExternalIntents.openAppListing(context, CastContract.CAST_PACKAGE)
+                                }
+                                CastClient.Support.NEEDS_UPDATE -> {
+                                    AppMessages.show(castUpdateMessage)
+                                    ExternalIntents.openAppListing(context, CastContract.CAST_PACKAGE)
+                                }
+                                CastClient.Support.READY ->
+                                    if (isCasting) {
+                                        CastPlayback.close()
+                                    } else {
+                                        CastPlayback.markConnecting()
+                                        castPicker.launch(Unit)
+                                    }
+                            }
+                        },
+                        modifier = Modifier.background(Color.Black.copy(alpha = 0.5f), RoundedCornerShape(4.dp)).size(32.dp)
+                    ) {
+                        if (isCasting) {
+                            IconCastConnected(tint = Color.White, modifier = Modifier.size(20.dp))
+                        } else {
+                            IconCast(tint = Color.White, modifier = Modifier.size(20.dp))
                         }
                     }
 
@@ -835,6 +939,44 @@ fun VideoPlayer(
 
 private const val HISTORY_UPSERT_INTERVAL_MS = 5000L
 private const val CONTROLS_AUTO_HIDE_DELAY_MS = 2000L
+
+/**
+ * The frame height asked of Cast, with the width taken from the video's own aspect ratio.
+ *
+ * A request, not a decision: Cast clamps it to what the TV reported it can decode and to what this
+ * phone's encoder will take, and answers with the real numbers.
+ */
+private const val CAST_REQUEST_HEIGHT = 1080
+
+/**
+ * What the player shows once the video is on the TV.
+ *
+ * There is one video output and it is now the TV, so there is nothing to draw here - and this is also
+ * what the user expects to see after casting something, rather than the same video twice.
+ */
+@Composable
+private fun CastingPanel(
+    receiverName: String,
+    onStop: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier.background(Color.Black),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        IconCastConnected(tint = Color.White, modifier = Modifier.size(48.dp))
+        Text(
+            text = stringResource(R.string.cast_playing_on, receiverName),
+            color = Color.White,
+            style = MaterialTheme.typography.titleMedium,
+            modifier = Modifier.padding(top = 12.dp),
+        )
+        Button(onClick = onStop, modifier = Modifier.padding(top = 16.dp)) {
+            Text(stringResource(R.string.cast_stop))
+        }
+    }
+}
 
 /** Formats a tempo multiplier for display: whole values as "2", fractional as "1.5". */
 private fun formatTempo(speed: Float): String {

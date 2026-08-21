@@ -295,4 +295,18 @@
     <string name="label_keep_controls_visible">Keep player controls visible</string>
     <!-- Description for keep-controls toggle: controls stay on screen rather than hiding after inactivity. Accessibility feature -->
     <string name="label_keep_controls_visible_description">Controls stay on screen instead of hiding after 2 seconds. Useful for accessibility.</string>
+
+    <!-- Casting the video to a TV through the MA Cast app. -->
+    <!-- Content description for the cast button in the player controls -->
+    <string name="cast_to_tv">Cast to a television</string>
+    <!-- Shown where the video was, once it is playing on the TV instead. %1$s is the TV's name -->
+    <string name="cast_playing_on">Playing on %1$s</string>
+    <!-- Button under the "playing on TV" panel -->
+    <string name="cast_stop">Stop casting</string>
+    <!-- Shown when the Cast app is not installed and the store listing is being opened -->
+    <string name="cast_install_prompt">MA Cast is not installed. Opening its listing so you can install it.</string>
+    <!-- Shown when the installed Cast app is too old to stream app content -->
+    <string name="cast_update_prompt">MA Cast is too old to play videos on your TV. Opening its listing so you can update it.</string>
+    <!-- Shown when the TV would not start a stream -->
+    <string name="cast_failed">Could not start casting to your TV</string>
 </resources>
