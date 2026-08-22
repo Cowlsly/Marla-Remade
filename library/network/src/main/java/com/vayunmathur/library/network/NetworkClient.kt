@@ -4,10 +4,13 @@ import android.content.Context
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.DeserializationStrategy
+import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
-import java.io.ByteArrayInputStream
+import kotlinx.serialization.json.decodeFromStream
+import kotlinx.serialization.serializer
 import java.io.InputStream
-import java.net.HttpURLConnection
+import java.io.PushbackInputStream
 import java.net.URL
 import javax.net.ssl.SSLSocketFactory
 
@@ -96,6 +99,15 @@ object NetworkClient {
 
     private const val TAG = "NetworkClient"
 
+    /**
+     * How much of a non-success body [stream] keeps for the error message. Error bodies are
+     * diagnostics, not payloads, so they are read as a bounded prefix rather than in full.
+     */
+    private const val ERROR_PREFIX_BYTES = 64 * 1024
+
+    /** The JSON path only quotes 500 characters, so it needs far less than [ERROR_PREFIX_BYTES]. */
+    private const val JSON_ERROR_PREFIX_BYTES = 4 * 1024
+
     // Published API – accessible from public inline functions.
     @PublishedApi
     internal val jsonConfig = Json {
@@ -162,6 +174,21 @@ object NetworkClient {
         return explicit ?: defaultSslSocketFactory
     }
 
+    /** Reads at most [maxBytes] as UTF-8; a failed read just shortens the diagnostic. */
+    private fun readErrorPrefix(input: InputStream, maxBytes: Int): String {
+        val buffer = ByteArray(maxBytes)
+        var used = 0
+        try {
+            while (used < buffer.size) {
+                val n = input.read(buffer, used, buffer.size - used)
+                if (n < 0) break
+                used += n
+            }
+        } catch (_: Exception) {
+        }
+        return String(buffer, 0, used, Charsets.UTF_8)
+    }
+
     // ------------------------------------------------------------------
     // Bytes / Full / SimpleResponse
     // ------------------------------------------------------------------
@@ -206,16 +233,23 @@ object NetworkClient {
         sslSocketFactory: SSLSocketFactory? = null,
         useSystemTrust: Boolean = false,
     ): SimpleResponse {
-        // internalExecute suspends on Dispatchers.IO but returns to the caller's dispatcher,
-        // so decoding the body here would run the (potentially hundreds of MB) UTF-8
-        // conversion on whatever thread called us — the main thread, for Compose callers.
+        // The body is decoded straight off the socket here rather than after returning, so the
+        // (potentially hundreds of MB) UTF-8 conversion never lands on the caller's dispatcher —
+        // the main thread, for Compose callers.
         return withContext(Dispatchers.IO) {
-            val r = HttpUrlEngine.internalExecute(
+            val response = HttpUrlEngine.openResponse(
                 url, method, headers, HttpUrlEngine.toBodyBytes(body),
                 followRedirects = true, connectTimeoutMs = null,
                 sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
             )
-            SimpleResponse(r.status, r.statusMessage, r.bodyBytes.toString(Charsets.UTF_8), r.headers, r.finalUrl)
+            response.use {
+                val text = try {
+                    it.stream.reader(Charsets.UTF_8).buffered().readText()
+                } catch (e: Exception) {
+                    throw java.io.IOException("Failed to read response body from ${it.finalUrl}", e)
+                }
+                SimpleResponse(it.status, it.statusMessage, text, it.headers, it.finalUrl)
+            }
         }
     }
 
@@ -255,7 +289,7 @@ object NetworkClient {
     /**
      * Open a response and hand its body to [block] as a live stream, keeping the
      * connection open for the duration of the callback. On a non-streamable status
-     * the block gets a null stream and the (buffered) error body in
+     * the block gets a null stream and a bounded prefix of the error body in
      * [SimpleResponse.body].
      */
     suspend fun stream(
@@ -269,96 +303,46 @@ object NetworkClient {
         useSystemTrust: Boolean = false,
         block: suspend (stream: NetworkDataStream?, response: SimpleResponse) -> Unit,
     ): SimpleResponse {
-        var currentUrl = url
-        var currentMethod = method
-        var currentBody = HttpUrlEngine.toBodyBytes(body)
-        var redirects = 0
-        var lastConn: HttpURLConnection? = null
-        var finalStatus = 0
-        var finalMessage = ""
-        var finalHeaders: Map<String, List<String>> = emptyMap()
-        var finalUrl = url
+        val response = HttpUrlEngine.openResponse(
+            url, method, headers, HttpUrlEngine.toBodyBytes(body),
+            followRedirects = true, connectTimeoutMs = connectTimeoutMs, readTimeoutMs = readTimeoutMs,
+            sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
+            // This entry point has always let connect failures surface as they are.
+            wrapConnectErrors = false,
+        )
 
-        val effectiveFactory = resolveFactory(sslSocketFactory, useSystemTrust)
-
-        withContext(Dispatchers.IO) {
-            while (true) {
-                val conn = HttpUrlEngine.openConnection(
-                    currentUrl, currentMethod, headers, currentBody, connectTimeoutMs, readTimeoutMs,
-                    sslSocketFactory = effectiveFactory,
-                )
-                lastConn = conn
-                finalStatus = conn.responseCode
-                finalMessage = conn.responseMessage ?: ""
-                finalHeaders = HttpUrlEngine.extractHeaders(conn)
-                finalUrl = conn.url.toString().let { if (it == currentUrl) currentUrl else it }
-
-                if (finalStatus in 301..308 && finalStatus != 304 && redirects < HttpUrlEngine.MAX_REDIRECTS) {
-                    val loc = conn.getHeaderField("Location") ?: conn.getHeaderField("location")
-                    if (loc != null) {
-                        currentUrl = URL(URL(currentUrl), loc).toString()
-                        if (finalStatus == 303) {
-                            currentMethod = "GET"
-                            currentBody = null
-                        }
-                        redirects++
-                        conn.disconnect()
-                        continue
-                    }
-                }
-                break
-            }
-        }
-
-        var simple = SimpleResponse(finalStatus, finalMessage, "", finalHeaders, finalUrl)
-        val conn = lastConn!!
+        var simple = SimpleResponse(response.status, response.statusMessage, "", response.headers, response.finalUrl)
 
         if (simple.isSuccess || simple.status == 206) {
-            var raw: InputStream? = withContext(Dispatchers.IO) {
-                var s: InputStream? = try {
-                    if (finalStatus >= 400) conn.errorStream else conn.inputStream
-                } catch (_: Exception) { null }
-                HttpUrlEngine.maybeDecompress(conn, s)
-            }
-
-            if (raw != null) {
-                var closed = false
-                val streamObj = object : NetworkDataStream {
-                    override val isClosedForRead: Boolean get() = closed
-                    override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int =
-                        withContext(Dispatchers.IO) {
-                            try {
-                                val n = raw.read(buffer, offset, length)
-                                if (n == -1) closed = true
-                                n
-                            } catch (_: Exception) {
-                                closed = true
-                                -1
-                            }
-                        }
-                }
-                try {
-                    block(streamObj, simple)
-                } finally {
-                    withContext(Dispatchers.IO) {
-                        try { raw.close() } catch (_: Exception) {}
-                        conn.disconnect()
-                    }
-                }
-            } else {
-                withContext(Dispatchers.IO) { conn.disconnect() }
+            if (!response.hasStream) {
+                withContext(Dispatchers.IO) { response.close() }
                 block(null, simple)
+                return simple
+            }
+            val raw = response.stream
+            var closed = false
+            val streamObj = object : NetworkDataStream {
+                override val isClosedForRead: Boolean get() = closed
+                override suspend fun read(buffer: ByteArray, offset: Int, length: Int): Int =
+                    withContext(Dispatchers.IO) {
+                        try {
+                            val n = raw.read(buffer, offset, length)
+                            if (n == -1) closed = true
+                            n
+                        } catch (_: Exception) {
+                            closed = true
+                            -1
+                        }
+                    }
+            }
+            try {
+                block(streamObj, simple)
+            } finally {
+                withContext(Dispatchers.IO) { response.close() }
             }
         } else {
             val errorBody = withContext(Dispatchers.IO) {
-                val s = try {
-                    if (finalStatus >= 400) conn.errorStream else conn.inputStream
-                } catch (_: Exception) { null }
-                val bytes = try {
-                    HttpUrlEngine.maybeDecompress(conn, s)?.use { it.readBytes() } ?: ByteArray(0)
-                } catch (_: Exception) { ByteArray(0) }
-                conn.disconnect()
-                bytes.toString(Charsets.UTF_8)
+                response.use { readErrorPrefix(it.stream, ERROR_PREFIX_BYTES) }
             }
             simple = simple.copy(body = errorBody)
             block(null, simple)
@@ -379,64 +363,14 @@ object NetworkClient {
         sslSocketFactory: SSLSocketFactory? = null,
         useSystemTrust: Boolean = false,
     ): Triple<Int, Map<String, List<String>>, InputStream> {
-        return withContext(Dispatchers.IO) {
-            var currentUrl = url
-            var currentMethod = method
-            var currentBody = HttpUrlEngine.toBodyBytes(body)
-            var redirects = 0
-            var out: Triple<Int, Map<String, List<String>>, InputStream>? = null
-            val effectiveFactory = resolveFactory(sslSocketFactory, useSystemTrust)
-
-            while (out == null) {
-                val conn = HttpUrlEngine.openConnection(
-                    currentUrl, currentMethod, headers, currentBody, timeoutMs,
-                    sslSocketFactory = effectiveFactory,
-                )
-                val status = try {
-                    conn.responseCode
-                } catch (e: java.io.IOException) {
-                    conn.disconnect()
-                    throw e
-                }
-                val respHeaders = HttpUrlEngine.extractHeaders(conn)
-
-                if (status in 301..308 && status != 304 && redirects < HttpUrlEngine.MAX_REDIRECTS) {
-                    val loc = conn.getHeaderField("Location") ?: conn.getHeaderField("location")
-                    if (loc != null) {
-                        currentUrl = URL(URL(currentUrl), loc).toString()
-                        if (status == 303) {
-                            currentMethod = "GET"
-                            currentBody = null
-                        }
-                        redirects++
-                        try { conn.inputStream?.close() } catch (_: Exception) {}
-                        conn.disconnect()
-                        continue
-                    }
-                }
-
-                var stream: InputStream? = try {
-                    if (status >= 400) conn.errorStream ?: conn.inputStream else conn.inputStream
-                } catch (_: Exception) { null }
-
-                stream = HttpUrlEngine.maybeDecompress(conn, stream)
-
-                val finalStream: InputStream = stream?.let { s ->
-                    object : InputStream() {
-                        override fun read(): Int = s.read()
-                        override fun read(b: ByteArray, off: Int, len: Int): Int = s.read(b, off, len)
-                        override fun close() {
-                            try { s.close() } catch (_: Exception) {}
-                            conn.disconnect()
-                        }
-                    }
-                } ?: ByteArrayInputStream(ByteArray(0)).also { conn.disconnect() }
-
-                out = Triple(status, respHeaders, finalStream)
-            }
-
-            out
-        }
+        val response = HttpUrlEngine.openResponse(
+            url, method, headers, HttpUrlEngine.toBodyBytes(body),
+            followRedirects = true, connectTimeoutMs = timeoutMs, readTimeoutMs = timeoutMs,
+            sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
+            // SABR callers expect the raw IOException, not a wrapped one.
+            wrapConnectErrors = false,
+        )
+        return Triple(response.status, response.headers, response.stream)
     }
 
     suspend fun getContentLength(
@@ -492,6 +426,66 @@ object NetworkClient {
     // JSON
     // ------------------------------------------------------------------
 
+    /**
+     * Streaming JSON request. The body is parsed straight off the socket, so no whole-body
+     * `ByteArray` or `String` is ever materialized.
+     *
+     * Not inline itself so that [callJson] only has to supply the reified pieces.
+     */
+    @OptIn(ExperimentalSerializationApi::class)
+    @Suppress("UNCHECKED_CAST")
+    @PublishedApi
+    internal suspend fun <T> decodeJsonResponse(
+        url: String,
+        method: String,
+        headers: Map<String, *>,
+        body: Any?,
+        sslSocketFactory: SSLSocketFactory?,
+        useSystemTrust: Boolean,
+        deserializer: DeserializationStrategy<T>,
+        isBoolean: Boolean,
+        isUnit: Boolean,
+    ): T = withContext(Dispatchers.IO) {
+        val response = HttpUrlEngine.openResponse(
+            url, method, headers, HttpUrlEngine.toBodyBytes(body),
+            followRedirects = true, connectTimeoutMs = null,
+            sslSocketFactory = resolveFactory(sslSocketFactory, useSystemTrust),
+        )
+        response.use { resp ->
+            // The empty-body shortcuts below need to know whether there is anything to parse.
+            // Leading whitespace means nothing to a JSON parser, so it is skipped while looking:
+            // a body of just a newline counted as empty before this was a stream, and endpoints
+            // that answer `callJson<Unit>` that way must keep working.
+            val peekable = PushbackInputStream(resp.stream, 1)
+            var first = -1
+            try {
+                do {
+                    first = peekable.read()
+                } while (first == ' '.code || first == '\t'.code || first == '\r'.code || first == '\n'.code)
+            } catch (e: Exception) {
+                throw java.io.IOException("Failed to read response body from ${resp.finalUrl}", e)
+            }
+            if (first >= 0) peekable.unread(first)
+            val empty = first < 0
+
+            if (resp.status == 204 || empty) {
+                if (isBoolean) return@use resp.isSuccess as T
+                if (isUnit) return@use Unit as T
+            }
+
+            if (!resp.isSuccess) {
+                val prefix = readErrorPrefix(peekable, JSON_ERROR_PREFIX_BYTES)
+                throw java.io.IOException("HTTP ${resp.status}: ${prefix.take(500)}")
+            }
+
+            if (empty) {
+                jsonConfig.decodeFromString(deserializer, "null")
+            } else {
+                jsonConfig.decodeFromStream(deserializer, peekable)
+            }
+        }
+    }
+
     suspend inline fun <reified T> callJson(
         url: String,
         method: String = "GET",
@@ -499,32 +493,12 @@ object NetworkClient {
         body: Any? = null,
         sslSocketFactory: SSLSocketFactory? = null,
         useSystemTrust: Boolean = false,
-    ): T {
-        val simple = performRequest(url, method, headers, body, sslSocketFactory, useSystemTrust)
-
-        if (simple.status == 204 || simple.body.isEmpty() || simple.contentLength == 0L) {
-            @Suppress("UNCHECKED_CAST")
-            when (T::class) {
-                Boolean::class -> return (simple.status in 200..299) as T
-                Unit::class -> return Unit as T
-            }
-        }
-
-        if (!simple.isSuccess) {
-            throw java.io.IOException("HTTP ${simple.status}: ${simple.body.take(500)}")
-        }
-
-        return if (simple.body.isBlank()) {
-            @Suppress("UNCHECKED_CAST")
-            when (T::class) {
-                Boolean::class -> (true as T)
-                Unit::class -> (Unit as T)
-                else -> jsonConfig.decodeFromString(simple.body.ifBlank { "null" })
-            }
-        } else {
-            jsonConfig.decodeFromString(simple.body)
-        }
-    }
+    ): T = decodeJsonResponse(
+        url, method, headers, body, sslSocketFactory, useSystemTrust,
+        deserializer = serializer<T>(),
+        isBoolean = T::class == Boolean::class,
+        isUnit = T::class == Unit::class,
+    )
 
     suspend inline fun <reified T> getJson(
         url: String,

@@ -2,6 +2,8 @@ package com.vayunmathur.library.network
 
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
+import java.io.Closeable
 import java.io.IOException
 import java.io.InputStream
 import java.net.HttpURLConnection
@@ -32,6 +34,17 @@ internal object HttpUrlEngine {
     const val READ_TIMEOUT = 60_000
     const val MAX_REDIRECTS = 5
 
+    /** Segment size used when draining a body of unknown length. */
+    private const val SEGMENT_SIZE = 64 * 1024
+
+    /**
+     * Content-Length is attacker-controlled, so it is only trusted as an allocation size up to this
+     * much; larger bodies still read in full, just via segments instead of one up-front array.
+     */
+    private const val MAX_PRESIZE = 1L * 1024 * 1024
+
+    private val EMPTY_BYTES = ByteArray(0)
+
     data class InternalResult(
         val status: Int,
         val statusMessage: String,
@@ -39,6 +52,32 @@ internal object HttpUrlEngine {
         val bodyBytes: ByteArray,
         val finalUrl: String,
     )
+
+    /**
+     * A response whose body has *not* been read. [stream] is live and already decompressed;
+     * closing it (or this) also disconnects the underlying connection.
+     */
+    class OpenResponse(
+        val status: Int,
+        val statusMessage: String,
+        val headers: Map<String, List<String>>,
+        val finalUrl: String,
+        val stream: InputStream,
+        /** False when the connection exposed no body stream at all. */
+        val hasStream: Boolean,
+        /** Raw Content-Length header, which describes the *encoded* length. */
+        val contentLength: Long?,
+        val isIdentityEncoding: Boolean,
+    ) : Closeable {
+        val isSuccess: Boolean get() = status in 200..299
+
+        override fun close() {
+            try { stream.close() } catch (_: Exception) {}
+        }
+    }
+
+    /** Read failure carrying how far the body got, so the caller can name the endpoint. */
+    class BodyReadException(val bytesRead: Long, cause: Throwable) : IOException(cause)
 
     fun openConnection(
         urlString: String,
@@ -141,7 +180,14 @@ internal object HttpUrlEngine {
         else -> body.toString().toByteArray(Charsets.UTF_8)
     }
 
-    suspend fun internalExecute(
+    /**
+     * The single connect -> follow-redirects -> decompress sequence every entry point is built on.
+     * Hands back a live body instead of a buffered one so callers can consume incrementally.
+     *
+     * [wrapConnectErrors] reports a connect failure as `IOException("Failed to connect to ...")`;
+     * with it off the original exception propagates unchanged (the streaming callers rely on that).
+     */
+    suspend fun openResponse(
         url: String,
         method: String,
         headers: Map<String, *>,
@@ -150,12 +196,13 @@ internal object HttpUrlEngine {
         connectTimeoutMs: Long?,
         readTimeoutMs: Long? = connectTimeoutMs,
         sslSocketFactory: SSLSocketFactory? = null,
-    ): InternalResult = withContext(Dispatchers.IO) {
+        wrapConnectErrors: Boolean = true,
+    ): OpenResponse = withContext(Dispatchers.IO) {
         var currentUrl = url
         var currentMethod = method
         var currentBody = bodyBytes
         var redirects = 0
-        var result: InternalResult? = null
+        var result: OpenResponse? = null
 
         while (result == null) {
             val conn = openConnection(
@@ -166,7 +213,10 @@ internal object HttpUrlEngine {
                 conn.responseCode
             } catch (e: Exception) {
                 conn.disconnect()
-                throw IOException("Failed to connect to $currentUrl: ${e.message}", e)
+                if (wrapConnectErrors) {
+                    throw IOException("Failed to connect to $currentUrl: ${e.message}", e)
+                }
+                throw e
             }
             val msg = conn.responseMessage ?: ""
             val respHeaders = extractHeaders(conn)
@@ -187,18 +237,161 @@ internal object HttpUrlEngine {
                 }
             }
 
-            var stream: InputStream? = try {
+            val raw: InputStream? = try {
                 if (status >= 400) conn.errorStream ?: conn.inputStream else conn.inputStream
             } catch (_: Exception) { null }
 
-            stream = maybeDecompress(conn, stream)
-            val bytes = try { stream?.readBytes() ?: ByteArray(0) } catch (_: Exception) { ByteArray(0) }
-            try { stream?.close() } catch (_: Exception) {}
-            conn.disconnect()
+            val encoding = (conn.getHeaderField("Content-Encoding")
+                ?: conn.getHeaderField("content-encoding"))?.trim()?.lowercase()
+            val identity = encoding.isNullOrEmpty() || encoding == "identity"
+            val declaredLength = conn.getHeaderField("Content-Length")?.toLongOrNull()
 
-            result = InternalResult(status, msg, respHeaders, bytes, finalUrl)
+            val decompressed = maybeDecompress(conn, raw)
+            val body: InputStream = if (decompressed == null) {
+                conn.disconnect()
+                ByteArrayInputStream(EMPTY_BYTES)
+            } else {
+                object : InputStream() {
+                    override fun read(): Int = decompressed.read()
+                    override fun read(b: ByteArray, off: Int, len: Int): Int = decompressed.read(b, off, len)
+                    override fun available(): Int = decompressed.available()
+                    override fun close() {
+                        try { decompressed.close() } catch (_: Exception) {}
+                        conn.disconnect()
+                    }
+                }
+            }
+
+            result = OpenResponse(
+                status, msg, respHeaders, finalUrl, body,
+                hasStream = decompressed != null,
+                contentLength = declaredLength,
+                isIdentityEncoding = identity,
+            )
         }
 
         result
+    }
+
+    /**
+     * Read a whole body without ever growing an array by doubling.
+     *
+     * With a usable Content-Length on an unencoded body the result is allocated once at its exact
+     * size; otherwise fixed-size segments accumulate and a single exact-size array is assembled at
+     * the end. A header that over- or under-states the real length is tolerated, not trusted.
+     *
+     * Pure in its arguments so it can be unit-tested without a network or a Context.
+     */
+    fun drainFully(
+        input: InputStream,
+        contentLengthHint: Long?,
+        isIdentityEncoding: Boolean,
+    ): ByteArray {
+        var read = 0L
+
+        // Fills target from [from] until full or EOF; returns how much of it is populated.
+        fun fill(target: ByteArray, from: Int): Int {
+            var used = from
+            while (used < target.size) {
+                val n = try {
+                    input.read(target, used, target.size - used)
+                } catch (e: Exception) {
+                    throw BodyReadException(read, e)
+                }
+                if (n < 0) break
+                used += n
+                read += n
+            }
+            return used
+        }
+
+        // Content-Length describes the encoded body, so it is only a size for identity encoding.
+        val hint = if (isIdentityEncoding) contentLengthHint else null
+        var presized: ByteArray? = null
+        var presizedLen = 0
+        if (hint != null && hint > 0 && hint <= MAX_PRESIZE) {
+            val exact = ByteArray(hint.toInt())
+            presizedLen = fill(exact, 0)
+            // Header promised more than the stream delivered.
+            if (presizedLen < exact.size) return exact.copyOf(presizedLen)
+            presized = exact
+        }
+
+        // Whatever remains (the whole body when there was no usable hint, or the excess when the
+        // header understated it) accumulates in segments so nothing is ever reallocated. Each
+        // segment is allocated only once a byte for it is in hand, so a body that ended exactly
+        // where the header said costs nothing extra.
+        val segments = ArrayList<ByteArray>()
+        var tail = 0L
+        while (true) {
+            val lead = try {
+                input.read()
+            } catch (e: Exception) {
+                throw BodyReadException(read, e)
+            }
+            if (lead < 0) break
+            read += 1
+            val segment = ByteArray(SEGMENT_SIZE)
+            segment[0] = lead.toByte()
+            val used = fill(segment, 1)
+            segments.add(if (used == SEGMENT_SIZE) segment else segment.copyOf(used))
+            tail += used
+            if (used < SEGMENT_SIZE) break
+        }
+
+        if (presized != null && tail == 0L) return presized
+        if (presized == null) {
+            if (segments.isEmpty()) return EMPTY_BYTES
+            if (segments.size == 1) return segments[0]
+        }
+
+        val total = presizedLen + tail
+        if (total > Int.MAX_VALUE) {
+            throw IOException("Response body of $total bytes cannot be returned as a single array")
+        }
+        val out = ByteArray(total.toInt())
+        var pos = 0
+        if (presized != null) {
+            System.arraycopy(presized, 0, out, 0, presizedLen)
+            pos = presizedLen
+        }
+        for (segment in segments) {
+            System.arraycopy(segment, 0, out, pos, segment.size)
+            pos += segment.size
+        }
+        return out
+    }
+
+    /**
+     * [drainFully] over an [OpenResponse], naming the endpoint if the read fails.
+     *
+     * A truncated body is an error here, where it used to be silently reported as an empty one:
+     * hiding it left no way to tell which endpoint had failed, which is what #582 asked for.
+     */
+    fun readBody(response: OpenResponse): ByteArray = try {
+        drainFully(response.stream, response.contentLength, response.isIdentityEncoding)
+    } catch (e: BodyReadException) {
+        throw IOException(
+            "Failed to read response body from ${response.finalUrl} after ${e.bytesRead} bytes",
+            e.cause,
+        )
+    }
+
+    suspend fun internalExecute(
+        url: String,
+        method: String,
+        headers: Map<String, *>,
+        bodyBytes: ByteArray?,
+        followRedirects: Boolean,
+        connectTimeoutMs: Long?,
+        readTimeoutMs: Long? = connectTimeoutMs,
+        sslSocketFactory: SSLSocketFactory? = null,
+    ): InternalResult = withContext(Dispatchers.IO) {
+        val response = openResponse(
+            url, method, headers, bodyBytes, followRedirects,
+            connectTimeoutMs, readTimeoutMs, sslSocketFactory,
+        )
+        val bytes = response.use { readBody(it) }
+        InternalResult(response.status, response.statusMessage, response.headers, bytes, response.finalUrl)
     }
 }
