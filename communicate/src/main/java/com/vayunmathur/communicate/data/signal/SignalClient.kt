@@ -470,7 +470,7 @@ object SignalClient {
 
     suspend fun createGroup(subject: String, contacts: List<String>): String? {
         // GroupsV2 via SignalGroups: GroupMasterKey 32B -> GroupSecretParams, GroupAttributeBlob, PUT /v2/groups/
-        val (masterKey, secretParams) = SignalGroups.generateMasterKeyAndSecretParams()
+        val (masterKey, _) = SignalGroups.generateMasterKeyAndSecretParams()
         val groupId = "group:${SignalGroups.groupIdFromMasterKey(masterKey)}"
         val requestBody = SignalGroups.buildCreateGroupRequest(masterKey, subject, contacts, revision = 0)
         val auth = authData ?: return null
@@ -479,11 +479,7 @@ object SignalClient {
         _events.emit(SignalEvent.ConversationUpdate(conversationId = groupId, peerName = subject, peerPhone = null, avatarUrl = null, lastPreview = null, lastTimestamp = System.currentTimeMillis(), unreadCount = 0, isGroup = true, participantCount = contacts.size))
         try {
             db?.conversationDao()?.upsert(SignalConversation(chatId = groupId, isGroup = true, name = subject, participants = contacts.joinToString(",")))
-            if (secretParams != null) {
-                Log.i(TAG, "createGroup $groupId with zkgroup GroupSecretParams (live PUT /v2/groups/ ${if (ok) "ok" else "offline"} )")
-            } else {
-                Log.w(TAG, "createGroup $groupId stub zkgroup (live-only), PUT /v2/groups/ ${if (ok) "ok" else "offline"}")
-            }
+            Log.i(TAG, "createGroup $groupId (PUT /v2/groups/ ${if (ok) "ok" else "failed"})")
         } catch (_: Exception) {}
         // Live-only: cache group-send-token per revision via SignalGroups.fetchGroupSendEndorsements (zkgroup GroupSendDerivedKeyPair + GroupSendFullToken.verify)
         return groupId
