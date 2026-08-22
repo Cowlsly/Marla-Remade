@@ -5,10 +5,15 @@ import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
 import javax.net.ssl.SSLSocketFactory
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -141,6 +146,67 @@ object SignalKeysApi {
 
     private fun JsonObject.obj(key: String): JsonObject? =
         try { this[key]?.jsonObject } catch (_: Exception) { null }
+
+    /**
+     * Register pre-keys with the server (`PUT /v2/keys?identity=aci`).
+     *
+     * Only needed for keys the server does not already have — a Kyber pre-key that had to be regenerated,
+     * or a fresh batch of one-time keys. Keys go up base64 **without** padding, matching the fetch format.
+     */
+    suspend fun uploadPreKeys(
+        lastResortKyber: SignalE2E.PreKeyUpload.KeyEntity?,
+        oneTimeEcPreKeys: List<SignalE2E.PreKeyUpload.KeyEntity>,
+        authHeader: String,
+        sslSocketFactory: SSLSocketFactory?,
+    ): Boolean {
+        val body = buildJsonObject {
+            if (lastResortKyber != null) {
+                putJsonObject("pqLastResortPreKey") {
+                    put("keyId", lastResortKyber.id)
+                    put("publicKey", encodeUnpadded(lastResortKyber.publicKey))
+                    put("signature", encodeUnpadded(lastResortKyber.signature ?: ByteArray(0)))
+                }
+            }
+            if (oneTimeEcPreKeys.isNotEmpty()) {
+                putJsonArray("preKeys") {
+                    oneTimeEcPreKeys.forEach { key ->
+                        add(
+                            buildJsonObject {
+                                put("keyId", key.id)
+                                put("publicKey", encodeUnpadded(key.publicKey))
+                            },
+                        )
+                    }
+                }
+            }
+        }.toString().toByteArray(Charsets.UTF_8)
+
+        val resp = try {
+            NetworkClient.execute(
+                "https://chat.signal.org/v2/keys?identity=aci",
+                method = "PUT",
+                headers = mapOf(
+                    "Authorization" to "Basic $authHeader",
+                    "Content-Type" to "application/json",
+                ),
+                body = body,
+                sslSocketFactory = sslSocketFactory,
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "pre-key registration failed", t)
+            return false
+        }
+        if (!resp.isSuccess) {
+            Log.w(TAG, "pre-key registration rejected: ${resp.status} ${resp.statusMessage}")
+            return false
+        }
+        Log.i(TAG, "registered pre-keys: kyber=${lastResortKyber != null} oneTime=${oneTimeEcPreKeys.size}")
+        return true
+    }
+
+    /** Keys go on the wire base64 without padding. */
+    private fun encodeUnpadded(bytes: ByteArray): String =
+        Base64.Default.encode(bytes).trimEnd('=')
 
     /** Keys arrive base64 without padding, so restore it before decoding. */
     private fun decode(value: String?): ByteArray? {

@@ -1,5 +1,6 @@
 package com.vayunmathur.communicate.data.signal.e2e
 
+import android.util.Log
 import com.vayunmathur.communicate.data.signal.SignalAuthData
 import com.vayunmathur.communicate.data.signal.SignalDatabase
 import com.vayunmathur.communicate.data.signal.SignalE2EPreKey
@@ -16,10 +17,16 @@ import org.signal.libsignal.protocol.IdentityKeyPair
 import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
+import org.signal.libsignal.protocol.ecc.ECKeyPair
 import org.signal.libsignal.protocol.ecc.ECPrivateKey
 import org.signal.libsignal.protocol.ecc.ECPublicKey
+import org.signal.libsignal.protocol.kem.KEMKeyPair
+import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.kem.KEMPublicKey
+import org.signal.libsignal.protocol.state.KyberPreKeyRecord
 import org.signal.libsignal.protocol.state.PreKeyBundle
+import org.signal.libsignal.protocol.state.PreKeyRecord
+import org.signal.libsignal.protocol.state.SignedPreKeyRecord
 
 /**
  * Rust-backed E2E crypto for Signal (PQXDH + Double Ratchet + Sender Keys + Sealed Sender).
@@ -43,6 +50,7 @@ class SignalE2E(
     private val onIdentityChanged: (String, ByteArray) -> Unit = { _, _ -> },
 ) {
     val ownIdentityPublicKey: ByteArray = b64(auth.identityPublicKey)
+    private val ownIdentityPrivate: ByteArray = b64(auth.identityPrivateKey)
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
     private val ownDeviceId: Int = auth.deviceId
 
@@ -285,6 +293,96 @@ class SignalE2E(
         return result.paddedMessage
     }
 
+    /**
+     * What needs registering with the server after [ensureLocalPreKeys].
+     *
+     * Keys are the serialized public halves; signatures are over those, by our identity key.
+     */
+    data class PreKeyUpload(
+        val lastResortKyber: KeyEntity?,
+        val oneTimeEcPreKeys: List<KeyEntity>,
+    ) {
+        data class KeyEntity(val id: Int, val publicKey: ByteArray, val signature: ByteArray? = null)
+
+        val isEmpty: Boolean get() = lastResortKyber == null && oneTimeEcPreKeys.isEmpty()
+    }
+
+    /**
+     * Make sure our own pre-keys are in the protocol store, which is what inbound pre-key messages need
+     * to decrypt. Registration only wrote them to preferences, so without this a first message from a
+     * peer fails with `InvalidKeyIdException: no signed pre-key <id>`.
+     *
+     * The signed pre-key is reconstructed from the stored key material so it keeps the id the server
+     * already hands out. A Kyber pre-key cannot be reconstructed — libsignal only exposes
+     * `KEMKeyPair.generate()`, with no way back from persisted bytes — so a fresh one is generated and
+     * must be registered, which is what the returned payload is for.
+     */
+    fun ensureLocalPreKeys(): PreKeyUpload {
+        seedSignedPreKey()
+        val kyber = ensureLastResortKyberPreKey()
+        val oneTime = ensureOneTimePreKeys()
+        return PreKeyUpload(lastResortKyber = kyber, oneTimeEcPreKeys = oneTime)
+    }
+
+    private fun seedSignedPreKey() {
+        val id = auth.signedPreKeyId
+        if (id == 0) return
+        if (protocolStore.containsSignedPreKey(id)) return
+        val pub = b64(auth.signedPreKeyPublic)
+        val priv = b64(auth.signedPreKeyPrivate)
+        val signature = b64(auth.signedPreKeySignature)
+        if (pub.isEmpty() || priv.isEmpty()) {
+            Log.w(TAG, "no stored signed pre-key material; inbound pre-key messages will not decrypt")
+            return
+        }
+        try {
+            val keyPair = ECKeyPair(ECPublicKey(pub), ECPrivateKey(priv))
+            protocolStore.storeSignedPreKey(
+                id,
+                SignedPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature),
+            )
+            Log.i(TAG, "seeded signed pre-key $id into the protocol store")
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not rebuild signed pre-key $id from stored material", t)
+        }
+    }
+
+    private fun ensureLastResortKyberPreKey(): PreKeyUpload.KeyEntity? {
+        val existing = runBlocking { db.e2eKyberPreKeyDao().getAll() }
+        if (existing.any { it.lastResort }) return null
+        return try {
+            val keyPair = KEMKeyPair.generate(KEMKeyType.KYBER_1024)
+            val publicKey = keyPair.publicKey.serialize()
+            val signature = signSignedPreKey(ownIdentityPrivate, publicKey)
+            val id = (runBlocking { db.e2eKyberPreKeyDao().getAll() }.maxOfOrNull { it.id } ?: 0) + 1
+            val record = KyberPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature)
+            protocolStore.storeKyberPreKey(id, record, lastResort = true)
+            Log.i(TAG, "generated last-resort Kyber pre-key $id; needs registering")
+            PreKeyUpload.KeyEntity(id, publicKey, signature)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not generate a last-resort Kyber pre-key", t)
+            null
+        }
+    }
+
+    private fun ensureOneTimePreKeys(): List<PreKeyUpload.KeyEntity> {
+        val have = runBlocking { db.e2ePreKeyDao().getAll() }.size
+        if (have >= ONE_TIME_PREKEY_FLOOR) return emptyList()
+        val maxId = runBlocking { db.e2ePreKeyDao().getMaxId() }
+        return (1..ONE_TIME_PREKEY_BATCH).mapNotNull { offset ->
+            val id = maxId + offset
+            try {
+                val keyPair = ECKeyPair.generate()
+                // Stored through the store so it lands as a libsignal record, not a bespoke blob.
+                protocolStore.storePreKey(id, PreKeyRecord(id, keyPair))
+                PreKeyUpload.KeyEntity(id, keyPair.publicKey.serialize())
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not generate one-time pre-key $id", t)
+                null
+            }
+        }
+    }
+
     private data class LocalPreKey(val id: Int, val publicKey: ByteArray)
 
     private fun generatePreKeys(count: Int): List<LocalPreKey> {
@@ -302,7 +400,9 @@ class SignalE2E(
         return locals
     }
 
-    fun ensureSignedPreKeyStored() { }
+    fun ensureSignedPreKeyStored() {
+        seedSignedPreKey()
+    }
 
     fun markPreKeysUploaded() {
         val maxId = runBlocking { db.e2ePreKeyDao().getMaxId() }
@@ -311,6 +411,10 @@ class SignalE2E(
 
     companion object {
         private const val TAG = "SignalE2E"
+
+        /** Regenerate one-time pre-keys once the store dips below this. */
+        private const val ONE_TIME_PREKEY_FLOOR = 10
+        private const val ONE_TIME_PREKEY_BATCH = 100
 
         /**
          * Marker for "this ciphertext is a sealed-sender message", mapped to `Envelope.UNIDENTIFIED_SENDER`.

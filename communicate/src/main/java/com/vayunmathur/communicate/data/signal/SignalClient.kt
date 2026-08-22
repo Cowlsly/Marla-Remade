@@ -208,6 +208,10 @@ object SignalClient {
                 }
             }
         })
+        // Our own pre-keys must be in the protocol store or inbound pre-key messages cannot decrypt
+        // ("no signed pre-key <id>"). Registration only wrote them to preferences.
+        scope.launch { ensureLocalPreKeys() }
+
         // Discover which address-book numbers are on Signal. Without this, phone-addressed conversations
         // have no ACI and cannot be sent to at all. Deliberately not in socketJobs: those are cancelled on
         // every reconnect, which would kill a discovery request mid-flight.
@@ -298,8 +302,43 @@ object SignalClient {
      * only ever learn a real ACI from an inbound message or from CDSI contact discovery, so a number
      * belonging to someone who has never messaged us cannot be resolved and the send has to fail.
      */
+    /**
+     * Seed our own pre-keys into the protocol store and register anything the server does not yet have.
+     * Runs once per start; without it a peer's first message cannot be decrypted.
+     */
+    private suspend fun ensureLocalPreKeys() {
+        if (!preKeysPrepared.compareAndSet(false, true)) return
+        val e = e2e ?: run {
+            preKeysPrepared.set(false)
+            return
+        }
+        val upload = try {
+            e.ensureLocalPreKeys()
+        } catch (t: Throwable) {
+            preKeysPrepared.set(false)
+            Log.w(TAG, "could not prepare local pre-keys", t)
+            return
+        }
+        if (upload.isEmpty) return
+        val ok = SignalKeysApi.uploadPreKeys(
+            lastResortKyber = upload.lastResortKyber,
+            oneTimeEcPreKeys = upload.oneTimeEcPreKeys,
+            authHeader = basicAuthHeader(),
+            sslSocketFactory = signalTls(),
+        )
+        if (ok) {
+            e.markPreKeysUploaded()
+        } else {
+            // Let a later start retry rather than leaving keys stored but unregistered.
+            preKeysPrepared.set(false)
+        }
+    }
+
     /** Guards against overlapping discovery runs; `start()` can fire more than once. */
     private val discoveryRunning = AtomicBoolean(false)
+
+    /** Same reason as [discoveryRunning]: without it, each start generates and uploads another batch. */
+    private val preKeysPrepared = AtomicBoolean(false)
 
     /**
      * Run contact discovery once. Returns whether it completed, so a caller waiting on a resolution knows
