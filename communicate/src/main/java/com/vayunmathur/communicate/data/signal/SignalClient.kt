@@ -205,6 +205,16 @@ object SignalClient {
                 }
             }
         })
+        // Discover which address-book numbers are on Signal. Without this, phone-addressed conversations
+        // have no ACI and cannot be sent to at all, so it runs on connect rather than on first send.
+        socketJobs.add(scope.launch {
+            try {
+                val result = SignalContactSync.sync(ctx)
+                Log.i(TAG, "contact discovery: ${result.onSignalCount}/${result.e164Count} on Signal${result.transportError?.let { " ($it)" } ?: ""}")
+            } catch (t: Throwable) {
+                Log.w(TAG, "contact discovery failed", t)
+            }
+        })
         Log.i(TAG, "start: socket connecting for ${auth.phoneNumber.takeLast(4)} host=${SignalSocket.DEFAULT_HOST}")
     }
 
@@ -277,14 +287,33 @@ object SignalClient {
         val trimmed = destination.trim()
         if (trimmed.isEmpty()) return null
         if (ACI_REGEX.matches(trimmed)) return trimmed
-        val contact = try { db?.contactDao()?.getByPhone(trimmed) } catch (_: Exception) { null }
-        // The contact row's `aci` column falls back to the phone number when discovery could not
-        // identify the account, so only a UUID-shaped value is usable.
-        val aci = contact?.aci?.takeIf { ACI_REGEX.matches(it) }
-        if (aci == null) {
-            Log.w(TAG, "no known ACI for $trimmed; Signal cannot address a message by phone number")
+
+        knownAciFor(trimmed)?.let { return it }
+        // Not in the contact table: the number may have joined Signal since the last sync, or we may
+        // never have synced. Discovery is the only way to find out.
+        val ctx = appContext
+        if (ctx != null) {
+            val result = try {
+                SignalContactSync.sync(ctx)
+            } catch (t: Throwable) {
+                Log.w(TAG, "contact discovery failed while resolving $trimmed", t)
+                null
+            }
+            if (result?.transportError != null) {
+                Log.w(TAG, "contact discovery unavailable (${result.transportError})")
+            }
+            knownAciFor(trimmed)?.let { return it }
         }
-        return aci
+        Log.w(TAG, "$trimmed is not a registered Signal user, or discovery could not confirm it")
+        return null
+    }
+
+    /** A UUID-shaped ACI for [e164] from the contact table, or null. */
+    private suspend fun knownAciFor(e164: String): String? {
+        val contact = try { db?.contactDao()?.getByPhone(e164) } catch (_: Exception) { null } ?: return null
+        // The `aci` column falls back to the phone number when discovery found no account, so only a
+        // UUID-shaped value is usable for addressing.
+        return contact.aci.takeIf { contact.onSignal && ACI_REGEX.matches(it) }
     }
 
     private suspend fun sendEncryptedTo(destination: String, padded: ByteArray): Boolean {
