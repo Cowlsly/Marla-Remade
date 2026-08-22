@@ -20,6 +20,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/device.h>
 #include <zephyr/drivers/gpio.h>
+#include <zephyr/drivers/watchdog.h>
 #include <zephyr/logging/log.h>
 #include <psa/crypto.h>
 
@@ -98,6 +99,67 @@ static uint8_t battery_percent(void)
 
 /* ---- Main ------------------------------------------------------------- */
 
+/*
+ * Hardware watchdog.
+ *
+ * The UWB stack has wedged the firmware more than once, and a hung tracker advertises
+ * nothing at all — so crowd-finding silently dies with it, and it stays dead until someone
+ * physically resets the board. That happened for an hour. This bounds the damage to a few
+ * seconds: the main loop feeds the watchdog on every pass, so if anything stops it running,
+ * the device reboots and comes back advertising from its persisted state.
+ *
+ * The timeout is deliberately several times the loop period, so a slow pass never trips it.
+ */
+#define WDT_TIMEOUT_MS 8000
+
+static const struct device *wdt;
+static int wdt_channel = -1;
+
+static void watchdog_init(void)
+{
+	struct wdt_timeout_cfg cfg = {
+		.window = { .min = 0U, .max = WDT_TIMEOUT_MS },
+		/* No callback: by the time it fires the firmware is untrustworthy, and a
+		 * handler that tries to log could itself hang. Just reset. */
+		.callback = NULL,
+		.flags = WDT_FLAG_RESET_SOC,
+	};
+	int rc;
+
+	wdt = DEVICE_DT_GET_OR_NULL(DT_ALIAS(watchdog0));
+	if (wdt == NULL || !device_is_ready(wdt)) {
+		LOG_WRN("no watchdog available; a hang will not self-recover");
+		wdt = NULL;
+		return;
+	}
+
+	wdt_channel = wdt_install_timeout(wdt, &cfg);
+	if (wdt_channel < 0) {
+		LOG_WRN("wdt_install_timeout: %d", wdt_channel);
+		wdt = NULL;
+		return;
+	}
+	/*
+	 * WDT_OPT_PAUSE_HALTED_BY_DBG so a debugger breakpoint doesn't reboot the board
+	 * mid-inspection. The nRF watchdog cannot be stopped once started, which is exactly
+	 * the property wanted here.
+	 */
+	rc = wdt_setup(wdt, WDT_OPT_PAUSE_HALTED_BY_DBG);
+	if (rc) {
+		LOG_WRN("wdt_setup: %d", rc);
+		wdt = NULL;
+		return;
+	}
+	LOG_INF("watchdog armed (%d ms)", WDT_TIMEOUT_MS);
+}
+
+static void watchdog_feed(void)
+{
+	if (wdt != NULL && wdt_channel >= 0) {
+		(void)wdt_feed(wdt, wdt_channel);
+	}
+}
+
 int main(void)
 {
 	psa_status_t status;
@@ -129,6 +191,7 @@ int main(void)
 	}
 
 	(void)button_init();
+	watchdog_init();
 
 #ifdef CONFIG_FF_TRACKER_UWB
 	rc = ff_uwb_init();
@@ -150,6 +213,8 @@ int main(void)
 	}
 
 	while (true) {
+		watchdog_feed();
+
 		if (ff_ble_take_provision_event()) {
 			LOG_INF("provisioning accepted: switching to beacon mode");
 			if (ff_ble_set_mode(FF_BLE_MODE_BEACON) != 0) {

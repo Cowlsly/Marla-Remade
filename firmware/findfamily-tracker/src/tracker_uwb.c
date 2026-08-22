@@ -73,6 +73,26 @@ static struct k_thread uwb_thread;
 static atomic_t poll_running;
 
 /*
+ * Session setup runs on its own thread rather than on the caller's.
+ *
+ * The fira_helper_* and uwbmac_start calls block, and at least one of them can block
+ * indefinitely when the stack is unhappy. Called straight from the main loop — which is
+ * also what refreshes the beacon and drives the mode state machine — a stall there took
+ * the whole tracker off the air, so crowd-finding died along with ranging. Keeping it on a
+ * separate thread means the worst a wedged UWB session can do is lose UWB.
+ */
+#define UWB_SESSION_THREAD_STACK_SIZE 4096
+#define UWB_SESSION_THREAD_PRIORITY 6
+
+static K_THREAD_STACK_DEFINE(uwb_session_stack, UWB_SESSION_THREAD_STACK_SIZE);
+static struct k_thread uwb_session_thread_data;
+static K_SEM_DEFINE(session_request, 0, 1);
+static struct ff_uwb_params requested_params;
+static uint8_t requested_secret[FF_SECRET_LEN];
+
+static void uwb_session_thread(void *a, void *b, void *c);
+
+/*
  * Board calibration hook, from the vendor's DWM3001CDK support (built by
  * firmware/qorvo-uwb). It loads this module's factory calibration — antenna delays,
  * crystal trim, TX power — out of the DW3110's OTP. l1_config_init() returns
@@ -212,6 +232,11 @@ int ff_uwb_init(void)
 
 	stack_ready = true;
 	LOG_INF("Qorvo uwbstack up; DW3110 identified");
+
+	k_thread_create(&uwb_session_thread_data, uwb_session_stack,
+			UWB_SESSION_THREAD_STACK_SIZE, uwb_session_thread, NULL, NULL, NULL,
+			UWB_SESSION_THREAD_PRIORITY, 0, K_NO_WAIT);
+	k_thread_name_set(&uwb_session_thread_data, "ff_uwb_sess");
 	return 0;
 }
 
@@ -441,19 +466,41 @@ void ff_uwb_stop(void)
 	LOG_INF("FiRa session stopped");
 }
 
+/*
+ * Runs session setup off the main loop; see the note by uwb_session_stack. One request at a
+ * time is enough — the phone writes params once per find, and a second write while a session
+ * is starting is better dropped than queued behind a possibly-wedged one.
+ */
+static void uwb_session_thread(void *a, void *b, void *c)
+{
+	ARG_UNUSED(a);
+	ARG_UNUSED(b);
+	ARG_UNUSED(c);
+
+	while (true) {
+		k_sem_take(&session_request, K_FOREVER);
+		(void)ff_uwb_start(&requested_params, requested_secret);
+	}
+}
+
 int ff_uwb_on_params(const uint8_t *data, size_t len, const uint8_t *secret)
 {
-	struct ff_uwb_params params;
-
 	if (len != FF_UWB_PARAMS_LEN) {
 		return -EINVAL;
 	}
-	/* TrackerUwbGatt.encodeSessionParams: [2B addr][4B sessionId BE][1B ch][1B pre] */
-	params.peer_address[0] = data[0];
-	params.peer_address[1] = data[1];
-	params.session_id = sys_get_be32(&data[2]);
-	params.channel = data[6];
-	params.preamble_index = data[7];
+	if (!stack_ready) {
+		return -EAGAIN;
+	}
 
-	return ff_uwb_start(&params, secret);
+	/* TrackerUwbGatt.encodeSessionParams: [2B addr][4B sessionId BE][1B ch][1B pre] */
+	requested_params.peer_address[0] = data[0];
+	requested_params.peer_address[1] = data[1];
+	requested_params.session_id = sys_get_be32(&data[2]);
+	requested_params.channel = data[6];
+	requested_params.preamble_index = data[7];
+	memcpy(requested_secret, secret, sizeof(requested_secret));
+
+	/* Hand off and return immediately: the caller is the main loop. */
+	k_sem_give(&session_request);
+	return 0;
 }
