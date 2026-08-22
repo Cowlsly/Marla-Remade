@@ -75,6 +75,12 @@ Three outcomes worth distinguishing:
 | yes | no | no | Not reachable from this app on this device; consistent with AWDL |
 | no | — | — | No result. The sheet was not open, or Bluetooth is off. Re-run |
 
+**Role matters for the third column.** `_airdrop._tcp` is published by the AirDrop *receiver* and
+browsed by the *sender*. An iPhone with the share sheet open is a sender and publishes nothing, so
+that column is only meaningful when the iPhone is the *idle receiver* — which requires waking it
+with a `0x004C`/`0x05` beacon from Android first. Do not read a blank third column as a finding
+unless the iPhone was in receiver mode.
+
 `P2pObservations.unavailableReason` is reported separately from an empty peer list on purpose: a
 probe that could not run and a probe that ran and saw nothing produce the same silence otherwise,
 and only one of them is evidence.
@@ -142,8 +148,17 @@ AirDrop's discovery is therefore on a link this device cannot see. That is what 
 
 ### Caveats
 
+- **The run did not test receiver-side mDNS publication.** The iPhone had its share sheet open,
+  so it was in the *sender* role \u2014 and in AirDrop the **receiver** is what publishes
+  `_airdrop._tcp` while the sender browses for it. So "no `_airdrop._tcp` on `wlan0`" is exactly
+  what a sender-mode iPhone would produce regardless of which link AirDrop uses, and it is **not**
+  evidence that a *receiving* iPhone withholds that record from the infrastructure network. The
+  conclusion still holds on the APK evidence (Mosey reaches the record over `mosey0`), but this
+  particular observation does not carry it. Testing the receiver side needs a different setup:
+  advertise the `0x004C`/`0x05` beacon from Android to wake nearby receivers, then browse
+  `_airdrop._tcp` on `wlan0`. Untested.
 - This is a **Pixel 9 Pro XL, not a Pixel 10**, so it has none of Google's AirDrop interop. That
-  limits what the run can say about *how Google did it* — but not about the Wi-Fi Direct
+  limits what the run can say about *how Google did it* \u2014 but not about the Wi-Fi Direct
   hypothesis, because Wi-Fi Direct is fully supported on this handset and the iPhone still did
   not appear on it.
 - **Wi-Fi Aware (NAN) was not probed.** It is the other standards-based candidate and the one
