@@ -299,6 +299,18 @@ interface SignalCachedMessageDao {
     @Query("SELECT * FROM signal_cached_message WHERE messageId = :messageId LIMIT 1")
     suspend fun get(messageId: String): SignalCachedMessage?
 
+    /**
+     * Find an outgoing message by its sent timestamp, which is how receipts identify it. Not scoped to a
+     * conversation on purpose: a receipt has to resolve regardless of which id the message was filed
+     * under, and the timestamp is the message's protocol-level identity.
+     */
+    @Query("SELECT * FROM signal_cached_message WHERE timestamp = :timestamp AND outgoing = 1 LIMIT 1")
+    suspend fun getOutgoingByTimestamp(timestamp: Long): SignalCachedMessage?
+
+    /** As [getOutgoingByTimestamp], but either direction — for read syncs from our own other devices. */
+    @Query("SELECT * FROM signal_cached_message WHERE timestamp = :timestamp LIMIT 1")
+    suspend fun getByTimestamp(timestamp: Long): SignalCachedMessage?
+
     /** Most-recent message per conversation, newest first (for the thread list). */
     @Query(
         "SELECT * FROM signal_cached_message WHERE timestamp IN " +

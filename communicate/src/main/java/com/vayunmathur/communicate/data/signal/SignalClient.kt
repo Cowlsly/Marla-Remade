@@ -1614,11 +1614,29 @@ object SignalClient {
             is SignalProtocol.ParsedContent.Receipt -> {
                 val rm = parsed.receiptMessage
                 val isDelivery = rm.type == SignalServiceProtos.ReceiptMessage.Type.DELIVERY
+                Log.i(
+                    TAG,
+                    "receipt from ${env.sourceAci}: type=${rm.type} timestamps=${rm.timestampList}",
+                )
                 for (tsVal in rm.timestampList) {
-                    val mid = try {
-                        db?.cachedMessageDao()?.getForConversation(conversationId)?.firstOrNull { it.timestamp == tsVal }?.messageId ?: tsVal.toString()
-                    } catch (_: Exception) { tsVal.toString() }
-                    _events.emit(SignalEvent.ReadReceipt(conversationId = conversationId, messageId = mid, timestampMs = tsVal, timestamp = tsVal, isDelivery = isDelivery))
+                    // Resolved by timestamp rather than by conversation: the outgoing message may have been
+                    // filed under a different id (phone number vs service id) than this receipt resolves to,
+                    // and the timestamp is the message's protocol-level identity either way.
+                    val cached = try {
+                        db?.cachedMessageDao()?.getOutgoingByTimestamp(tsVal)
+                    } catch (_: Exception) { null }
+                    if (cached == null) {
+                        Log.w(TAG, "receipt for unknown outgoing message at $tsVal")
+                    }
+                    _events.emit(
+                        SignalEvent.ReadReceipt(
+                            conversationId = cached?.conversationId ?: conversationId,
+                            messageId = cached?.messageId ?: tsVal.toString(),
+                            timestampMs = tsVal,
+                            timestamp = tsVal,
+                            isDelivery = isDelivery,
+                        ),
+                    )
                 }
             }
             is SignalProtocol.ParsedContent.Typing -> {
@@ -1645,20 +1663,13 @@ object SignalClient {
             }
             is SignalProtocol.ParsedContent.Sync -> {
                 val sm = parsed.syncMessage
-                // Multi-device read sync: SyncMessage.read[] -> markReadStatus
+                // Read/viewed syncs from our own other devices refer to inbound messages by sent timestamp,
+                // so resolve on that rather than scoping to a conversation id that may not match.
                 for (r in sm.readList) {
-                    val tsVal = r.timestamp
-                    val mid = try {
-                        db?.cachedMessageDao()?.getForConversation(conversationId)?.firstOrNull { it.timestamp == tsVal }?.messageId ?: tsVal.toString()
-                    } catch (_: Exception) { tsVal.toString() }
-                    _events.emit(SignalEvent.ReadReceipt(conversationId = conversationId, messageId = mid, timestampMs = tsVal, timestamp = tsVal, isDelivery = false))
+                    emitReadSync(r.timestamp, conversationId)
                 }
                 for (v in sm.viewedList) {
-                    val tsVal = v.timestamp
-                    val mid = try {
-                        db?.cachedMessageDao()?.getForConversation(conversationId)?.firstOrNull { it.timestamp == tsVal }?.messageId ?: tsVal.toString()
-                    } catch (_: Exception) { tsVal.toString() }
-                    _events.emit(SignalEvent.ReadReceipt(conversationId = conversationId, messageId = mid, timestampMs = tsVal, timestamp = tsVal, isDelivery = false))
+                    emitReadSync(v.timestamp, conversationId)
                 }
             }
             else -> {
@@ -1807,6 +1818,19 @@ object SignalClient {
      */
     private suspend fun conversationIdFor(serviceId: String): String =
         contactFor(serviceId)?.phoneE164?.takeIf { it.isNotBlank() } ?: serviceId
+
+    private suspend fun emitReadSync(timestamp: Long, fallbackConversationId: String) {
+        val cached = try { db?.cachedMessageDao()?.getByTimestamp(timestamp) } catch (_: Exception) { null }
+        _events.emit(
+            SignalEvent.ReadReceipt(
+                conversationId = cached?.conversationId ?: fallbackConversationId,
+                messageId = cached?.messageId ?: timestamp.toString(),
+                timestampMs = timestamp,
+                timestamp = timestamp,
+                isDelivery = false,
+            ),
+        )
+    }
 
     private suspend fun emitDecryptionError(env: SignalProtocol.SignalEnvelope, message: String?) {
         val cid = SignalProtocol.toConversationId(env.sourceAci, null as ByteArray?)
