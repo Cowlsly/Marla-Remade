@@ -24,6 +24,11 @@ dependencyResolutionManagement {
         mavenCentral()
         // JitPack for Stockfish-Library (games:chess) and ncnn-android
         maven("https://jitpack.io")
+        // RingRTC is published by Signal, not to Maven Central. Scoped to org.signal so nothing else
+        // resolves through it.
+        maven("https://build-artifacts.signal.org/libraries/maven/") {
+            content { includeGroup("org.signal") }
+        }
     }
 }
 

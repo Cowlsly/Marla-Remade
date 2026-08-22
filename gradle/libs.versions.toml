@@ -109,6 +109,9 @@ onnxruntimeAndroid = "1.27.0"
 cryptographyCore = "0.6.0"
 sqlcipherAndroid = "4.17.0"
 libsignalAndroid = "0.86.5"
+# Signal's WebRTC fork plus its calling engine. Bundles its own org.webrtc, so it cannot coexist with
+# another WebRTC distribution in the same APK.
+ringrtcAndroid = "2.71.0"
 # signalProtocolJava removed — WhatsApp X3DH now via Rust libwhatsapp_signal
 
 # XML
@@ -280,6 +283,7 @@ cryptography-core = { module = "dev.whyoleg.cryptography:cryptography-core", ver
 cryptography-provider-jdk = { module = "dev.whyoleg.cryptography:cryptography-provider-jdk", version.ref = "cryptographyCore" }
 sqlcipher-android = { module = "net.zetetic:sqlcipher-android", version.ref = "sqlcipherAndroid" }
 libsignal-android = { module = "org.signal:libsignal-android", version.ref = "libsignalAndroid" }
+ringrtc-android = { module = "org.signal:ringrtc-android", version.ref = "ringrtcAndroid" }
 
 # XML
 kxml2 = { module = "net.sf.kxml:kxml2", version.ref = "kxml2" }

@@ -157,8 +157,11 @@ dependencies {
     implementation(project(":library:network"))
     // Local Compose image loading for Google Voice MMS previews (remote https + content://).
     implementation(project(":library:image"))
-    // Maintained prebuilt WebRTC (org.webrtc.*) for the calling audio session.
-    implementation(libs.stream.webrtc.android)
+    // RingRTC supplies both Signal's calling engine and the org.webrtc classes every line's calling
+    // uses. It bundles its own WebRTC, so no other WebRTC distribution can be on the classpath: the two
+    // ship ~368 identical org.webrtc class names, and RingRTC's native library binds to that exact
+    // package via JNI symbol names and FindClass descriptors, so relocating it is not an option either.
+    implementation(libs.ringrtc.android)
     // E.164 normalization to reconcile SIM vs Google Voice numbers.
     implementation(libs.libphonenumber)
     // Persist the Google Voice / WhatsApp session (cookies, API key, auth, number).

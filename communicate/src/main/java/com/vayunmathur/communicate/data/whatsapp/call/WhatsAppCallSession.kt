@@ -11,6 +11,7 @@ import org.webrtc.IceCandidate
 import org.webrtc.MediaConstraints
 import org.webrtc.MediaStream
 import org.webrtc.PeerConnection
+import com.vayunmathur.communicate.data.call.WebRtcInit
 import org.webrtc.PeerConnectionFactory
 import org.webrtc.RtpReceiver
 import org.webrtc.RtpSender
@@ -45,11 +46,7 @@ open class WhatsAppCallSession(protected val appContext: Context) {
     protected val iceComplete = CompletableDeferred<Unit>()
 
     open fun initialize() {
-        PeerConnectionFactory.initialize(
-            PeerConnectionFactory.InitializationOptions.builder(appContext)
-                .setEnableInternalTracer(false)
-                .createInitializationOptions(),
-        )
+        WebRtcInit.ensureInitialized(appContext)
         val encoder = DefaultVideoEncoderFactory(eglBase.eglBaseContext, true, true)
         val decoder = DefaultVideoDecoderFactory(eglBase.eglBaseContext)
         factory = PeerConnectionFactory.builder()
