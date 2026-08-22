@@ -120,10 +120,21 @@ object TrackerUwbGatt {
         value: ByteArray,
     ): Boolean = suspendCancellableCoroutine { cont ->
         val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+        val adapter = manager?.adapter
         val device = try {
-            manager?.adapter?.getRemoteDevice(bleAddress)
+            /*
+             * getRemoteLeDevice with an explicit RANDOM address type, not getRemoteDevice.
+             *
+             * The tracker advertises a Zephyr static random identity address, and
+             * getRemoteDevice(String) assumes ADDRESS_TYPE_PUBLIC — connecting with the
+             * wrong type never reaches the peer and fails with GATT status 147 after a
+             * 30-second timeout. Binding is unaffected because TrackerProvisioner gets its
+             * BluetoothDevice from a ScanResult, which already carries the right type; this
+             * is the only path that rebuilds a device from a stored address string.
+             */
+            adapter?.getRemoteLeDevice(bleAddress, BluetoothDevice.ADDRESS_TYPE_RANDOM)
         } catch (e: Exception) {
-            Log.w(TAG, "getRemoteDevice($bleAddress) failed", e); null
+            Log.w(TAG, "getRemoteLeDevice($bleAddress) failed", e); null
         }
         if (device == null) { cont.resume(false); return@suspendCancellableCoroutine }
 
