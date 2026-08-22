@@ -55,7 +55,14 @@ class SignalSocket(
 ) {
     companion object {
         private const val TAG = "SignalSocket"
-        const val DEFAULT_HOST = "grpc.chat.signal.org"
+
+        /**
+         * The HTTP/1.1 chat host. Note libsignal's `env.rs` names `grpc.chat.signal.org`, but that host is
+         * configured `http_version: Http2` and serves websockets over HTTP/2 extended CONNECT — an
+         * HTTP/1.1 `Upgrade` there is closed without a response ("ws handshake EOF"). This client speaks
+         * HTTP/1.1, so it must use the same host as the REST API.
+         */
+        const val DEFAULT_HOST = "chat.signal.org"
         const val DEFAULT_PORT = 443
         private const val KEEPALIVE_INTERVAL_MS = 30_000L
         private const val REQUEST_TIMEOUT_MS = 30_000L
