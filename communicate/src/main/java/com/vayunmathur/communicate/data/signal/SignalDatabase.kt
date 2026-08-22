@@ -387,6 +387,12 @@ interface SignalContactDao {
     @Query("SELECT * FROM signal_contact WHERE phoneE164 = :phone LIMIT 1")
     suspend fun getByPhone(phone: String): SignalContact?
 
+    @Query("SELECT * FROM signal_contact WHERE pni = :pni AND pni != '' LIMIT 1")
+    suspend fun getByPni(pni: String): SignalContact?
+
+    @Query("DELETE FROM signal_contact WHERE phoneE164 = :phone")
+    suspend fun deleteByPhone(phone: String)
+
     @Query("SELECT * FROM signal_contact WHERE onSignal = 1 ORDER BY displayName COLLATE NOCASE ASC")
     suspend fun getOnSignal(): List<SignalContact>
 

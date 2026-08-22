@@ -14,6 +14,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import org.signal.libsignal.metadata.certificate.SenderCertificate
+import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.UntrustedIdentityException
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.signal.libsignal.protocol.message.PlaintextContent
@@ -1272,7 +1273,7 @@ object SignalClient {
                         from = senderAci,
                         callCreator = senderAci,
                         isVideo = isVideo,
-                        peerName = senderAci,
+                        peerName = displayNameFor(senderAci),
                         timestamp = timestamp,
                     ),
                 )
@@ -1519,7 +1520,19 @@ object SignalClient {
             is SignalProtocol.ParsedContent.Edit -> if (parsed.editMessage.hasDataMessage() && parsed.editMessage.dataMessage.hasGroupV2()) parsed.editMessage.dataMessage.groupV2.masterKey.toByteArray() else null
             else -> null
         }
-        val conversationId = if (masterKeyFromData != null) SignalProtocol.toConversationId(env.sourceAci, masterKeyFromData) else SignalProtocol.toConversationId(env.sourceAci, null as String?)
+        // A verified PNI signature merges the sender's ACI with the PNI we knew them by, which is what
+        // keeps their reply in the conversation we sent to instead of opening a second one.
+        if (content.hasPniSignatureMessage()) {
+            linkPniToAci(env.sourceAci, env.sourceDevice, content.pniSignatureMessage)
+        }
+        val conversationId = if (masterKeyFromData != null) {
+            SignalProtocol.toConversationId(env.sourceAci, masterKeyFromData)
+        } else {
+            // Anchored on the contact rather than the raw service id, so ACI- and PNI-addressed traffic
+            // share one thread.
+            conversationIdFor(env.sourceAci)
+        }
+        val senderDisplayName = displayNameFor(env.sourceAci)
         val senderAci = env.sourceAci
         val senderDevice = env.sourceDevice
         val serverGuid = env.serverGuid ?: SignalProtocol.generateMessageId()
@@ -1552,7 +1565,7 @@ object SignalClient {
                     dm.hasPollCreate() -> {
                         val pc = dm.pollCreate
                         val sd = SignalServiceData(pollQuestion = pc.question, pollOptions = pc.optionsList.map { SignalPollOptionData(it) }, senderId = senderAci)
-                        _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = pc.question, peerName = senderAci, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = sd.serialize(), pollQuestion = pc.question, pollOptions = pc.optionsList))
+                        _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = pc.question, peerName = senderDisplayName, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = sd.serialize(), pollQuestion = pc.question, pollOptions = pc.optionsList))
                     }
                     dm.hasPollVote() -> {
                         val pv = dm.pollVote
@@ -1567,7 +1580,7 @@ object SignalClient {
                     }
                     dm.hasPollTerminate() -> {
                         // Treat as generic incoming for now; live will handle poll closure UI via serviceData flag.
-                        _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = dm.body, peerName = senderAci, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = SignalServiceData(senderId = senderAci).serialize()))
+                        _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = dm.body, peerName = senderDisplayName, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = SignalServiceData(senderId = senderAci).serialize()))
                     }
                     else -> {
                         val body = dm.body
@@ -1581,13 +1594,13 @@ object SignalClient {
                                 Log.w(TAG, "failed to store sender key distribution from $senderAci", t)
                             }
                         }
-                        val sd = SignalServiceData(senderId = senderAci, senderName = senderAci, isGroup = masterKeyFromData != null)
+                        val sd = SignalServiceData(senderId = senderAci, senderName = senderDisplayName, isGroup = masterKeyFromData != null)
                         _events.emit(
                             SignalEvent.IncomingMessage(
                                 conversationId = conversationId,
                                 messageId = serverGuid,
                                 body = body,
-                                peerName = senderAci,
+                                peerName = senderDisplayName,
                                 peerPhone = null,
                                 timestamp = timestamp,
                                 senderId = senderAci,
@@ -1708,6 +1721,92 @@ object SignalClient {
             Log.w(TAG, "could not build a retry receipt for $sender", t)
         }
     }
+
+    /**
+     * Associate a sender's ACI with the PNI we already knew them by, when they prove the link.
+     *
+     * `PniSignatureMessage` carries their PNI plus a signature *by* the PNI identity key *of* the ACI
+     * identity key, so the two can be merged without trusting the server. Until they are merged, a reply
+     * arrives under the ACI while everything we sent went to the PNI — which shows up as a second
+     * conversation with a UUID for a name.
+     */
+    private suspend fun linkPniToAci(
+        senderAci: String,
+        senderDeviceId: Int,
+        pniSignature: SignalServiceProtos.PniSignatureMessage,
+    ) {
+        val e = e2e ?: return
+        val database = db ?: return
+        val pniRaw = try {
+            SignalProtocol.bytesToUuidString(pniSignature.pni.toByteArray())
+        } catch (_: Exception) {
+            null
+        }
+        if (pniRaw.isNullOrEmpty()) return
+        val pniServiceId = "$PNI_PREFIX$pniRaw"
+
+        val aciIdentity = e.storedIdentityKey(senderAci)
+        val pniIdentity = e.storedIdentityKey(pniServiceId)
+        if (aciIdentity == null || pniIdentity == null) {
+            Log.i(TAG, "cannot verify the PNI signature for $senderAci: missing an identity key")
+            return
+        }
+        val verified = try {
+            IdentityKey(pniIdentity).verifyAlternateIdentity(
+                IdentityKey(aciIdentity),
+                pniSignature.signature.toByteArray(),
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "PNI signature verification failed for $senderAci", t)
+            false
+        }
+        if (!verified) {
+            Log.w(TAG, "invalid PNI signature from $senderAci; not associating it with $pniServiceId")
+            return
+        }
+        val contact = try {
+            database.contactDao().getByPni(pniServiceId) ?: database.contactDao().getByPni(pniRaw)
+        } catch (_: Exception) {
+            null
+        }
+        if (contact == null) {
+            Log.i(TAG, "verified PNI signature from $senderAci but no contact holds $pniServiceId")
+            return
+        }
+        if (contact.aci == senderAci) return
+        try {
+            // The row is keyed by aci, so replace it rather than update in place.
+            database.contactDao().deleteByPhone(contact.phoneE164)
+            database.contactDao().upsert(contact.copy(aci = senderAci))
+            Log.i(TAG, "associated $senderAci with ${contact.phoneE164} via a verified PNI signature")
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not associate $senderAci with ${contact.phoneE164}", t)
+        }
+    }
+
+    /** The contact behind a service id, matched on ACI or PNI. */
+    private suspend fun contactFor(serviceId: String): SignalContact? = try {
+        db?.contactDao()?.let { dao ->
+            dao.get(serviceId) ?: dao.getByPni(serviceId) ?: dao.getByPni(serviceId.removePrefix(PNI_PREFIX))
+        }
+    } catch (_: Exception) {
+        null
+    }
+
+    /** A human name for a sender, falling back through phone number to the raw id. */
+    private suspend fun displayNameFor(serviceId: String): String {
+        val contact = contactFor(serviceId) ?: return serviceId
+        return contact.displayName.takeIf { it.isNotBlank() }
+            ?: contact.phoneE164.takeIf { it.isNotBlank() }
+            ?: serviceId
+    }
+
+    /**
+     * The conversation a sender belongs to. Anchored on the contact's phone number when we know it, so a
+     * reply from an ACI lands in the same thread as everything we sent to their PNI.
+     */
+    private suspend fun conversationIdFor(serviceId: String): String =
+        contactFor(serviceId)?.phoneE164?.takeIf { it.isNotBlank() } ?: serviceId
 
     private suspend fun emitDecryptionError(env: SignalProtocol.SignalEnvelope, message: String?) {
         val cid = SignalProtocol.toConversationId(env.sourceAci, null as ByteArray?)

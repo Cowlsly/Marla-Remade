@@ -351,7 +351,7 @@ object SignalProtocol {
         return try { String(bytes, Charsets.UTF_8).takeIf { it.isNotBlank() } ?: bytesToUuidString(bytes.take(16).toByteArray()) } catch (_: Exception) { "" }
     }
 
-    private fun bytesToUuidString(bytes: ByteArray): String {
+    internal fun bytesToUuidString(bytes: ByteArray): String {
         if (bytes.size < 16) return ""
         val b = if (bytes.size > 16) bytes.copyOfRange(0, 16) else bytes
         return try {
