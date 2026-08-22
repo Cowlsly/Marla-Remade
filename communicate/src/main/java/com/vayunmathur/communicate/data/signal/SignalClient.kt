@@ -8,6 +8,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
+import org.signal.libsignal.metadata.certificate.SenderCertificate
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -86,6 +87,9 @@ object SignalClient {
     private var db: SignalDatabase? = null
     private var e2e: SignalE2E? = null
     private var socket: SignalSocket? = null
+
+    /** Credential-free socket used only for sealed-sender sends. */
+    private var unauthSocket: SignalSocket? = null
     private var processor: SignalEventProcessor? = null
     private var socketJobs: MutableList<Job> = mutableListOf()
     private var reconnectJob: Job? = null
@@ -138,13 +142,21 @@ object SignalClient {
         } catch (_: Exception) {}
 
         _state.value = State.Connecting
+        // Tear down anything from a previous start(); otherwise the old instances keep their own
+        // reconnect loops running with no reference left to stop them.
+        disconnectSockets()
         val sock = SignalSocket(ctx, auth)
         socket = sock
+        // Sealed-sender sends go over a second socket with no credentials. It carries no inbound queue,
+        // so its frames are not collected — only its request/response pairs matter.
+        val unauthSock = SignalSocket(ctx, auth, authenticated = false)
+        unauthSocket = unauthSock
 
         socketJobs.forEach { it.cancel() }
         socketJobs.clear()
 
         sock.connect()
+        unauthSock.connect()
 
         socketJobs.add(scope.launch {
             sock.connectionState.collect { cs ->
@@ -169,6 +181,15 @@ object SignalClient {
                 handleInboundFrame(raw)
             }
         })
+        // The unauthenticated socket must not drive client state, but a permanently failing one silently
+        // degrades every sealed send to the authenticated path, so make that visible.
+        socketJobs.add(scope.launch {
+            unauthSock.connectionState.collect { cs ->
+                if (cs is SignalSocket.ConnectionState.Disconnected) {
+                    Log.i(TAG, "unauthenticated socket down (${cs.reason}); sealed sends will go authenticated")
+                }
+            }
+        })
         Log.i(TAG, "start: socket connecting for ${auth.phoneNumber.takeLast(4)} host=${SignalSocket.DEFAULT_HOST}")
     }
 
@@ -176,8 +197,7 @@ object SignalClient {
         if (!initialized.get()) return
         socketJobs.forEach { it.cancel() }
         socketJobs.clear()
-        try { socket?.disconnect() } catch (_: Exception) {}
-        socket = null
+        disconnectSockets()
         _state.value = State.NeedsSetup
         scope.launch { _events.emit(SignalEvent.StateChanged(state = SignalState.Disconnected, detail = "client stop")) }
     }
@@ -186,9 +206,15 @@ object SignalClient {
         if (!initialized.get()) return
         socketJobs.forEach { it.cancel() }
         socketJobs.clear()
+        disconnectSockets()
+        start()
+    }
+
+    private fun disconnectSockets() {
         try { socket?.disconnect() } catch (_: Exception) {}
         socket = null
-        start()
+        try { unauthSocket?.disconnect() } catch (_: Exception) {}
+        unauthSocket = null
     }
 
     // ---- internal single send path: Content -> encrypted -> PUT /v1/messages/{aci} ----
@@ -238,6 +264,11 @@ object SignalClient {
         if (!e.hasSession(aci, PRIMARY_DEVICE_ID) && !establishSession(e, aci)) return false
 
         val timestamp = System.currentTimeMillis()
+        // Sealed sender when we can: a delivery certificate proves who we are to the recipient without
+        // telling the server, and the access key authorises the unauthenticated send. Absent either,
+        // fall back to an identified send rather than not sending.
+        val sealedSender = sealedSenderFor(aci)
+
         // The server reports device-set disagreements as 409/410; correcting them changes which
         // devices we encrypt for, so the whole encrypt-and-send has to be redone. The timestamp is
         // deliberately not regenerated — it is the message's identity for recipient-side dedup.
@@ -247,7 +278,11 @@ object SignalClient {
             var primaryFailed = false
             for (deviceId in targets) {
                 try {
-                    val enc = e.encryptDM(aci, deviceId, padded)
+                    val enc = if (sealedSender != null) {
+                        e.sealedSenderEncrypt(aci, deviceId, padded, sealedSender.certificate)
+                    } else {
+                        e.encryptDM(aci, deviceId, padded)
+                    }
                     messages.add(
                         SignalPayload.OutgoingPushMessage(
                             type = SignalPayload.envelopeTypeFor(enc.ciphertextType),
@@ -275,7 +310,7 @@ object SignalClient {
             }
 
             val body = SignalPayload.buildPutMessagesBody(aci, messages, timestamp)
-            when (val outcome = putMessages(aci, body)) {
+            when (val outcome = putMessages(aci, body, sealedSender?.accessKey)) {
                 is SendOutcome.Success -> return true
                 is SendOutcome.Failed -> return false
                 is SendOutcome.DeviceSetChanged -> {
@@ -290,48 +325,104 @@ object SignalClient {
 
     private sealed interface SendOutcome {
         data object Success : SendOutcome
-        data object Failed : SendOutcome
+        data class Failed(val status: Int) : SendOutcome
         data class DeviceSetChanged(val status: Int, val body: ByteArray) : SendOutcome
     }
 
-    private suspend fun putMessages(aci: String, jsonBody: ByteArray): SendOutcome {
-        val sock = socket
-        if (sock != null) {
-            val result = try {
-                sock.sendRequestAwaitingResponse(SignalPayload.buildPutMessagesRequest(aci, jsonBody))
-            } catch (_: Exception) { null }
-            if (result != null) {
-                if (result.isSuccess) return SendOutcome.Success
-                if (result.status == 409 || result.status == 410) {
-                    return SendOutcome.DeviceSetChanged(result.status, result.body)
-                }
+    /** A profile key can arrive on any DataMessage, including the one wrapped inside an edit. */
+    private fun profileKeyFrom(parsed: SignalProtocol.ParsedContent): ByteArray? {
+        val dm = when (parsed) {
+            is SignalProtocol.ParsedContent.Data -> parsed.dataMessage
+            is SignalProtocol.ParsedContent.Edit ->
+                if (parsed.editMessage.hasDataMessage()) parsed.editMessage.dataMessage else null
+            else -> null
+        } ?: return null
+        return if (dm.hasProfileKey()) dm.profileKey.toByteArray() else null
+    }
+
+    private data class SealedSenderAccess(val certificate: SenderCertificate, val accessKey: ByteArray)
+
+    /**
+     * The certificate and access key needed to send sealed to [aci], or null when either is missing and
+     * the send must be identified instead.
+     */
+    private suspend fun sealedSenderFor(aci: String): SealedSenderAccess? {
+        val database = db ?: return null
+        val accessKey = SignalSealedSender.accessKeyFor(database, aci) ?: return null
+        val certificate = SignalSealedSender.senderCertificate(
+            db = database,
+            authHeader = basicAuthHeader(),
+            sslSocketFactory = signalTls(),
+        ) ?: return null
+        return SealedSenderAccess(certificate, accessKey)
+    }
+
+    private suspend fun putMessages(aci: String, jsonBody: ByteArray, accessKey: ByteArray?): SendOutcome {
+        // Sealed sends go over the credential-free socket. A 401 means the access key was refused, so
+        // retry over the authenticated socket with the same body — the recipient still receives a sealed
+        // envelope, which official clients expect on an identified channel (SignalServiceCipher logs
+        // exactly this case), but the server learns the sender. That is the intended degradation: the
+        // alternative is not delivering at all.
+        if (accessKey != null) {
+            val outcome = putMessagesOverSocket(unauthSocket, aci, jsonBody, accessKey)
+            if (outcome != null && !(outcome is SendOutcome.Failed && outcome.status == 401)) return outcome
+            if (outcome != null) Log.i(TAG, "sealed send to $aci refused with 401, retrying authenticated")
+        }
+        val identified = putMessagesOverSocket(socket, aci, jsonBody, accessKey = null)
+        if (identified != null) return identified
+        return putMessagesOverRest(aci, jsonBody)
+    }
+
+    /** Null when the socket is absent or gave no response, so the caller can fall back. */
+    private suspend fun putMessagesOverSocket(
+        sock: SignalSocket?,
+        aci: String,
+        jsonBody: ByteArray,
+        accessKey: ByteArray?,
+    ): SendOutcome? {
+        if (sock == null) return null
+        val headers = buildList {
+            add("content-type:application/json")
+            if (accessKey != null) add(SignalSealedSender.accessKeyHeader(accessKey))
+        }
+        val result = try {
+            sock.sendRequestAwaitingResponse(
+                SignalPayload.buildPutMessagesRequest(aci, jsonBody, headers = headers),
+            )
+        } catch (_: Exception) { null } ?: return null
+
+        return when {
+            result.isSuccess -> SendOutcome.Success
+            result.status == 409 || result.status == 410 -> SendOutcome.DeviceSetChanged(result.status, result.body)
+            else -> {
                 Log.w(TAG, "PUT messages to $aci rejected: ${result.status} ${result.message}")
-                return SendOutcome.Failed
+                SendOutcome.Failed(result.status)
             }
         }
-        // Fallback when the websocket is not connected yet.
-        return try {
-            val headers = mapOf(
-                "Authorization" to "Basic ${basicAuthHeader()}",
-                "Content-Type" to "application/json",
-            )
-            val resp = NetworkClient.execute(
-                "https://chat.signal.org${SignalPayload.putMessagesPath(aci)}",
-                method = "PUT",
-                headers = headers,
-                body = jsonBody,
-                sslSocketFactory = signalTls(),
-            )
-            when {
-                resp.isSuccess -> SendOutcome.Success
-                resp.status == 409 || resp.status == 410 -> SendOutcome.DeviceSetChanged(resp.status, resp.bytes)
-                else -> {
-                    Log.w(TAG, "PUT messages to $aci rejected: ${resp.status} ${resp.statusMessage}")
-                    SendOutcome.Failed
-                }
-            }
-        } catch (_: Exception) { SendOutcome.Failed }
     }
+
+    /** Fallback for when neither socket is connected. Authenticated transport, whatever the body holds. */
+    private suspend fun putMessagesOverRest(aci: String, jsonBody: ByteArray): SendOutcome = try {
+        val headers = mapOf(
+            "Authorization" to "Basic ${basicAuthHeader()}",
+            "Content-Type" to "application/json",
+        )
+        val resp = NetworkClient.execute(
+            "https://chat.signal.org${SignalPayload.putMessagesPath(aci)}",
+            method = "PUT",
+            headers = headers,
+            body = jsonBody,
+            sslSocketFactory = signalTls(),
+        )
+        when {
+            resp.isSuccess -> SendOutcome.Success
+            resp.status == 409 || resp.status == 410 -> SendOutcome.DeviceSetChanged(resp.status, resp.bytes)
+            else -> {
+                Log.w(TAG, "PUT messages to $aci rejected: ${resp.status} ${resp.statusMessage}")
+                SendOutcome.Failed(resp.status)
+            }
+        }
+    } catch (_: Exception) { SendOutcome.Failed(0) }
 
     /**
      * Bring our device set for [aci] back in line with the server's. Returns whether anything actually
@@ -816,6 +907,12 @@ object SignalClient {
             return true
         }
         val parsed = SignalProtocol.classifyContent(content)
+        // A sender's profile key rides along with their messages and is what lets us send sealed to them
+        // in return. It is independent of the message kind, so capture it before dispatching — a key on a
+        // reaction or an edit counts just as much as one on a text message.
+        profileKeyFrom(parsed)?.let { key ->
+            db?.let { SignalSealedSender.rememberProfileKey(it, env.sourceAci, key) }
+        }
         val masterKeyFromData: ByteArray? = when (parsed) {
             is SignalProtocol.ParsedContent.Data -> if (parsed.dataMessage.hasGroupV2() && parsed.dataMessage.groupV2.hasMasterKey()) parsed.dataMessage.groupV2.masterKey.toByteArray() else null
             is SignalProtocol.ParsedContent.Edit -> if (parsed.editMessage.hasDataMessage() && parsed.editMessage.dataMessage.hasGroupV2()) parsed.editMessage.dataMessage.groupV2.masterKey.toByteArray() else null

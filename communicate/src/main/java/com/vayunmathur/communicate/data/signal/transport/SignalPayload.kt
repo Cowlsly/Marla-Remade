@@ -3,6 +3,7 @@ package com.vayunmathur.communicate.data.signal.transport
 import android.os.Build
 import com.google.protobuf.ByteString
 import com.vayunmathur.communicate.data.signal.SignalAuthData
+import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
@@ -105,13 +106,16 @@ object SignalPayload {
 
     /**
      * Map a `CiphertextMessage` type to the `Envelope.Type` the server expects. The two enums do not
-     * share values: `WHISPER_TYPE` is 2 but `DOUBLE_RATCHET` is 1.
+     * share values: `WHISPER_TYPE` is 2 but `DOUBLE_RATCHET` is 1. Sealed-sender messages carry their
+     * own envelope type and are marked with [SignalE2E.SEALED_SENDER_TYPE].
      */
     fun envelopeTypeFor(ciphertextMessageType: Int): Int = when (ciphertextMessageType) {
         CiphertextMessage.PREKEY_TYPE ->
             SignalServiceProtos.Envelope.Type.PREKEY_MESSAGE.number
         CiphertextMessage.WHISPER_TYPE ->
             SignalServiceProtos.Envelope.Type.DOUBLE_RATCHET.number
+        SignalE2E.SEALED_SENDER_TYPE ->
+            SignalServiceProtos.Envelope.Type.UNIDENTIFIED_SENDER.number
         else -> throw IllegalArgumentException("unsendable ciphertext type $ciphertextMessageType")
     }
 
@@ -156,12 +160,13 @@ object SignalPayload {
         jsonBody: ByteArray,
         story: Boolean = false,
         id: Long = nextRequestId(),
+        headers: List<String> = listOf("content-type:application/json"),
     ): WebSocketRequestMessage = buildWebSocketRequestMessage(
         verb = "PUT",
         path = putMessagesPath(destinationAci, story),
         body = jsonBody,
         id = id,
-        headers = listOf("content-type:application/json"),
+        headers = headers,
     )
 
     fun buildKeepaliveRequest(id: Long = nextRequestId()): WebSocketRequestMessage =

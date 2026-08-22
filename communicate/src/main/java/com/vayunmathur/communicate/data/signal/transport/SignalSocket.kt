@@ -37,6 +37,11 @@ import java.util.concurrent.ConcurrentHashMap
  *  - Close codes: 4401 invalid auth, 4409 connected elsewhere (env.rs:39-40)
  *  - Validate x-signal-timestamp to defeat captive portals (env.rs:57,947)
  *
+ * Signal keeps **two** of these. The authenticated one carries the inbound message queue and
+ * identified sends; the [authenticated]`= false` one carries sealed-sender sends, which must not go
+ * over the authenticated socket or the server learns the sender identity that sealed sender exists to
+ * hide. The unauthenticated socket sends no `Authorization` header.
+ *
  * Uses :library:network WebSocketClient (binary frames).
  */
 class SignalSocket(
@@ -46,6 +51,7 @@ class SignalSocket(
     private val port: Int = DEFAULT_PORT,
     private val useTls: Boolean = true,
     private val passwordOverride: String? = null,
+    private val authenticated: Boolean = true,
 ) {
     companion object {
         private const val TAG = "SignalSocket"
@@ -92,14 +98,17 @@ class SignalSocket(
     }
 
     private fun authHeaders(): Map<String, String> {
+        val userAgent = mapOf("User-Agent" to SignalPayload.userAgent())
+        // The unauthenticated socket deliberately carries no credentials, and receives no inbound
+        // queue, so the stories header would be meaningless on it.
+        if (!authenticated) return userAgent
         val login = if (authData.aci.isNotEmpty()) "${authData.aci}.${authData.deviceId}" else authData.phoneNumber
         val password = passwordOverride ?: resolvePassword() ?: ""
         val credentials = "$login:$password"
         val basic = Base64.encodeToString(credentials.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
-        return mapOf(
+        return userAgent + mapOf(
             "Authorization" to "Basic $basic",
             "X-Signal-Receive-Stories" to "true",
-            "User-Agent" to SignalPayload.userAgent(),
         )
     }
 
@@ -118,7 +127,7 @@ class SignalSocket(
                 try {
                     _connectionState.emit(ConnectionState.Connecting)
                     val url = wsUrl()
-                    Log.i(TAG, "connecting $url as ${authData.aci.take(8)}.${authData.deviceId} host=$host")
+                    Log.i(TAG, "connecting $url as ${if (authenticated) "${authData.aci.take(8)}.${authData.deviceId}" else "unauthenticated"} host=$host")
                     doConnectOnce()
                     attempt = 0
                 } catch (e: Exception) {

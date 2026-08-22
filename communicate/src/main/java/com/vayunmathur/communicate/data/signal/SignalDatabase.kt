@@ -35,9 +35,11 @@ import com.vayunmathur.library.util.DatabaseMigrations
         SignalE2EKyberPreKey::class,
         SignalE2EKyberUsedBaseKey::class,
         SignalE2ESenderKey::class,
+        SignalSenderCertificate::class,
+        SignalProfileKey::class,
         SignalCallLog::class,
     ],
-    version = 2,
+    version = 3,
     exportSchema = false
 )
 @TypeConverters(SignalTypeConverters::class)
@@ -55,6 +57,8 @@ abstract class SignalDatabase : RoomDatabase() {
     abstract fun e2eKyberPreKeyDao(): SignalE2EKyberPreKeyDao
     abstract fun e2eKyberUsedBaseKeyDao(): SignalE2EKyberUsedBaseKeyDao
     abstract fun e2eSenderKeyDao(): SignalE2ESenderKeyDao
+    abstract fun senderCertificateDao(): SignalSenderCertificateDao
+    abstract fun profileKeyDao(): SignalProfileKeyDao
     abstract fun callLogDao(): SignalCallLogDao
 
     companion object : DatabaseMigrations {
@@ -83,7 +87,28 @@ abstract class SignalDatabase : RoomDatabase() {
             }
         }
 
-        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2)
+        /**
+         * v2 → v3: sealed sender. The delivery certificate is a rotating credential, and recipient
+         * profile keys are secret material used to derive unidentified-access keys — both belong in the
+         * encrypted database rather than the plaintext preferences blob.
+         */
+        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `signal_sender_certificate` (" +
+                        "`id` INTEGER NOT NULL, `record` BLOB NOT NULL, " +
+                        "`expiration` INTEGER NOT NULL, `includesE164` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `signal_profile_keys` (" +
+                        "`address` TEXT NOT NULL, `profileKey` BLOB NOT NULL, " +
+                        "PRIMARY KEY(`address`))",
+                )
+            }
+        }
+
+        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3)
 
         fun getDatabase(context: Context): SignalDatabase =
             SignalRepository.get(context).database()
@@ -516,6 +541,51 @@ interface SignalE2ESenderKeyDao {
 
     @Query("DELETE FROM signal_e2e_sender_keys WHERE address = :address AND deviceId = :deviceId AND distributionId = :distributionId")
     suspend fun delete(address: String, deviceId: Int, distributionId: String)
+}
+
+// -- Sealed sender --
+
+/**
+ * The delivery certificate, a single rotating row. [expiration] is the certificate's own expiry, used
+ * to refresh it before it lapses.
+ */
+@Entity(tableName = "signal_sender_certificate")
+data class SignalSenderCertificate(
+    @PrimaryKey val id: Int = 0,
+    val record: ByteArray,
+    val expiration: Long,
+    val includesE164: Boolean,
+)
+
+/**
+ * A recipient's profile key, from which their unidentified-access key is derived. Secret material —
+ * this table lives in the encrypted database.
+ */
+@Entity(tableName = "signal_profile_keys")
+data class SignalProfileKey(
+    @PrimaryKey val address: String,
+    val profileKey: ByteArray,
+)
+
+@Dao
+interface SignalSenderCertificateDao {
+    @Query("SELECT * FROM signal_sender_certificate WHERE id = 0 LIMIT 1")
+    suspend fun get(): SignalSenderCertificate?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: SignalSenderCertificate)
+
+    @Query("DELETE FROM signal_sender_certificate")
+    suspend fun clear()
+}
+
+@Dao
+interface SignalProfileKeyDao {
+    @Query("SELECT * FROM signal_profile_keys WHERE address = :address LIMIT 1")
+    suspend fun get(address: String): SignalProfileKey?
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun upsert(entity: SignalProfileKey)
 }
 
 // -- Call log --

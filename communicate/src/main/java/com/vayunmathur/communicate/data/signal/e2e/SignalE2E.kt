@@ -220,15 +220,23 @@ class SignalE2E(
         return decrypted.data
     }
 
-    fun sealedSenderEncrypt(recipientAci: String, recipientDeviceId: Int, plaintext: ByteArray, senderCertificate: SenderCertificate): ByteArray {
+    /** Sealed-sender encrypt. Returns the message plus the registration id the envelope needs. */
+    fun sealedSenderEncrypt(
+        recipientAci: String,
+        recipientDeviceId: Int,
+        paddedPlaintext: ByteArray,
+        senderCertificate: SenderCertificate,
+    ): EncResult {
         val address = signalAddress(recipientAci, recipientDeviceId)
         val localUuid = try { UUID.fromString(ownAci) } catch (_: Exception) { UUID.randomUUID() }
         val cipher = SealedSessionCipher(protocolStore, localUuid, null, ownDeviceId)
-        return cipher.encrypt(address, senderCertificate, plaintext)
-    }
-
-    fun sealedSenderEncrypt(recipientAci: String, recipientDeviceId: Int, plaintext: ByteArray): ByteArray {
-        return RustSignalCrypto.sealedSenderEncrypt(plaintext, recipientAci, recipientDeviceId) ?: throw RuntimeException("sealedSenderEncrypt returned null")
+        val encrypted = cipher.encrypt(address, senderCertificate, paddedPlaintext)
+        return EncResult(
+            // Sealed sender is its own envelope type; the inner ciphertext type is not exposed.
+            ciphertextType = SEALED_SENDER_TYPE,
+            remoteRegistrationId = cipher.getRemoteRegistrationId(address),
+            data = encrypted,
+        )
     }
 
     fun sealedSenderDecrypt(ciphertext: ByteArray, trustRoots: List<ECPublicKey>, timestampMs: Long = System.currentTimeMillis()): ByteArray {
@@ -265,6 +273,12 @@ class SignalE2E(
 
     companion object {
         private const val TAG = "SignalE2E"
+
+        /**
+         * Marker for "this ciphertext is a sealed-sender message", mapped to `Envelope.UNIDENTIFIED_SENDER`.
+         * Not a `CiphertextMessage` constant — those describe the inner message, which sealed sender wraps.
+         */
+        const val SEALED_SENDER_TYPE = -1
         private fun b64(s: String): ByteArray = if (s.isEmpty()) ByteArray(0) else Base64.Default.decode(s)
 
         fun signSignedPreKey(identityPrivate32: ByteArray, signedPreKeyPublic32: ByteArray): ByteArray {
