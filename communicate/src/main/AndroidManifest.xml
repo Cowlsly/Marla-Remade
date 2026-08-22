@@ -167,6 +167,22 @@
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
+        <!-- Shared self-managed Telecom account for WhatsApp and Signal calls, so the system owns
+             ringing, call audio focus and Bluetooth routing rather than the app approximating them. -->
+        <service
+            android:name=".telephony.InAppCallConnectionService"
+            android:exported="true"
+            android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE">
+            <intent-filter>
+                <action android:name="android.telecom.ConnectionService" />
+            </intent-filter>
+        </service>
+
+        <service
+            android:name=".telephony.InAppCallForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="phoneCall" />
+
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.mmsfileprovider"

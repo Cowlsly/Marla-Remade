@@ -36,7 +36,12 @@ import com.vayunmathur.communicate.ui.CallLogsScreen
 import com.vayunmathur.communicate.ui.ConversationScreen
 import com.vayunmathur.communicate.ui.DialerScreen
 import com.vayunmathur.communicate.ui.MessagesScreen
+import com.vayunmathur.communicate.data.call.InAppCallPhase
+import com.vayunmathur.communicate.data.call.InAppCallRegistry
+import com.vayunmathur.communicate.data.whatsapp.call.WhatsAppCallBridge
+import com.vayunmathur.communicate.telephony.InAppCallTelecom
 import com.vayunmathur.communicate.ui.call.CallScreen
+import com.vayunmathur.communicate.ui.call.InAppCallScreen
 import com.vayunmathur.communicate.ui.googlevoice.GoogleVoiceSignInScreen
 import com.vayunmathur.communicate.ui.whatsapp.WhatsAppRegistrationScreen
 import com.vayunmathur.communicate.telephony.WhatsAppSyncService
@@ -103,6 +108,7 @@ private fun CommunicateApp() {
     val sigSession = remember { SignalLineSession.get(context) }
     val sigSignedIn by sigSession.signedInFlow.collectAsState(initial = false)
     val callState by GoogleVoiceCallManager.state.collectAsState()
+    val inAppCallState by InAppCallRegistry.state.collectAsState()
 
     // Own the WhatsApp always-on receive state via its foreground sync service (dev-only).
     LaunchedEffect(waSignedIn) {
@@ -126,6 +132,21 @@ private fun CommunicateApp() {
             GoogleVoiceSyncService.start(context)
         } else {
             GoogleVoiceSyncService.stop(context)
+        }
+    }
+
+    // WhatsApp and Signal calls share one Telecom account and one call screen. Registered whenever either
+    // line is usable, so the system owns ringing and audio routing rather than the app approximating it.
+    LaunchedEffect(waSignedIn, sigSignedIn) {
+        val anyLine = (com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled && waSignedIn) ||
+            (SignalFeature.enabled && sigSignedIn)
+        if (anyLine) {
+            InAppCallTelecom.registerPhoneAccount(context, context.getString(R.string.app_name))
+            if (com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled) {
+                WhatsAppCallBridge.ensureStarted(context)
+            }
+        } else {
+            InAppCallTelecom.unregisterPhoneAccount(context)
         }
     }
 
@@ -197,6 +218,10 @@ private fun CommunicateApp() {
     // In-app call UI overlays everything while a Google Voice VoIP call is in progress.
     if (callState.phase != CallPhase.Idle) {
         CallScreen(onClose = { GoogleVoiceCallManager.clearEnded() })
+    } else if (inAppCallState.phase != InAppCallPhase.Idle) {
+        // WhatsApp and Signal share one screen. Google Voice wins a tie: it is a Telecom-owned call that
+        // was already on screen.
+        InAppCallScreen(onClose = { InAppCallRegistry.clearEnded() })
     }
 }
 

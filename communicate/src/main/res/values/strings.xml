@@ -113,4 +113,12 @@
     <string name="signal_safety_number_accept">Accept new safety number</string>
     <string name="signal_safety_number_accept_failed">Could not accept the new safety number</string>
     <string name="call_failed">Could not start the call</string>
+    <!-- Shared by the WhatsApp and Signal call UI; call_state_incoming is Google Voice specific. -->
+    <string name="call_state_connecting">Connecting…</string>
+    <string name="call_state_incoming_generic">Incoming call</string>
+    <string name="account_whatsapp">WhatsApp</string>
+    <string name="inapp_ongoing_call">Ongoing call</string>
+    <string name="inapp_call_channel_name">Calls</string>
+    <string name="inapp_incoming_call_channel_name">Incoming calls</string>
+    <string name="inapp_incoming_call_channel_desc">Ringing for WhatsApp and Signal calls</string>
 </resources>

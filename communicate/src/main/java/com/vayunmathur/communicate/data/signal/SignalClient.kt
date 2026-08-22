@@ -4,6 +4,10 @@ import android.content.Context
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
+import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.data.call.InAppCallController
+import com.vayunmathur.communicate.data.call.InAppCallPhase
+import com.vayunmathur.communicate.data.call.InAppCallRegistry
 import com.vayunmathur.communicate.data.signal.call.SignalCallManager
 import com.vayunmathur.communicate.data.signal.call.SignalCallMessage
 import com.vayunmathur.communicate.data.signal.call.toContent
@@ -14,6 +18,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
+import com.vayunmathur.communicate.telephony.InAppCallTelecom
 import org.signal.libsignal.metadata.certificate.SenderCertificate
 import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.UntrustedIdentityException
@@ -400,6 +405,16 @@ object SignalClient {
 
     /** Guards against overlapping discovery runs; `start()` can fire more than once. */
     private val discoveryRunning = AtomicBoolean(false)
+
+    /**
+     * The inbound call awaiting an answer. RingRTC reports `Ringing` for both directions, so this is what
+     * distinguishes an incoming call and supplies the id [InAppCallController.answer] needs.
+     */
+    @Volatile
+    private var pendingIncomingCallAci: String? = null
+
+    @Volatile
+    private var pendingIncomingCallId: Long? = null
 
     /** Same reason as [discoveryRunning]: without it, each start generates and uploads another batch. */
     private val preKeysPrepared = AtomicBoolean(false)
@@ -1238,7 +1253,10 @@ object SignalClient {
                     state: SignalCallManager.CallState,
                     isVideo: Boolean,
                 ) {
-                    scope.launch { emitCallState(aci, callId, state, isVideo) }
+                    scope.launch {
+                        publishCallState(aci, callId, state, isVideo)
+                        emitCallState(aci, callId, state, isVideo)
+                    }
                 }
             },
             sslSocketFactory = { signalTls() },
@@ -1272,6 +1290,10 @@ object SignalClient {
             cm.hasOffer() -> {
                 val offer = cm.offer
                 val isVideo = offer.type == SignalServiceProtos.CallMessage.Offer.Type.OFFER_VIDEO_CALL
+                // Recorded before RingRTC reports Ringing, which is how the shared registry tells an
+                // inbound call from an outbound one, and what `answer()` needs.
+                pendingIncomingCallAci = senderAci
+                pendingIncomingCallId = offer.id
                 _events.emit(
                     SignalEvent.CallOffer(
                         callId = offer.id.toString(),
@@ -1282,6 +1304,8 @@ object SignalClient {
                         timestamp = timestamp,
                     ),
                 )
+                // Hand the call to the system so it owns ringing, audio focus and routing.
+                appContext?.let { ctx -> InAppCallTelecom.addIncoming(ctx, senderAci) }
                 // Age matters: RingRTC drops offers that sat in the queue too long to still be ringing.
                 val ageSec = ((env.serverTimestamp - env.timestamp).coerceAtLeast(0L)) / 1000
                 manager.receivedOffer(
@@ -1325,6 +1349,71 @@ object SignalClient {
                 _events.emit(SignalEvent.CallEnded(callId = cm.busy.id.toString(), reason = "busy"))
             }
             cm.hasOpaque() -> Log.i(TAG, "ignoring an opaque call message (group calling not implemented)")
+        }
+    }
+
+    /**
+     * Mirror RingRTC's state into the shared call registry, which is what the call screen and the system
+     * call surface read. Registered lazily on the first state change so the controller is bound before the
+     * UI can act on it.
+     */
+    private suspend fun publishCallState(
+        aci: String,
+        callId: Long,
+        state: SignalCallManager.CallState,
+        isVideo: Boolean,
+    ) {
+        val current = InAppCallRegistry.state.value
+        if (current.phase == InAppCallPhase.Idle && state != SignalCallManager.CallState.Ended) {
+            InAppCallRegistry.bind(CommunicateLine.Signal, signalCallController)
+            InAppCallRegistry.onCallStarting(
+                line = CommunicateLine.Signal,
+                peerId = aci,
+                peerName = displayNameFor(aci),
+                isVideo = isVideo,
+                // RingRTC reports Ringing for both directions; an inbound call already has an offer
+                // recorded, which is how we tell them apart.
+                incoming = pendingIncomingCallAci == aci,
+            )
+        }
+        when (state) {
+            SignalCallManager.CallState.Ringing ->
+                if (pendingIncomingCallAci == aci) {
+                    InAppCallRegistry.onPhase(InAppCallPhase.Incoming)
+                } else {
+                    InAppCallRegistry.onPhase(InAppCallPhase.Outgoing)
+                }
+            SignalCallManager.CallState.Connecting -> InAppCallRegistry.onPhase(InAppCallPhase.Connecting)
+            SignalCallManager.CallState.Connected -> InAppCallRegistry.onPhase(InAppCallPhase.Active)
+            SignalCallManager.CallState.Ended -> {
+                InAppCallRegistry.onEnded(null)
+                pendingIncomingCallAci = null
+            }
+        }
+    }
+
+    /** Bridges the shared call UI and the system call surface onto RingRTC. */
+    private val signalCallController = object : InAppCallController {
+        override fun answer() {
+            val id = pendingIncomingCallId ?: return
+            callManager?.accept(id)
+        }
+
+        override fun reject() {
+            callManager?.hangup()
+        }
+
+        override fun hangup() {
+            callManager?.hangup()
+        }
+
+        override fun setMuted(muted: Boolean) {
+            // RingRTC's flag is "audio enabled", the inverse of muted.
+            callManager?.setAudioEnabled(!muted)
+        }
+
+        override fun setSpeaker(on: Boolean) {
+            // Routing belongs to Telecom while a self-managed connection is active; nothing to do here.
         }
     }
 
@@ -1388,6 +1477,8 @@ object SignalClient {
                 return@launch
             }
             manager.placeCall(localAci, authData?.deviceId ?: PRIMARY_DEVICE_ID, resolved, video)
+            // Mirror the call into the system so it owns audio focus and routing.
+            appContext?.let { ctx -> InAppCallTelecom.addOutgoing(ctx, resolved) }
         }
     }
 
