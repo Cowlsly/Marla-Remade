@@ -1,15 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  Dev-only manifest overlay. AGP merges this ONLY into the `dev` (and, by source-set
-  convention, debug) variant, never into `release`. It declares the Bluetooth
-  permissions the experimental custom UWB tracker feature needs for BLE binding
-  (GATT) and crowd-finding (LE scan). Release builds gate the whole feature off via
-  BuildConfig.DEV_BUILD and therefore never declare or request these.
--->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Crowd-finding: scan for tracker beacons. Binding: connect to the tracker's
-         GATT server. Advertising is reserved for future tracker-emulation testing. -->
     <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />

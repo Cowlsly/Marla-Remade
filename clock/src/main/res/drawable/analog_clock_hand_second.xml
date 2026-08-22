@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Second "hand" rendered as a filled DOT (not a line). The circle sits near the top
-     of an otherwise transparent drawable; AnalogClock rotates the whole drawable about
-     the dial center (100,100), so the dot orbits the dial once per minute. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="200dp"
     android:height="200dp"

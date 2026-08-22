@@ -12,8 +12,6 @@
     <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
     <uses-permission android:name="android.permission.READ_PHONE_STATE" />
 
-    <!-- Google Voice virtual line: network for protojson RPCs + SIP/WSS, mic + audio
-         routing for VoIP, self-managed calls, and the ongoing-call foreground service. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -27,7 +25,6 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
 
-    <!-- WhatsApp calling (Phase D/E): camera for video calls + FGS types for in-call mic/camera. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
@@ -141,8 +138,6 @@
             </intent-filter>
         </service>
 
-        <!-- Google Voice virtual line: self-managed ConnectionService (the "GV SIM") + the
-             foreground service that hosts the active VoIP call. -->
         <service
             android:name=".telephony.GoogleVoiceConnectionService"
             android:exported="true"
@@ -172,7 +167,6 @@
             android:exported="false"
             android:foregroundServiceType="phoneCall" />
 
-        <!-- Exposes the temporary M-Send.req PDU file to the system MMS service. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.mmsfileprovider"

@@ -5,13 +5,9 @@
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
         tools:ignore="AllFilesAccessPolicy,ScopedStorage" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Lets the app hand an .apk to the system package installer. The user must still
-         grant "install unknown apps" to Files before an install can proceed. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Signature|privileged. Granted only when Files ships as the system documents UI (MAOS);
-         ignored on a normal install. Lets the SAF picker return/persist provider-backed URIs. -->
     <uses-permission android:name="android.permission.MANAGE_DOCUMENTS"
         tools:ignore="ProtectedPermissions" />
 
@@ -46,7 +42,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Text editor activity to open/edit/save text files using SAF -->
         <activity android:name=".ui.TextEditorActivity"
             android:exported="true"
             android:launchMode="standard"
@@ -66,12 +61,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Storage Access Framework picker. Files takes over DocumentsUI's SAF role, but
-             ONLY when it is the privileged system documents UI. Ships DISABLED so it never
-             appears (e.g. in GET_CONTENT choosers) on a normal install; FilesApp enables it
-             at startup iff MANAGE_DOCUMENTS is granted. The OPEN_DOCUMENT / CREATE_DOCUMENT /
-             OPEN_DOCUMENT_TREE actions are only ever routed by the framework to the configured
-             documents UI package, so they are inert elsewhere regardless. -->
         <activity
             android:name=".data.saf.DocumentPickerActivity"
             android:enabled="false"

@@ -3,13 +3,11 @@
     android:height="24dp"
     android:viewportWidth="24"
     android:viewportHeight="24">
-    <!-- Yellow triangle body -->
     <path
         android:fillColor="#FFEB3B"
         android:strokeColor="#F44336"
         android:strokeWidth="1.2"
         android:pathData="M12,3 L22,20 L2,20 Z" />
-    <!-- Red exclamation mark -->
     <path
         android:fillColor="#F44336"
         android:pathData="M11,9h2v6h-2z" />

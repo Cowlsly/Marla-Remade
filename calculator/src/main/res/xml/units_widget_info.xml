@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- updatePeriodMillis is 0: a conversion only changes when the user changes it, and the app and
-     the widget both push an update when that happens. -->
 <appwidget-provider xmlns:android="http://schemas.android.com/apk/res/android"
     android:minWidth="180dp"
     android:minHeight="110dp"

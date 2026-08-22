@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- VPN user-supplied endpoint: dynamic host, must use system trust.
-         Debug flavor could allow user certs for self-hosted test, but base is system-only. -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />

@@ -48,7 +48,6 @@
             android:exported="true"
             android:theme="@android:style/Theme.NoDisplay" />
 
-        <!-- Glance widget receiver -->
         <receiver
             android:name=".widget.glance.WeatherGlanceWidgetReceiver"
             android:exported="false">
@@ -59,7 +58,6 @@
                 android:name="android.appwidget.provider"
                 android:resource="@xml/weather_glance_widget_info" />
         </receiver>
-        <!-- Blob widget — organic dark shape with large temp, matches homescreen reference -->
         <receiver
             android:name=".widget.glance.WeatherBlobGlanceWidgetReceiver"
             android:exported="false">

@@ -5,16 +5,8 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <!-- NOT dataSync: Android 15 caps dataSync/mediaProcessing foreground services at 6
-         cumulative hours per 24h, then calls onTimeout() and stops the service — which for
-         a VPN means the tunnel silently drops mid-day. A VpnService is one of the categories
-         Android explicitly exempts, so systemExempted is both the correct and the durable
-         type here. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SYSTEM_EXEMPTED" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Naming the app behind a flow means resolving arbitrary UIDs, including apps with no
-         launcher entry, so the narrower <queries> forms aren't enough. Without this,
-         getPackagesForUid() is filtered to nothing and the log can only show a bare UID. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
@@ -36,7 +28,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -48,8 +39,6 @@
             android:permission="android.permission.BIND_VPN_SERVICE"
             android:exported="true"
             android:foregroundServiceType="systemExempted">
-            <!-- Settings queries for this action to discover VPN apps; without it the
-                 always-on toggle is greyed out as "not supported by this app". -->
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>

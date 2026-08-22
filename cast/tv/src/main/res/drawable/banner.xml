@@ -1,16 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  android:banner - the 16:9 tile the Android TV home screen draws for this app. Committed rather
-  than generated: LauncherIconGen produces only the adaptive launcher icon, which the leanback
-  launcher never shows, so without this file the app appears as a blank rectangle.
-
-  Declared at 160x90dp rather than the conventional 320x180: a vector scales losslessly to whatever
-  the launcher asks for, and staying under 200dp keeps it inside the size at which vector drawing is
-  cheap (lint's VectorRaster). The aspect ratio is what actually matters.
-
-  The cast glyph is the same path as :cast's ic_cast, so the two halves of the feature look like one
-  thing.
--->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="160dp"
     android:height="90dp"

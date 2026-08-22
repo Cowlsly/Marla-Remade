@@ -1,11 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- Night counterpart of values/themes.xml. The parent has to change to the dark Material
-         theme (rather than inherit Theme.General) so android:isLightTheme resolves to false,
-         which is what WebView reads to decide the `prefers-color-scheme` it reports to pages.
-         Theme.General's windowSoftInputMode is repeated here because the parent differs and so
-         it can't be inherited. -->
     <style name="Theme.Web" parent="android:Theme.Material.NoActionBar">
         <item name="android:windowSoftInputMode">stateUnchanged</item>
         <item name="android:isLightTheme">false</item>

@@ -5,22 +5,18 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Contacts -->
     <uses-permission android:name="android.permission.READ_CONTACTS" />
     <uses-permission android:name="android.permission.WRITE_CONTACTS" />
 
-    <!-- Calendar -->
     <uses-permission android:name="android.permission.READ_CALENDAR" />
     <uses-permission android:name="android.permission.WRITE_CALENDAR" />
 
-    <!-- Accounts + sync framework -->
     <uses-permission android:name="android.permission.GET_ACCOUNTS" />
     <uses-permission android:name="android.permission.MANAGE_ACCOUNTS" />
     <uses-permission android:name="android.permission.AUTHENTICATE_ACCOUNTS" />
     <uses-permission android:name="android.permission.READ_SYNC_SETTINGS" />
     <uses-permission android:name="android.permission.WRITE_SYNC_SETTINGS" />
 
-    <!-- Health Connect: body composition + vitals synced from Google Health. -->
     <uses-permission android:name="android.permission.health.READ_WEIGHT" />
     <uses-permission android:name="android.permission.health.WRITE_WEIGHT" />
     <uses-permission android:name="android.permission.health.READ_HEIGHT" />
@@ -90,17 +86,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
-        <!-- Receives the OAuth2 redirect (com.vayunmathur.everysync:/oauth). The
-             custom scheme is the app id, registered as the iOS OAuth client's
-             bundle ID in Google Cloud. Scheme-only filter so the hostless
-             `com.vayunmathur.everysync:/oauth` is matched. -->
         <activity
             android:name=".auth.OAuthCallbackActivity"
             android:exported="true"
@@ -114,7 +105,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Health Connect permission rationale (Android 13 and 14+). -->
         <activity
             android:name=".ui.PermissionsRationaleActivity"
             android:exported="true">
@@ -133,7 +123,6 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- Account authenticator: all EverySync accounts share one account type. -->
         <service
             android:name=".auth.AuthenticatorService"
             android:exported="false">
@@ -145,7 +134,6 @@
                 android:resource="@xml/authenticator" />
         </service>
 
-        <!-- Contacts sync adapter. -->
         <service
             android:name=".sync.ContactsSyncService"
             android:exported="false">
@@ -160,7 +148,6 @@
                 android:resource="@xml/contacts" />
         </service>
 
-        <!-- Calendar sync adapter. -->
         <service
             android:name=".sync.CalendarSyncService"
             android:exported="false">
@@ -172,7 +159,6 @@
                 android:resource="@xml/syncadapter_calendar" />
         </service>
 
-        <!-- Re-schedules the periodic sync after reboot / app update. -->
         <receiver
             android:name=".platform.BootReceiver"
             android:exported="true"

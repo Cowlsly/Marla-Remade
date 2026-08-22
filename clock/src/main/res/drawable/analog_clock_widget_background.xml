@@ -1,8 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Flower blob for the analog clock widget: matches BlackyHawky/Clock's
-     analog_clock_dial_flower (12 smooth rounded bumps with smooth valleys; original shape
-     designed by iJahangard). Kept 1:1 (square) so it always renders as a blob; the layout
-     scales it with fitCenter to stay centered and as large as possible in any widget size. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="200dp"
     android:height="200dp"

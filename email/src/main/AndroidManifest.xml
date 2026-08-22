@@ -32,7 +32,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -50,7 +49,6 @@
                 <data android:scheme="mailto" />
             </intent-filter>
 
-            <!-- .eml file viewer: handle taps from Files / Downloads / file managers -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -113,11 +111,6 @@
                 android:resource="@xml/file_paths" />
         </provider>
 
-        <!-- Microsoft OAuth redirect handler. Azure app registered as Mobile & Desktop
-             with redirect com.vayunmathur.email://oauth per RFC8252 compliant native pattern.
-             Thunderbird Desktop uses useExternalBrowser=true + custom scheme same as this.
-             Single filter only — second filter with host=\"\" was invalid on Android 12+ (AOSP disallows empty host)
-             and prevented intent resolution for com.vayunmathur.email://oauth. -->
         <activity
             android:name=".ui.OAuthActivity"
             android:exported="true"

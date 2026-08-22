@@ -1,8 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android Auto app descriptor (P12). Declares this app to the Android Auto
-     host as a Car App Library "template" app so the projected host will surface
-     our CarAppService. Referenced from AndroidManifest via the
-     com.google.android.gms.car.application meta-data. -->
 <automotiveApp>
     <uses name="template" />
 </automotiveApp>

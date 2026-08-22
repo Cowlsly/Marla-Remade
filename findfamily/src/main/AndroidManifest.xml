@@ -15,10 +15,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <!-- Find Nearby (UWB) screen uses the public android.ranging API
-         introduced in Android 15. We do not depend on androidx.core.uwb
-         (its only backend is GMS, which is broken on GrapheneOS), and
-         consequently do not declare UWB_RANGING. -->
     <uses-permission android:name="android.permission.RANGING" />
     <uses-feature android:name="android.hardware.uwb" android:required="false" />
 
@@ -46,8 +42,6 @@
 
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Deep-link invite: findfamily://add/<base26Userid>. Carries only the
-                 sender's public id; tapping prefills the Add Person dialog. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 
@@ -63,9 +57,6 @@
             android:foregroundServiceType="location"
             android:exported="false" />
 
-        <!-- Live family-location channel for co-signed apps (the maps app binds
-             this while its map screen is open). Guarded by the signature
-             permission below so only apps signed with the same key can bind. -->
         <service
             android:name=".ipc.FamilyLocationService"
             android:exported="true"
@@ -75,7 +66,6 @@
             </intent-filter>
         </service>
 
-        <!-- Quick Settings tile to turn location tracking on/off (GitHub #487). -->
         <service
             android:name=".util.TrackingTileService"
             android:exported="true"

@@ -6,8 +6,6 @@
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
 
-    <!-- Android 11+ package visibility: without this, SpeechRecognizer can't see an
-         installed recognition service and isRecognitionAvailable() returns false. -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
@@ -31,7 +29,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- "Translate" appears in the text-selection context menu of other apps. -->
             <intent-filter>
                 <action android:name="android.intent.action.PROCESS_TEXT" />
                 <category android:name="android.intent.category.DEFAULT" />

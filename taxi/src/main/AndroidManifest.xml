@@ -8,18 +8,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-    <!-- Package visibility: without these the deep-link handoff cannot resolve
-         the official apps and silently falls back to the browser. -->
     <queries>
         <package android:name="com.ubercab" />
         <package android:name="me.lyft.android" />
     </queries>
 
-    <!-- Cross-app ride-estimate guard (P20): the exported RideEstimateProvider is
-         readable only by apps signed with the same key (the maps app), which is why
-         this is signature-level. On any other signer it is not granted and the
-         provider is simply unreadable (the maps taxi option then falls back to
-         launch-only or is absent). -->
     <permission
         android:name="com.vayunmathur.taxi.permissions.ACCESS_RIDES"
         android:protectionLevel="signature" />
@@ -43,10 +36,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Cross-app booking deep link (P20): taxi://book?pickup_lat=&pickup_lng=
-                 &dest_lat=&dest_lng=(&labels…) opens the ride screen with the trip
-                 pre-filled. Fired by the maps route-sheet "Book ride" button (see
-                 RideHandoffContract.bookingDeepLink). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -55,9 +44,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Cross-app ride estimate (P20): reuses the app's quote pipeline to return
-             { available, fareEstimate, etaMinutes } for an origin→destination.
-             Exported but signature-guarded so only co-signed apps (maps) can read. -->
         <provider
             android:name=".ipc.RideEstimateProvider"
             android:authorities="com.vayunmathur.taxi.ridelookup"

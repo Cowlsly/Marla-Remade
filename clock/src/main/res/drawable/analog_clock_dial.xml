@@ -1,6 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Clock face: intentionally blank. This vector only defines the clock's intrinsic size
-     (200x200) so AnalogClock scales the hands to match; the tick dots have been removed. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="200dp"
     android:height="200dp"

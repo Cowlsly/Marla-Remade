@@ -1,14 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-        Theme.General inherits android:Theme.Material.Light.NoActionBar, whose
-        windowBackground is white in both light and dark mode. That white is what the
-        system paints for the starting window and for the activity window until Compose
-        draws, which is the flash on cold start.
-
-        Overriding only windowBackground keeps every other Theme.General behaviour
-        (notably windowSoftInputMode=stateUnchanged).
-    -->
     <style name="Theme.Weather" parent="Theme.General">
         <item name="android:windowBackground">@color/window_background</item>
     </style>

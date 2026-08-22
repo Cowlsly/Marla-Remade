@@ -27,8 +27,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- Deep-link join request: voxels://join/<worldId>?owner=<ownerDeviceId>. Lands in the
-                 menu (not the game) and sends a sealed join request to the host. Public ids only. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 

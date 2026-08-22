@@ -6,61 +6,30 @@
 
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Navigation foreground service requires the LOCATION subtype on Android 14+. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
-    <!-- Required on Android 13+ to show the navigation notification. -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
-    <!-- Live family-location channel (P18): bind findfamily's exported bound
-         service. Signature-level, so it is granted only because both MA apps
-         share the signing key; on any other signer it is simply not granted and
-         the family-pins feature is absent. -->
     <uses-permission android:name="com.vayunmathur.findfamily.permissions.ACCESS_FAMILY" />
 
-    <!-- Order integration (P19): read fooddelivery's exported orderable-lookup
-         provider. Signature-level, granted only because both MA apps share the
-         signing key; on any other signer it is not granted and the Order button
-         is simply absent. -->
     <uses-permission android:name="com.vayunmathur.fooddelivery.permissions.ACCESS_ORDERS" />
 
-    <!-- Taxi integration (P20): read taxi's exported ride-estimate provider to show a
-         fare/ETA inline on the route sheet. Signature-level, granted only because both
-         MA apps share the signing key; on any other signer it is not granted and the
-         estimate simply doesn't resolve (the taxi option falls back to launch-only). -->
     <uses-permission android:name="com.vayunmathur.taxi.permissions.ACCESS_RIDES" />
 
-    <!-- Voice search (P8): records audio for the system SpeechRecognizer, which
-         routes to the user-selected recognition service (the MA speech app when
-         installed). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- Contact address shortcut (P17): NO READ_CONTACTS. The system Contact
-         Picker returns a URI with a temporary per-URI read grant, so the picked
-         address is read directly from that URI without any contacts permission. -->
-    <!-- Android 11+ package visibility: needed so SpeechRecognizer can see and
-         bind the installed on-device recognition service for voice search. -->
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
-        <!-- Resolve the system postal-address picker (ACTION_PICK over the
-             Contacts provider) for the P17 contact address shortcut. -->
         <intent>
             <action android:name="android.intent.action.PICK" />
             <data android:mimeType="vnd.android.cursor.dir/postal-address_v2" />
         </intent>
-        <!-- Android 11+ package visibility: resolve + bind findfamily's live
-             family-location service (P18) by its action. -->
         <intent>
             <action android:name="com.vayunmathur.findfamily.action.FAMILY_LOCATIONS" />
         </intent>
-        <!-- Android 11+ package visibility: resolve fooddelivery's orderable-lookup
-             provider (P19) and its fooddelivery://restaurant/<id> order deep link. -->
         <package android:name="com.vayunmathur.fooddelivery" />
-        <!-- Android 11+ package visibility: resolve taxi's ride-estimate provider (P20),
-             detect whether the taxi app is installed, and launch its taxi://book deep
-             link with the route's origin+destination pre-filled. -->
         <package android:name="com.vayunmathur.taxi" />
     </queries>
 
@@ -86,9 +55,6 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
 
-            <!-- geo: links from other apps (assistant, contacts, browsers) → this
-                 app can be the system maps handler. geo:lat,lng[?q=&z=],
-                 geo:0,0?q=lat,lng(label), geo:0,0?q=<address>. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -96,8 +62,6 @@
                 <data android:scheme="geo" />
             </intent-filter>
 
-            <!-- Turn-by-turn requests: google.navigation:q=<lat,lng|address>[&mode=d/w/b/l]
-                 → start guidance to the destination. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -105,9 +69,6 @@
                 <data android:scheme="google.navigation" />
             </intent-filter>
 
-            <!-- Google-Maps web links → "open in maps" offers this app too. Covers
-                 place/search/@coord/?q= links and /dir/ directions, plus the short
-                 maps.app.goo.gl / goo.gl/maps share links. -->
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -122,21 +83,11 @@
             </intent-filter>
         </activity>
 
-        <!-- Live navigation foreground service. Owns the ongoing
-             progress notification and keeps GPS streaming while the
-             app is backgrounded or the screen is off. -->
         <service
             android:name=".util.NavigationService"
             android:foregroundServiceType="location"
             android:exported="false" />
 
-        <!-- Android Auto (P12): the Car App Library entry point. The host
-             (Android Auto, projected) binds this CarAppService via the
-             androidx.car.app.CarAppService action; the NAVIGATION category
-             marks it as a turn-by-turn navigation app so it may draw to the
-             car Surface and use the NavigationTemplate. The map/nav session
-             reuses the existing routing + NavigationSessionManager + system
-             TTS stack; the phone UI (MainActivity) is unaffected. -->
         <service
             android:name=".car.MapsCarAppService"
             android:exported="true"
@@ -147,12 +98,10 @@
             </intent-filter>
         </service>
 
-        <!-- Minimum Car App API level this app targets (Car App Library). -->
         <meta-data
             android:name="androidx.car.app.minCarApiLevel"
             android:value="1" />
 
-        <!-- Declares this app to the Android Auto host as a template app. -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />

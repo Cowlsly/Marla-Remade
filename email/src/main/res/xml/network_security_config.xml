@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Email must allow any cert because users can configure arbitrary self-hosted IMAP/SMTP servers.
-         Base config allows system + user-installed CAs, no cleartext. -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />

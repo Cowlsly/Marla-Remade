@@ -1,16 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-        The share-sheet target is a bottom sheet, not a screen: the activity window itself must
-        be invisible so the Compose sheet's own scrim is the only thing drawn over whatever the
-        user was already looking at. Inheriting Theme.General keeps the rest of its behaviour
-        (notably windowSoftInputMode=stateUnchanged); the two overrides are the same pair
-        Theme.Launcher needs to expose the wallpaper.
-
-        windowIsTranslucent is what stops the system from freezing the activity behind this one,
-        so the app under the sheet keeps drawing. No backgroundDimEnabled: that only applies to
-        floating windows, and the sheet dims for itself.
-    -->
     <style name="Theme.SharePopup" parent="Theme.General">
         <item name="android:windowBackground">@android:color/transparent</item>
         <item name="android:windowIsTranslucent">true</item>

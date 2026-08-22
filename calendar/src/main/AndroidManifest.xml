@@ -31,7 +31,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -54,7 +53,6 @@
                 <data android:scheme="content" />
                 <data android:host="com.android.calendar" />
             </intent-filter>
-            <!-- Handle opening/importing .ics calendar files directly in the main app. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <action android:name="android.intent.action.SEND" />
@@ -75,7 +73,6 @@
                 <data android:mimeType="application/octet-stream" />
             </intent-filter>
         </activity>
-        <!-- Glance widget receiver -->
         <receiver
             android:name=".glance.CalendarGlanceWidgetReceiver"
             android:exported="true">
@@ -96,12 +93,10 @@
                 android:resource="@xml/calendar_glance_widget_info" />
         </receiver>
 
-        <!-- Fires event-reminder notifications from AlarmManager exact alarms. -->
         <receiver
             android:name=".util.ReminderReceiver"
             android:enabled="true"
             android:exported="false" />
-        <!-- Reschedules reminder alarms after reboot / app update. -->
         <receiver
             android:name=".util.BootReceiver"
             android:enabled="true"

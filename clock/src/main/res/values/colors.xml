@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Analog clock widget colors (light). Mirrors BlackyHawky/Clock's values-v31 mapping. -->
 <resources>
     <color name="clock_widget_background">@android:color/system_accent2_50</color>
     <color name="clock_widget_hour">@android:color/system_accent2_700</color>

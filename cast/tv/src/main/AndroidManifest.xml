@@ -1,32 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- MA Cast receiver. Everything is on the LAN: mDNS to advertise, a TCP socket for the
-         control channel, and UDP for the RTP stream. Deliberately NO android.permission.INTERNET
-         beyond what the LAN needs - the phone is the only device that is meant to have internet
-         access, and this app never reaches past the local network. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Local Network Protections (Android 16+): without this NsdManager.registerService throws
-         SecurityException and every LAN socket is blocked, which would make this receiver silently
-         invisible rather than visibly broken. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
 
-    <!-- mediaPlayback, because that is what this is: the service holds the sockets and decodes a
-         stream for as long as the phone is sending. Not subject to Android 15's cumulative-runtime
-         cap, which applies only to dataSync and mediaProcessing. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Leanback is required, not optional: this app is only usable with a remote on a TV, and
-         listing it on a phone would offer a receiver to a device that cannot be one. -->
     <uses-feature
         android:name="android.software.leanback"
         android:required="true" />
-    <!-- Android TV has no touchscreen, and the default for this feature is `required="true"`, so
-         omitting it would make the app uninstallable on the only hardware it targets. -->
     <uses-feature
         android:name="android.hardware.touchscreen"
         android:required="false" />
@@ -52,15 +38,10 @@
             android:theme="@style/Theme.General">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <!-- LEANBACK_LAUNCHER, not LAUNCHER: the Android TV home screen only shows the
-                     former, so without it the app installs and is then unreachable. -->
                 <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
             </intent-filter>
         </activity>
 
-        <!-- The picture. A separate Activity from the idle screen so the decoder surface can be
-             created, torn down and rotated independently of the pairing UI, and so the system's own
-             recents/back behaviour returns to idle rather than to a black surface. -->
         <activity
             android:name=".platform.MirrorActivity"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
@@ -69,8 +50,6 @@
             android:launchMode="singleTop"
             android:theme="@style/Theme.General" />
 
-        <!-- Owns the mDNS registration and both sockets. A foreground service because a receiver
-             that stops listening when its Activity goes away is not a receiver. -->
         <service
             android:name=".service.ReceiverService"
             android:exported="false"

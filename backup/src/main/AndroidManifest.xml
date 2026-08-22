@@ -2,21 +2,14 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Privileged: act as the system app-data backup transport. Granted only to a
-         platform-signed priv-app whitelisted in privapp-permissions*.xml. -->
     <uses-permission android:name="android.permission.BACKUP" />
-    <!-- Set ourselves as the active transport where permitted. -->
     <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
-    <!-- Long-running scheduled file/media backups. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-    <!-- Reaching a WebDAV/Nextcloud remote. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Enumerate installed apps to present per-app backup toggles. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />
-    <!-- Read the user's photos/videos/audio for standalone file/media backup. -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
@@ -40,10 +33,6 @@
             </intent-filter>
         </activity>
 
-        <!-- System app-data backup transport. The platform's BackupManagerService
-             binds this via the TRANSPORT_HOST action once this app is a whitelisted
-             priv-app holding BACKUP; access is gated by the system-only
-             BIND_BACKUP_TRANSPORT permission. -->
         <service
             android:name=".service.ConfigurableBackupTransportService"
             android:exported="true"

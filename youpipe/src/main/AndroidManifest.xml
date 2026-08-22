@@ -9,9 +9,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <!-- Casting is brokered through the installed Cast app, so nothing about the network is needed
-         here: MA Cast owns the sockets, the pairing and the encoders. Only this signature permission,
-         and visibility of the package so the capability probe can resolve it. -->
     <uses-permission android:name="com.vayunmathur.cast.permission.STREAM_CONTENT" />
 
     <queries>
@@ -34,7 +31,6 @@
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
             android:theme="@style/Theme.General">
             <intent-filter android:autoVerify="true">
-                <!-- open youtube.com -->
                 <action android:name="android.intent.action.VIEW" />
 
                 <category android:name="android.intent.category.DEFAULT" />
@@ -46,12 +42,10 @@
                 <data android:host="m.youtube.com" />
                 <data android:host="youtu.be" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <!-- Share sheet: a shared YouTube URL opens straight into the video. -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -64,7 +58,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Share-sheet action: add the shared video straight to Watch later. -->
         <activity-alias
             android:name=".ShareWatchLater"
             android:targetActivity=".MainActivity"
@@ -78,7 +71,6 @@
             </intent-filter>
         </activity-alias>
 
-        <!-- Share-sheet action: pick a playlist (excluding Watch later) for the shared video. -->
         <activity-alias
             android:name=".SharePlaylist"
             android:targetActivity=".MainActivity"

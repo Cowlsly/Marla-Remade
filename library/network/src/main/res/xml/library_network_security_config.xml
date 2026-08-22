@@ -1,7 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Base hardened config: no cleartext, system roots only, no user-installed CAs.
-         Per-app configs override / add domain-config where needed (e.g. RCS cleartext, email user certs). -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />

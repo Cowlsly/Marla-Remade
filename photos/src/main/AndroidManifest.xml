@@ -12,7 +12,6 @@
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.ACCESS_MEDIA_LOCATION" />
-    <!-- For managing media files without popup on Android 12+ -->
     <uses-permission android:name="android.permission.MANAGE_MEDIA" />
 
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
@@ -23,8 +22,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
-    <!-- Semantic search delegates embedding to the OpenAssistant app's exported,
-         signature-permission-gated InferenceService. -->
     <uses-permission android:name="com.vayunmathur.openassistant.permission.ACCESS_INFERENCE" />
 
     <queries>
@@ -77,7 +74,6 @@
                 <data android:mimeType="video/*" />
             </intent-filter>
         </activity>
-        <!-- Glance widget receiver -->
         <receiver
             android:name=".glance.PhotoGlanceWidgetReceiver"
             android:exported="false">

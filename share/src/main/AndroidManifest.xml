@@ -1,48 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Google Nearby Share / Quick Share interop without Play Services -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <!-- Local Network Protections (Android 16+): without this, NsdManager.registerService
-         throws SecurityException("Missing local network permission") and every LAN socket is
-         blocked. WIFI_LAN is the only medium :share can accept a transfer on, so discovery
-         and transfer both depend on it. -->
-    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
-
-    <!-- BLE discovery (Nearby Connections uses BLE for advertisement + scan).
-         No BLUETOOTH_CONNECT: the peer's name comes from the endpoint-info blob inside the
-         advertisement, falling back to ScanRecord.getDeviceName(), and both are parsed from
-         bytes we already have. BluetoothDevice.getName() is the only API here that would need
-         CONNECT, and it reports the same advertised local name.
-         No location permission either: minSdk is 31, so neverForLocation on BLUETOOTH_SCAN is
-         the whole story — the pre-Android-12 classic-scan fallback that used to require
-         ACCESS_FINE_LOCATION cannot be reached. -->
-    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
-    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" android:usesPermissionFlags="neverForLocation" />
-
-    <!-- Stay discoverable/receivable in background. NOT dataSync: Android 15 caps
-         dataSync foreground services at 6 cumulative hours per 24h and then calls
-         onTimeout() and stops the service, which for an always-on receiver means it
-         silently stops being receivable part-way through the day (see :vpn's manifest for
-         the same reasoning). connectedDevice is semantically accurate — BLE advertising
-         plus a local peer link — is not capped, and is not on Android 13/14's list of
-         types a BOOT_COMPLETED receiver may not start. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- Nearby Share over Wi-Fi Direct / Hotspot uses nearby-devices on Android 13+ -->
-    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
-
-    <!-- Deliberately NO storage or media permissions. Files to send are picked with
-         ACTION_OPEN_DOCUMENT and files are saved with ACTION_CREATE_DOCUMENT, both of which
-         grant access to exactly the URI the user chose. Received files are staged in
-         app-private storage and handed out through the FileProvider below. -->
-
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
@@ -65,18 +23,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Long-press on the Quick Settings tile. The tile's
-                 android.service.quicksettings.ACTIVITY meta-data names this activity, but the
-                 system only honours it if the target also declares this action. -->
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
-        <!-- The system share sheet's target. A bottom sheet over the sharing app rather than the
-             whole app: the files are already chosen, so only the device is left to pick.
-             configChanges matches MainActivity's so a rotation does not restart discovery. -->
         <activity
             android:name=".SharePopupActivity"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
@@ -94,24 +46,17 @@
             </intent-filter>
         </activity>
 
-        <!-- Transparent trampoline for the Save action's SAF directory picker: an
-             ActivityResultLauncher needs an Activity and there is no receive screen left.
-             Deliberately NOT noHistory: that finishes the activity as soon as it stops being
-             visible, which is exactly what launching the picker does, so the result callback
-             would be dropped. excludeFromRecents gives the invisibility without the hazard. -->
         <activity
             android:name=".platform.receive.ShareSaveActivity"
             android:excludeFromRecents="true"
             android:exported="false"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
-        <!-- Keep receiving / transferring while backgrounded. -->
         <service
             android:name=".platform.transfer.ShareTransferService"
             android:exported="false"
             android:foregroundServiceType="connectedDevice" />
 
-        <!-- The only on/off control for receiving. -->
         <service
             android:name=".platform.receive.ShareReceiveTileService"
             android:exported="true"
@@ -126,7 +71,6 @@
                 android:value=".MainActivity" />
         </service>
 
-        <!-- Accept / Reject / Cancel from a notification. Explicit component only. -->
         <receiver
             android:name=".platform.receive.ShareNotificationReceiver"
             android:exported="false" />
@@ -139,7 +83,6 @@
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
-        <!-- Grants read access to a received file when the user taps Share. -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

@@ -1,12 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <!-- WebView derives the `prefers-color-scheme` it reports to pages from the hosting
-         activity theme's android:isLightTheme. The shared Theme.General is hard-wired to
-         android:Theme.Material.Light.NoActionBar, so pages always saw "light" no matter the
-         system setting. Theme.Web adds a values-night variant so the flag tracks the system
-         light/dark mode; see values-night/themes.xml. Scoped to :web rather than changing
-         Theme.General, which every app in the repo shares. -->
     <style name="Theme.Web" parent="Theme.General">
         <item name="android:isLightTheme">true</item>
     </style>

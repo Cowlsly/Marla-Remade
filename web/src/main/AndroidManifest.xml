@@ -4,8 +4,6 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <!-- Without this the OS blocks every socket to a private-range address, so LAN sites
-         (routers, NAS, dev servers) fail to load with a generic network error. -->
     <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
@@ -39,7 +37,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -59,8 +56,6 @@
             android:theme="@style/Theme.Web"
             android:launchMode="singleTop"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode">
-            <!-- Launched only via explicit intents (pinned PWA shortcuts with EXTRA_URL). No VIEW/BROWSABLE
-                 filter so it does not appear as a second "Web" option in the system link chooser. -->
         </activity>
 
     </application>

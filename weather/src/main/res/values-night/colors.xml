@@ -1,12 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-        Dark counterpart of the launch window background. DynamicTheme follows the system
-        dark setting (isSystemInDarkTheme), which is the same signal that selects -night,
-        so the two stay in step.
-
-        surfaceContainerHigh is neutral tone 17 in dark; tone 20 is the closest fixed step
-        the dynamic palette exposes.
-    -->
     <color name="window_background">@android:color/system_neutral1_800</color>
 </resources>

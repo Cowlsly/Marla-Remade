@@ -1,43 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- MA Cast: mDNS discovery of _macast._tcp, a TCP socket to the port the TV advertises for
-         the control channel, and UDP to the port it names in STREAM_READY for the RTP stream.
-         Nothing here reaches past the local network - the TV is not required to have internet
-         access at all, which is why the Cast media path could not be used. -->
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Local Network Protections (Android 16+): without this NsdManager.discoverServices
-         throws SecurityException and every LAN socket is blocked, which would make the
-         device list silently empty and the cast socket unopenable. Everything this app
-         does is on the LAN, so it is not optional. -->
-    <uses-permission android:name="android.permission.ACCESS_LOCAL_NETWORK" />
-
-    <!-- mediaProjection is the type that must be in force before getMediaProjection() is
-         called; mediaPlayback covers the window where a control channel is open but nothing
-         is being captured yet. Neither is subject to Android 15's cumulative-runtime cap,
-         which applies only to dataSync and mediaProcessing. -->
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- AudioRecord needs this even for playback capture, where no microphone is involved:
-         the permission gates the API, not the source. -->
-    <uses-permission android:name="android.permission.RECORD_AUDIO" />
-
-    <!-- Deliberately NO storage or media permissions: nothing is read from the device's
-         storage. Screen capture is granted per session by the system consent dialog rather
-         than by a manifest permission, and the token is single-use. -->
-
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
 
-    <!-- What another app needs to hand us a Surface and a PCM pipe. Signature-level, so only apps
-         signed with the Modern Apps key can bind: that is the only enforcement available, because a
-         Messenger service's Handler dispatch loses the Binder calling identity before the message is
-         read. The sending app's *name* therefore never crosses that channel - CastPickerActivity
-         resolves it from callingPackage, which the framework establishes. Label and description are
-         declared because this is what the system shows in the caller's permission list. -->
     <permission
         android:name="com.vayunmathur.cast.permission.STREAM_CONTENT"
         android:label="@string/cast_stream_content_permission_label"
@@ -62,16 +27,11 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Without this filter the system ignores the tile's ACTIVITY meta-data, so a
-                 long-press on the tile would go nowhere. -->
             <intent-filter>
                 <action android:name="android.service.quicksettings.action.QS_TILE_PREFERENCES" />
             </intent-filter>
         </activity>
 
-        <!-- The consent trampoline. Translucent and NOT android:noHistory: noHistory finishes an
-             activity as soon as it stops being visible, which is exactly what launching the system
-             consent dialog does, so the result callback would be dropped. -->
         <activity
             android:name=".platform.mirror.MirrorConsentActivity"
             android:excludeFromRecents="true"
@@ -79,8 +39,6 @@
             android:launchMode="singleTop"
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
 
-        <!-- Where another app's user picks a TV, and the only place callingPackage is available.
-             Launched for a result by CastPickerContract; permission-gated like the service. -->
         <activity
             android:name=".platform.CastPickerActivity"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
@@ -90,17 +48,11 @@
             android:permission="com.vayunmathur.cast.permission.STREAM_CONTENT"
             android:theme="@style/Theme.General" />
 
-        <!-- Holds the cast channel and the screen-capture projection up while the app is not in
-             front, so backgrounding the app does not stop mirroring. -->
         <service
             android:name=".service.CastService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection|mediaPlayback" />
 
-        <!-- The SDK's session channel. Exported because that is the point, and not a foreground
-             service: CastService already owns that role, and an app-content session needs
-             mediaPlayback only, which its enterForeground(withProjection = false) already claims.
-             Unbinding is what ends a session, so the binding is the session's lifetime. -->
         <service
             android:name=".service.ContentCastService"
             android:exported="true"

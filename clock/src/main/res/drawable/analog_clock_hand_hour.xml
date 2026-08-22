@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Hour hand: thick rounded bar. AnalogClock rotates it about the dial center (100,100). -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="200dp"
     android:height="200dp"

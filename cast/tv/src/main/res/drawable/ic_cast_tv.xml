@@ -1,7 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Notification small icon. A drawable rather than the launcher mipmap because the status bar
-     tints and masks whatever it is given, and a full-colour icon comes out as a blob. Same glyph
-     as :cast's ic_cast, so the two halves of the feature look like one thing. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"

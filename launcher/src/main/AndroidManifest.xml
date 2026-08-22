@@ -3,38 +3,15 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.SET_WALLPAPER" />
-    <!-- Read the current wallpaper to preview it in the picker. Ignored on API 33+, where
-         WallpaperManager.getDrawable() is restricted to the default home app regardless. -->
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
-    <!--
-        Privileged permissions, declared so a build that *is* on the system image gets the
-        features they unlock. On an ordinary device none of them is granted, every probe in
-        `platform/LauncherPrivilege.kt` answers false, and the app behaves exactly as it would
-        without this block. Only `<uses-permission>` appears here on purpose: a `<permission>`,
-        a `sharedUserId` or a `<uses-feature>` would stop the APK installing on a stock device.
-
-        `ProtectedPermissions` is suppressed rather than fixed because it is telling us the truth -
-        these are granted to system apps only - and that is exactly the arrangement intended. The
-        declaration is harmless on a device that will not grant it; requesting it is not possible.
-    -->
-    <!-- Uninstall without the system confirmation dialog, from the drop bar. -->
     <uses-permission android:name="android.permission.DELETE_PACKAGES"
         tools:ignore="ProtectedPermissions" />
-    <!-- Pause and resume the work profile from the drawer's Work tab. -->
     <uses-permission android:name="android.permission.MODIFY_QUIET_MODE"
         tools:ignore="ProtectedPermissions" />
-    <!-- Pull the notification shade down by swiping down on the workspace. -->
     <uses-permission android:name="android.permission.EXPAND_STATUS_BAR" />
 
-    <!--
-        The app drawer lists launchable activities, so it needs to see them. This is the
-        narrow form of package visibility rather than QUERY_ALL_PACKAGES: it resolves
-        exactly the MAIN/LAUNCHER activities a drawer shows and nothing else, and it is
-        what makes LauncherApps.getActivityList return a full list before we hold the
-        HOME role.
-    -->
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />
@@ -64,16 +41,9 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
-                <!--
-                    HOME plus DEFAULT is what makes this eligible to be the home app; without
-                    DEFAULT the system will not offer it in the chooser. LAUNCHER stays so the
-                    app is still reachable from whatever launcher is currently in charge,
-                    which matters while it is not yet the default.
-                -->
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />

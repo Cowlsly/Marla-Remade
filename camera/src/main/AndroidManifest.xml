@@ -5,8 +5,6 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
-    <!-- Camera vision runs fully on-device; strip any INTERNET/network permission a
-         transitive dependency might merge in. -->
     <uses-permission android:name="android.permission.INTERNET" tools:node="remove" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" tools:node="remove" />
 
@@ -33,7 +31,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Surfaces an in-app settings entry on the system App Info page. -->
             <intent-filter>
                 <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -42,9 +39,6 @@
                 <action android:name="android.media.action.IMAGE_CAPTURE" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
-            <!-- Quick-launch (power double-press) and lockscreen camera shortcut. The SECURE
-                 variant is what GrapheneOS/stock fire from the lockscreen; showWhenLocked lets
-                 it display over the keyguard. -->
             <intent-filter>
                 <action android:name="android.media.action.STILL_IMAGE_CAMERA" />
                 <category android:name="android.intent.category.DEFAULT" />

@@ -2,11 +2,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
-    <!-- As a system RecognitionService we run the framework's caller permission check in
-         OUR process: it verifies the CALLING app's RECORD_AUDIO via AppOps. On Android 11+
-         package visibility hides other apps, so that lookup fails ("caller without
-         permission RECORD_AUDIO") even when the caller holds it. A recognizer serves
-         arbitrary apps, so we need to see all of them. -->
     <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES" />
 
     <application
@@ -28,9 +23,6 @@
             </intent-filter>
         </activity>
 
-        <!-- System speech recognition service. Once selected as the device's voice-input
-             / on-device recognition service, any app using android.speech.SpeechRecognizer
-             (e.g. Translate) gets fully offline transcription through this. -->
         <service
             android:name=".service.WhisperRecognitionService"
             android:label="@string/recognition_service_label"
@@ -44,9 +36,6 @@
                 android:resource="@xml/recognition_service" />
         </service>
 
-        <!-- System text-to-speech engine (offline Piper/VITS via sherpa-onnx). Once selected
-             as the device's TTS engine, any app using android.speech.tts.TextToSpeech speaks
-             fully on-device. -->
         <service
             android:name=".service.PiperTtsService"
             android:label="@string/tts_engine_label"
@@ -60,7 +49,6 @@
                 android:resource="@xml/tts_engine" />
         </service>
 
-        <!-- Framework probe run by the TTS settings to discover installed voices. -->
         <activity
             android:name=".tts.CheckVoiceDataActivity"
             android:exported="true"

@@ -41,19 +41,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- market:// links are ours to claim outright. The https ones are path-scoped:
-                 handleIntentUrl only knows how to turn an app-listing URL into a package
-                 name, so claiming the whole host would put this app in the chooser for
-                 every unrelated play.google.com / f-droid.org link and then drop the user
-                 on an empty screen. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="market" />
             </intent-filter>
-            <!-- autoVerify="false": these are third-party domains, so we can never host
-                 assetlinks.json for them; this is a chooser entry, not an App Link. -->
             <intent-filter android:autoVerify="false">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -67,7 +60,6 @@
                 <data android:scheme="https" />
                 <data android:host="f-droid.org" />
                 <data android:pathPrefix="/packages/" />
-                <!-- f-droid.org also serves localised listing URLs (/en/packages/...). -->
                 <data android:pathPattern="/.*/packages/.*" />
             </intent-filter>
         </activity>

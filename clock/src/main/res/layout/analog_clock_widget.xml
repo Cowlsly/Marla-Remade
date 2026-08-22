@@ -1,8 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The blob background is drawn by an ImageView with scaleType="fitCenter" (instead of
-     as the root's stretchable background) so it always stays a centered 1:1 blob, as large
-     as possible, even when the widget is resized into a non-square rectangle. The framework
-     AnalogClock likewise scales its square dial centered, so the two stay aligned. -->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/analog_clock_widget_root"
     android:layout_width="match_parent"

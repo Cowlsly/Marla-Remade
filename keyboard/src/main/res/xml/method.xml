@@ -1,5 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- IME descriptor: points the system at the setup activity and declares one English subtype. -->
 <input-method xmlns:android="http://schemas.android.com/apk/res/android"
     android:settingsActivity="com.vayunmathur.keyboard.MainActivity"
     android:supportsSwitchingToNextInputMethod="true">

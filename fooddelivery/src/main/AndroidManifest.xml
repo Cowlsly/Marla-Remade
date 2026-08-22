@@ -6,10 +6,6 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
 
-    <!-- Cross-app orderable-lookup guard (P19): the exported OrderLookupProvider
-         is readable only by apps signed with the same key (the maps app), which
-         is why this is signature-level. On any other signer it is not granted and
-         the provider is simply unreadable. -->
     <permission
         android:name="com.vayunmathur.fooddelivery.permissions.ACCESS_ORDERS"
         android:protectionLevel="signature" />
@@ -33,9 +29,6 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Cross-app deep link (P19): fooddelivery://restaurant/<id> opens
-                 that merchant's order page. Fired by the maps place-sheet "Order"
-                 button (see OrderLookupContract.deepLink). -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -44,9 +37,6 @@
             </intent-filter>
         </activity>
 
-        <!-- Cross-app orderable lookup (P19): tolerant name+proximity match over
-             the merchant catalog, returning { orderable, restaurantId, deepLink }.
-             Exported but signature-guarded so only co-signed apps (maps) can read. -->
         <provider
             android:name=".ipc.OrderLookupProvider"
             android:authorities="com.vayunmathur.fooddelivery.orderlookup"

@@ -1,13 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!--
-        Window background for the launcher activity. This is what the system's starting
-        window paints before Compose produces its first frame, so it has to match what
-        HomePage draws first — its holding Scaffold, which uses surfaceContainerHigh.
-
-        Material3's dynamic surfaceContainerHigh is neutral tone 92 (light). The Android 12
-        dynamic palette only exposes fixed tone steps, so tone 90 is the closest available;
-        the residual difference is a couple of tone steps rather than a white flash.
-    -->
     <color name="window_background">@android:color/system_neutral1_100</color>
 </resources>

@@ -21,7 +21,6 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.General">
 
-        <!-- Android Auto (media) app descriptor: declares this as a media app for AA. -->
         <meta-data
             android:name="com.google.android.gms.car.application"
             android:resource="@xml/automotive_app_desc" />
@@ -38,9 +37,6 @@
             </intent-filter>
         </activity>
 
-        <!-- MediaLibraryService: serves phone transport AND the Android Auto browse tree.
-             The MediaBrowserService action lets Android Auto discover the browsable
-             content hierarchy; the media3 actions serve MediaController/MediaBrowser. -->
         <service
             android:name=".service.PlaybackService"
             android:foregroundServiceType="mediaPlayback"
@@ -67,9 +63,6 @@
             android:permission="com.vayunmathur.music.permissions.ACCESS_MUSIC">
         </activity>
 
-        <!-- Popup single-file player (mirrors AOSP Music's .AudioPreview): VIEW an audio
-             file/content/http uri and play just that track in a translucent dialog over the
-             launching app, without opening the full Music app. -->
         <activity
             android:name=".intents.AudioPreviewActivity"
             android:exported="true"

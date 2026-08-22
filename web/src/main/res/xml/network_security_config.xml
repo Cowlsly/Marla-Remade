@@ -1,11 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
-    <!-- Web is a browser: must trust any cert host + user-installed CAs (MITM debug, corp proxies).
-         Cleartext is permitted at the platform level because LAN sites (routers, NAS boxes, dev
-         servers) are almost all plain http, and this file can only match exact hostnames - there
-         is no CIDR syntax, so "cleartext on the LAN only" is not expressible here for a browser
-         that navigates wherever the user types. That rule is enforced in the app layer instead,
-         by ShieldsRequestFilter via LanPolicy. -->
     <base-config cleartextTrafficPermitted="true">
         <trust-anchors>
             <certificates src="system" />
