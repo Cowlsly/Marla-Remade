@@ -12,6 +12,7 @@ import android.telecom.PhoneAccount
 import android.telecom.PhoneAccountHandle
 import android.telecom.TelecomManager
 import android.telecom.VideoProfile
+import android.util.Log
 import com.vayunmathur.communicate.data.call.InAppCallConnectionBridge
 import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
@@ -137,6 +138,7 @@ class InAppCallConnectionService : ConnectionService() {
         request: ConnectionRequest?,
     ): Connection {
         val state = InAppCallRegistry.state.value
+        Log.i(TAG, "onCreateOutgoingConnection for ${state.line} phase=${state.phase}")
         val connection = InAppCallConnection().apply {
             setAddress(
                 request?.address ?: Uri.fromParts(PhoneAccount.SCHEME_SIP, state.peerId, null),
@@ -159,6 +161,7 @@ class InAppCallConnectionService : ConnectionService() {
         request: ConnectionRequest?,
     ): Connection {
         val state = InAppCallRegistry.state.value
+        Log.i(TAG, "onCreateIncomingConnection for ${state.line} phase=${state.phase}")
         val address = request?.extras?.getParcelable(TelecomManager.EXTRA_INCOMING_CALL_ADDRESS) as? Uri
         val connection = InAppCallConnection().apply {
             setAddress(
@@ -176,10 +179,28 @@ class InAppCallConnectionService : ConnectionService() {
         return connection
     }
 
+    /**
+     * Telecom could not create the mirror connection.
+     *
+     * Deliberately does **not** end the call. Telecom here is a surface for a call the line already owns,
+     * so a failure to mirror must not terminate working media - doing so turned every outgoing call into an
+     * instant "missed call" on the other end.
+     */
     override fun onCreateOutgoingConnectionFailed(
         connectionManagerPhoneAccount: PhoneAccountHandle?,
         request: ConnectionRequest?,
     ) {
-        InAppCallRegistry.hangup()
+        Log.w(TAG, "Telecom could not create the outgoing connection; the call continues without it")
+    }
+
+    override fun onCreateIncomingConnectionFailed(
+        connectionManagerPhoneAccount: PhoneAccountHandle?,
+        request: ConnectionRequest?,
+    ) {
+        Log.w(TAG, "Telecom could not create the incoming connection; the call continues without it")
+    }
+
+    private companion object {
+        const val TAG = "InAppCallService"
     }
 }
