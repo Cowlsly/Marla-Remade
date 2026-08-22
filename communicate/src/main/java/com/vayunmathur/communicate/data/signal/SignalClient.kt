@@ -206,15 +206,9 @@ object SignalClient {
             }
         })
         // Discover which address-book numbers are on Signal. Without this, phone-addressed conversations
-        // have no ACI and cannot be sent to at all, so it runs on connect rather than on first send.
-        socketJobs.add(scope.launch {
-            try {
-                val result = SignalContactSync.sync(ctx)
-                Log.i(TAG, "contact discovery: ${result.onSignalCount}/${result.e164Count} on Signal${result.transportError?.let { " ($it)" } ?: ""}")
-            } catch (t: Throwable) {
-                Log.w(TAG, "contact discovery failed", t)
-            }
-        })
+        // have no ACI and cannot be sent to at all. Deliberately not in socketJobs: those are cancelled on
+        // every reconnect, which would kill a discovery request mid-flight.
+        scope.launch { runContactDiscovery(ctx) }
         Log.i(TAG, "start: socket connecting for ${auth.phoneNumber.takeLast(4)} host=${SignalSocket.DEFAULT_HOST}")
     }
 
@@ -283,6 +277,31 @@ object SignalClient {
      * only ever learn a real ACI from an inbound message or from CDSI contact discovery, so a number
      * belonging to someone who has never messaged us cannot be resolved and the send has to fail.
      */
+    /** Guards against overlapping discovery runs; `start()` can fire more than once. */
+    private val discoveryRunning = AtomicBoolean(false)
+
+    /**
+     * Run contact discovery once. Returns whether it completed, so a caller waiting on a resolution knows
+     * whether the result is meaningful or a concurrent run simply owned it.
+     */
+    private suspend fun runContactDiscovery(ctx: Context): Boolean {
+        if (!discoveryRunning.compareAndSet(false, true)) return false
+        return try {
+            val result = SignalContactSync.sync(ctx)
+            Log.i(
+                TAG,
+                "contact discovery: ${result.onSignalCount}/${result.e164Count} on Signal" +
+                    (result.transportError?.let { " ($it)" } ?: ""),
+            )
+            result.transportError == null
+        } catch (t: Throwable) {
+            Log.w(TAG, "contact discovery failed", t)
+            false
+        } finally {
+            discoveryRunning.set(false)
+        }
+    }
+
     private suspend fun resolveDestinationAci(destination: String): String? {
         val trimmed = destination.trim()
         if (trimmed.isEmpty()) return null
@@ -293,15 +312,7 @@ object SignalClient {
         // never have synced. Discovery is the only way to find out.
         val ctx = appContext
         if (ctx != null) {
-            val result = try {
-                SignalContactSync.sync(ctx)
-            } catch (t: Throwable) {
-                Log.w(TAG, "contact discovery failed while resolving $trimmed", t)
-                null
-            }
-            if (result?.transportError != null) {
-                Log.w(TAG, "contact discovery unavailable (${result.transportError})")
-            }
+            runContactDiscovery(ctx)
             knownAciFor(trimmed)?.let { return it }
         }
         Log.w(TAG, "$trimmed is not a registered Signal user, or discovery could not confirm it")
