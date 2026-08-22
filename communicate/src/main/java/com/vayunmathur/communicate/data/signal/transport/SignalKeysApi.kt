@@ -154,12 +154,20 @@ object SignalKeysApi {
      * or a fresh batch of one-time keys. Keys go up base64 **without** padding, matching the fetch format.
      */
     suspend fun uploadPreKeys(
+        signedPreKey: SignalE2E.PreKeyUpload.KeyEntity?,
         lastResortKyber: SignalE2E.PreKeyUpload.KeyEntity?,
         oneTimeEcPreKeys: List<SignalE2E.PreKeyUpload.KeyEntity>,
         authHeader: String,
         sslSocketFactory: SSLSocketFactory?,
     ): Boolean {
         val body = buildJsonObject {
+            if (signedPreKey != null) {
+                putJsonObject("signedPreKey") {
+                    put("keyId", signedPreKey.id)
+                    put("publicKey", encodeUnpadded(signedPreKey.publicKey))
+                    put("signature", encodeUnpadded(signedPreKey.signature ?: ByteArray(0)))
+                }
+            }
             if (lastResortKyber != null) {
                 putJsonObject("pqLastResortPreKey") {
                     put("keyId", lastResortKyber.id)
@@ -200,7 +208,7 @@ object SignalKeysApi {
             Log.w(TAG, "pre-key registration rejected: ${resp.status} ${resp.statusMessage}")
             return false
         }
-        Log.i(TAG, "registered pre-keys: kyber=${lastResortKyber != null} oneTime=${oneTimeEcPreKeys.size}")
+        Log.i(TAG, "registered pre-keys: signed=${signedPreKey != null} kyber=${lastResortKyber != null} oneTime=${oneTimeEcPreKeys.size}")
         return true
     }
 

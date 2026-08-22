@@ -15,6 +15,8 @@ import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import org.signal.libsignal.metadata.certificate.SenderCertificate
 import org.signal.libsignal.protocol.UntrustedIdentityException
+import org.signal.libsignal.protocol.message.DecryptionErrorMessage
+import org.signal.libsignal.protocol.message.PlaintextContent
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -306,21 +308,40 @@ object SignalClient {
      * Seed our own pre-keys into the protocol store and register anything the server does not yet have.
      * Runs once per start; without it a peer's first message cannot be decrypted.
      */
+    /**
+     * Seed our own pre-keys into the protocol store and register anything the server does not yet have.
+     *
+     * After seeding, our stored signed pre-key is checked against the bundle the server actually hands
+     * out. That is the only authoritative comparison: senders encrypt to the server's copy, so if it
+     * differs from ours every inbound pre-key message fails in the key agreement with an error that names
+     * neither half. A mismatch is repaired by rotating and re-registering.
+     */
     private suspend fun ensureLocalPreKeys() {
         if (!preKeysPrepared.compareAndSet(false, true)) return
         val e = e2e ?: run {
             preKeysPrepared.set(false)
             return
         }
-        val upload = try {
+        var upload = try {
             e.ensureLocalPreKeys()
         } catch (t: Throwable) {
             preKeysPrepared.set(false)
             Log.w(TAG, "could not prepare local pre-keys", t)
             return
         }
+
+        if (upload.signedPreKey == null && !signedPreKeyMatchesServer(e)) {
+            upload = try {
+                upload.copy(signedPreKey = e.rotateSignedPreKeyNow())
+            } catch (t: Throwable) {
+                Log.w(TAG, "could not rotate the signed pre-key", t)
+                upload
+            }
+        }
+
         if (upload.isEmpty) return
         val ok = SignalKeysApi.uploadPreKeys(
+            signedPreKey = upload.signedPreKey,
             lastResortKyber = upload.lastResortKyber,
             oneTimeEcPreKeys = upload.oneTimeEcPreKeys,
             authHeader = basicAuthHeader(),
@@ -332,6 +353,46 @@ object SignalClient {
             // Let a later start retry rather than leaving keys stored but unregistered.
             preKeysPrepared.set(false)
         }
+    }
+
+    /**
+     * Whether the signed pre-key the server serves for us is one we hold the private half of. Returns true
+     * when it cannot be checked, so a network problem does not trigger a needless rotation.
+     */
+    private suspend fun signedPreKeyMatchesServer(e: SignalE2E): Boolean {
+        val ourAci = authData?.aci?.takeIf { it.isNotEmpty() } ?: return true
+        val bundles = try {
+            SignalKeysApi.fetchPreKeys(ourAci, authData?.deviceId ?: PRIMARY_DEVICE_ID, basicAuthHeader(), signalTls())
+        } catch (t: Throwable) {
+            Log.i(TAG, "could not fetch our own bundle to verify the signed pre-key", t)
+            return true
+        }
+        val ours = bundles.firstOrNull { it.deviceId == (authData?.deviceId ?: PRIMARY_DEVICE_ID) }
+        if (ours == null) {
+            Log.w(TAG, "the server has no bundle for our own device ${authData?.deviceId}")
+            return true
+        }
+        val signedMatches = e.hasSignedPreKeyMatching(ours.bundle.signedPreKeyId, ours.bundle.signedPreKeyPublic)
+        // The identity key is the other half of what a sender binds to; a mismatch here breaks every
+        // inbound message and cannot be repaired by rotating pre-keys.
+        val identityMatches = ours.bundle.identityKey.contentEquals(e.ownIdentityPublicKey)
+        Log.i(
+            TAG,
+            "own bundle check: signedPreKeyId=${ours.bundle.signedPreKeyId} signedMatches=$signedMatches " +
+                "identityMatches=$identityMatches kyberPreKeyId=${ours.bundle.kyberPreKeyId} " +
+                "hasOneTime=${ours.bundle.preKeyId != null}",
+        )
+        if (!identityMatches) {
+            Log.e(
+                TAG,
+                "our registered identity key differs from the one we hold; inbound messages cannot decrypt " +
+                    "and re-registration is required",
+            )
+        }
+        if (!signedMatches) {
+            Log.w(TAG, "the server serves signed pre-key ${ours.bundle.signedPreKeyId} that we cannot use; rotating")
+        }
+        return signedMatches
     }
 
     /** Guards against overlapping discovery runs; `start()` can fire more than once. */
@@ -1427,6 +1488,8 @@ object SignalClient {
         } catch (t: Throwable) {
             Log.w(TAG, "decrypt failed for ${env.sourceAci}:${env.sourceDevice}", t)
             emitDecryptionError(env, t.message)
+            // Ask the sender to rebuild the session; otherwise this fails identically forever.
+            if (env.type != SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT) sendRetryReceipt(env)
             // Redelivery cannot fix a decrypt failure, so ack rather than spin on it.
             return true
         }
@@ -1590,6 +1653,52 @@ object SignalClient {
             }
         }
         return true
+    }
+
+    /**
+     * Tell [env]'s sender that we could not decrypt, so they rebuild the session.
+     *
+     * This is the protocol's recovery path: a `DecryptionErrorMessage` in a plaintext envelope makes the
+     * sender archive their session and fetch a fresh pre-key bundle. Without it a session that has drifted
+     * — for instance because our Kyber pre-key was replaced — stays broken forever, with every retry
+     * failing identically.
+     *
+     * Sent unencrypted by design; `PLAINTEXT_CONTENT` is the one envelope type that may be, and it may
+     * carry nothing but this.
+     */
+    private suspend fun sendRetryReceipt(env: SignalProtocol.SignalEnvelope) {
+        val e = e2e ?: return
+        val sender = env.sourceAci.takeIf { it.isNotEmpty() } ?: return
+        if (env.content.isEmpty()) return
+        try {
+            val errorMessage = DecryptionErrorMessage.forOriginalMessage(
+                env.content,
+                env.type.number,
+                env.timestamp,
+                env.sourceDevice,
+            )
+            val body = PlaintextContent(errorMessage).serialize()
+            // Their next message builds a new session, so drop ours rather than keep a chain they abandoned.
+            e.archiveSession(sender, env.sourceDevice)
+            val message = SignalPayload.OutgoingPushMessage(
+                type = SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT.number,
+                destinationDeviceId = env.sourceDevice,
+                destinationRegistrationId = 0,
+                content = body,
+            )
+            val json = SignalPayload.buildPutMessagesBody(
+                destinationAci = sender,
+                messages = listOf(message),
+                timestamp = System.currentTimeMillis(),
+                urgent = false,
+            )
+            when (val outcome = putMessages(sender, json, accessKey = null)) {
+                is SendOutcome.Success -> Log.i(TAG, "sent a retry receipt to $sender:${env.sourceDevice}")
+                else -> Log.w(TAG, "could not send a retry receipt to $sender: $outcome")
+            }
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not build a retry receipt for $sender", t)
+        }
     }
 
     private suspend fun emitDecryptionError(env: SignalProtocol.SignalEnvelope, message: String?) {

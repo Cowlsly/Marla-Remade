@@ -312,12 +312,14 @@ class SignalE2E(
      * Keys are the serialized public halves; signatures are over those, by our identity key.
      */
     data class PreKeyUpload(
+        val signedPreKey: KeyEntity?,
         val lastResortKyber: KeyEntity?,
         val oneTimeEcPreKeys: List<KeyEntity>,
     ) {
         data class KeyEntity(val id: Int, val publicKey: ByteArray, val signature: ByteArray? = null)
 
-        val isEmpty: Boolean get() = lastResortKyber == null && oneTimeEcPreKeys.isEmpty()
+        val isEmpty: Boolean
+            get() = signedPreKey == null && lastResortKyber == null && oneTimeEcPreKeys.isEmpty()
     }
 
     /**
@@ -325,39 +327,96 @@ class SignalE2E(
      * to decrypt. Registration only wrote them to preferences, so without this a first message from a
      * peer fails with `InvalidKeyIdException: no signed pre-key <id>`.
      *
-     * The signed pre-key is reconstructed from the stored key material so it keeps the id the server
-     * already hands out. A Kyber pre-key cannot be reconstructed — libsignal only exposes
-     * `KEMKeyPair.generate()`, with no way back from persisted bytes — so a fresh one is generated and
-     * must be registered, which is what the returned payload is for.
+     * Stored material is reused only when it verifies against itself — the private half must derive the
+     * public half, and the signature must check out under our identity key. Anything that fails is
+     * regenerated and re-registered, because a key the server serves but we cannot use produces a
+     * decryption failure with no way to tell from the error which half was wrong.
+     *
+     * A Kyber pre-key is always regenerated: libsignal only exposes `KEMKeyPair.generate()`, with no path
+     * back from persisted bytes.
      */
     fun ensureLocalPreKeys(): PreKeyUpload {
-        seedSignedPreKey()
+        val signed = ensureSignedPreKey()
         val kyber = ensureLastResortKyberPreKey()
         val oneTime = ensureOneTimePreKeys()
-        return PreKeyUpload(lastResortKyber = kyber, oneTimeEcPreKeys = oneTime)
+        return PreKeyUpload(signedPreKey = signed, lastResortKyber = kyber, oneTimeEcPreKeys = oneTime)
     }
 
-    private fun seedSignedPreKey() {
-        val id = auth.signedPreKeyId
-        if (id == 0) return
-        if (protocolStore.containsSignedPreKey(id)) return
+    /** Whether our store holds a signed pre-key [id] whose public half is exactly [publicKey]. */
+    fun hasSignedPreKeyMatching(id: Int, publicKey: ByteArray?): Boolean {
+        if (publicKey == null) return true
+        return try {
+            val record = protocolStore.loadSignedPreKey(id)
+            record.keyPair.publicKey.serialize().contentEquals(publicKey)
+        } catch (_: Throwable) {
+            false
+        }
+    }
+
+    /** Rotate the signed pre-key regardless of what is stored, for when the server's copy is unusable. */
+    fun rotateSignedPreKeyNow(): PreKeyUpload.KeyEntity? = rotateSignedPreKey()
+
+    /**
+     * Returns a payload when the signed pre-key had to be regenerated and needs registering, null when the
+     * stored one was sound and simply seeded.
+     */
+    private fun ensureSignedPreKey(): PreKeyUpload.KeyEntity? {
+        val storedId = auth.signedPreKeyId
+        if (storedId != 0 && protocolStore.containsSignedPreKey(storedId)) return null
+        if (storedId != 0 && seedStoredSignedPreKey(storedId)) return null
+        return rotateSignedPreKey()
+    }
+
+    /** True when the stored material verified and was seeded into the store. */
+    private fun seedStoredSignedPreKey(id: Int): Boolean {
         val pub = b64(auth.signedPreKeyPublic)
         val priv = b64(auth.signedPreKeyPrivate)
         val signature = b64(auth.signedPreKeySignature)
         if (pub.isEmpty() || priv.isEmpty()) {
-            Log.w(TAG, "no stored signed pre-key material; inbound pre-key messages will not decrypt")
-            return
+            Log.w(TAG, "no stored signed pre-key material; rotating")
+            return false
         }
-        try {
-            val keyPair = ECKeyPair(ECPublicKey(pub), ECPrivateKey(priv))
+        return try {
+            val privateKey = ECPrivateKey(priv)
+            val derived = privateKey.getPublicKey().serialize()
+            if (!derived.contentEquals(pub)) {
+                // The server serves the public half; without the matching private half every inbound
+                // pre-key message fails in the key agreement rather than at lookup.
+                Log.w(TAG, "stored signed pre-key $id is inconsistent (private half derives a different public key); rotating")
+                return false
+            }
+            val identityOk = signature.isNotEmpty() &&
+                ECPublicKey(ownIdentityPublicKey).verifySignature(pub, signature)
+            if (!identityOk) {
+                Log.w(TAG, "stored signed pre-key $id signature does not verify under our identity key; rotating")
+                return false
+            }
             protocolStore.storeSignedPreKey(
                 id,
-                SignedPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature),
+                SignedPreKeyRecord(id, System.currentTimeMillis(), ECKeyPair(ECPublicKey(pub), privateKey), signature),
             )
             Log.i(TAG, "seeded signed pre-key $id into the protocol store")
+            true
         } catch (t: Throwable) {
-            Log.w(TAG, "could not rebuild signed pre-key $id from stored material", t)
+            Log.w(TAG, "could not rebuild signed pre-key $id; rotating", t)
+            false
         }
+    }
+
+    private fun rotateSignedPreKey(): PreKeyUpload.KeyEntity? = try {
+        val keyPair = ECKeyPair.generate()
+        val publicKey = keyPair.publicKey.serialize()
+        val signature = signSignedPreKey(ownIdentityPrivate, publicKey)
+        val id = auth.signedPreKeyId.takeIf { it != 0 }?.plus(1) ?: 1
+        protocolStore.storeSignedPreKey(
+            id,
+            SignedPreKeyRecord(id, System.currentTimeMillis(), keyPair, signature),
+        )
+        Log.i(TAG, "rotated signed pre-key to $id; needs registering")
+        PreKeyUpload.KeyEntity(id, publicKey, signature)
+    } catch (t: Throwable) {
+        Log.e(TAG, "could not rotate the signed pre-key", t)
+        null
     }
 
     private fun ensureLastResortKyberPreKey(): PreKeyUpload.KeyEntity? {
@@ -414,7 +473,7 @@ class SignalE2E(
     }
 
     fun ensureSignedPreKeyStored() {
-        seedSignedPreKey()
+        ensureLocalPreKeys()
     }
 
     fun markPreKeysUploaded() {
