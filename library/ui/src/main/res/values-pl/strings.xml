@@ -15,4 +15,7 @@
     <string name="done">Zrobione</string>
     <string name="ok">OK</string>
     <string name="undo">Cofnij</string>
+    <string name="ringtone_default">Domyślny</string>
+    <string name="ringtone_silent">Cichy</string>
+    <string name="ringtone_custom">Niestandardowy</string>
 </resources>

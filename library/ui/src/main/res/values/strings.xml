@@ -84,6 +84,12 @@
     <string name="undo">Undo</string>
     <!-- Shared library: UI – CompassCalibrationBanner: Emphasized title line shown when the magnetometer reports low accuracy -->
     <string name="compass_low_accuracy_title">Low compass accuracy</string>
-    <!-- Shared library: UI – CompassCalibrationBanner: Instruction line telling the user how to recalibrate the compass -->
+    <!-- Shared library: UI - CompassCalibrationBanner: Instruction line telling the user how to recalibrate the compass -->
     <string name="compass_calibrate_figure_8">Move phone in a figure 8 to calibrate</string>
+    <!-- Shared library: UI - RingtonePicker: label for a ringtone setting left at the system default sound -->
+    <string name="ringtone_default">Default</string>
+    <!-- Shared library: UI - RingtonePicker: label for a ringtone setting where the user chose no sound -->
+    <string name="ringtone_silent">Silent</string>
+    <!-- Shared library: UI - RingtonePicker: fallback label when the picked sound file has no readable title -->
+    <string name="ringtone_custom">Custom</string>
 </resources>

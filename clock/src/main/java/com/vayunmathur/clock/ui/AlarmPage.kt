@@ -1,5 +1,6 @@
 package com.vayunmathur.clock.ui
 
+import android.media.RingtoneManager
 import android.text.format.DateFormat
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -10,14 +11,15 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.data.Alarm
-import com.vayunmathur.clock.ui.components.ringtonePickerIntent
-import com.vayunmathur.clock.ui.components.ringtonePickerResult
 import com.vayunmathur.clock.platform.AlarmActions
 import com.vayunmathur.clock.platform.AlarmScheduler
 import com.vayunmathur.clock.platform.AlarmUiState
 import com.vayunmathur.clock.platform.ClockViewModel
+import com.vayunmathur.library.ui.ringtonePickerIntent
+import com.vayunmathur.library.ui.ringtonePickerResult
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.datetime.LocalTime
 
@@ -65,7 +67,13 @@ fun AlarmPage(backStack: NavBackStack<Route>, clockViewModel: ClockViewModel, ne
 
             override fun pickRingtone(alarm: Alarm) {
                 pickingAlarmId = alarm.id
-                ringtoneLauncher.launch(ringtonePickerIntent(alarm.ringtoneUri))
+                ringtoneLauncher.launch(
+                    ringtonePickerIntent(
+                        alarm.ringtoneUri,
+                        RingtoneManager.TYPE_ALARM,
+                        context.getString(R.string.sound),
+                    )
+                )
             }
 
             override fun setVibrate(alarm: Alarm, vibrate: Boolean) {

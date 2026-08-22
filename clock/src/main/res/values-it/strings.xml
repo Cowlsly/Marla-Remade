@@ -48,9 +48,6 @@
     <string name="alarm_settings">Impostazioni sveglia</string>
     <string name="defaults_for_new_alarms">Impostazioni predefinite per le nuove sveglie</string>
     <string name="gradual_off">Disattivo</string>
-    <string name="ringtone_default">Predefinito</string>
-    <string name="ringtone_silent">Silenzioso</string>
-    <string name="ringtone_custom">Personalizzato</string>
     <string name="timer_name_optional">Nome timer (opzionale)</string>
     <string name="sound">Suono</string>
     <string name="vibrate">Vibrazione</string>

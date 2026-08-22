@@ -127,12 +127,6 @@
     <!-- AlarmSettingsPage: volume and ringtone dropdown options -->
     <!-- Dropdown option: gradual volume increase disabled -->
     <string name="gradual_off">Off</string>
-    <!-- Ringtone picker option: use system default alarm sound -->
-    <string name="ringtone_default">Default</string>
-    <!-- Ringtone picker option: no sound -->
-    <string name="ringtone_silent">Silent</string>
-    <!-- Ringtone picker option: custom sound file selected -->
-    <string name="ringtone_custom">Custom</string>
     <string name="timer_name_optional">Timer name (optional)</string>
     <string name="alarm_label_hint">Alarm name (optional)</string>
     <string name="sound">Sound</string>

@@ -45,9 +45,6 @@
     <string name="action_reset">Réinitialiser</string>
     <string name="action_lap">Tour</string>
     <string name="action_stop">Arrêter</string>
-    <string name="ringtone_custom">Personnalisé</string>
-    <string name="ringtone_silent">Silencieux</string>
-    <string name="ringtone_default">Par défaut</string>
     <string name="defaults_for_new_alarms">Paramètres par défaut des nouvelles alarmes</string>
     <string name="gradual_off">Désactivé</string>
     <string name="alarm_settings">Paramètres des alarmes</string>

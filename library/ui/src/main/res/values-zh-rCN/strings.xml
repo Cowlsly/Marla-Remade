@@ -19,4 +19,7 @@
     <string name="clear">清除</string>
     <string name="share">分享</string>
     <string name="undo">撤销</string>
+    <string name="ringtone_default">默认</string>
+    <string name="ringtone_silent">静音</string>
+    <string name="ringtone_custom">自定义</string>
 </resources>

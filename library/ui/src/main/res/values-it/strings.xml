@@ -17,4 +17,7 @@
     <string name="done">Fatto</string>
     <string name="ok">OK</string>
     <string name="undo">Annulla</string>
+    <string name="ringtone_default">Predefinito</string>
+    <string name="ringtone_silent">Silenzioso</string>
+    <string name="ringtone_custom">Personalizzato</string>
 </resources>

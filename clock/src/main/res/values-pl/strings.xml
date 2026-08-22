@@ -48,9 +48,6 @@
     <string name="alarm_settings">Ustawienia alarmu</string>
     <string name="defaults_for_new_alarms">Domyślne dla nowych alarmów</string>
     <string name="gradual_off">Wyłącz</string>
-    <string name="ringtone_default">Domyślny</string>
-    <string name="ringtone_silent">Cichy</string>
-    <string name="ringtone_custom">Niestandardowy</string>
     <string name="snooze_length">Długość drzemki</string>
     <string name="gradually_increase_volume">Stopniowe zwiększanie głośności</string>
     <string name="sound">Dzwięk</string>

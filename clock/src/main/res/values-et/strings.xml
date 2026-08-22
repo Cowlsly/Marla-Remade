@@ -45,9 +45,6 @@
     <string name="action_reset">Lähtesta</string>
     <string name="action_lap">Ringi aeg</string>
     <string name="action_stop">Lõpeta</string>
-    <string name="ringtone_custom">Sinu valitud</string>
-    <string name="ringtone_silent">Hääletu</string>
-    <string name="ringtone_default">Vaikimisi</string>
     <string name="defaults_for_new_alarms">Vaikimisi väärtused uute äratuste jaoks</string>
     <string name="gradual_off">Väljas</string>
     <string name="alarm_settings">Äratuse seadistused</string>

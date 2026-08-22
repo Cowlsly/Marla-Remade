@@ -16,4 +16,7 @@
     <string name="ok">OK</string>
     <string name="clear">Smazat</string>
     <string name="undo">Vrátit zpět</string>
+    <string name="ringtone_default">Výchozí</string>
+    <string name="ringtone_silent">Tichý</string>
+    <string name="ringtone_custom">Vlastní</string>
 </resources>

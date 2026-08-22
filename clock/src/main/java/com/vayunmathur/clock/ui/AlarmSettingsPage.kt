@@ -1,5 +1,5 @@
 package com.vayunmathur.clock.ui
-
+import android.media.RingtoneManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
@@ -8,18 +8,19 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.Route
 import com.vayunmathur.clock.ui.components.AlarmOptionControls
-import com.vayunmathur.clock.ui.components.ringtonePickerIntent
-import com.vayunmathur.clock.ui.components.ringtonePickerResult
 import com.vayunmathur.clock.platform.ClockViewModel
 import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.ringtonePickerIntent
+import com.vayunmathur.library.ui.ringtonePickerResult
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.NavBackStack
 import kotlinx.coroutines.launch
@@ -27,6 +28,7 @@ import kotlinx.coroutines.launch
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun AlarmSettingsPage(backStack: NavBackStack<Route>, ds: DataStoreUtils) {
+    val context = LocalContext.current
     val scope = rememberCoroutineScope()
 
     var ringtone by remember { mutableStateOf(ds.getString(ClockViewModel.KEY_DEFAULT_RINGTONE)) }
@@ -59,7 +61,15 @@ fun AlarmSettingsPage(backStack: NavBackStack<Route>, ds: DataStoreUtils) {
             vibrate = vibrate,
             snoozeMinutes = snooze,
             gradualVolumeSeconds = gradual,
-            onRingtoneClick = { ringtoneLauncher.launch(ringtonePickerIntent(ringtone)) },
+            onRingtoneClick = {
+                ringtoneLauncher.launch(
+                    ringtonePickerIntent(
+                        ringtone,
+                        RingtoneManager.TYPE_ALARM,
+                        context.getString(R.string.sound),
+                    )
+                )
+            },
             onVibrateChange = {
                 vibrate = it
                 scope.launch { ds.setBoolean(ClockViewModel.KEY_DEFAULT_VIBRATE, it) }

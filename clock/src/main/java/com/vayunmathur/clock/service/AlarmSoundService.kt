@@ -14,6 +14,7 @@ import androidx.core.net.toUri
 import com.vayunmathur.clock.R
 import com.vayunmathur.clock.platform.createNotificationChannels
 import com.vayunmathur.clock.data.ClockRepository
+import com.vayunmathur.library.ui.RINGTONE_SILENT
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -21,9 +22,6 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-
-/** Sentinel [com.vayunmathur.clock.data.Alarm.ringtoneUri] value meaning "no sound". */
-const val RINGTONE_SILENT = "silent"
 
 class AlarmSoundService : Service() {
     private var mediaPlayer: MediaPlayer? = null
