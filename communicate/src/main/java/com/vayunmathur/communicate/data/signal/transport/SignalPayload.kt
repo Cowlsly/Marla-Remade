@@ -190,6 +190,12 @@ object SignalPayload {
         pollTerminate: SignalServiceProtos.DataMessage.PollTerminate? = null,
         expireTimer: Int? = null,
         profileKey: ByteArray? = null,
+        /**
+         * The minimum protocol version a recipient needs to render this message. Claiming more than the
+         * message actually uses makes older clients reject it outright as unsupported, so it is derived
+         * from the content rather than passed in: 0 for a plain message, higher only for the features
+         * that require it.
+         */
         requiredProtocolVersion: Int? = null,
     ): SignalServiceProtos.DataMessage {
         val b = SignalServiceProtos.DataMessage.newBuilder()
@@ -212,7 +218,14 @@ object SignalPayload {
         if (pollTerminate != null) b.setPollTerminate(pollTerminate)
         if (expireTimer != null) b.setExpireTimer(expireTimer)
         if (profileKey != null) b.setProfileKey(ByteString.copyFrom(profileKey))
-        if (requiredProtocolVersion != null) b.setRequiredProtocolVersion(requiredProtocolVersion)
+        // Derived, not trusted from the caller: only the features actually present raise the floor.
+        // REACTIONS = 4 and POLLS = 8 per DataMessage.ProtocolVersion; everything else is 0.
+        val derivedVersion = requiredProtocolVersion ?: when {
+            pollCreate != null || pollVote != null || pollTerminate != null -> 8
+            reaction != null -> 4
+            else -> 0
+        }
+        b.setRequiredProtocolVersion(derivedVersion)
         return b.build()
     }
 

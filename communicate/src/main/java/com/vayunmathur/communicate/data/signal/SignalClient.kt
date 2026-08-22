@@ -241,10 +241,28 @@ object SignalClient {
 
     // ---- internal single send path: Content -> encrypted -> PUT /v1/messages/{aci} ----
 
+    /**
+     * The envelope timestamp for [content].
+     *
+     * Taken from the message rather than the clock: recipients reject a message whose
+     * `DataMessage.timestamp` differs from the envelope's (`EnvelopeContentValidator`: "Timestamps don't
+     * match!"). Generating the two independently means anything slow in between — a pre-key fetch on a
+     * first message — silently produces a message the peer discards.
+     */
+    private fun envelopeTimestampFor(content: SignalServiceProtos.Content): Long = when {
+        content.hasDataMessage() && content.dataMessage.hasTimestamp() ->
+            content.dataMessage.timestamp
+        content.hasEditMessage() && content.editMessage.hasDataMessage() &&
+            content.editMessage.dataMessage.hasTimestamp() ->
+            content.editMessage.dataMessage.timestamp
+        else -> System.currentTimeMillis()
+    }
+
     private suspend fun sendContent(destinationAci: String, content: SignalServiceProtos.Content): Boolean {
         val aci = destinationAci.trim()
         if (aci.isEmpty()) return false
         val padded = SignalProtocol.padMessageBody(content.toByteArray())
+        val timestamp = envelopeTimestampFor(content)
 
         // Group send: expand to participants and encrypt per recipient. There is no shared ciphertext
         // — sender keys would be the efficient path, but each member still needs their own envelope.
@@ -259,12 +277,12 @@ object SignalClient {
             }
             var allOk = true
             for (pid in participants) {
-                if (!sendEncryptedTo(pid, padded)) allOk = false
+                if (!sendEncryptedTo(pid, padded, timestamp)) allOk = false
             }
             return allOk
         }
 
-        return sendEncryptedTo(aci, padded)
+        return sendEncryptedTo(aci, padded, timestamp)
     }
 
     /**
@@ -340,7 +358,7 @@ object SignalClient {
         }
     }
 
-    private suspend fun sendEncryptedTo(destination: String, padded: ByteArray): Boolean {
+    private suspend fun sendEncryptedTo(destination: String, padded: ByteArray, timestamp: Long): Boolean {
         val e = e2e
         if (e == null) {
             Log.w(TAG, "no protocol store, cannot send to $destination")
@@ -349,15 +367,15 @@ object SignalClient {
         val aci = resolveDestinationAci(destination) ?: return false
         if (!e.hasSession(aci, PRIMARY_DEVICE_ID) && !establishSession(e, aci)) return false
 
-        val timestamp = System.currentTimeMillis()
         // Sealed sender when we can: a delivery certificate proves who we are to the recipient without
         // telling the server, and the access key authorises the unauthenticated send. Absent either,
         // fall back to an identified send rather than not sending.
         val sealedSender = sealedSenderFor(aci)
 
         // The server reports device-set disagreements as 409/410; correcting them changes which
-        // devices we encrypt for, so the whole encrypt-and-send has to be redone. The timestamp is
-        // deliberately not regenerated — it is the message's identity for recipient-side dedup.
+        // devices we encrypt for, so the whole encrypt-and-send has to be redone. [timestamp] comes from
+        // the message itself and is never regenerated — it is both the message's identity for dedup and a
+        // value the recipient checks against the DataMessage.
         for (attempt in 1..SEND_ATTEMPTS) {
             val targets = e.deviceIdsWithSessions(aci)
             val messages = ArrayList<SignalPayload.OutgoingPushMessage>(targets.size)
@@ -691,7 +709,6 @@ object SignalClient {
             timestamp = ts,
             groupV2MasterKey = groupMasterKey,
             groupV2Revision = if (groupMasterKey != null) groupRevisionForConversation(aci) else null,
-            requiredProtocolVersion = 8,
         )
         val content = SignalPayload.buildContentWithDataMessage(dataMessage)
         val ok = sendContent(aci, content)
@@ -746,7 +763,6 @@ object SignalClient {
             body = "",
             timestamp = ts,
             attachments = listOf(pointer),
-            requiredProtocolVersion = 8,
         )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         if (!sendContent(recipient, content)) {
@@ -836,7 +852,7 @@ object SignalClient {
             targetAuthorAciBinary = targetAuthorBinary,
             targetSentTimestamp = targetTimestamp,
         )
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = ts, reaction = reaction, requiredProtocolVersion = 8)
+        val dm = SignalPayload.buildDataMessage(body = "", timestamp = ts, reaction = reaction)
         val content = SignalPayload.buildContentWithDataMessage(dm)
         val ok = sendContent(conversationId, content)
         if (isRemove) {
@@ -853,7 +869,7 @@ object SignalClient {
         val ts = System.currentTimeMillis()
         val cached = try { db?.cachedMessageDao()?.get(targetMessageId) } catch (_: Exception) { null }
         val targetTs = cached?.timestamp ?: ts
-        val newDm = SignalPayload.buildDataMessage(body = newBody, timestamp = ts, requiredProtocolVersion = 8)
+        val newDm = SignalPayload.buildDataMessage(body = newBody, timestamp = ts)
         val content = SignalPayload.buildContentForEdit(targetSentTimestamp = targetTs, newDataMessage = newDm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         try { db?.cachedMessageDao()?.markEdited(targetMessageId, newBody) } catch (_: Exception) {}
@@ -865,7 +881,7 @@ object SignalClient {
         val cached = try { db?.cachedMessageDao()?.get(targetMessageId) } catch (_: Exception) { null }
         val targetTs = cached?.timestamp ?: System.currentTimeMillis()
         val del = SignalPayload.buildDelete(targetSentTimestamp = targetTs)
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), delete = del, requiredProtocolVersion = 8)
+        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), delete = del)
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         try { db?.cachedMessageDao()?.markRevoked(targetMessageId) } catch (_: Exception) {}
@@ -877,7 +893,7 @@ object SignalClient {
         val ts = System.currentTimeMillis()
         val id = SignalProtocol.generateMessageId()
         val pollCreate = SignalPayload.buildPollCreate(question, options, allowMultiple = false)
-        val dm = SignalPayload.buildDataMessage(body = question, timestamp = ts, pollCreate = pollCreate, requiredProtocolVersion = 8)
+        val dm = SignalPayload.buildDataMessage(body = question, timestamp = ts, pollCreate = pollCreate)
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         val sd = SignalServiceData(pollQuestion = question, pollOptions = options.map { SignalPollOptionData(it) }, senderId = authData?.aci)
@@ -902,7 +918,7 @@ object SignalClient {
             optionIndexes = indexes,
             voteCount = selectedOptions.size,
         )
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), pollVote = pollVote, requiredProtocolVersion = 8)
+        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), pollVote = pollVote)
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         _events.emit(SignalEvent.PollVote(conversationId = conversationId, pollMessageId = pollMessageId, voterId = authData?.aci ?: "", optionNames = selectedOptions))
