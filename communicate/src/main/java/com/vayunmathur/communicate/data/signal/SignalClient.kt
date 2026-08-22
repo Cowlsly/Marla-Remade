@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
+import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
@@ -630,20 +631,109 @@ object SignalClient {
     }
 
     /**
-     * Always fails until the attachment upload transport exists.
-     *
-     * Encryption itself is implemented ([SignalAttachmentCipher]); what is missing is the upload, which
-     * needs the server-issued form from `GET /v2/attachments/form/upload` followed by a CDN2 or CDN3
-     * resumable upload. Posting raw bytes to the CDN instead would hand it plaintext media.
+     * Encrypt, upload, and send an attachment. Returns null on any failure — the plaintext never leaves
+     * the device unencrypted, so a failed upload simply means no message.
      */
     suspend fun sendMedia(recipient: String, bytes: ByteArray, mimeType: String): String? {
-        Log.w(TAG, "refusing to send ${bytes.size}B $mimeType attachment: upload transport not implemented")
+        val encrypted = try {
+            SignalAttachmentCipher.encrypt(bytes)
+        } catch (t: Throwable) {
+            Log.w(TAG, "attachment encryption failed", t)
+            return sendMediaFailed(recipient, "could not encrypt the attachment")
+        }
+        val form = SignalAttachmentUpload.fetchForm(
+            uploadLength = encrypted.blob.size,
+            authHeader = basicAuthHeader(),
+            sslSocketFactory = signalTls(),
+        ) ?: return sendMediaFailed(recipient, "could not get an upload form")
+
+        if (!SignalAttachmentUpload.upload(form, encrypted.blob, signalTls())) {
+            return sendMediaFailed(recipient, "attachment upload failed")
+        }
+
+        val ts = System.currentTimeMillis()
+        val pointer = SignalServiceProtos.AttachmentPointer.newBuilder()
+            .setCdnKey(form.key)
+            .setCdnNumber(form.cdn)
+            .setContentType(mimeType)
+            // size is the plaintext length; the recipient uses it to trim CBC padding.
+            .setSize(encrypted.plaintextSize)
+            .setKey(com.google.protobuf.ByteString.copyFrom(encrypted.key))
+            .setDigest(com.google.protobuf.ByteString.copyFrom(encrypted.digest))
+            .build()
+        val dm = SignalPayload.buildDataMessage(
+            body = "",
+            timestamp = ts,
+            attachments = listOf(pointer),
+            requiredProtocolVersion = 8,
+        )
+        val content = SignalPayload.buildContentWithDataMessage(dm)
+        if (!sendContent(recipient, content)) {
+            return sendMediaFailed(recipient, "send failed")
+        }
+
+        val id = SignalProtocol.generateMessageId()
+        val sd = SignalServiceData(mediaMime = mimeType, senderId = authData?.aci)
+        try {
+            db?.cachedMessageDao()?.upsert(
+                SignalCachedMessage(
+                    messageId = id,
+                    conversationId = recipient,
+                    body = "[Media: $mimeType]",
+                    timestamp = ts,
+                    outgoing = true,
+                    senderId = authData?.aci ?: "",
+                    serviceData = sd.serialize(),
+                    status = 1,
+                ),
+            )
+        } catch (_: Exception) {}
         _events.emit(
-            SignalEvent.SendFailed(
+            SignalEvent.MessageUpdate(
                 conversationId = recipient,
-                errorMessage = "Signal attachments are not supported yet",
+                messageId = id,
+                body = "[Media: $mimeType]",
+                outgoing = true,
+                timestamp = ts,
+                senderName = null,
+                serviceData = sd.serialize(),
             ),
         )
+        return id
+    }
+
+    /**
+     * Inbound attachment pointers, previously dropped entirely. The CDN URL is derived from
+     * `cdnKey`/`cdnNumber`; the key and digest travel with the pointer and are what
+     * [downloadMedia] needs to decrypt and verify.
+     */
+    private fun attachmentsFrom(dm: SignalServiceProtos.DataMessage): List<SignalAttachment> =
+        dm.attachmentsList.mapNotNull { pointer ->
+            val cdnKey = pointer.cdnKey?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+            val mime = pointer.contentType?.takeIf { it.isNotEmpty() } ?: "application/octet-stream"
+            SignalAttachment(
+                url = attachmentUrl(cdnKey, pointer.cdnNumber),
+                mimeType = mime,
+                attachmentType = when {
+                    mime.startsWith("image/") -> "image"
+                    mime.startsWith("video/") -> "video"
+                    mime.startsWith("audio/") -> "audio"
+                    else -> "file"
+                },
+                fileName = pointer.fileName?.takeIf { it.isNotEmpty() },
+                width = pointer.width,
+                height = pointer.height,
+            )
+        }
+
+    private fun attachmentUrl(cdnKey: String, cdnNumber: Int): String {
+        val host = if (cdnNumber == 0) "cdn.signal.org" else "cdn$cdnNumber.signal.org"
+        return "https://$host/attachments/$cdnKey"
+    }
+
+    private suspend fun sendMediaFailed(recipient: String, reason: String): String? {
+        Log.w(TAG, "attachment send to $recipient failed: $reason")
+        _events.emit(SignalEvent.SendFailed(conversationId = recipient, errorMessage = reason))
         return null
     }
 
@@ -1130,7 +1220,19 @@ object SignalClient {
                             }
                         }
                         val sd = SignalServiceData(senderId = senderAci, senderName = senderAci, isGroup = masterKeyFromData != null)
-                        _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = body, peerName = senderAci, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = sd.serialize()))
+                        _events.emit(
+                            SignalEvent.IncomingMessage(
+                                conversationId = conversationId,
+                                messageId = serverGuid,
+                                body = body,
+                                peerName = senderAci,
+                                peerPhone = null,
+                                timestamp = timestamp,
+                                senderId = senderAci,
+                                attachments = attachmentsFrom(dm),
+                                serviceData = sd.serialize(),
+                            ),
+                        )
                     }
                 }
             }
