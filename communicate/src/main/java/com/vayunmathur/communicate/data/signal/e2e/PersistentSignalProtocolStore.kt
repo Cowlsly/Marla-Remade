@@ -38,6 +38,11 @@ class PersistentSignalProtocolStore(
     private val db: SignalDatabase,
     private val identityKeyPair: IdentityKeyPair,
     private val registrationId: Int,
+    /**
+     * Invoked when a peer presents an identity key that differs from the one recorded. Called from
+     * libsignal's synchronous crypto path, so it must not block.
+     */
+    private val onIdentityChanged: (SignalProtocolAddress, IdentityKey) -> Unit = { _, _ -> },
 ) : SignalProtocolStore {
 
     // -- IdentityKeyStore --
@@ -65,8 +70,8 @@ class PersistentSignalProtocolStore(
 
     /**
      * Trust-on-first-use: an unknown peer is accepted, a known peer must present the same key. A
-     * changed key is refused rather than silently accepted, which is what makes a server-substituted
-     * identity visible instead of transparent.
+     * changed key is refused and reported rather than silently accepted, which is what makes a
+     * server-substituted identity visible instead of transparent.
      */
     override fun isTrustedIdentity(
         address: SignalProtocolAddress,
@@ -74,7 +79,9 @@ class PersistentSignalProtocolStore(
         direction: IdentityKeyStore.Direction,
     ): Boolean {
         val stored = runBlocking { db.e2eIdentityDao().get(address.name) } ?: return true
-        return stored.identityKey.contentEquals(identityKey.serialize())
+        if (stored.identityKey.contentEquals(identityKey.serialize())) return true
+        onIdentityChanged(address, identityKey)
+        return false
     }
 
     override fun getIdentity(address: SignalProtocolAddress): IdentityKey? {

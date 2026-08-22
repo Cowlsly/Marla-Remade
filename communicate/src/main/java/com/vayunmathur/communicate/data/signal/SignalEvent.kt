@@ -180,6 +180,20 @@ sealed interface SignalEvent {
         val errorMessage: String? = null,
     ) : SignalEvent
 
+    /**
+     * A peer's identity key no longer matches the one we recorded. Either they reinstalled or changed
+     * devices, or someone is substituting keys — the two are indistinguishable without the user
+     * comparing safety numbers out of band, so this must be surfaced rather than absorbed.
+     */
+    data class IdentityKeyChanged(
+        override val source: SignalSource = SignalSource.SIGNAL,
+        val conversationId: String,
+        val peerAci: String,
+        /** Hex of the identity key now being presented, for a safety-number comparison. */
+        val newIdentityKeyHex: String,
+        val timestamp: Long,
+    ) : SignalEvent
+
     /** The primary line was logged out server-side. */
     data class SourceLoggedOut(
         override val source: SignalSource = SignalSource.SIGNAL,

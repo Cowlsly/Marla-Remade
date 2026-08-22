@@ -71,7 +71,11 @@ class SignalSyncService : Service() {
             // meanwhile we post notifications on inbound messages directly.
             launch {
                 SignalClient.events.collect { event ->
-                    if (event is SignalEvent.IncomingMessage) showIncomingNotification(event)
+                    when (event) {
+                        is SignalEvent.IncomingMessage -> showIncomingNotification(event)
+                        is SignalEvent.IdentityKeyChanged -> showIdentityChangeNotification(event)
+                        else -> Unit
+                    }
                 }
             }
             // Also persist the minimal fan-out until SignalEventProcessor exists:
@@ -166,6 +170,38 @@ class SignalSyncService : Service() {
             .setContentIntent(tap)
             .setAutoCancel(true)
             .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .build()
+        (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+            .notify(event.conversationId, notificationId, notification)
+    }
+
+    /**
+     * A changed identity key means messages to that contact now fail. Only the user can decide whether
+     * it was a reinstall or an interception, so it has to reach them rather than sitting in a log.
+     */
+    private fun showIdentityChangeNotification(event: SignalEvent.IdentityKeyChanged) {
+        val notificationId = event.peerAci.hashCode()
+        val tap = PendingIntent.getActivity(
+            this,
+            notificationId,
+            Intent(this, MainActivity::class.java).apply {
+                addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                putExtra(EXTRA_OPEN_SIGNAL_THREAD, event.conversationId)
+            },
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val notification = NotificationCompat.Builder(this, INCOMING_CHANNEL_ID)
+            .setSmallIcon(R.mipmap.ic_launcher)
+            .setContentTitle(getString(R.string.signal_safety_number_changed_title))
+            .setContentText(getString(R.string.signal_safety_number_changed_body))
+            .setStyle(
+                NotificationCompat.BigTextStyle()
+                    .bigText(getString(R.string.signal_safety_number_changed_body)),
+            )
+            .setContentIntent(tap)
+            .setAutoCancel(true)
+            .setCategory(NotificationCompat.CATEGORY_ERROR)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)

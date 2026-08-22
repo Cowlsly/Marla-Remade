@@ -107,4 +107,6 @@
     <string name="delete_call_log_title">Delete call?</string>
     <string name="delete_call_log_message">This will remove this entry from your call history.</string>
     <string name="delete_failed">Delete failed</string>
+    <string name="signal_safety_number_changed_title">Safety number changed</string>
+    <string name="signal_safety_number_changed_body">This contact\'s Signal identity key changed. Messages to them will fail until you verify it. This can mean they reinstalled, or that someone is intercepting.</string>
 </resources>

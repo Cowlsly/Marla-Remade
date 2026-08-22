@@ -39,6 +39,8 @@ import org.signal.libsignal.protocol.state.PreKeyBundle
 class SignalE2E(
     private val db: SignalDatabase,
     private val auth: SignalAuthData,
+    /** See [PersistentSignalProtocolStore.onIdentityChanged]. */
+    private val onIdentityChanged: (String, ByteArray) -> Unit = { _, _ -> },
 ) {
     val ownIdentityPublicKey: ByteArray = b64(auth.identityPublicKey)
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
@@ -46,7 +48,12 @@ class SignalE2E(
 
     private val protocolStore: PersistentSignalProtocolStore by lazy {
         val ikp = loadIdentityPair(auth.identityPrivateKey, auth.identityPublicKey)
-        PersistentSignalProtocolStore(db, ikp, auth.registrationId.takeIf { it != 0 } ?: 1)
+        PersistentSignalProtocolStore(
+            db = db,
+            identityKeyPair = ikp,
+            registrationId = auth.registrationId.takeIf { it != 0 } ?: 1,
+            onIdentityChanged = { address, key -> onIdentityChanged(address.name, key.serialize()) },
+        )
     }
 
     private fun loadIdentityPair(privB64: String, pubB64: String): IdentityKeyPair {

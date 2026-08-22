@@ -9,6 +9,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import org.signal.libsignal.metadata.certificate.SenderCertificate
+import org.signal.libsignal.protocol.UntrustedIdentityException
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -128,7 +129,9 @@ object SignalClient {
             return
         }
         if (db == null) try { db = SignalDatabase.getDatabase(ctx) } catch (_: Exception) {}
-        if (e2e == null && db != null) try { e2e = SignalE2E(db!!, auth) } catch (t: Throwable) {
+        if (e2e == null && db != null) try {
+            e2e = SignalE2E(db!!, auth) { peerAci, newKey -> reportIdentityChange(peerAci, newKey) }
+        } catch (t: Throwable) {
             Log.e(TAG, "could not build the protocol store", t)
         }
         if (e2e == null) {
@@ -291,6 +294,11 @@ object SignalClient {
                             content = enc.data,
                         ),
                     )
+                } catch (u: UntrustedIdentityException) {
+                    // Already reported by the store; abandon the send rather than encrypting to a key
+                    // the user has not accepted.
+                    Log.w(TAG, "untrusted identity for $aci:$deviceId, abandoning send")
+                    return false
                 } catch (t: Throwable) {
                     Log.w(TAG, "encrypt failed for $aci:$deviceId", t)
                     if (deviceId == PRIMARY_DEVICE_ID) primaryFailed = true
@@ -338,6 +346,25 @@ object SignalClient {
             else -> null
         } ?: return null
         return if (dm.hasProfileKey()) dm.profileKey.toByteArray() else null
+    }
+
+    /**
+     * A peer's identity key changed. Reported rather than absorbed: this is either a reinstall or a key
+     * substitution, and only the user comparing safety numbers can tell the difference.
+     */
+    private fun reportIdentityChange(peerAci: String, newIdentityKey: ByteArray) {
+        val hex = SignalGroups.run { newIdentityKey.toHex() }
+        Log.w(TAG, "identity key changed for $peerAci")
+        scope.launch {
+            _events.emit(
+                SignalEvent.IdentityKeyChanged(
+                    conversationId = SignalProtocol.toConversationId(peerAci, null as ByteArray?),
+                    peerAci = peerAci,
+                    newIdentityKeyHex = hex,
+                    timestamp = System.currentTimeMillis(),
+                ),
+            )
+        }
     }
 
     private data class SealedSenderAccess(val certificate: SenderCertificate, val accessKey: ByteArray)
@@ -478,8 +505,11 @@ object SignalClient {
         for (device in bundles) {
             try {
                 e.processPreKeyBundle(aci, device.deviceId, device.bundle)
+            } catch (u: UntrustedIdentityException) {
+                // The store has already reported the change; a new session must not be built on a key
+                // the user has not accepted.
+                Log.w(TAG, "untrusted identity for $aci:${device.deviceId}, not building a session")
             } catch (t: Throwable) {
-                // An untrusted identity key lands here; one bad device shouldn't block the others.
                 Log.w(TAG, "failed to build session for $aci:${device.deviceId}", t)
             }
         }
