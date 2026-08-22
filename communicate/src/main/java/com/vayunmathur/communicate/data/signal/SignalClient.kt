@@ -4,6 +4,10 @@ import android.content.Context
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
+import com.vayunmathur.communicate.data.signal.call.SignalCallManager
+import com.vayunmathur.communicate.data.signal.call.SignalCallMessage
+import com.vayunmathur.communicate.data.signal.call.toContent
+import com.vayunmathur.communicate.data.signal.call.toRingRtc
 import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
@@ -1002,40 +1006,196 @@ object SignalClient {
         _events.emit(SignalEvent.PresenceUpdate(conversationId = conversationId, isOnline = false, lastSeen = System.currentTimeMillis()))
     }
 
-    fun placeCall(conversationId: String, video: Boolean) {
-        val callId = SignalProtocol.generateMessageId()
-        val ts = System.currentTimeMillis()
-        scope.launch {
-            _events.emit(SignalEvent.CallOffer(callId = callId, from = authData?.aci ?: "", callCreator = authData?.aci ?: "", isVideo = video))
-            _events.emit(SignalEvent.CallStateChanged(callId = callId, phase = "offer", isVideo = video))
+    /**
+     * The RingRTC bridge. Created lazily because it loads native libraries and only matters once a call
+     * is actually placed or received.
+     */
+    private val callManager: SignalCallManager? by lazy {
+        val ctx = appContext ?: return@lazy null
+        SignalCallManager(
+            appContext = ctx,
+            signaling = object : SignalCallManager.Signaling {
+                override suspend fun sendCallMessage(
+                    aci: String,
+                    deviceId: Int?,
+                    message: SignalCallMessage,
+                    urgent: Boolean,
+                ): Boolean = sendContent(aci, message.toContent(deviceId))
+
+                override suspend fun identityKeys(aci: String): SignalCallManager.IdentityKeyPairBytes? {
+                    val e = e2e ?: return null
+                    // RingRTC binds the SRTP key derivation to both identity keys, so a call cannot be
+                    // set up before a session with this peer exists.
+                    val remote = e.storedIdentityKey(aci) ?: return null
+                    return SignalCallManager.IdentityKeyPairBytes(
+                        local = e.ownIdentityPublicKey,
+                        remote = remote,
+                    )
+                }
+
+                override fun onCallStateChanged(
+                    aci: String,
+                    callId: Long,
+                    state: SignalCallManager.CallState,
+                    isVideo: Boolean,
+                ) {
+                    scope.launch { emitCallState(aci, callId, state, isVideo) }
+                }
+            },
+            sslSocketFactory = { signalTls() },
+        )
+    }
+
+    /**
+     * Hand an inbound `CallMessage` to RingRTC, which owns the call state machine.
+     *
+     * `destinationDeviceId` is application-level addressing: the server fans out to every device, so a
+     * message meant for a different one of our devices must be ignored here.
+     */
+    private suspend fun handleCallMessage(
+        cm: SignalServiceProtos.CallMessage,
+        senderAci: String,
+        senderDeviceId: Int,
+        env: SignalProtocol.SignalEnvelope,
+        timestamp: Long,
+    ) {
+        val localDeviceId = authData?.deviceId ?: PRIMARY_DEVICE_ID
+        if (cm.hasDestinationDeviceId() && cm.destinationDeviceId != localDeviceId) return
+        val manager = callManager ?: run {
+            Log.w(TAG, "RingRTC unavailable, dropping a call message from $senderAci")
+            return
         }
-        // Wire CallMessage Offer inside Content.callMessage -> PUT /v1/messages/{aci} (SFU via SIGNAL_SFU_URL live).
-        scope.launch {
-            try {
-                val offer = SignalServiceProtos.CallMessage.Offer.newBuilder()
-                    .setId(callId.hashCode().toLong() and 0xFFFFFFFFL)
-                    .setType(if (video) SignalServiceProtos.CallMessage.Offer.Type.OFFER_VIDEO_CALL else SignalServiceProtos.CallMessage.Offer.Type.OFFER_AUDIO_CALL)
-                    .build()
-                val callMessage = SignalServiceProtos.CallMessage.newBuilder().setOffer(offer).setDestinationDeviceId(1).build()
-                val content = SignalServiceProtos.Content.newBuilder().setCallMessage(callMessage).build()
-                sendContent(conversationId, content)
-            } catch (e: Exception) { Log.w(TAG, "placeCall send failed", e) }
+        // Ensure the native stack is up before feeding anything in.
+        val localAci = authData?.aci?.takeIf { it.isNotEmpty() } ?: return
+        if (manager.ensureInitialized(localAci) == null) return
+
+        when {
+            cm.hasOffer() -> {
+                val offer = cm.offer
+                val isVideo = offer.type == SignalServiceProtos.CallMessage.Offer.Type.OFFER_VIDEO_CALL
+                _events.emit(
+                    SignalEvent.CallOffer(
+                        callId = offer.id.toString(),
+                        from = senderAci,
+                        callCreator = senderAci,
+                        isVideo = isVideo,
+                        peerName = senderAci,
+                        timestamp = timestamp,
+                    ),
+                )
+                // Age matters: RingRTC drops offers that sat in the queue too long to still be ringing.
+                val ageSec = ((env.serverTimestamp - env.timestamp).coerceAtLeast(0L)) / 1000
+                manager.receivedOffer(
+                    callId = offer.id,
+                    senderAci = senderAci,
+                    senderDeviceId = senderDeviceId,
+                    localDeviceId = localDeviceId,
+                    opaque = offer.opaque.toByteArray(),
+                    messageAgeSec = ageSec,
+                    video = isVideo,
+                )
+            }
+            cm.hasAnswer() -> manager.receivedAnswer(
+                callId = cm.answer.id,
+                senderAci = senderAci,
+                senderDeviceId = senderDeviceId,
+                opaque = cm.answer.opaque.toByteArray(),
+            )
+            cm.iceUpdateCount > 0 -> {
+                // A batch shares one call id.
+                val callId = cm.iceUpdateList.first().id
+                manager.receivedIceCandidates(
+                    callId = callId,
+                    senderAci = senderAci,
+                    senderDeviceId = senderDeviceId,
+                    candidates = cm.iceUpdateList.map { it.opaque.toByteArray() },
+                )
+            }
+            cm.hasHangup() -> {
+                manager.receivedHangup(
+                    callId = cm.hangup.id,
+                    senderAci = senderAci,
+                    senderDeviceId = senderDeviceId,
+                    type = cm.hangup.type.toRingRtc(),
+                    deviceId = cm.hangup.deviceId,
+                )
+                _events.emit(SignalEvent.CallEnded(callId = cm.hangup.id.toString(), reason = "hangup"))
+            }
+            cm.hasBusy() -> {
+                manager.receivedBusy(cm.busy.id, senderAci, senderDeviceId)
+                _events.emit(SignalEvent.CallEnded(callId = cm.busy.id.toString(), reason = "busy"))
+            }
+            cm.hasOpaque() -> Log.i(TAG, "ignoring an opaque call message (group calling not implemented)")
         }
     }
 
+    private suspend fun emitCallState(
+        aci: String,
+        callId: Long,
+        state: SignalCallManager.CallState,
+        isVideo: Boolean,
+    ) {
+        val id = callId.toString()
+        when (state) {
+            SignalCallManager.CallState.Ringing ->
+                _events.emit(SignalEvent.CallStateChanged(callId = id, phase = "ringing", isVideo = isVideo))
+            SignalCallManager.CallState.Connecting ->
+                _events.emit(SignalEvent.CallStateChanged(callId = id, phase = "connecting", isVideo = isVideo))
+            SignalCallManager.CallState.Connected ->
+                _events.emit(SignalEvent.CallStateChanged(callId = id, phase = "connected", isVideo = isVideo))
+            SignalCallManager.CallState.Ended ->
+                _events.emit(SignalEvent.CallEnded(callId = id, reason = "ended"))
+        }
+    }
+
+    /**
+     * Place a 1:1 call. Requires an established session with the recipient, since RingRTC needs both
+     * identity keys to derive the SRTP keys.
+     */
+    fun placeCall(conversationId: String, video: Boolean) {
+        val aci = conversationId.trim()
+        if (!ACI_REGEX.matches(aci)) {
+            Log.w(TAG, "cannot call $aci: not an ACI")
+            return
+        }
+        val localAci = authData?.aci?.takeIf { it.isNotEmpty() } ?: run {
+            Log.w(TAG, "cannot call before registration")
+            return
+        }
+        val manager = callManager ?: run {
+            Log.w(TAG, "RingRTC unavailable, cannot place a call")
+            return
+        }
+        scope.launch {
+            val e = e2e
+            if (e == null || !e.hasSession(aci, PRIMARY_DEVICE_ID)) {
+                // Without a session there is no identity key to bind the call keys to.
+                if (e == null || !establishSession(e, aci)) {
+                    Log.w(TAG, "no session with $aci, cannot place a call")
+                    _events.emit(SignalEvent.CallEnded(callId = "", reason = "no session"))
+                    return@launch
+                }
+            }
+            manager.placeCall(localAci, authData?.deviceId ?: PRIMARY_DEVICE_ID, aci, video)
+        }
+    }
+
+    fun acceptCall(callId: String): Boolean {
+        val id = callId.toLongOrNull() ?: return false
+        return callManager?.accept(id) ?: false
+    }
+
     suspend fun rejectCall(from: String, callId: String, creator: String): Boolean {
-        _events.emit(SignalEvent.CallEnded(callId = callId, reason = "rejected"))
-        try {
-            val hangup = SignalServiceProtos.CallMessage.Hangup.newBuilder()
-                .setId(callId.hashCode().toLong() and 0xFFFFFFFFL)
-                .setType(SignalServiceProtos.CallMessage.Hangup.Type.HANGUP_DECLINED)
-                .build()
-            val callMessage = SignalServiceProtos.CallMessage.newBuilder().setHangup(hangup).build()
-            val content = SignalServiceProtos.Content.newBuilder().setCallMessage(callMessage).build()
-            sendContent(from, content)
-        } catch (_: Exception) {}
+        // RingRTC turns this into the right hangup type and tells us what to send.
+        val ok = callManager?.hangup() ?: false
+        if (!ok) _events.emit(SignalEvent.CallEnded(callId = callId, reason = "rejected"))
         return true
     }
+
+    fun endCall(): Boolean = callManager?.hangup() ?: false
+
+    fun setCallAudioEnabled(enabled: Boolean): Boolean =
+        callManager?.setAudioEnabled(enabled) ?: false
 
     // -- Inbound ----
 
@@ -1266,18 +1426,7 @@ object SignalClient {
                 _events.emit(SignalEvent.MessageEdited(conversationId = conversationId, messageId = targetId, newBody = newBody, timestamp = timestamp))
             }
             is SignalProtocol.ParsedContent.Call -> {
-                val cm = parsed.callMessage
-                when {
-                    cm.hasOffer() -> {
-                        val offer = cm.offer
-                        val callId = offer.id.toString()
-                        val isVideo = offer.type == SignalServiceProtos.CallMessage.Offer.Type.OFFER_VIDEO_CALL
-                        _events.emit(SignalEvent.CallOffer(callId = callId, from = senderAci, callCreator = senderAci, isVideo = isVideo, peerName = senderAci, timestamp = timestamp))
-                    }
-                    cm.hasHangup() -> _events.emit(SignalEvent.CallEnded(callId = cm.hangup.id.toString(), reason = "hangup"))
-                    cm.hasBusy() -> _events.emit(SignalEvent.CallEnded(callId = cm.busy.id.toString(), reason = "busy"))
-                    else -> {}
-                }
+                handleCallMessage(parsed.callMessage, senderAci, senderDevice, env, timestamp)
             }
             is SignalProtocol.ParsedContent.Sync -> {
                 val sm = parsed.syncMessage
