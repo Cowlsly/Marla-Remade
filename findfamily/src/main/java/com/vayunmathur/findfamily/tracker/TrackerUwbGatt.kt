@@ -140,17 +140,33 @@ object TrackerUwbGatt {
         val callback = object : BluetoothGattCallback() {
             override fun onConnectionStateChange(g: BluetoothGatt, status: Int, newState: Int) {
                 if (newState == BluetoothProfile.STATE_CONNECTED) {
+                    Log.i(TAG, "connected to tracker (status=$status); discovering services")
                     runCatching { g.discoverServices() }
                 } else if (newState == BluetoothProfile.STATE_DISCONNECTED) {
+                    // status 133 is the catch-all GATT error, and normally means the
+                    // connection was never established rather than that it dropped.
+                    Log.w(TAG, "disconnected before the params write completed (status=$status)")
                     finish(false)
                 }
             }
 
             override fun onServicesDiscovered(g: BluetoothGatt, status: Int) {
-                if (status != BluetoothGatt.GATT_SUCCESS) { finish(false); return }
-                val ch = g.getService(TrackerBle.UNPROVISIONED_SERVICE_UUID)
-                    ?.getCharacteristic(TrackerBle.UWB_SESSION_CHARACTERISTIC_UUID)
-                if (ch == null) { finish(false); return }
+                if (status != BluetoothGatt.GATT_SUCCESS) {
+                    Log.w(TAG, "service discovery failed: $status")
+                    finish(false); return
+                }
+                val service = g.getService(TrackerBle.UNPROVISIONED_SERVICE_UUID)
+                if (service == null) {
+                    Log.w(TAG, "service ${TrackerBle.UNPROVISIONED_SERVICE_UUID} not found; " +
+                        "discovered=${g.services.map { it.uuid }}")
+                    finish(false); return
+                }
+                val ch = service.getCharacteristic(TrackerBle.UWB_SESSION_CHARACTERISTIC_UUID)
+                if (ch == null) {
+                    Log.w(TAG, "UWB characteristic not found; service has " +
+                        "${service.characteristics.map { it.uuid }}")
+                    finish(false); return
+                }
                 val ok = try {
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                         g.writeCharacteristic(
@@ -168,10 +184,11 @@ object TrackerUwbGatt {
 
             @Deprecated("compat shim for API < 33")
             override fun onCharacteristicWrite(g: BluetoothGatt, ch: BluetoothGattCharacteristic, status: Int) {
+                Log.i(TAG, "session params write completed with status=$status")
                 finish(status == BluetoothGatt.GATT_SUCCESS)
             }
         }
-
+        Log.i(TAG, "connecting to tracker at $bleAddress to hand over session params")
         gatt = try {
             device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
         } catch (e: Exception) {
