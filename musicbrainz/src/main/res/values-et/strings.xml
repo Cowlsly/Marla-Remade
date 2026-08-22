@@ -30,7 +30,7 @@
     <string name="state_queued">Ootel</string>
     <string name="state_searching">Otsin helifaili</string>
     <string name="state_downloading">Allalaadimisel</string>
-    <string name="state_tagging">Lisan üksikasju</string>
+    <string name="state_tagging">Sildistan helifali</string>
     <string name="state_done">Salvestatud</string>
     <string name="state_failed">Ebaõnnestunud</string>
     <string name="settings">Seadistused</string>
