@@ -848,7 +848,7 @@ fun UserCard(user: User, locationValue: LocationValue?, showSupportingContent: B
         timeSinceEntry < 15.minutes -> stringResource(R.string.since_minutes_ago, timeSinceEntry.inWholeMinutes)
         else -> {
             val formattedTime = DateString.time(sinceTime.time, is24Hour(context))
-            val formattedDate = when (sinceTime.date.toEpochDays() - Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date.toEpochDays()) {
+            val formattedDate = when (Clock.System.now().toLocalDateTime(TimeZone.currentSystemDefault()).date.toEpochDays() - sinceTime.date.toEpochDays()) {
                 0L -> stringResource(R.string.today)
                 1L -> stringResource(R.string.yesterday)
                 else -> DateString.monthDayYear(sinceTime.date)
