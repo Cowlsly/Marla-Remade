@@ -15,6 +15,7 @@ import kotlinx.datetime.format
 import kotlinx.datetime.format.MonthNames
 import kotlinx.datetime.toLocalDateTime
 import com.vayunmathur.library.util.localizedMonthNames
+import com.vayunmathur.library.ui.RINGTONE_SILENT
 import kotlinx.serialization.Serializable
 import kotlin.io.encoding.Base64
 import kotlin.time.Clock
@@ -230,7 +231,9 @@ data class Contact(
     val accountType: String?,
     val accountName: String?,
     val isFavorite: Boolean,
-    val details: ContactDetails
+    val details: ContactDetails,
+    /** `null` rings with the system default; [RINGTONE_SILENT] suppresses the ringtone. */
+    val customRingtone: String? = null
 ) {
     val name: Name
         get() = details.names.first()
@@ -256,14 +259,16 @@ data class Contact(
             ops += ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
                 .withValue(ContactsContract.RawContacts.ACCOUNT_TYPE, accountType)
                 .withValue(ContactsContract.RawContacts.ACCOUNT_NAME, accountName)
+                .withValue(ContactsContract.RawContacts.CUSTOM_RINGTONE, ringtoneToProvider(customRingtone))
                 .build()
 
             ops += details.all().map { createInsertOperation(it) }
         } else {
-            // Favorite
+            // Favorite and ringtone
             ops += ContentProviderOperation.newUpdate(ContactsContract.RawContacts.CONTENT_URI)
                 .withSelection("${ContactsContract.RawContacts._ID} = ?", arrayOf(id.toString()))
                 .withValue(ContactsContract.RawContacts.STARRED, if (isFavorite) 1 else 0)
+                .withValue(ContactsContract.RawContacts.CUSTOM_RINGTONE, ringtoneToProvider(customRingtone))
                 .build()
 
             // details
@@ -409,8 +414,19 @@ data class Contact(
             val displayName: String?,
             val isFavorite: Boolean,
             val accountName: String?,
-            val accountType: String?
+            val accountType: String?,
+            val customRingtone: String?
         )
+
+        /**
+         * The provider spells "do not ring" as an empty CUSTOM_RINGTONE and "system default"
+         * as NULL, so translate between that and the shared [RINGTONE_SILENT] sentinel.
+         */
+        private fun ringtoneFromProvider(stored: String?): String? =
+            if (stored != null && stored.isEmpty()) RINGTONE_SILENT else stored
+
+        private fun ringtoneToProvider(value: String?): String? =
+            if (value == RINGTONE_SILENT) "" else value
 
         private fun getContacts(context: Context, contactId: Long?): List<Contact> {
             val contentResolver = context.contentResolver
@@ -420,6 +436,7 @@ data class Contact(
                 ContactsContract.RawContacts.STARRED,
                 ContactsContract.RawContacts.ACCOUNT_NAME,
                 ContactsContract.RawContacts.ACCOUNT_TYPE,
+                ContactsContract.RawContacts.CUSTOM_RINGTONE,
             )
 
             val rawContacts = mutableListOf<RawContactInfo>()
@@ -435,6 +452,7 @@ data class Contact(
                     val starredIdx = cursor.getColumnIndexOrThrow(ContactsContract.RawContacts.STARRED)
                     val accountNameIdx = cursor.getColumnIndexOrThrow(ContactsContract.RawContacts.ACCOUNT_NAME)
                     val accountTypeIdx = cursor.getColumnIndexOrThrow(ContactsContract.RawContacts.ACCOUNT_TYPE)
+                    val ringtoneIdx = cursor.getColumnIndexOrThrow(ContactsContract.RawContacts.CUSTOM_RINGTONE)
 
                     while (cursor.moveToNext()) {
                         rawContacts += RawContactInfo(
@@ -442,7 +460,8 @@ data class Contact(
                             displayName = cursor.getStringOrNull(nameIdx),
                             isFavorite = cursor.getInt(starredIdx) == 1,
                             accountName = cursor.getStringOrNull(accountNameIdx),
-                            accountType = cursor.getStringOrNull(accountTypeIdx)
+                            accountType = cursor.getStringOrNull(accountTypeIdx),
+                            customRingtone = ringtoneFromProvider(cursor.getStringOrNull(ringtoneIdx))
                         )
                     }
                 }
@@ -455,7 +474,7 @@ data class Contact(
             val allDetails = getDetailsInternal(context, contactId)
             return rawContacts.mapNotNull { raw ->
                 val details = processDetails(allDetails[raw.id] ?: ContactDetails.empty(), raw.displayName) ?: return@mapNotNull null
-                Contact(raw.id, raw.accountType, raw.accountName, raw.isFavorite, details)
+                Contact(raw.id, raw.accountType, raw.accountName, raw.isFavorite, details, raw.customRingtone)
             }
         }
 

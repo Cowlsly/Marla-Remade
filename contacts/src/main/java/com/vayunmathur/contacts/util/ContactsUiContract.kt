@@ -56,6 +56,8 @@ interface ContactsActions {
     /** Asks for confirmation before deleting — the plain [deleteContact] does not. */
     fun confirmDeleteContact(contact: Contact) {}
     fun closeContact() {}
+    /** Opens the system ringtone picker; the result is saved straight onto [contact]. */
+    fun pickRingtone(contact: Contact) {}
     fun addToGroup(contactIds: List<Long>) {}
 
     /** Exports [contacts] to a VCF named [filename] and opens a share chooser. */

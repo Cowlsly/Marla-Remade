@@ -6,6 +6,7 @@ import android.content.ContentUris
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.media.RingtoneManager
 import android.net.Uri
 import android.provider.ContactsContract
 import android.os.Bundle
@@ -44,6 +45,8 @@ import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -70,6 +73,7 @@ import com.google.i18n.phonenumbers.PhoneNumberUtil
 import com.vayunmathur.contacts.data.CDKEvent
 import com.vayunmathur.contacts.data.Contact
 import com.vayunmathur.contacts.data.formatDisplay
+import com.vayunmathur.contacts.data.isSimAccountType
 import com.vayunmathur.contacts.util.ContactDetailsUiState
 import com.vayunmathur.contacts.util.ContactPlatforms
 import com.vayunmathur.contacts.util.ContactViewModel
@@ -93,9 +97,13 @@ import com.vayunmathur.library.ui.IconSms
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.IconStarBorder
 import com.vayunmathur.library.ui.IconVideoCamera
+import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.OverflowMenu
 import com.vayunmathur.library.ui.rememberMessenger
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.ringtonePickerIntent
+import com.vayunmathur.library.ui.ringtonePickerResult
+import com.vayunmathur.library.ui.ringtoneTitle
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.filterNotNull
@@ -152,6 +160,14 @@ fun ContactDetailsPage(
 
     val scope = rememberCoroutineScope()
     val shareContactLabel = stringResource(R.string.share_contact)
+    val ringtonePickerTitle = stringResource(R.string.select_ringtone)
+    val ringtoneLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            viewModel.saveContact(contact.copy(customRingtone = ringtonePickerResult(result.data)))
+        }
+    }
 
     ContactDetailsScreen(
         state = ContactDetailsUiState(
@@ -169,6 +185,16 @@ fun ContactDetailsPage(
 
             override fun shareContacts(contacts: List<Contact>, filename: String) {
                 shareContactsAsVcf(scope, context, contacts, filename, shareContactLabel)
+            }
+
+            override fun pickRingtone(contact: Contact) {
+                ringtoneLauncher.launch(
+                    ringtonePickerIntent(
+                        contact.customRingtone,
+                        RingtoneManager.TYPE_RINGTONE,
+                        ringtonePickerTitle,
+                    )
+                )
             }
         },
         showBackButton = showBackButton,
@@ -400,6 +426,18 @@ fun ContactDetailsScreen(
                             }
                         }
                     }
+                }
+            }
+
+            // A SIM's address book has nowhere to keep a ringtone.
+            if (!isSimAccountType(contact.accountType)) {
+                item {
+                    DetailItem(
+                        icon = { IconVolumeUp() },
+                        data = ringtoneTitle(context, contact.customRingtone),
+                        label = stringResource(R.string.ringtone),
+                        onClick = { actions.pickRingtone(contact) },
+                    )
                 }
             }
         }

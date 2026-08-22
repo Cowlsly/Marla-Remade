@@ -8,6 +8,13 @@
     <string name="about_name"><xliff:g id="first_name" example="John">%1$s</xliff:g> について</string>
     <string name="birthday">誕生日</string>
     <string name="note">ノート</string>
+    <string name="ringtone">着信音</string>
+    <string name="select_ringtone">着信音を選択</string>
+    <!-- Japanese overrides for the shared :library:ui ringtone labels. They cannot live in
+         :library:ui because a values-ja there would add Japanese to every app's localeConfig. -->
+    <string name="ringtone_default">デフォルト</string>
+    <string name="ringtone_silent">無音</string>
+    <string name="ringtone_custom">カスタム</string>
     <string name="favorites">お気に入り</string>
     <string name="export_contacts">全ての連絡先をエクスポート</string>
     <string name="on_device">デバイス上</string>

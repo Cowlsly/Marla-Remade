@@ -17,6 +17,10 @@
     <string name="birthday">Birthday</string>
     <!-- Section header and field label for freeform notes -->
     <string name="note">Note</string>
+    <!-- Field label for the row showing which ringtone plays for calls from this contact -->
+    <string name="ringtone">Ringtone</string>
+    <!-- Title of the system ringtone picker opened from the ringtone row -->
+    <string name="select_ringtone">Select ringtone</string>
     <!-- ContactList: section header above starred contacts -->
     <string name="favorites">Favorites</string>
     <!-- Settings: button to export all contacts to VCF file -->
