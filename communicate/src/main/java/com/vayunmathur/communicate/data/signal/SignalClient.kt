@@ -1351,12 +1351,15 @@ object SignalClient {
      * Place a 1:1 call. Requires an established session with the recipient, since RingRTC needs both
      * identity keys to derive the SRTP keys.
      */
+    /**
+     * Place a 1:1 call. Requires an established session with the recipient, since RingRTC needs both
+     * identity keys to derive the SRTP keys.
+     *
+     * The app addresses conversations by phone number, so the destination is resolved the same way a send
+     * is. A call needs an **ACI** specifically: a PNI-only contact cannot be called, because calling binds
+     * to the ACI identity. Their ACI arrives with their first message.
+     */
     fun placeCall(conversationId: String, video: Boolean) {
-        val aci = conversationId.trim()
-        if (!ACI_REGEX.matches(aci)) {
-            Log.w(TAG, "cannot call $aci: not an ACI")
-            return
-        }
         val localAci = authData?.aci?.takeIf { it.isNotEmpty() } ?: run {
             Log.w(TAG, "cannot call before registration")
             return
@@ -1366,16 +1369,25 @@ object SignalClient {
             return
         }
         scope.launch {
-            val e = e2e
-            if (e == null || !e.hasSession(aci, PRIMARY_DEVICE_ID)) {
-                // Without a session there is no identity key to bind the call keys to.
-                if (e == null || !establishSession(e, aci)) {
-                    Log.w(TAG, "no session with $aci, cannot place a call")
-                    _events.emit(SignalEvent.CallEnded(callId = "", reason = "no session"))
-                    return@launch
-                }
+            val resolved = resolveDestinationAci(conversationId)
+            if (resolved == null) {
+                Log.w(TAG, "cannot call $conversationId: no Signal identity for it")
+                _events.emit(SignalEvent.CallEnded(callId = "", reason = "not a Signal user"))
+                return@launch
             }
-            manager.placeCall(localAci, authData?.deviceId ?: PRIMARY_DEVICE_ID, aci, video)
+            if (!ACI_REGEX.matches(resolved)) {
+                // A PNI is enough to message but not to call.
+                Log.w(TAG, "cannot call $resolved: calling needs an ACI, which arrives with their first message")
+                _events.emit(SignalEvent.CallEnded(callId = "", reason = "cannot call this contact yet"))
+                return@launch
+            }
+            val e = e2e
+            if (e == null || (!e.hasSession(resolved, PRIMARY_DEVICE_ID) && !establishSession(e, resolved))) {
+                Log.w(TAG, "no session with $resolved, cannot place a call")
+                _events.emit(SignalEvent.CallEnded(callId = "", reason = "no session"))
+                return@launch
+            }
+            manager.placeCall(localAci, authData?.deviceId ?: PRIMARY_DEVICE_ID, resolved, video)
         }
     }
 
