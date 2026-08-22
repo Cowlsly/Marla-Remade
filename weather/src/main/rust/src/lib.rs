@@ -343,7 +343,9 @@ mod jni_bindings {
     /// `OmRangeFetcher` (HttpURLConnection) instead of full 148 MB file.
     #[no_mangle]
     #[allow(clippy::too_many_arguments)]
-    pub extern "system" fn Java_com_vayunmathur_weather_map_OmTilesNative_decodeRegion<'local>(
+    pub extern "system" fn Java_com_vayunmathur_weather_domain_map_OmTilesNative_decodeRegion<
+        'local,
+    >(
         mut env: JNIEnv<'local>,
         _class: JClass<'local>,
         om_url: JString<'local>,
