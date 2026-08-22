@@ -1,18 +1,16 @@
 /*
- * Placement for the Qorvo l1_config persistent-configuration blob.
+ * Placement for the Qorvo l1_config sections.
  *
- * The prebuilt FiRa bundle emits .l1_config_persist_storage (1004 bytes of default L1
- * configuration) and .l1_config_persist_storage_sha256 (its checksum) as their own
- * sections, expecting the platform's linker script to place them. Without this they land
- * as orphan sections, which the linker warns about and which leaves
- * l1_config_get_persistent_memory() pointing somewhere unintended.
+ * The prebuilt FiRa bundle emits .l1_config_persist_storage and
+ * .l1_config_persist_storage_sha256 as their own sections and expects the platform's
+ * linker script to place them. Left unplaced they become orphan sections, which the
+ * linker warns about.
  *
- * NOTE: this puts the blob in rodata, alongside code. That is correct for *reading* the
- * compiled-in defaults, which is all this firmware needs — per-unit calibration is read
- * from the DW3110's own OTP at init, and qflash_write() is deliberately unimplemented
- * (see qhal_extras_zephyr.c). If persisting a modified L1 config is ever needed, this
- * has to move to a dedicated flash partition first: erasing a page here would erase
- * code with it.
+ * They are placed in rodata and then go unused: src/l1_config_storage_zephyr.c overrides
+ * the accessors l1_config reads them through, pointing them at a writable RAM buffer
+ * instead. See that file for why RAM placement via the linker was abandoned — every
+ * variant of it disturbed a RAM layout the kernel depends on. This snippet exists purely
+ * to keep the build free of orphan-section warnings.
  */
 . = ALIGN(4);
 KEEP(*(.l1_config_persist_storage))

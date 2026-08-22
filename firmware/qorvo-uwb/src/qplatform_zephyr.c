@@ -81,11 +81,24 @@ struct qspi_config qm33_qspi_config = {
  * The transaction is a DW3000 short-addressed read: one header byte (bit 7 clear = read,
  * register file 0 offset 0) followed by four bytes clocked out to shift the value in.
  */
+static const struct spi_dt_spec uwb_bus =
+	SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET(8) | SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB, 0);
+
+/*
+ * The devicetree-derived bus spec, shared with the qspi backend.
+ *
+ * Hand-assembling an equivalent spi_config produced transfers that clocked out correctly
+ * but read back all zeros, while this spec worked on the same bus with what logged as an
+ * identical frequency, operation word and chip-select. Rather than keep guessing at the
+ * discrepancy, the backend uses Zephyr's own DT plumbing and only overrides the clock.
+ */
+const struct spi_dt_spec *ff_qorvo_spi_spec(void)
+{
+	return &uwb_bus;
+}
+
 uint32_t ff_qorvo_read_dev_id(void)
 {
-	static const struct spi_dt_spec bus =
-		SPI_DT_SPEC_GET(UWB_NODE,
-				SPI_WORD_SET(8) | SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB, 0);
 	uint8_t tx[5] = { 0x00, 0x00, 0x00, 0x00, 0x00 };
 	uint8_t rx[5] = { 0 };
 	const struct spi_buf tx_buf = { .buf = tx, .len = sizeof(tx) };
@@ -93,7 +106,7 @@ uint32_t ff_qorvo_read_dev_id(void)
 	const struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
 	const struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
 
-	if (spi_transceive_dt(&bus, &tx_set, &rx_set) < 0) {
+	if (spi_transceive_dt(&uwb_bus, &tx_set, &rx_set) < 0) {
 		return 0;
 	}
 	return sys_get_le32(&rx[1]);

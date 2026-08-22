@@ -14,6 +14,14 @@
 #include "qmalloc.h"
 
 #include <zephyr/kernel.h>
+#include <zephyr/sys/util.h>
+
+/*
+ * Thread stacks come out of here (see qmalloc_internal), and Zephyr assumes a stack buffer
+ * meets ARCH_STACK_PTR_ALIGN. 32 bytes covers that on Cortex-M and is also the MPU region
+ * granularity the stack guard wants.
+ */
+#define QMALLOC_ALIGN 32
 
 /*
  * Per-quota budgets consumed by qosal's wrappers in qosal/src/qmalloc.c. Index 0 is
@@ -38,11 +46,25 @@ uint32_t allocation_quotas[] = {
 
 void *qmalloc_internal(size_t size)
 {
-	return k_malloc(size);
+	/*
+	 * Aligned, not plain k_malloc: qthread_create() requires its caller to supply the
+	 * thread stack, and the prebuilt uwbmac allocates those through here. Zephyr builds
+	 * a thread's initial stack frame assuming the buffer meets ARCH_STACK_PTR_ALIGN, and
+	 * k_malloc only guarantees pointer alignment — so a MAC thread came up with a
+	 * garbage return address and faulted with "Illegal load of EXC_RETURN into PC" the
+	 * moment it was scheduled.
+	 */
+	return k_aligned_alloc(QMALLOC_ALIGN, ROUND_UP(size, QMALLOC_ALIGN));
 }
 
 void *qrealloc_internal(void *ptr, size_t new_size)
 {
+	/*
+	 * Plain k_realloc, which drops back to pointer alignment. That is fine: the
+	 * alignment above matters only for thread stacks, and those are allocated once by
+	 * qthread_create's caller and never resized. Growing an aligned block by hand here
+	 * would mean tracking the old size ourselves just to copy it.
+	 */
 	return k_realloc(ptr, new_size);
 }
 

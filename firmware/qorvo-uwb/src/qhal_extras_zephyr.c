@@ -25,6 +25,8 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 
+#include <string.h>
+
 LOG_MODULE_REGISTER(qorvo_qhal, CONFIG_QORVO_UWB_LOG_LEVEL);
 
 /* From qplatform_zephyr.c; carries the chip-select pin used for the wake pulse. */
@@ -152,18 +154,34 @@ void qrtc_update_rtc_systime(int64_t updated_rtc_us, uint32_t updated_systime)
 	ARG_UNUSED(updated_systime);
 }
 
-/* ---- Flash ------------------------------------------------------------ */
+/* ---- "Flash" ---------------------------------------------------------- */
 
 enum qerr qflash_write(uint32_t dst_addr, void *src_addr, uint32_t size)
 {
-	ARG_UNUSED(dst_addr);
-	ARG_UNUSED(src_addr);
-	ARG_UNUSED(size);
+	const uint32_t ram_start = CONFIG_SRAM_BASE_ADDRESS;
+	const uint32_t ram_end = CONFIG_SRAM_BASE_ADDRESS + (CONFIG_SRAM_SIZE * 1024);
+
+	if (src_addr == NULL || size == 0U) {
+		return QERR_EINVAL;
+	}
+
 	/*
-	 * Only reached by l1_config's "store calibration to persistent memory" path.
-	 * Per-unit antenna-delay calibration is not done here — the DWM3001CDK module
-	 * ships calibrated and l1_config_init(NULL) uses defaults — so there is nothing
-	 * to write back.
+	 * l1_config is the only caller, storing its configuration and that config's
+	 * SHA-256 to what it believes is persistent memory. Both live in .data here (see
+	 * l1_config_storage.ld), so this is a plain copy and the store/load round-trip is
+	 * consistent within a boot. It is deliberately not persistent: the calibration
+	 * that matters is re-read from the DW3110's OTP by reset_to_default on every boot.
+	 *
+	 * The bounds check is the point of this function — if a future SDK moves those
+	 * sections back into flash, this must fail loudly rather than write into the
+	 * address space where the code lives.
 	 */
-	return QERR_ENOTSUP;
+	if (dst_addr < ram_start || (dst_addr + size) > ram_end) {
+		LOG_ERR("qflash_write to 0x%08x (%u bytes) is outside RAM; refusing",
+			dst_addr, size);
+		return QERR_ENOTSUP;
+	}
+
+	memcpy((void *)dst_addr, src_addr, size);
+	return QERR_SUCCESS;
 }

@@ -56,6 +56,7 @@ set(FIRA_INC
 
 zephyr_include_directories(
   ${FIRA_INC}
+  ${CMAKE_CURRENT_LIST_DIR}/include
   ${QOSAL}/include
   ${QOSAL}/include/zephyr
   ${QHAL}/include
@@ -77,8 +78,12 @@ zephyr_library_named(qorvo_uwb)
 zephyr_library_sources(
   # Our glue. Three of the SDK's Zephyr backends are unusable as shipped:
   #  - qhal/src/zephyr/qspi.c returns QERR_ENOTSUP from every function (a placeholder).
+  #  - qhal/src/zephyr/qtimer.c likewise, which alone makes llhw_init fail with EIO.
   #  - qhal/src/zephyr/qgpio.c redefines gpio_is_ready_dt/gpio_add_callback_dt, which
   #    Zephyr has since added itself.
+  src/qspi_zephyr.c
+  src/qtimer_zephyr.c
+  src/qgpio_zephyr.c
   #  - qplatform/qm33_qhal_zephyr/qplatform.c dereferences spi_config.cs as a pointer
   #    (by value since Zephyr 3.5) and hard-requires a "dw35720" node label.
   #  - qhal/src/qm33/qpwr.c and qhal/src/qrtc.c likewise, or route through
@@ -89,7 +94,9 @@ zephyr_library_sources(
   src/qgpio_zephyr.c
   src/qplatform_zephyr.c
   src/qhal_extras_zephyr.c
+  src/l1_config_storage_zephyr.c
   src/qmalloc_zephyr.c
+  src/qthread_zephyr.c
   src/mcps_crypto_psa.c
 
   # qosal — Zephyr OS abstraction.
@@ -106,13 +113,11 @@ zephyr_library_sources(
   ${QOSAL}/src/zephyr/qrand.c
   ${QOSAL}/src/zephyr/qsemaphore.c
   ${QOSAL}/src/zephyr/qsignal.c
-  ${QOSAL}/src/zephyr/qthread.c
   ${QOSAL}/src/zephyr/qtime.c
   ${QOSAL}/src/zephyr/qtracing.c
   ${QOSAL}/src/zephyr/qworkqueue.c
 
-  # qhal — Zephyr hardware abstraction (qspi.c and qgpio.c replaced above).
-  ${QHAL}/src/zephyr/qtimer.c
+  # qhal — Zephyr hardware abstraction (qspi.c, qgpio.c and qtimer.c replaced above).
   # OTP access, needed to read this module's factory calibration.
   ${QHAL}/src/qm33/qotp.c
 
@@ -138,6 +143,7 @@ zephyr_library_sources(
 
 zephyr_library_include_directories(
   ${QPLATFORM}/qm33_qhal_common/include
+  ${CMAKE_CURRENT_LIST_DIR}/src
   ${QORVO_DRIVER_DIR}/dw3000
   ${QORVO_SDK_DIR}/Src/Boards/Src/Common
   ${QORVO_SDK_DIR}/Src/Boards/Src/Common_OTP
@@ -156,7 +162,7 @@ zephyr_library_compile_definitions(
   CONFIG_SPI_UWB_IRQ_PRIORITY=3
   CONFIG_SPI_UWB_SLOW_RATE_FREQ=${CONFIG_QORVO_UWB_SPI_FREQ_SLOW_HZ}
   CONFIG_SPI_UWB_FAST_RATE_FREQ=${CONFIG_QORVO_UWB_SPI_FREQ_FAST_HZ}
-  CONFIG_QLOG_LEVEL=${CONFIG_QORVO_UWB_LOG_LEVEL}
+  CONFIG_QLOG_LEVEL=${CONFIG_QORVO_UWB_QLOG_LEVEL}
   # Number of GPIO callback slots in our qgpio backend's static table; the stack only
   # registers one, on the transceiver IRQ.
   CONFIG_QHAL_MAX_GPIO_CALLBACKS=2
@@ -175,7 +181,8 @@ zephyr_library_compile_options(
   -Wno-missing-field-initializers
 )
 
-# Place the FiRa bundle's l1_config blob rather than leaving it an orphan section.
+# The FiRa bundle's l1_config sections are placed in rodata purely to avoid orphan-section
+# warnings; src/l1_config_storage_zephyr.c redirects the accessors to a RAM buffer.
 zephyr_linker_sources(RODATA l1_config_storage.ld)
 
 zephyr_link_libraries(${FIRA_LIB})

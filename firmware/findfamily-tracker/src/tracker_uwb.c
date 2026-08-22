@@ -24,6 +24,7 @@
 #include <zephyr/sys/byteorder.h>
 
 /* Qorvo uwbstack. */
+#include <ff_qorvo_l1_config.h>
 #include <l1_config.h>
 #include <llhw.h>
 #include <net/fira_region_params.h>
@@ -36,8 +37,14 @@
 
 LOG_MODULE_REGISTER(ff_uwb, LOG_LEVEL_INF);
 
-/* The stack calls back from MAC context, so ranging results are only logged here. */
-#define UWB_THREAD_STACK_SIZE 4096
+/*
+ * The stack calls back from MAC context, so ranging results are only logged here.
+ *
+ * 8 KB because uwbmac_poll_events runs the whole MAC event loop on this stack — frame
+ * assembly, crypto and region callbacks all nest below it. 4 KB tripped the MPU stack
+ * guard immediately on the first poll.
+ */
+#define UWB_THREAD_STACK_SIZE 8192
 #define UWB_THREAD_PRIORITY 5
 
 /*
@@ -149,9 +156,21 @@ int ff_uwb_init(void)
 	 */
 	r = qplatform_init();
 	if (r != QERR_SUCCESS) {
-		LOG_ERR("qplatform_init: %d (DW3110 not responding over SPI?)", r);
+		LOG_ERR("qplatform_init: %d", r);
+		/*
+		 * Re-read the id on the raw bus. It worked before qplatform_init, so if it
+		 * reads back zero now, the transceiver is being held in reset rather than
+		 * failing to talk — which points at the rstn pin handling, not the SPI.
+		 */
+		LOG_ERR("DEV_ID after failed init: 0x%08x", ff_qorvo_read_dev_id());
 		return -EIO;
 	}
+
+	/*
+	 * Must precede l1_config_init, which stores its defaults back to this storage.
+	 * As shipped it points into the image, where the store would target flash.
+	 */
+	ff_qorvo_l1_config_use_ram_storage();
 
 	r = l1_config_init(&l1_config_platform_ops);
 	if (r != QERR_SUCCESS) {
@@ -177,13 +196,27 @@ int ff_uwb_init(void)
 
 	stack_ready = true;
 	LOG_INF("Qorvo uwbstack up; DW3110 identified");
-
-	atomic_set(&poll_running, 1);
-	k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
-			uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
-			K_NO_WAIT);
-	k_thread_name_set(&uwb_thread, "ff_uwb");
 	return 0;
+}
+
+/*
+ * The MAC event loop is only driven while a session exists. Starting it at init time
+ * faulted with a corrupted return address: there is nothing for uwbmac_poll_events to
+ * dispatch before uwbmac_start(), and polling an unstarted MAC is not a supported state.
+ */
+static void start_polling(void)
+{
+	if (atomic_cas(&poll_running, 0, 1)) {
+		k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
+				uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
+				K_NO_WAIT);
+		k_thread_name_set(&uwb_thread, "ff_uwb");
+	}
+}
+
+static void stop_polling(void)
+{
+	atomic_set(&poll_running, 0);
 }
 
 /*
@@ -375,6 +408,7 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	}
 
 	session_active = true;
+	start_polling();
 	LOG_INF("FiRa responder started: session=%08x ch=%u preamble=%u own=%04x peer=%04x",
 		params->session_id, params->channel, params->preamble_index, own_short_addr,
 		peer_short_addr);
@@ -392,6 +426,7 @@ void ff_uwb_stop(void)
 	if (!session_active) {
 		return;
 	}
+	stop_polling();
 	(void)fira_helper_stop_session(&fira_ctx, session_handle);
 	(void)fira_helper_deinit_session(&fira_ctx, session_handle);
 	(void)uwbmac_stop(uwbmac_ctx);

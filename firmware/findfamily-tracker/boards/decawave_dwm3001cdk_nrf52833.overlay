@@ -24,7 +24,15 @@
 		 * raises it to CONFIG_QORVO_UWB_SPI_FREQ_FAST_HZ once identified. */
 		spi-max-frequency = <8000000>;
 		irq-gpios = <&gpio1 2 (GPIO_ACTIVE_HIGH | GPIO_PULL_DOWN)>;
-		rstn-gpios = <&gpio0 25 (GPIO_ACTIVE_LOW | GPIO_OPEN_DRAIN)>;
+		/*
+		 * Open drain, but deliberately NOT GPIO_ACTIVE_LOW. qplatform_uwb_reset()
+		 * asserts reset with qgpio's QGPIO_OUTPUT_LOW, which maps to Zephyr's
+		 * GPIO_OUTPUT_INIT_LOW — a *logical* level. Marking the pin active-low
+		 * would invert that and release reset instead of asserting it. Active-high
+		 * here makes logical and physical levels agree, so "output low" really
+		 * pulls RSTn down; open drain still means it is never driven high.
+		 */
+		rstn-gpios = <&gpio0 25 GPIO_OPEN_DRAIN>;
 		wakeup-gpios = <&gpio1 19 GPIO_ACTIVE_HIGH>;
 		status = "okay";
 	};

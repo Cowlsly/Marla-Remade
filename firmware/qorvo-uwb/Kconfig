@@ -31,17 +31,25 @@ config QORVO_UWB_SPI_FREQ_SLOW_HZ
 
 config QORVO_UWB_SPI_FREQ_FAST_HZ
 	int "SPI frequency used once the device is up (Hz)"
-	default 32000000
+	default 8000000
 	help
-	  Capped by the SPIM peripheral: nRF52833's SPIM3 does 32 MHz, other
-	  instances only 8 MHz.
+	  The DW3000 tolerates up to 38 MHz, but this is also capped by the dw3110 node's
+	  spi-max-frequency, and 32 MHz only works at all on nRF52833's SPIM3. 8 MHz is
+	  plenty — nothing about ranging is bottlenecked on register access — and it avoids
+	  a class of signal-integrity problems that only appear once traffic gets real.
 
-config QORVO_UWB_LOG_LEVEL
-	int "Qorvo stack log level passed as CONFIG_QLOG_LEVEL"
+config QORVO_UWB_QLOG_LEVEL
+	int "Log level passed to the Qorvo stack as CONFIG_QLOG_LEVEL"
 	default 2
 	range 0 4
 	help
-	  0=off 1=error 2=info 3=debug 4=trace. The Qorvo stack filters its own logs
-	  with this and routes them through the Zephyr logging backend.
+	  Qorvo's own scale, which is NOT Zephyr's: 0=off 1=error 2=info 3=debug 4=trace.
+	  The stack filters its own logs with this and routes them through the Zephyr
+	  logging backend. The Zephyr-side level for this module's own sources is
+	  QORVO_UWB_LOG_LEVEL below, where 2 means warning rather than info.
+
+module = QORVO_UWB
+module-str = Qorvo UWB
+source "subsys/logging/Kconfig.template.log_config"
 
 endif # QORVO_UWB

@@ -23,10 +23,12 @@
 
 LOG_MODULE_REGISTER(qorvo_qspi, CONFIG_QORVO_UWB_LOG_LEVEL);
 
+/* From qplatform_zephyr.c: the devicetree-derived bus spec for the dw3110 node. */
+const struct spi_dt_spec *ff_qorvo_spi_spec(void);
+
 struct qspi {
 	const struct device *dev;
 	struct spi_config cfg;
-	struct spi_cs_control cs;
 	bool in_use;
 	/*
 	 * Async completion callback. The stack sets this to opt into async transfers;
@@ -40,6 +42,10 @@ struct qspi {
 
 /* One UWB transceiver per board; a static instance avoids needing an allocator here. */
 static struct qspi the_spi;
+
+/* Number of opening transfers to hexdump, which is enough to cover the device-id probe. */
+#define TRACE_XFERS 4
+static unsigned int traced;
 
 struct qspi *qspi_open(const struct qspi_instance *instance)
 {
@@ -77,43 +83,32 @@ enum qerr qspi_close(struct qspi *spi)
 
 enum qerr qspi_configure(struct qspi *spi, const struct qspi_config *config)
 {
-	spi_operation_t op;
+	const struct spi_dt_spec *spec = ff_qorvo_spi_spec();
 
 	if (spi == NULL || config == NULL || spi->dev == NULL) {
 		return QERR_EINVAL;
 	}
 
-	op = SPI_WORD_SET(8) | SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB;
-	if (config->op_flags & QSPI_CPOL) {
-		op |= SPI_MODE_CPOL;
-	}
-	if (config->op_flags & QSPI_CPHA) {
-		op |= SPI_MODE_CPHA;
-	}
-	if (config->op_flags & QSPI_LSB_FIRST) {
-		op &= ~(spi_operation_t)SPI_TRANSFER_MSB;
-		op |= SPI_TRANSFER_LSB;
-	}
-	if (config->op_flags & QSPI_LOOP) {
-		op |= SPI_MODE_LOOP;
-	}
-
-	spi->cfg.frequency = config->freq_hz;
-	spi->cfg.operation = op;
-
 	/*
-	 * qplatform hands us the chip select as a gpio_dt_spec in cs_pin.dev, taken
-	 * from the devicetree. Zephyr's SPI driver drives CS itself when given this,
-	 * which matters for the DW3000: it needs CS to frame the whole
-	 * header-plus-body transfer, not each byte.
+	 * Start from the devicetree-derived config rather than assembling one by hand.
+	 * A hand-built equivalent clocked out the right bytes but read back all zeros,
+	 * even though its frequency, operation word and chip-select all logged identically
+	 * to this spec's. Only the clock is taken from qspi_config, because the driver
+	 * raises it from the cold-start rate once the device is identified.
+	 *
+	 * Clamped to the node's spi-max-frequency: the driver asks for its fast rate
+	 * unconditionally, and honouring a rate above what the board declares is how you
+	 * get a bus that enumerates fine and then fails once traffic gets real.
 	 */
-	if (config->cs_pin.dev != NULL) {
-		spi->cs.gpio = *(const struct gpio_dt_spec *)config->cs_pin.dev;
-		spi->cs.delay = 0;
-		spi->cfg.cs = spi->cs;
-	}
+	spi->cfg = spec->config;
+	spi->cfg.frequency = MIN(config->freq_hz, spec->config.frequency);
 
-	LOG_DBG("qspi_configure: %u Hz, op=0x%08x", config->freq_hz, (unsigned int)op);
+	if (config->freq_hz > spec->config.frequency) {
+		LOG_INF("qspi_configure: capping %u Hz to the node's %u Hz",
+			config->freq_hz, spec->config.frequency);
+	}
+	LOG_INF("qspi_configure: %u Hz, op=0x%08x (from devicetree spec)",
+		spi->cfg.frequency, (unsigned int)spi->cfg.operation);
 	return QERR_SUCCESS;
 }
 
@@ -150,6 +145,17 @@ enum qerr qspi_transceive(struct qspi *spi, const struct qspi_transfer *xfer)
 	if (rc < 0) {
 		LOG_ERR("spi_transceive failed: %d", rc);
 		return QERR_EIO;
+	}
+
+	/*
+	 * The first few transfers are the driver probing the device id. Logging them makes
+	 * a probe failure diagnosable: dwt_probe() only reports DWT_ERROR, which cannot
+	 * distinguish "the bus returned nothing" from "the id matched no known driver".
+	 */
+	if (traced < TRACE_XFERS) {
+		traced++;
+		LOG_HEXDUMP_INF(xfer->tx_buf, MIN(xfer->tx_size, 8U), "spi tx");
+		LOG_HEXDUMP_INF(xfer->rx_buf, MIN(xfer->rx_size, 8U), "spi rx");
 	}
 
 	if (spi->done_cb) {
