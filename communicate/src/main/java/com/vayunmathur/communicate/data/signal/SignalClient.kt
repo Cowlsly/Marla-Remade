@@ -266,16 +266,34 @@ object SignalClient {
      * violation that real clients discard, so sending one would disclose the message and forfeit
      * sender authentication without even being delivered.
      */
-    private suspend fun sendEncryptedTo(aci: String, padded: ByteArray): Boolean {
+    /**
+     * The ACI to address on the wire for [destination], which the app may hand us as a phone number.
+     *
+     * Signal addresses messages by ACI, never by phone number, so an E.164 has to be resolved first. We
+     * only ever learn a real ACI from an inbound message or from CDSI contact discovery, so a number
+     * belonging to someone who has never messaged us cannot be resolved and the send has to fail.
+     */
+    private suspend fun resolveDestinationAci(destination: String): String? {
+        val trimmed = destination.trim()
+        if (trimmed.isEmpty()) return null
+        if (ACI_REGEX.matches(trimmed)) return trimmed
+        val contact = try { db?.contactDao()?.getByPhone(trimmed) } catch (_: Exception) { null }
+        // The contact row's `aci` column falls back to the phone number when discovery could not
+        // identify the account, so only a UUID-shaped value is usable.
+        val aci = contact?.aci?.takeIf { ACI_REGEX.matches(it) }
+        if (aci == null) {
+            Log.w(TAG, "no known ACI for $trimmed; Signal cannot address a message by phone number")
+        }
+        return aci
+    }
+
+    private suspend fun sendEncryptedTo(destination: String, padded: ByteArray): Boolean {
         val e = e2e
         if (e == null) {
-            Log.w(TAG, "no protocol store, cannot send to $aci")
+            Log.w(TAG, "no protocol store, cannot send to $destination")
             return false
         }
-        if (!ACI_REGEX.matches(aci)) {
-            Log.w(TAG, "destination is not an ACI, cannot establish a session: $aci")
-            return false
-        }
+        val aci = resolveDestinationAci(destination) ?: return false
         if (!e.hasSession(aci, PRIMARY_DEVICE_ID) && !establishSession(e, aci)) return false
 
         val timestamp = System.currentTimeMillis()
@@ -625,7 +643,13 @@ object SignalClient {
         val content = SignalPayload.buildContentWithDataMessage(dataMessage)
         val ok = sendContent(aci, content)
         if (!ok) {
-            _events.emit(SignalEvent.SendFailed(conversationId = aci, messageId = id, errorMessage = "send failed (wire PUT /v1/messages)"))
+            _events.emit(
+                SignalEvent.SendFailed(
+                    conversationId = aci,
+                    messageId = id,
+                    errorMessage = "could not send (see log: no ACI, no session, or server rejected)",
+                ),
+            )
             return null
         }
         val sd = SignalServiceData(senderId = authData?.aci, isGroup = isGroup)
