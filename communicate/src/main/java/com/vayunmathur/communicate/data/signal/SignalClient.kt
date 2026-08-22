@@ -41,6 +41,18 @@ object SignalClient {
 
     private const val TAG = "SignalClient"
 
+    /**
+     * Production sealed-sender trust roots, mirroring the official client's
+     * `UNIDENTIFIED_SENDER_TRUST_ROOTS` build constant. Two entries so the server can rotate.
+     */
+    private val TRUST_ROOTS_B64 = listOf(
+        "BXu6QIKVz5MA8gstzfOgRQGqyLqOwNKHL6INkv3IHWMF",
+        "BUkY0I+9+oPgDCn4+Ac6Iu813yvqkDr/ga8DzLxFxuk6",
+    )
+
+    private val ACI_REGEX =
+        Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+
     sealed interface State {
         data object Idle : State
         data object NeedsSetup : State
@@ -169,85 +181,79 @@ object SignalClient {
     private suspend fun sendContent(destinationAci: String, content: SignalServiceProtos.Content): Boolean {
         val aci = destinationAci.trim()
         if (aci.isEmpty()) return false
-        val plaintext = content.toByteArray()
-        val padded = SignalProtocol.padMessageBody(plaintext)
-        val encrypted: ByteArray = try {
-            val e = e2e
-            if (e != null && aci.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))) {
-                if (e.hasSession(aci, 1)) {
-                    // Live-only: should fetch prekey bundle and processPreKeyBundle (PQXDH) if no session; wire still correct via this path.
-                    e.encryptDM(aci, 1, padded).data
-                } else {
-                    // Try sealed sender if available requires sender certificate (live-only GET /v1/certificate/delivery), else send Content bytes as body for wire-correct shape.
-                    try {
-                        val cert = try { org.signal.libsignal.metadata.certificate.SenderCertificate(ByteArray(0)) } catch (_: Exception) { null }
-                        if (cert != null) e.sealedSenderEncrypt(aci, 1, padded, senderCertificate = cert) else plaintext
-                    } catch (_: Exception) {
-                        // Fallback: no cert offline, send plaintext Content bytes; live will be encrypted.
-                        plaintext
-                    }
-                }
-            } else {
-                plaintext
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "encrypt failed, sending plaintext Content bytes (wire-correct, live will encrypt)", t)
-            plaintext
-        }
+        val padded = SignalProtocol.padMessageBody(content.toByteArray())
 
-        // Group send: if destination is group:<hex>, expand to participants via DB and fan out (or use /v1/messages/multi live).
+        // Group send: expand to participants and encrypt per recipient. There is no shared ciphertext
+        // — sender keys would be the efficient path, but each member still needs their own envelope.
         if (aci.startsWith("group:") || aci.startsWith("group-")) {
-            val convId = aci
             val participants: List<String> = try {
-                db?.conversationDao()?.getConversation(convId)?.participants
+                db?.conversationDao()?.getConversation(aci)?.participants
                     ?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
             } catch (_: Exception) { emptyList() }
             if (participants.isEmpty()) {
-                Log.w(TAG, "group send no participants for $convId, dropping (wire shape correct but needs live group membership)")
+                Log.w(TAG, "group send has no known participants for $aci, dropping")
                 return false
             }
             var allOk = true
-            val groupMasterKey: ByteArray? = try {
-                // Derive masterKey from convId if hex; live-only zkgroup would supply real 32B.
-                val hex = convId.removePrefix("group:").removePrefix("group-")
-                if (hex.length >= 32) hex.chunked(2).take(16).map { it.toInt(16).toByte() }.toByteArray() else null
-            } catch (_: Exception) { null }
             for (pid in participants) {
-                val req = SignalPayload.buildPutMessagesRequest(pid, encrypted)
-                val ok = try {
-                    socket?.sendRequest(req) ?: false
-                } catch (_: Exception) { false }
-                if (!ok) {
-                    // REST fallback for offline validation: PUT https://chat.signal.org/v1/messages/{aci}
-                    try {
-                        val basic = basicAuthHeader()
-                        val headers = mapOf("Authorization" to "Basic $basic", "Content-Type" to "application/octet-stream")
-                        val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$pid", method = "PUT", headers = headers, body = encrypted, sslSocketFactory = signalTls())
-                        if (!resp.isSuccess) allOk = false
-                    } catch (_: Exception) { allOk = false }
-                }
-            }
-            if (groupMasterKey != null) {
-                // Live-only: group-send-token header required (GET /v2/groups/token zkgroup endorsement). Send path already wire-correct; token added when live.
-                Log.i(TAG, "group send fanned to ${participants.size} members (live-only group-send-token endorsement needed for full zkgroup)")
+                if (!sendEncryptedTo(pid, padded)) allOk = false
             }
             return allOk
         }
 
-        val request = SignalPayload.buildPutMessagesRequest(aci, encrypted)
+        return sendEncryptedTo(aci, padded)
+    }
+
+    /**
+     * Encrypt [padded] for one recipient and PUT it. Returns false rather than falling back to
+     * plaintext: an unencrypted Content is a protocol violation that real clients discard, so sending
+     * one would disclose the message and forfeit sender authentication without even being delivered.
+     */
+    private suspend fun sendEncryptedTo(aci: String, padded: ByteArray): Boolean {
+        val e = e2e
+        if (e == null) {
+            Log.w(TAG, "no protocol store, cannot send to $aci")
+            return false
+        }
+        if (!ACI_REGEX.matches(aci)) {
+            Log.w(TAG, "destination is not an ACI, cannot establish a session: $aci")
+            return false
+        }
+        if (!e.hasSession(aci, 1)) {
+            // Establishing one needs a prekey-bundle fetch (GET /v2/keys/{aci}/*), which is not
+            // implemented yet. Refuse rather than emit something readable.
+            Log.w(TAG, "no session for $aci and prekey fetch is not implemented; refusing to send")
+            return false
+        }
+        val encrypted = try {
+            e.encryptDM(aci, 1, padded).data
+        } catch (t: Throwable) {
+            Log.w(TAG, "encrypt failed for $aci", t)
+            return false
+        }
+        return putMessage(aci, encrypted)
+    }
+
+    private suspend fun putMessage(aci: String, encrypted: ByteArray): Boolean {
         val sock = socket
         if (sock != null) {
             try {
-                val ok = sock.sendRequest(request)
-                if (ok) return true
+                if (sock.sendRequest(SignalPayload.buildPutMessagesRequest(aci, encrypted))) return true
             } catch (_: Exception) {}
         }
-        // Fallback: REST PUT via NetworkClient when WS not yet connected (wire-correct path, auth via Basic aci:password)
+        // Fallback when the websocket is not connected yet.
         return try {
-            val basic = basicAuthHeader()
-            val headers = mapOf("Authorization" to "Basic $basic", "Content-Type" to "application/octet-stream")
-            val resp = NetworkClient.execute("https://chat.signal.org/v1/messages/$aci", method = "PUT", headers = headers, body = encrypted, sslSocketFactory = signalTls())
-            resp.isSuccess
+            val headers = mapOf(
+                "Authorization" to "Basic ${basicAuthHeader()}",
+                "Content-Type" to "application/octet-stream",
+            )
+            NetworkClient.execute(
+                "https://chat.signal.org/v1/messages/$aci",
+                method = "PUT",
+                headers = headers,
+                body = encrypted,
+                sslSocketFactory = signalTls(),
+            ).isSuccess
         } catch (_: Exception) { false }
     }
 
@@ -633,39 +639,30 @@ object SignalClient {
 
         if (env.content.isEmpty()) return
 
-        // Decrypt: strip version byte and handle sealed vs session
+        // Decrypt. A failure must never fall back to the raw envelope bytes: those are attacker
+        // controlled, so treating them as a Content would let anyone forge a message from any ACI.
+        val e = e2e
+        if (e == null) {
+            Log.w(TAG, "no protocol store, dropping envelope from ${env.sourceAci}")
+            emitDecryptionError(env, "no protocol store")
+            return
+        }
         val paddedPlaintext: ByteArray = try {
-            val e = e2e
             when (env.type) {
-                SignalServiceProtos.Envelope.Type.UNIDENTIFIED_SENDER -> {
-                    // Sealed sender: requires SenderCertificate + ServerCertificate trustRoot live (GET /v1/certificate/delivery). Fallback to Rust stub for tests.
-                    try {
-                        val trustRootB64 = "" // Live-only: fetch server trust root via libsignal; offline fallback uses empty
-                        if (trustRootB64.isNotEmpty() && e != null) {
-                            val trustBytes = AndroidBase64.decode(trustRootB64, AndroidBase64.NO_WRAP)
-                            val trustKey = org.signal.libsignal.protocol.ecc.ECPublicKey(trustBytes)
-                            e.sealedSenderDecrypt(env.content, trustKey, System.currentTimeMillis())
-                        } else {
-                            e?.sealedSenderDecrypt(env.content) ?: env.content
-                        }
-                    } catch (se: Exception) {
-                        Log.w(TAG, "sealedSenderDecrypt failed, trying session decrypt", se)
-                        tryDecryptSession(env, e)
-                    }
-                }
-                SignalServiceProtos.Envelope.Type.PREKEY_MESSAGE, SignalServiceProtos.Envelope.Type.DOUBLE_RATCHET -> {
-                    tryDecryptSession(env, e)
-                }
-                SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT -> {
-                    // Marker byte | Content — strip marker (SignalProtocol.parseContent does it)
-                    env.content
-                }
-                else -> tryDecryptSession(env, e)
+                SignalServiceProtos.Envelope.Type.UNIDENTIFIED_SENDER ->
+                    e.sealedSenderDecrypt(env.content, unidentifiedSenderTrustRoots(), env.serverTimestamp)
+                SignalServiceProtos.Envelope.Type.PREKEY_MESSAGE ->
+                    e.decryptDM(env.sourceAci, env.sourceDevice, true, env.content)
+                SignalServiceProtos.Envelope.Type.DOUBLE_RATCHET ->
+                    e.decryptDM(env.sourceAci, env.sourceDevice, false, env.content)
+                // The one unencrypted envelope type, and it may only carry a DecryptionErrorMessage
+                // (enforced after parsing, below).
+                SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT -> env.content
+                else -> throw IllegalArgumentException("unknown envelope type ${env.type}")
             }
         } catch (t: Throwable) {
             Log.w(TAG, "decrypt failed for ${env.sourceAci}:${env.sourceDevice}", t)
-            val cid = SignalProtocol.toConversationId(env.sourceAci, null as ByteArray?)
-            _events.emit(SignalEvent.DecryptionError(conversationId = cid, senderAci = env.sourceAci, senderDeviceId = env.sourceDevice, timestamp = env.timestamp, errorMessage = t.message))
+            emitDecryptionError(env, t.message)
             return
         }
         // Signal pads the plaintext before encrypting, for every envelope type.
@@ -674,6 +671,12 @@ object SignalClient {
         val content = SignalProtocol.parseContent(plaintext)
         if (content == null) {
             Log.w(TAG, "parseContent failed for ${env.sourceAci}")
+            return
+        }
+        if (env.type == SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT &&
+            !SignalProtocol.isValidPlaintextContent(content)
+        ) {
+            Log.w(TAG, "dropping PLAINTEXT_CONTENT carrying more than a DecryptionErrorMessage from ${env.sourceAci}")
             return
         }
         val parsed = SignalProtocol.classifyContent(content)
@@ -811,17 +814,28 @@ object SignalClient {
         }
     }
 
-    private fun tryDecryptSession(env: SignalProtocol.SignalEnvelope, e: SignalE2E?): ByteArray {
-        if (e == null) return env.content
-        val isPreKey = env.type == SignalServiceProtos.Envelope.Type.PREKEY_MESSAGE
-        return try {
-            val pt = e.decryptDM(env.sourceAci, env.sourceDevice, isPreKey, env.content)
-            pt
-        } catch (_: Exception) {
-            // Try sealed fallback then raw
-            try { e.sealedSenderDecrypt(env.content) } catch (_: Exception) { env.content }
-        }
+    private suspend fun emitDecryptionError(env: SignalProtocol.SignalEnvelope, message: String?) {
+        val cid = SignalProtocol.toConversationId(env.sourceAci, null as ByteArray?)
+        _events.emit(
+            SignalEvent.DecryptionError(
+                conversationId = cid,
+                senderAci = env.sourceAci,
+                senderDeviceId = env.sourceDevice,
+                timestamp = env.timestamp,
+                errorMessage = message,
+            ),
+        )
     }
+
+    /**
+     * Sealed-sender trust roots. These are build constants in the official client
+     * (`UNIDENTIFIED_SENDER_TRUST_ROOTS`), a list so the server can rotate; a certificate is accepted
+     * if it validates against any of them.
+     */
+    private fun unidentifiedSenderTrustRoots(): List<org.signal.libsignal.protocol.ecc.ECPublicKey> =
+        TRUST_ROOTS_B64.map {
+            org.signal.libsignal.protocol.ecc.ECPublicKey(AndroidBase64.decode(it, AndroidBase64.NO_WRAP))
+        }
 
     private fun groupIdFor(dm: SignalServiceProtos.DataMessage): String {
         return if (dm.hasGroupV2() && dm.groupV2.hasMasterKey()) {

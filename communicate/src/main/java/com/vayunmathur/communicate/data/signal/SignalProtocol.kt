@@ -223,6 +223,22 @@ object SignalProtocol {
         null
     }
 
+    /**
+     * `PLAINTEXT_CONTENT` is the one unencrypted envelope type and may only carry a
+     * `DecryptionErrorMessage`. Official clients drop anything else, so accepting a plaintext
+     * DataMessage would be a spoofing hole rather than a compatibility feature.
+     */
+    fun isValidPlaintextContent(content: SignalServiceProtos.Content): Boolean =
+        content.hasDecryptionErrorMessage() &&
+            !content.hasDataMessage() &&
+            !content.hasSyncMessage() &&
+            !content.hasCallMessage() &&
+            !content.hasNullMessage() &&
+            !content.hasReceiptMessage() &&
+            !content.hasTypingMessage() &&
+            !content.hasStoryMessage() &&
+            !content.hasEditMessage()
+
     fun classifyContent(content: SignalServiceProtos.Content): ParsedContent {
         return when {
             content.hasDataMessage() -> ParsedContent.Data(content.dataMessage, content)

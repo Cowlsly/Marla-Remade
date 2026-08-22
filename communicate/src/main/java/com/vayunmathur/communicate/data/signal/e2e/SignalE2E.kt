@@ -243,16 +243,12 @@ class SignalE2E(
         return RustSignalCrypto.sealedSenderEncrypt(plaintext, recipientAci, recipientDeviceId) ?: throw RuntimeException("sealedSenderEncrypt returned null")
     }
 
-    fun sealedSenderDecrypt(ciphertext: ByteArray, trustRoot: ECPublicKey, timestampMs: Long = System.currentTimeMillis()): ByteArray {
-        val validator = CertificateValidator(trustRoot)
+    fun sealedSenderDecrypt(ciphertext: ByteArray, trustRoots: List<ECPublicKey>, timestampMs: Long = System.currentTimeMillis()): ByteArray {
+        val validator = CertificateValidator(trustRoots)
         val localUuid = try { UUID.fromString(ownAci) } catch (_: Exception) { UUID.randomUUID() }
         val cipher = SealedSessionCipher(protocolStore, localUuid, null, ownDeviceId)
         val result = cipher.decrypt(validator, ciphertext, timestampMs)
         return result.paddedMessage
-    }
-
-    fun sealedSenderDecrypt(ciphertext: ByteArray): ByteArray {
-        return RustSignalCrypto.sealedSenderDecrypt(ciphertext) ?: throw RuntimeException("sealedSenderDecrypt returned null")
     }
 
     private data class LocalPreKey(val id: Int, val publicKey: ByteArray)

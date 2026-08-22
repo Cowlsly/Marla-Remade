@@ -1,13 +1,17 @@
 package com.vayunmathur.communicate.signal
 
+import com.google.protobuf.ByteString
 import com.vayunmathur.communicate.data.signal.SignalProtocol
+import org.whispersystems.signalservice.internal.push.SignalServiceProtos
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 /**
- * Vectors for Signal's transport padding (trailing `0x80` terminator, 80-byte blocks). Pure, no
- * Android — so the malformed-padding branch, which logs, is deliberately not exercised here.
+ * Vectors for Signal's transport padding (trailing `0x80` terminator, 80-byte blocks) and the
+ * `PLAINTEXT_CONTENT` restriction. Pure, no Android — so the malformed-padding branch, which logs,
+ * is deliberately not exercised here.
  */
 class SignalPaddingTest {
     @Test
@@ -49,5 +53,31 @@ class SignalPaddingTest {
         val stripped = SignalProtocol.stripMessagePadding(SignalProtocol.padMessageBody(body))
         assertEquals(0x0A.toByte(), stripped.first())
         assertTrue(body.contentEquals(stripped))
+    }
+
+    @Test
+    fun plaintextContent_acceptsOnlyADecryptionErrorMessage() {
+        val decryptionErrorOnly = SignalServiceProtos.Content.newBuilder()
+            .setDecryptionErrorMessage(ByteString.copyFrom(byteArrayOf(1, 2, 3)))
+            .build()
+        assertTrue(SignalProtocol.isValidPlaintextContent(decryptionErrorOnly))
+    }
+
+    @Test
+    fun plaintextContent_rejectsADataMessage() {
+        // The spoofing case: an unencrypted DataMessage must never be treated as authentic.
+        val dataMessage = SignalServiceProtos.Content.newBuilder()
+            .setDataMessage(SignalServiceProtos.DataMessage.newBuilder().setBody("spoofed"))
+            .build()
+        assertFalse(SignalProtocol.isValidPlaintextContent(dataMessage))
+    }
+
+    @Test
+    fun plaintextContent_rejectsADecryptionErrorSmuggledAlongsideOtherFields() {
+        val smuggled = SignalServiceProtos.Content.newBuilder()
+            .setDecryptionErrorMessage(ByteString.copyFrom(byteArrayOf(1, 2, 3)))
+            .setDataMessage(SignalServiceProtos.DataMessage.newBuilder().setBody("spoofed"))
+            .build()
+        assertFalse(SignalProtocol.isValidPlaintextContent(smuggled))
     }
 }
