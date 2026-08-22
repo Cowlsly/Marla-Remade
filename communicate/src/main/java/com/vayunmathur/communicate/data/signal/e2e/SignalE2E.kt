@@ -68,8 +68,12 @@ class SignalE2E(
     }
 
     /**
-     * Our own address. libsignal now takes this explicitly alongside the remote one so it can tell a
-     * self-send from a peer send rather than inferring it.
+     * Our own address.
+     *
+     * Careful: libsignal orders these two inconsistently — `SessionCipher(store, local, remote)` but
+     * `SessionBuilder(store, remote, local)`. Kotlin cannot use named arguments for Java constructors, so
+     * the order at each call site is load-bearing. Getting it wrong looks up the session under our own
+     * address and fails with a `NoSessionException` naming us rather than the peer.
      */
     private fun localAddress(): SignalProtocolAddress = signalAddress(ownAci, ownDeviceId)
 
@@ -101,7 +105,8 @@ class SignalE2E(
      * different format and would corrupt the stored record.
      */
     fun encryptDM(aci: String, deviceId: Int, paddedPlaintext: ByteArray): EncResult {
-        val cipher = SessionCipher(protocolStore, signalAddress(aci, deviceId), localAddress())
+        // SessionCipher is (local, remote).
+        val cipher = SessionCipher(protocolStore, localAddress(), signalAddress(aci, deviceId))
         val msg = cipher.encrypt(paddedPlaintext)
         return EncResult(
             ciphertextType = msg.type,
@@ -155,7 +160,8 @@ class SignalE2E(
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {
         val address = signalAddress(aci, deviceId)
-        val cipher = SessionCipher(protocolStore, address, localAddress())
+        // SessionCipher is (local, remote).
+        val cipher = SessionCipher(protocolStore, localAddress(), address)
         return if (isPreKey) {
             cipher.decrypt(org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext))
         } else {
@@ -209,6 +215,7 @@ class SignalE2E(
             bundle.kyberPreKeySignature,
         )
         // SessionBuilder writes the real session record through the store; nothing else should.
+        // SessionBuilder is (remote, local) — the opposite of SessionCipher.
         SessionBuilder(protocolStore, address, localAddress()).process(preKeyBundle)
     }
 
