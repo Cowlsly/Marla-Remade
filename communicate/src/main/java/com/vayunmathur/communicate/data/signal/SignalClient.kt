@@ -1405,6 +1405,13 @@ object SignalClient {
             return false
         }
         val paddedPlaintext: ByteArray = try {
+            // Which identity the sender addressed matters: a message to our PNI must be decrypted with the
+            // PNI identity and its own pre-keys, not the ACI ones.
+            Log.i(
+                TAG,
+                "envelope type=${env.type} from=${env.sourceAci}:${env.sourceDevice} " +
+                    "destination=${env.destinationAci} ourAci=${authData?.aci} ourPni=${authData?.pni}",
+            )
             when (env.type) {
                 SignalServiceProtos.Envelope.Type.UNIDENTIFIED_SENDER ->
                     e.sealedSenderDecrypt(env.content, unidentifiedSenderTrustRoots(), env.serverTimestamp)

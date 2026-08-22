@@ -23,6 +23,7 @@ import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.signal.libsignal.protocol.kem.KEMKeyPair
 import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.kem.KEMPublicKey
+import org.signal.libsignal.protocol.message.PreKeySignalMessage
 import org.signal.libsignal.protocol.state.KyberPreKeyRecord
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import org.signal.libsignal.protocol.state.PreKeyRecord
@@ -171,7 +172,19 @@ class SignalE2E(
         // SessionCipher is (local, remote).
         val cipher = SessionCipher(protocolStore, localAddress(), address)
         return if (isPreKey) {
-            cipher.decrypt(org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext))
+            val message = PreKeySignalMessage(ciphertext)
+            // Which of our keys the sender used. A decryption failure here is almost always a mismatch
+            // between these ids and what the store holds, so name them rather than guessing later.
+            Log.i(
+                TAG,
+                "inbound prekey message from $aci:$deviceId " +
+                    "signedPreKeyId=${message.signedPreKeyId} " +
+                    "preKeyId=${message.preKeyId.orElse(null)} " +
+                    "registrationId=${message.registrationId} " +
+                    "ourRegistrationId=${protocolStore.localRegistrationId} " +
+                    "theirIdentity=${message.identityKey.serialize().size}B",
+            )
+            cipher.decrypt(message)
         } else {
             cipher.decrypt(org.signal.libsignal.protocol.message.SignalMessage(ciphertext))
         }
