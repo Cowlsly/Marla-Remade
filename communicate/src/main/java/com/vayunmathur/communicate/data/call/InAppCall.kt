@@ -60,6 +60,8 @@ interface InAppCallConnectionBridge {
  * Google Voice deliberately stays outside this: it already has its own Telecom integration.
  */
 object InAppCallRegistry {
+    private const val TAG = "InAppCallRegistry"
+
     private val _state = MutableStateFlow(InAppCallState())
     val state: StateFlow<InAppCallState> = _state.asStateFlow()
 
@@ -133,11 +135,21 @@ object InAppCallRegistry {
 
     // -- Actions, forwarded to whichever line owns the call --
 
-    fun answer() = controller?.answer() ?: Unit
+    /** [source] is logged so it is clear what ended a call; several paths can. */
+    fun answer(source: String = "ui") {
+        android.util.Log.i(TAG, "answer requested by $source")
+        controller?.answer()
+    }
 
-    fun reject() = controller?.reject() ?: Unit
+    fun reject(source: String = "ui") {
+        android.util.Log.i(TAG, "reject requested by $source")
+        controller?.reject()
+    }
 
-    fun hangup() = controller?.hangup() ?: Unit
+    fun hangup(source: String = "ui") {
+        android.util.Log.i(TAG, "hangup requested by $source")
+        controller?.hangup()
+    }
 
     fun toggleMuted() {
         val next = !_state.value.muted

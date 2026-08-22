@@ -90,23 +90,23 @@ class InAppCallConnection : Connection(), InAppCallConnectionBridge {
     }
 
     override fun onAnswer() {
-        InAppCallRegistry.answer()
+        InAppCallRegistry.answer("telecom.onAnswer")
     }
 
     override fun onReject() {
-        InAppCallRegistry.reject()
+        InAppCallRegistry.reject("telecom.onReject")
         setDisconnected(DisconnectCause(DisconnectCause.REJECTED))
         destroy()
     }
 
     override fun onDisconnect() {
-        InAppCallRegistry.hangup()
+        InAppCallRegistry.hangup("telecom.onDisconnect")
         setDisconnected(DisconnectCause(DisconnectCause.LOCAL))
         destroy()
     }
 
     override fun onAbort() {
-        InAppCallRegistry.hangup()
+        InAppCallRegistry.hangup("telecom.onAbort")
         setDisconnected(DisconnectCause(DisconnectCause.CANCELED))
         destroy()
     }

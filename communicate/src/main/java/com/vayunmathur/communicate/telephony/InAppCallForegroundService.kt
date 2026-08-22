@@ -36,12 +36,12 @@ class InAppCallForegroundService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_ANSWER -> InAppCallRegistry.answer()
+            ACTION_ANSWER -> InAppCallRegistry.answer("notification")
             ACTION_HANGUP -> {
                 if (InAppCallRegistry.state.value.phase == InAppCallPhase.Incoming) {
-                    InAppCallRegistry.reject()
+                    InAppCallRegistry.reject("notification")
                 } else {
-                    InAppCallRegistry.hangup()
+                    InAppCallRegistry.hangup("notification")
                 }
             }
         }

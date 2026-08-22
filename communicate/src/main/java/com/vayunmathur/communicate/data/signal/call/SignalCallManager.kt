@@ -248,6 +248,7 @@ class SignalCallManager(
                 mediaType.isVideo(),
                 null,
             )
+            Log.i(TAG, "proceed ok for call $callId with ${iceServers.size} ICE servers")
         } catch (t: Throwable) {
             Log.w(TAG, "proceed failed for call $callId", t)
         }
@@ -261,6 +262,7 @@ class SignalCallManager(
 
     override fun onCallEvent(remote: Remote?, event: CallManager.CallEvent?) {
         val aci = (remote as? SignalRemote)?.aci ?: return
+        Log.i(TAG, "call event for $aci: $event")
         val state = when (event) {
             CallManager.CallEvent.LOCAL_CONNECTED, CallManager.CallEvent.REMOTE_CONNECTED -> CallState.Connected
             CallManager.CallEvent.LOCAL_RINGING, CallManager.CallEvent.REMOTE_RINGING -> CallState.Ringing
