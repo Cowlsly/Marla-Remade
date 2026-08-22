@@ -4,7 +4,6 @@ import com.vayunmathur.communicate.data.signal.SignalAuthData
 import com.vayunmathur.communicate.data.signal.SignalDatabase
 import com.vayunmathur.communicate.data.signal.SignalE2EPreKey
 import com.vayunmathur.communicate.data.signal.SignalE2ESenderKey
-import com.vayunmathur.communicate.data.signal.SignalE2ESession
 import java.util.UUID
 import kotlinx.coroutines.runBlocking
 import kotlin.io.encoding.Base64
@@ -21,7 +20,6 @@ import org.signal.libsignal.protocol.ecc.ECPrivateKey
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.signal.libsignal.protocol.kem.KEMPublicKey
 import org.signal.libsignal.protocol.state.PreKeyBundle
-import org.signal.libsignal.protocol.state.impl.InMemorySignalProtocolStore
 
 /**
  * Rust-backed E2E crypto for Signal (PQXDH + Double Ratchet + Sender Keys + Sealed Sender).
@@ -43,14 +41,12 @@ class SignalE2E(
     private val auth: SignalAuthData,
 ) {
     val ownIdentityPublicKey: ByteArray = b64(auth.identityPublicKey)
-    private val ownIdentityPrivate: ByteArray = b64(auth.identityPrivateKey)
-    private val ownSignedPreKeyPrivate: ByteArray = b64(auth.signedPreKeyPrivate)
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
     private val ownDeviceId: Int = auth.deviceId
 
-    private val protocolStore: InMemorySignalProtocolStore by lazy {
+    private val protocolStore: PersistentSignalProtocolStore by lazy {
         val ikp = loadIdentityPair(auth.identityPrivateKey, auth.identityPublicKey)
-        InMemorySignalProtocolStore(ikp, auth.registrationId.takeIf { it != 0 } ?: 1)
+        PersistentSignalProtocolStore(db, ikp, auth.registrationId.takeIf { it != 0 } ?: 1)
     }
 
     private fun loadIdentityPair(privB64: String, pubB64: String): IdentityKeyPair {
@@ -67,68 +63,37 @@ class SignalE2E(
     fun signalAddress(aci: String, deviceId: Int = 1): SignalProtocolAddress =
         SignalProtocolAddress(aci, deviceId)
 
+    /**
+     * Whether a usable session exists. Delegates to the same store [encryptDM] uses, so it cannot
+     * report a session that encryption would then fail to find.
+     */
     fun hasSession(aci: String, deviceId: Int = 1): Boolean =
-        runBlocking { db.e2eSessionDao().exists(aci, deviceId) } || try { protocolStore.containsSession(signalAddress(aci, deviceId)) } catch (_: Exception) { false }
+        try { protocolStore.containsSession(signalAddress(aci, deviceId)) } catch (_: Exception) { false }
 
     fun deleteSession(aci: String, deviceId: Int = 1) {
-        runBlocking { db.e2eSessionDao().delete(aci, deviceId) }
         try { protocolStore.deleteSession(signalAddress(aci, deviceId)) } catch (_: Exception) {}
     }
 
     data class EncResult(val type: String, val data: ByteArray)
-
+    /**
+     * Encrypt for an established session. libsignal owns the session record through [protocolStore];
+     * a failure propagates rather than falling back to the Rust crate, which serializes sessions in a
+     * different format and would corrupt the stored record.
+     */
     fun encryptDM(aci: String, deviceId: Int, paddedPlaintext: ByteArray): EncResult {
-        return try {
-            val address = signalAddress(aci, deviceId)
-            val cipher = SessionCipher(protocolStore, address)
-            val msg = cipher.encrypt(paddedPlaintext)
-            val typeStr = when (msg.type) { 3 -> "prekey"; else -> "whisper" }
-            EncResult(typeStr, msg.serialize())
-        } catch (_: Exception) {
-            val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) } ?: throw RuntimeException("No session for $aci:$deviceId")
-            val result = RustSignalCrypto.encryptSplit(entity.record, paddedPlaintext)
-            runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, result.newSession)) }
-            EncResult(if (result.isPreKey) "prekey" else "whisper", result.body)
-        }
+        val address = signalAddress(aci, deviceId)
+        val msg = SessionCipher(protocolStore, address).encrypt(paddedPlaintext)
+        val typeStr = when (msg.type) { 3 -> "prekey"; else -> "whisper" }
+        return EncResult(typeStr, msg.serialize())
     }
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {
-        return try {
-            val address = signalAddress(aci, deviceId)
-            val cipher = SessionCipher(protocolStore, address)
-            if (isPreKey) {
-                val preKeyMsg = org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext)
-                cipher.decrypt(preKeyMsg)
-            } else {
-                val signalMsg = org.signal.libsignal.protocol.message.SignalMessage(ciphertext)
-                cipher.decrypt(signalMsg)
-            }
-        } catch (_: Exception) {
-            if (isPreKey) {
-                val preKeyId = parsePreKeyIdFromMessage(ciphertext)
-                val oneTimePriv: ByteArray? = if (preKeyId != null) {
-                    val entity = runBlocking { db.e2ePreKeyDao().get(preKeyId) }
-                    entity?.let { rec -> if (rec.record.size >= 32) rec.record.copyOfRange(0, 32) else null }
-                } else null
-                val decrypted = RustSignalCrypto.decryptPreKeySplit(
-                    localIdentityPrivate = ownIdentityPrivate,
-                    localIdentityPublic = ownIdentityPublicKey,
-                    signedPreKeyPrivate = ownSignedPreKeyPrivate,
-                    oneTimePrivate = oneTimePriv,
-                    kyberSecretKey = null,
-                    preKeyMessageBytes = ciphertext,
-                )
-                runBlocking {
-                    db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession))
-                    if (preKeyId != null) try { db.e2ePreKeyDao().delete(preKeyId) } catch (_: Exception) {}
-                }
-                decrypted.plaintext
-            } else {
-                val entity = runBlocking { db.e2eSessionDao().get(aci, deviceId) } ?: throw RuntimeException("No session for $aci:$deviceId (msg)")
-                val decrypted = RustSignalCrypto.decryptMessageSplit(entity.record, ciphertext)
-                runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, decrypted.newSession)) }
-                decrypted.plaintext
-            }
+        val address = signalAddress(aci, deviceId)
+        val cipher = SessionCipher(protocolStore, address)
+        return if (isPreKey) {
+            cipher.decrypt(org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext))
+        } else {
+            cipher.decrypt(org.signal.libsignal.protocol.message.SignalMessage(ciphertext))
         }
     }
 
@@ -148,49 +113,37 @@ class SignalE2E(
         val kyberPreKeySignature: ByteArray? = null,
     )
 
+    /**
+     * Build a session from a fetched pre-key bundle. Kyber is mandatory on this protocol version, so
+     * a bundle without it is rejected rather than downgraded to a non-post-quantum session — the
+     * official client skips such a device instead.
+     */
     fun processPreKeyBundle(aci: String, deviceId: Int, bundle: ParsedPreKeyBundle) {
-        val hasKyber = bundle.kyberPreKeyId != null && bundle.kyberPreKeyPublic != null && bundle.kyberPreKeySignature != null
-        if (hasKyber) {
-            val address = signalAddress(aci, deviceId)
-            val ecPreKey: ECPublicKey? = bundle.preKeyPublic?.let { ECPublicKey(it) }
-            val signedEc = ECPublicKey(bundle.signedPreKeyPublic)
-            val identity = IdentityKey(bundle.identityKey)
-            val kyberPub = KEMPublicKey(bundle.kyberPreKeyPublic!!)
-            val preKeyBundle = PreKeyBundle(
-                bundle.registrationId,
-                deviceId,
-                bundle.preKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID,
-                ecPreKey,
-                bundle.signedPreKeyId,
-                signedEc,
-                bundle.signedPreKeySignature,
-                identity,
-                bundle.kyberPreKeyId!!,
-                kyberPub,
-                bundle.kyberPreKeySignature!!,
-            )
-            val builder = SessionBuilder(protocolStore, address)
-            builder.process(preKeyBundle)
-            runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, ByteArray(0))) }
-            return
-        }
-        val sessionBytes = RustSignalCrypto.processPreKeyBundle(
-            localIdentityPrivate = ownIdentityPrivate,
-            localIdentityPublic = ownIdentityPublicKey,
-            localRegistrationId = auth.registrationId,
-            registrationId = bundle.registrationId,
-            preKeyId = bundle.preKeyId ?: -1,
-            preKeyPublic = bundle.preKeyPublic,
-            signedPreKeyId = bundle.signedPreKeyId,
-            signedPreKeyPublic = bundle.signedPreKeyPublic,
-            signedPreKeySignature = bundle.signedPreKeySignature,
-            identityKey = bundle.identityKey,
-            kyberPreKeyId = bundle.kyberPreKeyId ?: -1,
-            kyberPreKeyPublic = bundle.kyberPreKeyPublic ?: ByteArray(0),
-            kyberPreKeySignature = bundle.kyberPreKeySignature ?: ByteArray(0),
-            kyberCiphertext = ByteArray(0),
-        ) ?: throw RuntimeException("Rust processPreKeyBundle returned null")
-        runBlocking { db.e2eSessionDao().insert(SignalE2ESession(aci, deviceId, sessionBytes)) }
+        require(
+            bundle.kyberPreKeyId != null &&
+                bundle.kyberPreKeyPublic != null &&
+                bundle.kyberPreKeySignature != null,
+        ) { "pre-key bundle for $aci:$deviceId has no Kyber pre-key" }
+        val address = signalAddress(aci, deviceId)
+        val ecPreKey: ECPublicKey? = bundle.preKeyPublic?.let { ECPublicKey(it) }
+        val signedEc = ECPublicKey(bundle.signedPreKeyPublic)
+        val identity = IdentityKey(bundle.identityKey)
+        val kyberPub = KEMPublicKey(bundle.kyberPreKeyPublic)
+        val preKeyBundle = PreKeyBundle(
+            bundle.registrationId,
+            deviceId,
+            bundle.preKeyId ?: PreKeyBundle.NULL_PRE_KEY_ID,
+            ecPreKey,
+            bundle.signedPreKeyId,
+            signedEc,
+            bundle.signedPreKeySignature,
+            identity,
+            bundle.kyberPreKeyId,
+            kyberPub,
+            bundle.kyberPreKeySignature,
+        )
+        // SessionBuilder writes the real session record through the store; nothing else should.
+        SessionBuilder(protocolStore, address).process(preKeyBundle)
     }
 
     fun markKyberPreKeyUsed(kyberId: Int, signedEcId: Int, baseKey: ByteArray) {
@@ -278,52 +231,6 @@ class SignalE2E(
     companion object {
         private const val TAG = "SignalE2E"
         private fun b64(s: String): ByteArray = if (s.isEmpty()) ByteArray(0) else Base64.Default.decode(s)
-
-        fun parsePreKeyIdFromMessage(data: ByteArray): Int? {
-            if (data.isEmpty()) return null
-            var pos = 1
-            while (pos < data.size) {
-                var keyVal = 0L
-                var shift = 0
-                var idx = pos
-                var b: Int
-                do {
-                    if (idx >= data.size) return null
-                    b = data[idx].toInt() and 0xFF
-                    keyVal = keyVal or ((b and 0x7F).toLong() shl shift)
-                    shift += 7
-                    idx++
-                } while (b and 0x80 != 0)
-                val fieldNum = (keyVal shr 3).toInt()
-                val wireType = (keyVal and 7).toInt()
-                pos = idx
-                if (wireType == 0) {
-                    var v = 0L
-                    shift = 0
-                    while (pos < data.size) {
-                        b = data[pos].toInt() and 0xFF
-                        v = v or ((b and 0x7F).toLong() shl shift)
-                        pos++
-                        if (b and 0x80 == 0) break
-                        shift += 7
-                    }
-                    if (fieldNum == 1) return v.toInt()
-                } else if (wireType == 2) {
-                    var len = 0L
-                    shift = 0
-                    while (pos < data.size) {
-                        b = data[pos].toInt() and 0xFF
-                        len = len or ((b and 0x7F).toLong() shl shift)
-                        pos++
-                        if (b and 0x80 == 0) break
-                        shift += 7
-                    }
-                    if (pos + len > data.size) return null
-                    pos += len.toInt()
-                } else break
-            }
-            return null
-        }
 
         fun signSignedPreKey(identityPrivate32: ByteArray, signedPreKeyPublic32: ByteArray): ByteArray {
             val priv = ECPrivateKey(identityPrivate32)

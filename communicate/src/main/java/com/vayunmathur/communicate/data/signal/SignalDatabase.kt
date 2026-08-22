@@ -32,10 +32,12 @@ import com.vayunmathur.library.util.DatabaseMigrations
         SignalE2EIdentity::class,
         SignalE2EPreKey::class,
         SignalE2ESignedPreKey::class,
+        SignalE2EKyberPreKey::class,
+        SignalE2EKyberUsedBaseKey::class,
         SignalE2ESenderKey::class,
         SignalCallLog::class,
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(SignalTypeConverters::class)
@@ -50,11 +52,38 @@ abstract class SignalDatabase : RoomDatabase() {
     abstract fun e2eIdentityDao(): SignalE2EIdentityDao
     abstract fun e2ePreKeyDao(): SignalE2EPreKeyDao
     abstract fun e2eSignedPreKeyDao(): SignalE2ESignedPreKeyDao
+    abstract fun e2eKyberPreKeyDao(): SignalE2EKyberPreKeyDao
+    abstract fun e2eKyberUsedBaseKeyDao(): SignalE2EKyberUsedBaseKeyDao
     abstract fun e2eSenderKeyDao(): SignalE2ESenderKeyDao
     abstract fun callLogDao(): SignalCallLogDao
 
     companion object : DatabaseMigrations {
-        override val migrations = emptyList<androidx.room.migration.Migration>()
+        /**
+         * v1 → v2: Kyber pre-key storage. The protocol store needs somewhere to keep our own Kyber
+         * pre-keys, plus the (kyberPreKeyId, signedPreKeyId, baseKey) tuples that make last-resort
+         * keys single-use — reusing one is what `ReusedBaseKeyException` guards against.
+         */
+        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                // Must match Room's generated createAllTables statements byte for byte, including the
+                // absence of column defaults — TableInfo validation compares them and throws on a
+                // mismatch. Both tables are new, so there is nothing to backfill.
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `signal_e2e_kyber_pre_keys` (" +
+                        "`id` INTEGER NOT NULL, `record` BLOB NOT NULL, " +
+                        "`lastResort` INTEGER NOT NULL, `uploaded` INTEGER NOT NULL, " +
+                        "PRIMARY KEY(`id`))",
+                )
+                db.execSQL(
+                    "CREATE TABLE IF NOT EXISTS `signal_e2e_kyber_used_base_keys` (" +
+                        "`kyberPreKeyId` INTEGER NOT NULL, `signedPreKeyId` INTEGER NOT NULL, " +
+                        "`baseKeyB64` TEXT NOT NULL, " +
+                        "PRIMARY KEY(`kyberPreKeyId`, `signedPreKeyId`, `baseKeyB64`))",
+                )
+            }
+        }
+
+        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2)
 
         fun getDatabase(context: Context): SignalDatabase =
             SignalRepository.get(context).database()
@@ -330,6 +359,28 @@ data class SignalE2ESignedPreKey(
     val record: ByteArray,
 )
 
+@Entity(tableName = "signal_e2e_kyber_pre_keys")
+data class SignalE2EKyberPreKey(
+    @PrimaryKey val id: Int,
+    val record: ByteArray,
+    val lastResort: Boolean = false,
+    val uploaded: Boolean = false,
+)
+
+/**
+ * Records that a last-resort Kyber pre-key has already been used with a given signed pre-key and
+ * sender base key. Re-seeing a tuple means a replayed pre-key message.
+ */
+@Entity(
+    tableName = "signal_e2e_kyber_used_base_keys",
+    primaryKeys = ["kyberPreKeyId", "signedPreKeyId", "baseKeyB64"],
+)
+data class SignalE2EKyberUsedBaseKey(
+    val kyberPreKeyId: Int,
+    val signedPreKeyId: Int,
+    val baseKeyB64: String,
+)
+
 @Entity(tableName = "signal_e2e_sender_keys", primaryKeys = ["address", "deviceId", "distributionId"])
 data class SignalE2ESenderKey(
     val address: String,
@@ -420,6 +471,39 @@ interface SignalE2ESignedPreKeyDao {
 
     @Query("DELETE FROM signal_e2e_signed_pre_keys WHERE id = :id")
     suspend fun delete(id: Int)
+}
+
+@Dao
+interface SignalE2EKyberPreKeyDao {
+    @Query("SELECT * FROM signal_e2e_kyber_pre_keys WHERE id = :id LIMIT 1")
+    suspend fun get(id: Int): SignalE2EKyberPreKey?
+
+    @Query("SELECT * FROM signal_e2e_kyber_pre_keys")
+    suspend fun getAll(): List<SignalE2EKyberPreKey>
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: SignalE2EKyberPreKey)
+
+    @Query("SELECT COUNT(*) > 0 FROM signal_e2e_kyber_pre_keys WHERE id = :id")
+    suspend fun exists(id: Int): Boolean
+
+    @Query("DELETE FROM signal_e2e_kyber_pre_keys WHERE id = :id")
+    suspend fun delete(id: Int)
+}
+
+@Dao
+interface SignalE2EKyberUsedBaseKeyDao {
+    @Query(
+        "SELECT COUNT(*) > 0 FROM signal_e2e_kyber_used_base_keys " +
+            "WHERE kyberPreKeyId = :kyberPreKeyId AND signedPreKeyId = :signedPreKeyId AND baseKeyB64 = :baseKeyB64",
+    )
+    suspend fun exists(kyberPreKeyId: Int, signedPreKeyId: Int, baseKeyB64: String): Boolean
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insert(entity: SignalE2EKyberUsedBaseKey)
+
+    @Query("DELETE FROM signal_e2e_kyber_used_base_keys WHERE kyberPreKeyId = :kyberPreKeyId")
+    suspend fun deleteForKyberPreKey(kyberPreKeyId: Int)
 }
 
 @Dao
