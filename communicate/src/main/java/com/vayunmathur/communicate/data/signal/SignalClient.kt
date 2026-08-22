@@ -304,50 +304,23 @@ object SignalClient {
         return id
     }
 
+    /**
+     * Always fails until client-side attachment encryption exists.
+     *
+     * Attachments must be encrypted client-side (AES-256-CBC + HMAC-SHA256, with the key and digest
+     * carried in the AttachmentPointer) and uploaded to a server-issued form obtained from
+     * GET /v2/attachments/form/upload. Posting the raw bytes would hand plaintext media to the CDN
+     * while producing a pointer no peer could decrypt anyway.
+     */
     suspend fun sendMedia(recipient: String, bytes: ByteArray, mimeType: String): String? {
-        // Wire-correct attachment flow is GET /v2/attachments/form/upload -> multipart POST to CDN + encrypted AttachmentPointer.
-        // Offline: best-effort direct CDN POST and fall back to caption; live will use form fetch (documented live-only below).
-        val cdnInfo: Pair<String?, SignalServiceProtos.AttachmentPointer?> = try {
-            // Live-only: GET /v2/attachments/form/upload returns {key,credential,acl,algorithm,date,policy,signature} for CDN0 multipart.
-            // This stub posts directly to cdn.signal.org; live should replace with form fetch per PushServiceSocket/AttachmentUploadForm.
-            val formResp = NetworkClient.execute("https://chat.signal.org/v2/attachments/form/upload", method = "GET", headers = mapOf("Authorization" to "Basic ${basicAuthHeader()}"), sslSocketFactory = signalTls())
-            if (formResp.isSuccess) {
-                // Not parsing form here (live-only gap); still upload raw for wire validation.
-                val up = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes, sslSocketFactory = signalTls())
-                if (up.isSuccess) {
-                    val cdnKey = SignalProtocol.generateMessageId()
-                    // Build minimal AttachmentPointer (live will encrypt key/digest/incrementalMac via AttachmentCipher)
-                    val pointer = SignalServiceProtos.AttachmentPointer.newBuilder()
-                        .setCdnKey(cdnKey)
-                        .setContentType(mimeType)
-                        .setSize(bytes.size)
-                        .setCdnNumber(0)
-                        .build()
-                    Pair("cdn.signal.org/$cdnKey", pointer)
-                } else Pair(null, null)
-            } else Pair(null, null)
-        } catch (_: Exception) { Pair(null, null) } ?: run {
-            try {
-                val resp = NetworkClient.execute("https://cdn.signal.org/attachments/", method = "POST", headers = mapOf("Content-Type" to mimeType), body = bytes, sslSocketFactory = signalTls())
-                if (resp.isSuccess) Pair("cdn.signal.org/${SignalProtocol.generateMessageId()}", null) else Pair(null, null)
-            } catch (_: Exception) { Pair(null, null) }
-        }
-        val (cdnUrl, pointer) = cdnInfo
-        return if (pointer != null) {
-            val ts = System.currentTimeMillis()
-            val dm = SignalPayload.buildDataMessage(body = "", timestamp = ts, attachments = listOf(pointer), requiredProtocolVersion = 8)
-            val content = SignalPayload.buildContentWithDataMessage(dm)
-            val ok = sendContent(recipient, content)
-            if (!ok) return null
-            val id = SignalProtocol.generateMessageId()
-            val sd = SignalServiceData(mediaUrl = cdnUrl, mediaMime = mimeType, senderId = authData?.aci)
-            try { db?.cachedMessageDao()?.upsert(SignalCachedMessage(messageId = id, conversationId = recipient, body = "[Media: $mimeType]", timestamp = ts, outgoing = true, senderId = authData?.aci ?: "", serviceData = sd.serialize(), status = 1)) } catch (_: Exception) {}
-            _events.emit(SignalEvent.MessageUpdate(conversationId = recipient, messageId = id, body = "[Media: $mimeType]", outgoing = true, timestamp = ts, senderName = null, serviceData = sd.serialize()))
-            id
-        } else {
-            val body = if (cdnUrl != null) "[Media: $mimeType $cdnUrl]" else "[Media: $mimeType ${bytes.size} bytes]"
-            sendMessage(recipient, body)
-        }
+        Log.w(TAG, "refusing to send ${bytes.size}B $mimeType attachment: encryption not implemented")
+        _events.emit(
+            SignalEvent.SendFailed(
+                conversationId = recipient,
+                errorMessage = "Signal attachments are not supported yet",
+            ),
+        )
+        return null
     }
 
     suspend fun sendReaction(conversationId: String, messageId: String, emoji: String): Boolean {
