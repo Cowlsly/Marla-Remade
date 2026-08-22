@@ -14,7 +14,6 @@
     <string name="detecting">Détection en cours…</string>
     <string name="people_model_missing">Le regroupement de visages nécessite un modèle MobileFaceNet. Ajoutez le fichier mobilefacenet.tflite, sous licence permissive, dans le répertoire photos/src/main/assets (voir FaceRecognizer).</string>
     <string name="location">Lieu : <xliff:g id="place" example="Paris, France">%1$s</xliff:g></string>
-    <string name="openassistant_not_found">L\'application OpenAssistant n\'est pas installée. Veuillez l\'installer pour activer cette fonctionnalité.</string>
     <string name="people_empty">Aucune personne n\'a encore été détectée. L\'analyse s\'effectue en arrière-plan : revenez vérifier une fois que vos photos auront été indexées.</string>
     <string name="label_gallery">Galerie</string>
     <string name="label_trash">Corbeille</string>
@@ -22,8 +21,6 @@
     <string name="photo_widget_description">Une photo de votre galerie qui change automatiquement - appuyez pour en afficher une autre</string>
     <string name="label_secure_folder">Dossier sécurisé</string>
     <string name="action_save">Enregistrer</string>
-    <string name="openassistant_needs_update">Mettez à jour l\'application OpenAssistant pour activer la recherche de photos par IA.</string>
-    <string name="model_downloading_description">Le téléchargement du modèle d\'IA est en cours. Cela peut prendre quelques minutes, selon votre connexion.</string>
     <string name="resolution">Résolution : %1$d × %2$d</string>
     <plurals name="people_photo_count">
         <item quantity="one"><xliff:g id="count" example="12">%1$d</xliff:g> photo</item>

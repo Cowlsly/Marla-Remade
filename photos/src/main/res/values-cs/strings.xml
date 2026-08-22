@@ -19,10 +19,7 @@
     <string name="detecting">Detekuji…</string>
     <string name="grant_image_video_permissions">Udělit přístup k fotkám/videím</string>
     <string name="grant_storage_permission">Udělit přístup k souborům</string>
-    <string name="openassistant_not_found">Aplikace OpenAsistent není nainstalována. Pro povolení této funkce ji prosím nainstalujte.</string>
-    <string name="openassistant_needs_update">Aktualizujte aplikaci OpenAsistent, abyste povolili AI vyhledávání fotek.</string>
     <string name="search_placeholder">Hledat fokty…</string>
-    <string name="model_downloading_description">AI model se stahuje. Může to trvat pár minut, záleží na vašem připojení.</string>
     <string name="people_empty">Nenalezeni žádní lidé. Skenováni probíha v pozadí - zkontroluje po indexaci vašich fotek.</string>
     <string name="people_scanning">Seskupování obličejů... lidé se zde budou zobrazovat, jak budou nalezeni.</string>
     <string name="face_indexing_progress">Indexování %1$d / %2$d</string>

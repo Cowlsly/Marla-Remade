@@ -18,6 +18,11 @@ android {
         // ncnn model files (face/segmentation here, OCR via :library:ocr) are
         // bundled in this app's assets and their paths passed to the wrappers;
         // the AAR ships none.
+        //
+        // The TinyCLIP .onnx is read straight out of the APK by ClipEmbedder, so leave it
+        // uncompressed: int8 weights barely deflate, and a compressed asset would have to be
+        // inflated into a 24 MB heap buffer before ORT could open it.
+        noCompress += "onnx"
     }
     packaging {
         jniLibs {
@@ -62,7 +67,8 @@ dependencies {
     implementation(project(":library:widgets"))
     implementation(project(":library:biometric"))
     implementation(project(":library:ocr"))
-    // Semantic photo search now delegates image/text embedding to the
-    // OpenAssistant app via this thin cross-app client (no on-device CLIP).
-    implementation(project(":sdk:openassistant"))
+
+    // Semantic photo search runs on-device again: TinyCLIP int8 ships in assets/clip/ and is
+    // executed by ClipEmbedder, so search no longer needs the OpenAssistant app installed.
+    implementation(libs.onnxruntime.android)
 }

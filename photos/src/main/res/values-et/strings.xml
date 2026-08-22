@@ -16,9 +16,7 @@
     <string name="detecting">Tuvastan…</string>
     <string name="grant_image_video_permissions">Luba õigused piltide ja videote vaatamiseks</string>
     <string name="grant_storage_permission">Luba õigused andmeruumi kasutamiseks</string>
-    <string name="openassistant_not_found">OpenAssistant pole paigaldatud. Antud funktsionaalsuse kasutamiseks palun tee seda.</string>
     <string name="search_placeholder">Otsi fotosid…</string>
-    <string name="model_downloading_description">Tehisaru mudel on allalaadimisel. Sõltuvalt sinu nutiseadme ühendusest võib selleks kuluda õige mitu minutit.</string>
     <string name="label_people">Inimesed</string>
     <string name="people_empty">Inimesi veel ei leidu. Skaneerimine toimub taustal - vaata uuesti peale fotode skaneerimise lõppu.</string>
     <string name="face_indexing_progress">Indekseerimisel: <xliff:g id="processed" example="20">%1$d</xliff:g> / <xliff:g id="total" example="100">%2$d</xliff:g></string>
@@ -33,7 +31,6 @@
         <item quantity="other"><xliff:g id="count" example="3">%1$d</xliff:g> inimest</item>
     </plurals>
     <string name="photo_widget_description">Fotod sinu galeriist - klõpsa ja seadista</string>
-    <string name="openassistant_needs_update">Kui soovid kasutada tehisarupõhist fotootsingut, uuenda OpenAssistanti rakendus.</string>
     <string name="view_360">360° vaade</string>
     <string name="view_panorama">Vaata panoraampilti</string>
     <string name="level">Tase</string>

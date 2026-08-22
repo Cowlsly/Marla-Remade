@@ -24,11 +24,8 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.ListenableWorker.Result as WorkResult
-import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.ocr.OcrEngine
-import com.vayunmathur.sdk.openassistant.EmbeddingImageFailedException
-import com.vayunmathur.sdk.openassistant.EmbeddingModelDownloadingException
-import com.vayunmathur.sdk.openassistant.OpenAssistant
+import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.photos.data.Person
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.data.PhotoFace
@@ -42,7 +39,6 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -466,7 +462,7 @@ class ClipWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
 /**
  * Embed any not-yet-embedded library photos into a SigLIP2 vector — served by
- * the **OpenAssistant** app (see [ClipEmbedder]) — and store the L2-normalised
+ * the bundled **TinyCLIP** model (see [ClipEmbedder]) — and store the L2-normalised
  * vector on the [Photo] row so semantic search can cosine-compare them against
  * the query's text embedding.
  *
@@ -474,39 +470,22 @@ class ClipWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
  * at a time, throttled between items to keep battery/CPU low, and marks each
  * photo scanned regardless of per-image outcome so we never retry it forever.
  *
- * Gated on OpenAssistant availability ([OpenAssistant.embeddingSupport]):
- *  - `READY` → embed + store.
- *  - models downloading on demand → pause the run (retry later, don't mark
- *    scanned), surfaced as [EmbeddingModelDownloadingException].
- *  - not installed / too old → skip entirely (leave `clipScanned=0`), no crash.
+ * Gated on the bundled model loading ([ClipEmbedder.embeddingSupport]): if it cannot be opened
+ * (corrupt install), skip indexing and leave `clipScanned=0` so OCR/filename search still works.
  */
 suspend fun runClipIndexing(repository: PhotosRepository, context: Context) = coroutineScope {
     val dataStore = DataStoreUtils.getInstance(context)
 
-    // Semantic search is served by OpenAssistant. If it isn't installed or is too
-    // old, skip indexing (leave clipScanned=0) — OCR/filename search still works.
-    when (ClipEmbedder.embeddingSupport(context)) {
-        OpenAssistant.EmbeddingSupport.NOT_INSTALLED,
-        OpenAssistant.EmbeddingSupport.NEEDS_UPDATE -> {
-            Log.w("ClipWorker", "OpenAssistant embedding unavailable; skipping semantic indexing")
-            return@coroutineScope
-        }
-        OpenAssistant.EmbeddingSupport.READY -> {}
+    // The model ships in the APK, so this only fails on a broken install.
+    if (ClipEmbedder.embeddingSupport(context) != ClipEmbedder.Support.READY) {
+        Log.w("ClipWorker", "TinyCLIP embedder unavailable; skipping semantic indexing")
+        return@coroutineScope
     }
 
-    // If the embedder version OR the OA-provided model id changed, old embeddings
-    // are incompatible (e.g. the previous 512-d space → 768-d SigLIP2): clear
-    // them and
-    // re-embed every photo. Photo rows themselves (OCR text, faces) are untouched.
-    val modelId = try {
-        ClipEmbedder.embeddingInfo(context).modelId
-    } catch (e: EmbeddingModelDownloadingException) {
-        Log.i("ClipWorker", "OpenAssistant downloading models (${(e.progress * 100).toInt()}%); retry later")
-        return@coroutineScope
-    } catch (e: Exception) {
-        Log.e("ClipWorker", "Failed to probe embedding info; skipping", e)
-        return@coroutineScope
-    }
+    // If the embedder version OR the model id changed, old embeddings are incompatible (e.g.
+    // OpenAssistant's 768-d SigLIP2 space -> TinyCLIP's 512-d): clear them and re-embed every
+    // photo. Photo rows themselves (OCR text, faces) are untouched.
+    val modelId = ClipEmbedder.embeddingInfo(context).modelId
     val storedVersion = dataStore.getLong("clip_embedder_version") ?: 0L
     val storedModelId = dataStore.getString("clip_model_id")
     if (storedVersion != ClipEmbedder.EMBEDDER_VERSION.toLong() || storedModelId != modelId) {
@@ -524,27 +503,19 @@ suspend fun runClipIndexing(repository: PhotosRepository, context: Context) = co
 
         val t0 = System.currentTimeMillis()
         val embedding = try {
-            // OpenAssistant decodes the URI, so photos no longer decodes a bitmap.
             ClipEmbedder.imageEmbedding(context, photo.uri.toUri())
-        } catch (e: EmbeddingImageFailedException) {
-            // Provider is healthy but this one image couldn't be embedded (e.g.
-            // decode failed): mark it scanned with no vector so we skip it rather
-            // than blocking the queue on it forever.
+        } catch (e: ClipEmbedder.ImageFailedException) {
+            // The embedder is healthy but this one image couldn't be decoded: mark it scanned
+            // with no vector so we skip it rather than blocking the queue on it forever.
             Log.w("ClipWorker", "Skipping un-embeddable photo ${photo.id}: ${e.message}")
             repository.upsertAll(listOf(photo.copy(clipEmbedding = null, clipScanned = true)))
             delay(CLIP_INTER_ITEM_DELAY_MS)
             continue
-        } catch (e: TimeoutCancellationException) {
-            // OpenAssistant didn't respond in time — treat as a transient outage:
-            // pause WITHOUT marking scanned so these photos retry later.
-            Log.w("ClipWorker", "Embedding request timed out; pausing indexing")
-            return@coroutineScope
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
-            // Any other failure (not installed / too old / models downloading /
-            // service unreachable / load failure) is systemic: stop the run
-            // WITHOUT marking scanned so these photos retry once OA is healthy.
+            // Anything else is systemic (model failed to load): stop the run WITHOUT marking
+            // scanned so these photos retry on the next pass.
             Log.w("ClipWorker", "Embedding unavailable; pausing indexing", e)
             return@coroutineScope
         }

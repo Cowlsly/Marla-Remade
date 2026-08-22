@@ -296,13 +296,11 @@ fun GalleryScreen(
                     ) {
                         // Search bar expanded content
                         if (state.searchQuery.isNotEmpty()) {
-                            // Semantic search is served by OpenAssistant; if it's
-                            // unavailable, tell the user (OCR/filename results, if
-                            // any, still show below).
+                            // Semantic search runs on-device; if the bundled model failed to
+                            // load, say so (OCR/filename results, if any, still show below).
                             val aiMessage = when (state.searchAiState) {
-                                SearchAiState.NOT_INSTALLED -> stringResource(R.string.openassistant_not_found)
-                                SearchAiState.NEEDS_UPDATE -> stringResource(R.string.openassistant_needs_update)
-                                SearchAiState.DOWNLOADING -> stringResource(R.string.model_downloading_description)
+                                SearchAiState.UNAVAILABLE ->
+                                    stringResource(R.string.semantic_search_unavailable)
                                 SearchAiState.READY -> null
                             }
                             if (aiMessage != null) {

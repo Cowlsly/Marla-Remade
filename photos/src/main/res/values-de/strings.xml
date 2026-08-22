@@ -16,7 +16,5 @@
     <string name="detecting">Erkenne…</string>
     <string name="grant_image_video_permissions">Erlaube Bild/Video Berechtigung</string>
     <string name="grant_storage_permission">Erlaube Speicher Berechtigung</string>
-    <string name="openassistant_not_found">OpenAssistant App ist nicht installiert. Bitte installieren Sie sie um dieses ... zu nutzen.</string>
     <string name="search_placeholder">Suche Fotos…</string>
-    <string name="model_downloading_description">Das KI Modell wird herungergeladen, dies könne je nach Verbindung einige Minuten dauern.</string>
 </resources>

@@ -10,9 +10,6 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.data.PhotosRepository
-import com.vayunmathur.sdk.openassistant.AssistantNotInstalledException
-import com.vayunmathur.sdk.openassistant.EmbeddingModelDownloadingException
-import com.vayunmathur.sdk.openassistant.EmbeddingUnsupportedException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.FlowPreview
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -61,9 +58,9 @@ class GalleryViewModel(
     val searchResults: StateFlow<List<Photo>> = _searchResults.asStateFlow()
 
     /**
-     * Availability of the OpenAssistant-backed semantic search, updated on each
-     * search so the UI can prompt the user to install/update OpenAssistant or
-     * show that its models are downloading. OCR/filename search is unaffected.
+     * Availability of on-device semantic search, updated on each search so the UI can explain
+     * why AI results are missing when the bundled model fails to load. OCR/filename search is
+     * unaffected.
      */
     private val _searchAiState = MutableStateFlow(SearchAiState.READY)
     val searchAiState: StateFlow<SearchAiState> = _searchAiState.asStateFlow()
@@ -82,7 +79,7 @@ class GalleryViewModel(
     val ocrTargetCount: StateFlow<Int> = photoDao.getOCRTargetCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
-    /** Photos already embedded (via OpenAssistant/SigLIP2) for semantic search (progress numerator). */
+    /** Photos already embedded with TinyCLIP for semantic search (progress numerator). */
     val clipCount: StateFlow<Int> = photoDao.getClipCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
@@ -164,7 +161,7 @@ class GalleryViewModel(
      * ranking:
      *  - OCR/name search: the existing case-insensitive LIKE over recognised text
      *    and file name.
-     *  - Semantic search: embed the query via OpenAssistant (SigLIP2) and
+     *  - Semantic search: embed the query on-device with TinyCLIP and
      *    cosine-compare it against stored image embeddings (see [ClipEmbedder]);
      *    keep matches at/above [SEMANTIC_THRESHOLD], capped to the top
      *    [MAX_SEMANTIC_RESULTS].
@@ -186,9 +183,9 @@ class GalleryViewModel(
         }
         val ocrIds = ocrHits.map { it.id }.toSet()
 
-        // (b) Semantic search: one embed request to OpenAssistant, then cosine
-        // vs stored image embeddings. Inert (empty) if OA is unavailable; the
-        // AI-state flow is updated so the UI can explain why.
+        // (b) Semantic search: embed the query on-device with TinyCLIP, then cosine vs stored
+        // image embeddings. Inert (empty) if the model can't load; the AI-state flow is updated
+        // so the UI can explain why.
         val semanticById: Map<Long, Float> = try {
             val textEmb = ClipEmbedder.textEmbedding(getApplication(), query)
             _searchAiState.value = SearchAiState.READY
@@ -199,17 +196,9 @@ class GalleryViewModel(
                 .sortedByDescending { it.second }
                 .take(MAX_SEMANTIC_RESULTS)
                 .toMap()
-        } catch (e: EmbeddingModelDownloadingException) {
-            _searchAiState.value = SearchAiState.DOWNLOADING
-            emptyMap()
-        } catch (e: AssistantNotInstalledException) {
-            _searchAiState.value = SearchAiState.NOT_INSTALLED
-            emptyMap()
-        } catch (e: EmbeddingUnsupportedException) {
-            _searchAiState.value = SearchAiState.NEEDS_UPDATE
-            emptyMap()
         } catch (e: Exception) {
             Log.e(TAG, "semantic search failed", e)
+            _searchAiState.value = SearchAiState.UNAVAILABLE
             emptyMap()
         }
 
@@ -290,7 +279,7 @@ class GalleryViewModel(
          * Single most-important tunable knob. SigLIP2 is sigmoid-trained and
          * 768-d, so its cosine distribution differs from the previous 512-d
          * embedding space — **retune this against real photos** after the move to
-         * OpenAssistant. Higher = stricter/fewer, lower = looser/more; results
+         * TinyCLIP. Higher = stricter/fewer, lower = looser/more; results
          * are ranked and capped so the best matches still surface first.
          */
         private const val SEMANTIC_THRESHOLD = 0.15f
@@ -330,17 +319,11 @@ data class PersonCluster(
     val photos: List<Photo>,
 )
 
-/** Availability of OpenAssistant-backed semantic search, for the search UI. */
+/** Availability of on-device semantic search, for the search UI. */
 enum class SearchAiState {
-    /** OpenAssistant is installed, recent, and serving embeddings. */
+    /** The bundled TinyCLIP model loaded and is serving embeddings. */
     READY,
 
-    /** OpenAssistant is not installed. */
-    NOT_INSTALLED,
-
-    /** OpenAssistant is installed but too old to provide embeddings. */
-    NEEDS_UPDATE,
-
-    /** OpenAssistant is downloading the SigLIP2 models on demand. */
-    DOWNLOADING,
+    /** The bundled model could not be loaded, so only OCR/filename search works. */
+    UNAVAILABLE,
 }

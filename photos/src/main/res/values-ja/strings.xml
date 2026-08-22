@@ -15,9 +15,6 @@
     <string name="month_year_format"><xliff:g id="year" example="2024">%2$d</xliff:g>年<xliff:g id="month" example="January">%1$s</xliff:g></string>
     <string name="search_placeholder">写真を検索…</string>
     <string name="of_photos_processed"><xliff:g id="percent" example="45">%1$d</xliff:g>%% 個の写真を処理済</string>
-    <string name="openassistant_not_found">OpenAssistantがインストールされていません。この機能を有効にするにはインストールしてください。</string>
-    <string name="openassistant_needs_update">AI写真検索を有効にするにはOpenAssistantをアップデートしてください。</string>
-    <string name="model_downloading_description">AIモデルをインストール中です。接続状況によっては時間がかかる可能性があります。</string>
     <string name="people_scanning">顔を分類中… 人物が見つかるとここに表示されます。</string>
     <plurals name="people_photo_count">
         <item quantity="other"><xliff:g id="count" example="12">%1$d</xliff:g> 個の写真</item>

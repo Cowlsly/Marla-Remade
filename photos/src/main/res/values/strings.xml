@@ -46,12 +46,8 @@
     <!-- Gallery progress: text search OCR index progress. %1$d = done, %2$d = total -->
     <string name="photos_indexed_for_text_search"><xliff:g id="done" example="120">%1$d</xliff:g> / <xliff:g id="total" example="500">%2$d</xliff:g> photos indexed for text search</string>
 
-    <!-- ListItem shown when user searches but OpenAssistant not installed -->
-    <string name="openassistant_not_found">OpenAssistant app is not installed. Please install it to enable this feature.</string>
-    <!-- ListItem shown when OpenAssistant installed but too old for AI photo search -->
-    <string name="openassistant_needs_update">Update the OpenAssistant app to enable AI photo search.</string>
-    <!-- Description while AI model downloading, explains may take minutes -->
-    <string name="model_downloading_description">The AI model is being downloaded. This may take a few minutes depending on your connection.</string>
+    <!-- ListItem shown when the bundled AI search model could not be loaded -->
+    <string name="semantic_search_unavailable">AI photo search is unavailable on this install. Text and filename search still work.</string>
 
     <!-- Empty state: no faces found yet, scanning happens in background background explanation -->
     <string name="people_empty">No people found yet. Scanning happens in the background — check back after your photos have been indexed.</string>
