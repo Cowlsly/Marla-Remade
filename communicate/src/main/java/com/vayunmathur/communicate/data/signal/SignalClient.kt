@@ -118,7 +118,15 @@ object SignalClient {
             return
         }
         if (db == null) try { db = SignalDatabase.getDatabase(ctx) } catch (_: Exception) {}
-        if (e2e == null && db != null) try { e2e = SignalE2E(db!!, auth) } catch (_: Exception) {}
+        if (e2e == null && db != null) try { e2e = SignalE2E(db!!, auth) } catch (t: Throwable) {
+            Log.e(TAG, "could not build the protocol store", t)
+        }
+        if (e2e == null) {
+            // Connecting without a protocol store would pull messages we cannot decrypt and, since
+            // they are only acked once handled, leave them cycling on the server queue.
+            _state.value = State.Disconnected("no protocol store")
+            return
+        }
         if (processor == null && db != null) try {
             processor = SignalEventProcessor(db!!).also { it.start(events) }
         } catch (_: Exception) {}
@@ -613,25 +621,52 @@ object SignalClient {
             Log.w(TAG, "unparseable ws frame len=${raw.size}")
             return
         }
-        // Ack every REQUEST so server drains queue (binary protobuf WebSocketMessage, uint64 id)
-        if (wsMessage.type == WebSocketMessage.Type.REQUEST && wsMessage.hasRequest()) {
-            val req = wsMessage.request
-            if (req.hasId()) {
-                val ack = SignalProtocol.buildWsResponseProto(req.id, 200)
-                val ackBytes = SignalProtocol.encodeWebSocketResponse(ack)
-                try { socket?.send(ackBytes) } catch (_: Exception) {}
-            }
-            if (SignalProtocol.isQueueEmptySignal(raw)) return
-            if (req.hasPath() && req.path.contains("keepalive")) return
-            if (!req.hasPath() || (!req.path.contains("/api/v1/message") && !req.path.contains("/v1/messages") && !req.path.contains("/v1/queue") && req.hasBody().not())) {
-                // Non-message request (e.g. provisioning) — ignore after ack
-                if (!req.hasBody()) return
-            }
-        } else {
+        if (wsMessage.type != WebSocketMessage.Type.REQUEST || !wsMessage.hasRequest()) return
+        val req = wsMessage.request
+        val ackId = if (req.hasId()) req.id else null
+
+        // Control frames carry nothing to persist, so they can be acked straight away.
+        val isControlFrame = SignalProtocol.isQueueEmptySignal(raw) ||
+            (req.hasPath() && req.path.contains("keepalive")) ||
+            !req.hasBody()
+        if (isControlFrame) {
+            ackEnvelope(ackId)
             return
         }
 
-        val envelopeProto = SignalProtocol.parseEnvelopeFromWsMessage(wsMessage) ?: return
+        val handled = try {
+            processEnvelope(wsMessage)
+        } catch (c: kotlinx.coroutines.CancellationException) {
+            throw c
+        } catch (t: Throwable) {
+            // Redelivery cannot fix a deterministic failure, and there is no attempt counter, so
+            // acking is the lesser evil: not acking would spin on the same envelope forever.
+            Log.e(TAG, "failed to process envelope, acking anyway to avoid a redelivery loop", t)
+            true
+        }
+        // An ack deletes the message from the server's queue, so it is deferred until the envelope has
+        // been decrypted, validated and handed to the event pipeline. Note this is hand-off, not a
+        // durable write: SignalEventProcessor persists asynchronously and swallows its own failures.
+        if (handled) {
+            ackEnvelope(ackId)
+        } else {
+            Log.w(TAG, "not acking envelope; leaving it queued for redelivery")
+        }
+    }
+
+    private suspend fun ackEnvelope(requestId: Long?) {
+        if (requestId == null) return
+        val ack = SignalProtocol.buildWsResponseProto(requestId, 200)
+        try { socket?.send(SignalProtocol.encodeWebSocketResponse(ack)) } catch (_: Exception) {}
+    }
+
+    /**
+     * Returns whether the envelope may be acked. False means "leave it on the server queue", which is
+     * only appropriate when we could not even attempt to handle it — a malformed or undecryptable
+     * message returns true, since redelivering it would only spin.
+     */
+    private suspend fun processEnvelope(wsMessage: WebSocketMessage): Boolean {
+        val envelopeProto = SignalProtocol.parseEnvelopeFromWsMessage(wsMessage) ?: return true
         val env = SignalProtocol.toSignalEnvelope(envelopeProto)
 
         // Server delivery receipt (plaintext, no content) -> emit ReadReceipt as delivery
@@ -639,18 +674,19 @@ object SignalClient {
             val cid = env.sourceAci.ifEmpty { env.destinationAci ?: "unknown" }
             val ts = if (env.timestamp != 0L) env.timestamp else env.serverTimestamp
             _events.emit(SignalEvent.ReadReceipt(conversationId = cid, messageId = env.serverGuid, timestampMs = ts, timestamp = ts, isDelivery = true))
-            return
+            return true
         }
 
-        if (env.content.isEmpty()) return
+        if (env.content.isEmpty()) return true
 
         // Decrypt. A failure must never fall back to the raw envelope bytes: those are attacker
         // controlled, so treating them as a Content would let anyone forge a message from any ACI.
         val e = e2e
         if (e == null) {
-            Log.w(TAG, "no protocol store, dropping envelope from ${env.sourceAci}")
-            emitDecryptionError(env, "no protocol store")
-            return
+            // Defensive: start() refuses to connect without a store, so this should be unreachable.
+            // Keep the envelope queued rather than acking something we never tried to decrypt.
+            Log.w(TAG, "no protocol store, leaving envelope from ${env.sourceAci} queued")
+            return false
         }
         val paddedPlaintext: ByteArray = try {
             when (env.type) {
@@ -668,7 +704,8 @@ object SignalClient {
         } catch (t: Throwable) {
             Log.w(TAG, "decrypt failed for ${env.sourceAci}:${env.sourceDevice}", t)
             emitDecryptionError(env, t.message)
-            return
+            // Redelivery cannot fix a decrypt failure, so ack rather than spin on it.
+            return true
         }
         // Signal pads the plaintext before encrypting, for every envelope type.
         val plaintext = SignalProtocol.stripMessagePadding(paddedPlaintext)
@@ -676,13 +713,13 @@ object SignalClient {
         val content = SignalProtocol.parseContent(plaintext)
         if (content == null) {
             Log.w(TAG, "parseContent failed for ${env.sourceAci}")
-            return
+            return true
         }
         if (env.type == SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT &&
             !SignalProtocol.isValidPlaintextContent(content)
         ) {
             Log.w(TAG, "dropping PLAINTEXT_CONTENT carrying more than a DecryptionErrorMessage from ${env.sourceAci}")
-            return
+            return true
         }
         val parsed = SignalProtocol.classifyContent(content)
         val masterKeyFromData: ByteArray? = when (parsed) {
@@ -742,10 +779,15 @@ object SignalClient {
                     }
                     else -> {
                         val body = dm.body
-                        if (body.isBlank() && dm.attachmentsCount == 0 && !dm.hasGroupV2()) return
+                        if (body.isBlank() && dm.attachmentsCount == 0 && !dm.hasGroupV2()) return true
                         // senderKeyDistributionMessage
                         if (content.hasSenderKeyDistributionMessage()) {
-                            try { e2e?.processSenderKeyDistribution(groupIdFor(dm), senderAci, senderDevice, content.senderKeyDistributionMessage.toByteArray()) } catch (_: Exception) {}
+                            try {
+                                e2e?.processSenderKeyDistribution(groupIdFor(dm), senderAci, senderDevice, content.senderKeyDistributionMessage.toByteArray())
+                            } catch (t: Throwable) {
+                                // Losing this means later group messages from this sender won't decrypt.
+                                Log.w(TAG, "failed to store sender key distribution from $senderAci", t)
+                            }
                         }
                         val sd = SignalServiceData(senderId = senderAci, senderName = senderAci, isGroup = masterKeyFromData != null)
                         _events.emit(SignalEvent.IncomingMessage(conversationId = conversationId, messageId = serverGuid, body = body, peerName = senderAci, peerPhone = null, timestamp = timestamp, senderId = senderAci, serviceData = sd.serialize()))
@@ -817,6 +859,7 @@ object SignalClient {
                 Log.i(TAG, "unhandled Content type ${parsed::class.simpleName} from $senderAci")
             }
         }
+        return true
     }
 
     private suspend fun emitDecryptionError(env: SignalProtocol.SignalEnvelope, message: String?) {
