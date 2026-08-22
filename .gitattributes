@@ -89,3 +89,9 @@ gradlew text eol=lf
 *.der      -text
 *.jks      -text
 *.keystore -text
+
+# ---- Vendored CAD supplied by the part vendor ----
+# LCSC's STEP/WRL models are ASCII but machine-generated and never hand-edited, so they cannot
+# cause the review churn this policy exists to prevent. Excluded so they stay byte-identical to
+# what the vendor shipped — normalising them would add ~460k lines of diff for no benefit.
+things/hardware/scale/libs/lcsc/** -text
