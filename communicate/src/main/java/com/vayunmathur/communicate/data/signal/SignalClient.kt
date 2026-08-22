@@ -1678,12 +1678,20 @@ object SignalClient {
                 env.sourceDevice,
             )
             val body = PlaintextContent(errorMessage).serialize()
-            // Their next message builds a new session, so drop ours rather than keep a chain they abandoned.
-            e.archiveSession(sender, env.sourceDevice)
+            // The server rejects a send whose destinationRegistrationId does not match the recipient's, so
+            // this must be their real one. A pre-key message carries it; otherwise fall back to the session.
+            // Deliberately read before anything touches the session, and the session is not archived here —
+            // the receipt asks *them* to archive theirs.
+            val registrationId = e.senderRegistrationId(env.content)
+                ?: e.remoteRegistrationId(sender, env.sourceDevice)
+            if (registrationId == null) {
+                Log.w(TAG, "no registration id for $sender:${env.sourceDevice}, cannot send a retry receipt")
+                return
+            }
             val message = SignalPayload.OutgoingPushMessage(
                 type = SignalServiceProtos.Envelope.Type.PLAINTEXT_CONTENT.number,
                 destinationDeviceId = env.sourceDevice,
-                destinationRegistrationId = 0,
+                destinationRegistrationId = registrationId,
                 content = body,
             )
             val json = SignalPayload.buildPutMessagesBody(

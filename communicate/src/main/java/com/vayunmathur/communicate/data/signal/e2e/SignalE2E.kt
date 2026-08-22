@@ -342,6 +342,23 @@ class SignalE2E(
         return PreKeyUpload(signedPreKey = signed, lastResortKyber = kyber, oneTimeEcPreKeys = oneTime)
     }
 
+    /**
+     * The registration id to address [aci]'s device with, from our session with them. A send whose
+     * `destinationRegistrationId` does not match what the server holds is rejected as a stale device.
+     */
+    fun remoteRegistrationId(aci: String, deviceId: Int): Int? = try {
+        protocolStore.loadSession(signalAddress(aci, deviceId)).remoteRegistrationId
+    } catch (_: Throwable) {
+        null
+    }
+
+    /** The sender's registration id, carried on every pre-key message. */
+    fun senderRegistrationId(ciphertext: ByteArray): Int? = try {
+        PreKeySignalMessage(ciphertext).registrationId
+    } catch (_: Throwable) {
+        null
+    }
+
     /** Whether our store holds a signed pre-key [id] whose public half is exactly [publicKey]. */
     fun hasSignedPreKeyMatching(id: Int, publicKey: ByteArray?): Boolean {
         if (publicKey == null) return true
