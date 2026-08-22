@@ -6,8 +6,10 @@
  * without needing the button.
  *
  * Button (the kit's Button 1):
- *   long press  (>= 2 s) -> pairing mode, so an already-bound tracker can be re-bound
- *                           or have its clock resynced
+ *   long press  (>= 2 s) -> pairing mode for CONFIG_FF_TRACKER_PAIRING_TIMEOUT_S, then back
+ *                           to beaconing. Note a bound tracker cannot be re-provisioned:
+ *                           on_provision_write refuses writes once provisioned, which is
+ *                           the anti-theft lock. Nothing unbinds a tracker today.
  *   short press          -> toggle the beacon off/on ("mute"), for taking it on a plane
  *                           or debugging whether a sighting really came from this board
  *
@@ -164,9 +166,19 @@ int main(void)
 {
 	psa_status_t status;
 	uint64_t last_persisted_epoch = 0;
+	/* Non-zero while a long press has put a provisioned tracker into pairing mode. */
+	int64_t pairing_deadline_ms = 0;
 	int rc;
 
 	LOG_INF("FindFamily tracker starting");
+
+	/*
+	 * Before anything that can fail out of main(). Every `return 0` below leaves a live
+	 * board with no advertising and no thread to recover it, which is precisely what
+	 * the watchdog exists to bound: armed first, such a board reboots and retries
+	 * instead of going quiet until someone unplugs it.
+	 */
+	watchdog_init();
 
 	status = psa_crypto_init();
 	if (status != PSA_SUCCESS) {
@@ -191,9 +203,11 @@ int main(void)
 	}
 
 	(void)button_init();
-	watchdog_init();
 
 #ifdef CONFIG_FF_TRACKER_UWB
+	/* Crypto, NVS and bt_enable() are behind us; don't make the UWB bring-up share
+	 * their slice of the watchdog window. */
+	watchdog_feed();
 	rc = ff_uwb_init();
 	if (rc) {
 		LOG_ERR("uwb init failed: %d", rc);
@@ -203,8 +217,14 @@ int main(void)
 	if (tracker_state.provisioned) {
 		LOG_INF("provisioned as userId=%llu", tracker_state.tracker_user_id);
 		if (ff_ble_set_mode(FF_BLE_MODE_BEACON) != 0) {
-			/* Provisioned but unusable — almost always a missing time base
-			 * after a reset. Offer to be re-bound so it can resync. */
+			/*
+			 * Provisioned but unusable — almost always a missing time base,
+			 * without which no epoch id would fall in the owner's search
+			 * window. Nothing can currently repair that over the air
+			 * (on_provision_write refuses writes once provisioned), so pairing
+			 * mode here only makes the tracker visible to the owner's app
+			 * rather than silent.
+			 */
 			(void)ff_ble_set_mode(FF_BLE_MODE_PAIRING);
 		}
 	} else {
@@ -226,8 +246,8 @@ int main(void)
 		}
 
 		if (ff_ble_take_readvertise_event()) {
-			LOG_INF("connection slot free: re-applying advertising mode");
-			(void)ff_ble_set_mode(ff_ble_desired_mode());
+			LOG_INF("connection ended: re-applying advertising");
+			(void)ff_ble_readvertise();
 		}
 
 		{
@@ -242,6 +262,36 @@ int main(void)
 		if (atomic_cas(&pending_long_press, 1, 0)) {
 			LOG_INF("long press: entering pairing mode");
 			(void)ff_ble_set_mode(FF_BLE_MODE_PAIRING);
+			pairing_deadline_ms = 0;
+			if (tracker_state.provisioned) {
+				/*
+				 * Bound trackers go back to beaconing on their own. Leaving
+				 * the unprovisioned service on air indefinitely both stops
+				 * crowd-finding and widens the window in which anything
+				 * nearby could try to claim the tracker. An unprovisioned
+				 * board has nothing to go back to, so it keeps advertising
+				 * until it is bound.
+				 *
+				 * Measured from the press, not from when the advertisement
+				 * starts: if it could not start yet — the connection slot was
+				 * busy — ff_ble_readvertise() starts it later, and the window
+				 * still expires rather than running unbounded.
+				 */
+				pairing_deadline_ms =
+					k_uptime_get() +
+					CONFIG_FF_TRACKER_PAIRING_TIMEOUT_S * MSEC_PER_SEC;
+			}
+		}
+		if (pairing_deadline_ms != 0 && ff_ble_mode() == FF_BLE_MODE_PAIRING &&
+		    k_uptime_get() >= pairing_deadline_ms) {
+			pairing_deadline_ms = 0;
+			LOG_INF("pairing window over: back to beaconing");
+			if (ff_ble_set_mode(FF_BLE_MODE_BEACON) != 0) {
+				/* Same fallback as at boot: beacon mode needs a time base,
+				 * and a tracker advertising nothing at all is worse than one
+				 * still offering to bind. */
+				(void)ff_ble_set_mode(FF_BLE_MODE_PAIRING);
+			}
 		}
 		if (atomic_cas(&pending_short_press, 1, 0)) {
 			if (ff_ble_mode() == FF_BLE_MODE_BEACON) {

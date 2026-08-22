@@ -23,7 +23,8 @@
 #define FF_PROVISION_BLOB_LEN 48
 #define FF_PROVISION_BLOB_LEN_NO_TIME 40
 
-/* TrackerUwbGatt.encodeSessionParams: [2B addr][4B sessionId BE][1B ch][1B preamble] */
+/* TrackerUwbGatt.encodeSessionParams:
+ * [2B addr little-endian][4B sessionId BE][1B ch][1B preamble] */
 #define FF_UWB_PARAMS_LEN 8
 
 /* Service data payload: [16B epochId][1B battery%] */
@@ -82,7 +83,8 @@ enum ff_ble_mode {
 	FF_BLE_MODE_IDLE,
 	/* Legacy connectable adv of the unprovisioned service, awaiting a bind. */
 	FF_BLE_MODE_PAIRING,
-	/* Extended connectable adv carrying the rotating epoch id. */
+	/* Extended non-connectable adv carrying the rotating epoch id, plus a separate
+	 * legacy connectable set so the owner can still write UWB session params. */
 	FF_BLE_MODE_BEACON,
 };
 
@@ -104,14 +106,18 @@ bool ff_ble_take_provision_event(void);
 bool ff_ble_take_uwb_params(uint8_t *out);
 
 /*
- * True once after a disconnect left the tracker in the wrong advertising mode. A
- * connectable advertisement needs a free connection slot, so the switch to beacon mode
- * right after a bind fails while the phone is still attached.
+ * True once after a disconnect. Both cases need it: a mode we could not start while the
+ * connection slot was taken, and — in beacon mode — the connectable set the controller
+ * stopped when it accepted that connection.
  */
 bool ff_ble_take_readvertise_event(void);
 
-/* The mode the tracker is meant to be in, which may differ from what actually started. */
-enum ff_ble_mode ff_ble_desired_mode(void);
+/*
+ * Puts advertising back to what it should be after a disconnect. Not the same as
+ * ff_ble_set_mode(): that returns early when the mode is already current, which is exactly
+ * the case where the connectable set needs restarting.
+ */
+int ff_ble_readvertise(void);
 
 /* Recomputes the epoch id and pushes fresh service data into the beacon adv set. */
 int ff_ble_refresh_beacon(uint8_t battery_percent);

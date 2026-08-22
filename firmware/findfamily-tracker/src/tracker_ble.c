@@ -9,12 +9,13 @@
  *    TrackerProvisioner.unprovisioned() keeps working with default (legacy-only)
  *    ScanSettings.
  *
- *  - Beacon: EXTENDED connectable adv of [16B epochId][1B battery] as service data.
+ *  - Beacon: EXTENDED NON-connectable adv of [16B epochId][1B battery] as service data.
  *    That AD structure is 18B of overhead + 17B of payload = 35 bytes, past the legacy
  *    limit, and the full 16-byte UUID has to be on air because the phone reads it back
  *    with ScanRecord.getServiceData(ParcelUuid). Secondary PHY is pinned to 1M so the
- *    phone needs no coded-PHY scan configuration. Connectable so the owner can still
- *    write UWB session params after binding.
+ *    phone needs no coded-PHY scan configuration. Connectability runs on a third, legacy,
+ *    dataless set alongside it — see beacon_param for why it cannot live on the beacon
+ *    set itself.
  *
  * Both characteristics stay registered under the "unprovisioned" service for the
  * device's whole life; provisioning only stops that service being advertised.
@@ -131,14 +132,14 @@ static void on_disconnected(struct bt_conn *conn, uint8_t reason)
 	LOG_INF("disconnected (reason=0x%02x)", reason);
 
 	/*
-	 * A connectable advertisement cannot start while the single connection slot is
-	 * taken, so the switch to beacon mode after a bind fails with -ENOMEM and leaves
-	 * the tracker silent. Now that the slot is free, have the main loop re-apply
-	 * whatever mode we are supposed to be in.
+	 * Always ask the main loop to re-apply advertising, not just when the mode we
+	 * wanted differs from the one we got. The controller stops a connectable set when
+	 * it yields a connection and Zephyr does not restart it, so after one owner
+	 * connection connect_adv is down with both modes still BEACON — and the tracker is
+	 * unreachable for every later find, which is what made each bring-up iteration need
+	 * a power cycle.
 	 */
-	if (desired_mode != current_mode) {
-		atomic_set(&pending_readvertise, 1);
-	}
+	atomic_set(&pending_readvertise, 1);
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
@@ -178,11 +179,14 @@ static ssize_t on_provision_write(struct bt_conn *conn, const struct bt_gatt_att
 	/*
 	 * The blob is 48 bytes, well past the 20 usable bytes of a default 23-byte ATT
 	 * MTU, so a client that hasn't negotiated a larger MTU sends it as a long write:
-	 * several Prepare Writes at increasing offsets, then one Execute Write. Chunks are
-	 * staged here and only acted on once a whole blob has arrived.
+	 * several Prepare Writes at increasing offsets, then one Execute Write. Zephyr
+	 * reassembles contiguous fragments itself and calls this once with the first
+	 * fragment's offset (att.c exec_write_reassemble), but a client is also free to
+	 * write at explicit offsets, so chunks are staged here either way.
 	 *
-	 * Zephyr invokes this with BT_GATT_WRITE_FLAG_PREPARE and len 0 first, purely to
-	 * ask whether the write is permitted; the real data comes at execute time.
+	 * The PREPARE flag only ever arrives for an attribute carrying
+	 * BT_GATT_PERM_PREPARE_WRITE (att.c:2262), which this one does not; handling it is
+	 * kept so that adding the permission cannot silently commit a half blob.
 	 */
 	if (flags & BT_GATT_WRITE_FLAG_PREPARE) {
 		return 0;
@@ -207,7 +211,18 @@ static ssize_t on_provision_write(struct bt_conn *conn, const struct bt_gatt_att
 	memcpy(&provision_staging[offset], data, len);
 	total = offset + len;
 
-	if (total != FF_PROVISION_BLOB_LEN && total != FF_PROVISION_BLOB_LEN_NO_TIME) {
+	/*
+	 * 40 counts as a complete blob only when it arrived in one piece. A 48-byte blob
+	 * written at offsets 0/20/40 passes through total == 40 on its way, and treating
+	 * that as complete committed provisioning with unix_seconds = 0, set `provisioned`,
+	 * and then rejected its own final chunk at the guard above — leaving a tracker with
+	 * no time base that can never beacon and can never be re-provisioned. Nothing can
+	 * tell the two apart mid-write, so the 40-byte form has to arrive whole; every
+	 * producer sends it that way (TrackerBle, tools/bench_provision.py), and it fits a
+	 * single write at the MTU this build asks for.
+	 */
+	if (total != FF_PROVISION_BLOB_LEN &&
+	    !(offset == 0U && len == FF_PROVISION_BLOB_LEN_NO_TIME)) {
 		/* A partial chunk: acknowledge it and wait for the rest. */
 		LOG_DBG("provisioning chunk: offset=%u len=%u", offset, len);
 		return len;
@@ -289,11 +304,6 @@ bool ff_ble_take_uwb_params(uint8_t *out)
 bool ff_ble_take_readvertise_event(void)
 {
 	return atomic_cas(&pending_readvertise, 1, 0);
-}
-
-enum ff_ble_mode ff_ble_desired_mode(void)
-{
-	return desired_mode;
 }
 
 BT_GATT_SERVICE_DEFINE(ff_tracker_svc,
@@ -504,7 +514,7 @@ int ff_ble_set_mode(enum ff_ble_mode mode)
 		rc = ff_ble_refresh_beacon(100);
 		if (rc == -EAGAIN) {
 			current_mode = FF_BLE_MODE_IDLE;
-			LOG_WRN("cannot beacon: no time base (re-provision to sync time)");
+			LOG_WRN("cannot beacon: no time base");
 			return rc;
 		}
 		if (rc) {
@@ -535,4 +545,40 @@ int ff_ble_set_mode(enum ff_ble_mode mode)
 enum ff_ble_mode ff_ble_mode(void)
 {
 	return current_mode;
+}
+
+int ff_ble_readvertise(void)
+{
+	struct bt_le_ext_adv *adv;
+	int rc;
+
+	if (desired_mode != current_mode) {
+		/* The mode we wanted never started — usually beacon mode attempted while
+		 * the binding phone still held the connection slot. */
+		return ff_ble_set_mode(desired_mode);
+	}
+	/*
+	 * Otherwise the mode is already current, so ff_ble_set_mode() would return early
+	 * and restart nothing — yet the connectable set of that mode is down, because the
+	 * controller stops a connectable advertisement when it yields a connection and
+	 * nothing in the host restarts an extended-API set. Left alone, the tracker takes
+	 * exactly one connection per mode change: one UWB handover, or one attempt at a
+	 * bind.
+	 */
+	if (current_mode == FF_BLE_MODE_BEACON) {
+		adv = connect_adv;
+	} else if (current_mode == FF_BLE_MODE_PAIRING) {
+		adv = pairing_adv;
+	} else {
+		return 0;
+	}
+
+	/* -EALREADY means it is still running, which is not a failure. */
+	rc = bt_le_ext_adv_start(adv, BT_LE_EXT_ADV_START_DEFAULT);
+	if (rc && rc != -EALREADY) {
+		LOG_WRN("restarting connectable adv: %d (not reachable until the next mode "
+			"change)", rc);
+		return rc;
+	}
+	return 0;
 }

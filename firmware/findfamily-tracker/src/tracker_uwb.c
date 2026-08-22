@@ -9,20 +9,12 @@
  *
  * Built only when CONFIG_FF_TRACKER_UWB=y, which needs the licensed Qorvo SDK; see
  * README.md and firmware/qorvo-uwb/.
- *
- * Interop caveat: the parameters below are FiRa/Qorvo defaults, which is the best
- * available guess at what Android's `UwbRangingParams.CONFIG_UNICAST_DS_TWR` asks for.
- * Slot duration, block duration and round length are session parameters under static
- * STS — they are configured identically on both ends rather than negotiated — so if
- * they disagree with what the phone picked, ranging simply never converges. Expect to
- * iterate here against a real phone.
  */
 #include "ff_tracker.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
-#include <zephyr/sys/printk.h>
 
 /* Qorvo uwbstack. */
 #include <ff_qorvo_l1_config.h>
@@ -46,7 +38,15 @@ LOG_MODULE_REGISTER(ff_uwb, LOG_LEVEL_INF);
  * guard immediately on the first poll.
  */
 #define UWB_THREAD_STACK_SIZE 8192
-#define UWB_THREAD_PRIORITY 5
+/*
+ * Below the session thread that creates it (6), and below every vendor MAC thread: qosal
+ * runs CRITICAL=0..IDLE=6 (qthread.h) and firmware/qorvo-uwb/src/qthread_zephyr.c maps
+ * that straight onto K_PRIO_PREEMPT(0..6), so the MAC occupies Zephyr 0..6. At 5 this
+ * thread preempted its own creator the instant k_thread_create() returned, which left
+ * fira_helper_start_session() — the call immediately after start_polling() — reachable
+ * only if the poll loop happened to give the CPU back.
+ */
+#define UWB_THREAD_PRIORITY 7
 
 /*
  * Ranging timing, and the STS/PHY settings that go with it.
@@ -79,6 +79,13 @@ static bool session_active;
 static K_THREAD_STACK_DEFINE(uwb_thread_stack, UWB_THREAD_STACK_SIZE);
 static struct k_thread uwb_thread;
 static atomic_t poll_running;
+/* Only ever touched from the session thread, which is the only caller of start/stop. */
+static bool poll_thread_created;
+/*
+ * k_uptime_get_32() at session start, then at every notification. Written from MAC
+ * context and read by the session thread, so it goes through atomic_t.
+ */
+static atomic_t last_activity_ms;
 
 /*
  * Session setup runs on its own thread rather than on the caller's.
@@ -88,9 +95,23 @@ static atomic_t poll_running;
  * also what refreshes the beacon and drives the mode state machine — a stall there took
  * the whole tracker off the air, so crowd-finding died along with ranging. Keeping it on a
  * separate thread means the worst a wedged UWB session can do is lose UWB.
+ *
+ * 8 KB for the same reason as the poll thread: fira_helper_open, init_session, the 23
+ * setters and uwbmac_start all nest MAC work onto this stack, and 4 KB was half what that
+ * was measured to need.
  */
-#define UWB_SESSION_THREAD_STACK_SIZE 4096
+#define UWB_SESSION_THREAD_STACK_SIZE 8192
 #define UWB_SESSION_THREAD_PRIORITY 6
+
+/*
+ * A find is about 10 s of ranging, and the phone drops the GATT link before ranging even
+ * starts (TrackerUwbGatt.writeSessionParams disconnects as soon as the write completes),
+ * so a BLE disconnect is not a teardown signal — using one would kill the session before
+ * the first round. Stop instead once the session has been silent this long: either the
+ * find finished, or it never worked. Without this the radio and a stale session stay up
+ * until the next params write or a reset.
+ */
+#define SESSION_IDLE_TIMEOUT_MS 30000
 
 static K_THREAD_STACK_DEFINE(uwb_session_stack, UWB_SESSION_THREAD_STACK_SIZE);
 static struct k_thread uwb_session_thread_data;
@@ -114,6 +135,119 @@ extern struct l1_config_platform_ops l1_config_platform_ops;
  */
 uint32_t ff_qorvo_read_dev_id(void);
 
+/*
+ * Decoders for the two enums that distinguish the failures this bring-up has to tell
+ * apart: "never heard anything" (RX_TIMEOUT) from "heard it, STS wrong"
+ * (RX_PHY_STS_FAILED) from "the region rejected a parameter" (the ERROR_INVALID_* reason
+ * codes). Switches rather than a table so the compiler ties each name to its enumerator.
+ * Only the codes a static-STS unicast controlee can produce are listed; anything else
+ * still prints as a number.
+ */
+static const char *ranging_status_name(uint8_t status)
+{
+	switch (status) {
+	case QUWBS_FBS_STATUS_RANGING_SUCCESS:
+		return "SUCCESS";
+	case QUWBS_FBS_STATUS_RANGING_TX_FAILED:
+		return "TX_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_TIMEOUT:
+		return "RX_TIMEOUT";
+	case QUWBS_FBS_STATUS_RANGING_RX_PHY_DEC_FAILED:
+		return "RX_PHY_DEC_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_PHY_TOA_FAILED:
+		return "RX_PHY_TOA_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_PHY_STS_FAILED:
+		return "RX_PHY_STS_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_MAC_DEC_FAILED:
+		return "RX_MAC_DEC_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_MAC_IE_DEC_FAILED:
+		return "RX_MAC_IE_DEC_FAILED";
+	case QUWBS_FBS_STATUS_RANGING_RX_MAC_IE_MISSING:
+		return "RX_MAC_IE_MISSING";
+	case QUWBS_FBS_STATUS_RANGING_INTERNAL_ERROR:
+		return "INTERNAL_ERROR";
+	default:
+		return "?";
+	}
+}
+
+static const char *session_state_name(enum quwbs_fbs_session_state state)
+{
+	switch (state) {
+	case QUWBS_FBS_SESSION_STATE_INIT:
+		return "INIT";
+	case QUWBS_FBS_SESSION_STATE_DEINIT:
+		return "DEINIT";
+	case QUWBS_FBS_SESSION_STATE_ACTIVE:
+		return "ACTIVE";
+	case QUWBS_FBS_SESSION_STATE_IDLE:
+		return "IDLE";
+	default:
+		return "?";
+	}
+}
+
+static const char *reason_code_name(enum quwbs_fbs_reason_code code)
+{
+	switch (code) {
+	case QUWBS_FBS_REASON_CODE_SUCCESS:
+		/* Also SESSION_MANAGEMENT_COMMANDS, which shares the value 0. */
+		return "SUCCESS/STATE_CHANGE_REQUESTED";
+	case QUWBS_FBS_REASON_CODE_MAX_RANGING_ROUND_RETRY_COUNT_REACHED:
+		return "MAX_RANGING_ROUND_RETRY_COUNT_REACHED";
+	case QUWBS_FBS_REASON_CODE_MAX_NUMBER_OF_MEASUREMENTS_REACHED:
+		return "MAX_NUMBER_OF_MEASUREMENTS_REACHED";
+	case QUWBS_FBS_REASON_CODE_ERROR_SLOT_LENGTH_NOT_SUPPORTED:
+		return "ERROR_SLOT_LENGTH_NOT_SUPPORTED";
+	case QUWBS_FBS_REASON_CODE_ERROR_INSUFFICIENT_SLOTS_PER_RR:
+		return "ERROR_INSUFFICIENT_SLOTS_PER_RR";
+	case QUWBS_FBS_REASON_CODE_ERROR_MAC_ADDRESS_MODE_NOT_SUPPORTED:
+		return "ERROR_MAC_ADDRESS_MODE_NOT_SUPPORTED";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_RANGING_DURATION:
+		return "ERROR_INVALID_RANGING_DURATION";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_STS_CONFIG:
+		return "ERROR_INVALID_STS_CONFIG";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_RFRAME_CONFIG:
+		return "ERROR_INVALID_RFRAME_CONFIG";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_PREAMBLE_CODE_INDEX:
+		return "ERROR_INVALID_PREAMBLE_CODE_INDEX";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_SFD_ID:
+		return "ERROR_INVALID_SFD_ID";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_PHR_DATA_RATE:
+		return "ERROR_INVALID_PHR_DATA_RATE";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_PREAMBLE_DURATION:
+		return "ERROR_INVALID_PREAMBLE_DURATION";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_STS_LENGTH:
+		return "ERROR_INVALID_STS_LENGTH";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_NUM_OF_STS_SEGMENTS:
+		return "ERROR_INVALID_NUM_OF_STS_SEGMENTS";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_DST_ADDRESS_LIST:
+		return "ERROR_INVALID_DST_ADDRESS_LIST";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_RESULT_REPORT_CONFIG:
+		return "ERROR_INVALID_RESULT_REPORT_CONFIG";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_RANGING_ROUND_CONTROL_CONFIG:
+		return "ERROR_INVALID_RANGING_ROUND_CONTROL_CONFIG";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_RANGING_ROUND_USAGE:
+		return "ERROR_INVALID_RANGING_ROUND_USAGE";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_MULTI_NODE_MODE:
+		return "ERROR_INVALID_MULTI_NODE_MODE";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_SCHEDULE_MODE:
+		return "ERROR_INVALID_SCHEDULE_MODE";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_PRF_MODE:
+		return "ERROR_INVALID_PRF_MODE";
+	case QUWBS_FBS_REASON_CODE_ERROR_INVALID_DEVICE_ROLE:
+		return "ERROR_INVALID_DEVICE_ROLE";
+	case QUWBS_FBS_REASON_CODE_ERROR_UWB_INITIATION_TIME_EXPIRED:
+		return "ERROR_UWB_INITIATION_TIME_EXPIRED";
+	case QUWBS_FBS_REASON_CODE_ERROR_DRIVER_DOWN:
+		return "ERROR_DRIVER_DOWN";
+	case QUWBS_FBS_REASON_CODE_ERROR_NOMEM:
+		return "ERROR_NOMEM";
+	default:
+		return "?";
+	}
+}
+
 static void on_fira_notification(enum fira_helper_cb_type cb_type, const void *content,
 				 void *user_data)
 {
@@ -127,20 +261,36 @@ static void on_fira_notification(enum fira_helper_cb_type cb_type, const void *c
 			const struct fira_twr_measurements *m = &res->measurements[i];
 
 			/*
+			 * Only a measurement that worked counts as the session being
+			 * alive (see SESSION_IDLE_TIMEOUT_MS). A responder that is
+			 * hearing nothing may still report a round per block with
+			 * RX_TIMEOUT, and treating that as activity would keep a session
+			 * that has never worked up forever.
+			 */
+			if (m->status == QUWBS_FBS_STATUS_RANGING_SUCCESS) {
+				atomic_set(&last_activity_ms,
+					   (atomic_val_t)k_uptime_get_32());
+			}
+
+			/*
 			 * The phone computes the arrow from its own multi-antenna array;
 			 * the tracker is single-port and has no AoA to report. Logging the
 			 * distance is purely so the bench can see the session converge.
 			 */
-			LOG_INF("range: peer=%04x status=%u distance=%dcm rssi=%u",
-				m->short_addr, m->status, m->distance_cm, m->rssi);
+			LOG_INF("range: peer=%04x status=%u (%s) distance=%dcm rssi=%u",
+				m->short_addr, m->status, ranging_status_name(m->status),
+				m->distance_cm, m->rssi);
 		}
 		break;
 	}
 	case FIRA_HELPER_CB_TYPE_SESSION_STATUS_NTF: {
 		const struct fbs_helper_session_status_ntf *ntf = content;
 
-		LOG_INF("session %u state=%d reason=%d", ntf->session_handle, ntf->state,
-			ntf->reason_code);
+		/* Not periodic, so it cannot hold the idle timeout off indefinitely. */
+		atomic_set(&last_activity_ms, (atomic_val_t)k_uptime_get_32());
+		LOG_INF("session %u state=%d (%s) reason=%d (%s)", ntf->session_handle,
+			ntf->state, session_state_name(ntf->state), ntf->reason_code,
+			reason_code_name(ntf->reason_code));
 		break;
 	}
 	default:
@@ -151,34 +301,88 @@ static void on_fira_notification(enum fira_helper_cb_type cb_type, const void *c
 
 static void uwb_poll_thread(void *a, void *b, void *c)
 {
+	enum qerr last_r = QERR_SUCCESS;
+	bool logged = false;
+
 	ARG_UNUSED(a);
 	ARG_UNUSED(b);
 	ARG_UNUSED(c);
 
 	while (atomic_get(&poll_running)) {
 		/* Drives the MAC event loop; notifications are dispatched from here. */
-		(void)uwbmac_poll_events(uwbmac_ctx, 100000);
+		enum qerr r = uwbmac_poll_events(uwbmac_ctx, 100000);
+
+		if (!logged || r != last_r) {
+			/*
+			 * uwbmac.h:331-336 documents a non-zero timeout as blocking, but
+			 * :328-329 also says the call only exists when uwbmac_init() was
+			 * passed a NULL event_loop_ops — a parameter this delivery's
+			 * uwbmac_init() does not have. So the return value is the only way
+			 * to know whether the pump works here at all; an immediate error
+			 * means nothing is dispatching notifications.
+			 */
+			LOG_INF("uwbmac_poll_events: %d", r);
+			last_r = r;
+			logged = true;
+		}
+		/*
+		 * Yield unconditionally, in case the call turns out not to block. This is
+		 * defence, not the mechanism: session-start liveness comes from this
+		 * thread running *below* the session thread (see UWB_THREAD_PRIORITY).
+		 * 1 ms against a 120 ms ranging block costs nothing, and the tick here is
+		 * 32768 Hz so it really is ~1 ms.
+		 */
+		k_sleep(K_MSEC(1));
 	}
 }
 
 /*
- * The MAC event loop has an exact window in which it must be started.
- *
- * Too early — before uwbmac_start() — and uwbmac_poll_events() hangs on a MAC that is not
- * running, which wedges the firmware during boot. Too late — after
- * fira_helper_start_session() — and the session start never completes, because it is a
- * request/response over the MAC that needs its events dispatched; that deadlock stopped the
- * tracker advertising altogether, so it went silent for crowd-finding too and only a reset
- * recovered it. So: immediately after uwbmac_start(), before starting the session.
+ * Started immediately after uwbmac_start(), because fira_helper_start_session() is a
+ * request/response over the MAC and needs its events dispatched to complete.
  */
 static void start_polling(void)
 {
-	if (atomic_cas(&poll_running, 0, 1)) {
-		k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
-				uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
-				K_NO_WAIT);
-		k_thread_name_set(&uwb_thread, "ff_uwb");
+	if (poll_thread_created) {
+		/*
+		 * A previous stop_polling() could not join it. If it has exited since,
+		 * replace it; otherwise re-arm the one that is there, because creating a
+		 * second thread over a live k_thread would corrupt the scheduler. A failed
+		 * join only says the thread has not terminated — if it is wedged inside
+		 * uwbmac_poll_events() this session has no working pump, hence the warning.
+		 */
+		if (k_thread_join(&uwb_thread, K_NO_WAIT) != 0) {
+			LOG_WRN("reusing a poll thread that would not exit; events may not "
+				"be dispatched");
+			atomic_set(&poll_running, 1);
+			return;
+		}
+		poll_thread_created = false;
 	}
+	atomic_set(&poll_running, 1);
+	k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
+			uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
+			K_NO_WAIT);
+	k_thread_name_set(&uwb_thread, "ff_uwb");
+	poll_thread_created = true;
+}
+
+static void stop_polling(void)
+{
+	if (!poll_thread_created) {
+		return;
+	}
+	atomic_set(&poll_running, 0);
+	/*
+	 * The loop can be inside a poll with a 100 ms timeout, so give it room. If it
+	 * somehow does not come back, leave the thread object alone and let
+	 * start_polling() sort it out; the alternative is creating a second thread over a
+	 * live k_thread.
+	 */
+	if (k_thread_join(&uwb_thread, K_MSEC(500)) != 0) {
+		LOG_ERR("poll thread did not exit within 500 ms");
+		return;
+	}
+	poll_thread_created = false;
 }
 
 int ff_uwb_init(void)
@@ -318,8 +522,17 @@ static int apply_session_params(const struct session_parameters *sp)
 
 int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 {
+	/*
+	 * Zero-init is load-bearing. apply_session_params() never pushes sts_config,
+	 * preamble_duration, psdu_data_rate, sts_length, number_of_sts_segments or
+	 * enable_diagnostics, so the FiRa region's own defaults govern those and the
+	 * struct values are only a starting point. Adding setters for them would change
+	 * behaviour silently: fira_helper_set_session_sts_config(.., 0x01) selects Dynamic
+	 * STS rather than Static (fira_helper.h:2036-2050), and sp.preamble_duration == 0
+	 * is FIRA_PREAMBLE_DURATION_32, not 64.
+	 */
 	struct session_parameters sp = { 0 };
-	struct fbs_session_init_rsp rsp;
+	struct fbs_session_init_rsp rsp = { 0 };
 	uint8_t vupper64[FIRA_VUPPER64_SIZE];
 	uint8_t own_address[2];
 	uint16_t own_short_addr;
@@ -334,11 +547,7 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 		ff_uwb_stop();
 	}
 
-	/*
-	 * vUpper64 is exactly [2B VendorID][6B STATIC_STS_IV], which is the same 8 bytes
-	 * Android hands to UwbRangingParams.setSessionKeyInfo. So the derived STS key is
-	 * used verbatim on both sides with no reinterpretation.
-	 */
+	/* Both are derived from the bind-time secret, never taken from the wire. */
 	rc = ff_sts_key(secret, params->session_id, vupper64);
 	if (rc) {
 		return rc;
@@ -347,6 +556,13 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	if (rc) {
 		return rc;
 	}
+	/*
+	 * Little-endian, i.e. byte 0 is the low byte. That is the 802.15.4 convention and
+	 * what the vendor's own BLE-provisioned accessory does with an out-of-band address:
+	 * AR2U16(x) = ((x[1] << 8) | x[0]) (QANI fira_niq.c:43,218-220). The phone hands the
+	 * same two bytes to UwbAddress.fromBytes() without documenting an order, so the
+	 * summary log below prints both readings to settle it against a RangingSession log.
+	 */
 	own_short_addr = sys_get_le16(own_address);
 	peer_short_addr = sys_get_le16(params->peer_address);
 
@@ -355,26 +571,42 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 		LOG_ERR("uwbmac_set_short_addr: %d", r);
 		return -EIO;
 	}
+	/*
+	 * Passing true *disables* hardware address filtering (uwbmac.h:580-590; the comment
+	 * at fira_niq.c:125 says the opposite of what its own argument does). Without it the
+	 * DW3110 drops the phone's polls before the MAC sees them if the two ends disagree
+	 * about the address byte order, and there is no error on either side to say so.
+	 * QANI, the only vendor BLE-provisioned responder, does the same.
+	 */
+	r = uwbmac_set_promiscuous_mode(uwbmac_ctx, true);
+	if (r != QERR_SUCCESS) {
+		LOG_ERR("uwbmac_set_promiscuous_mode: %d", r);
+		return -EIO;
+	}
 
-	printk("ff_uwb: fira_helper_open\n");
+	/* Per-step markers from here on: any of these vendor calls can be the one that does
+	 * not return, and which one it is only shows in what the trace stops after. */
+	LOG_INF("fira_helper_open");
 	r = fira_helper_open(&fira_ctx, uwbmac_ctx, on_fira_notification, "endless", 0, NULL);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_open: %d", r);
 		return -EIO;
 	}
 	/* Must happen while the MAC is stopped. */
-	printk("ff_uwb: fira_helper_set_scheduler\n");
+	LOG_INF("fira_helper_set_scheduler");
 	r = fira_helper_set_scheduler(&fira_ctx);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_set_scheduler: %d", r);
 		goto close;
 	}
 
-	printk("ff_uwb: fira_helper_init_session\n");
+	LOG_INF("fira_helper_init_session");
 	r = fira_helper_init_session(&fira_ctx, params->session_id,
 				     QUWBS_FBS_SESSION_TYPE_RANGING_NO_IN_BAND_DATA, &rsp);
-	if (r != QERR_SUCCESS) {
-		LOG_ERR("fira_helper_init_session: %d", r);
+	if (r != QERR_SUCCESS || rsp.status_code != QUWBS_FBS_STATUS_OK) {
+		/* The qerr return and the FBS status are separate answers; a session that
+		 * was refused reports it in rsp.status_code only. */
+		LOG_ERR("fira_helper_init_session: %d (status %d)", r, rsp.status_code);
 		goto close;
 	}
 	session_handle = rsp.session_handle;
@@ -389,7 +621,17 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	sp.short_addr = own_short_addr;
 	sp.n_destination_short_address = 1;
 	sp.destination_short_address[0] = peer_short_addr;
-	memcpy(sp.vupper64, vupper64, sizeof(vupper64));
+	/*
+	 * The derived 8 bytes are [2B VendorID][6B STATIC_STS_IV], the order Android hands
+	 * to setSessionKeyInfo. The Qorvo struct holds the opposite layout — a union over
+	 * { static_sts_iv[6]; vendor_id[2]; } (fira_helper.h:382-397) — and its own NI
+	 * accessory fills the array as a full reversal of VendorID||StaticStsIv
+	 * (fira_niq.c:228-235). Follow that: a straight memcpy puts VendorID into
+	 * static_sts_iv[0..1] and the STS silently never matches (tracker_sts.c).
+	 */
+	for (size_t i = 0; i < FIRA_VUPPER64_SIZE; i++) {
+		sp.vupper64[i] = vupper64[FIRA_VUPPER64_SIZE - 1 - i];
+	}
 
 	/* One initiator, one responder, deferred DS-TWR: the FiRa shape of Android's
 	 * CONFIG_UNICAST_DS_TWR. */
@@ -399,14 +641,13 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	sp.rframe_config = FIRA_RFRAME_CONFIG_SP3;
 	sp.sfd_id = FIRA_SFD_ID_2;
 	sp.prf_mode = FIRA_PRF_MODE_BPRF;
-	sp.phr_data_rate = FIRA_PRF_MODE_BPRF;
+	sp.phr_data_rate = FIRA_PHR_DATA_RATE_850K;
 	sp.slot_duration_rstu = SLOT_DURATION_RSTU;
 	sp.block_duration_ms = BLOCK_DURATION_MS;
 	sp.round_duration_slots = ROUND_DURATION_SLOTS;
 	sp.round_hopping = ROUND_HOPPING;
 	sp.block_stride_length = 0;
 	sp.report_rssi = 1;
-	sp.enable_diagnostics = false;
 
 	/* Report time-of-flight; no AoA, the DW3110 has a single RF port. */
 	sp.result_report_config = fira_helper_bool_to_result_report_config(true, false, false, false);
@@ -422,39 +663,44 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	sp.meas_seq.steps[0].tx_ant_set_nonranging = 0xff;
 	sp.meas_seq.steps[0].tx_ant_set_ranging = 0xff;
 
-	printk("ff_uwb: applying session parameters\n");
+	LOG_INF("applying session parameters");
 	rc = apply_session_params(&sp);
 	if (rc) {
 		goto deinit;
 	}
 
-	printk("ff_uwb: uwbmac_start\n");
-
+	LOG_INF("uwbmac_start");
 	r = uwbmac_start(uwbmac_ctx);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("uwbmac_start: %d", r);
 		goto deinit;
 	}
-	/* See start_polling(): the MAC is running now, and the session start below needs
-	 * its events pumped to complete. */
 	start_polling();
 
-	printk("ff_uwb: starting FiRa session\n");
+	LOG_INF("starting FiRa session");
 	r = fira_helper_start_session(&fira_ctx, session_handle);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_start_session: %d", r);
-		uwbmac_stop(uwbmac_ctx);
-		goto deinit;
+		/* Same order as ff_uwb_stop(): deinit while the pump is up, then take the
+		 * pump down while the MAC is still running. */
+		(void)fira_helper_deinit_session(&fira_ctx, session_handle);
+		stop_polling();
+		(void)uwbmac_stop(uwbmac_ctx);
+		goto close;
 	}
-	printk("ff_uwb: FiRa session started\n");
+	LOG_INF("FiRa session started");
 
 	session_active = true;
-	LOG_INF("FiRa responder started: session=%08x ch=%u preamble=%u own=%04x peer=%04x",
+	atomic_set(&last_activity_ms, (atomic_val_t)k_uptime_get_32());
+	LOG_INF("FiRa responder started: session=%08x ch=%u preamble=%u own=%04x peer=%04x "
+		"(peer bytes %02x%02x, big-endian reading would be %04x)",
 		params->session_id, params->channel, params->preamble_index, own_short_addr,
-		peer_short_addr);
+		peer_short_addr, params->peer_address[0], params->peer_address[1],
+		sys_get_be16(params->peer_address));
 	return 0;
 
 deinit:
+	/* Only reached before uwbmac_start(), so there is no pump to shut down here. */
 	(void)fira_helper_deinit_session(&fira_ctx, session_handle);
 close:
 	fira_helper_close(&fira_ctx);
@@ -468,6 +714,13 @@ void ff_uwb_stop(void)
 	}
 	(void)fira_helper_stop_session(&fira_ctx, session_handle);
 	(void)fira_helper_deinit_session(&fira_ctx, session_handle);
+	/*
+	 * Between those two and uwbmac_stop(): they are request/response over the MAC and
+	 * need the pump, while nothing in the vendor API says what uwbmac_poll_events()
+	 * does on a *stopped* MAC. Keeping the pump's lifetime inside
+	 * [uwbmac_start, uwbmac_stop) means never finding out.
+	 */
+	stop_polling();
 	(void)uwbmac_stop(uwbmac_ctx);
 	fira_helper_close(&fira_ctx);
 	session_active = false;
@@ -478,6 +731,9 @@ void ff_uwb_stop(void)
  * Runs session setup off the main loop; see the note by uwb_session_stack. One request at a
  * time is enough — the phone writes params once per find, and a second write while a session
  * is starting is better dropped than queued behind a possibly-wedged one.
+ *
+ * Teardown lives here too, so that every fira_helper_* call in this file is made from this
+ * one thread and needs no locking.
  */
 static void uwb_session_thread(void *a, void *b, void *c)
 {
@@ -486,9 +742,22 @@ static void uwb_session_thread(void *a, void *b, void *c)
 	ARG_UNUSED(c);
 
 	while (true) {
-		k_sem_take(&session_request, K_FOREVER);
-		LOG_INF("session request picked up: starting FiRa setup");
-		(void)ff_uwb_start(&requested_params, requested_secret);
+		/* Nothing to do until the phone writes params — unless a session is up,
+		 * in which case wake up often enough to notice it going quiet. */
+		k_timeout_t wait = session_active ? K_MSEC(1000) : K_FOREVER;
+
+		if (k_sem_take(&session_request, wait) == 0) {
+			LOG_INF("session request picked up: starting FiRa setup");
+			(void)ff_uwb_start(&requested_params, requested_secret);
+			continue;
+		}
+		if (session_active &&
+		    (k_uptime_get_32() - (uint32_t)atomic_get(&last_activity_ms)) >
+			    (uint32_t)SESSION_IDLE_TIMEOUT_MS) {
+			LOG_WRN("no UWB activity for %d ms: stopping the session",
+				SESSION_IDLE_TIMEOUT_MS);
+			ff_uwb_stop();
+		}
 	}
 }
 
@@ -499,6 +768,22 @@ int ff_uwb_on_params(const uint8_t *data, size_t len, const uint8_t *secret)
 	}
 	if (!stack_ready) {
 		return -EAGAIN;
+	}
+	/*
+	 * Reject what the stack would reject anyway, so an out-of-range value says so here
+	 * instead of surfacing as an unexplained session-start failure. Only channels 5 and
+	 * 9 exist in this stack, and BPRF preamble indices are 9..12
+	 * (FIRA_PCODE_BPRF_MIN/MAX, whose header notes the wider 9..24 range elsewhere in
+	 * the SDK does not apply here).
+	 */
+	if (data[6] != 5U && data[6] != 9U) {
+		LOG_WRN("UWB params rejected: channel %u (expected 5 or 9)", data[6]);
+		return -EINVAL;
+	}
+	if (data[7] < FIRA_PCODE_BPRF_MIN || data[7] > FIRA_PCODE_BPRF_MAX) {
+		LOG_WRN("UWB params rejected: preamble index %u (expected %d..%d)", data[7],
+			FIRA_PCODE_BPRF_MIN, FIRA_PCODE_BPRF_MAX);
+		return -EINVAL;
 	}
 
 	/* TrackerUwbGatt.encodeSessionParams: [2B addr][4B sessionId BE][1B ch][1B pre] */

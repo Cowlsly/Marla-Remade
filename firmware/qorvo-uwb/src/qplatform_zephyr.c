@@ -82,7 +82,7 @@ struct qspi_config qm33_qspi_config = {
  * register file 0 offset 0) followed by four bytes clocked out to shift the value in.
  */
 static const struct spi_dt_spec uwb_bus =
-	SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET(8) | SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB, 0);
+	SPI_DT_SPEC_GET(UWB_NODE, SPI_WORD_SET(8) | SPI_OP_MODE_MASTER | SPI_TRANSFER_MSB);
 
 /*
  * The devicetree-derived bus spec, shared with the qspi backend.

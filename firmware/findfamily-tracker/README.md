@@ -88,7 +88,9 @@ Logs come out of the on-board J-Link CDC UART at 115200 (COM4 on this machine).
 Otherwise → pairing mode, so a fresh board is bindable without touching the button.
 
 **Button** (the kit's Button 1, `sw0`):
-- long press (≥ 2 s) → pairing mode, to re-bind or to resync the clock
+- long press (≥ 2 s) → pairing mode for `CONFIG_FF_TRACKER_PAIRING_TIMEOUT_S`, then back to
+  beaconing. This does **not** re-bind: a provisioned tracker refuses provisioning writes
+  (the anti-theft lock), and nothing unbinds one today — `ff_store_clear()` has no caller.
 - short press → mute/unmute the beacon
 
 **Advertising** uses two modes on one state machine, arranged so only the phone's beacon
@@ -97,12 +99,14 @@ scanner needed changing:
 - **Pairing** — *legacy* connectable advertising of the unprovisioned service
   (`…2f01…`). Flags + a 128-bit UUID is 21 bytes, comfortably inside the legacy budget,
   so `TrackerProvisioner.unprovisioned()` still finds it with default `ScanSettings`.
-- **Beacon** — *extended* connectable advertising of `[16B epochId][1B battery%]` as
-  service data under `…2f00…`. This one **cannot** be legacy: the AD structure costs
+- **Beacon** — *extended* **non-connectable** advertising of `[16B epochId][1B battery%]`
+  as service data under `…2f00…`. This one **cannot** be legacy: the AD structure costs
   `1B len + 1B type + 16B UUID + 17B payload = 35 bytes` against a 31-byte limit, and the
   UUID can't be shortened because the phone looks the service data up by it. Secondary PHY
-  stays at 1M so the phone needs no coded-PHY scan config, and it stays connectable so the
-  owner can still write UWB session params after binding.
+  stays at 1M so the phone needs no coded-PHY scan config. Connectability is a **third,
+  legacy, dataless set** running alongside it, so the owner can still write UWB session
+  params after binding — a connectable extended set cannot carry advertising data at all,
+  which is why the two are separate. See `beacon_param` in `src/tracker_ble.c`.
 
 **Time.** The board has no battery-backed RTC, but `epochId` needs `unix_seconds / 900`,
 so the provisioning blob carries a timestamp and time is kept as
@@ -153,22 +157,22 @@ nrfutil toolchain-manager launch --ncs-version v3.4.0 -- `
 
 Quote the `-D` arguments: PowerShell otherwise splits `uwb.conf` at the dot.
 
-### State: builds, links, runs — but the stack does not come up yet
+### State: the stack comes up; ranging does not work yet
 
 Verified on hardware:
-- the image builds and links clean (58% flash, 47% RAM) and BLE crowd-finding is
-  unaffected — the beacon keeps working in the UWB image;
+- the image builds and links clean and BLE crowd-finding is unaffected — the beacon keeps
+  working in the UWB image;
 - the DW3110 answers a direct device-id read over SPI with **`0xdeca0302`**, logged at
   startup. That clears the wiring, the `dw3110` devicetree node, chip-select handling and
-  the SPI mode.
+  the SPI mode;
+- `qplatform_init()` now succeeds and the Qorvo stack initialises, so ranging has been
+  attempted end to end against a phone. It fails: the phone reports UCI RangingStatus
+  `0x21` (RX timeout) on every round for its whole 10 s and then drops the controlee, with
+  nothing logged on the tracker side.
 
-Not working: `qplatform_init()` returns `QERR_EADDRNOTAVAIL` (-1), so Qorvo's driver
-rejects the part even though the bus is demonstrably fine. The fault is somewhere in the
-glue below the driver rather than in the hardware — most likely `qspi_transceive` in
-`firmware/qorvo-uwb/src/qspi_zephyr.c` (chip-select framing across the driver's
-header-then-body transfers is the first thing to check) or the reset sequence in
-`qhal_extras_zephyr.c`. **No ranging has been attempted**, and nothing here should be
-taken as evidence that FiRa interop with the phone works.
+That failure is being worked through against `docs/DISCREPANCIES.md`, which orders the
+candidates and cites each one. Nothing in the current tree has been re-verified on hardware
+since those fixes landed, so treat FiRa interop as unproven.
 
 ### What the glue replaces, and why
 
