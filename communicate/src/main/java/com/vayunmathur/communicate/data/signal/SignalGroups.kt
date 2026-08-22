@@ -5,6 +5,7 @@ import android.util.Log
 import com.google.protobuf.ByteString
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.library.network.NetworkClient
+import org.signal.libsignal.protocol.ServiceId
 import org.signal.libsignal.zkgroup.groups.ClientZkGroupCipher
 import org.signal.libsignal.zkgroup.groups.GroupMasterKey
 import org.signal.libsignal.zkgroup.groups.GroupSecretParams
@@ -49,8 +50,34 @@ object SignalGroups {
         return masterKey to secretParams.serialize()
     }
 
+    /**
+     * The group's public 32-byte identifier, hex encoded, derived from its master key.
+     *
+     * The master key itself is secret and must never be used as an identifier — it is what encrypts the
+     * group's attributes and membership. The identifier is the public value derived from it, which is
+     * what the server and `TypingMessage.groupId` use.
+     */
     fun groupIdFromMasterKey(masterKey: ByteArray): String =
-        masterKey.joinToString("") { "%02x".format(it) }.take(16)
+        groupIdentifierBytes(masterKey).toHex()
+
+    /** The raw 32-byte `GroupIdentifier` for [masterKey]. */
+    fun groupIdentifierBytes(masterKey: ByteArray): ByteArray =
+        GroupSecretParams.deriveFromMasterKey(GroupMasterKey(masterKey))
+            .publicParams
+            .groupIdentifier
+            .serialize()
+
+    fun ByteArray.toHex(): String = joinToString("") { "%02x".format(it) }
+
+    /** Inverse of [toHex]; null when [hex] is not an even-length hex string. */
+    fun hexToBytes(hex: String): ByteArray? {
+        if (hex.isEmpty() || hex.length % 2 != 0) return null
+        return try {
+            ByteArray(hex.length / 2) { hex.substring(it * 2, it * 2 + 2).toInt(16).toByte() }
+        } catch (_: Exception) {
+            null
+        }
+    }
 
     fun buildGroupContextV2(masterKey: ByteArray, revision: Int = 0, groupChange: ByteArray? = null): SignalServiceProtos.GroupContextV2 {
         val b = SignalServiceProtos.GroupContextV2.newBuilder()
@@ -58,6 +85,22 @@ object SignalGroups {
             .setRevision(revision)
         if (groupChange != null) b.setGroupChange(ByteString.copyFrom(groupChange))
         return b.build()
+    }
+
+    /** [GroupSecretParams] bytes for a master key, for the blob and member ciphers. */
+    fun secretParamsFor(masterKey: ByteArray): ByteArray =
+        GroupSecretParams.deriveFromMasterKey(GroupMasterKey(masterKey)).serialize()
+
+    /**
+     * Encrypt a member's ACI as a `UuidCiphertext`. Returns null when [serviceId] is not a UUID, so the
+     * caller can refuse rather than fall back to sending it in the clear.
+     */
+    fun encryptServiceId(secretParamsBytes: ByteArray, serviceId: String): ByteArray? = try {
+        val aci = ServiceId.Aci.parseFromString(serviceId)
+        ClientZkGroupCipher(GroupSecretParams(secretParamsBytes)).encrypt(aci).serialize()
+    } catch (e: Exception) {
+        Log.w(TAG, "could not encrypt member id: ${e.message}")
+        null
     }
 
     /** Encrypt a GroupAttributeBlob (title/description/avatar/timer) under the group's secret params. */

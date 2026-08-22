@@ -497,12 +497,20 @@ object SignalClient {
         return AndroidBase64.encodeToString(creds.toByteArray(Charsets.UTF_8), AndroidBase64.NO_WRAP)
     }
 
-    private fun groupMasterKeyForConversation(conversationId: String): ByteArray? {
-        if (!conversationId.startsWith("group:") && !conversationId.contains("group")) return null
-        // ConversationId is group:<hex16> derived from masterKey; recover not possible without storing masterKey.
-        // SignalGroups stores masterKey in conversationId derivation; live stores real 32B in SignalConversation via masterKey column (future migration).
-        // For wire-correct send, return null and let DataMessage.groupV2 be omitted or stubbed; live will supply real masterKey.
-        return null
+    /** The stored master key for a group conversation, or null for a 1:1 or an unknown group. */
+    private suspend fun groupMasterKeyForConversation(conversationId: String): ByteArray? {
+        if (!SignalProtocol.isGroupConversation(conversationId)) return null
+        return try {
+            db?.conversationDao()?.getConversation(conversationId)?.groupMasterKey
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    private suspend fun groupRevisionForConversation(conversationId: String): Int = try {
+        db?.conversationDao()?.getConversation(conversationId)?.groupRevision ?: 0
+    } catch (_: Exception) {
+        0
     }
 
     // ---- Messaging (public signatures stable) ----
@@ -512,13 +520,19 @@ object SignalClient {
         val id = SignalProtocol.generateMessageId()
         val ts = System.currentTimeMillis()
         val aci = recipient.trim()
-        val isGroup = aci.startsWith("group:") || aci.startsWith("group-")
+        val isGroup = SignalProtocol.isGroupConversation(aci)
         val groupMasterKey = if (isGroup) groupMasterKeyForConversation(aci) else null
+        if (isGroup && groupMasterKey == null) {
+            // Without the master key the recipients cannot tell which group this belongs to.
+            Log.w(TAG, "no stored master key for $aci, cannot send to the group")
+            _events.emit(SignalEvent.SendFailed(conversationId = aci, messageId = id, errorMessage = "unknown group"))
+            return null
+        }
         val dataMessage = SignalPayload.buildDataMessage(
             body = body,
             timestamp = ts,
             groupV2MasterKey = groupMasterKey,
-            groupV2Revision = if (groupMasterKey != null) 0 else null,
+            groupV2Revision = if (groupMasterKey != null) groupRevisionForConversation(aci) else null,
             requiredProtocolVersion = 8,
         )
         val content = SignalPayload.buildContentWithDataMessage(dataMessage)
@@ -671,61 +685,89 @@ object SignalClient {
     }
 
     suspend fun createGroup(subject: String, contacts: List<String>): String? {
-        // GroupsV2 via SignalGroups: GroupMasterKey 32B -> GroupSecretParams, GroupAttributeBlob, PUT /v2/groups/
         val (masterKey, _) = SignalGroups.generateMasterKeyAndSecretParams()
-        val groupId = "group:${SignalGroups.groupIdFromMasterKey(masterKey)}"
+        val groupId = SignalProtocol.toConversationId("", masterKey)
         val requestBody = SignalGroups.buildCreateGroupRequest(masterKey, subject, contacts, revision = 0)
         val auth = authData ?: return null
         val ok = SignalGroups.putNewGroup(authData = auth, requestBody = requestBody, sslSocketFactory = signalTls())
-        // Even if PUT fails offline, persist locally for wire validation; live will confirm via serverSignature.
         _events.emit(SignalEvent.ConversationUpdate(conversationId = groupId, peerName = subject, peerPhone = null, avatarUrl = null, lastPreview = null, lastTimestamp = System.currentTimeMillis(), unreadCount = 0, isGroup = true, participantCount = contacts.size))
         try {
-            db?.conversationDao()?.upsert(SignalConversation(chatId = groupId, isGroup = true, name = subject, participants = contacts.joinToString(",")))
+            // The master key must be kept: without it we cannot address the group again.
+            db?.conversationDao()?.upsert(
+                SignalConversation(
+                    chatId = groupId,
+                    isGroup = true,
+                    name = subject,
+                    participants = contacts.joinToString(","),
+                    groupMasterKey = masterKey,
+                    groupRevision = 0,
+                ),
+            )
             Log.i(TAG, "createGroup $groupId (PUT /v2/groups/ ${if (ok) "ok" else "failed"})")
         } catch (_: Exception) {}
-        // Live-only: cache group-send-token per revision via SignalGroups.fetchGroupSendEndorsements (zkgroup GroupSendDerivedKeyPair + GroupSendFullToken.verify)
         return groupId
     }
 
     suspend fun setGroupName(conversationId: String, name: String): Boolean {
-        // GroupsV2: PATCH /v2/groups/ with GroupChange.Actions + GroupAttributeBlob title encrypted via ClientZkGroupCipher.encryptBlob
-        // Live-only GroupChange signature requires server; wire-correct is PATCH with encrypted title.
+        val existing = try { db?.conversationDao()?.getConversation(conversationId) } catch (_: Exception) { null }
+        val masterKey = existing?.groupMasterKey
+        if (masterKey == null) {
+            // Previously this generated a fresh random master key per rename, which described an
+            // unrelated group rather than this one.
+            Log.w(TAG, "no stored master key for $conversationId, cannot rename the group")
+            return false
+        }
         val auth = authData
         if (auth != null) {
             try {
-                val (mk, sp) = SignalGroups.generateMasterKeyAndSecretParams()
-                val titleBlob = SignalGroups.encryptGroupBlob(sp, name.toByteArray(Charsets.UTF_8))
+                val secretParams = SignalGroups.secretParamsFor(masterKey)
+                val titleBlob = SignalGroups.encryptGroupBlob(secretParams, name.toByteArray(Charsets.UTF_8))
+                val revision = existing.groupRevision + 1
                 val body = org.json.JSONObject().apply {
-                    put("masterKey", AndroidBase64.encodeToString(mk, AndroidBase64.NO_WRAP))
+                    put("masterKey", AndroidBase64.encodeToString(masterKey, AndroidBase64.NO_WRAP))
                     put("titleBlob", AndroidBase64.encodeToString(titleBlob, AndroidBase64.NO_WRAP))
-                    put("revision", 1)
+                    put("revision", revision)
                 }.toString().toByteArray(Charsets.UTF_8)
                 val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, sslSocketFactory = signalTls())
-                Log.i(TAG, "setGroupName PATCH /v2/groups/ ${resp.status} (live-only GroupChange.Actions + ClientZkGroupCipher)")
-            } catch (e: Exception) { Log.w(TAG, "setGroupName failed (expected offline)", e) }
+                // Live-only: a real GroupChange.Actions needs the server's signature over signed actions.
+                Log.i(TAG, "setGroupName PATCH /v2/groups/ ${resp.status}")
+            } catch (e: Exception) { Log.w(TAG, "setGroupName failed", e) }
         }
         _events.emit(SignalEvent.ConversationNameChanged(conversationId = conversationId, newName = name))
-        try {
-            val existing = db?.conversationDao()?.getConversation(conversationId)
-            if (existing != null) db?.conversationDao()?.upsert(existing.copy(name = name))
-        } catch (_: Exception) {}
+        try { db?.conversationDao()?.upsert(existing.copy(name = name)) } catch (_: Exception) {}
         return true
     }
 
     suspend fun updateGroupParticipants(conversationId: String, participantIds: List<String>, action: String): Boolean {
-        // GroupsV2: PATCH /v2/groups/ with member add/remove as UidCiphertext via ClientZkGroupCipher.encryptServiceId
-        // Wire-correct includes GroupChange.Actions with zk proofs; stub sends JSON but documents gap.
+        val existing = try { db?.conversationDao()?.getConversation(conversationId) } catch (_: Exception) { null }
+        val masterKey = existing?.groupMasterKey
+        if (masterKey == null) {
+            Log.w(TAG, "no stored master key for $conversationId, cannot change membership")
+            return false
+        }
         val auth = authData
         if (auth != null) {
             try {
+                // Members go as UuidCiphertext, not plaintext ACIs — hiding the membership list is the
+                // point of GroupsV2, and posting it in the clear defeats it.
+                val secretParams = SignalGroups.secretParamsFor(masterKey)
+                val encryptedMembers = participantIds.mapNotNull { SignalGroups.encryptServiceId(secretParams, it) }
+                if (encryptedMembers.size != participantIds.size) {
+                    Log.w(TAG, "could not encrypt every member id for $conversationId, refusing to send them")
+                    return false
+                }
                 val body = org.json.JSONObject().apply {
-                    put("members", org.json.JSONArray(participantIds))
+                    put("masterKey", AndroidBase64.encodeToString(masterKey, AndroidBase64.NO_WRAP))
+                    put(
+                        "members",
+                        org.json.JSONArray(encryptedMembers.map { AndroidBase64.encodeToString(it, AndroidBase64.NO_WRAP) }),
+                    )
                     put("action", action)
-                    put("revision", 1)
+                    put("revision", existing.groupRevision + 1)
                 }.toString().toByteArray(Charsets.UTF_8)
                 val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, sslSocketFactory = signalTls())
-                Log.i(TAG, "updateGroupParticipants PATCH /v2/groups/ $action ${resp.status} (live-only UidCiphertext zk proof)")
-            } catch (e: Exception) { Log.w(TAG, "updateGroupParticipants failed (expected offline)", e) }
+                Log.i(TAG, "updateGroupParticipants PATCH /v2/groups/ $action ${resp.status}")
+            } catch (e: Exception) { Log.w(TAG, "updateGroupParticipants failed", e) }
         }
         for (pid in participantIds) {
             if (action == "add") _events.emit(SignalEvent.ParticipantAdded(conversationId = conversationId, participantId = pid))
@@ -737,9 +779,8 @@ object SignalClient {
     suspend fun sendTyping(conversationId: String, isTyping: Boolean) {
         _events.emit(SignalEvent.TypingIndicator(conversationId = conversationId, senderId = authData?.aci ?: "", isTyping = isTyping))
         val ts = System.currentTimeMillis()
-        val groupId: ByteArray? = if (conversationId.startsWith("group:")) {
-            try { conversationId.removePrefix("group:").chunked(2).take(16).map { it.toInt(16).toByte() }.toByteArray() } catch (_: Exception) { null }
-        } else null
+        // TypingMessage.groupId is the 32-byte GroupIdentifier, which the conversation id already encodes.
+        val groupId: ByteArray? = SignalProtocol.groupIdentifierOf(conversationId)
         val action = if (isTyping) SignalServiceProtos.TypingMessage.Action.STARTED else SignalServiceProtos.TypingMessage.Action.STOPPED
         val content = SignalPayload.buildContentForTyping(timestamp = ts, action = action, groupId = groupId)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
@@ -999,9 +1040,9 @@ object SignalClient {
                 val tm = parsed.typingMessage
                 val isTyping = tm.action == SignalServiceProtos.TypingMessage.Action.STARTED
                 val cid = if (tm.hasGroupId()) {
-                    // groupId is 32B GroupIdentifier bytes — map to group conversationId via hex prefix match
-                    val gidHex = tm.groupId.toByteArray().joinToString("") { "%02x".format(it) }.take(16)
-                    "group:$gidHex"
+                    // groupId is the 32-byte GroupIdentifier, which is exactly what the conversation id
+                    // encodes, so it maps across directly.
+                    SignalProtocol.toConversationId("", SignalGroups.run { tm.groupId.toByteArray().toHex() })
                 } else conversationId
                 _events.emit(SignalEvent.TypingIndicator(conversationId = cid, senderId = senderAci, isTyping = isTyping))
             }
@@ -1076,10 +1117,13 @@ object SignalClient {
             org.signal.libsignal.protocol.ecc.ECPublicKey(AndroidBase64.decode(it, AndroidBase64.NO_WRAP))
         }
 
+    /** The group conversation id a DataMessage belongs to, or empty when it is not a group message. */
     private fun groupIdFor(dm: SignalServiceProtos.DataMessage): String {
         return if (dm.hasGroupV2() && dm.groupV2.hasMasterKey()) {
-            "group:${dm.groupV2.masterKey.toByteArray().joinToString("") { "%02x".format(it) }.take(16)}"
-        } else ""
+            SignalProtocol.toConversationId("", dm.groupV2.masterKey.toByteArray())
+        } else {
+            ""
+        }
     }
 
     private fun uuidStringToBytes(uuid: String): ByteArray {

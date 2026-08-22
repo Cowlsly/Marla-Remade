@@ -1,6 +1,7 @@
 package com.vayunmathur.communicate.data.signal
 
 import android.content.Context
+import androidx.room.ColumnInfo
 import androidx.room.Dao
 import androidx.room.Database
 import androidx.room.Entity
@@ -39,7 +40,7 @@ import com.vayunmathur.library.util.DatabaseMigrations
         SignalProfileKey::class,
         SignalCallLog::class,
     ],
-    version = 3,
+    version = 4,
     exportSchema = false
 )
 @TypeConverters(SignalTypeConverters::class)
@@ -108,7 +109,25 @@ abstract class SignalDatabase : RoomDatabase() {
             }
         }
 
-        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3)
+        /**
+         * v3 → v4: store the group master key in its own column.
+         *
+         * Conversation ids used to be the hex of the master key's first 8 bytes, which both leaked secret
+         * material and was not the identifier the protocol uses. They are now the derived 32-byte
+         * `GroupIdentifier`. Existing group rows cannot be converted — the full master key was never
+         * stored, so the new id is not recoverable from the old one — so they are dropped and will be
+         * recreated from inbound traffic.
+         */
+        private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupMasterKey BLOB")
+                db.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupRevision INTEGER NOT NULL DEFAULT 0")
+                db.execSQL("DELETE FROM signal_cached_message WHERE conversationId LIKE 'group:%'")
+                db.execSQL("DELETE FROM signal_conversation WHERE chatId LIKE 'group:%'")
+            }
+        }
+
+        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
 
         fun getDatabase(context: Context): SignalDatabase =
             SignalRepository.get(context).database()
@@ -205,6 +224,15 @@ data class SignalConversation(
     val lastMessageTimestamp: Long = 0L,
     val archived: Boolean = false,
     val pinned: Boolean = false,
+    /**
+     * The group's 32-byte master key. Secret material: it encrypts the group's attributes and
+     * membership, so it is stored here rather than being folded into [chatId], which is the derived
+     * public identifier.
+     */
+    val groupMasterKey: ByteArray? = null,
+    // Declared here so the ALTER TABLE default in MIGRATION_3_4 matches what Room expects; adding a
+    // NOT NULL column requires a default, and TableInfo validation compares them.
+    @ColumnInfo(defaultValue = "0") val groupRevision: Int = 0,
 )
 
 @Dao

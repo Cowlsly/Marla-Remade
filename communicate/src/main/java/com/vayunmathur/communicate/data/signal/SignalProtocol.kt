@@ -309,18 +309,40 @@ object SignalProtocol {
 
     fun generateMessageId(): String = UUID.randomUUID().toString()
 
+    /**
+     * Conversation id for a message. Groups are keyed by their derived public identifier — never by the
+     * master key, which is secret material that must not end up in a database key or a log line.
+     */
     fun toConversationId(sourceAci: String, groupMasterKey: ByteArray?): String {
         return when {
-            groupMasterKey != null -> "group:${groupMasterKey.joinToString("") { "%02x".format(it) }.take(16)}"
+            groupMasterKey != null -> {
+                val id = try {
+                    SignalGroups.groupIdFromMasterKey(groupMasterKey)
+                } catch (e: Exception) {
+                    Log.w(TAG, "could not derive a group identifier: ${e.message}")
+                    return if (sourceAci.isNotEmpty()) sourceAci else "unknown"
+                }
+                "$GROUP_PREFIX$id"
+            }
             sourceAci.isNotEmpty() -> sourceAci
             else -> "unknown"
         }
     }
 
     fun toConversationId(sourceAci: String, groupId: String?): String = when {
-        !groupId.isNullOrEmpty() -> "group:$groupId"
+        !groupId.isNullOrEmpty() -> "$GROUP_PREFIX$groupId"
         sourceAci.isNotEmpty() -> sourceAci
         else -> "unknown"
+    }
+
+    const val GROUP_PREFIX = "group:"
+
+    fun isGroupConversation(conversationId: String): Boolean = conversationId.startsWith(GROUP_PREFIX)
+
+    /** The raw 32-byte group identifier for a `group:<hex>` conversation id, or null. */
+    fun groupIdentifierOf(conversationId: String): ByteArray? {
+        if (!isGroupConversation(conversationId)) return null
+        return SignalGroups.hexToBytes(conversationId.removePrefix(GROUP_PREFIX))
     }
 
     private fun bytesToAciString(bytes: ByteArray): String {
