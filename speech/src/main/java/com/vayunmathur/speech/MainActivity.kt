@@ -202,9 +202,6 @@ private fun SetupScreen() {
 
             override fun refresh() { refresh++ }
 
-            override fun recognitionProgress() = WhisperModel.progress(ds)
-            override suspend fun downloadRecognitionModel() = WhisperModel.download(context, ds)
-
             // Legacy single-voice
             override fun voiceProgress() = PiperVoiceRegistry.overallProgress(ds)
             override suspend fun downloadVoice() {
@@ -274,12 +271,13 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
             title = "Speech recognition model",
             done = state.modelReady,
         ) {
+            // The recogniser is bundled in the APK, so there is nothing to download here; the
+            // card stays as step 1 only to keep the numbering users see stable.
             if (!state.modelReady) {
-                ModelDownloadButton(
-                    label = stringResource(R.string.download_model_113_mb),
-                    progressOf = actions::recognitionProgress,
-                    download = actions::downloadRecognitionModel,
-                    onDone = actions::refresh,
+                Text(
+                    text = "The bundled recognition model could not be read. Reinstalling the app should fix it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
                 )
             }
         }
@@ -498,40 +496,6 @@ private fun VoiceRow(
             }
         }
     }
-}
-
-/**
- * A button that runs a suspending model [download] (progress polled from DataStore via
- * [progressOf]) and calls [onDone] when finished so the caller can refresh its "installed"
- * status. Disabled while downloading.
- */
-@Composable
-private fun ModelDownloadButton(
-    label: String,
-    progressOf: () -> Float,
-    download: suspend () -> Unit,
-    onDone: () -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
-    var pct by remember { mutableIntStateOf(0) }
-    LaunchedEffect(busy) {
-        while (busy) {
-            pct = (progressOf() * 100f).toInt().coerceIn(0, 100)
-            delay(500)
-        }
-    }
-    Button(
-        enabled = !busy,
-        onClick = {
-            busy = true
-            scope.launch {
-                runCatching { download() }
-                busy = false
-                onDone()
-            }
-        },
-    ) { Text(if (busy) "Downloading… $pct%" else label) }
 }
 
 @Composable

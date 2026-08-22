@@ -11,5 +11,4 @@
     <string name="try_the_voice">音声を試す</string>
     <string name="speak_sample">サンプルを話す</string>
     <string name="heard">%1$s を聞く</string>
-    <string name="download_model_113_mb">モデルをダウンロード (~113 MB)</string>
 </resources>

@@ -4,7 +4,6 @@
     <string name="try_the_voice">Testi häälsisestust</string>
     <string name="speak_sample">Kõnenäide</string>
     <string name="heard">Kuuldud: %1$s</string>
-    <string name="download_model_113_mb">Laadi tuvastusmudel alla (~113 MB)</string>
     <string name="app_name">Kõne</string>
     <string name="tts_engine_label">MA Kõne</string>
     <string name="recognition_service_label">MA Kõne</string>

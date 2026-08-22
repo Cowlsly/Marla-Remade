@@ -11,5 +11,4 @@
     <string name="try_the_voice">Прослушать голос</string>
     <string name="speak_sample">Пример произношения</string>
     <string name="heard">Услышано: %1$s</string>
-    <string name="download_model_113_mb">Скачать модель (~113 МБ)</string>
 </resources>

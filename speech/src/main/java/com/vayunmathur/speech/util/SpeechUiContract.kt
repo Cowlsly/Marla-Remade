@@ -32,7 +32,7 @@ data class TtsVoiceUiState(
 
 /** Which of the five setup steps are already done + voices list. */
 data class SpeechSetupUiState(
-    /** Whisper recognition model present on disk. */
+    /** Whisper recognition model readable from the APK's assets. */
     val modelReady: Boolean = false,
     val hasMic: Boolean = false,
     /** This app is the device's `voice_recognition_service`. */
@@ -54,8 +54,9 @@ data class SpeechSetupUiState(
  * Setup screen callbacks. Every method has a no-op default so a preview can render the
  * screen without supplying behaviour — [Noop] is the whole implementation a preview needs.
  *
- * The two downloads are `suspend` because the button drives them directly and polls
- * [recognitionProgress]/[voiceProgress] while they run.
+ * The voice downloads are `suspend` because the button drives them directly and polls
+ * [voiceProgress] while they run. Speech recognition has no download: the model ships in the
+ * APK, so only TTS voices beyond the bundled English one are fetched at runtime.
  */
 interface SpeechSetupActions {
     fun requestMicPermission() {}
@@ -64,9 +65,6 @@ interface SpeechSetupActions {
 
     /** Re-read the device state after a step completes. */
     fun refresh() {}
-
-    fun recognitionProgress(): Float = 0f
-    suspend fun downloadRecognitionModel() {}
 
     /** Overall voice progress (averaged) for legacy single-voice UI. */
     fun voiceProgress(): Float = 0f

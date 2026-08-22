@@ -11,5 +11,4 @@
     <string name="try_the_voice">试听语音</string>
     <string name="speak_sample">朗读示例</string>
     <string name="heard">听到：%1$s</string>
-    <string name="download_model_113_mb">下载模型（约 113 MB）</string>
 </resources>

@@ -14,17 +14,26 @@ android {
     defaultConfig {
         applicationId = "com.vayunmathur.speech"
     }
+
+    androidResources {
+        // ORT mmaps the model out of the APK; a deflated asset would have to be inflated to
+        // a 40 MB heap buffer first. Storing them uncompressed costs nothing on download size
+        // either — int8 weights are already incompressible.
+        noCompress += "onnx"
+    }
 }
 
 dependencies {
-    // Both offline speech engines run in the ncnn AAR: speech-to-text via
-    // com.vayunmathur.ncnn.Whisper and text-to-speech (Piper/VITS) via
-    // com.vayunmathur.ncnn.Vits. Their models are downloaded at runtime from the mirror
-    // (WhisperModel.FILES, PiperModel.FILES) and loaded from the filesystem by path —
-    // only native code ships in the APK.
+    // Text-to-speech (Piper/VITS) runs in the ncnn AAR via com.vayunmathur.ncnn.Vits, which
+    // is filesystem-only, so voices are extracted to disk before use.
     implementation(libs.ncnn.android)
 
-    // Runtime model download (mirror-hosted, SHA-256 pinned) — same infra as Translate.
+    // Speech-to-text is whisper-tiny int8 ONNX (bundled in assets, see WhisperOnnxEngine).
+    // It is not ncnn: onnx2ncnn has no DynamicQuantizeLinear/MatMulInteger/ConvInteger
+    // support, and the AAR's Whisper expects a six-net decomposition HF does not export.
+    implementation(libs.onnxruntime.android)
+
+    // Runtime model download (mirror-hosted, SHA-256 pinned) — non-English TTS voices only.
     implementation(project(":library:downloadservice"))
     implementation(libs.androidx.datastore.preferences)
 }

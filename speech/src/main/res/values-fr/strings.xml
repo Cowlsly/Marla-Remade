@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="heard">Entendu : %1$s</string>
-    <string name="download_model_113_mb">Télécharger le modèle (~113 Mo)</string>
     <string name="test_microphone">Tester le microphone</string>
     <string name="try_it">Essayer</string>
     <string name="tts_engine_label">MA Speech</string>
