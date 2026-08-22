@@ -548,15 +548,14 @@ object SignalClient {
     }
 
     /**
-     * Always fails until client-side attachment encryption exists.
+     * Always fails until the attachment upload transport exists.
      *
-     * Attachments must be encrypted client-side (AES-256-CBC + HMAC-SHA256, with the key and digest
-     * carried in the AttachmentPointer) and uploaded to a server-issued form obtained from
-     * GET /v2/attachments/form/upload. Posting the raw bytes would hand plaintext media to the CDN
-     * while producing a pointer no peer could decrypt anyway.
+     * Encryption itself is implemented ([SignalAttachmentCipher]); what is missing is the upload, which
+     * needs the server-issued form from `GET /v2/attachments/form/upload` followed by a CDN2 or CDN3
+     * resumable upload. Posting raw bytes to the CDN instead would hand it plaintext media.
      */
     suspend fun sendMedia(recipient: String, bytes: ByteArray, mimeType: String): String? {
-        Log.w(TAG, "refusing to send ${bytes.size}B $mimeType attachment: encryption not implemented")
+        Log.w(TAG, "refusing to send ${bytes.size}B $mimeType attachment: upload transport not implemented")
         _events.emit(
             SignalEvent.SendFailed(
                 conversationId = recipient,
@@ -788,13 +787,40 @@ object SignalClient {
 
     fun isLoggedIn(): Boolean = isConnected()
 
-    suspend fun downloadMedia(url: String, key: ByteArray, type: String): ByteArray? {
-        return try {
+    /**
+     * Download and decrypt an attachment. [key] is the 64-byte combined key from the
+     * `AttachmentPointer`, and [digest] its digest when present — both are verified before the
+     * plaintext is returned, so a CDN that served the wrong bytes produces null rather than garbage.
+     *
+     * Note the upload side is not implemented, so nothing in the app produces pointers yet; this handles
+     * pointers from real peers.
+     */
+    suspend fun downloadMedia(
+        url: String,
+        key: ByteArray,
+        type: String,
+        digest: ByteArray? = null,
+        plaintextSize: Int? = null,
+    ): ByteArray? {
+        val blob = try {
             // Signal attachments live on cdn.signal.org (Signal's private CA); other hosts hit
             // public CAs. signalTls() is a union factory (Signal roots + system), safe for both.
             val resp = NetworkClient.execute(url, method = "GET", sslSocketFactory = signalTls())
-            if (resp.isSuccess) resp.bytes else null
-        } catch (_: Exception) { null }
+            if (!resp.isSuccess) {
+                Log.w(TAG, "attachment download failed: ${resp.status} ${resp.statusMessage}")
+                return null
+            }
+            resp.bytes
+        } catch (t: Throwable) {
+            Log.w(TAG, "attachment download failed", t)
+            return null
+        }
+        return try {
+            SignalAttachmentCipher.decrypt(blob, key, digest, plaintextSize)
+        } catch (t: Throwable) {
+            Log.w(TAG, "attachment did not decrypt ($type)", t)
+            null
+        }
     }
 
     suspend fun refreshPresence(conversationId: String) {
