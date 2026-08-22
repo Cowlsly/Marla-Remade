@@ -8,6 +8,7 @@ import com.vayunmathur.library.network.WebSocketClient
 import com.vayunmathur.library.network.WsSession
 import com.vayunmathur.library.network.webSocket
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -16,10 +17,12 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketMessage
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketRequestMessage
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketResponseMessage
 import java.security.SecureRandom
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Persistent WebSocket to Signal's chat server for the primary client.
@@ -49,6 +52,7 @@ class SignalSocket(
         const val DEFAULT_HOST = "grpc.chat.signal.org"
         const val DEFAULT_PORT = 443
         private const val KEEPALIVE_INTERVAL_MS = 30_000L
+        private const val REQUEST_TIMEOUT_MS = 30_000L
         private const val RECONNECT_BASE_MS = 2_000L
         private const val RECONNECT_MAX_MS = 60_000L
         const val CLOSE_INVALID_AUTH = 4401
@@ -73,6 +77,14 @@ class SignalSocket(
         data object Connected : ConnectionState
         data class Disconnected(val reason: String) : ConnectionState
     }
+
+    /** A server response to one of our requests. */
+    data class RequestResult(val status: Int, val message: String, val body: ByteArray) {
+        val isSuccess: Boolean get() = status in 200..299
+    }
+
+    // Requests awaiting their response, keyed by request id.
+    private val pending = ConcurrentHashMap<Long, CompletableDeferred<WebSocketResponseMessage?>>()
 
     private fun wsUrl(): String {
         val scheme = if (useTls) "wss" else "ws"
@@ -148,7 +160,10 @@ class SignalSocket(
             try {
                 incoming.collect { frame ->
                     when (frame) {
-                        is WebSocketClient.WsFrame.Binary -> _messages.emit(frame.bytes)
+                        is WebSocketClient.WsFrame.Binary -> {
+                            completePending(frame.bytes)
+                            _messages.emit(frame.bytes)
+                        }
                         is WebSocketClient.WsFrame.Text -> {
                             Log.w(TAG, "unexpected text frame len=${frame.text.length}")
                             _messages.emit(frame.text.toByteArray(Charsets.UTF_8))
@@ -168,6 +183,8 @@ class SignalSocket(
                 isConnected = false
                 stopKeepalive()
                 session = null
+                // Release anyone blocked on a response rather than making them wait for the timeout.
+                failAllPending()
                 Log.i(TAG, "WebSocket session ended")
             }
         }
@@ -197,12 +214,53 @@ class SignalSocket(
         }
     }
 
-    suspend fun sendRequest(request: WebSocketRequestMessage): Boolean {
-        val msg = WebSocketMessage.newBuilder()
-            .setType(WebSocketMessage.Type.REQUEST)
-            .setRequest(request)
-            .build()
-        return send(msg.toByteArray())
+    /**
+     * Send a request and wait for the server's response, so callers can see the status code. Returns
+     * null when the frame could not be written, the socket closed, or no response arrived in time —
+     * all of which are failures, but none of which carry a status.
+     */
+    suspend fun sendRequestAwaitingResponse(
+        request: WebSocketRequestMessage,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
+    ): RequestResult? {
+        val withId = if (request.hasId() && request.id != 0L) {
+            request
+        } else {
+            request.toBuilder().setId(nextRequestId()).build()
+        }
+        val id = withId.id
+        val deferred = CompletableDeferred<WebSocketResponseMessage?>()
+        pending[id] = deferred
+        try {
+            val msg = WebSocketMessage.newBuilder()
+                .setType(WebSocketMessage.Type.REQUEST)
+                .setRequest(withId)
+                .build()
+            if (!send(msg.toByteArray())) return null
+            val response = withTimeoutOrNull(timeoutMs) { deferred.await() } ?: return null
+            return RequestResult(
+                status = if (response.hasStatus()) response.status else 0,
+                message = if (response.hasMessage()) response.message else "",
+                body = if (response.hasBody()) response.body.toByteArray() else ByteArray(0),
+            )
+        } finally {
+            pending.remove(id)
+        }
+    }
+
+    private fun completePending(bytes: ByteArray) {
+        if (pending.isEmpty()) return
+        val ws = try { WebSocketMessage.parseFrom(bytes) } catch (_: Exception) { return }
+        if (ws.type != WebSocketMessage.Type.RESPONSE || !ws.hasResponse()) return
+        val response = ws.response
+        if (!response.hasId()) return
+        pending.remove(response.id)?.complete(response)
+    }
+
+    private fun failAllPending() {
+        val entries = pending.entries.toList()
+        pending.clear()
+        entries.forEach { it.value.complete(null) }
     }
 
     suspend fun sendResponse(response: WebSocketResponseMessage): Boolean {

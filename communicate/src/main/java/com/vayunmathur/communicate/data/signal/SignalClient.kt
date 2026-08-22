@@ -33,7 +33,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * dual ACI/PNI SignalAuthData).
  *
  * All chat sends go through single PUT /v1/messages/{aci} (or /multi) as encrypted Content
- * (SignalPayload.buildPutMessagesRequest + SignalSocket.sendRequest). No per-action sub-paths.
+ * (SignalPayload.buildPutMessagesRequest + SignalSocket.sendRequestAwaitingResponse). No per-action sub-paths.
  * Receipts/typing/edit/reactions are Content peers via SignalProtocol/SignalPayload builders.
  * GroupsV2 via SignalGroups (GroupMasterKey 32B -> GroupSecretParams, PUT /v2/groups/).
  * CDSIv2 via SignalContactSync (POST https://cdsi.signal.org/v1/{mrenclave}/discovery).
@@ -264,9 +264,16 @@ object SignalClient {
     private suspend fun putMessage(aci: String, encrypted: ByteArray): Boolean {
         val sock = socket
         if (sock != null) {
-            try {
-                if (sock.sendRequest(SignalPayload.buildPutMessagesRequest(aci, encrypted))) return true
-            } catch (_: Exception) {}
+            val result = try {
+                sock.sendRequestAwaitingResponse(SignalPayload.buildPutMessagesRequest(aci, encrypted))
+            } catch (_: Exception) { null }
+            if (result != null) {
+                if (result.isSuccess) return true
+                // 409 mismatched devices / 410 stale devices are recoverable but need the per-device
+                // send that Stage 3 introduces; for now surface them instead of reporting success.
+                Log.w(TAG, "PUT /v1/messages/$aci rejected: ${result.status} ${result.message}")
+                return false
+            }
         }
         // Fallback when the websocket is not connected yet.
         return try {
@@ -274,13 +281,15 @@ object SignalClient {
                 "Authorization" to "Basic ${basicAuthHeader()}",
                 "Content-Type" to "application/octet-stream",
             )
-            NetworkClient.execute(
+            val resp = NetworkClient.execute(
                 "https://chat.signal.org/v1/messages/$aci",
                 method = "PUT",
                 headers = headers,
                 body = encrypted,
                 sslSocketFactory = signalTls(),
-            ).isSuccess
+            )
+            if (!resp.isSuccess) Log.w(TAG, "PUT /v1/messages/$aci rejected: ${resp.status} ${resp.statusMessage}")
+            resp.isSuccess
         } catch (_: Exception) { false }
     }
 
