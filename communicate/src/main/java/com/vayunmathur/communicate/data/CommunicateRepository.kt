@@ -177,6 +177,29 @@ object CommunicateRepository {
     }
 
     /**
+     * Clear the unread flags on a SIM thread's provider rows. SIM [SmsThread.unreadCount] is
+     * recomputed from the provider on every load, so a row left at `read = 0` — typically imported
+     * from a previously installed SMS app — keeps the badge forever unless something writes it
+     * back (#562). Only the default SMS app may write these columns.
+     */
+    suspend fun markSimThreadRead(context: Context, threadId: Long): Boolean = withContext(Dispatchers.IO) {
+        val values = android.content.ContentValues().apply {
+            put(Telephony.Sms.READ, 1)
+            put(Telephony.Sms.SEEN, 1)
+        }
+        // SMS and MMS are separate tables sharing the thread id; an unread thread may be either.
+        listOf(Telephony.Sms.CONTENT_URI, Telephony.Mms.CONTENT_URI).sumOf { uri ->
+            runCatching {
+                context.contentResolver.update(
+                    uri, values,
+                    "${Telephony.Sms.THREAD_ID} = ? AND ${Telephony.Sms.READ} = 0",
+                    arrayOf(threadId.toString()),
+                )
+            }.getOrDefault(0)
+        } > 0
+    }
+
+    /**
      * Map each provider thread id to its recipient addresses via `mms-sms/conversations` +
      * `mms-sms/canonical-addresses`. Threads with >1 recipient are group threads. Empty on any
      * provider error (falls back to per-message address inference).

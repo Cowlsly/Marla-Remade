@@ -147,6 +147,13 @@ fun ConversationScreen(
         }
     }
 
+    // Opening a SIM thread clears the provider's unread flags. Nothing else writes them back, and
+    // the badge is recomputed from the provider, so imported rows would stay unread forever (#562).
+    androidx.compose.runtime.LaunchedEffect(threadId, line) {
+        if (line == CommunicateLine.Sim) {
+            CommunicateRepository.markSimThreadRead(context, threadId)
+        }
+    }
     // Opening a Google Voice thread marks it read server-side via batchupdateattributes.
     androidx.compose.runtime.LaunchedEffect(remoteId, line) {
         if (line == CommunicateLine.GoogleVoice && remoteId != null) {
