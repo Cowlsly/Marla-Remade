@@ -142,23 +142,27 @@ object SignalContactSync {
         val discoveredByE164 = result.discovered.associateBy { entry -> entry.e164 }
         var onSignal = 0
         val toUpsert = byE164.map { (e164, name) ->
-            val discoveredAci = discoveredByE164[e164]?.aci
-            if (discoveredAci != null) onSignal++
+            val hit = discoveredByE164[e164]
+            // Registered means discovery returned an identity at all. The ACI is usually absent — CDSI
+            // only returns one when we already hold the contact's profile key — so the PNI is what makes
+            // a contact addressable.
+            val registered = hit != null && (hit.aci != null || hit.pni != null)
+            if (registered) onSignal++
             SignalContact(
-                // The primary key falls back to the number when the account has no usable ACI, so a
-                // row always exists; callers must check `onSignal` before treating `aci` as an ACI.
-                aci = discoveredAci ?: e164,
+                aci = hit?.aci ?: e164,
                 phoneE164 = e164,
                 displayName = name,
-                onSignal = discoveredAci != null,
+                onSignal = registered,
                 updatedAt = now,
+                pni = hit?.pni ?: "",
             )
         }
         db.contactDao().upsertAll(toUpsert)
         Log.i(
             TAG,
             "CDSI sync: device=${device.size} e164=${byE164.size} previous=${previous.size} " +
-                "new=${new.size} onSignal=$onSignal",
+                "new=${new.size} registered=$onSignal " +
+                "withAci=${result.discovered.count { it.aci != null }}",
         )
         return SyncResult(device.size, byE164.size, onSignal)
     }

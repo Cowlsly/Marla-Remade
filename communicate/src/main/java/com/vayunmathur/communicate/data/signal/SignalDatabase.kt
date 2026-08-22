@@ -40,7 +40,7 @@ import com.vayunmathur.library.util.DatabaseMigrations
         SignalProfileKey::class,
         SignalCallLog::class,
     ],
-    version = 4,
+    version = 5,
     exportSchema = false
 )
 @TypeConverters(SignalTypeConverters::class)
@@ -127,7 +127,14 @@ abstract class SignalDatabase : RoomDatabase() {
             }
         }
 
-        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4)
+        /** v4 → v5: keep the PNI from contact discovery, which is how a new contact is addressed. */
+        private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE signal_contact ADD COLUMN pni TEXT NOT NULL DEFAULT ''")
+            }
+        }
+
+        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun getDatabase(context: Context): SignalDatabase =
             SignalRepository.get(context).database()
@@ -358,6 +365,12 @@ data class SignalContact(
     val displayName: String = "",
     val onSignal: Boolean = false,
     val updatedAt: Long = 0L,
+    /**
+     * The phone-number identity. Contact discovery returns this, not the ACI — an ACI only comes back
+     * when we already hold the contact's profile key — so this is what addresses a contact we have never
+     * exchanged messages with.
+     */
+    @ColumnInfo(defaultValue = "''") val pni: String = "",
 )
 
 @Dao

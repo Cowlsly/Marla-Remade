@@ -67,6 +67,9 @@ object SignalClient {
     /** Every Signal account has device 1; linked devices get higher ids. */
     private const val PRIMARY_DEVICE_ID = 1
 
+    /** Wire prefix distinguishing a phone-number identity from an ACI, which is a bare UUID. */
+    private const val PNI_PREFIX = "PNI:"
+
     sealed interface State {
         data object Idle : State
         data object NeedsSetup : State
@@ -302,29 +305,39 @@ object SignalClient {
         }
     }
 
+    /**
+     * The service id to address on the wire for [destination], which the app may hand us as a phone
+     * number. May be an ACI (a bare UUID) or a PNI (`PNI:<uuid>`) — both are valid destinations.
+     *
+     * Contact discovery returns a PNI rather than an ACI unless we already hold the contact's profile
+     * key, so a contact we have never messaged is addressed by PNI. Their ACI arrives with their reply.
+     */
     private suspend fun resolveDestinationAci(destination: String): String? {
         val trimmed = destination.trim()
         if (trimmed.isEmpty()) return null
-        if (ACI_REGEX.matches(trimmed)) return trimmed
+        if (ACI_REGEX.matches(trimmed) || trimmed.startsWith(PNI_PREFIX)) return trimmed
 
-        knownAciFor(trimmed)?.let { return it }
+        knownServiceIdFor(trimmed)?.let { return it }
         // Not in the contact table: the number may have joined Signal since the last sync, or we may
         // never have synced. Discovery is the only way to find out.
         val ctx = appContext
         if (ctx != null) {
             runContactDiscovery(ctx)
-            knownAciFor(trimmed)?.let { return it }
+            knownServiceIdFor(trimmed)?.let { return it }
         }
         Log.w(TAG, "$trimmed is not a registered Signal user, or discovery could not confirm it")
         return null
     }
 
-    /** A UUID-shaped ACI for [e164] from the contact table, or null. */
-    private suspend fun knownAciFor(e164: String): String? {
+    /** An ACI if we know one, otherwise the PNI, for [e164]. */
+    private suspend fun knownServiceIdFor(e164: String): String? {
         val contact = try { db?.contactDao()?.getByPhone(e164) } catch (_: Exception) { null } ?: return null
-        // The `aci` column falls back to the phone number when discovery found no account, so only a
-        // UUID-shaped value is usable for addressing.
-        return contact.aci.takeIf { contact.onSignal && ACI_REGEX.matches(it) }
+        if (!contact.onSignal) return null
+        // The `aci` column falls back to the phone number when discovery returned no ACI.
+        contact.aci.takeIf { ACI_REGEX.matches(it) }?.let { return it }
+        return contact.pni.takeIf { it.isNotEmpty() }?.let { pni ->
+            if (pni.startsWith(PNI_PREFIX)) pni else "$PNI_PREFIX$pni"
+        }
     }
 
     private suspend fun sendEncryptedTo(destination: String, padded: ByteArray): Boolean {

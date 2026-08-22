@@ -67,6 +67,12 @@ class SignalE2E(
         }
     }
 
+    /**
+     * Our own address. libsignal now takes this explicitly alongside the remote one so it can tell a
+     * self-send from a peer send rather than inferring it.
+     */
+    private fun localAddress(): SignalProtocolAddress = signalAddress(ownAci, ownDeviceId)
+
     fun signalAddress(aci: String, deviceId: Int = 1): SignalProtocolAddress =
         SignalProtocolAddress(aci, deviceId)
 
@@ -95,7 +101,7 @@ class SignalE2E(
      * different format and would corrupt the stored record.
      */
     fun encryptDM(aci: String, deviceId: Int, paddedPlaintext: ByteArray): EncResult {
-        val cipher = SessionCipher(protocolStore, signalAddress(aci, deviceId))
+        val cipher = SessionCipher(protocolStore, signalAddress(aci, deviceId), localAddress())
         val msg = cipher.encrypt(paddedPlaintext)
         return EncResult(
             ciphertextType = msg.type,
@@ -149,7 +155,7 @@ class SignalE2E(
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {
         val address = signalAddress(aci, deviceId)
-        val cipher = SessionCipher(protocolStore, address)
+        val cipher = SessionCipher(protocolStore, address, localAddress())
         return if (isPreKey) {
             cipher.decrypt(org.signal.libsignal.protocol.message.PreKeySignalMessage(ciphertext))
         } else {
@@ -203,7 +209,7 @@ class SignalE2E(
             bundle.kyberPreKeySignature,
         )
         // SessionBuilder writes the real session record through the store; nothing else should.
-        SessionBuilder(protocolStore, address).process(preKeyBundle)
+        SessionBuilder(protocolStore, address, localAddress()).process(preKeyBundle)
     }
 
     fun markKyberPreKeyUsed(kyberId: Int, signedEcId: Int, baseKey: ByteArray) {

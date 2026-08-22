@@ -108,7 +108,11 @@ onnxruntimeAndroid = "1.27.0"
 # Crypto, security & credential storage
 cryptographyCore = "0.6.0"
 sqlcipherAndroid = "4.17.0"
-libsignalAndroid = "0.86.5"
+# Pinned at 0.101.0, not Maven Central's newest (0.86.5): the CDSI enclave identity is compiled into the
+# native library, and 0.86.5/0.92.0 carry a retired MRENCLAVE, so contact discovery requests
+# /v1/{stale}/discovery and the server answers 404. 0.101.0 also matches the checked-out libsignal source,
+# which keeps its API verifiable. Published by Signal, not Maven Central.
+libsignalAndroid = "0.101.0"
 # Signal's WebRTC fork plus its calling engine. Bundles its own org.webrtc, so it cannot coexist with
 # another WebRTC distribution in the same APK.
 ringrtcAndroid = "2.71.0"
