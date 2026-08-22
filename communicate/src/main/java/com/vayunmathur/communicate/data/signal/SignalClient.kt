@@ -54,6 +54,9 @@ object SignalClient {
     private val ACI_REGEX =
         Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
 
+    /** Attempts allowed to reconcile a recipient's device set before a send is abandoned. */
+    private const val SEND_ATTEMPTS = 4
+
     sealed interface State {
         data object Idle : State
         data object NeedsSetup : State
@@ -214,9 +217,10 @@ object SignalClient {
     }
 
     /**
-     * Encrypt [padded] for one recipient and PUT it. Returns false rather than falling back to
-     * plaintext: an unencrypted Content is a protocol violation that real clients discard, so sending
-     * one would disclose the message and forfeit sender authentication without even being delivered.
+     * Encrypt [padded] for every device of [aci] we have a session with and PUT them as one request.
+     * Returns false rather than falling back to plaintext: an unencrypted Content is a protocol
+     * violation that real clients discard, so sending one would disclose the message and forfeit
+     * sender authentication without even being delivered.
      */
     private suspend fun sendEncryptedTo(aci: String, padded: ByteArray): Boolean {
         val e = e2e
@@ -228,16 +232,121 @@ object SignalClient {
             Log.w(TAG, "destination is not an ACI, cannot establish a session: $aci")
             return false
         }
-        if (!e.hasSession(aci, 1)) {
-            if (!establishSession(e, aci)) return false
+        if (!e.hasSession(aci, 1) && !establishSession(e, aci)) return false
+
+        val timestamp = System.currentTimeMillis()
+        // The server reports device-set disagreements as 409/410; correcting them changes which
+        // devices we encrypt for, so the whole encrypt-and-send has to be redone.
+        for (attempt in 1..SEND_ATTEMPTS) {
+            val messages = e.deviceIdsWithSessions(aci).mapNotNull { deviceId ->
+                try {
+                    val enc = e.encryptDM(aci, deviceId, padded)
+                    SignalPayload.OutgoingPushMessage(
+                        type = SignalPayload.envelopeTypeFor(enc.ciphertextType),
+                        destinationDeviceId = deviceId,
+                        destinationRegistrationId = enc.remoteRegistrationId,
+                        content = enc.data,
+                    )
+                } catch (t: Throwable) {
+                    Log.w(TAG, "encrypt failed for $aci:$deviceId", t)
+                    null
+                }
+            }
+            if (messages.isEmpty()) {
+                Log.w(TAG, "no device of $aci could be encrypted for")
+                return false
+            }
+
+            val body = SignalPayload.buildPutMessagesBody(aci, messages, timestamp)
+            when (val outcome = putMessages(aci, body)) {
+                is SendOutcome.Success -> return true
+                is SendOutcome.Failed -> return false
+                is SendOutcome.DeviceSetChanged -> {
+                    if (!reconcileDevices(e, aci, outcome.status, outcome.body)) return false
+                    Log.i(TAG, "device set for $aci changed (${outcome.status}), retrying send")
+                }
+            }
         }
-        val encrypted = try {
-            e.encryptDM(aci, 1, padded).data
-        } catch (t: Throwable) {
-            Log.w(TAG, "encrypt failed for $aci", t)
+        Log.w(TAG, "giving up on $aci after $SEND_ATTEMPTS attempts to resolve its device set")
+        return false
+    }
+
+    private sealed interface SendOutcome {
+        data object Success : SendOutcome
+        data object Failed : SendOutcome
+        data class DeviceSetChanged(val status: Int, val body: ByteArray) : SendOutcome
+    }
+
+    private suspend fun putMessages(aci: String, jsonBody: ByteArray): SendOutcome {
+        val sock = socket
+        if (sock != null) {
+            val result = try {
+                sock.sendRequestAwaitingResponse(SignalPayload.buildPutMessagesRequest(aci, jsonBody))
+            } catch (_: Exception) { null }
+            if (result != null) {
+                if (result.isSuccess) return SendOutcome.Success
+                if (result.status == 409 || result.status == 410) {
+                    return SendOutcome.DeviceSetChanged(result.status, result.body)
+                }
+                Log.w(TAG, "PUT messages to $aci rejected: ${result.status} ${result.message}")
+                return SendOutcome.Failed
+            }
+        }
+        // Fallback when the websocket is not connected yet.
+        return try {
+            val headers = mapOf(
+                "Authorization" to "Basic ${basicAuthHeader()}",
+                "Content-Type" to "application/json",
+            )
+            val resp = NetworkClient.execute(
+                "https://chat.signal.org${SignalPayload.putMessagesPath(aci)}",
+                method = "PUT",
+                headers = headers,
+                body = jsonBody,
+                sslSocketFactory = signalTls(),
+            )
+            when {
+                resp.isSuccess -> SendOutcome.Success
+                resp.status == 409 || resp.status == 410 -> SendOutcome.DeviceSetChanged(resp.status, resp.bytes)
+                else -> {
+                    Log.w(TAG, "PUT messages to $aci rejected: ${resp.status} ${resp.statusMessage}")
+                    SendOutcome.Failed
+                }
+            }
+        } catch (_: Exception) { SendOutcome.Failed }
+    }
+
+    /**
+     * Bring our device set for [aci] back in line with the server's.
+     *
+     * 409 reports `missingDevices` (fetch pre-keys and build sessions) and `extraDevices` (archive).
+     * 410 reports `staleDevices`, which are archived so the next attempt rebuilds them. Sessions are
+     * archived rather than deleted so in-flight messages on the old chain stay decryptable.
+     */
+    private suspend fun reconcileDevices(e: SignalE2E, aci: String, status: Int, body: ByteArray): Boolean {
+        val devices = SignalDeviceMismatch.parse(status, body.toString(Charsets.UTF_8)) ?: run {
+            Log.w(TAG, "could not parse $status device mismatch body for $aci")
             return false
         }
-        return putMessage(aci, encrypted)
+        devices.archive.forEach { e.archiveSession(aci, it) }
+        if (devices.fetch.isEmpty()) return devices.archive.isNotEmpty()
+
+        val bundles = try {
+            SignalKeysApi.fetchPreKeys(aci, 1, basicAuthHeader(), signalTls())
+        } catch (t: Throwable) {
+            Log.w(TAG, "prekey fetch for missing devices of $aci failed", t)
+            return false
+        }
+        var built = false
+        for (device in bundles.filter { it.deviceId in devices.fetch }) {
+            try {
+                e.processPreKeyBundle(aci, device.deviceId, device.bundle)
+                built = true
+            } catch (t: Throwable) {
+                Log.w(TAG, "failed to build session for $aci:${device.deviceId}", t)
+            }
+        }
+        return built || devices.archive.isNotEmpty()
     }
 
     /**
@@ -267,38 +376,6 @@ object SignalClient {
             }
         }
         return e.hasSession(aci, 1)
-    }
-
-    private suspend fun putMessage(aci: String, encrypted: ByteArray): Boolean {
-        val sock = socket
-        if (sock != null) {
-            val result = try {
-                sock.sendRequestAwaitingResponse(SignalPayload.buildPutMessagesRequest(aci, encrypted))
-            } catch (_: Exception) { null }
-            if (result != null) {
-                if (result.isSuccess) return true
-                // 409 mismatched devices / 410 stale devices are recoverable but need the per-device
-                // send that Stage 3 introduces; for now surface them instead of reporting success.
-                Log.w(TAG, "PUT /v1/messages/$aci rejected: ${result.status} ${result.message}")
-                return false
-            }
-        }
-        // Fallback when the websocket is not connected yet.
-        return try {
-            val headers = mapOf(
-                "Authorization" to "Basic ${basicAuthHeader()}",
-                "Content-Type" to "application/octet-stream",
-            )
-            val resp = NetworkClient.execute(
-                "https://chat.signal.org/v1/messages/$aci",
-                method = "PUT",
-                headers = headers,
-                body = encrypted,
-                sslSocketFactory = signalTls(),
-            )
-            if (!resp.isSuccess) Log.w(TAG, "PUT /v1/messages/$aci rejected: ${resp.status} ${resp.statusMessage}")
-            resp.isSuccess
-        } catch (_: Exception) { false }
     }
 
     /** TLS factory that trusts Signal's private service CA (chat/cdn/storage/cdsi); null before init. */

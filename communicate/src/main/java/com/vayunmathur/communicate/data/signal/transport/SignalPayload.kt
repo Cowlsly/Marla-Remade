@@ -3,12 +3,19 @@ package com.vayunmathur.communicate.data.signal.transport
 import android.os.Build
 import com.google.protobuf.ByteString
 import com.vayunmathur.communicate.data.signal.SignalAuthData
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import org.json.JSONObject
+import org.signal.libsignal.protocol.message.CiphertextMessage
 import org.whispersystems.signalservice.internal.push.SignalServiceProtos
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketMessage
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketRequestMessage
 import signal.proto.chat_websocket.SignalChatWebsocket.WebSocketResponseMessage
 import java.security.SecureRandom
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 
 /**
  * Payload builder for the Signal primary client.
@@ -19,9 +26,10 @@ import java.security.SecureRandom
  *  - libsignal/rust/protocol/src/proto/{wire,sealed_sender}.proto
  *
  * Transport framing: binary protobuf WebSocketMessage (type REQUEST/RESPONSE, uint64 id).
- * All chat sends go via single path PUT /v1/messages/{destinationAci} (or /v1/messages/multi)
- * with body = encrypted Content. No per-action sub-paths.
+ * Chat sends go via PUT /v1/messages/{destinationAci} with a JSON OutgoingPushMessageList body
+ * carrying one base64 ciphertext per destination device.
  */
+@OptIn(ExperimentalEncodingApi::class)
 object SignalPayload {
 
     private val secureRandom = SecureRandom()
@@ -81,24 +89,80 @@ object SignalPayload {
         body: ByteArray? = null,
     ): ByteArray = buildWebSocketMessageForResponse(buildWebSocketResponseMessage(id, status, message, body)).toByteArray()
 
-    // ---- Single send path: PUT /v1/messages/{aci} and /multi ----
+    // ---- Single send path: PUT /v1/messages/{aci} ----
+
+    /**
+     * One encrypted message for one destination device, matching the official client's
+     * `OutgoingPushMessage`. [type] is an **Envelope** type, which is a different numbering space from
+     * `CiphertextMessage` — see [envelopeTypeFor].
+     */
+    data class OutgoingPushMessage(
+        val type: Int,
+        val destinationDeviceId: Int,
+        val destinationRegistrationId: Int,
+        val content: ByteArray,
+    )
+
+    /**
+     * Map a `CiphertextMessage` type to the `Envelope.Type` the server expects. The two enums do not
+     * share values: `WHISPER_TYPE` is 2 but `DOUBLE_RATCHET` is 1.
+     */
+    fun envelopeTypeFor(ciphertextMessageType: Int): Int = when (ciphertextMessageType) {
+        CiphertextMessage.PREKEY_TYPE ->
+            SignalServiceProtos.Envelope.Type.PREKEY_MESSAGE.number
+        CiphertextMessage.WHISPER_TYPE ->
+            SignalServiceProtos.Envelope.Type.DOUBLE_RATCHET.number
+        else -> throw IllegalArgumentException("unsendable ciphertext type $ciphertextMessageType")
+    }
+
+    /**
+     * The `PUT /v1/messages/{aci}` JSON body (`OutgoingPushMessageList`). `content` is base64 **with**
+     * padding here, unlike the unpadded encoding used for pre-keys.
+     */
+    fun buildPutMessagesBody(
+        destinationAci: String,
+        messages: List<OutgoingPushMessage>,
+        timestamp: Long,
+        online: Boolean = false,
+        urgent: Boolean = true,
+    ): ByteArray {
+        val list = buildJsonObject {
+            put("destination", destinationAci)
+            put("timestamp", timestamp)
+            put("online", online)
+            put("urgent", urgent)
+            putJsonArray("messages") {
+                messages.forEach { m ->
+                    add(
+                        buildJsonObject {
+                            put("type", m.type)
+                            put("destinationDeviceId", m.destinationDeviceId)
+                            put("destinationRegistrationId", m.destinationRegistrationId)
+                            // Padded base64 here, unlike the unpadded encoding used for pre-keys.
+                            put("content", Base64.Default.encode(m.content))
+                        },
+                    )
+                }
+            }
+        }
+        return list.toString().toByteArray(Charsets.UTF_8)
+    }
+
+    fun putMessagesPath(destinationAci: String, story: Boolean = false): String =
+        "/v1/messages/$destinationAci?story=$story"
 
     fun buildPutMessagesRequest(
         destinationAci: String,
-        encryptedContentBytes: ByteArray,
-        isMulti: Boolean = false,
+        jsonBody: ByteArray,
+        story: Boolean = false,
         id: Long = nextRequestId(),
-    ): WebSocketRequestMessage {
-        val path = if (isMulti) "/v1/messages/multi" else "/v1/messages/$destinationAci"
-        return buildWebSocketRequestMessage(verb = "PUT", path = path, body = encryptedContentBytes, id = id)
-    }
-
-    fun encodePutMessagesRequest(
-        destinationAci: String,
-        encryptedContentBytes: ByteArray,
-        isMulti: Boolean = false,
-        id: Long = nextRequestId(),
-    ): ByteArray = buildWebSocketMessageForRequest(buildPutMessagesRequest(destinationAci, encryptedContentBytes, isMulti, id)).toByteArray()
+    ): WebSocketRequestMessage = buildWebSocketRequestMessage(
+        verb = "PUT",
+        path = putMessagesPath(destinationAci, story),
+        body = jsonBody,
+        id = id,
+        headers = listOf("content-type:application/json"),
+    )
 
     fun buildKeepaliveRequest(id: Long = nextRequestId()): WebSocketRequestMessage =
         buildWebSocketRequestMessage(verb = "PUT", path = "/v1/keepalive", id = id)

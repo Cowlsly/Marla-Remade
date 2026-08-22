@@ -74,17 +74,46 @@ class SignalE2E(
         try { protocolStore.deleteSession(signalAddress(aci, deviceId)) } catch (_: Exception) {}
     }
 
-    data class EncResult(val type: String, val data: ByteArray)
+    /** One encrypted message plus the metadata the send envelope needs alongside it. */
+    data class EncResult(
+        /** A `CiphertextMessage` type, not an `Envelope` type — the numbering spaces differ. */
+        val ciphertextType: Int,
+        val remoteRegistrationId: Int,
+        val data: ByteArray,
+    )
+
     /**
      * Encrypt for an established session. libsignal owns the session record through [protocolStore];
      * a failure propagates rather than falling back to the Rust crate, which serializes sessions in a
      * different format and would corrupt the stored record.
      */
     fun encryptDM(aci: String, deviceId: Int, paddedPlaintext: ByteArray): EncResult {
-        val address = signalAddress(aci, deviceId)
-        val msg = SessionCipher(protocolStore, address).encrypt(paddedPlaintext)
-        val typeStr = when (msg.type) { 3 -> "prekey"; else -> "whisper" }
-        return EncResult(typeStr, msg.serialize())
+        val cipher = SessionCipher(protocolStore, signalAddress(aci, deviceId))
+        val msg = cipher.encrypt(paddedPlaintext)
+        return EncResult(
+            ciphertextType = msg.type,
+            remoteRegistrationId = cipher.remoteRegistrationId,
+            data = msg.serialize(),
+        )
+    }
+
+    /** Devices of [aci] we already have a session with, always including device 1. */
+    fun deviceIdsWithSessions(aci: String): List<Int> {
+        val subDevices = try { protocolStore.getSubDeviceSessions(aci) } catch (_: Exception) { emptyList() }
+        return (listOf(1) + subDevices).distinct().sorted()
+    }
+
+    /**
+     * Archive rather than delete: the old chain must stay readable so messages already in flight on it
+     * can still be decrypted.
+     */
+    fun archiveSession(aci: String, deviceId: Int) {
+        try {
+            val address = signalAddress(aci, deviceId)
+            val record = protocolStore.loadSession(address)
+            record.archiveCurrentState()
+            protocolStore.storeSession(address, record)
+        } catch (_: Exception) {}
     }
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {
