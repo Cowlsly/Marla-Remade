@@ -1,3 +1,91 @@
+# Line-ending policy for the whole repo.
+#
+# Why this file exists: the repo used to have no eol policy and `core.autocrlf=false`, so
+# whatever bytes an editor wrote were the bytes that got committed. Some files ended up stored
+# with CRLF and others with LF, sometimes in the same directory. Any tool that rewrote a file
+# wholesale then flipped every line, turning a three-line edit into a whole-file diff that
+# still built and still passed tests — so nothing caught it except review. At the worst point
+# 1329 files in the working tree differed from HEAD by line endings alone.
+#
+# `text=auto eol=lf` makes git normalise to LF in the index and check out LF everywhere, so a
+# CRLF-writing editor no longer produces a diff at all. Binary types are listed explicitly
+# rather than left to git's NUL-byte heuristic, because a false "text" guess would corrupt
+# them irreversibly.
+
+# Default: treat as text, store LF, check out LF.
+* text=auto eol=lf
+
+# ---- Shell / tooling that MUST be LF ----
+# These are executed by bash, including under WSL where CRLF gives "bad interpreter".
+*.sh    text eol=lf
+gradlew text eol=lf
+
+# ---- Windows-only scripts that want CRLF ----
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# ---- Images ----
+*.png  -text
+*.jpg  -text
+*.jpeg -text
+*.webp -text
+*.gif  -text
+*.ico  -text
+*.bmp  -text
+
+# ---- Models / large binary data ----
+*.onnx    -text
+*.nnue    -text
+*.tflite  -text
+*.pt      -text
+*.bin     -text
+*.dat     -text
+*.db      -text
+*.pmtiles -text
+*.spv     -text
+
+# ---- Archives / compressed ----
+*.zip -text
+*.gz  -text
+*.br  -text
+*.7z  -text
+*.xz  -text
+
+# ---- Native / JVM build output ----
+*.so    -text
+*.a     -text
+*.o     -text
+*.jar   -text
+*.aar   -text
+*.apk   -text
+*.aab   -text
+*.dex   -text
+*.class -text
+
+# ---- Fonts ----
+*.ttf   -text
+*.otf   -text
+*.woff  -text
+*.woff2 -text
+*.eot   -text
+
+# ---- Audio / video ----
+*.ogg  -text
+*.mp3  -text
+*.mp4  -text
+*.wav  -text
+*.flac -text
+*.m4a  -text
+*.webm -text
+
+# ---- Office / documents ----
+*.pdf  -text
+*.docx -text
+*.xlsx -text
+
+# ---- Keys and certificates ----
 # Certificate DER files are binary; never apply EOL (LF<->CRLF) conversion,
 # which would corrupt the bytes and break TLS trust-bundle loading.
-*.der binary
+*.der      -text
+*.jks      -text
+*.keystore -text
