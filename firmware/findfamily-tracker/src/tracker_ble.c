@@ -59,6 +59,8 @@ static enum ff_ble_mode desired_mode = FF_BLE_MODE_IDLE;
 
 static struct bt_le_ext_adv *pairing_adv;
 static struct bt_le_ext_adv *beacon_adv;
+/* Runs alongside beacon_adv so the owner can connect while crowd-finding. */
+static struct bt_le_ext_adv *connect_adv;
 
 /*
  * Service-data AD payload: the 16-byte UUID followed by [16B epochId][1B battery].
@@ -332,18 +334,36 @@ static int create_adv_sets(void)
 		.interval_max = BT_GAP_ADV_FAST_INT_MAX_2,
 	};
 	/*
-	 * Extended connectable. BT_LE_ADV_OPT_EXT_ADV without OPT_CODED pins the
-	 * secondary PHY to 1M, so a phone scanning with setLegacy(false) and the default
-	 * PHY sees it. BT_LE_ADV_OPT_SCANNABLE is intentionally absent: extended
-	 * advertisements can be connectable or scannable, not both, and connectable is
-	 * what lets the owner write UWB params.
+	 * Beacon data set: extended, NON-connectable.
+	 *
+	 * BT_LE_ADV_OPT_EXT_ADV without OPT_CODED pins the secondary PHY to 1M, so a phone
+	 * scanning with setLegacy(false) on the default PHY sees it.
+	 *
+	 * Deliberately NOT connectable. A connectable extended advertising set cannot carry
+	 * advertising data at all in BLE 5 — ask for both and the controller keeps the data
+	 * and quietly drops connectability, so the tracker beacons perfectly while being
+	 * impossible to connect to. That cost an evening: the phone timed out with GATT
+	 * status 147 while Android's stale service cache kept reporting success from a
+	 * previous session. Connectability now lives on its own set below.
 	 */
 	const struct bt_le_adv_param beacon_param = {
 		.id = BT_ID_DEFAULT,
-		.options = BT_LE_ADV_OPT_EXT_ADV | BT_LE_ADV_OPT_CONN,
+		.options = BT_LE_ADV_OPT_EXT_ADV,
 		.interval_min = BT_GAP_MS_TO_ADV_INTERVAL(CONFIG_FF_TRACKER_BEACON_INTERVAL_MS),
 		.interval_max = BT_GAP_MS_TO_ADV_INTERVAL(CONFIG_FF_TRACKER_BEACON_INTERVAL_MS + 100),
 		.secondary_max_skip = 0,
+	};
+	/*
+	 * Connectable set, run alongside the beacon so the owner can still write UWB session
+	 * params while crowd-finding. Legacy connectable and carries no data: finders locate
+	 * the tracker by the beacon's rotating id, and the owner already knows its address,
+	 * so advertising anything identifiable here would only leak a stable identifier.
+	 */
+	const struct bt_le_adv_param connect_param = {
+		.id = BT_ID_DEFAULT,
+		.options = BT_LE_ADV_OPT_CONN,
+		.interval_min = BT_GAP_ADV_SLOW_INT_MIN,
+		.interval_max = BT_GAP_ADV_SLOW_INT_MAX,
 	};
 	int rc;
 
@@ -361,6 +381,13 @@ static int create_adv_sets(void)
 	rc = bt_le_ext_adv_create(&beacon_param, NULL, &beacon_adv);
 	if (rc) {
 		LOG_ERR("creating beacon adv set: %d", rc);
+		return rc;
+	}
+
+	/* No data on this one, deliberately — see connect_param. */
+	rc = bt_le_ext_adv_create(&connect_param, NULL, &connect_adv);
+	if (rc) {
+		LOG_ERR("creating connectable adv set: %d", rc);
 		return rc;
 	}
 	return 0;
@@ -444,6 +471,10 @@ int ff_ble_set_mode(enum ff_ble_mode mode)
 		if (rc && rc != -EALREADY) {
 			LOG_WRN("stopping beacon adv: %d", rc);
 		}
+		rc = bt_le_ext_adv_stop(connect_adv);
+		if (rc && rc != -EALREADY) {
+			LOG_WRN("stopping connectable adv: %d", rc);
+		}
 	}
 	current_mode = FF_BLE_MODE_IDLE;
 
@@ -486,7 +517,16 @@ int ff_ble_set_mode(enum ff_ble_mode mode)
 			LOG_ERR("starting beacon adv: %d", rc);
 			return rc;
 		}
-		LOG_INF("beacon mode: advertising rotating epoch id (extended)");
+		/*
+		 * Connectability is a separate set. Failing to start it is not fatal — the
+		 * tracker is still findable, it just can't be ranged until the next attempt
+		 * — so log and carry on rather than dropping out of beacon mode.
+		 */
+		rc = bt_le_ext_adv_start(connect_adv, BT_LE_EXT_ADV_START_DEFAULT);
+		if (rc) {
+			LOG_WRN("starting connectable adv: %d (UWB handover unavailable)", rc);
+		}
+		LOG_INF("beacon mode: rotating epoch id (extended) + connectable set");
 		return 0;
 	}
 	return -EINVAL;
