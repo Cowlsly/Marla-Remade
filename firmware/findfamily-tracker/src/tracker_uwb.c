@@ -49,18 +49,26 @@ LOG_MODULE_REGISTER(ff_uwb, LOG_LEVEL_INF);
 #define UWB_THREAD_PRIORITY 5
 
 /*
- * Ranging timing. These are the FiRa defaults (the vendor SDK's fira_default_params.h
- * carries the same values, but that header ships with its sample apps rather than the
- * library, so they are spelled out here).
+ * Ranging timing, and the STS/PHY settings that go with it.
  *
- * Under static STS these are *not* negotiated: the controller and controlee each
- * configure them and they have to agree, so these three constants are the most likely
- * thing to need changing if the phone won't range. 2400 RSTU is 2 ms; 25 slots of that
- * inside a 200 ms block leaves the radio idle most of the time.
+ * These are NOT free choices: under static STS none of it is negotiated, so the controlee
+ * has to be configured identically to the controller or it listens on the wrong schedule
+ * and never hears a poll. The values below were read off the wire — Android's UWB HAL logs
+ * its raw UCI SESSION_SET_APP_CONFIG, and these are the TLVs it sends for
+ * RangingParams CONFIG_UNICAST_DS_TWR:
+ *
+ *   SLOT_DURATION      2400 RSTU (2 ms)
+ *   RANGING_DURATION    120 ms   <- block duration
+ *   SLOTS_PER_RR          6
+ *   HOPPING_MODE          1      <- enabled
+ *
+ * Guessing these from the FiRa defaults instead (200 ms / 25 slots / no hopping) produced a
+ * session where the phone reported UCI status 0x21, RX timeout, on every round.
  */
 #define SLOT_DURATION_RSTU 2400
-#define BLOCK_DURATION_MS 200
-#define ROUND_DURATION_SLOTS 25
+#define BLOCK_DURATION_MS 120
+#define ROUND_DURATION_SLOTS 6
+#define ROUND_HOPPING true
 
 static struct uwbmac_context *uwbmac_ctx;
 static struct fira_context fira_ctx;
@@ -395,7 +403,7 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	sp.slot_duration_rstu = SLOT_DURATION_RSTU;
 	sp.block_duration_ms = BLOCK_DURATION_MS;
 	sp.round_duration_slots = ROUND_DURATION_SLOTS;
-	sp.round_hopping = false;
+	sp.round_hopping = ROUND_HOPPING;
 	sp.block_stride_length = 0;
 	sp.report_rssi = 1;
 	sp.enable_diagnostics = false;
@@ -479,6 +487,7 @@ static void uwb_session_thread(void *a, void *b, void *c)
 
 	while (true) {
 		k_sem_take(&session_request, K_FOREVER);
+		LOG_INF("session request picked up: starting FiRa setup");
 		(void)ff_uwb_start(&requested_params, requested_secret);
 	}
 }
@@ -501,6 +510,10 @@ int ff_uwb_on_params(const uint8_t *data, size_t len, const uint8_t *secret)
 	memcpy(requested_secret, secret, sizeof(requested_secret));
 
 	/* Hand off and return immediately: the caller is the main loop. */
+	LOG_INF("UWB session requested: peer=%02x%02x session=%08x ch=%u preamble=%u",
+		requested_params.peer_address[0], requested_params.peer_address[1],
+		requested_params.session_id, requested_params.channel,
+		requested_params.preamble_index);
 	k_sem_give(&session_request);
 	return 0;
 }

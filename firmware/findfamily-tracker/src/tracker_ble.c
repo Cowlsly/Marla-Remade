@@ -186,6 +186,18 @@ static ssize_t on_provision_write(struct bt_conn *conn, const struct bt_gatt_att
 		return 0;
 	}
 
+	/*
+	 * Provisioning is only meaningful while unprovisioned. Refusing it once bound also
+	 * surfaces a misdirected write: an 8-byte UWB session-params write landing here
+	 * instead of on the UWB characteristic would otherwise be silently accepted as a
+	 * partial chunk of a long write, and reported to the phone as success.
+	 */
+	if (state->provisioned) {
+		LOG_WRN("provisioning write of %u bytes at offset %u refused: already "
+			"provisioned (misdirected UWB write?)", len, offset);
+		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
+	}
+
 	if (offset + len > sizeof(provision_staging)) {
 		LOG_WRN("provisioning write past end of blob (offset=%u len=%u)", offset, len);
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
@@ -235,18 +247,23 @@ static ssize_t on_uwb_write(struct bt_conn *conn, const struct bt_gatt_attr *att
 	ARG_UNUSED(attr);
 	ARG_UNUSED(flags);
 
+	LOG_INF("UWB params write: len=%u offset=%u", len, offset);
+
 	if (offset != 0U) {
+		LOG_WRN("UWB params write rejected: offset=%u (expected 0)", offset);
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_OFFSET);
 	}
 	if (len != FF_UWB_PARAMS_LEN) {
+		LOG_WRN("UWB params write rejected: %u bytes (expected %d)", len,
+			FF_UWB_PARAMS_LEN);
 		return BT_GATT_ERR(BT_ATT_ERR_INVALID_ATTRIBUTE_LEN);
 	}
 	if (!state->provisioned) {
 		/* Without the secret there is no session key, so there is nothing to
-		 * start — and an unprovisioned tracker has no owner to be ranged by. */
+		 * start - and an unprovisioned tracker has no owner to be ranged by. */
+		LOG_WRN("UWB params write rejected: not provisioned");
 		return BT_GATT_ERR(BT_ATT_ERR_WRITE_NOT_PERMITTED);
 	}
-
 	/* Deriving the STS key is PSA work; hand it to the main loop. */
 	memcpy(pending_uwb_params, buf, FF_UWB_PARAMS_LEN);
 	atomic_set(&pending_uwb, 1);
