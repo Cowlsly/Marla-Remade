@@ -57,6 +57,9 @@ object SignalClient {
     /** Attempts allowed to reconcile a recipient's device set before a send is abandoned. */
     private const val SEND_ATTEMPTS = 4
 
+    /** Every Signal account has device 1; linked devices get higher ids. */
+    private const val PRIMARY_DEVICE_ID = 1
+
     sealed interface State {
         data object Idle : State
         data object NeedsSetup : State
@@ -232,29 +235,43 @@ object SignalClient {
             Log.w(TAG, "destination is not an ACI, cannot establish a session: $aci")
             return false
         }
-        if (!e.hasSession(aci, 1) && !establishSession(e, aci)) return false
+        if (!e.hasSession(aci, PRIMARY_DEVICE_ID) && !establishSession(e, aci)) return false
 
         val timestamp = System.currentTimeMillis()
         // The server reports device-set disagreements as 409/410; correcting them changes which
-        // devices we encrypt for, so the whole encrypt-and-send has to be redone.
+        // devices we encrypt for, so the whole encrypt-and-send has to be redone. The timestamp is
+        // deliberately not regenerated — it is the message's identity for recipient-side dedup.
         for (attempt in 1..SEND_ATTEMPTS) {
-            val messages = e.deviceIdsWithSessions(aci).mapNotNull { deviceId ->
+            val targets = e.deviceIdsWithSessions(aci)
+            val messages = ArrayList<SignalPayload.OutgoingPushMessage>(targets.size)
+            var primaryFailed = false
+            for (deviceId in targets) {
                 try {
                     val enc = e.encryptDM(aci, deviceId, padded)
-                    SignalPayload.OutgoingPushMessage(
-                        type = SignalPayload.envelopeTypeFor(enc.ciphertextType),
-                        destinationDeviceId = deviceId,
-                        destinationRegistrationId = enc.remoteRegistrationId,
-                        content = enc.data,
+                    messages.add(
+                        SignalPayload.OutgoingPushMessage(
+                            type = SignalPayload.envelopeTypeFor(enc.ciphertextType),
+                            destinationDeviceId = deviceId,
+                            destinationRegistrationId = enc.remoteRegistrationId,
+                            content = enc.data,
+                        ),
                     )
                 } catch (t: Throwable) {
                     Log.w(TAG, "encrypt failed for $aci:$deviceId", t)
-                    null
+                    if (deviceId == PRIMARY_DEVICE_ID) primaryFailed = true
                 }
+            }
+            if (primaryFailed) {
+                // Delivering to linked devices but not the recipient's primary is not a send.
+                Log.w(TAG, "could not encrypt for $aci's primary device, abandoning send")
+                return false
             }
             if (messages.isEmpty()) {
                 Log.w(TAG, "no device of $aci could be encrypted for")
                 return false
+            }
+            if (messages.size < targets.size) {
+                Log.w(TAG, "sending to ${messages.size} of ${targets.size} devices for $aci")
             }
 
             val body = SignalPayload.buildPutMessagesBody(aci, messages, timestamp)
@@ -317,36 +334,36 @@ object SignalClient {
     }
 
     /**
-     * Bring our device set for [aci] back in line with the server's.
+     * Bring our device set for [aci] back in line with the server's. Returns whether anything actually
+     * changed — retrying with an identical device set would just produce the same rejection.
      *
      * 409 reports `missingDevices` (fetch pre-keys and build sessions) and `extraDevices` (archive).
-     * 410 reports `staleDevices`, which are archived so the next attempt rebuilds them. Sessions are
-     * archived rather than deleted so in-flight messages on the old chain stay decryptable.
+     * 410 reports `staleDevices`, which are archived and then rebuilt. Sessions are archived rather
+     * than deleted so in-flight messages on the old chain stay decryptable.
      */
     private suspend fun reconcileDevices(e: SignalE2E, aci: String, status: Int, body: ByteArray): Boolean {
         val devices = SignalDeviceMismatch.parse(status, body.toString(Charsets.UTF_8)) ?: run {
             Log.w(TAG, "could not parse $status device mismatch body for $aci")
             return false
         }
-        devices.archive.forEach { e.archiveSession(aci, it) }
-        if (devices.fetch.isEmpty()) return devices.archive.isNotEmpty()
+        var changed = devices.archive.count { e.archiveSession(aci, it) } > 0
+        if (devices.fetch.isEmpty()) return changed
 
         val bundles = try {
             SignalKeysApi.fetchPreKeys(aci, 1, basicAuthHeader(), signalTls())
         } catch (t: Throwable) {
-            Log.w(TAG, "prekey fetch for missing devices of $aci failed", t)
-            return false
+            Log.w(TAG, "prekey fetch for changed devices of $aci failed", t)
+            return changed
         }
-        var built = false
         for (device in bundles.filter { it.deviceId in devices.fetch }) {
             try {
                 e.processPreKeyBundle(aci, device.deviceId, device.bundle)
-                built = true
+                changed = true
             } catch (t: Throwable) {
                 Log.w(TAG, "failed to build session for $aci:${device.deviceId}", t)
             }
         }
-        return built || devices.archive.isNotEmpty()
+        return changed
     }
 
     /**

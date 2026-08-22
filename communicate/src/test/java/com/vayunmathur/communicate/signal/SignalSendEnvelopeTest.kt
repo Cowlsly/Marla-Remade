@@ -76,11 +76,12 @@ class SignalSendEnvelopeTest {
     }
 
     @Test
-    fun parses410StaleDevicesAsArchiveOnly() {
-        // Stale sessions are archived, not refetched directly; the retry rebuilds them.
+    fun parses410StaleDevicesAsArchiveAndRebuild() {
+        // Archiving alone would leave the device unsendable until a later 409 named it, so a stale
+        // device is both archived (keeping the old chain readable) and refetched.
         val m = SignalDeviceMismatch.parse(410, """{"staleDevices":[2]}""")!!
-        assertTrue(m.fetch.isEmpty())
         assertEquals(setOf(2), m.archive)
+        assertEquals(setOf(2), m.fetch)
     }
 
     @Test

@@ -105,15 +105,21 @@ class SignalE2E(
 
     /**
      * Archive rather than delete: the old chain must stay readable so messages already in flight on it
-     * can still be decrypted.
+     * can still be decrypted. Returns whether a stored record was actually changed — no-ops for a
+     * device we hold no session for, which would otherwise materialise an empty record that
+     * [deviceIdsWithSessions] then reports forever.
      */
-    fun archiveSession(aci: String, deviceId: Int) {
-        try {
+    fun archiveSession(aci: String, deviceId: Int): Boolean {
+        if (!runBlocking { db.e2eSessionDao().exists(aci, deviceId) }) return false
+        return try {
             val address = signalAddress(aci, deviceId)
             val record = protocolStore.loadSession(address)
             record.archiveCurrentState()
             protocolStore.storeSession(address, record)
-        } catch (_: Exception) {}
+            true
+        } catch (_: Exception) {
+            false
+        }
     }
 
     fun decryptDM(aci: String, deviceId: Int, isPreKey: Boolean, ciphertext: ByteArray): ByteArray {

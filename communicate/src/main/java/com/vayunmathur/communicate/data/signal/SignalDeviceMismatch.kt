@@ -34,8 +34,12 @@ data class SignalDeviceMismatch(
                     fetch = root.ints("missingDevices"),
                     archive = root.ints("extraDevices"),
                 )
-                // Stale sessions are archived so the next attempt rebuilds them from fresh pre-keys.
-                410 -> SignalDeviceMismatch(fetch = emptySet(), archive = root.ints("staleDevices"))
+                // Stale sessions are archived to keep the old chain readable, then rebuilt from fresh
+                // pre-keys. Archiving alone would leave the device unsendable until the server came
+                // back with a 409 naming it.
+                410 -> root.ints("staleDevices").let { stale ->
+                    SignalDeviceMismatch(fetch = stale, archive = stale)
+                }
                 else -> return null
             }
             return if (result.fetch.isEmpty() && result.archive.isEmpty()) null else result

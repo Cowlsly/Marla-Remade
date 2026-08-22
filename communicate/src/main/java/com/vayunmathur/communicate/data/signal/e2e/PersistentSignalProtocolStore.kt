@@ -103,8 +103,14 @@ class PersistentSignalProtocolStore(
             }
         }
 
+    /**
+     * Devices of [aci] with a usable session. Uses the same sender-chain test as [containsSession] so
+     * archived or empty records are not reported — otherwise a device we can no longer encrypt for
+     * would be retried on every send.
+     */
     override fun getSubDeviceSessions(name: String): List<Int> =
-        runBlocking { db.e2eSessionDao().getSubDeviceIds(name) }.filter { it != 1 }
+        runBlocking { db.e2eSessionDao().getSubDeviceIds(name) }
+            .filter { it != 1 && containsSession(SignalProtocolAddress(name, it)) }
 
     override fun storeSession(address: SignalProtocolAddress, record: SessionRecord) {
         runBlocking {
