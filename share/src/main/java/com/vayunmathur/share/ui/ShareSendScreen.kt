@@ -19,6 +19,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CircularProgressIndicator
@@ -26,6 +27,8 @@ import com.vayunmathur.library.ui.LinearProgressIndicator
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
+import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.share.R
 import com.vayunmathur.share.network.transport.Connection
 import com.vayunmathur.share.platform.discovery.DiscoverySource
@@ -34,6 +37,33 @@ import com.vayunmathur.share.domain.protocol.ShareState
 import com.vayunmathur.share.platform.ShareViewModel
 import com.vayunmathur.share.platform.ShareActions
 import com.vayunmathur.share.platform.SendUiState
+
+/**
+ * The whole in-app surface: sending.
+ *
+ * Receiving has no screen. It is driven by notifications and turned on and off from a Quick
+ * Settings tile, so it works when the app has never been opened.
+ *
+ * [onOpenAirDropProbe] opens the AirDrop transport diagnostic, which is not part of the send
+ * flow and shares nothing with it.
+ */
+@Composable
+fun ShareSendPage(viewModel: ShareViewModel, onOpenAirDropProbe: () -> Unit) {
+    AppScaffold(
+        title = stringResource(R.string.app_name),
+        actions = {
+            TextButton(onClick = onOpenAirDropProbe) {
+                Text(stringResource(R.string.share_airdrop_probe))
+            }
+        },
+        scrollBehavior = appBarScrollBehavior(),
+    ) { padding ->
+        ShareSendScreen(
+            viewModel = viewModel,
+            modifier = Modifier.fillMaxSize().padding(padding),
+        )
+    }
+}
 
 @Composable
 fun ShareSendScreen(
