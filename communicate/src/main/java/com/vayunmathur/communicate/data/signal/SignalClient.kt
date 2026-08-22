@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
+import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
@@ -220,10 +221,7 @@ object SignalClient {
             return false
         }
         if (!e.hasSession(aci, 1)) {
-            // Establishing one needs a prekey-bundle fetch (GET /v2/keys/{aci}/*), which is not
-            // implemented yet. Refuse rather than emit something readable.
-            Log.w(TAG, "no session for $aci and prekey fetch is not implemented; refusing to send")
-            return false
+            if (!establishSession(e, aci)) return false
         }
         val encrypted = try {
             e.encryptDM(aci, 1, padded).data
@@ -232,6 +230,35 @@ object SignalClient {
             return false
         }
         return putMessage(aci, encrypted)
+    }
+
+    /**
+     * Fetch pre-keys for [aci] and build sessions for every device the server reports. Returns whether
+     * device 1 ended up with a usable session, since that is the one this send targets.
+     */
+    private suspend fun establishSession(e: SignalE2E, aci: String): Boolean {
+        val bundles = try {
+            SignalKeysApi.fetchPreKeys(aci, 1, basicAuthHeader(), signalTls())
+        } catch (u: SignalKeysApi.UnregisteredUserException) {
+            Log.w(TAG, "cannot send to $aci: ${u.message}")
+            return false
+        } catch (t: Throwable) {
+            Log.w(TAG, "prekey fetch failed for $aci", t)
+            return false
+        }
+        if (bundles.isEmpty()) {
+            Log.w(TAG, "no usable prekey bundles for $aci")
+            return false
+        }
+        for (device in bundles) {
+            try {
+                e.processPreKeyBundle(aci, device.deviceId, device.bundle)
+            } catch (t: Throwable) {
+                // An untrusted identity key lands here; one bad device shouldn't block the others.
+                Log.w(TAG, "failed to build session for $aci:${device.deviceId}", t)
+            }
+        }
+        return e.hasSession(aci, 1)
     }
 
     private suspend fun putMessage(aci: String, encrypted: ByteArray): Boolean {
