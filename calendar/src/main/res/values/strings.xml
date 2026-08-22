@@ -212,6 +212,14 @@
     <string name="create_new_calendar">+ Create new calendar</string>
     <!-- Settings: row to open file picker for .ics import -->
     <string name="import_ics_file">Import .ics file</string>
+    <!-- Settings: row to choose a destination file for .ics export -->
+    <string name="export_ics_file">Export .ics file</string>
+    <!-- Settings: row to export events to an .ics file -->
+    <string name="export_events_to_ics_file">Export events to an .ics file</string>
+    <!-- Confirmation after writing an .ics file -->
+    <string name="export_ics_success">Calendar exported</string>
+    <!-- Shown when writing an .ics file failed. %1$s = error message -->
+    <string name="export_ics_failed_format">Calendar export failed: <xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
     <!-- Settings: row label for ICS import feature -->
     <string name="import_events">Import events</string>
     <!-- Import flow: option to import into existing calendar -->

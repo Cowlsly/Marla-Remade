@@ -27,6 +27,7 @@ import com.vayunmathur.calendar.data.Calendar
 import com.vayunmathur.calendar.data.Instance
 
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.library.util.AppMessages
 
 /**
  * Implements the screens' actions interfaces (see `CalendarUiContract`) so a binder can
@@ -177,6 +178,31 @@ class CalendarViewModel(application: Application) :
             }
             updateWidgets()
             onDone()
+        }
+    }
+
+    /**
+     * Writes the app's events to [uri] as RFC 5545. A [calendarId] limits the export to that one
+     * calendar; without it every currently-visible calendar is included.
+     */
+    fun exportIcs(uri: Uri, calendarId: Long? = null) {
+        val app = getApplication<Application>()
+        viewModelScope.launch(Dispatchers.IO) {
+            val message = try {
+                val visible = _calendarVisibility.value
+                val events = Event.getAllEvents(app).filter { event ->
+                    if (calendarId != null) event.calendarID == calendarId
+                    else visible[event.calendarID] != false
+                }
+                app.contentResolver.openOutputStream(uri)?.use { out ->
+                    out.bufferedWriter().use { writer -> writeIcs(events, writer) }
+                } ?: error("Could not open $uri for writing")
+                app.getString(R.string.export_ics_success)
+            } catch (e: Exception) {
+                Log.e("CalendarViewModel", "Error exporting ICS to $uri", e)
+                app.getString(R.string.export_ics_failed_format, e.message ?: e.javaClass.simpleName)
+            }
+            withContext(Dispatchers.Main) { AppMessages.show(message) }
         }
     }
 

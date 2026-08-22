@@ -105,6 +105,12 @@ interface SettingsActions {
     /** Opens the system file picker; the picked files are handed to the import screen. */
     fun importIcs() {}
 
+    /** Opens the system file creator, then writes every visible calendar's events to it. */
+    fun exportIcs() {}
+
+    /** Same, restricted to one calendar. Read-only calendars are exportable too. */
+    fun exportCalendarIcs(calendarId: Long) {}
+
     companion object {
         val Noop: SettingsActions = object : SettingsActions {}
     }

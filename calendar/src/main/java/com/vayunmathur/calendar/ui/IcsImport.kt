@@ -79,11 +79,15 @@ fun parseICSFile(iS: InputStream): List<Event> {
     val lines = mutableListOf<String>()
     for (line in rawLines) {
         if (line.startsWith(" ") || line.startsWith('\t')) {
+            // Exactly one character of the continuation is the fold marker. Trimming all leading
+            // whitespace would swallow a space that belongs to the value, which happens whenever a
+            // fold lands right before one.
+            val continued = line.substring(1)
             if (lines.isNotEmpty()) {
                 val prev = lines.removeAt(lines.size - 1)
-                lines.add(prev + line.trimStart())
+                lines.add(prev + continued)
             } else {
-                lines.add(line.trimStart())
+                lines.add(continued)
             }
         } else {
             lines.add(line)
@@ -97,9 +101,21 @@ fun parseICSFile(iS: InputStream): List<Event> {
     var rdateProps = mutableListOf<Pair<String, String>>()
     var exdateProps = mutableListOf<Pair<String, String>>()
     var inEvent = false
+    // VALARM sits inside VEVENT and carries its own DESCRIPTION, which would otherwise overwrite
+    // the event's. Nothing in the alarm is read, so the whole block is skipped.
+    var inAlarm = false
 
     for (raw in lines) {
         val line = raw.trimEnd()
+        if (line.equals("BEGIN:VALARM", ignoreCase = true)) {
+            inAlarm = true
+            continue
+        }
+        if (line.equals("END:VALARM", ignoreCase = true)) {
+            inAlarm = false
+            continue
+        }
+        if (inAlarm) continue
         if (line.equals("BEGIN:VEVENT", ignoreCase = true)) {
             inEvent = true
             current = mutableMapOf()
@@ -112,9 +128,9 @@ fun parseICSFile(iS: InputStream): List<Event> {
             try {
                 val uid = current["UID"] ?: current["ID"] ?: ""
                 val id = if (uid.isNotBlank()) uid.hashCode().toLong() else null
-                val title = current["SUMMARY"] ?: "Untitled"
-                val description = current["DESCRIPTION"] ?: ""
-                val location = current["LOCATION"] ?: ""
+                val title = unescapeIcsText(current["SUMMARY"] ?: "Untitled")
+                val description = unescapeIcsText(current["DESCRIPTION"] ?: "")
+                val location = unescapeIcsText(current["LOCATION"] ?: "")
 
                 val (startMillis, startAllDay, startTz) = parseICSTime(current["DTSTART_PROP"], current["DTSTART"])
                 val (endMillisRaw, _, endTzRaw) = parseICSTime(current["DTEND_PROP"], current["DTEND"])
@@ -193,6 +209,32 @@ fun parseICSFile(iS: InputStream): List<Event> {
     }
 
     return events
+}
+
+/**
+ * Reverses RFC 5545 TEXT escaping. Required to read back anything this app exports, since escaping
+ * `,` `;` and newlines on the way out is mandatory.
+ */
+private fun unescapeIcsText(value: String): String {
+    if ('\\' !in value) return value
+    val out = StringBuilder(value.length)
+    var i = 0
+    while (i < value.length) {
+        val c = value[i]
+        if (c == '\\' && i + 1 < value.length) {
+            when (val next = value[i + 1]) {
+                'n', 'N' -> out.append('\n')
+                // An unrecognised pair is passed through as the escaped character, which is what
+                // \\, \; and \, all need.
+                else -> out.append(next)
+            }
+            i += 2
+        } else {
+            out.append(c)
+            i++
+        }
+    }
+    return out.toString()
 }
 
 /**

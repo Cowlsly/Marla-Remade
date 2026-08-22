@@ -11,6 +11,7 @@ import kotlinx.datetime.UtcOffset
 import kotlinx.datetime.atTime
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
+import kotlin.time.Instant
 
 // Full yyyyMMdd'T'HHmmssZ pattern (ISO_BASIC handles 'Z' or '+HHmm').
 val BasicIsoInstantFormat = DateTimeComponents.Format {
@@ -35,6 +36,21 @@ private val UtcBasicDateTimeFormat = LocalDateTime.Format {
     hour(); minute(); second()
     chars("Z")
 }
+
+// Zone-local datetime yyyyMMdd'T'HHmmss, which only means anything alongside a TZID parameter.
+private val LocalBasicDateTimeFormat = LocalDateTime.Format {
+    year(); monthNumber(); day()
+    char('T')
+    hour(); minute(); second()
+}
+
+/** RFC 5545 UTC datetime (YYYYMMDDTHHMMSSZ) for the instant [millis]. */
+fun icalUtcDateTime(millis: Long): String =
+    Instant.fromEpochMilliseconds(millis).toLocalDateTime(TimeZone.UTC).format(UtcBasicDateTimeFormat)
+
+/** RFC 5545 datetime for [millis] as wall time in [timeZone]; pair it with a TZID parameter. */
+fun icalLocalDateTime(millis: Long, timeZone: TimeZone): String =
+    Instant.fromEpochMilliseconds(millis).toLocalDateTime(timeZone).format(LocalBasicDateTimeFormat)
 
 /**
  * RFC 5545 value for one occurrence of a timed event: this date at [timeOfDay] in [timeZone],

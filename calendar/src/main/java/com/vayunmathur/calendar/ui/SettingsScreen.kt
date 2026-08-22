@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -54,6 +55,7 @@ import com.vayunmathur.calendar.R
 import com.vayunmathur.library.ui.IconAdd
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconDelete
+import com.vayunmathur.library.ui.IconDownload
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.appBarScrollBehavior
 
@@ -71,6 +73,16 @@ fun SettingsScreen(viewModel: CalendarViewModel, backStack: NavBackStack<Route>)
         if (uris.isNotEmpty()) {
             backStack.add(Route.Settings.ImportIcs(uris.map { it.toString() }))
         }
+    }
+
+    // Which calendar the pending export is for, since the contract only hands back a Uri.
+    // null means every visible calendar. Saveable because the document picker is another activity,
+    // and losing the id would silently widen the export to every calendar.
+    var exportCalendarId by rememberSaveable { mutableStateOf<Long?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/calendar")
+    ) { uri ->
+        if (uri != null) viewModel.exportIcs(uri, exportCalendarId)
     }
 
     SettingsScreen(
@@ -117,6 +129,16 @@ fun SettingsScreen(viewModel: CalendarViewModel, backStack: NavBackStack<Route>)
                     "*/*"
                 ))
             }
+
+            override fun exportIcs() {
+                exportCalendarId = null
+                exportLauncher.launch("calendar.ics")
+            }
+
+            override fun exportCalendarIcs(calendarId: Long) {
+                exportCalendarId = calendarId
+                exportLauncher.launch("calendar-$calendarId.ics")
+            }
         },
     )
 }
@@ -141,6 +163,10 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
         actions = {
             if(selectedCalendarId != null) {
                 val selectedCalendar = calendars.find { it.id == selectedCalendarId }
+                // Not gated on canModify: a read-only calendar is still exportable.
+                IconButton(onClick = { actions.exportCalendarIcs(selectedCalendarId!!) }) {
+                    IconDownload()
+                }
                 if (selectedCalendar?.canModify == true) {
                     IconButton(onClick = {
                         // open rename dialog via navigation
@@ -215,6 +241,18 @@ fun SettingsScreen(state: SettingsUiState, actions: SettingsActions) {
                         content = { Text(stringResource(R.string.import_ics_file)) },
                         supportingContent = { Text(stringResource(R.string.import_events_from_ics_files)) },
                         modifier = Modifier.clickable { actions.importIcs() },
+                        trailingContent = {
+                            IconArrowDropDown()
+                        },
+                    )
+                    HorizontalDivider()
+                }
+
+                item {
+                    ListItem(
+                        content = { Text(stringResource(R.string.export_ics_file)) },
+                        supportingContent = { Text(stringResource(R.string.export_events_to_ics_file)) },
+                        modifier = Modifier.clickable { actions.exportIcs() },
                         trailingContent = {
                             IconArrowDropDown()
                         },
