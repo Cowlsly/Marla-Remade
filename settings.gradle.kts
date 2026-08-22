@@ -22,8 +22,14 @@ dependencyResolutionManagement {
         mavenLocal()
         google()
         mavenCentral()
-        // JitPack for Stockfish-Library (games:chess) and ncnn-android
-        maven("https://jitpack.io")
+        // JitPack serves only the two personal forks that live there: Stockfish-Library
+        // (games:chess) and ncnn-android. Scoped to com.github.* because JitPack answers
+        // unknown coordinates with 401/429 rather than 404, and Gradle treats that as a hard
+        // failure — an unscoped JitPack breaks resolution of anything Central hasn't yet
+        // propagated (e.g. a freshly published artifact).
+        maven("https://jitpack.io") {
+            content { includeGroupByRegex("com\\.github\\..*") }
+        }
         // RingRTC is published by Signal, not to Maven Central. Scoped to org.signal so nothing else
         // resolves through it.
         maven("https://build-artifacts.signal.org/libraries/maven/") {

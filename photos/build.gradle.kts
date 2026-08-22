@@ -70,5 +70,9 @@ dependencies {
 
     // Semantic photo search runs on-device again: TinyCLIP int8 ships in assets/clip/ and is
     // executed by ClipEmbedder, so search no longer needs the OpenAssistant app installed.
-    implementation(libs.onnxruntime.android)
+    //
+    // Reduced ORT build (10 MB native, vs 28 MB for the full one). Its operator set is
+    // generated from the bundled model_int8.onnx, so swapping in a different CLIP export can
+    // fail at session creation — regenerate the AAR rather than falling back to the full build.
+    implementation(libs.onnxruntime.reduced)
 }

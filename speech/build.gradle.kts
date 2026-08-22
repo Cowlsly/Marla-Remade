@@ -31,7 +31,11 @@ dependencies {
     // Speech-to-text is whisper-tiny int8 ONNX (bundled in assets, see WhisperOnnxEngine).
     // It is not ncnn: onnx2ncnn has no DynamicQuantizeLinear/MatMulInteger/ConvInteger
     // support, and the AAR's Whisper expects a six-net decomposition HF does not export.
-    implementation(libs.onnxruntime.android)
+    //
+    // Reduced ORT build (10 MB native, vs 28 MB for the full one). Its operator set is
+    // generated from the two bundled .onnx files, so if they are ever re-exported with
+    // different ops the session will fail to create — regenerate the AAR, don't work around it.
+    implementation(libs.onnxruntime.reduced)
 
     // Runtime model download (mirror-hosted, SHA-256 pinned) — non-English TTS voices only.
     implementation(project(":library:downloadservice"))
