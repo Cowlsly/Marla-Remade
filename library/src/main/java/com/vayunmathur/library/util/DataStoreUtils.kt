@@ -140,6 +140,13 @@ class DataStoreUtils private constructor(context: Context) {
         }
     }
 
+    /** Read-modify-write [name] in one edit, so concurrent callers can't drop each other's change. */
+    suspend fun updateString(name: String, transform: (String?) -> String) {
+        dataStore.edit {
+            it[stringPreferencesKey(name)] = transform(it[stringPreferencesKey(name)])
+        }
+    }
+
     fun stringFlow(key: String): Flow<String> {
         return dataStore.data.mapNotNull { it[stringPreferencesKey(key)] }.distinctUntilChanged()
     }

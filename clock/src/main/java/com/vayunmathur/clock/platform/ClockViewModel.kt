@@ -284,6 +284,7 @@ class ClockViewModel(
     init {
         loadCities()
         loadStopwatchState()
+        viewModelScope.launch(Dispatchers.IO) { WorldClockCities.migrate(ds) }
     }
 
     private fun loadCities() {
