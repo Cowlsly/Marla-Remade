@@ -148,14 +148,16 @@ enum qerr qspi_transceive(struct qspi *spi, const struct qspi_transfer *xfer)
 	}
 
 	/*
-	 * The first few transfers are the driver probing the device id. Logging them makes
-	 * a probe failure diagnosable: dwt_probe() only reports DWT_ERROR, which cannot
-	 * distinguish "the bus returned nothing" from "the id matched no known driver".
+	 * The first few transfers are the driver probing the device id. Logged at debug
+	 * level: it was what made a probe failure diagnosable, since dwt_probe() only
+	 * reports DWT_ERROR and cannot distinguish "the bus returned nothing" from "the id
+	 * matched no known driver". Left in for the next bring-up, but off by default —
+	 * hexdumps on the init path are slow enough to matter.
 	 */
 	if (traced < TRACE_XFERS) {
 		traced++;
-		LOG_HEXDUMP_INF(xfer->tx_buf, MIN(xfer->tx_size, 8U), "spi tx");
-		LOG_HEXDUMP_INF(xfer->rx_buf, MIN(xfer->rx_size, 8U), "spi rx");
+		LOG_HEXDUMP_DBG(xfer->tx_buf, MIN(xfer->tx_size, 8U), "spi tx");
+		LOG_HEXDUMP_DBG(xfer->rx_buf, MIN(xfer->rx_size, 8U), "spi rx");
 	}
 
 	if (spi->done_cb) {

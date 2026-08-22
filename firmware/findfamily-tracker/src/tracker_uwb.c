@@ -141,14 +141,6 @@ int ff_uwb_init(void)
 	}
 
 	/*
-	 * Read the device id before handing the bus to Qorvo's driver: it tells a wiring
-	 * or SPI-mode problem apart from the driver rejecting what it read, which
-	 * qplatform_init's return code alone cannot.
-	 */
-	LOG_INF("DW3110 DEV_ID read over SPI: 0x%08x (expect 0xdeca0302)",
-		ff_qorvo_read_dev_id());
-
-	/*
 	 * Order matters and is not obvious. qplatform_init() brings up SPI/GPIO and probes
 	 * the DW3110, which has to happen first: l1_config_init()'s reset_to_default hook
 	 * reads this module's calibration out of the transceiver's OTP, and without a
@@ -158,11 +150,14 @@ int ff_uwb_init(void)
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("qplatform_init: %d", r);
 		/*
-		 * Re-read the id on the raw bus. It worked before qplatform_init, so if it
-		 * reads back zero now, the transceiver is being held in reset rather than
-		 * failing to talk — which points at the rstn pin handling, not the SPI.
+		 * Read the id straight off the bus to tell a wiring or SPI-mode problem
+		 * apart from the driver rejecting what it read, which qplatform_init's
+		 * return code alone cannot. Only on the failure path: qplatform_init resets
+		 * and wakes the transceiver, so before it runs the part is still asleep and
+		 * this reads zero even when everything is fine.
 		 */
-		LOG_ERR("DEV_ID after failed init: 0x%08x", ff_qorvo_read_dev_id());
+		LOG_ERR("DEV_ID read directly: 0x%08x (expect 0xdeca0302)",
+			ff_qorvo_read_dev_id());
 		return -EIO;
 	}
 
