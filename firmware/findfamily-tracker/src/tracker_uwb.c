@@ -22,6 +22,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/byteorder.h>
+#include <zephyr/sys/printk.h>
 
 /* Qorvo uwbstack. */
 #include <ff_qorvo_l1_config.h>
@@ -132,6 +133,26 @@ static void uwb_poll_thread(void *a, void *b, void *c)
 	}
 }
 
+/*
+ * The MAC event loop has an exact window in which it must be started.
+ *
+ * Too early — before uwbmac_start() — and uwbmac_poll_events() hangs on a MAC that is not
+ * running, which wedges the firmware during boot. Too late — after
+ * fira_helper_start_session() — and the session start never completes, because it is a
+ * request/response over the MAC that needs its events dispatched; that deadlock stopped the
+ * tracker advertising altogether, so it went silent for crowd-finding too and only a reset
+ * recovered it. So: immediately after uwbmac_start(), before starting the session.
+ */
+static void start_polling(void)
+{
+	if (atomic_cas(&poll_running, 0, 1)) {
+		k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
+				uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
+				K_NO_WAIT);
+		k_thread_name_set(&uwb_thread, "ff_uwb");
+	}
+}
+
 int ff_uwb_init(void)
 {
 	enum qerr r;
@@ -192,26 +213,6 @@ int ff_uwb_init(void)
 	stack_ready = true;
 	LOG_INF("Qorvo uwbstack up; DW3110 identified");
 	return 0;
-}
-
-/*
- * The MAC event loop is only driven while a session exists. Starting it at init time
- * faulted with a corrupted return address: there is nothing for uwbmac_poll_events to
- * dispatch before uwbmac_start(), and polling an unstarted MAC is not a supported state.
- */
-static void start_polling(void)
-{
-	if (atomic_cas(&poll_running, 0, 1)) {
-		k_thread_create(&uwb_thread, uwb_thread_stack, UWB_THREAD_STACK_SIZE,
-				uwb_poll_thread, NULL, NULL, NULL, UWB_THREAD_PRIORITY, 0,
-				K_NO_WAIT);
-		k_thread_name_set(&uwb_thread, "ff_uwb");
-	}
-}
-
-static void stop_polling(void)
-{
-	atomic_set(&poll_running, 0);
 }
 
 /*
@@ -322,18 +323,21 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 		return -EIO;
 	}
 
+	printk("ff_uwb: fira_helper_open\n");
 	r = fira_helper_open(&fira_ctx, uwbmac_ctx, on_fira_notification, "endless", 0, NULL);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_open: %d", r);
 		return -EIO;
 	}
 	/* Must happen while the MAC is stopped. */
+	printk("ff_uwb: fira_helper_set_scheduler\n");
 	r = fira_helper_set_scheduler(&fira_ctx);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_set_scheduler: %d", r);
 		goto close;
 	}
 
+	printk("ff_uwb: fira_helper_init_session\n");
 	r = fira_helper_init_session(&fira_ctx, params->session_id,
 				     QUWBS_FBS_SESSION_TYPE_RANGING_NO_IN_BAND_DATA, &rsp);
 	if (r != QERR_SUCCESS) {
@@ -385,25 +389,33 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 	sp.meas_seq.steps[0].tx_ant_set_nonranging = 0xff;
 	sp.meas_seq.steps[0].tx_ant_set_ranging = 0xff;
 
+	printk("ff_uwb: applying session parameters\n");
 	rc = apply_session_params(&sp);
 	if (rc) {
 		goto deinit;
 	}
+
+	printk("ff_uwb: uwbmac_start\n");
 
 	r = uwbmac_start(uwbmac_ctx);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("uwbmac_start: %d", r);
 		goto deinit;
 	}
+	/* See start_polling(): the MAC is running now, and the session start below needs
+	 * its events pumped to complete. */
+	start_polling();
+
+	printk("ff_uwb: starting FiRa session\n");
 	r = fira_helper_start_session(&fira_ctx, session_handle);
 	if (r != QERR_SUCCESS) {
 		LOG_ERR("fira_helper_start_session: %d", r);
 		uwbmac_stop(uwbmac_ctx);
 		goto deinit;
 	}
+	printk("ff_uwb: FiRa session started\n");
 
 	session_active = true;
-	start_polling();
 	LOG_INF("FiRa responder started: session=%08x ch=%u preamble=%u own=%04x peer=%04x",
 		params->session_id, params->channel, params->preamble_index, own_short_addr,
 		peer_short_addr);
@@ -421,7 +433,6 @@ void ff_uwb_stop(void)
 	if (!session_active) {
 		return;
 	}
-	stop_polling();
 	(void)fira_helper_stop_session(&fira_ctx, session_handle);
 	(void)fira_helper_deinit_session(&fira_ctx, session_handle);
 	(void)uwbmac_stop(uwbmac_ctx);
