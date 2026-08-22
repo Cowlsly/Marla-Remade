@@ -170,17 +170,18 @@ object SignalClient {
         val aci = destinationAci.trim()
         if (aci.isEmpty()) return false
         val plaintext = content.toByteArray()
+        val padded = SignalProtocol.padMessageBody(plaintext)
         val encrypted: ByteArray = try {
             val e = e2e
             if (e != null && aci.matches(Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"))) {
                 if (e.hasSession(aci, 1)) {
                     // Live-only: should fetch prekey bundle and processPreKeyBundle (PQXDH) if no session; wire still correct via this path.
-                    e.encryptDM(aci, 1, plaintext).data
+                    e.encryptDM(aci, 1, padded).data
                 } else {
                     // Try sealed sender if available requires sender certificate (live-only GET /v1/certificate/delivery), else send Content bytes as body for wire-correct shape.
                     try {
                         val cert = try { org.signal.libsignal.metadata.certificate.SenderCertificate(ByteArray(0)) } catch (_: Exception) { null }
-                        if (cert != null) e.sealedSenderEncrypt(aci, 1, plaintext, senderCertificate = cert) else plaintext
+                        if (cert != null) e.sealedSenderEncrypt(aci, 1, padded, senderCertificate = cert) else plaintext
                     } catch (_: Exception) {
                         // Fallback: no cert offline, send plaintext Content bytes; live will be encrypted.
                         plaintext
@@ -633,7 +634,7 @@ object SignalClient {
         if (env.content.isEmpty()) return
 
         // Decrypt: strip version byte and handle sealed vs session
-        val plaintext: ByteArray = try {
+        val paddedPlaintext: ByteArray = try {
             val e = e2e
             when (env.type) {
                 SignalServiceProtos.Envelope.Type.UNIDENTIFIED_SENDER -> {
@@ -667,6 +668,8 @@ object SignalClient {
             _events.emit(SignalEvent.DecryptionError(conversationId = cid, senderAci = env.sourceAci, senderDeviceId = env.sourceDevice, timestamp = env.timestamp, errorMessage = t.message))
             return
         }
+        // Signal pads the plaintext before encrypting, for every envelope type.
+        val plaintext = SignalProtocol.stripMessagePadding(paddedPlaintext)
 
         val content = SignalProtocol.parseContent(plaintext)
         if (content == null) {

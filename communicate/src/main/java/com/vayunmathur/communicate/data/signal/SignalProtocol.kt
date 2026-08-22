@@ -19,11 +19,15 @@ import java.util.UUID
  *  - libsignal/rust/protocol/src/proto/{wire,sealed_sender}.proto (PQXDH wire)
  *
  * Inbound: WebSocketMessage (binary protobuf) -> WebSocketRequestMessage.body contains
- *          Envelope bytes (Envelope.content is version||encrypted Content).
- * Outbound: Build Content -> encrypt via SignalE2E -> PUT /v1/messages/{aci} WebSocketRequestMessage.
+ *          Envelope bytes (Envelope.content is a serialized CiphertextMessage; libsignal owns its
+ *          version framing, so nothing is stripped from it here).
+ * Outbound: Build Content -> pad -> encrypt via SignalE2E -> PUT /v1/messages/{aci}.
  */
 object SignalProtocol {
     private const val TAG = "SignalProtocol"
+
+    private const val PADDING_BLOCK_SIZE = 80
+    private const val TERMINATOR = 0x80.toByte()
 
     data class SignalEnvelope(
         val type: SignalServiceProtos.Envelope.Type,
@@ -171,10 +175,49 @@ object SignalProtocol {
         return path.contains("queue/empty")
     }
 
+    /**
+     * Pad to a multiple of [PADDING_BLOCK_SIZE] with a trailing `0x80` terminator followed by zeroes.
+     * Applied to the serialized Content before encryption. Port of the official client's
+     * `PushTransportDetails.getPaddedMessageBody`.
+     */
+    fun padMessageBody(body: ByteArray): ByteArray {
+        // The +1/-1 leaves the cipher room for its own single padding byte; without it the cipher
+        // adds a full extra block.
+        val padded = ByteArray(paddedLength(body.size + 1) - 1)
+        body.copyInto(padded)
+        padded[body.size] = TERMINATOR
+        return padded
+    }
+
+    /**
+     * Strip [padMessageBody]'s terminator and trailing zeroes from a decrypted plaintext. Returns the
+     * input unchanged when the padding is malformed, matching the official client rather than
+     * guessing at a length.
+     */
+    fun stripMessagePadding(padded: ByteArray): ByteArray {
+        var paddingStart = 0
+        for (i in padded.indices.reversed()) {
+            if (padded[i] == TERMINATOR) {
+                paddingStart = i
+                break
+            }
+            if (padded[i] != 0x00.toByte()) {
+                Log.w(TAG, "malformed padding, leaving message unstripped")
+                return padded
+            }
+        }
+        return padded.copyOfRange(0, paddingStart)
+    }
+
+    private fun paddedLength(length: Int): Int {
+        val withTerminator = length + 1
+        val blocks = (withTerminator + PADDING_BLOCK_SIZE - 1) / PADDING_BLOCK_SIZE
+        return blocks * PADDING_BLOCK_SIZE
+    }
+
     fun parseContent(plaintext: ByteArray): SignalServiceProtos.Content? = try {
         if (plaintext.isEmpty()) return null
-        val stripped = if (plaintext.size > 1 && plaintext[0] in 0x00..0x0F) plaintext.copyOfRange(1, plaintext.size) else plaintext
-        SignalServiceProtos.Content.parseFrom(stripped)
+        SignalServiceProtos.Content.parseFrom(plaintext)
     } catch (e: InvalidProtocolBufferException) {
         Log.w(TAG, "parseContent failed: ${e.message}")
         null
