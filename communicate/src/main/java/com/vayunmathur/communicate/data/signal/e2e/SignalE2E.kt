@@ -104,6 +104,24 @@ class SignalE2E(
         )
     }
 
+    /** The identity key currently recorded for [aci], or null if we have never seen one. */
+    fun storedIdentityKey(aci: String): ByteArray? =
+        try { protocolStore.getIdentity(signalAddress(aci))?.serialize() } catch (_: Exception) { null }
+
+    /**
+     * Record [identityKey] as the trusted identity for [aci] and archive existing sessions, so the next
+     * message builds a session against the accepted key. Only call this once the user has verified it.
+     */
+    fun acceptIdentity(aci: String, identityKey: ByteArray): Boolean = try {
+        val address = signalAddress(aci)
+        protocolStore.saveIdentity(address, IdentityKey(identityKey))
+        // Every device's session was built against the old key.
+        deviceIdsWithSessions(aci).forEach { archiveSession(aci, it) }
+        true
+    } catch (t: Throwable) {
+        false
+    }
+
     /** Devices of [aci] we already have a session with, always including device 1. */
     fun deviceIdsWithSessions(aci: String): List<Int> {
         val subDevices = try { protocolStore.getSubDeviceSessions(aci) } catch (_: Exception) { emptyList() }

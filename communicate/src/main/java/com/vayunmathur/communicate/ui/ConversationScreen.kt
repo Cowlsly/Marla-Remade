@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -53,6 +54,7 @@ import com.vayunmathur.library.ui.OutlinedTextField
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
+import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.compose.AsyncImageState
@@ -63,6 +65,7 @@ import com.vayunmathur.communicate.data.CommunicateRepository
 import com.vayunmathur.communicate.data.LineChoice
 import com.vayunmathur.communicate.data.MessageStatus
 import com.vayunmathur.communicate.data.SmsMessage
+import com.vayunmathur.communicate.data.signal.SignalSafetyNumber
 import com.vayunmathur.communicate.data.SmsThread
 import com.vayunmathur.library.util.AppMessages
 import kotlinx.coroutines.Dispatchers
@@ -333,6 +336,37 @@ fun ConversationScreen(
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
+        // A changed Signal identity key blocks sending until the user verifies it, so the warning has to
+        // be in front of them here rather than only in a notification.
+        var safetyNumber by remember(remoteId, address) { mutableStateOf<Pair<String, String>?>(null) }
+        androidx.compose.runtime.LaunchedEffect(line, remoteId, address, refresh) {
+            safetyNumber = if (line == CommunicateLine.Signal) {
+                try {
+                    CommunicateRepository.signalPendingIdentityChange(context, remoteId, address)
+                } catch (_: Throwable) {
+                    null
+                }
+            } else {
+                null
+            }
+        }
+        safetyNumber?.let { (number, keyHex) ->
+            SafetyNumberBanner(
+                safetyNumber = number,
+                onAccept = {
+                    scope.launch {
+                        val ok = CommunicateRepository.acceptSignalIdentity(context, remoteId, address, keyHex)
+                        if (ok) {
+                            safetyNumber = null
+                            refresh++
+                        } else {
+                            AppMessages.show(context.getString(R.string.signal_safety_number_accept_failed))
+                        }
+                    }
+                },
+                modifier = Modifier.padding(padding),
+            )
+        }
         // Google Voice threads don't require the default-SMS role or READ_SMS; only SIM does.
         if (line == CommunicateLine.GoogleVoice) {
             MessagesList(padding, refresh) {
@@ -350,6 +384,38 @@ fun ConversationScreen(
                     value = withContext(Dispatchers.IO) { CommunicateRepository.loadSmsMessagesMerged(context, thread) }
                 }
                 MessagesContent(padding, messages.value)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SafetyNumberBanner(
+    safetyNumber: String,
+    onAccept: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.errorContainer,
+        contentColor = MaterialTheme.colorScheme.onErrorContainer,
+        modifier = modifier.fillMaxWidth(),
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text(
+                stringResource(R.string.signal_safety_number_changed_title),
+                fontWeight = FontWeight.Bold,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(stringResource(R.string.signal_safety_number_verify_prompt))
+            Spacer(Modifier.height(8.dp))
+            Text(
+                SignalSafetyNumber.format(safetyNumber),
+                style = MaterialTheme.typography.bodyLarge,
+                fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+            )
+            Spacer(Modifier.height(8.dp))
+            TextButton(onClick = onAccept) {
+                Text(stringResource(R.string.signal_safety_number_accept))
             }
         }
     }

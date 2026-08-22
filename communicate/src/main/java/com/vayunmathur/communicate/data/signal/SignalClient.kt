@@ -91,6 +91,13 @@ object SignalClient {
 
     /** Credential-free socket used only for sealed-sender sends. */
     private var unauthSocket: SignalSocket? = null
+
+    /**
+     * Identity keys peers are presenting that differ from the ones on record, awaiting the user's
+     * decision. Deliberately in memory: if the process dies the key is re-presented on the next message,
+     * and a stale pending key should not outlive the session.
+     */
+    private val pendingIdentityChanges = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
     private var processor: SignalEventProcessor? = null
     private var socketJobs: MutableList<Job> = mutableListOf()
     private var reconnectJob: Job? = null
@@ -354,6 +361,7 @@ object SignalClient {
      */
     private fun reportIdentityChange(peerAci: String, newIdentityKey: ByteArray) {
         val hex = SignalGroups.run { newIdentityKey.toHex() }
+        pendingIdentityChanges[peerAci] = newIdentityKey
         Log.w(TAG, "identity key changed for $peerAci")
         scope.launch {
             _events.emit(
@@ -365,6 +373,50 @@ object SignalClient {
                 ),
             )
         }
+    }
+
+    /** The unaccepted identity key a peer is presenting, if any. */
+    fun pendingIdentityChange(peerAci: String): ByteArray? = pendingIdentityChanges[peerAci]
+
+    /**
+     * The safety number to show for [peerAci] — for the key they are currently presenting when that
+     * differs from the one on record, otherwise for the accepted one. Null when it cannot be computed.
+     */
+    suspend fun safetyNumber(peerAci: String): String? {
+        val e = e2e ?: return null
+        val localAci = authData?.aci?.takeIf { it.isNotEmpty() } ?: return null
+        val remoteKey = pendingIdentityChanges[peerAci] ?: e.storedIdentityKey(peerAci) ?: return null
+        return SignalSafetyNumber.compute(
+            localAci = localAci,
+            localIdentityKey = e.ownIdentityPublicKey,
+            remoteAci = peerAci,
+            remoteIdentityKey = remoteKey,
+        )
+    }
+
+    /**
+     * Accept the identity key [peerAci] is presenting, after the user has compared safety numbers.
+     *
+     * [expectedKeyHex] must match the key currently pending, so accepting can only ever apply to the key
+     * whose safety number was actually shown — otherwise a key swapped in between display and tap would
+     * be trusted instead. Existing sessions are archived so the next send builds against the new key.
+     */
+    suspend fun acceptIdentityChange(peerAci: String, expectedKeyHex: String): Boolean {
+        val e = e2e ?: return false
+        val pending = pendingIdentityChanges[peerAci] ?: run {
+            Log.w(TAG, "no pending identity change for $peerAci")
+            return false
+        }
+        if (!SignalGroups.run { pending.toHex() }.equals(expectedKeyHex, ignoreCase = true)) {
+            Log.w(TAG, "refusing to accept a different key than the one shown for $peerAci")
+            return false
+        }
+        val accepted = e.acceptIdentity(peerAci, pending)
+        if (accepted) {
+            pendingIdentityChanges.remove(peerAci)
+            Log.i(TAG, "accepted the new identity key for $peerAci")
+        }
+        return accepted
     }
 
     private data class SealedSenderAccess(val certificate: SenderCertificate, val accessKey: ByteArray)

@@ -1326,6 +1326,32 @@ object CommunicateRepository {
         lastInbound.messageId
     }
 
+    /**
+     * The pending identity-key change for a Signal conversation, as (safety number, key hex), or null
+     * when there is nothing to verify. The hex is passed back to [acceptSignalIdentity] so acceptance
+     * can only apply to the key whose number was shown.
+     */
+    suspend fun signalPendingIdentityChange(
+        context: Context,
+        remoteId: String?,
+        address: String,
+    ): Pair<String, String>? = withContext(Dispatchers.IO) {
+        val aci = remoteId?.takeIf { it.isNotBlank() } ?: toSignalRecipient(context, address)
+        val pending = SignalClient.pendingIdentityChange(aci) ?: return@withContext null
+        val safetyNumber = SignalClient.safetyNumber(aci) ?: return@withContext null
+        safetyNumber to pending.joinToString("") { "%02x".format(it) }
+    }
+
+    suspend fun acceptSignalIdentity(
+        context: Context,
+        remoteId: String?,
+        address: String,
+        keyHex: String,
+    ): Boolean = withContext(Dispatchers.IO) {
+        val aci = remoteId?.takeIf { it.isNotBlank() } ?: toSignalRecipient(context, address)
+        SignalClient.acceptIdentityChange(aci, keyHex)
+    }
+
     suspend fun createSignalGroup(
         context: Context,
         subject: String,
