@@ -112,4 +112,5 @@
     <string name="signal_safety_number_verify_prompt">Compare this number with them in person or over a call you trust before accepting.</string>
     <string name="signal_safety_number_accept">Accept new safety number</string>
     <string name="signal_safety_number_accept_failed">Could not accept the new safety number</string>
+    <string name="call_failed">Could not start the call</string>
 </resources>

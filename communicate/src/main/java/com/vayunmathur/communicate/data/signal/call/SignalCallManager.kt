@@ -58,6 +58,12 @@ class SignalCallManager(
         /** The identity keys RingRTC binds the SRTP key derivation to. */
         suspend fun identityKeys(aci: String): IdentityKeyPairBytes?
 
+        /**
+         * TURN/STUN relays for the call. Without them only host candidates are available, so a call fails
+         * behind NAT.
+         */
+        suspend fun iceServers(): List<PeerConnection.IceServer>
+
         fun onCallStateChanged(aci: String, callId: Long, state: CallState, isVideo: Boolean)
     }
 
@@ -207,13 +213,23 @@ class SignalCallManager(
         val mediaType = callMediaType ?: CallManager.CallMediaType.AUDIO_CALL
         callMediaTypes[id] = mediaType
         signaling.onCallStateChanged(aci, id, CallState.Ringing, mediaType.isVideo())
-        // RingRTC waits for proceed() before touching media.
-        proceed(id, mediaType)
+        // RingRTC waits for proceed() before touching media, and proceed() needs relays, so both happen
+        // off the callback thread.
+        scope.launch { proceed(id, mediaType) }
     }
 
-    private fun proceed(callId: Long, mediaType: CallManager.CallMediaType) {
+    private suspend fun proceed(callId: Long, mediaType: CallManager.CallMediaType) {
         val manager = callManager ?: return
         val egl = eglBase ?: return
+        val iceServers = try {
+            signaling.iceServers()
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not fetch ICE servers; the call will likely fail behind NAT", t)
+            emptyList()
+        }
+        if (iceServers.isEmpty()) {
+            Log.w(TAG, "proceeding with no ICE servers; expect connection failure unless both ends are local")
+        }
         try {
             manager.proceed(
                 CallId(callId),
@@ -224,9 +240,7 @@ class SignalCallManager(
                 NoVideoSink,
                 NoVideoSink,
                 NoCameraControl,
-                // TURN servers come from GET /v2/calling/relays, which is not wired up; with an empty
-                // list only host and STUN-less candidates are available, so calls will fail behind NAT.
-                emptyList<PeerConnection.IceServer>(),
+                iceServers,
                 false,
                 CallManager.DataMode.NORMAL,
                 AUDIO_LEVEL_INTERVAL_MS,

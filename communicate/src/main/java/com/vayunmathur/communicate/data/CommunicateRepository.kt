@@ -1352,6 +1352,51 @@ object CommunicateRepository {
         SignalClient.acceptIdentityChange(aci, keyHex)
     }
 
+    /**
+     * Place a voice call on [line] for a conversation.
+     *
+     * SIM and Google Voice go through Telecom; WhatsApp and Signal are in-app WebRTC calls addressed by
+     * conversation id. Returns false when the line cannot place the call, so the caller can say so rather
+     * than appear to succeed.
+     */
+    suspend fun placeCallForLine(
+        context: Context,
+        line: CommunicateLine,
+        address: String,
+        remoteId: String?,
+        video: Boolean = false,
+    ): Boolean = when (line) {
+        CommunicateLine.Sim -> {
+            placeCall(context, choice = null, number = address)
+            true
+        }
+        CommunicateLine.GoogleVoice -> {
+            placeCall(context, choice = LineChoice.GoogleVoice, number = address)
+            true
+        }
+        CommunicateLine.WhatsApp -> {
+            val target = remoteId ?: address
+            if (target.isBlank()) false else { whatsAppPlaceCall(target, video); true }
+        }
+        CommunicateLine.Signal -> withContext(Dispatchers.IO) {
+            val target = remoteId?.takeIf { it.isNotBlank() } ?: toSignalRecipient(context, address)
+            if (target.isBlank()) {
+                false
+            } else {
+                SignalClient.get(context).placeCall(target, video)
+                true
+            }
+        }
+    }
+
+    /** Whether [line] can place a call at all, so the UI can hide the affordance instead of failing. */
+    fun canPlaceCall(line: CommunicateLine): Boolean = when (line) {
+        CommunicateLine.Sim -> true
+        CommunicateLine.GoogleVoice -> true
+        CommunicateLine.WhatsApp -> com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled
+        CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
+    }
+
     suspend fun createSignalGroup(
         context: Context,
         subject: String,

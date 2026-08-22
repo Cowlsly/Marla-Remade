@@ -9,6 +9,7 @@ import com.vayunmathur.communicate.data.signal.call.SignalCallMessage
 import com.vayunmathur.communicate.data.signal.call.toContent
 import com.vayunmathur.communicate.data.signal.call.toRingRtc
 import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
+import com.vayunmathur.communicate.data.signal.transport.SignalCallingApi
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
@@ -18,6 +19,7 @@ import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.UntrustedIdentityException
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.signal.libsignal.protocol.message.PlaintextContent
+import org.webrtc.PeerConnection
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -1226,6 +1228,9 @@ object SignalClient {
                         remote = remote,
                     )
                 }
+
+                override suspend fun iceServers(): List<PeerConnection.IceServer> =
+                    SignalCallingApi.fetchIceServers(basicAuthHeader(), signalTls())
 
                 override fun onCallStateChanged(
                     aci: String,

@@ -285,6 +285,21 @@ fun ConversationScreen(
                     onDismiss = { showDeleteConfirm = false },
                 )
             }
+            // Calling is per line: SIM and Google Voice hand off to Telecom, WhatsApp and Signal place an
+            // in-app WebRTC call. Groups are excluded — group calling is not implemented on either line.
+            if (!isGroup && address.isNotBlank() && CommunicateRepository.canPlaceCall(line)) {
+                IconButton(onClick = {
+                    scope.launch {
+                        val placed = CommunicateRepository.placeCallForLine(
+                            context = context,
+                            line = line,
+                            address = address,
+                            remoteId = remoteId,
+                        )
+                        if (!placed) AppMessages.show(context.getString(R.string.call_failed))
+                    }
+                }) { com.vayunmathur.library.ui.IconCall() }
+            }
             if (line == CommunicateLine.GoogleVoice && remoteId != null) {
                 IconButton(onClick = {
                     scope.launch {
