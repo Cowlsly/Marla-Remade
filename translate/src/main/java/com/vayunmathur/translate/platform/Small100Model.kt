@@ -59,14 +59,33 @@ object Small100Model {
         (FILES.map { ds.getDouble("progress_${it.fileName}") ?: 0.0 }.average()).toFloat()
 
     /**
-     * SMaLL-100 target-language token ids (`128004 + fairseq index`) for the app's
-     * offered languages. SMaLL-100 needs only the target language (it's prepended to
-     * the source), so no source id is required.
+     * The 100 languages SMaLL-100 was trained on, in fairseq dictionary order (which is
+     * plain lexicographic order of these codes). `ast`, `ceb`, `ilo` and `ns` are
+     * ISO-639-3 rather than -1, so [com.vayunmathur.translate.platform.TtsSpeaker] will
+     * report a missing voice for them.
      */
-    val LANG_ID: Map<String, Int> = mapOf(
-        "en" to 128022, "es" to 128023, "fr" to 128028, "de" to 128020, "it" to 128045,
-        "pt" to 128075, "nl" to 128067, "ru" to 128077, "pl" to 128073, "tr" to 128093,
-        "ar" to 128006, "hi" to 128036, "zh" to 128102, "ja" to 128046, "ko" to 128052,
-        "vi" to 128097, "th" to 128090, "id" to 128041, "uk" to 128094, "sv" to 128087,
+    private val LANG_ORDER = listOf(
+        "af", "am", "ar", "ast", "az", "ba", "be", "bg", "bn", "br",
+        "bs", "ca", "ceb", "cs", "cy", "da", "de", "el", "en", "es",
+        "et", "fa", "ff", "fi", "fr", "fy", "ga", "gd", "gl", "gu",
+        "ha", "he", "hi", "hr", "ht", "hu", "hy", "id", "ig", "ilo",
+        "is", "it", "ja", "jv", "ka", "kk", "km", "kn", "ko", "lb",
+        "lg", "ln", "lo", "lt", "lv", "mg", "mk", "ml", "mn", "mr",
+        "ms", "my", "ne", "nl", "no", "ns", "oc", "or", "pa", "pl",
+        "ps", "pt", "ro", "ru", "sd", "si", "sk", "sl", "so", "sq",
+        "sr", "ss", "su", "sv", "sw", "ta", "th", "tl", "tn", "tr",
+        "uk", "ur", "uz", "vi", "wo", "xh", "yi", "yo", "zh", "zu",
     )
+
+    /** Token id of the first language in [LANG_ORDER]; the rest follow contiguously. */
+    private const val FIRST_LANG_ID = 128004
+
+    /**
+     * SMaLL-100 target-language token ids (`128004 + fairseq index`). SMaLL-100 needs
+     * only the target language (it's prepended to the source), so no source id is
+     * required. Derived from [LANG_ORDER] rather than transcribed; the values match
+     * `lang_tokens` in the model's upstream `mobile_manifest.json`.
+     */
+    val LANG_ID: Map<String, Int> =
+        LANG_ORDER.withIndex().associate { (index, code) -> code to FIRST_LANG_ID + index }
 }
