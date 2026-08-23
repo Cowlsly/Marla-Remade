@@ -27,11 +27,21 @@ class CastResource(
      */
     val descriptor: ParcelFileDescriptor,
     /**
-     * Total length in bytes.
+     * Total length in bytes, or **negative when the resource is still being written and the final
+     * size is not known yet**.
      *
      * Stated by the app rather than measured, because a file still being written has a length its
      * author knows and `fstat` does not yet agree with. Cast reports it as the resource's length
      * and serves ranges against it.
+     *
+     * A negative length is how an app serves something it is producing as the TV fetches it - a
+     * live transcode, say. Cast then serves the whole resource with no `Content-Length` and, when a
+     * read reaches the current end of file, waits for more bytes instead of reporting the end. The
+     * app must finish with [CastClient.resourceComplete], on failure as well as on success: a
+     * reader that is never told turns into a stalled fetch.
+     *
+     * The price is that a resource with no length cannot answer a `Range`, so **the first play of
+     * one cannot be seeked**. Offer a real length whenever there is one.
      */
     val length: Long,
     /**

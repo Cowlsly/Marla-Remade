@@ -1,5 +1,6 @@
 package com.vayunmathur.cast.protocol
 
+import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
 import java.security.MessageDigest
@@ -49,23 +50,46 @@ object MediaProxy {
         expected.toByteArray(Charsets.US_ASCII),
         offered.toByteArray(Charsets.US_ASCII),
     )
+
+    /**
+     * A [MediaResource.length] below zero: still being written, final size unknown.
+     *
+     * A descriptor to a growing file reports EOF at the current end of file, and there is no way
+     * to tell "not yet" from "done" by reading it - so the length is what the producer says, and
+     * this is how it says it does not know yet.
+     */
+    const val UNKNOWN_LENGTH = -1L
 }
 
-/** A resource the proxy can serve: a known length and a stream that can start part-way in. */
+/** A resource the proxy can serve: a length that may not be known yet, and a stream that can start part-way in. */
 interface MediaResource {
 
     /**
-     * Total length in bytes.
+     * Total length in bytes, or negative for [MediaProxy.UNKNOWN_LENGTH].
      *
      * Known up front even when the bytes are not all present yet - a SABR segment still on its
      * way down has a length from its index. That is why [open] is allowed to end early and why
      * the caller has to notice when it does.
+     *
+     * Negative is the stronger case: the producer does not know the final size either, because it
+     * is still encoding. The proxy then states no `Content-Length`, honours no `Range`, and
+     * expects [open]'s stream to wait at the current end of file rather than report it.
      */
     val length: Long
 
+    /** Whether [length] can be stated to a client, and therefore whether a `Range` can be answered. */
+    val hasKnownLength: Boolean get() = length >= 0
+
     val contentType: String
 
-    /** A stream positioned at [offset]. The caller closes it. */
+    /**
+     * A stream positioned at [offset]. The caller closes it.
+     *
+     * For an unknown length the stream must block at the current end of file until either more
+     * bytes arrive or the producer is finished, and signal a producer that stopped without
+     * finishing by throwing [IOException] rather than by returning `-1`, which would be
+     * indistinguishable from a clean end.
+     */
     fun open(offset: Long): InputStream
 }
 
@@ -103,6 +127,10 @@ sealed interface ExchangeOutcome {
      * The response has already been committed with a `Content-Length` by then, so there is no
      * way to turn this into an error status; the connection must be closed so the client sees a
      * truncated body instead of waiting for bytes that are not coming.
+     *
+     * [expected] is [MediaProxy.UNKNOWN_LENGTH] when the resource never had a length to fall
+     * short of and its producer stopped without finishing - a transcode that died part-way. The
+     * answer is the same either way, because a closed connection is the only signal left.
      */
     data class Truncated(val resourceId: String, val expected: Long, val actual: Long) : ExchangeOutcome
 
@@ -166,6 +194,12 @@ class MediaProxyExchange(
             return Result(ExchangeOutcome.Rejected(404, "no resource '${path.resourceId}'"), reusable = true)
         }
 
+        // Before the `Range` is even parsed: with no total there is nothing to interpret one
+        // against, and `parseRange` would call every range unsatisfiable and answer `416`.
+        if (!resource.hasKnownLength) {
+            return serveUnknownLength(path.resourceId, resource, method, output)
+        }
+
         val range = parseRange(headers["range"], resource.length)
         if (range is RangeSpec.Unsatisfiable) {
             respondError(
@@ -212,6 +246,52 @@ class MediaProxyExchange(
     }
 
     data class Result(val outcome: ExchangeOutcome, val reusable: Boolean)
+
+    /**
+     * Answers a resource whose final size nobody knows yet.
+     *
+     * `200`, no `Content-Length`, and the body delimited by closing the connection - which
+     * HTTP/1.1 permits and `HttpURLConnection` reads as an unset length. `Accept-Ranges` is
+     * omitted rather than advertised, because there is no total to answer a `Range` against.
+     *
+     * **A `Range` on such a resource is ignored and the whole thing is served**, which is the
+     * answer the multi-range branch already establishes for a range this proxy declines. The
+     * consequence is worth stating plainly: the first play of a resource still being written
+     * cannot be seeked. The alternative is predicting the final size of a VBR stream before
+     * encoding it, which cannot be done exactly, and being wrong shows up as a seek bar that
+     * lies or a body cut short.
+     */
+    private fun serveUnknownLength(
+        resourceId: String,
+        resource: MediaResource,
+        method: String,
+        output: OutputStream,
+    ): Result {
+        val head = StringBuilder()
+        head.append("HTTP/1.1 200 OK\r\n")
+        head.append("Content-Type: ").append(resource.contentType).append("\r\n")
+        head.append("Connection: close\r\n")
+        head.append("\r\n")
+        output.write(head.toString().toByteArray(Charsets.ISO_8859_1))
+
+        if (method == "HEAD") {
+            output.flush()
+            // Not reusable even though no body was sent: the client has been told this connection
+            // closes, and answering a second request down it would contradict that.
+            return Result(ExchangeOutcome.Served(resourceId, RangeSpec.Whole, 0), reusable = false)
+        }
+
+        val transfer = resource.open(0).use { body -> copyUntilEnd(body, output) }
+        output.flush()
+        return if (transfer.complete) {
+            Result(ExchangeOutcome.Served(resourceId, RangeSpec.Whole, transfer.written), reusable = false)
+        } else {
+            Result(
+                ExchangeOutcome.Truncated(resourceId, MediaProxy.UNKNOWN_LENGTH, transfer.written),
+                reusable = false,
+            )
+        }
+    }
 
     // ------------------------------------------------------------------
     // Request reading
@@ -263,6 +343,32 @@ class MediaProxyExchange(
         }
         return limit - remaining
     }
+
+    /**
+     * Copies until the resource ends, with no length to stop at.
+     *
+     * The distinction the return value carries is the whole point. A stream over a resource still
+     * being written waits at the current end of file, so `-1` means the producer genuinely
+     * finished; a producer that died is expected to throw instead, because a `-1` for that case
+     * would be indistinguishable from success and would serve a silently half-length track.
+     */
+    private fun copyUntilEnd(from: InputStream, to: OutputStream): Transfer {
+        val buffer = ByteArray(COPY_BUFFER_BYTES)
+        var written = 0L
+        while (true) {
+            val read = try {
+                from.read(buffer, 0, buffer.size)
+            } catch (_: IOException) {
+                return Transfer(written, complete = false)
+            }
+            if (read == -1) return Transfer(written, complete = true)
+            to.write(buffer, 0, read)
+            written += read
+        }
+    }
+
+    /** How much of an unknown-length body was sent, and whether it was all of it. */
+    private class Transfer(val written: Long, val complete: Boolean)
 
     private fun respondError(output: OutputStream, status: Int, extraHeaders: List<String> = emptyList()) {
         val head = StringBuilder()

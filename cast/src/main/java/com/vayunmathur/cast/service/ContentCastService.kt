@@ -87,6 +87,13 @@ class ContentCastService : Service() {
                     resources.onResponse(msg.data)
                     true
                 }
+                CastContract.MSG_RESOURCE_COMPLETE -> {
+                    // Not gated on `sessionOpen`, unlike the two below: this releases a reader that
+                    // may be parked on a growing file, and dropping it during teardown would leave
+                    // that reader to wait out its own bound for no reason.
+                    resources.onComplete(msg.data)
+                    true
+                }
                 CastContract.MSG_PLAY_MEDIA -> {
                     // Dropped with no session, for the same reason a state snapshot is: there is no
                     // TV to play it on, and a client may send one a tick after the session ended.

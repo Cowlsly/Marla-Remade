@@ -45,6 +45,7 @@ class CastContractTest {
             CastContract.MSG_RESOURCE_REQUEST,
             CastContract.MSG_RESOURCE_RESPONSE,
             CastContract.MSG_PLAY_MEDIA,
+            CastContract.MSG_RESOURCE_COMPLETE,
         )
         assertEquals(codes.size, codes.toSet().size, "two Messenger `what` codes are the same")
     }
@@ -112,6 +113,17 @@ class CastContractTest {
     fun `the audio format the pipe expects is the one the RTP timebase uses`() {
         assertEquals(48_000, CastContract.AUDIO_SAMPLE_RATE)
         assertEquals(2, CastContract.AUDIO_CHANNELS)
+    }
+
+    @Test
+    fun `the completion message reuses the resource keys rather than inventing new ones`() {
+        // MSG_RESOURCE_COMPLETE names a resource and states its final length, which are the two
+        // things MSG_RESOURCE_RESPONSE already has keys for. A second spelling of either would be a
+        // message the service reads as being about no resource at all.
+        assertEquals("resourceId", CastContract.KEY_RESOURCE_ID)
+        assertEquals("resourceLength", CastContract.KEY_RESOURCE_LENGTH)
+        // Distinct from MSG_PLAY_MEDIA, which is the code it was added next to.
+        assertTrue(CastContract.MSG_RESOURCE_COMPLETE != CastContract.MSG_PLAY_MEDIA)
     }
 
     // ---- transport controls ----

@@ -1,6 +1,7 @@
 package com.vayunmathur.library.media
 
 import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 
 /**
  * Ogg page construction: lacing tables, the Ogg CRC-32, and splitting a packet across pages.
@@ -162,10 +163,23 @@ internal object OggPages {
  * Header packets each get their own page, as the Opus mapping requires. Audio packets are
  * grouped so a page holds up to about a second of audio, which is the usual trade between
  * page overhead and how much a reader loses to a corrupt page.
+ *
+ * **Pages go straight to [sink] as they are completed, and no byte is ever revisited.** Each
+ * page is built whole - lacing table, granule position, CRC - and only then written, and
+ * nothing discovered later reaches back into one already gone: [finish]'s final granule
+ * position lands on the *pending* page, and the header packets are fixed in size when written.
+ * So the same code serves a file being accumulated in memory and a stream being read while it
+ * is still being encoded, which is what lets a transcode start playing before it has finished.
  */
-internal class OggStreamWriter(private val serialNumber: Int) {
+internal class OggStreamWriter(
+    private val serialNumber: Int,
+    /**
+     * Where the pages go. Pass a `ByteArrayOutputStream` to accumulate the whole stream, or a
+     * file for a reader to follow along behind.
+     */
+    private val sink: OutputStream,
+) {
 
-    private val out = ByteArrayOutputStream(INITIAL_CAPACITY)
     private var sequence = 0
     private var headerWritten = false
 
@@ -182,7 +196,7 @@ internal class OggStreamWriter(private val serialNumber: Int) {
             granulePosition = 0L,
             firstHeaderType = if (headerWritten) 0 else OggPages.FLAG_BEGIN_OF_STREAM,
         )
-        pages.forEach { out.write(it) }
+        pages.forEach { writePage(it) }
         sequence += pages.size
         headerWritten = true
     }
@@ -206,15 +220,16 @@ internal class OggStreamWriter(private val serialNumber: Int) {
     }
 
     /**
-     * Closes the stream and returns the bytes.
+     * Writes the last page, flagged end of stream.
      *
      * [finalGranulePosition] overrides the last page's granule position so it reports the
      * stream's true length: the encoder pads its final packet out to a whole frame, and a
-     * decoder trims that padding by comparing what it decoded against this number.
+     * decoder trims that padding by comparing what it decoded against this number. It only
+     * ever affects the page still pending, which is why nothing already written has to be
+     * revisited and why the stream can be read as it is produced.
      */
-    fun finish(finalGranulePosition: Long): ByteArray {
+    fun finish(finalGranulePosition: Long) {
         flushPage(endOfStream = true, granulePosition = finalGranulePosition)
-        return out.toByteArray()
     }
 
     private fun flushPage(endOfStream: Boolean, granulePosition: Long) {
@@ -231,7 +246,7 @@ internal class OggStreamWriter(private val serialNumber: Int) {
             packet.copyInto(payload, at)
             at += packet.size
         }
-        out.write(
+        writePage(
             OggPages.build(
                 headerType = if (endOfStream) OggPages.FLAG_END_OF_STREAM else 0,
                 granulePosition = granulePosition,
@@ -248,9 +263,20 @@ internal class OggStreamWriter(private val serialNumber: Int) {
         pendingSegments = 0
     }
 
-    private companion object {
-        const val INITIAL_CAPACITY = 1 * 1024 * 1024
+    /**
+     * Flushed per page rather than left to the sink's own buffering.
+     *
+     * A reader following a live transcode can only see bytes that have actually been written,
+     * so a page held back in a buffer is a page the player does not have - and with a page
+     * carrying about a second of audio, buffering a few of them is the difference between
+     * playback starting and the TV waiting.
+     */
+    private fun writePage(page: ByteArray) {
+        sink.write(page)
+        sink.flush()
+    }
 
+    private companion object {
         /** Fifty 20 ms Opus packets, so a page carries about one second. */
         const val MAX_PACKETS_PER_PAGE = 50
     }

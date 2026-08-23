@@ -17,6 +17,7 @@ import com.vayunmathur.cast.protocol.PairFailed
 import com.vayunmathur.cast.protocol.PairOk
 import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
+import com.vayunmathur.cast.protocol.Ping
 import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.protocol.PlaybackState
@@ -353,6 +354,19 @@ class MirrorClient(
     }
 
     /**
+     * Put a keep-alive on the control channel, so the TV's read deadline does not expire.
+     *
+     * Non-throwing and unlogged for exactly [sendPlaybackState]'s reasons - it is a timer loop, and
+     * a socket that has really died is [awaitEnd]'s to report. The reply is absorbed by
+     * [awaitEnd]'s `else` branch, which is where it wants to be handled: the point of the echo is
+     * that a read happened at all, not what was in it.
+     */
+    fun sendPing() {
+        runCatching { socket.send(Ping) }
+            .onFailure { Log.w(TAG, "could not send a keep-alive", it) }
+    }
+
+    /**
      * Wait for the TV to say goodbye, or for the socket to die, acting on anything else it sends.
      *
      * Held open for the whole session so that a TV going away is noticed at once, rather than only
@@ -389,6 +403,9 @@ class MirrorClient(
                         onCommand(message)
                     }
                 }
+                // The echo of our own keep-alive. Nothing to do with it: having read it is the
+                // whole effect, because that is what pushed this socket's read deadline out.
+                is Ping -> {}
                 else -> {}
             }
         }

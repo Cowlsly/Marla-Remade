@@ -25,6 +25,8 @@ import kotlinx.serialization.json.Json
  * and the TV decodes them, so no video is encoded, seeking is a byte offset and audio-only becomes
  * expressible at all. Screen mirroring keeps the RTP path unchanged, because it has no file to serve.
  * [StreamConfig.videoCodec] became optional in the same bump, and [DecoderLimits] grew an audio half.
+ * [Ping] arrived in the same version, once a served session turned out to be able to go quiet for
+ * longer than either end's read timeout allows.
  */
 const val PROTOCOL_VERSION = 5
 
@@ -60,6 +62,8 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *                          ◄───────────── CONTENT_READY (accepted, or refused with a reason)
  *        PLAY_MEDIA ──────────────────────────►         (which resource, and what is in it)
  *        … the TV fetches byte ranges over HTTPS and decodes them itself …
+ *        PING ────────────────────────────────►         (every 20 s, so neither read deadline expires)
+ *                          ◄───────────── PING          (echoed straight back)
  *        BYE ─────────────────────────────────►
  * ```
  *
@@ -546,6 +550,37 @@ enum class PlaybackAction {
     @SerialName("SET_VOLUME")
     SetVolume,
 }
+
+/**
+ * Nothing to say, said out loud.
+ *
+ * **A read timeout is the only liveness check either end has, and it cannot tell a quiet session
+ * from a dead one.** Both ends give a read 60 seconds, which was sized for the longest legitimate
+ * wait in a handshake - a human reading six digits off a screen. A live content session has no such
+ * guarantee: the phone may have nothing whatever to say for minutes, because the TV is fetching the
+ * media over HTTPS on its own and owns its own clock. So a perfectly healthy session used to be
+ * torn down a minute in, by whichever end read first.
+ *
+ * Sent by the phone every [PING_INTERVAL_MS] while a content session is live, and **echoed straight
+ * back by the receiver**. The echo is not politeness: `SO_TIMEOUT` is a *read* timeout, so the
+ * phone's own outbound ping does nothing for the phone's deadline, and without the reply the phone
+ * would drop the session at 60 seconds exactly as the TV used to.
+ *
+ * Carries no payload. Anything worth knowing is already in [PlaybackState], and a keep-alive that
+ * grew fields would become a second, competing source of truth about the same session.
+ */
+@Serializable
+@SerialName("PING")
+data object Ping : ControlMessage
+
+/**
+ * How often a ping goes out, at a third of the 60 s read timeout.
+ *
+ * A third rather than a half so that two consecutive pings can be lost - to a stall, a scheduler
+ * that did not run the coroutine, a moment of packet loss - before either end concludes the other
+ * has gone.
+ */
+const val PING_INTERVAL_MS = 20_000L
 
 /**
  * Either end, at any point after the secret is established.

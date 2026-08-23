@@ -10,13 +10,20 @@ import com.vayunmathur.music.data.Music
 import com.vayunmathur.sdk.cast.CastClient
 import com.vayunmathur.sdk.cast.CastException
 import com.vayunmathur.sdk.cast.CastResource
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileOutputStream
 import java.util.concurrent.ConcurrentHashMap
 
 private const val TAG = "CastPlayback"
@@ -29,10 +36,15 @@ private const val TAG = "CastPlayback"
  * an HTTPS proxy, asks this app for a descriptor per track, and the TV decodes the original bytes.
  * So the phone starts no encoder, and the one thing it does encode is Opus, once per file.
  *
- * **Preparation happens before the TV is told to play, deliberately.** Cast's proxy holds an HTTP
- * request open while it waits for a descriptor, so transcoding inside that wait would turn a slow
- * conversion into a stalled fetch. Doing it first makes the delay this app's own, where it can be
- * shown as one.
+ * **The TV is told to play a track before it has finished being encoded, deliberately.** Waiting for
+ * the whole transcode first left the television holding an idle control channel for over a minute,
+ * and it tore the session down before a note played. Now the resource is offered with an unknown
+ * length, `PLAY_MEDIA` goes out at once, and the encoder - which runs several times faster than real
+ * time - stays comfortably ahead of the TV's reader.
+ *
+ * The price is one thing a user can notice: **a track being encoded for the first time cannot be
+ * seeked**, because a stream with no known length has nothing to answer a byte range with. It is
+ * cached as it goes, so every later play of it is instant and seekable both.
  */
 object CastPlayback {
 
@@ -46,10 +58,11 @@ object CastPlayback {
         data class Casting(
             val receiverName: String,
             /**
-             * A track is being converted to Opus.
+             * A track is still being encoded in the background.
              *
-             * Worth a state of its own because it is the only part of casting that takes visible
-             * time, and a first play with no explanation looks like a hang.
+             * No longer "you are waiting": playback has already started, and this only says the
+             * encoder is still working behind it. Worth showing anyway, because it is the window
+             * in which seeking does not work and in which a failure can still appear.
              */
             val preparing: Boolean = false,
         ) : State
@@ -58,7 +71,28 @@ object CastPlayback {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /**
+     * Owns the background transcodes, and is why they are not launched in the caller's scope.
+     *
+     * The one caller is a composable's `rememberCoroutineScope`, which is cancelled the moment the
+     * now-playing screen leaves composition - so a transcode launched there would be abandoned
+     * mid-track by a user simply navigating away, leaving the TV reading a file nothing is writing.
+     */
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
     private var client: CastClient? = null
+
+    /**
+     * The running transcode and the resource it is producing, so a track change can cancel it.
+     *
+     * Volatile because they are written from the transcode's own completion on `Dispatchers.IO` and
+     * read by [play] on the main thread.
+     */
+    @Volatile
+    private var transcodeJob: Job? = null
+
+    @Volatile
+    private var transcodingId: String? = null
 
     /**
      * What the TV has been told about, by resource id.
@@ -81,6 +115,14 @@ object CastPlayback {
 
         /** Converted once and cached, keyed by track id. */
         class Cached(val file: File) : Source
+
+        /**
+         * Being converted right now, into a file the TV is already reading.
+         *
+         * Served with an unknown length, which is what lets it be offered before it exists. Becomes
+         * a [Cached] the moment the transcode finishes, so the next play of it is seekable.
+         */
+        class Growing(val file: File) : Source
     }
 
     fun support(context: Context): CastClient.Support = CastClient(context).support()
@@ -121,30 +163,98 @@ object CastPlayback {
     }
 
     /**
-     * Put [song] on the TV, converting it first if it is not already Opus.
+     * Put [song] on the TV, encoding it in the background if it is not already Opus.
      *
-     * Suspends for as long as the conversion takes, which is why the state carries a `preparing`
-     * flag: a four-minute track is a second or two the first time and nothing at all afterwards.
+     * Returns as soon as the TV has been told to play, which for a track needing conversion is
+     * before any of it has been encoded. [State.Casting.preparing] is what says the encoder is
+     * still running behind the playback.
      */
     suspend fun play(context: Context, song: Music) {
         val active = client ?: return
         val id = song.id.toString()
+        // A transcode for a track the TV has moved on from is a minute of CPU nobody is waiting
+        // for. Skipped when the id matches, so replaying the current track does not kill its own.
+        cancelTranscodeExcept(id)
+
         val known = offered[id]
         if (known != null) {
             active.play(id, known.contentType, song.duration)
             return
         }
 
-        _state.update { if (it is State.Casting) it.copy(preparing = true) else it }
-        val prepared = withContext(Dispatchers.IO) { prepare(context, song) }
-        _state.update { if (it is State.Casting) it.copy(preparing = false) else it }
-
-        if (prepared == null) {
-            Log.w(TAG, "'${song.title}' could not be prepared for casting")
+        val uri = song.uri.toUri()
+        val ready = withContext(Dispatchers.IO) { alreadyPlayable(context, uri, song) }
+        if (ready != null) {
+            offered[id] = ready
+            active.play(id, ready.contentType, song.duration)
             return
         }
-        offered[id] = prepared
-        active.play(id, prepared.contentType, song.duration)
+
+        // Everything else is encoded as the TV plays it. The empty cache file has to exist and the
+        // resource has to be registered *before* PLAY_MEDIA: the TV asks for bytes before any have
+        // been written, and a resource this app has not offered - or a file that is not there yet -
+        // is answered with a 404 rather than a wait.
+        val cached = cacheFile(context, song.id)
+        val source = withContext(Dispatchers.IO) { readSource(context, uri, cached) }
+        if (source == null) {
+            Log.w(TAG, "'${song.title}' could not be read for casting")
+            return
+        }
+        offered[id] = Prepared(Source.Growing(cached), CONTENT_TYPE)
+        active.play(id, CONTENT_TYPE, song.duration)
+        startTranscode(active, song, id, cached, source)
+    }
+
+    /**
+     * Encodes into the file the TV is already reading, and says so when it stops.
+     *
+     * The completion is not optional on either path. A reader that has caught up with the encoder is
+     * parked waiting for more bytes, and the only things that release it are a real length or a
+     * failure - so a transcode that ended without reporting either would hold an HTTP connection
+     * open until the proxy's own bound expired.
+     */
+    private fun startTranscode(
+        active: CastClient,
+        song: Music,
+        id: String,
+        cached: File,
+        source: ByteArray,
+    ) {
+        _state.update { if (it is State.Casting) it.copy(preparing = true) else it }
+        transcodingId = id
+        transcodeJob = scope.launch {
+            val length = runCatching {
+                FileOutputStream(cached).use { sink ->
+                    OpusTranscoder.transcodeTo(source, sink, isStopped = { !isActive })
+                }
+            }.getOrNull()
+
+            // NonCancellable because this is what a cancelled transcode owes its reader: the
+            // failure has to travel even though the work was abandoned on purpose.
+            withContext(NonCancellable) {
+                if (length != null) {
+                    // Now a real file with a real length, so the next play of it can be seeked.
+                    offered[id] = Prepared(Source.Cached(cached), CONTENT_TYPE)
+                    Log.i(TAG, "encoded '${song.title}' to $length bytes of Opus")
+                } else {
+                    // A part-written file has no end-of-stream page, so it must not be mistaken for
+                    // a cached track on the next cast.
+                    offered.remove(id)
+                    runCatching { cached.delete() }
+                    Log.w(TAG, "could not encode '${song.title}' for casting")
+                }
+                active.resourceComplete(id, length ?: PRODUCER_FAILED)
+                if (transcodingId == id) {
+                    transcodingId = null
+                    _state.update { if (it is State.Casting) it.copy(preparing = false) else it }
+                }
+            }
+        }
+    }
+
+    private fun cancelTranscodeExcept(id: String) {
+        if (transcodingId == null || transcodingId == id) return
+        transcodeJob?.cancel()
     }
 
     fun close() {
@@ -153,6 +263,11 @@ object CastPlayback {
     }
 
     private fun clear() {
+        // Cancelled before the state is published: the transcode's own completion clears
+        // `preparing`, and letting it run on would leave it writing into a session that has gone.
+        transcodeJob?.cancel()
+        transcodeJob = null
+        transcodingId = null
         client = null
         offered.clear()
         _state.value = State.Idle
@@ -163,14 +278,12 @@ object CastPlayback {
     // ------------------------------------------------------------------
 
     /**
-     * Serve an Opus file as it is; convert anything else, once.
+     * Whichever of the two no-work cases applies, or null when the track has to be encoded.
      *
-     * Converting to a file rather than streaming a live encode is the whole reason scrubbing works: a
-     * live transcode has no length and no seekable offsets, so `Range` - and therefore the seek bar -
-     * would have nothing to answer with.
+     * An Opus file is served as it is, and a track converted on an earlier cast is served from the
+     * cache - both with a real length, so both are seekable from the first moment.
      */
-    private fun prepare(context: Context, song: Music): Prepared? {
-        val uri = song.uri.toUri()
+    private fun alreadyPlayable(context: Context, uri: Uri, song: Music): Prepared? {
         if (isOpus(context, uri)) {
             Log.i(TAG, "'${song.title}' is already Opus; serving it unchanged")
             return Prepared(Source.Original(uri), CONTENT_TYPE)
@@ -181,26 +294,32 @@ object CastPlayback {
             Log.i(TAG, "'${song.title}' was converted on an earlier cast; reusing it")
             return Prepared(Source.Cached(cached), CONTENT_TYPE)
         }
-
-        val source = runCatching {
-            context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        }.getOrNull() ?: return null
-
-        val encoded = OpusTranscoder.transcode(source, isStopped = { false }) {} ?: return null
-        return runCatching {
-            cached.parentFile?.mkdirs()
-            cached.writeBytes(encoded)
-            Log.i(TAG, "converted '${song.title}' to ${encoded.size} bytes of Opus")
-            Prepared(Source.Cached(cached), CONTENT_TYPE)
-        }.getOrNull()
+        return null
     }
+
+    /**
+     * Reads the track's bytes and creates the empty file its Opus will be written into.
+     *
+     * The file is created here rather than by the transcode, because it has to exist before the TV
+     * is told to play: the first fetch arrives within moments, and opening a descriptor to a file
+     * that is not there yet is a `404` the player treats as a failed load.
+     */
+    private fun readSource(context: Context, uri: Uri, cached: File): ByteArray? = runCatching {
+        val source = context.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+            ?: return null
+        cached.parentFile?.mkdirs()
+        // Truncating, so a file left behind by a transcode that died is not read as a head start.
+        FileOutputStream(cached).close()
+        source
+    }.getOrNull()
 
     /**
      * Answers Cast's request for a track's bytes.
      *
-     * Called on Cast's own background thread and expected to be quick, which it is: everything slow
-     * already happened in [prepare]. The descriptor must be seekable, because the TV asks for byte
-     * ranges - both branches here give a real file, and neither is a pipe.
+     * Called on Cast's own background thread, and quick in every branch: even a track still being
+     * encoded is answered immediately, with a descriptor to the file being written and a negative
+     * length that tells Cast to wait at the end of it rather than report one. The descriptor is
+     * always a real file, so a completed resource is seekable.
      */
     private fun openResource(context: Context, resourceId: String): CastResource? {
         val prepared = offered[resourceId] ?: run {
@@ -217,6 +336,13 @@ object CastPlayback {
                 is Source.Cached -> CastResource(
                     ParcelFileDescriptor.open(source.file, ParcelFileDescriptor.MODE_READ_ONLY),
                     source.file.length(),
+                    prepared.contentType,
+                )
+                is Source.Growing -> CastResource(
+                    ParcelFileDescriptor.open(source.file, ParcelFileDescriptor.MODE_READ_ONLY),
+                    // Not `file.length()`: the length now is a snapshot of a file still growing,
+                    // and stating it would cut the track off wherever the encoder happened to be.
+                    UNKNOWN_LENGTH,
                     prepared.contentType,
                 )
             }
@@ -258,6 +384,16 @@ object CastPlayback {
     private const val SNIFF_BYTES = 64
 
     private const val CACHE_DIR = "cast-opus"
+
+    /**
+     * The length reported for a track still being encoded: negative means "still being written,
+     * final size unknown", which is what makes Cast wait at the end of the file instead of
+     * reporting it.
+     */
+    private const val UNKNOWN_LENGTH = -1L
+
+    /** Sent as the completed length when the transcode failed, which releases readers with an error. */
+    private const val PRODUCER_FAILED = -1L
 
     /**
      * `audio/ogg` rather than `audio/opus`: the container is Ogg, and that is what decides which

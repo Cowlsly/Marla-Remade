@@ -20,6 +20,7 @@ import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
 import com.vayunmathur.cast.protocol.PairResult
 import com.vayunmathur.cast.protocol.PairingGate
+import com.vayunmathur.cast.protocol.Ping
 import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackAction
 import com.vayunmathur.cast.protocol.PlaybackCommand
@@ -445,6 +446,9 @@ object ReceiverController {
                 }
                 is VideoCodecConfig -> onVideoCodecConfig(message, config)
                 is PlaybackState -> onPlaybackState(message)
+                // As in the content-session loop below: echoed so the phone's read deadline moves
+                // too. Screen mirroring never sends one, so this only fires for app content.
+                is Ping -> runCatching { channel.send(Ping) }
                 else -> Unit
             }
         }
@@ -517,6 +521,10 @@ object ReceiverController {
                     }
                     is PlayMedia -> withContext(Dispatchers.Main) { player.play(message) }
                     is PlaybackState -> onPlaybackState(message)
+                    // Echoed straight back, which is the whole of the keep-alive. Reading it has
+                    // already pushed this end's deadline out; replying is what pushes the phone's,
+                    // since a read timeout is not reset by anything that end sends.
+                    is Ping -> runCatching { channel.send(Ping) }
                     else -> Unit
                 }
             }

@@ -37,6 +37,15 @@ package com.vayunmathur.sdk.cast
  *       … Cast serves byte ranges of that fd to the TV, which decodes them itself …
  * ```
  *
+ * A resource may also be offered while it is still being written, with a negative length - which
+ * is what lets an app start playback before it has finished encoding:
+ *
+ * ```
+ *       MSG_RESOURCE_RESPONSE             ─►     (a growing fd, length = -1, MIME type)
+ *       … Cast serves it with no Content-Length and waits at end of file rather than reporting one …
+ *       MSG_RESOURCE_COMPLETE             ─►     (the real length, or none if it failed)
+ * ```
+ *
  * Which is what lets an app cast with no encoder on the phone at all - and what lets an audio-only
  * app cast, which the `Surface` path could not do in any form.
  */
@@ -126,6 +135,21 @@ object CastContract {
      * Ignored without a session, so a client need not track readiness itself.
      */
     const val MSG_PLAY_MEDIA = 9
+
+    /**
+     * A resource that was offered with an unknown length has finished being written.
+     *
+     * Carries [KEY_RESOURCE_ID] and, on success, [KEY_RESOURCE_LENGTH]. Only meaningful for a
+     * resource whose length was negative in its [MSG_RESOURCE_RESPONSE]: a file descriptor to a
+     * file still being written reports EOF at the current end of file, and Cast cannot tell "not
+     * yet" from "done", so a reader that has caught up with the writer waits for this.
+     *
+     * **An absent [KEY_RESOURCE_LENGTH] means the producer failed**, and is what releases a
+     * waiting reader with an error rather than leaving it blocked until its own bound expires.
+     * A client that offers an unknown length and then never sends this turns a fetch into a
+     * stall, so it must send one on both paths.
+     */
+    const val MSG_RESOURCE_COMPLETE = 10
 
     // ---- service → client ----
 
@@ -257,7 +281,18 @@ object CastContract {
      */
     const val KEY_RESOURCE_FD = "resourceFd"
 
-    /** The resource's total length in bytes, stated by the app rather than measured. */
+    /**
+     * The resource's total length in bytes, stated by the app rather than measured.
+     *
+     * **Negative means "still being written, final size unknown"**, which is how an app offers a
+     * resource it is producing as the TV fetches it. Cast then serves the whole resource with no
+     * `Content-Length`, ends the body by closing the connection, and waits at end of file rather
+     * than reporting one - until [MSG_RESOURCE_COMPLETE] arrives with the real length.
+     *
+     * The cost of that is honest and unavoidable: with no total there is nothing to answer a
+     * `Range` against, so the first play of such a resource cannot be seeked. Once it has been
+     * completed the same resource reports a real length and behaves like any other.
+     */
     const val KEY_RESOURCE_LENGTH = "resourceLength"
 
     /** The resource's MIME type, which decides which extractor the TV's player reaches for. */

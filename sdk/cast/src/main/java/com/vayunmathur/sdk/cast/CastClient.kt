@@ -354,6 +354,33 @@ class CastClient(context: Context) {
     }
 
     /**
+     * Say that a resource offered with an unknown length has finished being written.
+     *
+     * Only for a [CastResource] whose `length` was negative. [length] is the real size now that it
+     * is known, or negative to say the producer **failed** - which releases whatever is reading it
+     * with an error instead of leaving it to wait out its own bound. Both outcomes must be
+     * reported: a reader that has caught up with the writer is parked until one of them arrives.
+     *
+     * Silent and non-throwing, like [play], and for the same reason.
+     */
+    fun resourceComplete(resourceId: String, length: Long) {
+        if (!open) return
+        val remote = service ?: return
+        val message = Message.obtain(null, CastContract.MSG_RESOURCE_COMPLETE).apply {
+            data = Bundle().apply {
+                putString(CastContract.KEY_RESOURCE_ID, resourceId)
+                // Absent rather than negative is what the service reads as a failure, so a failure
+                // is the absence of a length rather than a second flag that could disagree with it.
+                if (length >= 0) putLong(CastContract.KEY_RESOURCE_LENGTH, length)
+            }
+        }
+        try {
+            remote.send(message)
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /**
      * End the session and unbind. Idempotent, and safe if [openSession] never succeeded.
      *
      * [onEnded] is not called: the caller asked for this and already knows.

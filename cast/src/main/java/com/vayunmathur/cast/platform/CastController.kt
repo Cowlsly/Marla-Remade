@@ -25,6 +25,7 @@ import com.vayunmathur.cast.protocol.CodecNegotiation
 import com.vayunmathur.cast.protocol.CodecSelection
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.MediaResourceResolver
+import com.vayunmathur.cast.protocol.PING_INTERVAL_MS
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
 import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackCommand
@@ -40,6 +41,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -129,6 +131,14 @@ object CastController {
     private var socket: ControlSocket? = null
     private var client: MirrorClient? = null
     private var watchJob: Job? = null
+
+    /**
+     * The keep-alive on a served session's control channel.
+     *
+     * Its own job rather than part of [watchJob], because that one is parked in a blocking read for
+     * the whole session and has nowhere to run a timer.
+     */
+    private var pingJob: Job? = null
 
     /** The running mirror. Its retransmit buffers live per-stream inside it. */
     private var engine: MirrorEngine? = null
@@ -578,7 +588,7 @@ object CastController {
         _sessionState.update {
             it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
         }
-        startWatch(appContext, activeClient, device, codec.codec, transportControls = true)
+        startWatch(appContext, activeClient, device, codec.codec, transportControls = true, keepAlive = true)
         ContentSessionResult.Started(
             surface = surface,
             audioWriteEnd = newEngine.audioWriteEnd,
@@ -669,7 +679,7 @@ object CastController {
 
         _mirrorPhase.value = MirrorPhase.Mirroring
         _sessionState.update { it.copy(phase = ClientPhase.Streaming) }
-        startWatch(context, activeClient, device, codec = null, transportControls = true)
+        startWatch(context, activeClient, device, codec = null, transportControls = true, keepAlive = true)
         return ContentSessionResult.Serving(
             receiverName = activeClient.receiverName ?: device.friendlyName,
             hasVideo = wantVideo,
@@ -689,7 +699,15 @@ object CastController {
         /** Null for a served session, where nothing was encoded and there is no codec to demote. */
         codec: VideoCodec?,
         transportControls: Boolean = false,
+        /**
+         * Whether to keep the control channel warm, which only a served session needs.
+         *
+         * Screen mirroring is left alone: its traffic is RTP, and adding a heartbeat to it would be
+         * changing a path this work has no business touching.
+         */
+        keepAlive: Boolean = false,
     ) {
+        if (keepAlive) startKeepAlive(activeClient)
         watchJob = scope.launch {
             // Read late rather than captured: `ContentCastService` registers its callback only after
             // `startContentSession` returns, which is after this job has already started - the same
@@ -728,6 +746,28 @@ object CastController {
                 _mirrorPhase.value = MirrorPhase.Failed
             }
             CastService.stop(appContext)
+        }
+    }
+
+    /**
+     * Sends a keep-alive every [PING_INTERVAL_MS] for as long as a content session is live.
+     *
+     * A content session is the case where the control channel can go completely silent while
+     * everything is working: the TV fetches the media over HTTPS and owns its own clock, so unless
+     * the app volunteers playback snapshots there is nothing for the phone to say. Both ends give a
+     * read 60 seconds, so silence used to end the session on whichever side read first - which is
+     * what tore a session down a minute in while a track was still being encoded.
+     *
+     * Under [mutex] like every other writer, because this is one more thread writing one socket.
+     */
+    private fun startKeepAlive(activeClient: MirrorClient) {
+        pingJob?.cancel()
+        pingJob = scope.launch {
+            while (isActive) {
+                delay(PING_INTERVAL_MS)
+                if (!isActive) return@launch
+                mutex.withLock { activeClient.sendPing() }
+            }
         }
     }
 
@@ -911,6 +951,11 @@ object CastController {
         // would serve a token that is no longer anybody's.
         proxy?.stop()
         proxy = null
+        // Cancelled here rather than only in `teardown`: `stopMirroring` deliberately leaves the
+        // control channel and `watchJob` alive, so a ping loop left running would keep pinging on
+        // behalf of a session that has ended.
+        pingJob?.cancel()
+        pingJob = null
     }
 
     /**

@@ -6,6 +6,8 @@ import android.media.MediaCodecInfo
 import android.media.MediaExtractor
 import android.media.MediaFormat
 import android.util.Log
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import java.nio.ByteBuffer
 import kotlin.random.Random
 
@@ -47,19 +49,49 @@ object OpusTranscoder {
      * platform codecs refuse it. A null fails the download: writing one of the formats the
      * user asked to be rid of would be worse than reporting the failure.
      *
-     * [onProgress] is called with the fraction of the track encoded so far. Re-encoding a
-     * track takes seconds rather than milliseconds, so a caller with a progress indicator
-     * has to be able to move it; without that a slow transcode is indistinguishable from a
-     * hang, which is what the user sees as a spinner that never finishes.
+     * Accumulates the whole stream in memory, which is what a caller wanting a `ByteArray`
+     * asked for. [transcodeTo] is the same work without that: prefer it for anything with a
+     * file or a socket on the other end.
      */
     fun transcode(
         source: ByteArray,
         isStopped: () -> Boolean = { false },
         onProgress: (Float) -> Unit = {},
     ): ByteArray? {
+        val buffer = ByteArrayOutputStream(INITIAL_CAPACITY)
+        transcodeTo(source, buffer, isStopped, onProgress) ?: return null
+        return buffer.toByteArray().takeIf { it.isNotEmpty() }
+    }
+
+    /**
+     * Encodes [source] into [sink] as it goes, returning the bytes written or null on failure.
+     *
+     * **The stream is servable before it is finished**, which is the point: pages reach [sink]
+     * about a second of audio at a time, so a reader following behind can start playing while
+     * the rest is still being encoded. Encoding runs several times faster than real time, so a
+     * player that starts at the first page stays behind the encoder rather than catching it.
+     *
+     * A null means the bytes already in [sink] are a partial stream with no end-of-stream page,
+     * and the caller has to say so to whatever is reading: unlike [transcode], a failure here
+     * cannot be undone by discarding a buffer, because the bytes have already left.
+     *
+     * [onProgress] is called with the fraction of the track encoded so far. Re-encoding a
+     * track takes seconds rather than milliseconds, so a caller with a progress indicator
+     * has to be able to move it; without that a slow transcode is indistinguishable from a
+     * hang, which is what the user sees as a spinner that never finishes.
+     *
+     * [sink] is not closed - it belongs to the caller, who may well want its length afterwards.
+     */
+    fun transcodeTo(
+        source: ByteArray,
+        sink: OutputStream,
+        isStopped: () -> Boolean = { false },
+        onProgress: (Float) -> Unit = {},
+    ): Long? {
         var extractor: MediaExtractor? = null
         var decoder: MediaCodec? = null
         var pump: OpusPump? = null
+        val counted = CountingSink(sink)
         try {
             extractor = MediaExtractor().apply { setDataSource(ByteArrayMediaDataSource(source)) }
             val track = audioTrack(extractor) ?: return null
@@ -74,17 +106,25 @@ object OpusTranscoder {
             decoder.configure(format, null, null, 0)
             decoder.start()
 
-            pump = OpusPump(extractor, decoder, isStopped, ::createEncoder, durationUs(format), onProgress)
-            val output = pump.run()
+            pump = OpusPump(
+                extractor,
+                decoder,
+                isStopped,
+                ::createEncoder,
+                durationUs(format),
+                onProgress,
+                counted,
+            )
+            val completed = pump.run()
             // A cancel and a codec failure both used to log the same `out=0`, which is
             // indistinguishable in a bug report and reads as a broken encoder either way.
             val outcome = when {
-                output != null -> "out=${output.size}"
+                completed -> "out=${counted.count}"
                 isStopped() -> "cancelled"
                 else -> "failed"
             }
             Log.i(TAG, "transcode $mime: in=${source.size} $outcome")
-            return output?.takeIf { it.isNotEmpty() }
+            return if (completed) counted.count else null
         } catch (e: Exception) {
             Log.w(TAG, "transcode threw: ${e.javaClass.simpleName}: ${e.message}", e)
             return null
@@ -130,6 +170,37 @@ object OpusTranscoder {
             start()
         }
     }
+
+    /** A megabyte, which covers a few minutes of 256 kbps Opus without regrowing. */
+    private const val INITIAL_CAPACITY = 1 * 1024 * 1024
+}
+
+/**
+ * Counts what passes through, so a transcode can report its own size.
+ *
+ * The streaming path has no buffer to measure at the end, and the size is what a caller has to
+ * hand on: a reader waiting on a growing resource is told the final length, and a log line
+ * saying only "finished" is what makes a truncated encode look like a successful one.
+ */
+private class CountingSink(private val sink: OutputStream) : OutputStream() {
+
+    var count = 0L
+        private set
+
+    override fun write(b: Int) {
+        sink.write(b)
+        count++
+    }
+
+    override fun write(b: ByteArray, off: Int, len: Int) {
+        sink.write(b, off, len)
+        count += len
+    }
+
+    override fun flush() = sink.flush()
+
+    /** Deliberately not closing [sink]: it is the caller's, and they may still want its length. */
+    override fun close() = Unit
 }
 
 /**
@@ -154,6 +225,7 @@ private class OpusPump(
     private val createEncoder: (Int) -> MediaCodec,
     private val durationUs: Long,
     private val onProgress: (Float) -> Unit,
+    sink: OutputStream,
 ) {
     /** Exposed only so the caller can release it; created once the decoder's format is known. */
     var encoder: MediaCodec? = null
@@ -164,7 +236,7 @@ private class OpusPump(
     private val decoderInfo = MediaCodec.BufferInfo()
     private val encoderInfo = MediaCodec.BufferInfo()
     private val queue = PcmQueue()
-    private val writer = OggStreamWriter(Random.nextInt())
+    private val writer = OggStreamWriter(Random.nextInt(), sink)
 
     private var resampler: PolyphaseResampler? = null
 
@@ -193,11 +265,12 @@ private class OpusPump(
 
     private var lastProgressAt = 0L
 
-    fun run(): ByteArray? {
+    /** Whether a complete stream, end-of-stream page and all, reached the sink. */
+    fun run(): Boolean {
         while (!encoderDone) {
             // A hi-res transcode runs for many seconds, so a cancelled download has to be
             // able to stop part-way rather than only between tracks.
-            if (isStopped()) return null
+            if (isStopped()) return false
 
             var moved = false
             while (!extractorDone && feedDecoder(POLL_US)) moved = true
@@ -207,7 +280,7 @@ private class OpusPump(
             if (active == null) {
                 // The decoder finished without ever producing PCM, so there is nothing to
                 // encode and no format to configure an encoder from.
-                if (decoderDone) return null
+                if (decoderDone) return false
                 if (!moved) drainDecoder(TIMEOUT_US)
                 continue
             }
@@ -229,8 +302,9 @@ private class OpusPump(
         }
         // An encoder that reported end of stream without ever emitting a packet leaves a
         // container with no audio in it, which is a failure however valid the framing is.
-        if (encoded == 0L) return null
-        return writer.finish(preSkip + frames)
+        if (encoded == 0L) return false
+        writer.finish(preSkip + frames)
+        return true
     }
 
     /**

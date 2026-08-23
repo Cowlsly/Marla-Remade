@@ -2,6 +2,7 @@ package com.vayunmathur.cast.protocol
 
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.io.InputStream
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
@@ -224,6 +225,90 @@ class MediaProxyTest {
     }
 
     // ------------------------------------------------------------------
+    // Resources still being written
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `serves an unknown length with no Content-Length and closes to end the body`() {
+        // A live transcode has no total to state, so the body is delimited by the connection
+        // closing - which is what HttpURLConnection reads as an unset length.
+        val response = growing().get("/$token/track")
+        assertEquals(200, response.status)
+        assertNull(
+            response.headers["content-length"],
+            "stating a length for a file still being written would cut the track off",
+        )
+        assertEquals("close", response.headers["connection"])
+        assertNull(
+            response.headers["accept-ranges"],
+            "advertising ranges with no total to answer them against would invite a 416",
+        )
+        assertContentEquals(media, response.body)
+    }
+
+    @Test
+    fun `ignores a Range on an unknown length rather than refusing it`() {
+        // 416 here would end playback outright. Serving the whole thing is a permitted answer, and
+        // the same one the multi-range branch already gives.
+        val response = growing().get("/$token/track", "Range: bytes=100-199")
+        assertEquals(200, response.status)
+        assertNull(response.headers["content-range"])
+        assertContentEquals(media, response.body)
+    }
+
+    @Test
+    fun `never reuses a connection it said would close`() {
+        val result = growing().serve("GET /$token/track HTTP/1.1\r\n\r\n")
+        assertTrue(!result.first.reusable, "the body's only delimiter is the close")
+    }
+
+    @Test
+    fun `answers a HEAD on an unknown length with no length either`() {
+        val response = growing().request("HEAD /$token/track HTTP/1.1\r\n\r\n")
+        assertEquals(200, response.status)
+        assertNull(response.headers["content-length"])
+        assertEquals(0, response.body.size)
+    }
+
+    @Test
+    fun `reports a producer that stopped without finishing as truncated`() {
+        // The failure this has to be distinguishable from is success. A reader that gave up gets an
+        // IOException, and reporting it as Served would mean a half-length track logged as fine.
+        val died = GrowingResource(media, availableBytes = 2_000, everFinishes = false)
+        val result = MediaProxyExchange(token) { died }.serve("GET /$token/track HTTP/1.1\r\n\r\n")
+
+        val outcome = assertIs<ExchangeOutcome.Truncated>(result.first.outcome)
+        assertEquals(MediaProxy.UNKNOWN_LENGTH, outcome.expected, "there was never a length to fall short of")
+        assertEquals(2_000, outcome.actual)
+        assertTrue(!result.first.reusable)
+    }
+
+    @Test
+    fun `serves the bytes that arrive after a reader has caught up`() {
+        // The encoder runs ahead of the player, but not by a fixed margin: a reader that reaches the
+        // current end of file has to wait and then carry on, not report the end of the track.
+        val late = GrowingResource(media, availableBytes = 1_000, growsBy = 1_500)
+        val response = MediaProxyExchange(token) { late }.get("/$token/track")
+        assertEquals(200, response.status)
+        assertContentEquals(media, response.body, "the reader stopped at the first end of file")
+    }
+
+    @Test
+    fun `answers the same resource with a real length once it is finished`() {
+        // What makes a re-cast seekable: the resource reports a length as soon as the transcode has
+        // finished, and from then on it is an ordinary range serve.
+        val resource = GrowingResource(media, availableBytes = media.size)
+        val exchange = MediaProxyExchange(token) { resource }
+        assertNull(exchange.get("/$token/track").headers["content-length"])
+
+        resource.finish()
+        val response = exchange.get("/$token/track", "Range: bytes=100-199")
+        assertEquals(206, response.status)
+        assertEquals("bytes 100-199/5000", response.headers["content-range"])
+        assertContentEquals(media.copyOfRange(100, 200), response.body)
+    }
+
+    // ------------------------------------------------------------------
     // Connection reuse
     // ------------------------------------------------------------------
 
@@ -284,6 +369,69 @@ class MediaProxyTest {
     }
 
     private class Response(val status: Int, val headers: Map<String, String>, val body: ByteArray)
+
+    private fun growing() = MediaProxyExchange(token) { GrowingResource(media) }
+
+    /**
+     * A resource still being written, standing in for a live transcode.
+     *
+     * Models the two things the real one does that a plain `ByteArrayInputStream` cannot: a read
+     * that reaches the current end of file waits rather than reporting it, and a producer that dies
+     * throws rather than returning `-1` - which is the only way the proxy can tell a short body from
+     * a complete one when there was never a length.
+     */
+    private class GrowingResource(
+        private val bytes: ByteArray,
+        override val contentType: String = "audio/ogg",
+        /** How much has been written when the request arrives. */
+        private val availableBytes: Int = 0,
+        /** How much more appears the first time a reader catches up. */
+        private val growsBy: Int = 0,
+        /** False for a producer that stops without ever completing. */
+        private val everFinishes: Boolean = true,
+    ) : MediaResource {
+
+        private var written = availableBytes
+        private var complete = false
+
+        override val length: Long
+            get() = if (complete) bytes.size.toLong() else MediaProxy.UNKNOWN_LENGTH
+
+        fun finish() {
+            written = bytes.size
+            complete = true
+        }
+
+        override fun open(offset: Long): InputStream = object : InputStream() {
+            private var position = offset.toInt()
+
+            override fun read(): Int {
+                val one = ByteArray(1)
+                return if (read(one, 0, 1) == 1) one[0].toInt() and 0xff else -1
+            }
+
+            override fun read(b: ByteArray, off: Int, len: Int): Int {
+                while (position >= written) {
+                    // Caught up with the producer. Grow once, then finish - or never, for the
+                    // producer that died.
+                    when {
+                        growsBy > 0 && written < bytes.size ->
+                            written = (written + growsBy).coerceAtMost(bytes.size)
+                        !everFinishes -> throw IOException("the producer stopped")
+                        written < bytes.size -> written = bytes.size
+                        else -> {
+                            complete = true
+                            return -1
+                        }
+                    }
+                }
+                val count = minOf(len, written - position)
+                bytes.copyInto(b, off, position, position + count)
+                position += count
+                return count
+            }
+        }
+    }
 
     private fun MediaProxyExchange.get(target: String, vararg headers: String): Response =
         request("GET $target HTTP/1.1\r\n" + headers.joinToString("") { "$it\r\n" } + "\r\n")

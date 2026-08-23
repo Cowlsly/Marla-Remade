@@ -99,6 +99,25 @@ class ContentSessionTest {
             ControlJson.encodeToString(PlayMedia("a", "audio/ogg") as ControlMessage)
                 .contains("\"PLAY_MEDIA\""),
         )
+        assertTrue(ControlJson.encodeToString(Ping as ControlMessage).contains("\"PING\""))
+    }
+
+    @Test
+    fun `a ping survives the trip and carries nothing`() {
+        // The keep-alive has to decode on both ends or it is worse than useless: an unknown `type`
+        // is treated exactly like a dead socket, so a ping a build did not recognise would end the
+        // very session it was sent to preserve.
+        assertIs<Ping>(roundTrip(Ping))
+    }
+
+    @Test
+    fun `a ping goes out often enough to beat the read timeout`() {
+        // 60 s is what both ends give a read. At a third of that, two consecutive pings can be lost
+        // before either end concludes the other has gone.
+        assertTrue(
+            PING_INTERVAL_MS * 2 < 60_000L,
+            "a single lost ping should not be able to end a healthy session",
+        )
     }
 
     private fun roundTrip(message: ControlMessage): ControlMessage =

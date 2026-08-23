@@ -1,6 +1,9 @@
 package com.vayunmathur.library.media
 
+import java.io.ByteArrayOutputStream
+import java.io.OutputStream
 import kotlin.test.Test
+import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
@@ -102,7 +105,8 @@ class OggStreamWriterTest {
      * the pre-skip samples are the first ones it decodes and then discards.
      */
     private fun stream(packets: Int, packetSize: Int = 640, channels: Int = 2): ByteArray {
-        val writer = OggStreamWriter(serial)
+        val sink = ByteArrayOutputStream()
+        val writer = OggStreamWriter(serial, sink)
         writer.writeHeaderPacket(OpusHead.build(channels, OpusHead.DEFAULT_PRE_SKIP, 48_000))
         writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
         var samples = 0L
@@ -110,7 +114,8 @@ class OggStreamWriterTest {
             samples += 960
             writer.writeAudioPacket(opusPacket(packetSize), samples)
         }
-        return writer.finish(samples)
+        writer.finish(samples)
+        return sink.toByteArray()
     }
 
     // ------------------------------------------------------------------
@@ -208,10 +213,12 @@ class OggStreamWriterTest {
     fun `pages a packet that will not fit in one page`() {
         // 255 segments hold 65025 bytes at most, so this has to be continued onto a second
         // page - the case embedded cover art hits in the comment header.
-        val writer = OggStreamWriter(serial)
+        val sink = ByteArrayOutputStream()
+        val writer = OggStreamWriter(serial, sink)
         val big = ByteArray(70_000) { (it % 251).toByte() }
         writer.writeHeaderPacket(big)
-        val pages = parse(writer.finish(0L))
+        writer.finish(0L)
+        val pages = parse(sink.toByteArray())
 
         assertTrue(pages.size > 1, "an oversized packet must span pages")
         assertEquals(OggPages.FLAG_BEGIN_OF_STREAM, pages[0].headerType)
@@ -229,12 +236,14 @@ class OggStreamWriterTest {
         // The encoder pads its last frame out to a whole 20 ms, so the last page reports the
         // real length instead of the padded one and a decoder drops the difference. Reporting
         // the padded length is how a track ends with a fraction of a second of silence.
-        val writer = OggStreamWriter(serial)
+        val sink = ByteArrayOutputStream()
+        val writer = OggStreamWriter(serial, sink)
         writer.writeHeaderPacket(OpusHead.build(2, OpusHead.DEFAULT_PRE_SKIP, 48_000))
         writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
         repeat(3) { writer.writeAudioPacket(opusPacket(640), (it + 1) * 960L) }
         val trimmed = 2_400L
-        val pages = parse(writer.finish(trimmed))
+        writer.finish(trimmed)
+        val pages = parse(sink.toByteArray())
 
         assertEquals(trimmed, pages.last().granulePosition)
         assertTrue(
@@ -286,5 +295,80 @@ class OggStreamWriterTest {
     @Test
     fun `refuses to retag something that is not an ogg stream`() {
         assertNull(OggOpusTagger.tag(ByteArray(100), VorbisTags(title = "x")))
+    }
+
+    // ------------------------------------------------------------------
+    // Streaming
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `writes pages to the sink before finish is ever called`() {
+        // The property the whole streaming transcode rests on. If pages only landed at `finish`,
+        // a reader following a live encode would have nothing to play until it had all of it,
+        // which is the 69-second wait this replaced.
+        val sink = ByteArrayOutputStream()
+        val writer = OggStreamWriter(serial, sink)
+        writer.writeHeaderPacket(OpusHead.build(2, OpusHead.DEFAULT_PRE_SKIP, 48_000))
+        writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
+        assertTrue(sink.size() > 0, "the header pages should be readable at once")
+
+        val afterHeaders = sink.size()
+        var samples = 0L
+        // Two pages' worth, so a page boundary is certainly crossed.
+        repeat(120) {
+            samples += 960
+            writer.writeAudioPacket(opusPacket(640), samples)
+        }
+        assertTrue(
+            sink.size() > afterHeaders,
+            "a full page of audio should have been flushed without waiting for finish",
+        )
+
+        // And what was already flushed has to be complete, valid pages rather than a part-written
+        // one: a reader gets whatever is there, so a half page would be a corrupt stream.
+        parse(sink.toByteArray()).forEachIndexed { index, page ->
+            assertTrue(page.checksumValid, "page $index was flushed with a bad CRC")
+            assertEquals(index, page.sequence, "page $index was flushed out of sequence")
+        }
+    }
+
+    @Test
+    fun `hands the sink one whole page at a time`() {
+        // The equivalence that matters now that there is only one writer: a sink written to
+        // incrementally must end up with exactly the bytes a buffer would have collected, and each
+        // write must be a complete page. A page delivered in two writes would let a reader that is
+        // keeping up read a half-written page and see a corrupt stream.
+        val chunks = ArrayList<ByteArray>()
+        val recording = object : OutputStream() {
+            override fun write(b: Int) = chunks.add(byteArrayOf(b.toByte())).let { }
+            override fun write(b: ByteArray, off: Int, len: Int) {
+                chunks.add(b.copyOfRange(off, off + len))
+            }
+        }
+
+        val buffered = ByteArrayOutputStream()
+        for (sink in listOf<OutputStream>(recording, buffered)) {
+            val writer = OggStreamWriter(serial, sink)
+            writer.writeHeaderPacket(OpusHead.build(2, OpusHead.DEFAULT_PRE_SKIP, 48_000))
+            writer.writeHeaderPacket(OggOpusTagger.buildOpusTagsPacket(VorbisTags()))
+            var samples = 0L
+            repeat(200) {
+                samples += 960
+                writer.writeAudioPacket(opusPacket(640), samples)
+            }
+            writer.finish(samples)
+        }
+
+        val rejoined = chunks.fold(ByteArray(0)) { acc, chunk -> acc + chunk }
+        assertContentEquals(
+            buffered.toByteArray(),
+            rejoined,
+            "a streamed sink must receive exactly what a buffered one collects",
+        )
+        assertEquals(
+            parse(buffered.toByteArray()).size,
+            chunks.size,
+            "one write per page, so a reader never sees half of one",
+        )
     }
 }
