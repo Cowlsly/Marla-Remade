@@ -2,59 +2,60 @@
 set -euo pipefail
 
 # build_world_transit.sh — build the single global offline transit index
-# (`world.transit`) by resolving the Transitous registry against
-# transitland-atlas, downloading every static GTFS feed, and merging them into one
-# TRX2 pack via `scripts/maps/gtfs_ingest`.
+# (`world.transit`) by mirroring Transitous' own published GTFS directory and
+# merging every zip into one TRX2 pack via `scripts/maps/gtfs_ingest`.
 #
 # This mirrors the "single global graph" decision for roads: the app downloads ONE
 # transit pack on first open (see MainActivity's InitialDownloadChecker) and
 # `OfflineRouter` just iterates `*.transit` — no per-zone logic.
 #
-# WHAT CHANGED, AND WHY IT MATTERS. This script used to scrape `url` fields out of
-# the registry. Most US state files reference feeds by `transitland-atlas-id` with
-# no URL at all, so 38 of California's 49 sources were silently dropped. Its feed
-# names were also positional (`us_ca_0`, `us_ca_1`, …), which meant a two-field
-# manifest, which meant **no MOTIS stop ids** — and without those, live delays
-# cannot be matched to a stop. `gtfs_ingest`'s `resolve_feeds` now does the atlas
-# resolution `build_ca_transit.ps1` pioneered, and emits the three-field manifest
-# `manifest.rs::parse_feed_spec` reads.
+# ONE HOST, ONE MIRROR. Every feed comes from https://api.transitous.org/gtfs/,
+# which is Transitous' own already-fetched, already-normalised output. Nothing here
+# talks to an agency, a national access point, or a rehosting site.
 #
-# THIS IS A HEAVY DATA JOB and a large step up from what it replaces: hundreds of
-# feeds and many GB of downloads, against the 18.9 MB pack the `.url`-only scrape
-# produced. **`--region` and `--max-feeds` are how you stage it** — California
-# first, which is the known-good case, then a few regions, then the world. Run it
-# in WSL / Linux with plenty of disk.
+# That replaced resolving the Transitous registry against transitland-atlas and then
+# fetching each feed from its upstream URL. Those upstreams are third parties in
+# every state of disrepair: 401s from WMATA and the Spanish NAP, 403s, 404s from
+# dead rehosts, hostname-mismatched TLS certs, broken pipes. Every one of them was a
+# warning to be read and ignored, and a feed silently missing from the pack.
+# Transitous already solves that problem — including the API keys we do not have —
+# so the fix is to take its output instead of repeating its work badly.
 #
-# THE DIVISION OF LABOUR: this script owns network I/O — the two registry
-# tarballs, and every feed zip — and `resolve_feeds` owns the resolution. That is
-# what keeps `gtfs_ingest` dependency-free, and it is why downloads are cached
-# here rather than there.
+# THE FEED ID. A zip is `<region>_<Source>.gtfs.zip` and its MOTIS feed id is
+# `<region>-<Source>` — the same string `resolve_feeds` used to compose, and the
+# same one Transitous names its `scripts/*.lua` transforms after
+# (`au-vic_Transport-Victoria-metro-trains.gtfs.zip` <-> `au-vic-Transport-Victoria-
+# metro-trains.lua`). Only the FIRST underscore is a separator; the rest of the name
+# keeps its own hyphens and its case. Without that id the pack carries no MOTIS stop
+# ids and live delays cannot be matched to a stop.
 #
-# Downloads are CONTENT-ADDRESSED: a feed's zip is stored under the SHA-256 of its
-# URL, so a re-run with a different `--region` or `--max-feeds` re-uses everything
-# it already has instead of re-fetching by feed name. Feed names are not stable
-# across registry updates; URLs are.
+# THIS IS A HEAVY DATA JOB: ~2250 feeds and ~10 GB mirrored. **`--region` is how you
+# stage it** — California first, which is the known-good case, then the world. Run it
+# in WSL / Linux with plenty of disk. The mirror is timestamp-based, so a re-run
+# re-fetches only what changed upstream.
 #
-# Requirements: bash, curl, unzip, cargo, tar, and sha256sum (or shasum).
+# Requirements: bash, wget, unzip, cargo, and sha256sum (or shasum).
 #
 # Usage:
 #   ./build_world_transit.sh [options]
 #
 # Options:
-#   --work DIR       Scratch dir for the registries + downloads + unzipped GTFS
+#   --work DIR       Scratch dir for the mirror + unzipped GTFS
 #                    (default: ./world_transit_work). Reused/resumable.
 #   --out DIR        Output dir for world.transit (+ .json)  (default: --work).
-#   --region GLOB    Only resolve registry files matching this glob under feeds/
-#                    (e.g. 'us-ca', 'us-*', 'de-*'). Default '*' (the whole world).
-#                    USE THIS to stage the build.
+#   --region GLOB    Only use feeds whose region (the part before the first `_`)
+#                    matches this glob: 'us-ca', 'us-*', 'de-*'. Default '*' (the
+#                    whole world). USE THIS to stage the build.
 #   --max-feeds N    Cap the number of feeds (0 = no cap, default 0). Applied to a
 #                    name-sorted list, so the cap takes a stable prefix.
-#   --manifest FILE  Skip the registries entirely; build straight from a manifest
+#   --manifest FILE  Skip the mirror entirely; build straight from a manifest
 #                    of `name=dir[=motis_prefix]` lines (already-unzipped feeds).
-#   --jobs N         Parallel downloads (default 6).
+#   --mirror-dir DIR Where the mirror lives (default <work>/transitous). Point this
+#                    at an existing mirror to build fully offline.
+#   --skip-mirror    Use whatever is already in --mirror-dir; fetch nothing.
+#   --rate LIMIT     wget --limit-rate (default 30m). Be kind to a volunteer host.
 #   --pack-name NAME Output pack name (default 'world' -> world.transit).
-#   --resolve-only   Resolve and report the plan, then stop. Downloads nothing.
-#   --refresh        Re-fetch the registry tarballs even if they are cached.
+#   --list-only      List the feeds that would be used, then stop.
 #   --publish        After building, upload the pack via publish_r2.sh.
 #   --dry-run        Print what would happen; download/build nothing.
 #   -h|--help        Show this help.
@@ -63,8 +64,8 @@ set -euo pipefail
 #   # California only, the known-good staging step:
 #   ./build_world_transit.sh --region 'us-ca' --out /tmp/catransit
 #
-#   # See what the whole world would resolve to, without fetching a byte:
-#   ./build_world_transit.sh --resolve-only
+#   # See which feeds the mirror offers, without building a pack:
+#   ./build_world_transit.sh --list-only
 #
 #   # Whole world, then publish:
 #   export R2_ENDPOINT=... R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
@@ -78,15 +79,17 @@ OUT=""
 REGION="*"
 MAX_FEEDS=0
 MANIFEST=""
-JOBS=6
+MIRROR_DIR=""
+SKIP_MIRROR=0
+RATE="30m"
 PACK_NAME="world"
-RESOLVE_ONLY=0
-REFRESH=0
+LIST_ONLY=0
 PUBLISH=0
 DRY_RUN=0
 
-TRANSITOUS_TARBALL="https://codeload.github.com/public-transport/transitous/tar.gz/refs/heads/main"
-ATLAS_TARBALL="https://codeload.github.com/transitland/transitland-atlas/tar.gz/refs/heads/main"
+# Transitous' published output: the zips it has already fetched and normalised,
+# plus the `scripts/` transforms that name each feed's MOTIS id.
+GTFS_INDEX_URL="https://api.transitous.org/gtfs/"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -95,156 +98,173 @@ while [[ $# -gt 0 ]]; do
         --region) REGION="$2"; shift 2 ;;
         --max-feeds) MAX_FEEDS="$2"; shift 2 ;;
         --manifest) MANIFEST="$2"; shift 2 ;;
-        --jobs) JOBS="$2"; shift 2 ;;
+        --mirror-dir) MIRROR_DIR="$2"; shift 2 ;;
+        --skip-mirror) SKIP_MIRROR=1; shift ;;
+        --rate) RATE="$2"; shift 2 ;;
         --pack-name) PACK_NAME="$2"; shift 2 ;;
-        --resolve-only) RESOLVE_ONLY=1; shift ;;
-        --refresh) REFRESH=1; shift ;;
+        --list-only) LIST_ONLY=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
-        -h|--help) sed -n '4,71p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,72p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
 OUT="${OUT:-$WORK}"
+MIRROR_DIR="${MIRROR_DIR:-$WORK/transitous}"
 
 need() { command -v "$1" >/dev/null || { echo "ERROR: '$1' is required but not installed" >&2; exit 1; }; }
-need curl
 need unzip
 need cargo
-need tar
-
-sha256_of_string() {
-    if command -v sha256sum >/dev/null; then
-        printf '%s' "$1" | sha256sum | cut -d' ' -f1
-    elif command -v shasum >/dev/null; then
-        printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1
-    else
-        echo "ERROR: need sha256sum or shasum for the download cache" >&2
-        exit 1
-    fi
-}
-export -f sha256_of_string
+# Only when this run will actually fetch: a --dry-run, a supplied manifest or an
+# existing mirror all get by without it.
+[[ "$SKIP_MIRROR" == "1" || "$DRY_RUN" == "1" || -n "$MANIFEST" ]] || need wget
 
 mkdir -p "$WORK" "$OUT"
 GTFS_ROOT="$WORK/gtfs"          # unzipped feeds: $GTFS_ROOT/<feed_name>/
-CACHE="$WORK/cache"             # content-addressed zips: $CACHE/<sha256 of url>.zip
-mkdir -p "$GTFS_ROOT" "$CACHE"
+mkdir -p "$GTFS_ROOT"
 BUILD_MANIFEST="$WORK/feeds.manifest"
-PLAN="$WORK/plan.tsv"
 
-# --- 1. Build the ingest tools (release) ---
+# Delete a failed feed's unzip directory, and refuse to delete anything else.
+#
+# Every recursive delete in this script goes through here. It exists because the
+# flatten step below once computed a path of `.` and handed the repo root to a
+# plain `rm -rf`: a guard that asserts the target is a real subdirectory of
+# GTFS_ROOT turns that class of mistake into a refusal instead of data loss.
+discard_feed_dir() {
+    local target="$1" root
+    root="$(cd "$GTFS_ROOT" 2>/dev/null && pwd -P)" || return 0
+    [[ -n "$target" && -d "$target" ]] || return 0
+    target="$(cd "$target" 2>/dev/null && pwd -P)" || return 0
+    # Must be strictly inside GTFS_ROOT: not the root, not a parent, not elsewhere.
+    if [[ "$target" == "$root"/?* ]]; then
+        rm -rf "$target"
+    else
+        echo "  REFUSED to delete '$target': not inside $root" >&2
+    fi
+}
+
+# `Get-SafeName`, matching gtfs_ingest's registry::safe_name: lowercase, and every
+# run of non-alphanumerics becomes one `_`. Used for the unzip directory only.
+safe_name() {
+    printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/_/g; s/^_+//; s/_+$//'
+}
+
+# --- 1. Build the ingest tool (release) ---
 echo "=== building gtfs_ingest (release) ==="
 if [[ "$DRY_RUN" == "0" ]]; then
     ( cd "$INGEST_DIR" && cargo build --release )
 fi
 INGEST_BIN="$INGEST_DIR/target/release/gtfs_ingest"
-RESOLVE_BIN="$INGEST_DIR/target/release/resolve_feeds"
 
-# --- 2. Resolve the plan, unless a manifest was supplied ---
+# --- 2. Mirror Transitous' published GTFS directory ---
 if [[ -n "$MANIFEST" ]]; then
-    echo "=== using supplied manifest $MANIFEST (skipping the registries) ==="
+    echo "=== using supplied manifest $MANIFEST (skipping the mirror) ==="
     cp "$MANIFEST" "$BUILD_MANIFEST"
 else
-    # Fetch a registry tarball and extract it. Network I/O belongs here, not in
-    # resolve_feeds, which is what keeps gtfs_ingest dependency-free.
-    get_registry() {
-        local url="$1" dir="$2" label="$3"
-        if [[ -d "$dir/feeds" && "$REFRESH" == "0" ]]; then
-            echo "=== reusing $label at $dir ==="
-            return
-        fi
-        echo "=== fetching $label ==="
+    if [[ "$SKIP_MIRROR" == "1" ]]; then
+        echo "=== --skip-mirror: using the existing mirror at $MIRROR_DIR ==="
+    else
+        echo "=== mirroring $GTFS_INDEX_URL -> $MIRROR_DIR (rate: $RATE) ==="
+        mkdir -p "$MIRROR_DIR"
+        # ONE host, ONE recursive fetch. --mirror is timestamp-based, so a re-run
+        # only pulls what changed upstream. The `scripts/` transforms come along
+        # because they name each feed's MOTIS id, which is worth having on disk
+        # next to the zips it identifies.
+        MIRROR_ARGS=(
+            --limit-rate="$RATE" --mirror -l 2 --no-parent
+            --cut-dirs=1 --no-host-directories
+            --include-directories=gtfs,gtfs/scripts
+            --accept '.zip' --accept '.lua' --accept 'config.yml'
+            -e robots=off
+            -P "$MIRROR_DIR"
+            "$GTFS_INDEX_URL"
+        )
         if [[ "$DRY_RUN" == "1" ]]; then
-            echo "[dry-run] curl -fsSL $url | tar -xz -C $dir --strip-components=1"
-            return
+            echo "[dry-run] wget ${MIRROR_ARGS[*]}"
+        else
+            # wget exits 8 on a server error for any single file. With ~2250 files
+            # one 404 must not fail the whole build, so the exit code is reported
+            # and the feed count below is what actually gates the build.
+            wget "${MIRROR_ARGS[@]}" || echo "  NOTE: wget exited $? (partial mirror is expected; see the feed count)" >&2
         fi
-        rm -rf "$dir"
-        mkdir -p "$dir"
-        curl -fsSL "$url" | tar -xz -C "$dir" --strip-components=1
-        [[ -d "$dir/feeds" ]] || { echo "ERROR: $label has no feeds/ dir after extraction" >&2; exit 1; }
-    }
-    REG_DIR="$WORK/transitous"
-    ATLAS_DIR="$WORK/transitland-atlas"
-    get_registry "$TRANSITOUS_TARBALL" "$REG_DIR" "Transitous registry"
-    get_registry "$ATLAS_TARBALL" "$ATLAS_DIR" "transitland-atlas"
+    fi
 
-    echo "=== resolving feeds (region: $REGION, max: $MAX_FEEDS) ==="
-    RESOLVE_ARGS=(--registry "$REG_DIR" --atlas "$ATLAS_DIR" --out "$PLAN"
-                  --region "$REGION" --report)
-    [[ "$MAX_FEEDS" -gt 0 ]] && RESOLVE_ARGS+=(--max-feeds "$MAX_FEEDS")
-    if [[ "$DRY_RUN" == "1" ]]; then
-        echo "[dry-run] $RESOLVE_BIN ${RESOLVE_ARGS[*]}"
+    # --- 3. Enumerate, filter, unzip ---
+    mapfile -t ZIPS < <(find "$MIRROR_DIR" -name '*.gtfs.zip' -type f 2>/dev/null | sort)
+    if [[ "$DRY_RUN" == "1" && "${#ZIPS[@]}" -eq 0 ]]; then
+        echo "[dry-run] no mirror on disk yet; nothing to enumerate"
         echo "Done (dry run)."
         exit 0
     fi
-    "$RESOLVE_BIN" "${RESOLVE_ARGS[@]}"
+    echo "=== ${#ZIPS[@]} zip(s) in the mirror; region filter: $REGION ==="
 
-    if [[ "$RESOLVE_ONLY" == "1" ]]; then
-        echo "=== --resolve-only: the plan is in $PLAN, nothing downloaded ==="
+    : > "$BUILD_MANIFEST"
+    used=0
+    for zip in ${ZIPS[@]+"${ZIPS[@]}"}; do
+        stem="$(basename "$zip" .gtfs.zip)"
+        # `<region>_<Source>`: only the FIRST underscore separates them, and the
+        # MOTIS id rejoins them with a hyphen. Everything after keeps its own
+        # hyphens and its case -- `us-ca_SF-bayarea` -> `us-ca-SF-bayarea`.
+        region="${stem%%_*}"
+        source_name="${stem#*_}"
+        [[ "$source_name" != "$stem" ]] || source_name=""
+        # shellcheck disable=SC2254  # REGION is a glob on purpose
+        case "$region" in
+            $REGION) : ;;
+            *) continue ;;
+        esac
+        if [[ -z "$source_name" ]]; then
+            echo "  WARN: '$stem' has no <region>_<source> split; skipped" >&2
+            continue
+        fi
+        prefix="$region-$source_name"
+        name="$(safe_name "$stem")"
+        dir="$GTFS_ROOT/$name"
+
+        if [[ "$MAX_FEEDS" -gt 0 && "$used" -ge "$MAX_FEEDS" ]]; then break; fi
+        if [[ "$LIST_ONLY" == "1" ]]; then
+            printf '%s\t%s\t%s\n' "$name" "$prefix" "$zip"
+            used=$((used + 1))
+            continue
+        fi
+
+        if [[ ! -f "$dir/stops.txt" ]]; then
+            mkdir -p "$dir"
+            if ! unzip -oq "$zip" -d "$dir" 2>/dev/null; then
+                echo "  WARN: unzip failed: $stem" >&2; discard_feed_dir "$dir"; continue
+            fi
+            # Some feeds nest the txt files one dir deep; flatten if needed.
+            if [[ ! -f "$dir/stops.txt" ]]; then
+                found="$(find "$dir" -name stops.txt 2>/dev/null | head -n1)"
+                # Test the find RESULT, not the dirname of it. `dirname ""` is `.`,
+                # so a zip with no stops.txt anywhere used to set inner="." and run
+                # `mv ./* "$dir"/` -- moving the whole current working directory
+                # into the feed dir, which the discard below then deleted.
+                if [[ -n "$found" ]]; then
+                    inner="$(dirname "$found")"
+                    if [[ "$inner" != "$dir" ]]; then
+                        mv "$inner"/* "$dir"/ 2>/dev/null || true
+                    fi
+                fi
+            fi
+            if [[ ! -f "$dir/stops.txt" ]]; then
+                echo "  WARN: no stops.txt in the zip: $stem" >&2
+                discard_feed_dir "$dir"
+                continue
+            fi
+        fi
+        printf '%s=%s=%s\n' "$name" "$dir" "$prefix" >> "$BUILD_MANIFEST"
+        used=$((used + 1))
+    done
+
+    if [[ "$LIST_ONLY" == "1" ]]; then
+        echo "=== --list-only: $used feed(s) would be used ==="
         exit 0
     fi
-
-    # --- 3. Download + unzip each feed (parallel, resumable) ---
-    echo "=== downloading + unzipping feeds (jobs: $JOBS) ==="
-    fetch_one() {
-        local name="$1" url="$2"
-        local dir="$GTFS_ROOT/$name"
-        # Already unzipped: nothing to do, however the zip got here.
-        if [[ -f "$dir/stops.txt" ]]; then return 0; fi
-        # Content-addressed on the URL, not the feed name: names shift when the
-        # registry is updated, URLs do not, so this cache survives a re-resolve.
-        local zip="$CACHE/$(sha256_of_string "$url").zip"
-        if [[ ! -f "$zip" ]]; then
-            if ! curl -fsSL --retry 3 -o "$zip.partial" "$url"; then
-                echo "  WARN: download failed: $name ($url)" >&2
-                rm -f "$zip.partial"
-                return 0
-            fi
-            # Guard against HTML error pages / auth walls that are not a real zip.
-            if [[ "$(head -c 2 "$zip.partial" 2>/dev/null)" != "PK" ]]; then
-                echo "  WARN: not a GTFS zip, probably an auth wall (skipped): $name ($url)" >&2
-                rm -f "$zip.partial"
-                return 0
-            fi
-            # Renamed only once complete, so an interrupted run never leaves a
-            # truncated zip that looks cached.
-            mv "$zip.partial" "$zip"
-        fi
-        mkdir -p "$dir"
-        if ! unzip -oq "$zip" -d "$dir" 2>/dev/null; then
-            echo "  WARN: unzip failed: $name" >&2; rm -rf "$dir"; return 0
-        fi
-        # Some feeds nest the txt files one dir deep; flatten if needed.
-        if [[ ! -f "$dir/stops.txt" ]]; then
-            local inner; inner="$(dirname "$(find "$dir" -name stops.txt | head -n1)" 2>/dev/null || true)"
-            if [[ -n "$inner" && "$inner" != "$dir" ]]; then mv "$inner"/* "$dir"/ 2>/dev/null || true; fi
-        fi
-        if [[ ! -f "$dir/stops.txt" ]]; then
-            echo "  WARN: no stops.txt in the zip: $name" >&2; rm -rf "$dir"
-        fi
-    }
-    export -f fetch_one
-    export GTFS_ROOT CACHE
-
-    # `name<TAB>url<TAB>motis_prefix`; the prefix is not needed to download.
-    awk -F'\t' 'NF>=2 {print $1"\t"$2}' "$PLAN" \
-        | xargs -P "$JOBS" -I{} bash -c 'line="{}"; name="${line%%$'"'"'\t'"'"'*}"; url="${line#*$'"'"'\t'"'"'}"; fetch_one "$name" "$url"'
-
-    # --- 4. Build the three-field manifest from the plan, not from disk ---
-    # From the plan, so the MOTIS prefix survives -- it exists nowhere on disk --
-    # and so a stale feed left over from an earlier --region is not picked up.
-    : > "$BUILD_MANIFEST"
-    while IFS=$'\t' read -r name url prefix; do
-        [[ -n "$name" ]] || continue
-        dir="$GTFS_ROOT/$name"
-        [[ -f "$dir/stops.txt" ]] || continue
-        printf '%s=%s=%s\n' "$name" "$dir" "$prefix" >> "$BUILD_MANIFEST"
-    done < "$PLAN"
 fi
 
 nfeeds="$(wc -l < "$BUILD_MANIFEST" | tr -d ' ')"
-planned="$( [[ -f "$PLAN" ]] && wc -l < "$PLAN" | tr -d ' ' || echo "$nfeeds" )"
-echo "=== $nfeeds of $planned feed(s) usable, listed in $BUILD_MANIFEST ==="
+echo "=== $nfeeds feed(s) usable, listed in $BUILD_MANIFEST ==="
 if [[ "$nfeeds" -eq 0 ]]; then
     echo "ERROR: no usable feeds — nothing to build" >&2
     exit 1
@@ -257,13 +277,13 @@ if [[ "$withprefix" -lt "$nfeeds" ]]; then
     echo "         cannot be matched to live delays." >&2
 fi
 
-# --- 5. Merge into a single pack ---
+# --- 4. Merge into a single pack ---
 echo "=== running gtfs_ingest merge -> $OUT/$PACK_NAME.transit ==="
 "$INGEST_BIN" "$OUT" "$PACK_NAME" --manifest "$BUILD_MANIFEST"
 echo "--- size + section breakdown ($OUT/$PACK_NAME.transit.json) ---"
 cat "$OUT/$PACK_NAME.transit.json"
 
-# --- 6. Publish (optional) ---
+# --- 5. Publish (optional) ---
 if [[ "$PUBLISH" == "1" ]]; then
     echo "=== publishing $PACK_NAME.transit to R2 ==="
     "$HERE/publish_r2.sh" "$OUT/$PACK_NAME.transit" --key "$PACK_NAME.transit"
