@@ -147,4 +147,11 @@
         <item quantity="other"><xliff:g id="count" example="2">%1$s</xliff:g> prób</item>
     </plurals>
     <string name="font_family">Rodzina czcionek</string>
+    <string name="security">Zabezpieczenia:</string>
+    <string name="snooze">Odłóż</string>
+    <string name="snoozed">Odłożone</string>
+    <string name="justify">Wyjustuj</string>
+    <string name="monospace">Monospace</string>
+    <string name="blockquote">Blok cytatu</string>
+    <string name="highlight">Wyróżnienie</string>
 </resources>
