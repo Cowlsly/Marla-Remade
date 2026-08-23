@@ -69,16 +69,4 @@
     <string name="share_popup_title">Send to a nearby device</string>
     <string name="share_popup_no_devices">No devices found yet. Keep the other device visible.</string>
     <string name="share_popup_permission_needed">Nearby Share needs Bluetooth and Wi-Fi permissions to find nearby devices.</string>
-
-    <!-- AirDrop transport probe (diagnostic) -->
-    <string name="share_airdrop_probe">AirDrop probe</string>
-    <string name="share_airdrop_probe_open">AirDrop probe…</string>
-    <string name="share_airdrop_probe_start">Start probe</string>
-    <string name="share_airdrop_probe_stop">Stop probe</string>
-    <string name="share_airdrop_probe_idle">Scans for Apple\'s AirDrop BLE beacon, Wi-Fi Direct peers and Apple mDNS records at the same time, to establish which transports an AirDropping iPhone is actually reachable on from this device.</string>
-    <string name="share_airdrop_probe_howto">Open the share sheet on the iPhone, pick a file, and leave the AirDrop picker on screen while the probe runs. Set AirDrop to Everyone.</string>
-    <string name="share_airdrop_probe_beacons">Apple BLE beacons</string>
-    <string name="share_airdrop_probe_p2p">Wi-Fi Direct</string>
-    <string name="share_airdrop_probe_mdns">Apple mDNS on Wi-Fi</string>
-    <string name="share_airdrop_probe_none">Nothing seen yet.</string>
 </resources>

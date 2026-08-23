@@ -7,8 +7,4 @@ import kotlinx.serialization.Serializable
 sealed interface Route : NavKey {
     @Serializable
     data object Share : Route
-
-    /** Diagnostic: which transports an AirDropping iPhone is reachable on. Not a user feature. */
-    @Serializable
-    data object AirDropProbe : Route
 }

@@ -7,10 +7,16 @@
       entirely, which made advertising, scanning, mDNS, the foreground service, notifications
       and the boot receiver all fail silently at runtime.
 
+      INTERNET is the load-bearing one and the easiest to overlook: without it the app is not in
+      the `inet` group, so `ServerSocket` fails with EPERM *and* NsdManager's own socket work
+      fails, which surfaces only as `onStartDiscoveryFailed` with FAILURE_INTERNAL_ERROR — no
+      exception, and nothing that names the real cause.
+
       neverForLocation on both radio scans is what keeps this list free of
       ACCESS_FINE_LOCATION: minSdk is 31, so the pre-Android-12 location-backed scan fallback
       is unreachable and nothing here needs to derive position.
     -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
@@ -33,16 +39,9 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
-    <!-- Wi-Fi P2P service discovery drives the radio, so it needs the write-side too. -->
-    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-
     <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="false" />
     <uses-feature android:name="android.hardware.wifi" android:required="false" />
-    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
 
     <application
         android:allowBackup="true"
