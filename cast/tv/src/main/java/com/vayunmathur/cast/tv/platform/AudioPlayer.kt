@@ -293,8 +293,19 @@ class AudioPlayer {
          * possible nobody asked - a TV with no Opus decoder just played a silent picture - so an
          * audio-only session would have sat in silence with no failure to report.
          */
-        fun limits(): List<AudioCodec> =
-            if (decoderName() != null) listOf(AudioCodec.Opus) else emptyList()
+        fun limits(): List<AudioCodec> {
+            val name = decoderName()
+            if (name == null) {
+                Log.i(TAG, "no $AUDIO_MIME decoder on this TV; audio-only sessions will be refused")
+                return emptyList()
+            }
+            // Logged for the same reason `VideoDecoder.limits` logs its codecs: which decoder was
+            // found, and whether one was found at all, can only be answered on hardware and only
+            // from this line. A silent audio half was how an unplayable session used to look
+            // identical to a working one.
+            Log.i(TAG, "advertising ${AudioCodec.Opus.label} decode from $name")
+            return listOf(AudioCodec.Opus)
+        }
 
         fun decoderName(): String? {
             val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos

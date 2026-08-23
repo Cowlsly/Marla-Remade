@@ -124,7 +124,8 @@ class ReceiverAdvertiser(context: Context) {
                 Log.i(
                     TAG,
                     "advertised $MACAST_SERVICE_TYPE as ${info.serviceName} on port $port " +
-                        "(decoding ${limits.codecs.joinToString { it.label }.ifEmpty { "nothing" }})",
+                        "(decoding ${(limits.codecs.map { it.label } + limits.audioCodecs.map { it.label })
+                            .joinToString().ifEmpty { "nothing" }})",
                 )
             }
 
