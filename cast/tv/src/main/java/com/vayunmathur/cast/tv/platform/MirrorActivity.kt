@@ -211,8 +211,17 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             KeyEvent.KEYCODE_MEDIA_PREVIOUS ->
                 ReceiverController.send(PlaybackCommand(PlaybackAction.Previous))
 
-            // Volume is left to the system for now: the level is shared with the phone, and wiring
-            // only this end would have the two disagree the moment either was touched.
+            // The shared level, not this box's own volume: the phone owns it, so the press goes there
+            // and the gain follows on the next snapshot. Declining when there is no session lets the
+            // key fall through to the box's ordinary volume control.
+            KeyEvent.KEYCODE_DPAD_UP,
+            KeyEvent.KEYCODE_VOLUME_UP,
+            -> if (!ReceiverController.nudgeVolume(up = true)) return super.dispatchKeyEvent(event)
+
+            KeyEvent.KEYCODE_DPAD_DOWN,
+            KeyEvent.KEYCODE_VOLUME_DOWN,
+            -> if (!ReceiverController.nudgeVolume(up = false)) return super.dispatchKeyEvent(event)
+
             else -> return super.dispatchKeyEvent(event)
         }
         return true

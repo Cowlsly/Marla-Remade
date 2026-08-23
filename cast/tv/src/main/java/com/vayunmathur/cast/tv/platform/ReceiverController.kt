@@ -86,6 +86,9 @@ private const val CODEC_CONFIG_TIMEOUT_MS = 5_000L
  */
 private const val RECEIVE_BUFFER_BYTES = 2 * 1024 * 1024
 
+/** One press of the remote's volume key. Sixteen steps end to end, which is what a TV usually offers. */
+private const val VOLUME_STEP = 1f / 16f
+
 /**
  * The single owner of the live receiving session.
  *
@@ -142,6 +145,16 @@ object ReceiverController {
     @Volatile
     private var videoCodecConfig: ByteArray? = null
 
+    /**
+     * The output gain the phone last asked for, 0..1.
+     *
+     * A field rather than a call into [AudioPlayer], because that object belongs to the media loop
+     * outright - see `pump`. The loop picks this up on its next pass, which is at most one socket
+     * timeout away and imperceptible for a volume change.
+     */
+    @Volatile
+    private var castVolume: Float = 1f
+
     private val pairingGate = PairingGate()
 
     /**
@@ -170,6 +183,23 @@ object ReceiverController {
     /** Skip forward or back by the phone's own interval, which is the phone's to decide. */
     fun skip(forward: Boolean) {
         send(PlaybackCommand(if (forward) PlaybackAction.SkipForward else PlaybackAction.SkipBack))
+    }
+
+    /**
+     * Nudge the shared volume level up or down by one step.
+     *
+     * Sent to the phone rather than applied here, even though the sound comes out of this end. The
+     * phone owns the level - it stores it, it reports it, and it keeps it for local playback once the
+     * cast is over - so the round trip is what makes the two ends agree. The gain follows about half a
+     * second later when the next snapshot arrives, which is faster than a hand leaves a button.
+     *
+     * Returns false with no session, so the key falls through to the box's own volume control.
+     */
+    fun nudgeVolume(up: Boolean): Boolean {
+        val current = _state.value.playback?.state?.volume ?: return false
+        val level = (current + if (up) VOLUME_STEP else -VOLUME_STEP).coerceIn(0f, 1f)
+        send(PlaybackCommand(PlaybackAction.SetVolume, value = level.toDouble()))
+        return true
     }
 
     fun start(context: Context) {
@@ -382,6 +412,7 @@ object ReceiverController {
      * else about a session is diagnosed from.
      */
     private fun onPlaybackState(message: PlaybackState) {
+        castVolume = message.volume
         _state.update {
             it.copy(
                 playback = PlaybackSnapshot(
@@ -613,6 +644,8 @@ object ReceiverController {
         var lastFeedback = 0L
         var lastStatsLog = 0L
         var lastResync = 0L
+        // The gain currently on the track, so it is written only when the phone actually changes it.
+        var appliedVolume = Float.NaN
         // When the wait for a codec configuration began, or 0 while nothing is waiting. Started from
         // the moment the decoder *could* otherwise have been built, so it does not run down while the
         // Activity is still producing a surface.
@@ -710,6 +743,10 @@ object ReceiverController {
                     active.render()
                 }
                 if (player != null) {
+                    if (castVolume != appliedVolume) {
+                        appliedVolume = castVolume
+                        player.setVolume(appliedVolume)
+                    }
                     while (true) {
                         val frame = audioPlayout.due(now) ?: break
                         player.play(frame.payload, audioRtpToMicros(frame.rtpTimestamp))

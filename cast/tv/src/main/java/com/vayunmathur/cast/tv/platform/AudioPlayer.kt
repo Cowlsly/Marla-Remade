@@ -131,6 +131,24 @@ class AudioPlayer {
     }
 
     /**
+     * Set the output gain, 0..1.
+     *
+     * **A gain on the track rather than a change to the TV's own volume.** The level is the phone's,
+     * shared between the two ends so that turning the sound down here leaves the phone quiet when
+     * playback comes back to it. Moving the television's device volume instead would put the shared
+     * level and the box's own setting in a fight, and the user would have two controls doing the same
+     * job badly.
+     *
+     * Called from the media loop, like everything else that touches [track] - see `pump`'s note on why
+     * nothing outside that coroutine may.
+     */
+    fun setVolume(level: Float) {
+        val activeTrack = track ?: return
+        runCatching { activeTrack.setVolume(level.coerceIn(0f, 1f)) }
+            .onFailure { Log.w(TAG, "could not set the output volume", it) }
+    }
+
+    /**
      * Queue one Opus packet and write out whatever the decoder finished.
      *
      * Called from the socket loop, so the cost of failing has to be bounded - see the class comment for

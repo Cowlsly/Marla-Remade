@@ -1,10 +1,13 @@
 package com.vayunmathur.youpipe.platform
 
 import android.content.Context
+import android.media.AudioManager
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.OptIn
+import androidx.compose.runtime.getValue
+import androidx.core.content.getSystemService
 import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.TeeAudioProcessor
@@ -139,6 +142,14 @@ object CastPlayback {
      */
     private var player: Player? = null
 
+    /**
+     * The phone's own media volume, which is the level both ends share.
+     *
+     * Held from [open]'s context rather than asked for per call: the reporting loop reads it twice a
+     * second, and a `getSystemService` per tick would be work for nothing.
+     */
+    private var audio: AudioManager? = null
+
     /** Called by the player screen once its `MediaController` has connected, and with null as it goes. */
     fun attachPlayer(newPlayer: Player?) {
         player = newPlayer
@@ -197,6 +208,14 @@ object CastPlayback {
         close()
         _state.value = State.Connecting
         val newClient = CastClient(context)
+        // **The shared volume level is the phone's own media volume, and that is the whole trick.** A
+        // level invented for casting would have to be persisted, reconciled with the device volume, and
+        // explained to a user who found their phone quiet afterwards. `STREAM_MUSIC` is already the
+        // thing the user reaches for, already survives the session, and already applies to local
+        // playback when the cast ends - so it is reported to the TV as a gain and moved by the TV's
+        // remote through `SET_VOLUME`.
+        audio = context.applicationContext.getSystemService<AudioManager>()
+        audio?.let { manager -> update { it.copy(volume = manager.mediaLevel()) } }
         return try {
             val session = newClient.openSession(width, height, wantAudio = true)
             client = newClient
@@ -240,6 +259,7 @@ object CastPlayback {
         CastAudioTap.detach()
         client?.close()
         client = null
+        audio = null
         _transport.update { it.copy(hasNext = false, hasPrevious = false) }
         _state.value = State.Idle
     }
@@ -268,6 +288,11 @@ object CastPlayback {
             }
             while (isActive) {
                 delay(HEARTBEAT_MS)
+                // Re-read rather than trusting the last write. The level is the device's, so the
+                // hardware keys and every other app can move it - which is exactly why intercepting
+                // the volume keys here is unnecessary: the system already applies them to the shared
+                // level, and this is what carries the result to the television.
+                audio?.let { manager -> update { it.copy(volume = manager.mediaLevel()) } }
                 activeClient.reportPlaybackState(_transport.value.asPlaybackState())
             }
         }
@@ -310,8 +335,10 @@ object CastPlayback {
                 // `playbackParameters` here would drop whatever pitch the user had chosen.
                 update { it.copy(speed = speed.toFloat().coerceIn(MIN_SPEED, MAX_SPEED)) }
             }
-            // Volume is somebody else's to answer; ignored rather than guessed at.
-            PlaybackAction.SetVolume -> Unit
+            // The television asked for a level. Applied to the device's media volume, so it is still
+            // there when playback comes back to the phone - which is the point of sharing one level
+            // rather than inventing a cast-only one.
+            PlaybackAction.SetVolume -> command.value?.let { setVolume(it.toFloat()) }
             // Only offered when the phone said there was something to go to, but checked again here:
             // the TV's copy of that is up to half a second old.
             PlaybackAction.Next ->
@@ -335,6 +362,44 @@ object CastPlayback {
         val clamped = positionMs.coerceIn(0, end)
         target.seekTo(clamped)
         update { it.copy(positionMs = clamped) }
+    }
+
+    /**
+     * Move the shared level, from a television that asked.
+     *
+     * Written to the device volume *and* to [transport], rather than only to the device: the next
+     * snapshot is up to half a second away, and a seek bar's worth of latency on a volume press is the
+     * difference between a remote that feels connected and one that does not.
+     */
+    private fun setVolume(level: Float) {
+        val clamped = level.coerceIn(0f, 1f)
+        audio?.setMediaLevel(clamped)
+        update { it.copy(volume = clamped) }
+    }
+
+    /**
+     * `STREAM_MUSIC` as a 0..1 fraction.
+     *
+     * A fraction rather than an index because the two devices do not have the same number of steps - a
+     * phone commonly has 15 or 25, a television 16 or 100 - and sending an index would mean the TV's
+     * idea of "half" depended on the phone's hardware.
+     */
+    private fun AudioManager.mediaLevel(): Float {
+        val max = getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max <= 0) return 1f
+        return getStreamVolume(AudioManager.STREAM_MUSIC).toFloat() / max
+    }
+
+    private fun AudioManager.setMediaLevel(level: Float) {
+        val max = getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+        if (max <= 0) return
+        runCatching {
+            setStreamVolume(AudioManager.STREAM_MUSIC, Math.round(level * max), 0)
+        }.onFailure {
+            // A device with a volume policy that refuses the write - a work profile, a restriction.
+            // Nothing to report: the level the TV asked for simply does not take.
+            Log.w(TAG, "could not set the media volume", it)
+        }
     }
 
     /** Matches the phone's own skip buttons, so the two remotes move by the same amount. */
