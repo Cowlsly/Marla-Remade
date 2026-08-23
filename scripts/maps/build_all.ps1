@@ -6,17 +6,21 @@
 #
 # WHAT THIS TWIN CAN AND CANNOT DO. Only `admin_country` and `admin_region` cannot
 # be built here, and never will be from OSM: they come from Natural Earth
-# shapefiles. Everything else is cargo-only, so the tiles stage composites safety,
-# maxspeed, transit_lines, admin_city, ma_pois and transit_stops on top of a base
-# archive you point it at with -BaseArchive. It says so loudly rather than quietly
-# emitting an archive with layers missing. For a complete v5, run build_all.sh under
-# WSL. Stages graph, pois and transit are complete.
+# shapefiles. Everything else is cargo-only, so the tiles stage builds safety,
+# maxspeed, transit_lines, admin_city, ma_pois and transit_stops and merges them
+# into an OVERLAY-ONLY archive -- no base. The app mounts that alongside the
+# published base archive, which is also the only shape that fits in tile_join's
+# memory at planet scale (see build_v5_pmtiles.sh --no-base). It says so loudly
+# rather than quietly emitting an archive with layers missing. For the two
+# Natural Earth admin levels, run build_all.sh under WSL. Stages graph, pois and
+# transit are complete.
 #
-# THE 9 ARTIFACTS, all landing in -OutDir:
+# THE 11 ARTIFACTS, all landing in -OutDir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
-#   pois     poi_names.bin poi_index.bin
+#            intermediate.bin
+#   pois     poi_names.bin poi_index.bin poi_attrs.bin
 #   transit  world.transit
-#   tiles    v5.pmtiles                       (name from -Out)
+#   tiles    v5-overlay.pmtiles               (name from -Out)
 # plus manifest.txt with each one's size and SHA-256, byte-comparable with the
 # manifest.txt build_all.sh writes.
 #
@@ -48,9 +52,6 @@ param(
     [string] $OutDir = "build_all_out",
     [string] $Out = "",
     [string] $Work = "",
-    # Base tile archive to composite onto: a local .pmtiles, or a URL to fetch.
-    # Required by the tiles stage on Windows.
-    [string] $BaseArchive = "",
 
     # Stage control
     [switch] $SkipGraph,
@@ -73,6 +74,13 @@ param(
     # Publishing. Delegates to publish_r2.sh, which needs bash (WSL or Git Bash).
     [switch] $Publish,
     [switch] $PublishDryRun,
+
+    # Graph build-time memory, forwarded to road_graph. None change the on-disk
+    # contract, and -Rounds does not change the output at all. Required at planet
+    # scale -- see osm_ingest/README.md 'Build-time memory'.
+    [switch] $WithinWayChains,
+    [int] $Rounds = 0,
+    [string] $SpillDir = "",
 
     [int] $Jobs = 6
 )
@@ -141,7 +149,7 @@ $OutDir = (Resolve-Path $OutDir).Path
 if (-not $Work) { $Work = Join-Path $OutDir "work" }
 New-Item -ItemType Directory -Force -Path $Work | Out-Null
 $Work = (Resolve-Path $Work).Path
-if (-not $Out) { $Out = Join-Path $OutDir "v5.pmtiles" }
+if (-not $Out) { $Out = Join-Path $OutDir "v5-overlay.pmtiles" }
 $Stamps = Join-Path $Work "stamps"
 New-Item -ItemType Directory -Force -Path $Stamps | Out-Null
 
@@ -179,23 +187,27 @@ $AdminCityTile = Join-Path $Work "admin_city.pmtiles"
 $StopsTile   = Join-Path $Work "transit_stops.pmtiles"
 $TransitWork = Join-Path $Work "transit"
 
-# --- stage: graph (5 files) ---
+# --- stage: graph (6 files) ---
 if (Test-Stage "graph") {
     if (Test-Stamp "graph") {
         Write-Host "=== graph: stamp present, skipping (-Force to redo) ==="
     } else {
         Assert-Pbf "Graph"
-        Write-Host "=== graph -> $OutDir (metadata/road_names/nodes/edges/lanes.bin) ==="
+        Write-Host "=== graph -> $OutDir (metadata/road_names/nodes/edges/lanes/intermediate.bin) ==="
         # Gated deliberately: road_graph truncates its outputs as it writes, so a
         # failure here must not fall through to the manifest or the publish.
-        Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
-            "--bin", "road_graph", "--", $Pbf, "--out", $OutDir)
+        $graphArgs = @($Pbf, "--out", $OutDir)
+        if ($WithinWayChains) { $graphArgs += "--within-way-chains" }
+        if ($Rounds -gt 0)    { $graphArgs += @("--rounds", "$Rounds") }
+        if ($SpillDir)        { $graphArgs += @("--spill-dir", $SpillDir) }
+        Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
+            "--bin", "road_graph", "--") + $graphArgs)
         Set-Stamp "graph"
     }
 }
 
-# --- stage: pois (2 side files + the ma_pois tile layer) ---
-# One poi_extract pass produces the geojson the tiler reads AND the two side
+# --- stage: pois (3 side files + the ma_pois tile layer) ---
+# One poi_extract pass produces the geojson the tiler reads AND the three side
 # files, so they cannot disagree. The side files go straight to -OutDir.
 if (Test-Stage "pois") {
     if (Test-Stamp "pois") {
@@ -203,12 +215,13 @@ if (Test-Stage "pois") {
     } else {
         Assert-Pbf "Pois"
         $poiGeo = Join-Path $Work "ma_pois.geojsonseq"
-        Write-Host "=== pois -> $OutDir\poi_names.bin + poi_index.bin ==="
+        Write-Host "=== pois -> $OutDir\poi_names.bin + poi_index.bin + poi_attrs.bin ==="
         Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
             "--bin", "poi_extract", "--", $Pbf,
             "--geojson", $poiGeo,
             "--names", (Join-Path $OutDir "poi_names.bin"),
-            "--index", (Join-Path $OutDir "poi_index.bin"))
+            "--index", (Join-Path $OutDir "poi_index.bin"),
+            "--attrs", (Join-Path $OutDir "poi_attrs.bin"))
         Write-Host "=== pois -> $PoisTile (z12-16, tile_points) ==="
         Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
             "--bin", "tile_points", "--",
@@ -253,42 +266,11 @@ if (-not $script:EffectiveGtfsManifest) {
     elseif ($GtfsManifest)    { $script:EffectiveGtfsManifest = $GtfsManifest }
 }
 
-# --- stage: tiles (cargo-only layers onto a base archive) ---
+# --- stage: tiles (the cargo-only overlay layers, merged without a base) ---
 if (Test-Stage "tiles") {
     if (Test-Stamp "tiles") {
         Write-Host "=== tiles: stamp present, skipping (-Force to redo) ==="
     } else {
-        if (-not $BaseArchive) {
-            throw @"
-the tiles stage needs -BaseArchive on Windows.
-
-Only admin_country and admin_region cannot be built here -- they come from Natural
-Earth shapefiles, not OSM -- and the Planetiler base build needs Java. So this twin
-composites the cargo-only layers onto an existing archive rather than building one:
-
-  .\build_all.ps1 ... -BaseArchive https://data.vayunmathur.com/v5.pmtiles
-
-For a complete v5 with every layer, run build_all.sh under WSL.
-"@
-        }
-
-        $base = $BaseArchive
-        if ($BaseArchive -match '^https?://') {
-            $base = Join-Path $Work "base.pmtiles"
-            if (Test-Path $base) {
-                Write-Host "[all] reusing cached base $base"
-            } else {
-                Write-Host "[all] fetching $BaseArchive (this can be very large)"
-                if (-not $DryRun) {
-                    $partial = "$base.partial"
-                    Invoke-WebRequest -Uri $BaseArchive -OutFile $partial -MaximumRedirection 5
-                    Move-Item -Force $partial $base
-                }
-            }
-        } elseif (-not $DryRun -and -not (Test-Path $base)) {
-            throw "-BaseArchive not found: $base"
-        }
-
         # safety, maxspeed, transit_lines and admin_city are all cargo-only:
         # osm_extract reads the PBF directly -- assembling boundary rings itself for
         # admin_city -- and the tile_build tilers tile it. No osmium, tippecanoe,
@@ -333,8 +315,10 @@ For a complete v5 with every layer, run build_all.sh under WSL.
             Write-Warning "no GTFS manifest available; skipping the transit_stops layer"
         }
 
-        # Later inputs win a layer-name collision, so the overlays go after base.
-        $inputs = @($base)
+        # Later inputs win a layer-name collision, so a rebuilt overlay replaces a
+        # stale copy. No base is joined: the overlay names are disjoint from the
+        # base schema's, so the app mounts the two archives side by side instead.
+        $inputs = @()
         foreach ($t in @($SafetyTile, $MaxspeedTile, $TransitLinesTile, $AdminCityTile, $PoisTile, $StopsTile)) {
             if ((Test-Path $t) -or $DryRun) { $inputs += $t }
         }
@@ -342,16 +326,18 @@ For a complete v5 with every layer, run build_all.sh under WSL.
         $inputs | ForEach-Object { Write-Host "  + $_" }
         Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $TileManifest,
             "--bin", "tile_join", "--", "--out", $Out) + $inputs)
-        Write-Warning "admin_country and admin_region are NOT in $Out (they come from Natural Earth shapefiles, not OSM -- build under WSL for a complete archive)"
+        Write-Warning "admin_country and admin_region are NOT in $Out (they come from Natural Earth shapefiles, not OSM -- build under WSL for those two)"
         Set-Stamp "tiles"
     }
 }
 
-# --- manifest.txt: name, size, SHA-256 for all 9 ---
+# --- manifest.txt: name, size, SHA-256 for all 11 ---
 # Same column layout as build_all.sh so the two are diffable, and lowercase hex
 # so the digests compare directly.
 $artifacts = @("metadata.bin", "road_names.bin", "nodes.bin", "edges.bin", "lanes.bin",
-               "poi_names.bin", "poi_index.bin", "world.transit", (Split-Path $Out -Leaf))
+               "intermediate.bin",
+               "poi_names.bin", "poi_index.bin", "poi_attrs.bin", "world.transit",
+               (Split-Path $Out -Leaf))
 
 function Get-ArtifactPath {
     param([string] $Name)
@@ -361,7 +347,7 @@ function Get-ArtifactPath {
 
 if ($DryRun) {
     Write-Host ""
-    Write-Host "[dry-run] would write $OutDir\manifest.txt over these 9 artifacts:"
+    Write-Host "[dry-run] would write $OutDir\manifest.txt over these $($artifacts.Count) artifacts:"
     $artifacts | ForEach-Object { Write-Host "  $_" }
 } else {
     $manifestFile = Join-Path $OutDir "manifest.txt"

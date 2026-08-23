@@ -9,13 +9,14 @@ set -euo pipefail
 # and closes the gap where poi_names.bin/poi_index.bin had to be hand-copied
 # into the graph directory before the upload would pick them up.
 #
-# THE 9 ARTIFACTS, all landing in --out-dir:
+# THE 11 ARTIFACTS, all landing in --out-dir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
-#   pois     poi_names.bin poi_index.bin
+#            intermediate.bin
+#   pois     poi_names.bin poi_index.bin poi_attrs.bin
 #   transit  world.transit
-#   tiles    v5.pmtiles                       (name from --out)
-# plus manifest.txt listing every one with its size and SHA-256. The first eight
-# are what MainActivity's InitialDownloadChecker fetches; the ninth is streamed.
+#   tiles    v5-overlay.pmtiles               (name from --out)
+# plus manifest.txt listing every one with its size and SHA-256. The first ten
+# are what MainActivity's InitialDownloadChecker fetches; the eleventh is streamed.
 #
 # Stages run in order graph -> pois -> transit -> tiles. Each writes a stamp file
 # under <work>/stamps on success, so a re-run skips what already finished;
@@ -38,26 +39,35 @@ set -euo pipefail
 #                         ('-latest.osm.pbf' is appended). Cached in <work>.
 #     --gtfs-manifest F   feeds.manifest ('name=dir[=motis_prefix]' per line) for
 #                         world.transit and the transit_stops tile layer
-#     --gtfs-region GLOB  build that manifest from the Transitous registry
-#                         instead, e.g. 'us-ca' (see build_world_transit.sh)
+#     --gtfs-region GLOB  build that manifest from Transitous' published gtfs
+#                         directory instead, e.g. 'us-ca' (see build_world_transit.sh)
 #     --bbox BOX          "minlon,minlat,maxlon,maxlat". Clipped ONCE up front and
 #                         reused by every stage, so the graph honours it too.
 #                         Needs osmium.
 #   Outputs
-#     --out-dir DIR       where the 9 artifacts land (default ./build_all_out)
-#     --out FILE          the tile archive (default <out-dir>/v5.pmtiles). Its
-#                         basename becomes the published key, so match whatever
-#                         style.json points at.
+#     --out-dir DIR       where the 11 artifacts land (default ./build_all_out)
+#     --out FILE          the tile archive (default <out-dir>/v5-overlay.pmtiles,
+#                         or <out-dir>/v5.pmtiles with --with-base). Its basename
+#                         becomes the published key, so match whatever the app
+#                         points at.
 #     --work DIR          scratch + stamps (default <out-dir>/work)
+#     --with-base         merge the Protomaps base INTO the tile archive, instead
+#                         of the default overlay-only output. Only sane for a
+#                         metro-sized extract: tile_join holds every input in
+#                         memory, and a planet base is ~127 GB of a 137 GB result.
+#                         The app streams the base from its own published archive
+#                         (MapTileCache.BASEMAP_PMTILES_URL), so the overlay-only
+#                         default is the shippable shape.
 #     --base-archive URL  published archive to reuse for the base layers
-#                         (default: build_base_layers.sh's own)
+#                         (--with-base only; default build_base_layers.sh's own)
 #     --admin-reuse SRC   carry admin_country and admin_region forward from an
 #                         existing archive (a local .pmtiles or a URL) instead of
 #                         rebuilding them from Natural Earth. Those two are the only
 #                         layers that still need ogr2ogr and python3, so with this
 #                         and --base-mode reuse the whole tile build is cargo-only
 #                         apart from curl.
-#     --base-mode M       build|reuse (default reuse; build needs java 21 + --base-jar)
+#     --base-mode M       build|reuse (--with-base only; default reuse; build needs
+#                         java 21 + --base-jar)
 #     --base-jar FILE     protomaps basemap jar (--base-mode build only)
 #     --base-area A       planetiler area (--base-mode build only; default planet)
 #   Stage control
@@ -65,6 +75,21 @@ set -euo pipefail
 #     --only STAGE        run exactly one of graph|pois|transit|tiles
 #     --force             ignore stamps and redo every requested stage
 #     --dry-run           print what each stage would run; change nothing
+#   Graph build-time memory (forwarded to road_graph; none change the on-disk
+#   contract, and --rounds does not change the output at all)
+#     --within-way-chains confine chains to one OSM way, which removes the segment
+#                         array and the incidence index entirely. REQUIRED at
+#                         planet scale: without it the reference path peaked at
+#                         61.85 GiB on Europe alone, and a planet is 2.65x that.
+#                         Costs ~9% more nodes and ~7% more edges.
+#     --rounds N          write the pack in N source-partitioned rounds instead of
+#                         one, so the write buffer is edges/N x 48 B rather than
+#                         all of it. Planet wants 3.
+#     --spill-dir DIR     put chains.pts somewhere other than --out-dir. It is the
+#                         only file the build reads RANDOMLY, so it wants cheap
+#                         seeks -- keep it off a network or /mnt/c mount even when
+#                         the output lives there.
+#                         See osm_ingest/README.md 'Build-time memory'.
 #   Engines, per layer, so a ported layer rolls back with a flag
 #     --engine-base E     rust|legacy    (default legacy)
 #     --engine-safety E   rust|legacy    (default rust: osm_extract + tile_points,
@@ -103,6 +128,10 @@ ADMIN_REUSE=""
 BASE_MODE="reuse"
 BASE_JAR=""
 BASE_AREA="planet"
+WITH_BASE=0
+WITHIN_WAY_CHAINS=0
+ROUNDS=""
+SPILL_DIR=""
 SKIP_GRAPH=0
 SKIP_POIS=0
 SKIP_TRANSIT=0
@@ -131,6 +160,10 @@ while [[ $# -gt 0 ]]; do
         --out) OUT="$2"; shift 2 ;;
         --work) WORK="$2"; shift 2 ;;
         --base-archive) BASE_ARCHIVE="$2"; shift 2 ;;
+        --with-base) WITH_BASE=1; shift ;;
+        --within-way-chains) WITHIN_WAY_CHAINS=1; shift ;;
+        --rounds) ROUNDS="$2"; shift 2 ;;
+        --spill-dir) SPILL_DIR="$2"; shift 2 ;;
         --admin-reuse) ADMIN_REUSE="$2"; shift 2 ;;
         --base-mode) BASE_MODE="$2"; shift 2 ;;
         --base-jar) BASE_JAR="$2"; shift 2 ;;
@@ -151,7 +184,7 @@ while [[ $# -gt 0 ]]; do
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,89p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,114p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -189,7 +222,13 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK="${WORK:-$OUT_DIR/work}"
 mkdir -p "$WORK"
 WORK="$(cd "$WORK" && pwd)"
-OUT="${OUT:-$OUT_DIR/v5.pmtiles}"
+# Named after what it contains. The published v5.pmtiles has a base baked in, so
+# an overlay-only archive must not silently reuse that name.
+if [[ "$WITH_BASE" == "1" ]]; then
+    OUT="${OUT:-$OUT_DIR/v5.pmtiles}"
+else
+    OUT="${OUT:-$OUT_DIR/v5-overlay.pmtiles}"
+fi
 STAMPS="$WORK/stamps"
 mkdir -p "$STAMPS"
 
@@ -262,23 +301,27 @@ POIS_TILE="$WORK/ma_pois.pmtiles"
 TRANSIT_WORK="$WORK/transit"
 EFFECTIVE_GTFS_MANIFEST="$TRANSIT_WORK/feeds.manifest"
 
-# --- stage: graph (5 files) ---
+# --- stage: graph (6 files) ---
 if want_stage graph; then
     if stage_done graph; then
         echo "=== graph: stamp present, skipping (--force to redo) ==="
     else
         require_pbf graph
-        echo "=== graph -> $OUT_DIR (metadata/road_names/nodes/edges/lanes.bin) ==="
+        echo "=== graph -> $OUT_DIR (metadata/road_names/nodes/edges/lanes/intermediate.bin) ==="
+        GRAPH_ARGS=("$PBF" --out "$OUT_DIR")
+        [[ "$WITHIN_WAY_CHAINS" == "1" ]] && GRAPH_ARGS+=(--within-way-chains)
+        [[ -n "$ROUNDS" ]] && GRAPH_ARGS+=(--rounds "$ROUNDS")
+        [[ -n "$SPILL_DIR" ]] && GRAPH_ARGS+=(--spill-dir "$SPILL_DIR")
         # Gated deliberately: road_graph truncates its outputs as it writes, so a
         # failure here must not fall through to the manifest or the publish.
         run cargo run --release --quiet --manifest-path "$HERE/osm_ingest/Cargo.toml" \
-            --bin road_graph -- "$PBF" --out "$OUT_DIR"
+            --bin road_graph -- "${GRAPH_ARGS[@]}"
         mark_done graph
     fi
 fi
 
-# --- stage: pois (2 side files + the ma_pois tile layer) ---
-# One poi_extract pass produces the geojson the tiler reads AND the two side
+# --- stage: pois (3 side files + the ma_pois tile layer) ---
+# One poi_extract pass produces the geojson the tiler reads AND the three side
 # files, so they cannot disagree. The side files go straight to --out-dir; that
 # is the manual copy step run_generator.sh used to ask for.
 if want_stage pois; then
@@ -286,12 +329,13 @@ if want_stage pois; then
         echo "=== pois: stamp present, skipping (--force to redo) ==="
     else
         require_pbf pois
-        echo "=== pois -> $OUT_DIR/poi_{names,index}.bin + $POIS_TILE ==="
+        echo "=== pois -> $OUT_DIR/poi_{names,index,attrs}.bin + $POIS_TILE ==="
         run "$HERE/build_pois_layer.sh" \
             --pbf "$PBF" \
             --out "$POIS_TILE" \
             --names-out "$OUT_DIR/poi_names.bin" \
             --index-out "$OUT_DIR/poi_index.bin" \
+            --attrs-out "$OUT_DIR/poi_attrs.bin" \
             --engine "$ENGINE_POIS"
         mark_done pois
     fi
@@ -321,30 +365,38 @@ if want_stage transit; then
     fi
 fi
 
-# --- stage: tiles (v5.pmtiles) ---
+# --- stage: tiles ($OUT) ---
 if want_stage tiles; then
     if stage_done tiles; then
         echo "=== tiles: stamp present, skipping (--force to redo) ==="
     else
         require_pbf tiles
         echo "=== tiles -> $OUT ==="
-        V5_ARGS=(--pbf "$PBF" --out "$OUT" --workdir "$WORK/v5" --base-mode "$BASE_MODE")
+        V5_ARGS=(--pbf "$PBF" --out "$OUT" --workdir "$WORK/v5")
+        # Overlay-only unless asked otherwise. The base options only mean anything
+        # when there IS a base, and build_v5_pmtiles.sh rejects them alongside
+        # --no-base rather than ignoring them, so they are passed only here.
+        if [[ "$WITH_BASE" == "1" ]]; then
+            V5_ARGS+=(--base-mode "$BASE_MODE")
+            [[ -n "$BASE_ARCHIVE" ]] && V5_ARGS+=(--base-source "$BASE_ARCHIVE")
+            [[ "$BASE_MODE" == "build" ]] && V5_ARGS+=(--base-jar "$BASE_JAR" --base-area "$BASE_AREA")
+            V5_ARGS+=(--engine-base "$ENGINE_BASE")
+        else
+            V5_ARGS+=(--no-base)
+        fi
         # The pois stage already built the layer and the side files; --skip-pois
         # plus --extra-layer folds that archive into the merge without a second
         # poi_extract pass.
         if [[ -f "$POIS_TILE" || "$DRY_RUN" == "1" ]]; then
             V5_ARGS+=(--skip-pois --extra-layer "$POIS_TILE")
         fi
-        [[ -n "$BASE_ARCHIVE" ]] && V5_ARGS+=(--base-source "$BASE_ARCHIVE")
         [[ -n "$ADMIN_REUSE" ]] && V5_ARGS+=(--admin-reuse "$ADMIN_REUSE")
-        [[ "$BASE_MODE" == "build" ]] && V5_ARGS+=(--base-jar "$BASE_JAR" --base-area "$BASE_AREA")
         if [[ -f "$EFFECTIVE_GTFS_MANIFEST" ]]; then
             V5_ARGS+=(--gtfs-manifest "$EFFECTIVE_GTFS_MANIFEST")
         elif [[ -n "$GTFS_MANIFEST" ]]; then
             V5_ARGS+=(--gtfs-manifest "$GTFS_MANIFEST")
         fi
-        V5_ARGS+=(--engine-base "$ENGINE_BASE"
-                  --engine-safety "$ENGINE_SAFETY"
+        V5_ARGS+=(--engine-safety "$ENGINE_SAFETY"
                   --engine-maxspeed "$ENGINE_MAXSPEED"
                   --engine-transit-lines "$ENGINE_TRANSIT_LINES"
                   --engine-admin "$ENGINE_ADMIN"
@@ -356,8 +408,8 @@ if want_stage tiles; then
 fi
 
 # --- manifest.txt: name, size, SHA-256 for all 9 ---
-ARTIFACTS=(metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
-           poi_names.bin poi_index.bin world.transit)
+ARTIFACTS=(metadata.bin road_names.bin nodes.bin edges.bin lanes.bin intermediate.bin
+           poi_names.bin poi_index.bin poi_attrs.bin world.transit)
 
 sha256_of() {
     if command -v sha256sum >/dev/null; then
@@ -376,7 +428,7 @@ artifact_path() {
 
 if [[ "$DRY_RUN" == "1" ]]; then
     echo ""
-    echo "[dry-run] would write $OUT_DIR/manifest.txt over these 9 artifacts:"
+    echo "[dry-run] would write $OUT_DIR/manifest.txt over these $(( ${#ARTIFACTS[@]} + 1 )) artifacts:"
     printf '  %s\n' "${ARTIFACTS[@]}" "$(basename "$OUT")"
 else
     MANIFEST_FILE="$OUT_DIR/manifest.txt"
@@ -394,7 +446,7 @@ else
         fi
     done
     echo ""
-    echo "=== $OUT_DIR/manifest.txt (${#PRESENT[@]}/9 present) ==="
+    echo "=== $OUT_DIR/manifest.txt (${#PRESENT[@]}/$(( ${#ARTIFACTS[@]} + 1 )) present) ==="
     cat "$MANIFEST_FILE"
     if [[ ${#MISSING[@]} -gt 0 ]]; then
         # Not fatal: --skip-*/--only runs are expected to leave holes. Naming them

@@ -3,6 +3,21 @@ set -euo pipefail
 
 # build_v5_pmtiles.sh — build the custom v5.pmtiles for the maps app.
 #
+# Two shapes come out of this script, and which one you want is a choice about
+# size, not about content:
+#
+#   v5.pmtiles          base + overlays in one archive. ~137 GB at planet scale,
+#                       essentially all of it base — the overlays add under 3%.
+#   v5-overlay.pmtiles  overlays only (--no-base). ~2-7 GB at planet scale, and
+#                       the app pairs it with the published base archive.
+#
+# Prefer --no-base for anything planet-sized. tile_join holds every input in RAM
+# (see tile_build/src/bin/tile_join.rs), which a 127 GB base makes impossible;
+# never joining the base removes that limit rather than engineering around it.
+# The layer namespaces are disjoint by construction — build_base_layers.sh fixes
+# the base names and every overlay name is additive — so the split needs no
+# renaming and the app can mount both archives side by side.
+#
 # v5.pmtiles = Protomaps base schema (unchanged, style.json-compatible)
 #            + safety     (baked road-furniture: cameras/ALPR/stops/signals)
 #            + maxspeed   (posted speed limits for the P5b MaxspeedSource)
@@ -12,9 +27,9 @@ set -euo pipefail
 #                          removed /api/v1/map/stops per-viewport fetch)
 #            + admin_country / admin_region / admin_city  (borders; replaces .fgb)
 #
-# The ma_pois step ALSO emits two compact side files next to --out
-# (poi_names.bin + poi_index.bin) that the app mmaps for POI lookup — see
-# build_pois_layer.sh / osm_ingest / README for the exact formats.
+# The ma_pois step ALSO emits three compact side files next to --out
+# (poi_names.bin + poi_index.bin + poi_attrs.bin) that the app mmaps for POI
+# lookup — see build_pois_layer.sh / osm_ingest / README for the exact formats.
 #
 # This single file REPLACES both:
 #   * https://data.vayunmathur.com/v4.pmtiles      (base tiles)
@@ -22,13 +37,14 @@ set -euo pipefail
 #
 # Pipeline (each step is a standalone script in this dir):
 #   1. build_base_layers.sh   -> base.pmtiles           (planetiler OR reuse v4)
+#                                                      (skipped by --no-base)
 #   2. build_safety_layer.sh  -> safety.pmtiles         (osmium + tippecanoe)
 #   3. build_maxspeed_layer.sh-> maxspeed.pmtiles       (osmium + tippecanoe)
 #   4. build_transit_lines_layer.sh -> transit_lines.pmtiles (osmium/ogr2ogr + tippecanoe)
-#   5. build_pois_layer.sh    -> ma_pois.pmtiles + poi_names.bin + poi_index.bin
+#   5. build_pois_layer.sh    -> ma_pois.pmtiles + poi_{names,index,attrs}.bin
 #   6. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
 #   7. build_transit_stops_layer.sh -> transit_stops.pmtiles (GTFS, cargo-only)
-#   8. tile_join              -> v5.pmtiles             (merge all layers)
+#   8. tile_join              -> $OUT                   (merge all layers)
 #
 # Steps 7 and 8 are cargo-only (scripts/maps/tile_build), so they need neither
 # tippecanoe nor osmium. The rest still do -- see README.md.
@@ -38,13 +54,24 @@ set -euo pipefail
 #   ./build_v5_pmtiles.sh --pbf norcal.osm.pbf --bbox -122.6,37.2,-121.7,37.9 \
 #       --base-mode reuse --out v5-sf.pmtiles
 #
-# Planet build:
+# Planet build (overlays only -- the shippable shape):
+#   ./build_v5_pmtiles.sh --pbf planet.osm.pbf --no-base --out v5-overlay.pmtiles
+#
+# Planet build including the base, if you have the RAM for a 137 GB join:
 #   ./build_v5_pmtiles.sh --pbf planet.osm.pbf --base-mode build \
 #       --base-jar protomaps-basemap-HEAD-with-deps.jar --out v5.pmtiles
 #
 # Options:
 #   --pbf FILE        OSM extract for safety + city layers (required unless --skip-*)
-#   --out FILE        final output (default v5.pmtiles)
+#   --out FILE        final output (default v5.pmtiles, or v5-overlay.pmtiles
+#                     under --no-base)
+#   --no-base         build the overlays ONLY: skip step 1 and leave the base out
+#                     of the merge entirely. The result is a standalone overlay
+#                     archive the app mounts alongside the published base, and it
+#                     is the only way a planet build fits in tile_join's memory.
+#                     Mutually exclusive with --skip-base, and rejects the
+#                     base-only options (--base-mode build, --base-jar,
+#                     --base-source) rather than ignoring them.
 #   --workdir DIR     scratch dir for intermediates (default ./v5_work)
 #   --bbox BOX        metro bbox "minlon,minlat,maxlon,maxlat" (dry runs)
 #   --gtfs-manifest F feeds.manifest for the transit_stops layer (`name=dir[=motis_prefix]`
@@ -77,7 +104,7 @@ set -euo pipefail
 #   --skip-safety     omit safety layer
 #   --skip-maxspeed   omit maxspeed layer
 #   --skip-transit-lines omit transit_lines layer
-#   --skip-pois       omit ma_pois layer + poi_names.bin/poi_index.bin side files
+#   --skip-pois       omit ma_pois layer + poi_{names,index,attrs}.bin side files
 #   --skip-admin      omit admin layers
 #   --skip-transit-stops omit transit_stops layer
 #   --publish         after a successful build, upload $OUT to R2 (publish_r2.sh;
@@ -92,7 +119,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
-OUT="v5.pmtiles"
+OUT=""
 WORK="./v5_work"
 BBOX=""
 BASE_MODE="reuse"
@@ -108,6 +135,7 @@ ENGINE_ADMIN="legacy"
 ENGINE_ADMIN_CITY="rust"
 ADMIN_REUSE=""
 DRY_RUN=0
+NO_BASE=0
 SKIP_BASE=0
 SKIP_SAFETY=0
 SKIP_MAXSPEED=0
@@ -139,6 +167,7 @@ while [[ $# -gt 0 ]]; do
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --admin-reuse) ADMIN_REUSE="$2"; shift 2 ;;
         --dry-run) DRY_RUN=1; shift ;;
+        --no-base) NO_BASE=1; shift ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
         --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
@@ -150,10 +179,42 @@ while [[ $# -gt 0 ]]; do
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,91p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,118p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
+
+# --no-base is about the merge, --skip-base is about step 1 reusing an existing
+# intermediate: one omits the base, the other insists on having built it. Asking
+# for both is a contradiction, and guessing which was meant is worse than
+# stopping.
+if [[ "$NO_BASE" == "1" && "$SKIP_BASE" == "1" ]]; then
+    echo "ERROR: --no-base and --skip-base are contradictory (omit the base vs. reuse a built one)" >&2
+    exit 1
+fi
+
+# These only describe how to produce a base. Under --no-base there is no base to
+# produce, so accepting them would silently do nothing -- which reads as a
+# successful build of the wrong thing.
+if [[ "$NO_BASE" == "1" ]]; then
+    for pair in "--base-jar:$BASE_JAR" "--base-source:$BASE_SOURCE"; do
+        if [[ -n "${pair#*:}" ]]; then
+            echo "ERROR: ${pair%%:*} makes no sense with --no-base (no base is built)" >&2
+            exit 1
+        fi
+    done
+    if [[ "$BASE_MODE" == "build" ]]; then
+        echo "ERROR: --base-mode build makes no sense with --no-base (no base is built)" >&2
+        exit 1
+    fi
+fi
+
+# Named after what it contains. v5.pmtiles is published with the base baked in
+# and the app points at it today, so redefining that name mid-rollout would
+# break any client that had already fetched the old bytes.
+if [[ -z "$OUT" ]]; then
+    if [[ "$NO_BASE" == "1" ]]; then OUT="v5-overlay.pmtiles"; else OUT="v5.pmtiles"; fi
+fi
 
 # Every layer keeps a rust|legacy switch even before it has a rust path, so the
 # superscript can pass one uniformly. Asking for an unported engine is an error
@@ -198,17 +259,20 @@ INPUTS=()
 
 # --- 1. base ---
 BASE="$WORK/base.pmtiles"
-if [[ "$SKIP_BASE" == "1" ]]; then
+if [[ "$NO_BASE" == "1" ]]; then
+    echo "[v5] --no-base: overlays only, pairing with the published base archive"
+elif [[ "$SKIP_BASE" == "1" ]]; then
     [[ -f "$BASE" ]] || { echo "ERROR: --skip-base but $BASE missing" >&2; exit 1; }
     echo "[v5] using existing base $BASE"
+    INPUTS+=("$BASE")
 else
     BASE_ARGS=(--mode "$BASE_MODE" --out "$BASE")
     [[ -n "$BBOX" ]] && BASE_ARGS+=(--bbox "$BBOX")
     [[ -n "$BASE_SOURCE" ]] && BASE_ARGS+=(--source "$BASE_SOURCE")
     [[ "$BASE_MODE" == "build" ]] && BASE_ARGS+=(--jar "$BASE_JAR" --area "$BASE_AREA")
     run "$HERE/build_base_layers.sh" "${BASE_ARGS[@]}"
+    INPUTS+=("$BASE")
 fi
-INPUTS+=("$BASE")
 
 # --- 2. safety ---
 if [[ "$SKIP_SAFETY" == "0" ]]; then
@@ -241,7 +305,8 @@ fi
 if [[ "$SKIP_POIS" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for ma_pois layer (or --skip-pois)" >&2; exit 1; }
     POIS_ARGS=(--pbf "$PBF" --out "$WORK/ma_pois.pmtiles" \
-        --names-out "$OUTDIR/poi_names.bin" --index-out "$OUTDIR/poi_index.bin")
+        --names-out "$OUTDIR/poi_names.bin" --index-out "$OUTDIR/poi_index.bin" \
+        --attrs-out "$OUTDIR/poi_attrs.bin")
     [[ -n "$BBOX" ]] && POIS_ARGS+=(--bbox "$BBOX")
     run "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
     INPUTS+=("$WORK/ma_pois.pmtiles")
@@ -330,7 +395,11 @@ SIZE="$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT" 2>/dev/null || echo '?'
 echo "[v5] done: $OUT (${SIZE} bytes)"
 echo ""
 echo "Layers now in $OUT:"
-echo "  base : earth landcover landuse water roads buildings boundaries pois places"
+if [[ "$NO_BASE" == "1" ]]; then
+    echo "  (no base layers -- pair this with the published base archive)"
+else
+    echo "  base : earth landcover landuse water roads buildings boundaries pois places"
+fi
 echo "  new  : safety maxspeed transit_lines ma_pois transit_stops"
 echo "         admin_country admin_region admin_city"
 echo ""
@@ -338,6 +407,7 @@ if [[ "$SKIP_POIS" == "0" ]]; then
     echo "POI side files (emitted beside $OUT for the app to mmap):"
     echo "  $OUTDIR/poi_names.bin   (deduped NUL-terminated UTF-8 name table)"
     echo "  $OUTDIR/poi_index.bin   (flat 14-byte records: lat_e7,lon_e7,name_off,type)"
+    echo "  $OUTDIR/poi_attrs.bin   (attribute sidecar, keyed by poi_index record ordinal)"
     echo ""
 fi
 
@@ -350,9 +420,13 @@ else
     echo "Publish (creds from environment variables — see README 'Publishing to R2'):"
     echo "  export R2_ENDPOINT=https://<ACCOUNT_ID>.r2.cloudflarestorage.com"
     echo "  export R2_ACCESS_KEY_ID=...  R2_SECRET_ACCESS_KEY=..."
-    echo "  ./scripts/maps/publish_r2.sh $OUT --key v5.pmtiles"
+    echo "  ./scripts/maps/publish_r2.sh $OUT --key $(basename "$OUT")"
     echo "  # or re-run this build with --publish"
-    echo "Then P13 updates style.json url -> pmtiles://https://data.vayunmathur.com/v5.pmtiles"
+    if [[ "$NO_BASE" == "1" ]]; then
+        echo "Then point MapTileCache.OVERLAY_PMTILES_URL at the published key."
+    else
+        echo "Then P13 updates style.json url -> pmtiles://https://data.vayunmathur.com/v5.pmtiles"
+    fi
 fi
 
 # Intermediates are never deleted, by design -- they are what makes a re-run cheap.
