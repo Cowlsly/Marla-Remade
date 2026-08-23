@@ -12,6 +12,7 @@ import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.data.entities.AchievementDefEntity
 import com.vayunmathur.games.hub.data.entities.AchievementProgressEntity
 import com.vayunmathur.games.hub.data.entities.ActivityEventEntity
+import com.vayunmathur.games.hub.data.entities.DailyStreakEntity
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.data.entities.PlaySessionEntity
 import com.vayunmathur.sdk.games.GameHubContract
@@ -33,6 +34,7 @@ open class GamesHubProvider : ContentProvider() {
         private const val CODE_LEGACY_ACHIEVEMENT_ITEM = 21
         private const val CODE_SESSIONS_BY_GAME = 50
         private const val CODE_SESSION_ITEM = 51
+        private const val CODE_STREAK_BY_GAME = 60
 
         private val uriMatcher = UriMatcher(UriMatcher.NO_MATCH).apply {
             addURI(GameHubContract.AUTHORITY, "games", CODE_GAMES)
@@ -56,6 +58,9 @@ open class GamesHubProvider : ContentProvider() {
             addURI(GameHubContract.LEGACY_AUTHORITY, "sessions/*", CODE_SESSIONS_BY_GAME)
             addURI(GameHubContract.AUTHORITY, "sessions/*/*", CODE_SESSION_ITEM)
             addURI(GameHubContract.LEGACY_AUTHORITY, "sessions/*/*", CODE_SESSION_ITEM)
+
+            addURI(GameHubContract.AUTHORITY, "streaks/*", CODE_STREAK_BY_GAME)
+            addURI(GameHubContract.LEGACY_AUTHORITY, "streaks/*", CODE_STREAK_BY_GAME)
         }
     }
 
@@ -179,6 +184,17 @@ open class GamesHubProvider : ContentProvider() {
                             database.gameDao().markPlayed(session.gameId, session.startTime)
                         }
                         repo.upsertSession(session)
+                        uri
+                    }
+                    CODE_STREAK_BY_GAME -> {
+                        val reported = valuesToStreak(v, uri)
+                        ensureGameExists(reported.gameId, repo)
+                        val existing = repo.getStreak(reported.gameId)
+                        // Never lower a personal best: a reinstall starts the game's store from zero.
+                        val merged = reported.copy(
+                            longestStreak = maxOf(reported.longestStreak, existing?.longestStreak ?: 0)
+                        )
+                        repo.upsertStreak(merged)
                         uri
                     }
                     else -> null
@@ -309,6 +325,10 @@ open class GamesHubProvider : ContentProvider() {
                         val achId = uri.pathSegments.getOrNull(2) ?: return@runBlocking null
                         cursorFromLegacyAchievementItem(repo.getAchievementDef(gameId, achId), repo.getProgress(gameId, achId))
                     }
+                    CODE_STREAK_BY_GAME -> {
+                        val gameId = uri.pathSegments.getOrNull(1) ?: return@runBlocking null
+                        cursorFromStreaks(listOfNotNull(repo.getStreak(gameId)))
+                    }
                     else -> null
                 }
             } catch (e: Exception) {
@@ -418,6 +438,25 @@ open class GamesHubProvider : ContentProvider() {
             endTime = v.getAsLong(GameHubContract.Sessions.END_TIME) ?: v.getAsLong("end_time"),
             durationMs = v.getAsLong(GameHubContract.Sessions.DURATION_MS) ?: v.getAsLong("duration_ms")
         )
+    }
+
+    private fun valuesToStreak(v: ContentValues, uri: Uri): DailyStreakEntity {
+        val segGameId = uri.pathSegments.getOrNull(1)
+        return DailyStreakEntity(
+            gameId = v.getAsString(GameHubContract.Streaks.GAME_ID) ?: segGameId ?: error("gameId missing in streak"),
+            currentStreak = v.getAsInteger(GameHubContract.Streaks.CURRENT_STREAK) ?: 0,
+            longestStreak = v.getAsInteger(GameHubContract.Streaks.LONGEST_STREAK) ?: 0,
+            lastCompletedDay = v.getAsLong(GameHubContract.Streaks.LAST_COMPLETED_DAY) ?: 0L,
+            lastUpdated = v.getAsLong(GameHubContract.Streaks.LAST_UPDATED) ?: System.currentTimeMillis()
+        )
+    }
+
+    private fun cursorFromStreaks(streaks: List<DailyStreakEntity>): MatrixCursor {
+        val c = MatrixCursor(arrayOf("game_id", "current_streak", "longest_streak", "last_completed_day", "last_updated"))
+        for (s in streaks) {
+            c.addRow(arrayOf<Any?>(s.gameId, s.currentStreak, s.longestStreak, s.lastCompletedDay, s.lastUpdated))
+        }
+        return c
     }
 
     private fun cursorFromGames(games: List<HubGameEntity>): MatrixCursor {

@@ -8,6 +8,7 @@ import androidx.lifecycle.viewModelScope
 import com.vayunmathur.games.hub.data.GamesHubRepository
 import com.vayunmathur.games.hub.data.dao.AchievementWithProgress
 import com.vayunmathur.games.hub.data.entities.ActivityEventEntity
+import com.vayunmathur.games.hub.data.entities.DailyStreakEntity
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.data.entities.PlayerProfileEntity
 import com.vayunmathur.games.hub.data.entities.PlaySessionEntity
@@ -115,6 +116,12 @@ class GameHubViewModel(
         sessionsFlow.map { StreakCalculator.calculate(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), StreakCalculator.StreakResult(0, 0))
 
+    /** gameId -> (current, longest) daily-puzzle streak, as pushed by each game. */
+    val dailyStreaksFlow: StateFlow<Map<String, Pair<Int, Int>>> =
+        repository.allStreaksFlow()
+            .map { streaks -> streaks.associate { it.gameId to (it.currentStreak to it.longestStreak) } }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
     val recentActivityFlow: StateFlow<List<ActivityEventEntity>> =
         repository.recentActivityFlow(50)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -178,6 +185,9 @@ class GameHubViewModel(
     fun getSessionsForGameFlow(gameId: String): Flow<List<PlaySessionEntity>> =
         repository.sessionsByGameFlow(gameId)
 
+    fun getDailyStreakForGameFlow(gameId: String): Flow<DailyStreakEntity?> =
+        repository.streakByGameFlow(gameId)
+
     fun getActivityForGameFlow(gameId: String): Flow<List<ActivityEventEntity>> =
         repository.activityByGameFlow(gameId, 30)
 
@@ -187,6 +197,7 @@ class GameHubViewModel(
             repository.clearDefs()
             repository.clearProgress()
             repository.clearSessions()
+            repository.clearStreaks()
             repository.clearActivities()
         }
     }

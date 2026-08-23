@@ -52,6 +52,8 @@
     <string name="playtime_sessions">Playtime: <xliff:g id="playtime" example="2h 15m">%1$s</xliff:g> • <xliff:g id="sessions" example="5">%2$s</xliff:g> sessions</string>
     <!-- GameCard: Achievements progress. %1$s = unlocked count e.g. 3, %2$s = total count e.g. 10. Noun with fraction -->
     <string name="achievements_2">Achievements: <xliff:g id="unlocked" example="3">%1$s</xliff:g>/<xliff:g id="total" example="10">%2$s</xliff:g></string>
+    <!-- GameCard: Compact daily-puzzle streak label. %1$s = current streak days e.g. 5, %2$s = longest streak days e.g. 12. Noun phrase -->
+    <string name="daily_streak_days">Daily streak: <xliff:g id="current" example="5">%1$s</xliff:g> (best <xliff:g id="best" example="12">%2$s</xliff:g>)</string>
     <!-- GameDetailScreen: Game not found null state. Sentence -->
     <string name="game_not_found">Game not found</string>
     <!-- GameDetailScreen: Section header for achievements with progress. %1$s = unlocked e.g. 3, %2$s = total e.g. 10. Noun -->

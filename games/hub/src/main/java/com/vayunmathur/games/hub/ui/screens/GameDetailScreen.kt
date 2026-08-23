@@ -30,6 +30,7 @@ import com.vayunmathur.games.hub.MainRoute
 import com.vayunmathur.games.hub.ui.components.AchievementRow
 import com.vayunmathur.games.hub.ui.components.ActivityItemCard
 import com.vayunmathur.games.hub.ui.components.StatCard
+import com.vayunmathur.games.hub.ui.components.StreakCard
 import com.vayunmathur.games.hub.util.GameIconResolver
 import com.vayunmathur.games.hub.util.formatDurationMs
 import com.vayunmathur.games.hub.util.formatPlaytime
@@ -60,6 +61,7 @@ fun GameDetailScreen(
     val achievements by viewModel.getAchievementsForGameFlow(gameId).collectAsStateWithLifecycle(initialValue = emptyList())
     val sessions by viewModel.getSessionsForGameFlow(gameId).collectAsStateWithLifecycle(initialValue = emptyList())
     val activity by viewModel.getActivityForGameFlow(gameId).collectAsStateWithLifecycle(initialValue = emptyList())
+    val dailyStreak by viewModel.getDailyStreakForGameFlow(gameId).collectAsStateWithLifecycle(initialValue = null)
     val context = LocalContext.current
 
     val iconDrawable: Drawable? = remember(game?.packageName) { game?.packageName?.let { GameIconResolver.resolveAppIcon(context, it) } }
@@ -102,6 +104,9 @@ fun GameDetailScreen(
                 StatCard(label = stringResource(com.vayunmathur.games.hub.R.string.sessions), value = "${sessions.size}", modifier = Modifier.weight(1f))
                 StatCard(label = stringResource(com.vayunmathur.games.hub.R.string.last), value = g.lastPlayedAt?.let { formatRelativeTime(it) } ?: "Never", modifier = Modifier.weight(1f))
             } }
+            dailyStreak?.takeIf { it.currentStreak > 0 || it.longestStreak > 0 }?.let { streak ->
+                item { StreakCard(currentStreak = streak.currentStreak, longestStreak = streak.longestStreak, modifier = Modifier.fillMaxWidth()) }
+            }
             if (achievements.isNotEmpty()) {
                 val unlocked = achievements.count { it.isUnlocked }
                 item { Text(stringResource(R.string.achievements, unlocked, achievements.size), style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold) }

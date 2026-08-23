@@ -178,6 +178,21 @@ class GameHubClient(
         try { resolver.update(uri, values, null, null) > 0 } catch (_: Exception) { false }
     }
 
+    /** Pushes the game's current daily-puzzle streak. Fail-soft, like every other call here. */
+    suspend fun reportDailyStreak(streak: DailyStreak): Boolean = withContext(Dispatchers.IO) {
+        if (!isHubInstalled()) return@withContext false
+        val resolver = appContext.contentResolver
+        val uri = GameHubContract.buildStreakUri(gameId)
+        val values = ContentValues().apply {
+            put(GameHubContract.Streaks.GAME_ID, gameId)
+            put(GameHubContract.Streaks.CURRENT_STREAK, streak.currentStreak)
+            put(GameHubContract.Streaks.LONGEST_STREAK, streak.longestStreak)
+            put(GameHubContract.Streaks.LAST_COMPLETED_DAY, streak.lastCompletedDay)
+            put(GameHubContract.Streaks.LAST_UPDATED, System.currentTimeMillis())
+        }
+        try { resolver.insert(uri, values) != null } catch (_: Exception) { false }
+    }
+
     @Deprecated("Use registerAchievements with AchievementDefinition")
     suspend fun registerAchievementsLegacy(achievements: List<Achievement>) {
         val defs = achievements.map { AchievementDefinition(it.id, it.name, it.description, iconResName = it.iconResName) }

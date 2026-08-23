@@ -22,6 +22,7 @@ fun GamesListPage(
 ) {
     val games by viewModel.gamesFlow.collectAsStateWithLifecycle()
     val allAchievements by viewModel.allAchievementsFlow.collectAsStateWithLifecycle()
+    val dailyStreaks by viewModel.dailyStreaksFlow.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val iconCache = remember { mutableMapOf<String, Drawable?>() }
@@ -40,6 +41,7 @@ fun GamesListPage(
         state = GamesListUiState(
             games = games,
             achievementProgressByGame = achievementProgressByGame,
+            dailyStreakByGame = dailyStreaks,
             installedGameIds = installedGameIds,
         ),
         actions = object : GamesListActions {

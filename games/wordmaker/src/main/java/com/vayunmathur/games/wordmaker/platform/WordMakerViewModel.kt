@@ -12,6 +12,7 @@ import com.vayunmathur.games.wordmaker.data.LevelDataStore
 import com.vayunmathur.games.wordmaker.domain.CompetitiveLevelGenerator
 import com.vayunmathur.games.wordmaker.domain.Dictionary
 import com.vayunmathur.library.util.DailyChallengeStore
+import com.vayunmathur.library.util.DailyStreakReporter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -220,7 +221,11 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
 
     /** Records today's daily as solved, extending the streak. Idempotent within a day. */
     fun onDailyWin() {
-        viewModelScope.launch { dailyStore.recordDayCompleted(_dailyDay.value) }
+        viewModelScope.launch {
+            val day = _dailyDay.value
+            val streak = dailyStore.recordDayCompleted(day)
+            DailyStreakReporter.report(getApplication(), "wordmaker", streak, day)
+        }
     }
 
     private suspend fun loadCasualLevel(level: Int) {

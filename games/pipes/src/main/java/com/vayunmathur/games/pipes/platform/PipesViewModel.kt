@@ -11,6 +11,7 @@ import com.vayunmathur.games.pipes.data.LevelPack
 import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.DailyChallengeStore
+import com.vayunmathur.library.util.DailyStreakReporter
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.LevelStatsRepository
 import kotlinx.coroutines.Dispatchers
@@ -363,6 +364,7 @@ class PipesViewModel(application: Application) : AndroidViewModel(application), 
                 val streak = dailyStore.recordDayCompleted(day)
                 achievementsManager.onProgressUpdated("daily_streak_7", streak.best.toInt())
                 achievementsManager.onProgressUpdated("daily_streak_30", streak.best.toInt())
+                DailyStreakReporter.report(getApplication(), "pipes", streak, day)
             }
         }
     }

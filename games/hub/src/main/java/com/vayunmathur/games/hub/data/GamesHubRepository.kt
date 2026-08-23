@@ -5,6 +5,7 @@ import com.vayunmathur.games.hub.data.dao.AchievementWithProgress
 import com.vayunmathur.games.hub.data.entities.AchievementDefEntity
 import com.vayunmathur.games.hub.data.entities.AchievementProgressEntity
 import com.vayunmathur.games.hub.data.entities.ActivityEventEntity
+import com.vayunmathur.games.hub.data.entities.DailyStreakEntity
 import com.vayunmathur.games.hub.data.entities.HubGameEntity
 import com.vayunmathur.games.hub.data.entities.PlaySessionEntity
 import com.vayunmathur.games.hub.data.entities.PlayerProfileEntity
@@ -22,6 +23,7 @@ class GamesHubRepository private constructor(context: Context) :
     private val sessionDao get() = db.sessionDao()
     private val profileDao get() = db.profileDao()
     private val activityDao get() = db.activityDao()
+    private val streakDao get() = db.streakDao()
 
     val database: GamesHubDatabase get() = db
 
@@ -77,6 +79,16 @@ class GamesHubRepository private constructor(context: Context) :
     suspend fun endSession(sessionId: String, endTime: Long, durationMs: Long) = sessionDao.endSession(sessionId, endTime, durationMs)
     fun totalPlaytimeSessionsFlow(): Flow<Long> = sessionDao.flowTotalPlaytimeMs()
     suspend fun clearSessions() = sessionDao.clearAll()
+
+    // ------------------------------------------------------------------
+    // StreakDao
+    // ------------------------------------------------------------------
+
+    suspend fun upsertStreak(streak: DailyStreakEntity) = streakDao.upsert(streak)
+    suspend fun getStreak(gameId: String): DailyStreakEntity? = streakDao.getByGame(gameId)
+    fun streakByGameFlow(gameId: String): Flow<DailyStreakEntity?> = streakDao.flowByGame(gameId)
+    fun allStreaksFlow(): Flow<List<DailyStreakEntity>> = streakDao.flowAll()
+    suspend fun clearStreaks() = streakDao.clearAll()
 
     // ------------------------------------------------------------------
     // ProfileDao

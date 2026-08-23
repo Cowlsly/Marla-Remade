@@ -30,6 +30,8 @@ data class DashboardUiState(
     val recentActivity: List<ActivityEventEntity> = emptyList(),
     /** gameId -> (unlocked, total). */
     val achievementProgressByGame: Map<String, Pair<Int, Int>> = emptyMap(),
+    /** gameId -> (current, longest) daily-puzzle streak. */
+    val dailyStreakByGame: Map<String, Pair<Int, Int>> = emptyMap(),
     /** Games whose package is actually present on the device. */
     val installedGameIds: Set<String> = emptySet(),
 )
@@ -39,6 +41,8 @@ data class GamesListUiState(
     val games: List<HubGameEntity> = emptyList(),
     /** gameId -> (unlocked, total). */
     val achievementProgressByGame: Map<String, Pair<Int, Int>> = emptyMap(),
+    /** gameId -> (current, longest) daily-puzzle streak. */
+    val dailyStreakByGame: Map<String, Pair<Int, Int>> = emptyMap(),
     /** Games whose package is actually present on the device. */
     val installedGameIds: Set<String> = emptySet(),
 )

@@ -39,6 +39,8 @@ fun GameCard(
     isInstalled: Boolean,
     modifier: Modifier = Modifier,
     achievementProgress: Pair<Int, Int>? = null,
+    /** (current, longest) daily-puzzle streak, or null for a game that has none. */
+    dailyStreak: Pair<Int, Int>? = null,
     iconDrawable: Drawable? = null,
     onClick: () -> Unit,
     onPlay: () -> Unit
@@ -88,6 +90,11 @@ fun GameCard(
                 achievementProgress?.let { (unlocked, total) ->
                     if (total > 0) {
                         Text(stringResource(R.string.achievements_2, unlocked, total), style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+                dailyStreak?.let { (current, longest) ->
+                    if (current > 0) {
+                        Text(stringResource(R.string.daily_streak_days, current, longest), style = MaterialTheme.typography.labelSmall)
                     }
                 }
             }

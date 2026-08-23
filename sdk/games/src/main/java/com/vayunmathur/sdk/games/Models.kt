@@ -46,6 +46,18 @@ data class AchievementProgress(
     val unlockedAt: Long? = null
 )
 
+/**
+ * A game's daily-puzzle streak, pushed by the game as source of truth.
+ *
+ * [lastCompletedDay] is an epoch day, so the hub can tell a live streak from a lapsed one
+ * without depending on when the row was written.
+ */
+data class DailyStreak(
+    val currentStreak: Int,
+    val longestStreak: Int,
+    val lastCompletedDay: Long,
+)
+
 // ──────── Legacy models — kept for backward compatibility ────────
 
 /**

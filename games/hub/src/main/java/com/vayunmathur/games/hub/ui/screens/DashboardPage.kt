@@ -34,6 +34,7 @@ fun DashboardPage(
     val profile by viewModel.profileFlow.collectAsStateWithLifecycle()
     val recentActivity by viewModel.recentActivityFlow.collectAsStateWithLifecycle()
     val allAchievements by viewModel.allAchievementsFlow.collectAsStateWithLifecycle()
+    val dailyStreaks by viewModel.dailyStreaksFlow.collectAsStateWithLifecycle()
     val sessions by viewModel.sessionsFlow.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
@@ -67,6 +68,7 @@ fun DashboardPage(
             recentlyPlayed = recentlyPlayedGames,
             recentActivity = recentActivity,
             achievementProgressByGame = achievementProgressByGame,
+            dailyStreakByGame = dailyStreaks,
             installedGameIds = installedGameIds,
         ),
         actions = object : DashboardActions {

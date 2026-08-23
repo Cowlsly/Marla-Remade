@@ -60,6 +60,18 @@ object GameHubContract {
         const val DURATION_MS = "duration_ms"
     }
 
+    /**
+     * A game's daily-puzzle streak. One row per game, not per day: the game's own
+     * `DailyChallengeStore` is the source of truth and only keeps current/best/last-day.
+     */
+    object Streaks {
+        const val GAME_ID = "game_id"
+        const val CURRENT_STREAK = "current_streak"
+        const val LONGEST_STREAK = "longest_streak"
+        const val LAST_COMPLETED_DAY = "last_completed_day"
+        const val LAST_UPDATED = "last_updated"
+    }
+
     // Legacy columns (from old SDK)
     object Legacy {
         const val ACHIEVEMENT_ID = "achievement_id"
@@ -92,6 +104,9 @@ object GameHubContract {
 
     fun buildSessionItemUri(gameId: String, sessionId: String): Uri =
         BASE_URI.buildUpon().appendPath("sessions").appendPath(gameId).appendPath(sessionId).build()
+
+    fun buildStreakUri(gameId: String): Uri =
+        BASE_URI.buildUpon().appendPath("streaks").appendPath(gameId).build()
 
     // Legacy URI helpers
     fun buildLegacyAchievementsUri(gameId: String): Uri =

@@ -89,6 +89,7 @@ fun GamesListScreen(
                 GameCard(
                     game = game, isInstalled = game.gameId in state.installedGameIds,
                     achievementProgress = state.achievementProgressByGame[game.gameId],
+                    dailyStreak = state.dailyStreakByGame[game.gameId],
                     iconDrawable = iconFor(game),
                     onClick = { actions.openGame(game.gameId) },
                     onPlay = { actions.playGame(game) }
