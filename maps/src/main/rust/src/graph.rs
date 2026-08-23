@@ -72,9 +72,19 @@ pub const GRAPH_MAGIC: u32 = 0x4752_414D;
 /// Version 2 narrowed `nodes.bin` to 12-byte records, made `lanes.bin` a sparse
 /// index and gave `intermediate.bin` two-level offsets — 50.8 GB of planet became
 /// 34 GB. Version 3 gave `intermediate.bin` a presence bitmap and dropped both
-/// endpoints of every stored polyline, taking it to ~29 GB. There is no dual-path
-/// reader: an older pack is rejected.
-pub const GRAPH_VERSION: u32 = 3;
+/// endpoints of every stored polyline, taking it to ~29 GB. Version 4 changes no
+/// layout at all: it adds `edge_count` to `metadata.bin` so that nothing is
+/// derived from a file's *length*, which is what the next round of record
+/// narrowing would silently invalidate. There is no dual-path reader: an older
+/// pack is rejected.
+pub const GRAPH_VERSION: u32 = 4;
+
+/// Sentinel `name_offset` meaning "this edge has no name".
+///
+/// `NO_NAME` in the generator, and an on-disk contract with it. Callers should
+/// prefer [`Graph::edge_name_offset`], which spells absence as `None`; this exists
+/// for the places that have to put a `u32` in a struct crossing the JNI boundary.
+pub const NO_NAME: u32 = 0xFFFF_FFFF;
 
 /// Geometry edges per coarse block in `intermediate.bin`'s two-level offset table.
 ///
@@ -94,8 +104,9 @@ pub const GEOMETRY_RANK_BLOCK_BYTES: u64 = 64;
 
 // --- On-disk packed structs ---
 // `#[repr(C, packed)]` reproduces the exact byte strides the generator writes
-// (notably `Edge` is 14 bytes, not the 16 a naturally-aligned layout would give).
-// All reads go through `read_unaligned`, so element pointers need no alignment.
+// (notably `EdgeRec` is 14 bytes, not the 16 a naturally-aligned layout would
+// give). All reads go through `read_unaligned`, so element pointers need no
+// alignment. The `const _` block below asserts every stride at compile time.
 
 /// A `nodes.bin` record: 12 bytes, with `edge_ptr` narrowed to a `u32`.
 ///
@@ -119,12 +130,38 @@ struct LaneEntry {
     blob_off: u32,
 }
 
+/// An `edges.bin` record as the generator writes it: 14 bytes.
+///
+/// Private, so a layout change stays inside this file. [`Graph::edge`] widens it
+/// into [`Edge`].
 #[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct EdgeRec {
+    target: u32,
+    dist_mm: u32,
+    name_offset: u32,
+    type_: u8,
+    speed_limit: u8,
+}
+
+/// The in-memory view of an `edges.bin` record, the same widening
+/// [`NodeRec`]/[`NodeMaster`] uses.
+///
+/// Nothing above [`Graph::edge`] sees [`EdgeRec`], so the on-disk record is free to
+/// narrow a field, delta-encode it against the edge's source or move it into a
+/// sparse side table without any call site changing. That is the whole reason the
+/// two types are separate: the alternative is editing the same dozen call sites
+/// once per layout change.
+///
+/// `name_offset` is deliberately *not* here. It is read on the instruction-emission
+/// path and never in the A* relaxation, so it belongs in
+/// [`Graph::edge_name_offset`] where a sparse representation costs nothing;
+/// including it in the view would put every future reader of that field back on
+/// the hot path.
 #[derive(Clone, Copy)]
 pub struct Edge {
     pub target: u32,
     pub dist_mm: u32,
-    pub name_offset: u32,
     pub type_: u8,
     pub speed_limit: u8,
 }
@@ -143,6 +180,18 @@ pub struct LatLon {
     pub lat_e7: i32,
     pub lon_e7: i32,
 }
+
+const _: () = {
+    // Compile-time assertions that the fixed on-disk record sizes match the
+    // writer. `#[repr(C, packed)]` is what makes them what they are; without these
+    // a field reordered or widened by one byte changes every stride in the file and
+    // still compiles, and the resulting pack loads and routes wrongly. The length
+    // validation in `Graph::load` derives from these, so they are also what makes
+    // that validation mean anything.
+    assert!(std::mem::size_of::<NodeRec>() == 12);
+    assert!(std::mem::size_of::<EdgeRec>() == 14);
+    assert!(std::mem::size_of::<LaneEntry>() == 8);
+};
 
 /// Owns a read-only `mmap` region and unmaps it on drop.
 pub(crate) struct MmapRegion {
@@ -264,8 +313,24 @@ unsafe impl Sync for Graph {}
 impl Graph {
     /// Load the graph from `base` (a directory path, trailing slash optional).
     /// Returns `None` if any mandatory file is absent, if `metadata.bin` is not a
-    /// [`GRAPH_VERSION`] header, or if `intermediate.bin` is too short for this
-    /// `edge_count` (a mixed-vintage pack directory).
+    /// [`GRAPH_VERSION`] header, or if **any** file's length is not exactly what
+    /// `metadata.bin`'s counts say it should be.
+    ///
+    /// # Why the lengths are checked, and checked exactly
+    ///
+    /// The version lives in `metadata.bin` while the layouts live in `nodes.bin`
+    /// and `edges.bin`, so a matching version field cannot catch a pack directory
+    /// assembled from two vintages — only the lengths can. `nodes.bin`'s length used
+    /// not to be checked at all, and [`Graph::node`] documents that callers
+    /// guarantee `id <= node_count` with no bounds test, so a short or stale file
+    /// read straight past the mapping.
+    ///
+    /// Exactly, not "at least", because a file that is too *long* is just as much a
+    /// vintage mismatch as one that is too short, and one comparison catches both.
+    ///
+    /// `road_names.bin` is the one file with no count to check against: it is a
+    /// byte pool whose size is its own, and [`Graph::road_name`] bounds every read
+    /// on it instead.
     ///
     /// `intermediate.bin` is mandatory, not optional. The generator collapses
     /// degree-2 chains, so an edge is a whole road between junctions and its
@@ -279,11 +344,11 @@ impl Graph {
             base.push('/');
         }
 
-        // metadata.bin: u32 magic, u32 version, u64 node_count. Scoped so the
-        // mapping is released before the big regions are mapped.
-        let node_count = {
+        // metadata.bin: u32 magic, u32 version, u64 node_count, u64 edge_count.
+        // Scoped so the mapping is released before the big regions are mapped.
+        let (node_count, edge_count) = {
             let meta = MmapRegion::map(&format!("{base}metadata.bin"))?;
-            if meta.len < 16 {
+            if meta.len < 24 {
                 return None;
             }
             let magic = unsafe { read_at::<u32>(meta.base(), 0) };
@@ -291,12 +356,33 @@ impl Graph {
             if magic != GRAPH_MAGIC || version != GRAPH_VERSION {
                 return None;
             }
-            (unsafe { read_at::<u64>(meta.base().add(8), 0) }) as u32
+            let nodes = unsafe { read_at::<u64>(meta.base().add(8), 0) };
+            let edges = unsafe { read_at::<u64>(meta.base().add(16), 0) };
+            // `edge_ptr` is a `u32`, so an edge count past that ceiling would have
+            // wrapped in the writer and pointed a node at another node's range. The
+            // generator refuses to produce one; this refuses to read one.
+            if u32::try_from(edges).is_err() {
+                return None;
+            }
+            (u32::try_from(nodes).ok()?, edges)
         };
 
+        // `edge_count` now comes from the header rather than from `edges.bin`'s
+        // length. That is the point of version 4: every later version narrows the
+        // record, and a derived count would change silently with the stride and
+        // mis-size `intermediate.bin`'s trailer — which is computed from it.
         let nodes_region = MmapRegion::map(&format!("{base}nodes.bin"))?;
         let edges_region = MmapRegion::map(&format!("{base}edges.bin"))?;
-        let edge_count = (edges_region.len / std::mem::size_of::<Edge>()) as u64;
+        // nodes.bin is `NodeRec[node_count + 1]`: one sentinel record past the real
+        // nodes, whose `edge_ptr` is `edge_count`. Eight call sites read it.
+        let want_nodes =
+            (u64::from(node_count) + 1) * std::mem::size_of::<NodeRec>() as u64;
+        if nodes_region.len as u64 != want_nodes {
+            return None;
+        }
+        if edges_region.len as u64 != edge_count * std::mem::size_of::<EdgeRec>() as u64 {
+            return None;
+        }
 
         // intermediate.bin:
         //   [ blob ][ u64 rank[..] ][ u8 present[..] ][ u64 coarse[..] ]
@@ -381,8 +467,10 @@ impl Graph {
             // The sentinel entry's offset is the blob length, so checking it
             // validates the blob as well as the index. That matters because
             // `edge_lane_masks` reads at offsets taken straight from the file.
+            // Exactly, not "at least": the writer emits header + index + blob and
+            // nothing else, so a longer file is a vintage mismatch too.
             let sentinel = unsafe { read_at::<LaneEntry>(index, n as usize) };
-            if (r.len as u64) < index_bytes + u64::from(sentinel.blob_off) {
+            if r.len as u64 != index_bytes + u64::from(sentinel.blob_off) {
                 return None;
             }
             // Nothing else in this file mentions `edge_count`, so a stale-vintage
@@ -487,6 +575,10 @@ impl Graph {
 
     /// Safe node fetch: returns a zeroed node for out-of-range ids, mirroring
     /// the C++ `get_node` fallback.
+    ///
+    /// Deliberately asymmetric with [`Graph::node`], which is unchecked: the
+    /// sentinel index `node_count` is a *valid* read that this method rejects, and
+    /// [`Graph::edge_range`] depends on being able to make it.
     #[inline]
     pub fn get_node(&self, id: u32) -> NodeMaster {
         if self.nodes.is_null() || id >= self.node_count {
@@ -499,9 +591,87 @@ impl Graph {
         self.node(id)
     }
 
+    /// `[start, end)` of node `id`'s outgoing edges in `edges.bin`. `id` must be a
+    /// real node, i.e. `id < node_count`.
+    ///
+    /// The only way to ask that question. Every caller that reads an `edge_ptr`
+    /// wants a range, not an offset, so the pairing is expressed once here rather
+    /// than transcribed at eight sites — which is also what stops a future
+    /// `nodes.bin` layout from leaking out of this file.
+    ///
+    /// # What the sentinel record is for
+    ///
+    /// `nodes.bin` carries one record past the real nodes whose `edge_ptr` is
+    /// `edge_count`. That is what makes this well-defined for the *last* real node:
+    /// `id + 1` is read for every node, so without it the last one would read past
+    /// the mapping and every other node's range would be one short of correct.
+    /// `edge_range(node_count - 1).1 == edge_count` is the property, and it is
+    /// load-bearing at eight sites.
+    ///
+    /// The sentinel index itself is the highest `id` this may be *passed plus one* —
+    /// `edge_range(node_count)` would read `node_count + 1`, which does not exist.
+    /// Every caller either iterates `0..node_count` or rejects `id >= node_count`
+    /// first.
+    ///
+    /// Note that this goes through [`Graph::node`], which is unchecked, *not*
+    /// [`Graph::get_node`], which would reject the sentinel index and silently
+    /// return `edge_ptr = 0` — turning the last node's range into an empty one.
     #[inline]
-    pub fn edge(&self, idx: u64) -> Edge {
-        unsafe { read_at::<Edge>(self.edges, idx as usize) }
+    pub fn edge_range(&self, id: u32) -> (u64, u64) {
+        debug_assert!(id < self.node_count, "node {id} is not a real node");
+        (self.node(id).edge_ptr, self.node(id + 1).edge_ptr)
+    }
+
+    /// Edge `idx`, which must be one of node `source`'s outgoing edges.
+    ///
+    /// `source` is not needed to find the record today. It is in the signature
+    /// because the record will stop storing `target` absolutely — a delta from the
+    /// source is three bytes smaller — and because passing it makes the
+    /// debug assertion below possible, which is the cheapest available guard
+    /// against the one bug class that change introduces: decoding an edge against
+    /// the wrong source produces a plausible node id, not a crash.
+    #[inline]
+    pub fn edge(&self, source: u32, idx: u64) -> Edge {
+        debug_assert!(
+            {
+                let (s, e) = self.edge_range(source);
+                (s..e).contains(&idx)
+            },
+            "edge {idx} is not in node {source}'s range {:?}",
+            self.edge_range(source)
+        );
+        let r = unsafe { read_at::<EdgeRec>(self.edges, idx as usize) };
+        Edge {
+            target: r.target,
+            dist_mm: r.dist_mm,
+            type_: r.type_,
+            speed_limit: r.speed_limit,
+        }
+    }
+
+    /// Whether edge `idx` of node `source` points at `want`.
+    ///
+    /// Four call sites scan a node's edge range looking for the one edge that
+    /// reaches a given node and never use the target as a value. Once `target` is
+    /// stored as a delta they can answer that without widening the field at all, so
+    /// the comparison lives here rather than being hand-inlined four times against
+    /// whatever the record happens to hold.
+    #[inline]
+    pub fn edge_targets(&self, idx: u64, source: u32, want: u32) -> bool {
+        self.edge(source, idx).target == want
+    }
+
+    /// Byte offset of edge `idx`'s name in the string pool, or `None` when it has
+    /// none.
+    ///
+    /// Separate from [`Edge`] because 62% of a planet's edges are unnamed and this
+    /// is read on the instruction-emission path, never in the A* relaxation — so the
+    /// field can become a sparse side table without any hot-path cost. Being the
+    /// sole reader is what makes that possible.
+    #[inline]
+    pub fn edge_name_offset(&self, idx: u64) -> Option<u32> {
+        let r = unsafe { read_at::<EdgeRec>(self.edges, idx as usize) };
+        (r.name_offset != NO_NAME).then_some(r.name_offset)
     }
 
     /// Real OSM per-lane turn-indication masks for directed edge `idx`, ordered
@@ -607,7 +777,7 @@ impl Graph {
     /// Borrow a NUL-terminated road/feed/stop name from the string pool at
     /// `offset`. Returns `None` for the sentinel or out-of-range offsets.
     pub fn road_name(&self, offset: u32) -> Option<String> {
-        if offset == 0xFFFF_FFFF || (offset as usize) >= self.road_names_size {
+        if offset == NO_NAME || (offset as usize) >= self.road_names_size {
             return None;
         }
         Some(self.cstr_at(offset as usize))
@@ -626,7 +796,25 @@ impl Graph {
         }
     }
 
-    /// Largest node index whose `edge_ptr <= edge_idx` (edge_ptr is monotonic).
+    /// The node whose edge range `edge_idx` falls in, i.e. the edge's source.
+    ///
+    /// Found by binary search on the monotonic `edge_ptr`, ~29 probes on a planet.
+    /// Only for the one caller that genuinely has no source: an edge index arriving
+    /// from Kotlin in `updateTrafficNative`. Everything else already holds the
+    /// source, because it got the edge index by iterating a node's own range.
+    ///
+    /// # The tie-break is a contract, not an accident
+    ///
+    /// This returns the **largest** node index whose `edge_ptr <= edge_idx`. That is
+    /// the unique owner of the edge — any larger node's `edge_ptr` is at least
+    /// `edge_ptr(owner + 1)`, which is past `edge_idx` — but it is only the same
+    /// thing as the *first* such node when every node has out-degree at least one.
+    /// Degree-0 nodes exist (1,480 of California's 6.4 M, 0.023%), and they make
+    /// runs of nodes share an `edge_ptr`. A reimplementation that returned the first
+    /// of such a run would satisfy the description "a node whose `edge_ptr <=
+    /// edge_idx`" and be wrong: that node's range is empty, and the result seeds
+    /// [`Graph::decode_edge_coords`], so the failure is a polyline drawn from the
+    /// wrong place rather than anything that reports an error.
     pub fn find_node_idx_for_edge(&self, edge_idx: u64) -> u32 {
         let mut low: i64 = 0;
         let mut high: i64 = self.node_count as i64 - 1;
@@ -643,7 +831,40 @@ impl Graph {
         res
     }
 
-    /// 64-bit Morton code from lat/lon degrees (matches C++ `latlng_to_spatial`).
+    /// 64-bit Morton (Z-order) code from lat/lon degrees.
+    ///
+    /// The node array is sorted by this, so it decides both what
+    /// [`crate::routing::find_nearest_edge`]'s fixed 800-node window covers and how
+    /// far apart two adjacent nodes' *indices* are. It must agree bit for bit with
+    /// `latlng_to_spatial` in `scripts/maps/osm_ingest/src/spatial.rs`, which is
+    /// what sorts the array; that crate has a test comparing the two
+    /// transcriptions.
+    ///
+    /// # Hilbert was tried and is not better
+    ///
+    /// Z-order's known flaw is the "Z" discontinuity at every quadrant boundary:
+    /// the cells either side are neighbours on the ground and up to a whole
+    /// quadrant apart in index. Hilbert has no long-range jumps at all, so it looks
+    /// like the obvious win for `edges.bin`, which stores `target` as an `i16`
+    /// delta from its source and needs an escape table for the pairs that do not
+    /// fit.
+    ///
+    /// Measured on California (`road_graph --stats`), it is not. The two curves
+    /// cross almost exactly at the `i16` boundary:
+    ///
+    /// | `|target - source|` > | Morton | Hilbert |
+    /// |---|---|---|
+    /// | 1,024 | 2.225% | 2.155% |
+    /// | 16,384 | 0.4711% | 0.4648% |
+    /// | **32,767** | **0.3014%** | **0.3076%** |
+    /// | 262,144 | 0.0713% | 0.0892% |
+    ///
+    /// Hilbert wins below ~16 k and loses above it: it concentrates the
+    /// distribution rather than shortening it, trading mid-range deltas for far
+    /// ones. So the quadrant discontinuities are *not* what generates the 0.3%
+    /// tail — mapping a 2-D neighbourhood onto a 1-D index costs that much however
+    /// it is done — and the escape table is unavoidable. Not worth a node
+    /// permutation change for 2% the wrong way.
     pub fn latlng_to_spatial(lat: f64, lon: f64) -> u64 {
         let x = (lon + 180.0) / 360.0;
         let y = (lat + 90.0) / 180.0;
@@ -662,27 +883,14 @@ impl Graph {
         Graph::latlng_to_spatial(node.lat_e7 as f64 * 1e-7, node.lon_e7 as f64 * 1e-7)
     }
 
-    /// Decode the delta-encoded coordinate blob for `edge_idx` into `out`.
-    /// Returns `Some((count, is_reversed))`, with `count == 0` when the edge stores
-    /// no polyline. `out` must hold at least 256 points.
-    ///
-    /// Prefer [`Graph::get_edge_coordinates_from`] wherever the source node is
-    /// already known: this wrapper has to recover it with a ~29-probe binary
-    /// search, and the stored blob is now interior-only, so the source is needed to
-    /// decode at all rather than merely to find the twin.
-    pub fn get_edge_coordinates(&self, edge_idx: u64, out: &mut [LatLon]) -> Option<(u32, bool)> {
-        if self.edges.is_null() || edge_idx >= self.edge_count {
-            return None;
-        }
-        let source = self.find_node_idx_for_edge(edge_idx);
-        self.get_edge_coordinates_from(source, edge_idx, out)
-    }
-
-    /// [`Graph::get_edge_coordinates`] for a caller that already holds `edge_idx`'s
-    /// source node — which every call site iterating a node's edge range does.
+    /// Decode the delta-encoded coordinate blob for `edge_idx`, whose source is
+    /// `source`, into `out`. Returns `Some((count, is_reversed))`, with `count == 0`
+    /// when the edge stores no polyline. `out` must hold at least 256 points.
     ///
     /// `source` must really be the node whose range `edge_idx` falls in. It seeds
     /// the decode, so a wrong one silently draws the polyline from the wrong place.
+    /// Every call site iterating a node's edge range already has it; the one that
+    /// does not recovers it with [`Graph::find_node_idx_for_edge`].
     pub fn get_edge_coordinates_from(
         &self,
         source: u32,
@@ -692,7 +900,7 @@ impl Graph {
         if self.edges.is_null() || edge_idx >= self.edge_count {
             return None;
         }
-        let e = self.edge(edge_idx);
+        let e = self.edge(source, edge_idx);
         if source >= self.node_count || e.target >= self.node_count {
             return None;
         }
@@ -700,10 +908,9 @@ impl Graph {
         if e.type_ & REVERSE_GEOMETRY_FLAG != 0 {
             // The twin runs `target -> source`, so it is seeded and terminated the
             // other way round. `get_pt_at` is what flips the result for callers.
-            let s = self.node(e.target).edge_ptr;
-            let e_ptr = self.node(e.target + 1).edge_ptr; // sentinel valid
+            let (s, e_ptr) = self.edge_range(e.target);
             for k in s..e_ptr {
-                if self.edge(k).target == source {
+                if self.edge_targets(k, e.target, source) {
                     let cnt = self.decode_edge_coords(k, e.target, source, out);
                     return Some((cnt, true));
                 }

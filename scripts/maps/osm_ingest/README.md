@@ -129,22 +129,55 @@ changing its reader produces a graph that loads as garbage, which is why
 
 | File | Layout | Reader |
 |---|---|---|
-| `metadata.bin` | `u32 magic "MARG"`, `u32 version 3`, `u64 node_count` (16 B) | `graph.rs` `GRAPH_MAGIC`/`GRAPH_VERSION` |
+| `metadata.bin` | `u32 magic "MARG"`, `u32 version 4`, `u64 node_count`, `u64 edge_count` (24 B) | `graph.rs` `GRAPH_MAGIC`/`GRAPH_VERSION` |
 | `nodes.bin` | `NodeRec[node_count + 1]`, **12 bytes**: `i32 lat_e7, i32 lon_e7, u32 edge_ptr`; Morton-sorted, trailing sentinel whose `edge_ptr == edge_count` | `graph.rs` — widened into `NodeMaster` by `node()` |
-| `edges.bin` | `Edge[edge_count]`, **14 bytes**: `u32 target, u32 dist_mm, u32 name_offset, u8 type, u8 speed_limit` | `graph.rs` — `edge_count` comes from the *file size*, so this must be an exact multiple of 14 |
+| `edges.bin` | `EdgeRec[edge_count]`, **14 bytes**: `u32 target, u32 dist_mm, u32 name_offset, u8 type, u8 speed_limit` | `graph.rs` — widened into `Edge` by `edge()`; `name_offset` reached only through `edge_name_offset()` |
 | `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 blob_byte_off) × (n + 1)` ascending by `edge_idx`, then the packed `u16` per-lane turn masks. **Sparse**: only lane-bearing edges appear | `graph.rs` `edge_lane_masks` |
 | `intermediate.bin` | the delta-encoded polyline blob at **offset 0** — per storing edge, `i16 dlat, i16 dlon` per *interior* point — then a trailer: `u64 rank[E.div_ceil(512) + 1]`, `u8 present[E.div_ceil(8)]`, `u64 coarse[G.div_ceil(32) + 1]`, `u16 within[G + 1]`, `u64 G`. `off(g) = coarse[g / 32] + within[g]` where `g = rank(k)` | `graph.rs` `intermediate_range` / `decode_edge_coords` — **mandatory**, see below |
 | `road_names.bin` | deduped NUL-terminated UTF-8 pool; a name offset is a byte offset | `graph.rs` |
 | `poi_index.bin` | 14-byte records: `i32 lat_e7, i32 lon_e7, u32 name_off, u16 type`, Morton-sorted | `PoiIndex.kt` |
 | `poi_names.bin` | same pool convention as `road_names.bin` | `PoiIndex.kt` |
 
-`GRAPH_VERSION` is **3**. Version 1 stored a 16-byte node record and a dense
+`GRAPH_VERSION` is **4**. Version 1 stored a 16-byte node record and a dense
 `u64` offset per edge in both blob files; version 2 fixed that, and version 3 gave
 `intermediate.bin` a presence bitmap and dropped both endpoints of every stored
 polyline. See [Getting a planet under 40 GB](#getting-a-planet-under-40-gb) and
 [Getting it under 30](#getting-it-under-30) for what each cost and what replaced
 it. There is no dual-path reader — an older pack is rejected — so the app and the
 pack have to be updated together, as they already did across the v0→v1 boundary.
+
+Version 4 changes **no layout at all**. It adds `edge_count` to `metadata.bin`, so
+that the reader stops deriving it from `edges.bin`'s file size, and with it
+[exact length validation](#every-files-length-is-checked) of every other file.
+That has to land before any record narrows: the moment the stride changes, a
+derived `edge_count` changes silently — and it is what sizes `intermediate.bin`'s
+trailer, so the mis-parse would be of a *different file*.
+
+### Every file's length is checked
+
+Every mandatory file's length is now an exact function of the two counts in
+`metadata.bin`, and `Graph::load` checks each one:
+
+| File | Expected length |
+|---|---|
+| `metadata.bin` | ≥ 24 B, with the right magic and version |
+| `nodes.bin` | exactly `(node_count + 1) × 12` |
+| `edges.bin` | exactly `edge_count × 14` |
+| `lanes.bin` | exactly `4 + (n + 1) × 8 + blob`, from its own header, plus every `edge_idx < edge_count` |
+| `intermediate.bin` | trailer sized from `edge_count` and `G`, with `coarse[G/32] + within[G] == ` the blob length |
+
+Exactly, not "at least": a file that is too long is as much a vintage mismatch as
+one that is too short, and one comparison catches both. `nodes.bin`'s length used
+not to be checked at all — `node()` documents that callers guarantee
+`id <= node_count` and does no bounds test — so a stale or truncated file read
+straight past the mapping. `road_names.bin` is the one exception: it is a byte pool
+with no count of its own, and `road_name()` bounds each read against its size
+instead.
+
+Together these catch what a matching version field cannot. The version lives in
+`metadata.bin` while the layouts live in `nodes.bin` and `edges.bin`, so a pack
+directory assembled from two builds of the *same* version is invisible to it and
+obvious to the lengths.
 
 The POI Morton sort key is computed from the *stored* `lat_e7`/`lon_e7`, not from
 the pre-rounding `f64` centroid the C++ used, so the order matches the key a
@@ -565,6 +598,92 @@ with no resolvable geometry. It does not skip them: it falls through to
 "No geometry: snap to the straight node-to-node segment" and projects onto the
 chord itself, as do the other six `get_edge_coordinates` call sites. So chord
 recovery was never the missing piece, and nothing here changes snapping coverage.
+
+## Getting it under 25: what the census says
+
+v3 projects a planet pack at ~29.0 GB. The next question was whether 25 GB is
+reachable, and the answer had to come from measurement rather than from guessing
+which field looked wasteful — so `road_graph` gained a `--stats` mode that reports
+what a narrower record would cost, computed by **the encoder's own escape
+predicate** rather than by an analysis script that could disagree with it by one.
+
+```
+road_graph california-latest.osm.pbf --out DIR --stats
+```
+
+Measured on California, reference path (E = 16,785,702, N = 6,418,361):
+
+| | |
+|---|---|
+| `edges.bin` share of the pack | **52%** |
+| `\|target − source\|` fits an `i16` | 99.699% (**50,591** escapes) |
+| `dist_mm` at or above `0xFFFFFF` (16.78 km) | **166** edges, 0.001% |
+| named edges | 37.72% — so 62.28% of `name_offset` is a sentinel |
+| `speed_limit` zero | 91.76% |
+| max out-degree | **24** |
+| degree-0 nodes | **1,480** (0.023%) |
+| name pool | 5,481,848 B in 323,443 names |
+
+Three of `edges.bin`'s five fields are therefore mostly redundant, and `dist_mm`
+should be a `u24` in **millimetres** rather than centimetres: only 0.001% of edges
+exceed the ceiling, so the escape table is ~85 KB planet-wide and the field stays
+*exact* rather than quantising 1.07 G edges to save a table.
+
+### `c` is the number that transfers, not the escape rate
+
+An escape rate measured on one extract says nothing about a planet 22× larger. What
+should transfer is the constant in
+
+```
+P(|target − source| > n) ≈ c · n^(−1/2)
+```
+
+because a level-*k* quadrant boundary produces a delta of order `N / 4^k` and is
+crossed with probability proportional to `2^k`; substituting `n = N / 4^k` gives
+`P = (L·√N / W) / √n`, and `L·√N / W` is the ratio of edge length to node spacing —
+a local, physical quantity that does not depend on `N`. California gives
+**c ≈ 0.546** at the `i16` boundary. `--stats` prints `c` at every power of two so
+the shape of the curve is visible, not just one point on it.
+
+### Hilbert was tried, and loses
+
+Z-order's known flaw is the discontinuity at every quadrant boundary, which is
+exactly the mechanism above, so Hilbert — which has no long-range jumps at all —
+looked like a free win. It is not. Both curves, same extract, same predicate:
+
+| `\|target − source\|` > | Morton | Hilbert |
+|---|---|---|
+| 1,024 | 2.2254% | 2.1553% |
+| 16,384 | 0.4711% | 0.4648% |
+| **32,767** | **0.30139%** | **0.30756%** |
+| 262,144 | 0.0713% | 0.0892% |
+
+Hilbert wins below ~16 k and loses above it: it *concentrates* the distribution
+rather than shortening it, trading mid-range deltas for far ones, and the crossover
+falls almost exactly on the `i16` boundary. So the quadrant discontinuities are not
+what generates the 0.3% tail — mapping a 2-D neighbourhood onto a 1-D index costs
+about that much however it is done — and the escape table is unavoidable either way.
+Morton stays, and `spatial.rs` now pins the discontinuity in a test so the next
+person reads the measurement instead of repeating it.
+
+### Delta-coded coordinates stay rejected
+
+The other candidate v3 named. Longitude deltas along the Morton order fit an `i16`
+only 91.4% of the time, and `find_nearest_edge` binary-searches the coordinate array
+by spatial key, so it needs O(1) random access — which delta coding destroys.
+
+### Version 4 is the de-risking step
+
+No byte of any data file moves. What lands is the machinery every later phase needs:
+`edge_count` in `metadata.bin`, [exact length validation](#every-files-length-is-checked)
+of every file, compile-time record-size assertions, `Graph::edge_range` as the only
+way to ask for a node's edge range, the `EdgeRec`/`Edge` widening that keeps a
+layout change inside `graph.rs`, and `route_diff dump` — a per-element equivalence
+dump over **all** E edges and N+1 node records, which is what later phases are
+verified against instead of the ~35 K vertices 999 sampled routes happen to touch.
+
+`route_diff` also gained a `bench` mode, so the phases that are gated on latency
+rather than correctness have a baseline to be gated against.
 
 ## Build-time memory
 

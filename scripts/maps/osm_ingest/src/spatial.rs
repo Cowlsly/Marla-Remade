@@ -13,6 +13,9 @@ pub const DEG_TO_RAD: f64 = std::f64::consts::PI / 180.0;
 const R_MM: f64 = 6_371_000_800.0;
 
 /// 64-bit Morton (Z-order) code of a lat/lon pair.
+///
+/// Hilbert was measured as the alternative and is not better at the scale that
+/// matters — see `Graph::latlng_to_spatial`, which carries the numbers.
 pub fn latlng_to_spatial(lat: f64, lon: f64) -> u64 {
     let x = (lon + 180.0) / 360.0;
     let y = (lat + 90.0) / 180.0;
@@ -68,7 +71,7 @@ mod tests {
     }
 
     #[test]
-    fn morton_key_matches_the_router() {
+    fn spatial_key_matches_the_router() {
         let coords = [
             (0.0, 0.0),
             (37.7749, -122.4194),   // San Francisco
@@ -102,6 +105,32 @@ mod tests {
         let a = latlng_to_spatial(37.0, -122.0);
         let b = latlng_to_spatial(37.0, -121.0);
         assert!(a < b, "increasing longitude must increase the key");
+    }
+
+    /// Z-order's defining flaw, pinned rather than merely commented: two cells that
+    /// touch on the ground can be a whole quadrant apart in key, so two *adjacent
+    /// nodes* can be far apart in the node array.
+    ///
+    /// This is why `edges.bin` cannot store `target` as a small delta from its
+    /// source without an escape table, and it is what `road_graph --stats` measures
+    /// the cost of. Hilbert removes this jump and still does not help at the `i16`
+    /// boundary — see `Graph::latlng_to_spatial` for the measurement — so the
+    /// discontinuity is documented here instead of designed away.
+    #[test]
+    fn morton_jumps_a_whole_quadrant_at_a_quadrant_boundary() {
+        // Two points either side of the equator at the same longitude, a hair
+        // apart: the y bit at the top level flips, so the keys differ in bit 63.
+        let below = latlng_to_spatial(-0.0000001, 10.0);
+        let above = latlng_to_spatial(0.0000001, 10.0);
+        assert!(
+            above.abs_diff(below) > 1 << 62,
+            "expected a top-level jump, got {}",
+            above.abs_diff(below)
+        );
+        // Whereas the same separation away from any boundary is tiny.
+        let a = latlng_to_spatial(10.0, 10.0);
+        let b = latlng_to_spatial(10.0000001, 10.0);
+        assert!(a.abs_diff(b) < 1 << 20, "got {}", a.abs_diff(b));
     }
 
     #[test]

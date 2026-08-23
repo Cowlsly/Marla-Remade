@@ -7,15 +7,16 @@
 //!
 //! | File | Layout |
 //! |---|---|
-//! | `metadata.bin` | `u32 magic "MARG"`, `u32 version`, `u64 node_count` (16 B) |
+//! | `metadata.bin` | `u32 magic "MARG"`, `u32 version`, `u64 node_count`, `u64 edge_count` (24 B) |
 //! | `nodes.bin` | `NodeRec[node_count + 1]`, **12 bytes each**: `i32 lat_e7, i32 lon_e7, u32 edge_ptr`; the trailing sentinel's `edge_ptr` is `edge_count` |
 //! | `edges.bin` | `Edge[edge_count]`, **14 bytes each**: `u32 target, u32 dist_mm, u32 name_offset, u8 type, u8 speed_limit` |
 //! | `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 blob_byte_off) x (n + 1)` ascending by `edge_idx`, then the packed `u16` mask blob — **sparse**, only lane-bearing edges appear |
 //! | `intermediate.bin` | the delta-encoded polyline blob ([`crate::geom`]) at offset 0, then a trailer: `u64 rank[..]`, `u8 present[..]` (one bit per directed edge), `u64 coarse[..]`, `u16 within[..]` over the *geometry* edges, and `u64 G`. See [`GeomFile`] |
 //! | `road_names.bin` | deduped NUL-terminated string pool |
 //!
-//! `edge_count` is derived on device from `edges.bin`'s *file size*, so that file
-//! must stay an exact multiple of 14 bytes.
+//! Every file's length is now an exact function of `metadata.bin`'s two counts, and
+//! the reader checks each one. `road_names.bin` is the exception: it is a byte pool
+//! with no count of its own, and reads into it are bounds-checked instead.
 //!
 //! Three behavioural notes where this differs from the C++:
 //!
@@ -74,7 +75,11 @@ pub const BITSET_SIZE: u64 = 20_000_000_000;
 
 /// `"MARG"` little-endian — `GRAPH_MAGIC` in `graph.rs`.
 const GRAPH_MAGIC: u32 = 0x4752_414D;
-const GRAPH_VERSION: u32 = 3;
+/// Version 4 adds `edge_count` to `metadata.bin`. No layout changed; the point is
+/// that the reader stops deriving the edge count from `edges.bin`'s *length*, which
+/// the next round of record narrowing would silently invalidate — and which sizes
+/// `intermediate.bin`'s trailer.
+const GRAPH_VERSION: u32 = 4;
 
 /// Geometry edges per coarse block in `intermediate.bin`'s two-level offset table
 /// — `INTERMEDIATE_BLOCK` in `graph.rs`, and the two must agree.
@@ -119,6 +124,136 @@ const REVERSE_GEOMETRY_FLAG: u8 = 0x40;
 /// Fallback stop code for a transit stop node with no `name`.
 const UNNAMED_STOP: &[u8] = b"OSM_STOP";
 
+/// Sentinel in a narrowed `target` delta meaning "this record's `target` and
+/// `dist_mm` both live in the escape table".
+///
+/// A future `edges.bin` record stores `target` as an `i16` delta from the edge's
+/// own source rather than absolutely, which is only possible because the nodes are
+/// sorted by a space-filling curve and an edge is short: [`Census`] measures how
+/// often that fails. `i16::MIN` is reserved rather than used, so the representable
+/// range is symmetric at ±32767.
+const TARGET_DELTA_ESCAPE: i16 = i16::MIN;
+
+/// Sentinel in a narrowed `u24 dist_mm` meaning the same thing.
+///
+/// 0xFFFFFF mm is 16.78 km, which a collapsed degree-2 chain can exceed in empty
+/// country. One sentinel shared with [`TARGET_DELTA_ESCAPE`] means a single escape
+/// table serves both fields, so a `dist_mm` outlier costs no extra branch and no
+/// extra table.
+const DIST_MM_ESCAPE: u32 = 0xFF_FFFF;
+
+/// `target - source` when it fits the `i16` a narrowed record stores, `None` when
+/// the edge has to escape.
+///
+/// This is *the* escape predicate: [`Census`] counts with it and the encoder will
+/// narrow with it, so the two cannot disagree by one and produce a pack that loads
+/// while reading the wrong node.
+#[inline]
+fn target_delta(source: u32, target: u32) -> Option<i16> {
+    let d = i64::from(target) - i64::from(source);
+    i16::try_from(d).ok().filter(|d| *d != TARGET_DELTA_ESCAPE)
+}
+
+/// True when either field of this edge is unrepresentable inline.
+#[inline]
+fn edge_escapes(source: u32, target: u32, dist_mm: u32) -> bool {
+    target_delta(source, target).is_none() || dist_mm >= DIST_MM_ESCAPE
+}
+
+/// One bucket per possible bit width of `|target - source|`, from a zero delta up
+/// to a full `u32`. A named type only because arrays this long do not derive
+/// `Default`.
+pub struct DeltaBits([u64; 33]);
+
+impl Default for DeltaBits {
+    fn default() -> DeltaBits {
+        DeltaBits([0u64; 33])
+    }
+}
+
+impl std::ops::Deref for DeltaBits {
+    type Target = [u64; 33];
+    fn deref(&self) -> &[u64; 33] {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for DeltaBits {
+    fn deref_mut(&mut self) -> &mut [u64; 33] {
+        &mut self.0
+    }
+}
+
+/// What a narrower `edges.bin` record would cost, measured by the encoder itself
+/// rather than by a script that might disagree with it by one.
+///
+/// Reported by `road_graph --stats`. Everything here is a *property of one
+/// extract*, and the design that consumes it extrapolates to a planet 22x larger,
+/// so the histogram matters more than any single rate: for nodes ordered by a
+/// space-filling curve the tail should decay as `P(|delta| > n) ~ c * n^(-1/2)`,
+/// and `c` is what transfers between extracts, not the escape rate itself.
+#[derive(Default)]
+pub struct Census {
+    /// `delta_bits[b]` counts edges needing exactly `b` bits to be exceeded, i.e.
+    /// for which `b` is the number of `k` with `2^k < |target - source|`. Suffix
+    /// sums of it are the tail counts; see [`Census::delta_tail`].
+    pub delta_bits: DeltaBits,
+    /// Edges whose `|target - source|` will not fit an `i16`.
+    pub delta_escapes: u64,
+    /// Edges whose `dist_mm` reaches [`DIST_MM_ESCAPE`].
+    pub dist_escapes: u64,
+    /// Edges either sentinel forces into the escape table. Not the sum of the two
+    /// above: an edge can fail both tests and still be one row.
+    pub escapes: u64,
+    pub max_delta: u32,
+    pub max_dist_mm: u32,
+    /// Largest out-degree of any node, which bounds a per-node `u8 degree` field.
+    pub max_degree: u32,
+    /// Nodes with no outgoing edge. These make several nodes share an `edge_ptr`,
+    /// which is what makes `find_node_idx_for_edge`'s tie-break observable.
+    pub degree_zero_nodes: u64,
+    pub named_edges: u64,
+}
+
+impl Census {
+    /// Edges whose `|target - source|` exceeds `1 << k`, for `k` in `0..32`.
+    pub fn delta_tail(&self, k: u32) -> u64 {
+        self.delta_bits[(k as usize + 1).min(32)..].iter().sum()
+    }
+
+    /// Record one directed edge.
+    #[inline]
+    fn edge(&mut self, source: u32, target: u32, dist_mm: u32, named: bool) {
+        let delta = source.abs_diff(target);
+        // The bucket is the count of `k` with `2^k < delta`, so a plain suffix sum
+        // turns the histogram into the tail without a per-edge loop.
+        let bits = if delta == 0 { 0 } else { 32 - (delta - 1).leading_zeros() };
+        self.delta_bits[bits as usize] += 1;
+        self.max_delta = self.max_delta.max(delta);
+        self.max_dist_mm = self.max_dist_mm.max(dist_mm);
+        if target_delta(source, target).is_none() {
+            self.delta_escapes += 1;
+        }
+        if dist_mm >= DIST_MM_ESCAPE {
+            self.dist_escapes += 1;
+        }
+        if edge_escapes(source, target, dist_mm) {
+            self.escapes += 1;
+        }
+        if named {
+            self.named_edges += 1;
+        }
+    }
+
+    #[inline]
+    fn node(&mut self, degree: u32) {
+        self.max_degree = self.max_degree.max(degree);
+        if degree == 0 {
+            self.degree_zero_nodes += 1;
+        }
+    }
+}
+
 pub struct Stats {
     pub node_count: u64,
     pub edge_count: u64,
@@ -141,6 +276,9 @@ pub struct Stats {
     /// Edges deferring to their twin's polyline.
     pub reversed_edges: u64,
     pub intermediate_bytes: u64,
+    /// What a narrower record would cost. Always collected — it is a handful of
+    /// adds per edge — and reported by `--stats`.
+    pub census: Census,
 }
 
 /// Bytes per rank block. 64 bytes is 512 bits and one cache line, so a rank
@@ -347,6 +485,8 @@ pub struct Options {
     /// but it is only ever streamed from the front, so it can live somewhere roomy
     /// and slow while the randomly-read points go somewhere fast and small.
     pub spill_pts_dir: Option<PathBuf>,
+    /// Print the [`Census`] report after the build. Changes no output file.
+    pub stats: bool,
 }
 
 impl Options {
@@ -573,6 +713,7 @@ pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> 
         geometry_edges: written.geometry_edges,
         reversed_edges: written.reversed_edges,
         intermediate_bytes: written.intermediate_bytes,
+        census: written.census,
     })
 }
 
@@ -1279,6 +1420,7 @@ struct Written {
     geometry_edges: u64,
     reversed_edges: u64,
     intermediate_bytes: u64,
+    census: Census,
 }
 
 /// Write the pack in `rounds` source-partitioned rounds.
@@ -1340,6 +1482,7 @@ fn write_graph(
     let mut edge_ptr: u64 = 0;
     let mut geometry_edges: u64 = 0;
     let mut reversed_edges: u64 = 0;
+    let mut census = Census::default();
 
     for round in 0..rounds {
         // Split by node count. Contiguous and ascending, so the four output streams
@@ -1404,8 +1547,10 @@ fn write_graph(
         for v in lo..hi {
             let node = node_coords[v as usize];
             write_node(&mut nodes_out, node.0, node.1, edge_ptr as u32).map_err(io_err)?;
+            let degree_base = edge_ptr;
             while cursor < buffer.len() && buffer[cursor].source == v {
                 let e = &buffer[cursor];
+                census.edge(e.source, e.target, e.dist_mm, e.name_offset != NO_NAME);
 
                 // --- geometry ---
                 let mut type_ = e.type_;
@@ -1465,6 +1610,7 @@ fn write_graph(
                 edge_ptr += 1;
                 cursor += 1;
             }
+            census.node((edge_ptr - degree_base) as u32);
         }
         debug_assert_eq!(cursor, buffer.len(), "the round left edges unwritten");
     }
@@ -1484,11 +1630,13 @@ fn write_graph(
     lanes.finish()?;
 
     // metadata.bin's magic + version let the device refuse a pack directory
-    // holding files from two different vintages instead of misreading it.
+    // holding files from two different vintages instead of misreading it, and its
+    // counts are what every other file's length is validated against.
     let mut meta = create(&out_dir.join("metadata.bin"))?;
     meta.write_all(&GRAPH_MAGIC.to_le_bytes()).map_err(io_err)?;
     meta.write_all(&GRAPH_VERSION.to_le_bytes()).map_err(io_err)?;
     meta.write_all(&u64::from(kept).to_le_bytes()).map_err(io_err)?;
+    meta.write_all(&edge_count.to_le_bytes()).map_err(io_err)?;
     meta.flush().map_err(io_err)?;
 
     Ok(Written {
@@ -1496,6 +1644,7 @@ fn write_graph(
         geometry_edges,
         reversed_edges,
         intermediate_bytes,
+        census,
     })
 }
 
@@ -1861,7 +2010,7 @@ fn io_err(e: std::io::Error) -> Error {
 
 /// Parse the tool's command line:
 /// `road_graph IN.osm.pbf [--out DIR] [--within-way-chains] [--rounds N]
-/// [--spill-dir DIR] [--spill-pts-dir DIR]`.
+/// [--spill-dir DIR] [--spill-pts-dir DIR] [--stats]`.
 pub fn parse_args(
     args: &[String],
 ) -> std::result::Result<(PathBuf, PathBuf, Options), String> {
@@ -1877,6 +2026,7 @@ pub fn parse_args(
                 out = PathBuf::from(dir);
             }
             "--within-way-chains" => opts.within_way_chains = true,
+            "--stats" => opts.stats = true,
             "--spill-dir" => {
                 i += 1;
                 let dir = args
@@ -2218,8 +2368,9 @@ mod tests {
         assert_eq!(o.meta, {
             let mut want = Vec::new();
             want.extend(0x4752_414Du32.to_le_bytes());
-            want.extend(3u32.to_le_bytes());
+            want.extend(GRAPH_VERSION.to_le_bytes());
             want.extend(4u64.to_le_bytes());
+            want.extend(stats.edge_count.to_le_bytes());
             want
         });
 

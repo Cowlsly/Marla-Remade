@@ -211,8 +211,7 @@ fn junction_lanes(
         return Vec::new();
     }
     let jnode = g.node(junction);
-    let s = jnode.edge_ptr;
-    let e_ptr = g.node(junction + 1).edge_ptr; // sentinel valid
+    let (s, e_ptr) = g.edge_range(junction);
     let jlat = jnode.lat_e7;
     let jlon = jnode.lon_e7;
 
@@ -221,7 +220,7 @@ fn junction_lanes(
     let mut opts: Vec<(f64, i32)> = Vec::new();
 
     for k in s..e_ptr {
-        let edge = g.edge(k);
+        let edge = g.edge(junction, k);
         if !is_mode_allowed(edge.type_, DRIVING) {
             continue;
         }
@@ -313,9 +312,9 @@ pub fn find_nearest_edge(g: &Graph, lat: f64, lon: f64, mode: i32) -> SnappedEdg
     for i in lo..=hi {
         let u_global = i as u32;
         let node_u = g.node(u_global);
-        let e_ptr = g.node(u_global + 1).edge_ptr; // sentinel valid
-        for j in node_u.edge_ptr..e_ptr {
-            let e = g.edge(j);
+        let (e_start, e_ptr) = g.edge_range(u_global);
+        for j in e_start..e_ptr {
+            let e = g.edge(u_global, j);
             if !is_mode_allowed(e.type_, mode) {
                 continue;
             }
@@ -342,7 +341,7 @@ pub fn find_nearest_edge(g: &Graph, lat: f64, lon: f64, mode: i32) -> SnappedEdg
                             best.proj_lon = proj.lon_e7;
                             best.type_ = e.type_;
                             best.speed_limit = e.speed_limit;
-                            best.name_offset = e.name_offset;
+                            best.name_offset = g.edge_name_offset(j).unwrap_or(NO_NAME);
                             best.edge_idx = j;
                             best.segment_idx = p;
 
@@ -373,7 +372,7 @@ pub fn find_nearest_edge(g: &Graph, lat: f64, lon: f64, mode: i32) -> SnappedEdg
                 best.dist_b_mm = fast_dist_mm(g, p.lat_e7, p.lon_e7, node_v.lat_e7, node_v.lon_e7);
                 best.type_ = e.type_;
                 best.speed_limit = e.speed_limit;
-                best.name_offset = e.name_offset;
+                best.name_offset = g.edge_name_offset(j).unwrap_or(NO_NAME);
                 best.edge_idx = j;
                 best.segment_idx = 0;
             }
@@ -417,7 +416,6 @@ pub fn prepare_routing(
             let entry = scratch.get_entry(node);
             entry.g_fwd = t_actual;
             entry.g_bwd = t_actual;
-            entry.last_type = start.type_;
         }
         let n_data = g.get_node(node);
         let h = heuristic_time_10ms(g, n_data.lat_e7, n_data.lon_e7, end.proj_lat, end.proj_lon, mode);
@@ -473,11 +471,10 @@ fn twin_edge(g: &Graph, source: u32, target: u32) -> Option<u64> {
     if target >= g.node_count || source == target {
         return None;
     }
-    let s = g.node(target).edge_ptr;
-    let e = g.node(target + 1).edge_ptr; // sentinel valid
+    let (s, e) = g.edge_range(target);
     let mut found = None;
     for k in s..e {
-        if g.edge(k).target == source {
+        if g.edge_targets(k, target, source) {
             if found.is_some() {
                 return None;
             }
@@ -550,10 +547,15 @@ fn direct_path(
     let e_at = locate_on(g, &poly, e_pt.lat_e7, e_pt.lon_e7);
 
     // Going backwards along the polyline means driving the twin, which only
-    // exists when the road is not one-way.
+    // exists when the road is not one-way. The twin leaves the *other* end, so the
+    // source has to be chosen with the edge, not recovered afterwards.
     let forward = s_at <= e_at;
-    let edge_idx = if forward { start.edge_idx } else { twin? };
-    let e = g.edge(edge_idx);
+    let (edge_idx, edge_source) = if forward {
+        (start.edge_idx, start.node_a)
+    } else {
+        (twin?, start.node_b)
+    };
+    let e = g.edge(edge_source, edge_idx);
     if !is_mode_allowed(e.type_, mode) {
         return None;
     }
@@ -576,7 +578,7 @@ fn direct_path(
         time_10ms: get_edge_time_10ms(g, traffic, edge_idx, dist_mm, type_, e.speed_limit, mode),
         coords,
         dist_mm,
-        name_offset: e.name_offset,
+        name_offset: g.edge_name_offset(edge_idx).unwrap_or(NO_NAME),
         type_,
         speed_limit: e.speed_limit,
         edge_idx,
@@ -642,11 +644,10 @@ pub fn perform_search_loop(
         if mode == DRIVING {
             ensure_traffic(n_u.lat_e7, n_u.lon_e7);
         }
-        let s = n_u.edge_ptr;
-        let e_ptr = g.node(u + 1).edge_ptr; // sentinel valid
+        let (s, e_ptr) = g.edge_range(u);
 
         for i in s..e_ptr {
-            let edge = g.edge(i);
+            let edge = g.edge(u, i);
             if !is_mode_allowed(edge.type_, mode) {
                 continue;
             }
@@ -662,8 +663,6 @@ pub fn perform_search_loop(
                     entry_v.g_fwd = new_g;
                     entry_v.g_bwd = new_g;
                     entry_v.p_fwd = u;
-                    entry_v.last_type = edge.type_;
-                    entry_v.last_name_off = edge.name_offset;
                     true
                 } else {
                     false
@@ -981,12 +980,11 @@ pub fn reconstruct_path(
         let node_u = g.node(u);
         let node_v = g.get_node(v);
 
-        let s = node_u.edge_ptr;
-        let e_ptr = g.node(u + 1).edge_ptr;
+        let (s, e_ptr) = g.edge_range(u);
 
         let mut best_e_idx = INVALID_EDGE;
         for k in s..e_ptr {
-            if g.edge(k).target == v {
+            if g.edge_targets(k, u, v) {
                 best_e_idx = k;
                 break;
             }
@@ -995,7 +993,8 @@ pub fn reconstruct_path(
             continue;
         }
 
-        let e = g.edge(best_e_idx);
+        let e = g.edge(u, best_e_idx);
+        let e_name = g.edge_name_offset(best_e_idx).unwrap_or(NO_NAME);
         let mut d = e.dist_mm;
         if d == 0 {
             d = accurate_dist_mm(node_u.lat_e7, node_u.lon_e7, node_v.lat_e7, node_v.lon_e7);
@@ -1024,14 +1023,14 @@ pub fn reconstruct_path(
                 b.add_segment(
                     p1.lat_e7 as f64 * 1e-7, p1.lon_e7 as f64 * 1e-7,
                     p2.lat_e7 as f64 * 1e-7, p2.lon_e7 as f64 * 1e-7,
-                    e.name_offset, e.type_, e.speed_limit, seg_dist, best_e_idx,
+                    e_name, e.type_, e.speed_limit, seg_dist, best_e_idx,
                 );
             }
         } else {
             b.add_segment(
                 node_u.lat_e7 as f64 * 1e-7, node_u.lon_e7 as f64 * 1e-7,
                 node_v.lat_e7 as f64 * 1e-7, node_v.lon_e7 as f64 * 1e-7,
-                e.name_offset, e.type_, e.speed_limit, d, best_e_idx,
+                e_name, e.type_, e.speed_limit, d, best_e_idx,
             );
         }
     }

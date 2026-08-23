@@ -19,6 +19,9 @@
 //! cargo run --release --example route_diff -- gen-pairs --graph DIR --out pairs.txt [--count N]
 //! cargo run --release --example route_diff -- report    --graph DIR --pairs pairs.txt --out report.txt
 //! cargo run --release --example route_diff -- compare   --baseline a.txt --candidate b.txt [--tol-mm N]
+//! cargo run --release --example route_diff -- bench     --graph DIR --pairs pairs.txt [--passes N]
+//! cargo run --release --example route_diff -- dump      --graph DIR --out dump.bin
+//! cargo run --release --example route_diff -- dump-compare --baseline a.bin --candidate b.bin
 //! ```
 //!
 //! `Graph::load` mmaps, and `MmapRegion::map` is `#[cfg(unix)]`, so this must
@@ -29,7 +32,7 @@ use std::fmt::Write as _;
 use std::io::Write as _;
 
 use offlinerouter::geometry::{accurate_dist_mm, TrafficSpeeds};
-use offlinerouter::graph::{get_pt_at, Graph, LatLon, BICYCLE, DRIVING, WALK};
+use offlinerouter::graph::{get_pt_at, Graph, LatLon, BICYCLE, DRIVING, NO_NAME, WALK};
 use offlinerouter::routing::{perform_search_loop, prepare_routing, reconstruct_path};
 use offlinerouter::state::{RadixHeap, RoutingScratchpad};
 
@@ -51,6 +54,9 @@ fn main() -> std::process::ExitCode {
         Some("report") => report(&args[1..]),
         Some("compare") => compare(&args[1..]),
         Some("geometry") => geometry(&args[1..]),
+        Some("bench") => bench(&args[1..]),
+        Some("dump") => dump(&args[1..]),
+        Some("dump-compare") => dump_compare(&args[1..]),
         _ => Err(USAGE.to_string()),
     };
     match r {
@@ -68,7 +74,10 @@ usage:
   route_diff gen-pairs --graph DIR --out FILE [--count N]
   route_diff report    --graph DIR --pairs FILE --out FILE
   route_diff compare   --baseline FILE --candidate FILE [--tol-mm N] [--tol-10ms N]
-  route_diff geometry  --baseline DIR --candidate DIR";
+  route_diff geometry  --baseline DIR --candidate DIR
+  route_diff bench     --graph DIR --pairs FILE [--passes N]
+  route_diff dump         --graph DIR --out FILE
+  route_diff dump-compare --baseline FILE --candidate FILE [--limit N]";
 
 fn flag(args: &[String], name: &str) -> Option<String> {
     args.iter().position(|a| a == name).and_then(|i| args.get(i + 1)).cloned()
@@ -306,6 +315,384 @@ fn report(args: &[String]) -> Result<bool, String> {
     write_file(&out, buf.as_bytes())?;
     println!("{out}: routed {routed}/{} pair(s)", pairs.len());
     Ok(true)
+}
+
+// ---------------------------------------------------------------------------
+// dump / dump-compare
+// ---------------------------------------------------------------------------
+
+/// Magic and version of the dump format itself, so two dumps of different
+/// vintages cannot be compared as if they were the same thing.
+const DUMP_MAGIC: u32 = 0x5044_4752; // "RGDP"
+const DUMP_VERSION: u32 = 1;
+const DUMP_HEADER: usize = 24;
+/// `u32 source, u32 target, u32 dist_mm, u32 name_offset, u8 type_, u8 speed_limit`.
+const DUMP_EDGE: usize = 18;
+/// `i32 lat_e7, i32 lon_e7, u64 edge_ptr`.
+const DUMP_NODE: usize = 16;
+
+/// Every field of every edge and every node, in one linear pass.
+///
+/// This is the strongest check available on a pack-format change, and the cheapest.
+/// `report`/`compare` exercise whatever ~35 K vertices 999 sampled routes happen to
+/// touch; this exercises all E edges and all N+1 nodes, so a record that decodes
+/// wrongly one time in a million cannot hide. When it fails it names an edge index
+/// rather than a route, which is the difference between an afternoon and five
+/// minutes.
+///
+/// It reads through the *public* accessors — `edge_range`, `edge`,
+/// `edge_name_offset` — precisely so that the widened view, the delta decode and
+/// the sparse name table are all in the path being tested.
+///
+/// Fixed-width binary rather than text: California is 405 MB this way and 840 MB as
+/// text, and `dump_compare` decodes it back into field names anyway.
+fn dump(args: &[String]) -> Result<bool, String> {
+    let dir = need(args, "--graph")?;
+    let out = need(args, "--out")?;
+    let g = load(&dir)?;
+
+    let mut f = std::io::BufWriter::with_capacity(
+        1 << 20,
+        std::fs::File::create(&out).map_err(|e| format!("{out}: {e}"))?,
+    );
+    let mut w = |bytes: &[u8]| -> Result<(), String> {
+        f.write_all(bytes).map_err(|e| format!("{out}: {e}"))
+    };
+    w(&DUMP_MAGIC.to_le_bytes())?;
+    w(&DUMP_VERSION.to_le_bytes())?;
+    w(&u64::from(g.node_count).to_le_bytes())?;
+    w(&g.edge_count.to_le_bytes())?;
+
+    // Edges in index order, which is also source order, so `source` comes from the
+    // walk rather than from a search. Writing it down is the point: it is the one
+    // field no `edges.bin` record has ever stored, and getting it wrong is exactly
+    // how a delta-coded `target` fails.
+    let mut written = 0u64;
+    for u in 0..g.node_count {
+        let (start, end) = g.edge_range(u);
+        for idx in start..end {
+            let e = g.edge(u, idx);
+            w(&u.to_le_bytes())?;
+            w(&e.target.to_le_bytes())?;
+            w(&e.dist_mm.to_le_bytes())?;
+            w(&g.edge_name_offset(idx).unwrap_or(NO_NAME).to_le_bytes())?;
+            w(&[e.type_, e.speed_limit])?;
+            written += 1;
+        }
+    }
+    // Every edge must be reachable from exactly one node's range. If the ranges do
+    // not tile `0..edge_count` the dump is short, and no field comparison would say
+    // so.
+    if written != g.edge_count {
+        return Err(format!(
+            "the node ranges cover {written} edge(s), not the {} in the pack",
+            g.edge_count
+        ));
+    }
+
+    // N + 1, because the sentinel record is read by every `edge_range` call and so
+    // is as much a part of the contract as any real node.
+    for v in 0..=g.node_count {
+        let n = g.node(v);
+        w(&n.lat_e7.to_le_bytes())?;
+        w(&n.lon_e7.to_le_bytes())?;
+        w(&n.edge_ptr.to_le_bytes())?;
+    }
+    f.flush().map_err(|e| format!("{out}: {e}"))?;
+    println!(
+        "{out}: {} edge(s) and {} node record(s)",
+        g.edge_count,
+        u64::from(g.node_count) + 1
+    );
+    Ok(true)
+}
+
+/// Compare two dumps element by element, naming the first few that differ.
+///
+/// Streams both files, because a Europe dump is 6.3 GB and holding two of them
+/// would be the only reason this tool needed a big machine.
+fn dump_compare(args: &[String]) -> Result<bool, String> {
+    let base_path = need(args, "--baseline")?;
+    let cand_path = need(args, "--candidate")?;
+    let limit: usize = flag(args, "--limit")
+        .as_deref()
+        .unwrap_or("10")
+        .parse()
+        .map_err(|e| format!("--limit: {e}"))?;
+
+    let mut b = DumpReader::open(&base_path)?;
+    let mut c = DumpReader::open(&cand_path)?;
+    let mut ok = true;
+    if (b.node_count, b.edge_count) != (c.node_count, c.edge_count) {
+        println!(
+            "FAIL  counts differ: baseline {} node(s) {} edge(s), candidate {} / {}",
+            b.node_count, b.edge_count, c.node_count, c.edge_count
+        );
+        return Ok(false);
+    }
+    println!(
+        "DUMP  {} edge(s), {} node record(s)",
+        b.edge_count,
+        b.node_count + 1
+    );
+
+    let mut shown = 0usize;
+    let mut edge_diffs = 0u64;
+    for idx in 0..b.edge_count {
+        let (x, y) = (b.next(DUMP_EDGE)?, c.next(DUMP_EDGE)?);
+        if x == y {
+            continue;
+        }
+        edge_diffs += 1;
+        ok = false;
+        if shown < limit {
+            shown += 1;
+            println!("  edge {idx}\n    baseline {}\n    candidate {}", fmt_edge(&x), fmt_edge(&y));
+        }
+    }
+
+    let mut node_diffs = 0u64;
+    shown = 0;
+    for idx in 0..=b.node_count {
+        let (x, y) = (b.next(DUMP_NODE)?, c.next(DUMP_NODE)?);
+        if x == y {
+            continue;
+        }
+        node_diffs += 1;
+        ok = false;
+        if shown < limit {
+            shown += 1;
+            let sentinel = if idx == b.node_count { " (sentinel)" } else { "" };
+            println!(
+                "  node {idx}{sentinel}\n    baseline {}\n    candidate {}",
+                fmt_node(&x),
+                fmt_node(&y)
+            );
+        }
+    }
+
+    println!(
+        "  {edge_diffs} edge(s) and {node_diffs} node record(s) differ\n{}",
+        if ok { "DUMPS IDENTICAL" } else { "DUMPS DIFFER" }
+    );
+    Ok(ok)
+}
+
+/// Fixed-width record reader over a dump file.
+struct DumpReader {
+    inner: std::io::BufReader<std::fs::File>,
+    path: String,
+    node_count: u64,
+    edge_count: u64,
+    buf: Vec<u8>,
+}
+
+impl DumpReader {
+    fn open(path: &str) -> Result<DumpReader, String> {
+        let f = std::fs::File::open(path).map_err(|e| format!("{path}: {e}"))?;
+        let mut r = DumpReader {
+            inner: std::io::BufReader::with_capacity(1 << 20, f),
+            path: path.to_string(),
+            node_count: 0,
+            edge_count: 0,
+            buf: Vec::new(),
+        };
+        let h = r.next(DUMP_HEADER)?;
+        if u32::from_le_bytes(h[0..4].try_into().unwrap()) != DUMP_MAGIC
+            || u32::from_le_bytes(h[4..8].try_into().unwrap()) != DUMP_VERSION
+        {
+            return Err(format!("{path} is not a v{DUMP_VERSION} dump"));
+        }
+        r.node_count = u64::from_le_bytes(h[8..16].try_into().unwrap());
+        r.edge_count = u64::from_le_bytes(h[16..24].try_into().unwrap());
+        Ok(r)
+    }
+
+    fn next(&mut self, n: usize) -> Result<Vec<u8>, String> {
+        self.buf.resize(n, 0);
+        std::io::Read::read_exact(&mut self.inner, &mut self.buf)
+            .map_err(|e| format!("{}: {e}", self.path))?;
+        Ok(self.buf.clone())
+    }
+}
+
+fn fmt_edge(r: &[u8]) -> String {
+    let u32_at = |i: usize| u32::from_le_bytes(r[i..i + 4].try_into().unwrap());
+    format!(
+        "source={} target={} dist_mm={} name_offset={} type={} speed_limit={}",
+        u32_at(0),
+        u32_at(4),
+        u32_at(8),
+        u32_at(12),
+        r[16],
+        r[17]
+    )
+}
+
+fn fmt_node(r: &[u8]) -> String {
+    format!(
+        "lat_e7={} lon_e7={} edge_ptr={}",
+        i32::from_le_bytes(r[0..4].try_into().unwrap()),
+        i32::from_le_bytes(r[4..8].try_into().unwrap()),
+        u64::from_le_bytes(r[8..16].try_into().unwrap())
+    )
+}
+
+// ---------------------------------------------------------------------------
+// bench
+// ---------------------------------------------------------------------------
+
+/// Time the real reader against a fixed pair set.
+///
+/// Every pack-format phase is measured against this and one of them is *gated* on
+/// it, so the cold pass is reported apart from the warm ones. On a pack far larger
+/// than RAM the first pass is almost entirely major page faults, and that is the
+/// number that decides whether splitting one record across two arrays is
+/// affordable; the warm passes measure the instruction path instead. Dropping the
+/// page cache is the caller's job, so "cold" means whatever state it left the cache
+/// in.
+///
+/// The route checksum is not decoration. A format change that broke routing would
+/// otherwise show up here as a *speedup*, so the bench refuses to report a number
+/// without also reporting what was computed.
+fn bench(args: &[String]) -> Result<bool, String> {
+    let dir = need(args, "--graph")?;
+    let pairs_path = need(args, "--pairs")?;
+    let passes: u32 = flag(args, "--passes")
+        .as_deref()
+        .unwrap_or("3")
+        .parse()
+        .map_err(|e| format!("--passes: {e}"))?;
+    if passes == 0 {
+        return Err("--passes wants at least one".to_string());
+    }
+
+    let load_started = std::time::Instant::now();
+    let g = load(&dir)?;
+    let load_ms = load_started.elapsed().as_secs_f64() * 1e3;
+
+    let pairs = read_pairs(&pairs_path)?;
+    let speeds: TrafficSpeeds = HashMap::new();
+    let mut scratch = RoutingScratchpad::new();
+    let mut heap = RadixHeap::new();
+
+    println!("BENCH graph={dir} pairs={} passes={passes}", pairs.len());
+    println!("  Graph::load            {load_ms:>10.1} ms");
+
+    let mut first: Option<Pass> = None;
+    let mut last = Pass::default();
+    for pass in 0..passes {
+        let mut p = Pass::default();
+        let started = std::time::Instant::now();
+        for pair in &pairs {
+            let one = std::time::Instant::now();
+            let mut ensure = |_lat_e7: i32, _lon_e7: i32| {};
+            let ctx = prepare_routing(
+                &g, &speeds, &mut ensure, pair.s_lat, pair.s_lon, pair.e_lat, pair.e_lon,
+                pair.mode, &mut scratch, &mut heap,
+            );
+            if let Some(mut ctx) = ctx {
+                perform_search_loop(
+                    &g, &speeds, &mut ensure, pair.mode, &mut ctx, &mut scratch, &mut heap,
+                );
+                if ctx.target_node != 0xFFFF_FFFF || ctx.direct.is_some() {
+                    let steps = reconstruct_path(&g, &speeds, pair.mode, &ctx, &mut scratch);
+                    p.routed += 1;
+                    for s in &steps {
+                        // A cheap order-dependent mix, so a route that changes
+                        // length, timing or turn order changes the digest.
+                        p.checksum = p
+                            .checksum
+                            .rotate_left(7)
+                            .wrapping_add(u64::from(s.dist_mm))
+                            .wrapping_mul(0x1000_0000_1B3)
+                            ^ u64::from(s.time_10ms);
+                    }
+                }
+            }
+            p.latency_ns.push(one.elapsed().as_nanos() as u64);
+        }
+        p.wall_s = started.elapsed().as_secs_f64();
+        p.latency_ns.sort_unstable();
+        let label = if pass == 0 { "cold" } else { "warm" };
+        println!(
+            "  pass {:<2} ({label})  {:>9.1} routes/s   p50 {:>7.2}  p90 {:>7.2}  \
+             p99 {:>7.2}  max {:>8.2} ms",
+            pass + 1,
+            pairs.len() as f64 / p.wall_s,
+            p.pct_ms(50),
+            p.pct_ms(90),
+            p.pct_ms(99),
+            p.pct_ms(100),
+        );
+        if first.is_none() {
+            first = Some(p);
+        } else {
+            last = p;
+        }
+    }
+    let first = first.expect("at least one pass");
+    let warm = if last.latency_ns.is_empty() { &first } else { &last };
+    println!(
+        "  routed                 {}/{} pair(s), checksum {:016x}",
+        warm.routed,
+        pairs.len(),
+        warm.checksum
+    );
+    if first.checksum != warm.checksum || first.routed != warm.routed {
+        println!("  FAIL  the passes disagree on what they routed");
+        return Ok(false);
+    }
+    println!("  peak RSS               {:>10} kB", peak_rss_kb());
+    // One line per pass is what a script diffs, but the summary line is what a
+    // human reads, and the plan's tolerances are stated against these three.
+    println!(
+        "SUMMARY load_ms={load_ms:.1} cold_routes_s={:.1} warm_routes_s={:.1} \
+         cold_p50_ms={:.3} cold_p99_ms={:.3} warm_p50_ms={:.3} warm_p99_ms={:.3} \
+         peak_rss_kb={} checksum={:016x}",
+        pairs.len() as f64 / first.wall_s,
+        pairs.len() as f64 / warm.wall_s,
+        first.pct_ms(50),
+        first.pct_ms(99),
+        warm.pct_ms(50),
+        warm.pct_ms(99),
+        peak_rss_kb(),
+        warm.checksum
+    );
+    Ok(true)
+}
+
+#[derive(Default)]
+struct Pass {
+    latency_ns: Vec<u64>,
+    wall_s: f64,
+    routed: usize,
+    checksum: u64,
+}
+
+impl Pass {
+    /// The `p`-th percentile in milliseconds; `p = 100` is the maximum.
+    fn pct_ms(&self, p: usize) -> f64 {
+        if self.latency_ns.is_empty() {
+            return 0.0;
+        }
+        let last = self.latency_ns.len() - 1;
+        let i = (p * last / 100).min(last);
+        self.latency_ns[i] as f64 / 1e6
+    }
+}
+
+/// High-water mark of the process's resident set, in kB, or 0 where the kernel
+/// does not report it.
+fn peak_rss_kb() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("VmHWM:"))
+                .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
+        })
+        .unwrap_or(0)
 }
 
 // ---------------------------------------------------------------------------
@@ -731,14 +1118,14 @@ fn scan_geometry(g: &Graph) -> GeomScan {
 
     for u in 0..g.node_count {
         let node_u = g.node(u);
-        let end = g.node(u + 1).edge_ptr;
-        for j in node_u.edge_ptr..end {
-            let e = g.edge(j);
+        let (start, end) = g.edge_range(u);
+        for j in start..end {
+            let e = g.edge(u, j);
             if e.target >= g.node_count {
                 continue;
             }
             pts.clear();
-            match g.get_edge_coordinates(j, &mut coords) {
+            match g.get_edge_coordinates_from(u, j, &mut coords) {
                 Some((count, is_reversed)) if count >= 2 => {
                     out.with_geometry += 1;
                     if is_reversed {
@@ -778,9 +1165,8 @@ fn twin_of(g: &Graph, source: u32, target: u32) -> Option<u64> {
     if target >= g.node_count {
         return None;
     }
-    let s = g.node(target).edge_ptr;
-    let e = g.node(target + 1).edge_ptr;
-    (s..e).find(|k| g.edge(*k).target == source)
+    let (s, e) = g.edge_range(target);
+    (s..e).find(|k| g.edge_targets(*k, target, source))
 }
 
 /// Approximate ground distance in metres (equirectangular). Only used to report

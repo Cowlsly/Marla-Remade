@@ -98,21 +98,17 @@ pub struct Entry {
     pub p_fwd: u32,
     #[allow(dead_code)]
     pub p_bwd: u32,
-    pub last_name_off: u32,
-    pub last_type: u8,
 }
 
 impl Entry {
-    /// Freshly-allocated pages are memset to 0xFF then `last_type` zeroed,
-    /// matching the C++ page initializer.
+    /// Freshly-allocated pages are memset to 0xFF, matching the C++ page
+    /// initializer.
     const FRESH: Entry = Entry {
         node_id: 0xFFFF_FFFF,
         g_fwd: 0xFFFF_FFFF,
         g_bwd: 0xFFFF_FFFF,
         p_fwd: 0xFFFF_FFFF,
         p_bwd: 0xFFFF_FFFF,
-        last_name_off: 0xFFFF_FFFF,
-        last_type: 0,
     };
 }
 

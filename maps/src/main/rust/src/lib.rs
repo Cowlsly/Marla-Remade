@@ -927,10 +927,13 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_updateTraffi
         let edge_id = ids[i] as u64;
         let speed = sp[i] as u8;
         if edge_id < g.edge_count {
-            let edge = g.edge(edge_id);
             if speed < 255 {
                 speeds_w.insert(edge_id, speed);
-                let node_u = g.node(g.find_node_idx_for_edge(edge_id));
+                // The only entry point with no source node in hand: the id comes
+                // from Kotlin. Recovered first, because reading the record needs it.
+                let source = g.find_node_idx_for_edge(edge_id);
+                let edge = g.edge(source, edge_id);
+                let node_u = g.node(source);
                 if edge.target < g.node_count {
                     let node_v = g.node(edge.target);
                     let ratio = if edge.speed_limit > 0 {
