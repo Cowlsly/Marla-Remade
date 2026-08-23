@@ -68,3 +68,4 @@ health/src/main/assets/staging.db
 # Apple WPS scraping experiment (research scratch: crawler DBs, samples, artifacts)
 wtfps-experiment/
 wtfps/
+planet_out/
