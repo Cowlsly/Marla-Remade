@@ -1,5 +1,6 @@
 package com.vayunmathur.cast.tv.ui
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -36,13 +37,19 @@ import com.vayunmathur.cast.tv.platform.ReceiverUiState
  * whose entire job is to show one sentence was furniture; the ten-foot rule is that everything on
  * screen should be worth reading from a sofa.
  *
+ * The background is painted here rather than in `CastTvTheme`, because the other thing that theme wraps
+ * is an overlay above a decoder surface and must stay transparent.
+ *
  * Sizes are deliberately large: this is read from across a room, and a pair code the user has to walk
  * up to the TV to make out is a pair code that makes the feature feel broken.
  */
 @Composable
 fun ReceiverContent(state: ReceiverUiState, modifier: Modifier = Modifier) {
     Column(
-        modifier = modifier.fillMaxSize().padding(48.dp),
+        modifier = modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(48.dp),
         verticalArrangement = Arrangement.spacedBy(24.dp, Alignment.CenterVertically),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {

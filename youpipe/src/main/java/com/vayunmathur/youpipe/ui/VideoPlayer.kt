@@ -50,6 +50,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,6 +98,8 @@ import com.vayunmathur.youpipe.util.PlaybackService
 import com.vayunmathur.youpipe.util.YouPipeViewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.foundation.Canvas
@@ -181,6 +184,13 @@ fun VideoPlayer(
     val isDragging = transport.dragging
     val playbackSpeed = transport.speed
 
+    // Position and duration for *this* video's history entry, kept per screen rather than read back out
+    // of the shared transport state. A video-to-video navigation composes both screens at once, and
+    // both see the same singleton - so a shared read would persist the incoming video's progress
+    // against the outgoing video's id and lose the user's place in it.
+    var historyPosition by remember(videoInfo.videoID) { mutableLongStateOf(0L) }
+    var historyDuration by remember(videoInfo.videoID) { mutableLongStateOf(0L) }
+
     var isVideoMenuExpanded by remember { mutableStateOf(false) }
     var isLanguageMenuExpanded by remember { mutableStateOf(false) }
     var isChapterMenuVisible by remember { mutableStateOf(false) }
@@ -193,16 +203,24 @@ fun VideoPlayer(
     var playbackPitch by remember { mutableFloatStateOf(1f) }
     var unhookPitch by remember { mutableStateOf(false) }
 
-    // Durable in both directions, and each guarded against the other so they converge rather than
-    // ping-pong: the stored value seeds the session - it arrives asynchronously from DataStore, which
-    // is why this keys on it rather than running once - and every later change, from this menu or from
-    // the TV's remote, is written back so it survives moving to another video.
-    val persistedSpeed by ypvm.playbackSpeed.collectAsState()
-    LaunchedEffect(persistedSpeed) {
-        if (persistedSpeed != playbackSpeed) CastPlayback.update { it.copy(speed = persistedSpeed) }
+    // Hooked pitch follows tempo from *any* source, which is why it is an effect rather than a line in
+    // the slider's callback: the television can change the tempo too, and a pitch left behind would
+    // silently unhook itself without the checkbox moving.
+    LaunchedEffect(playbackSpeed, unhookPitch) {
+        if (!unhookPitch) playbackPitch = playbackSpeed
+    }
+
+    // **Seeded once, then written back one way only.** Following the stored value would mean an echo of
+    // an earlier write arriving mid-drag and snapping the slider out from under the thumb, because
+    // DataStore answers asynchronously and this cannot tell an echo from a fresh value. `drop(1)` is
+    // what waits for storage rather than for the flow's own 1x placeholder; if nothing is stored it
+    // never arrives and 1x stands, which is the right answer anyway.
+    LaunchedEffect(Unit) {
+        val stored = ypvm.playbackSpeed.drop(1).first()
+        CastPlayback.update { it.copy(speed = stored) }
     }
     LaunchedEffect(playbackSpeed) {
-        if (playbackSpeed != persistedSpeed) ypvm.setPlaybackSpeed(playbackSpeed)
+        ypvm.setPlaybackSpeed(playbackSpeed)
     }
 
     // Lock hides all controls (and disables seek/speed gestures) so a fullscreen video can't be
@@ -300,7 +318,7 @@ fun VideoPlayer(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
-            CastPlayback.attachPlayer(null)
+            CastPlayback.detachPlayer(player)
             context.findActivity().setPictureInPictureParams(PictureInPictureParams.Builder().apply {
                 setAutoEnterEnabled(false)
             }.build())
@@ -327,11 +345,13 @@ fun VideoPlayer(
                         bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
                     )
                 }
+                historyPosition = position
+                historyDuration = player.duration.coerceAtLeast(0L)
 
                 if (player.isPlaying) {
                     val now = System.currentTimeMillis()
                     if (now - lastHistoryUpsert >= HISTORY_UPSERT_INTERVAL_MS) {
-                        ypvm.upsertHistoryVideo(HistoryVideo.fromVideoData(videoInfo.copy(duration = duration), position))
+                        ypvm.upsertHistoryVideo(HistoryVideo.fromVideoData(videoInfo.copy(duration = historyDuration), position))
                         lastHistoryUpsert = now
                     }
                 }
@@ -343,7 +363,9 @@ fun VideoPlayer(
     // Persist the final watch position once when leaving the player.
     DisposableEffect(videoInfo.videoID) {
         onDispose {
-            ypvm.upsertHistoryVideo(HistoryVideo.fromVideoData(videoInfo.copy(duration = duration), currentPosition))
+            ypvm.upsertHistoryVideo(
+                HistoryVideo.fromVideoData(videoInfo.copy(duration = historyDuration), historyPosition),
+            )
         }
     }
 
@@ -759,7 +781,6 @@ fun VideoPlayer(
                                     value = playbackSpeed,
                                     onValueChange = {
                                         CastPlayback.update { state -> state.copy(speed = it) }
-                                        if (!unhookPitch) playbackPitch = it
                                     },
                                     valueRange = 0.25f..2f,
                                 )
@@ -802,7 +823,6 @@ fun VideoPlayer(
                                 TextButton(
                                     onClick = {
                                         CastPlayback.update { it.copy(speed = 1f) }
-                                        playbackPitch = 1f
                                         unhookPitch = false
                                     },
                                     modifier = Modifier.align(Alignment.End)

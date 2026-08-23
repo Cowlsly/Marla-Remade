@@ -142,7 +142,7 @@ object EncoderSupport {
         // 1344x2992 against a landscape-only envelope therefore rides the ladder down to something
         // that fits, which costs resolution and is logged rather than silent.
         if (video.realtime(width, height, frameRate)) return width to height
-        val ceiling = video.sustainableFrameRate(width, height).takeIf { it > 0 }
+        val ceiling = video.sustainableFrameRate(width, height)
         var scale = 1.0
         repeat(MAX_CLAMP_STEPS) {
             scale *= CLAMP_STEP
@@ -152,7 +152,7 @@ object EncoderSupport {
             if (video.realtime(w, h, frameRate)) {
                 Log.i(
                     TAG,
-                    "${width}x$height tops out at ${ceiling ?: "an unstated rate"}fps on " +
+                    "${width}x$height tops out at ${ceiling}fps on " +
                         "${info.name}; stepping down to ${w}x$h to hold ${frameRate}fps",
                 )
                 return w to h
@@ -163,7 +163,7 @@ object EncoderSupport {
         Log.w(
             TAG,
             "no size with this aspect ratio does ${frameRate}fps on ${info.name}; " +
-                "sending ${width}x$height, which tops out at ${ceiling ?: "an unstated rate"}fps",
+                "sending ${width}x$height, which tops out at ${ceiling}fps",
         )
         return width to height
     }

@@ -1,10 +1,6 @@
 package com.vayunmathur.cast.tv.ui
 
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.darkColorScheme
 
@@ -16,16 +12,12 @@ import androidx.tv.material3.darkColorScheme
  * has ever wanted a white screen filling a wall in a dim room. The old call site passed
  * `darkTheme = true` unconditionally, which was that conclusion reached one argument short.
  *
- * The background is painted here rather than by a `Surface`, so that a full-bleed decoder surface can
- * live under an overlay that draws nothing of its own - the mirror Activity needs transparency above
- * the picture, and a themed `Surface` wrapping everything would be an opaque layer in the way.
+ * **Paints nothing.** Deliberately not `Surface`, and not a `Box` with the scheme's background either:
+ * one of the two things wrapped in this theme is an overlay above a decoder surface, and anything
+ * opaque here would be a solid rectangle over the video for the whole session. Screens that want a
+ * background say so themselves - see `ReceiverContent`.
  */
 @Composable
 fun CastTvTheme(content: @Composable () -> Unit) {
-    MaterialTheme(colorScheme = darkColorScheme()) {
-        Box(
-            modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background),
-            content = { content() },
-        )
-    }
+    MaterialTheme(colorScheme = darkColorScheme(), content = content)
 }

@@ -150,14 +150,33 @@ object CastPlayback {
      */
     private var audio: AudioManager? = null
 
-    /** Called by the player screen once its `MediaController` has connected, and with null as it goes. */
+    /**
+     * Called by the player screen once its `MediaController` has connected, and with null as it goes.
+     *
+     * **Detach is identity-guarded, and has to be.** A navigation composes the incoming screen before
+     * disposing the outgoing one, so if the new screen's controller connects first an unguarded
+     * `attachPlayer(null)` would clear the player that had just arrived *and* start the orphan timer -
+     * ending the cast in exactly the "next from the television" case this whole mechanism exists for.
+     */
     fun attachPlayer(newPlayer: Player?) {
-        player = newPlayer
-        if (newPlayer != null) {
-            orphanJob?.cancel()
-            orphanJob = null
+        if (newPlayer == null) {
+            detachPlayer(null)
             return
         }
+        player = newPlayer
+        orphanJob?.cancel()
+        orphanJob = null
+    }
+
+    /**
+     * Let go of [outgoing], if it is still the attached player.
+     *
+     * Passing the player being disposed is what makes the guard possible; null means "whatever is
+     * attached", which only the session teardown wants.
+     */
+    fun detachPlayer(outgoing: Player?) {
+        if (outgoing != null && player !== outgoing) return
+        player = null
         if (_state.value !is State.Casting) return
         // **The grace period is what lets a cast survive navigation.** Leaving a video used to end the
         // session outright, on the reasoning that there is one video output and it cannot follow the
@@ -407,7 +426,7 @@ object CastPlayback {
 
     /** The range the phone's own speed menu offers; a TV must not be able to ask for more. */
     private const val MIN_SPEED = 0.25f
-    private const val MAX_SPEED = 4f
+    private const val MAX_SPEED = 2f
 
     /**
      * Slow enough not to compete with the encoder for the control socket, fast enough that a seek bar

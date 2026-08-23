@@ -219,7 +219,21 @@ object ReceiverController {
         advertiser = null
         runCatching { serverSocket?.close() }
         serverSocket = null
-        _state.update { it.copy(phase = ReceiverPhase.Starting, playback = null) }
+        forgetPlayback()
+        _state.update { it.copy(phase = ReceiverPhase.Starting) }
+    }
+
+    /**
+     * Drop everything the last session said about playback.
+     *
+     * Both halves together, always: clearing [ReceiverUiState.playback] is what takes the overlay away,
+     * and resetting [castVolume] is what stops the *next* session inheriting this one's gain. Missing
+     * the second is a quiet, nasty failure - a screen-mirroring session that follows a quiet cast would
+     * play at that gain for ever, with no snapshot to change it and `nudgeVolume` declining to try.
+     */
+    private fun forgetPlayback() {
+        castVolume = 1f
+        _state.update { it.copy(playback = null) }
     }
 
     /** Called by `MirrorActivity` once its `SurfaceView` has a surface to draw into. */
@@ -284,11 +298,12 @@ object ReceiverController {
             // A failure from the previous session has been on screen long enough; the phone connecting
             // now is what the user cares about. The previous session's playback goes with it, or the
             // next phone would inherit a seek bar describing something that is no longer playing.
+            forgetPlayback()
             _state.update {
                 if (it.phase is ReceiverPhase.Failed) {
-                    it.copy(phase = ReceiverPhase.Advertising, playback = null)
+                    it.copy(phase = ReceiverPhase.Advertising)
                 } else {
-                    it.copy(playback = null)
+                    it
                 }
             }
             this@ReceiverController.channel = channel
@@ -301,6 +316,7 @@ object ReceiverController {
                     channel.close()
                     this@ReceiverController.channel = null
                     endMedia()
+                    forgetPlayback()
                     // A failure the user has to read is *not* overwritten with "ready" - it stays until
                     // the next phone tries, which is when it stops being the useful thing to show.
                     if (scope.isActive) {
@@ -311,9 +327,6 @@ object ReceiverController {
                                 it.copy(
                                     phase = ReceiverPhase.Advertising,
                                     localNetworkBlocked = nsd.localNetworkBlocked,
-                                    // The overlay is gated on this being non-null, so clearing it is
-                                    // what takes the transport controls away with the session.
-                                    playback = null,
                                 )
                             }
                         }
