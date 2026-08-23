@@ -264,14 +264,23 @@ private fun OngoingControls(
                     onClick = { InAppCallRegistry.toggleMuted() },
                 ) { tint -> if (state.muted) IconMicOff(tint = tint) else IconMic(tint = tint) }
             }
-            if (caps.speaker && !state.localVideoEnabled) {
-                // Sending video implies hands-free, so the route is forced and the control would be a
-                // no-op the user could fight with.
-                CallToggle(
-                    label = stringResource(R.string.call_speaker),
-                    active = state.speaker,
-                    onClick = { InAppCallRegistry.toggleSpeaker() },
-                ) { tint -> IconVolumeUp(tint = tint) }
+            // Speaker and camera-flip share one slot: sending video forces hands-free, so the speaker
+            // control is meaningless then and flip only applies then. Swapping them in place keeps every
+            // other control — the video toggle especially — from shifting as video comes on and off.
+            if (caps.speaker || caps.video) {
+                if (state.localVideoEnabled && !state.screenSharing) {
+                    CallToggle(
+                        label = stringResource(R.string.call_flip_camera),
+                        active = false,
+                        onClick = { InAppCallRegistry.flipCamera() },
+                    ) { tint -> IconFlipCamera(tint = tint) }
+                } else if (caps.speaker) {
+                    CallToggle(
+                        label = stringResource(R.string.call_speaker),
+                        active = state.speaker,
+                        onClick = { InAppCallRegistry.toggleSpeaker() },
+                    ) { tint -> IconVolumeUp(tint = tint) }
+                }
             }
             if (caps.video) {
                 CallToggle(
@@ -281,14 +290,6 @@ private fun OngoingControls(
                 ) { tint ->
                     if (state.localVideoEnabled) IconVideoCamera(tint = tint) else IconCameraOff(tint = tint)
                 }
-            }
-            // Flipping the camera is meaningless while the source is the screen.
-            if (caps.video && state.localVideoEnabled && !state.screenSharing) {
-                CallToggle(
-                    label = stringResource(R.string.call_flip_camera),
-                    active = false,
-                    onClick = { InAppCallRegistry.flipCamera() },
-                ) { tint -> IconFlipCamera(tint = tint) }
             }
             if (caps.screenShare) {
                 CallToggle(
