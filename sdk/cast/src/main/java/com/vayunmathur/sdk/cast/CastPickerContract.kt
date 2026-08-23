@@ -18,6 +18,12 @@ import androidx.activity.result.contract.ActivityResultContract
  *
  * `true` means a TV is connected and [CastClient.openSession] will work; `false` means the user
  * backed out, or pairing failed, and nothing should change in the calling app.
+ *
+ * **The calling app must declare `com.vayunmathur.cast.permission.STREAM_CONTENT` in its manifest.**
+ * Cast guards this Activity with it, so an app that omits it does not degrade to "no casting" - the
+ * launch throws a `SecurityException` from `startActivityForResult`, which is a crash in the caller
+ * rather than something [parseResult] could report. It is signature level, so declaring it grants
+ * nothing to anything outside this repo.
  */
 class CastPickerContract : ActivityResultContract<Unit, Boolean>() {
 

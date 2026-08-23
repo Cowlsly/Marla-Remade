@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Cast guards its picker Activity and its content service with this, so a consumer that omits
+         it does not degrade: launching the picker throws a SecurityException outright. Signature
+         level, so it grants nothing to anyone outside this repo. -->
+    <uses-permission android:name="com.vayunmathur.cast.permission.STREAM_CONTENT" />
 
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="32"/>
 
