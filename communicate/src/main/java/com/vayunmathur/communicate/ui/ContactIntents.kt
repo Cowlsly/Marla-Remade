@@ -18,7 +18,9 @@ object ContactIntents {
         ExternalIntents.launch(
             context,
             Intent(ContactsContract.Intents.Insert.ACTION).apply {
-                type = ContactsContract.RawContacts.CONTENT_TYPE
+                // Must be Contacts.CONTENT_TYPE ("vnd.android.cursor.dir/contact"). RawContacts.CONTENT_TYPE
+                // is a different mimetype that editors do not register for, so it resolves to nothing.
+                type = ContactsContract.Contacts.CONTENT_TYPE
                 putExtra(ContactsContract.Intents.Insert.PHONE, number)
             },
         )
