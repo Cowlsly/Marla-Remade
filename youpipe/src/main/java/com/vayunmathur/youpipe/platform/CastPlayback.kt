@@ -5,14 +5,28 @@ import android.os.ParcelFileDescriptor
 import android.util.Log
 import android.view.Surface
 import androidx.annotation.OptIn
+import androidx.media3.common.Player
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.exoplayer.audio.TeeAudioProcessor
 import com.vayunmathur.sdk.cast.CastClient
 import com.vayunmathur.sdk.cast.CastContract
 import com.vayunmathur.sdk.cast.CastException
+import com.vayunmathur.sdk.cast.PlaybackAction
+import com.vayunmathur.sdk.cast.PlaybackCommand
+import com.vayunmathur.sdk.cast.PlaybackState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import java.io.FileOutputStream
 import java.nio.ByteBuffer
 import java.util.concurrent.ArrayBlockingQueue
@@ -68,6 +82,65 @@ object CastPlayback {
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
 
+    /**
+     * Where playback is, and everything a remote needs to know about it.
+     *
+     * **Hoisted out of `VideoPlayer` because a television outlives a composable.** All of this used to
+     * be `remember`ed locals, which was correct while the only thing that read them was the UI drawn
+     * beside them - the seek bar and the transport buttons are two feet from the player. A TV asking
+     * "what is playing, and how far in" is a second reader with a different lifetime, and a
+     * `remember` dies on navigation while the cast session does not.
+     *
+     * The 300 ms poll loop in `VideoPlayer` remains the **single writer** of [positionMs] and
+     * [bufferedMs]; the player listener writes the rest. Nothing else may write them, which is what
+     * makes [dragging] a sufficient guard.
+     */
+    data class Transport(
+        val positionMs: Long = 0,
+        val bufferedMs: Long = 0,
+        val durationMs: Long = 0,
+        val playing: Boolean = false,
+        val buffering: Boolean = false,
+        /**
+         * The user has the phone's own seek bar under their thumb.
+         *
+         * Freezes the poll loop's position write so the bar does not fight the finger, and - now that
+         * a television can seek too - refuses a remote seek for the same reason. Two seeks resolving
+         * against each other would leave the position wherever the loser landed.
+         */
+        val dragging: Boolean = false,
+        val speed: Float = 1f,
+        val volume: Float = 1f,
+        val hasNext: Boolean = false,
+        val hasPrevious: Boolean = false,
+    )
+
+    private val _transport = MutableStateFlow(Transport())
+    val transport: StateFlow<Transport> = _transport.asStateFlow()
+
+    /** Read-modify-write, so the poll loop and the player listener cannot drop each other's change. */
+    fun update(block: (Transport) -> Transport) {
+        _transport.update(block)
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
+
+    private var reportJob: Job? = null
+
+    /**
+     * The player a remote command is applied to.
+     *
+     * Held here rather than passed with each command because the commands arrive from Cast, which has
+     * no idea what a `MediaController` is. Cleared when the player screen goes away, so a command that
+     * outlives it is dropped rather than driving a released controller.
+     */
+    private var player: Player? = null
+
+    /** Called by the player screen once its `MediaController` has connected, and with null as it goes. */
+    fun attachPlayer(newPlayer: Player?) {
+        player = newPlayer
+    }
+
     private var client: CastClient? = null
 
     fun support(context: Context): CastClient.Support = CastClient(context).support()
@@ -98,6 +171,8 @@ object CastPlayback {
                 close()
             }
             CastAudioTap.attach(session.audio)
+            newClient.onCommand = { command -> apply(command) }
+            startReporting(newClient)
             if (session.width != width || session.height != height) {
                 Log.i(
                     TAG,
@@ -124,11 +199,113 @@ object CastPlayback {
 
     /** Back to playing locally. Idempotent. */
     fun close() {
+        reportJob?.cancel()
+        reportJob = null
         CastAudioTap.detach()
         client?.close()
         client = null
         _state.value = State.Idle
     }
+
+    /**
+     * Keep the TV's copy of [transport] current, for as long as this session lasts.
+     *
+     * Two cadences, because they answer different needs. Anything the TV *renders* differently goes out
+     * the instant it changes - a pause that took half a second to reach the screen reads as a dropped
+     * button press. Position is deliberately excluded from that: it moves on every poll, so "changed"
+     * would mean "always", and the TV interpolates between snapshots anyway precisely so it does not
+     * need them faster.
+     *
+     * The heartbeat underneath is what makes the whole thing self-repairing: every message is an
+     * absolute snapshot, so a lost one costs at most one interval of staleness and needs no
+     * acknowledgement, no sequence number and no retry.
+     */
+    private fun startReporting(activeClient: CastClient) {
+        reportJob?.cancel()
+        reportJob = scope.launch {
+            launch {
+                _transport
+                    .map { it.copy(positionMs = 0, bufferedMs = 0) }
+                    .distinctUntilChanged()
+                    .collect { activeClient.reportPlaybackState(_transport.value.asPlaybackState()) }
+            }
+            while (isActive) {
+                delay(HEARTBEAT_MS)
+                activeClient.reportPlaybackState(_transport.value.asPlaybackState())
+            }
+        }
+    }
+
+    private fun Transport.asPlaybackState() = PlaybackState(
+        positionMs = positionMs,
+        durationMs = durationMs,
+        playing = playing,
+        buffering = buffering,
+        speed = speed,
+        volume = volume,
+        hasNext = hasNext,
+        hasPrevious = hasPrevious,
+    )
+
+    /**
+     * Do what the television's remote asked.
+     *
+     * Runs on the main thread - `CastClient` guarantees it - because a `MediaController` may only be
+     * touched there. Every case drives the same player the phone's own buttons drive, so there is one
+     * transport rather than two that could disagree.
+     *
+     * With no player attached this does nothing at all. That is the correct answer rather than a
+     * failure: the user has navigated away from the video, and until the session learns to survive
+     * that there is nothing to control.
+     */
+    private fun apply(command: PlaybackCommand) {
+        val target = player ?: return
+        when (command.action) {
+            PlaybackAction.Play -> target.play()
+            PlaybackAction.Pause -> target.pause()
+            PlaybackAction.Toggle -> if (target.isPlaying) target.pause() else target.play()
+            PlaybackAction.SeekTo -> command.value?.let { seek(target, it.toLong()) }
+            PlaybackAction.SkipForward -> seek(target, target.currentPosition + SKIP_MS)
+            PlaybackAction.SkipBack -> seek(target, target.currentPosition - SKIP_MS)
+            PlaybackAction.SetSpeed -> command.value?.let { speed ->
+                // Written into [transport] rather than onto the player: `VideoPlayer` already has an
+                // effect that applies the speed together with the pitch, and setting
+                // `playbackParameters` here would drop whatever pitch the user had chosen.
+                update { it.copy(speed = speed.toFloat().coerceIn(MIN_SPEED, MAX_SPEED)) }
+            }
+            // Volume and the queue are somebody else's to answer; ignored rather than guessed at.
+            PlaybackAction.SetVolume, PlaybackAction.Next, PlaybackAction.Previous -> Unit
+        }
+    }
+
+    /**
+     * Seek, unless the phone's own seek bar is currently under a thumb.
+     *
+     * The position is written here rather than left to the next poll: the TV re-anchors its estimate on
+     * every snapshot, so one still carrying the pre-seek position would visibly pull its bar back
+     * before the following tick pushed it forward again.
+     */
+    private fun seek(target: Player, positionMs: Long) {
+        val current = _transport.value
+        if (current.dragging) return
+        val end = current.durationMs.takeIf { it > 0 } ?: Long.MAX_VALUE
+        val clamped = positionMs.coerceIn(0, end)
+        target.seekTo(clamped)
+        update { it.copy(positionMs = clamped) }
+    }
+
+    /** Matches the phone's own skip buttons, so the two remotes move by the same amount. */
+    private const val SKIP_MS = 10_000L
+
+    /** The range the phone's own speed menu offers; a TV must not be able to ask for more. */
+    private const val MIN_SPEED = 0.25f
+    private const val MAX_SPEED = 4f
+
+    /**
+     * Slow enough not to compete with the encoder for the control socket, fast enough that a seek bar
+     * re-anchors before its interpolation has drifted anywhere visible.
+     */
+    private const val HEARTBEAT_MS = 500L
 }
 
 /**

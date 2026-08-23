@@ -50,7 +50,6 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -164,14 +163,23 @@ fun VideoPlayer(
         currentAudioStream = filtered.maxByOrNull { it.bitrate } ?: filtered.firstOrNull()
     }
     var isControlsVisible by remember { mutableStateOf(true) }
-    var isPlaying by remember { mutableStateOf(false) }
     var controlsInteractionTick by remember { mutableStateOf(0) }
     val keepControlsVisible by ypvm.keepPlayerControlsVisible.collectAsState()
-    var currentPosition by remember { mutableLongStateOf(0L) }
-    var bufferedPosition by remember { mutableLongStateOf(0L) }
-    var duration by remember { mutableLongStateOf(0L) }
-    var isDragging by remember { mutableStateOf(false) }
-    var isBuffering by remember { mutableStateOf(false) }
+
+    // ---- transport state, which lives in CastPlayback rather than here ----
+    // All of this used to be `remember`ed locals, which was right while the only reader was the seek bar
+    // drawn beside them. A television showing this video is a second reader with a different lifetime -
+    // it needs to know where playback is in order to draw a bar of its own - and a `remember` dies on
+    // navigation while a cast session does not. The 300 ms loop below is still the only writer of the
+    // position, so `dragging` remains a sufficient guard against two seeks fighting.
+    val transport by CastPlayback.transport.collectAsState()
+    val currentPosition = transport.positionMs
+    val bufferedPosition = transport.bufferedMs
+    val duration = transport.durationMs
+    val isPlaying = transport.playing
+    val isBuffering = transport.buffering
+    val isDragging = transport.dragging
+    val playbackSpeed = transport.speed
 
     var isVideoMenuExpanded by remember { mutableStateOf(false) }
     var isLanguageMenuExpanded by remember { mutableStateOf(false) }
@@ -181,9 +189,21 @@ fun VideoPlayer(
 
     // Tempo (playback speed) and pitch, applied via PlaybackParameters. When pitch is "hooked"
     // to tempo it tracks it 1:1 (natural resample); unhooking lets the user set it independently.
-    var playbackSpeed by remember { mutableFloatStateOf(1f) }
+    // The tempo itself is in `transport` above, because the TV shows it and can change it.
     var playbackPitch by remember { mutableFloatStateOf(1f) }
     var unhookPitch by remember { mutableStateOf(false) }
+
+    // Durable in both directions, and each guarded against the other so they converge rather than
+    // ping-pong: the stored value seeds the session - it arrives asynchronously from DataStore, which
+    // is why this keys on it rather than running once - and every later change, from this menu or from
+    // the TV's remote, is written back so it survives moving to another video.
+    val persistedSpeed by ypvm.playbackSpeed.collectAsState()
+    LaunchedEffect(persistedSpeed) {
+        if (persistedSpeed != playbackSpeed) CastPlayback.update { it.copy(speed = persistedSpeed) }
+    }
+    LaunchedEffect(playbackSpeed) {
+        if (playbackSpeed != persistedSpeed) ypvm.setPlaybackSpeed(playbackSpeed)
+    }
 
     // Lock hides all controls (and disables seek/speed gestures) so a fullscreen video can't be
     // disturbed by accidental touches, until the user taps the on-screen unlock button.
@@ -247,17 +267,23 @@ fun VideoPlayer(
     DisposableEffect(controller) {
         val player = controller ?: return@DisposableEffect onDispose {}
         // Sync initial playing state once controller is available
-        isPlaying = player.isPlaying
+        CastPlayback.update { it.copy(playing = player.isPlaying) }
+        // What a remote command is applied to, so the TV drives the same transport these buttons do.
+        CastPlayback.attachPlayer(player)
         val listener = object : Player.Listener {
             override fun onEvents(player: Player, events: Player.Events) {
                 if (events.contains(Player.EVENT_TIMELINE_CHANGED) || events.contains(Player.EVENT_PLAYBACK_STATE_CHANGED)) {
-                    duration = player.duration.coerceAtLeast(0L)
-                    isBuffering = player.playbackState == Player.STATE_BUFFERING
-                    isPlaying = player.isPlaying
+                    CastPlayback.update {
+                        it.copy(
+                            durationMs = player.duration.coerceAtLeast(0L),
+                            buffering = player.playbackState == Player.STATE_BUFFERING,
+                            playing = player.isPlaying,
+                        )
+                    }
                 }
             }
             override fun onIsPlayingChanged(isPlayingNow: Boolean) {
-                isPlaying = isPlayingNow
+                CastPlayback.update { it.copy(playing = isPlayingNow) }
                 context.findActivity().setPictureInPictureParams(PictureInPictureParams.Builder().apply {
                     setAutoEnterEnabled(isPlayingNow)
                 }.build())
@@ -274,6 +300,7 @@ fun VideoPlayer(
         player.addListener(listener)
         onDispose {
             player.removeListener(listener)
+            CastPlayback.attachPlayer(null)
             context.findActivity().setPictureInPictureParams(PictureInPictureParams.Builder().apply {
                 setAutoEnterEnabled(false)
             }.build())
@@ -285,21 +312,26 @@ fun VideoPlayer(
         var lastHistoryUpsert = 0L
         while (true) {
             if (!isDragging) {
-                currentPosition = player.currentPosition.coerceAtLeast(0L)
-                bufferedPosition = player.bufferedPosition.coerceAtLeast(0L)
+                var position = player.currentPosition.coerceAtLeast(0L)
 
                 if (sponsorBlockEnabled) {
-                    val currentSegment = sponsorSegments.find { currentPosition in it.start until it.end }
+                    val currentSegment = sponsorSegments.find { position in it.start until it.end }
                     if (currentSegment != null) {
                         player.seekTo(currentSegment.end)
-                        currentPosition = currentSegment.end
+                        position = currentSegment.end
                     }
+                }
+                CastPlayback.update {
+                    it.copy(
+                        positionMs = position,
+                        bufferedMs = player.bufferedPosition.coerceAtLeast(0L),
+                    )
                 }
 
                 if (player.isPlaying) {
                     val now = System.currentTimeMillis()
                     if (now - lastHistoryUpsert >= HISTORY_UPSERT_INTERVAL_MS) {
-                        ypvm.upsertHistoryVideo(HistoryVideo.fromVideoData(videoInfo.copy(duration = duration), currentPosition))
+                        ypvm.upsertHistoryVideo(HistoryVideo.fromVideoData(videoInfo.copy(duration = duration), position))
                         lastHistoryUpsert = now
                     }
                 }
@@ -358,7 +390,7 @@ fun VideoPlayer(
 
         player.setMediaItem(mediaItem, timeWatched)
         player.prepare()
-        currentPosition = timeWatched
+        CastPlayback.update { it.copy(positionMs = timeWatched) }
     }
 
     LaunchedEffect(controller, selectedSubtitle) {
@@ -726,7 +758,7 @@ fun VideoPlayer(
                                 Slider(
                                     value = playbackSpeed,
                                     onValueChange = {
-                                        playbackSpeed = it
+                                        CastPlayback.update { state -> state.copy(speed = it) }
                                         if (!unhookPitch) playbackPitch = it
                                     },
                                     valueRange = 0.25f..2f,
@@ -769,7 +801,7 @@ fun VideoPlayer(
                                 HorizontalDivider()
                                 TextButton(
                                     onClick = {
-                                        playbackSpeed = 1f
+                                        CastPlayback.update { it.copy(speed = 1f) }
                                         playbackPitch = 1f
                                         unhookPitch = false
                                     },
@@ -836,9 +868,14 @@ fun VideoPlayer(
                             }
                             Slider(
                                 value = if (duration > 0) currentPosition.toFloat() else 0f,
-                                onValueChange = { isDragging = true; currentPosition = it.toLong() },
+                                onValueChange = {
+                                    CastPlayback.update { state ->
+                                        state.copy(dragging = true, positionMs = it.toLong())
+                                    }
+                                },
                                 onValueChangeFinished = {
-                                    controller?.seekTo(currentPosition); isDragging = false
+                                    controller?.seekTo(currentPosition)
+                                    CastPlayback.update { it.copy(dragging = false) }
                                 },
                                 valueRange = 0f..(duration.toFloat().coerceAtLeast(1f)),
                                 colors = SliderDefaults.colors(

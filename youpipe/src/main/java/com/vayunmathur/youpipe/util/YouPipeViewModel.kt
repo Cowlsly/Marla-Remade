@@ -1035,6 +1035,27 @@ class YouPipeViewModel(
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
     val keepPlayerControlsVisible: StateFlow<Boolean> = _keepPlayerControlsVisible
 
+    /**
+     * The tempo multiplier, kept across videos.
+     *
+     * Durable because it stopped being a per-video whim the moment a television could show it: a speed
+     * that reset on every navigation would have the TV's overlay disagree with the phone for reasons
+     * neither screen explains. Stored as a double because that is what `DataStoreUtils` has; the player
+     * works in floats.
+     */
+    private val _playbackSpeed: StateFlow<Float> = DataStoreUtils
+        .getInstance(application)
+        .doubleFlow("playback_speed")
+        .map { it.toFloat() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 1f)
+    val playbackSpeed: StateFlow<Float> = _playbackSpeed
+
+    fun setPlaybackSpeed(speed: Float) {
+        viewModelScope.launch {
+            DataStoreUtils.getInstance(getApplication()).setDouble("playback_speed", speed.toDouble())
+        }
+    }
+
     fun setKeepPlayerControlsVisible(keepVisible: Boolean) {
         viewModelScope.launch {
             DataStoreUtils.getInstance(getApplication()).setBoolean("keep_player_controls_visible", keepVisible)
