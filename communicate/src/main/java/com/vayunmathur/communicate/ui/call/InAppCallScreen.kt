@@ -507,6 +507,10 @@ private fun SelfView(
                     init(eglContext, null)
                     setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FILL)
                     setMirror(true)
+                    // Both renderers are SurfaceViews, which the system composites as their own layers
+                    // rather than in Compose's draw order. Without this the full-screen remote view covers
+                    // the self-view the moment it appears — i.e. exactly when the call is answered.
+                    setZOrderMediaOverlay(true)
                 }
             },
             modifier = Modifier.fillMaxSize(),
