@@ -19,7 +19,7 @@
 //! cargo run --release --example route_diff -- gen-pairs --graph DIR --out pairs.txt [--count N]
 //! cargo run --release --example route_diff -- report    --graph DIR --pairs pairs.txt --out report.txt
 //! cargo run --release --example route_diff -- compare   --baseline a.txt --candidate b.txt [--tol-mm N]
-//! cargo run --release --example route_diff -- bench     --graph DIR --pairs pairs.txt [--passes N]
+//! cargo run --release --example route_diff -- bench     --graph DIR --pairs pairs.txt [--passes N] [--cold]
 //! cargo run --release --example route_diff -- dump      --graph DIR --out dump.bin
 //! cargo run --release --example route_diff -- dump-compare --baseline a.bin --candidate b.bin
 //! ```
@@ -75,7 +75,7 @@ usage:
   route_diff report    --graph DIR --pairs FILE --out FILE
   route_diff compare   --baseline FILE --candidate FILE [--tol-mm N] [--tol-10ms N]
   route_diff geometry  --baseline DIR --candidate DIR
-  route_diff bench     --graph DIR --pairs FILE [--passes N]
+  route_diff bench     --graph DIR --pairs FILE [--passes N] [--cold]
   route_diff dump         --graph DIR --out FILE
   route_diff dump-compare --baseline FILE --candidate FILE [--limit N]";
 
@@ -574,6 +574,11 @@ fn bench(args: &[String]) -> Result<bool, String> {
     if passes == 0 {
         return Err("--passes wants at least one".to_string());
     }
+    let cold = args.iter().any(|a| a == "--cold");
+    if cold {
+        let evicted = evict(&dir)?;
+        println!("evicted {evicted} pack file(s) from the page cache");
+    }
 
     let load_started = std::time::Instant::now();
     let g = load(&dir)?;
@@ -701,6 +706,45 @@ fn peak_rss_kb() -> u64 {
                 .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
         })
         .unwrap_or(0)
+}
+
+/// Evict a pack directory's files from the page cache, so the pass that follows
+/// measures major faults rather than a warm cache. Returns how many files were hit.
+///
+/// `POSIX_FADV_DONTNEED` rather than `/proc/sys/vm/drop_caches`, which needs root.
+/// It is advisory and best-effort — pages that are dirty or still mapped elsewhere
+/// stay resident — so what it produces is a *lower bound* on how cold a real first
+/// run is. Which is the right direction: a phase that looks affordable here might
+/// still not be on a pack larger than RAM, and one that regresses here certainly is
+/// not.
+fn evict(dir: &str) -> Result<usize, String> {
+    const FILES: [&str; 6] = [
+        "metadata.bin",
+        "nodes.bin",
+        "edges.bin",
+        "lanes.bin",
+        "intermediate.bin",
+        "road_names.bin",
+    ];
+    let mut hit = 0;
+    for name in FILES {
+        let path = format!("{}/{name}", dir.trim_end_matches('/'));
+        let Ok(f) = std::fs::File::open(&path) else { continue };
+        // Offset 0, length 0 means "the whole file".
+        let rc = unsafe {
+            libc::posix_fadvise(
+                std::os::unix::io::AsRawFd::as_raw_fd(&f),
+                0,
+                0,
+                libc::POSIX_FADV_DONTNEED,
+            )
+        };
+        if rc != 0 {
+            return Err(format!("posix_fadvise({path}): {rc}"));
+        }
+        hit += 1;
+    }
+    Ok(hit)
 }
 
 // ---------------------------------------------------------------------------

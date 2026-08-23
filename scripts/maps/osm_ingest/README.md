@@ -615,7 +615,28 @@ predicate** rather than by an analysis script that could disagree with it by one
 road_graph california-latest.osm.pbf --out DIR --stats
 ```
 
-Measured on California, reference path (E = 16,785,702, N = 6,418,361):
+Where it ended up, on the planet basis of E = 1,074,282,569 directed edges and
+N = 431,474,933 nodes:
+
+| version | change | `edges.bin` | `nodes.bin` | pack |
+|---|---|---|---|---|
+| 3 | where this started | 15.04 GB | 5.18 GB | 29.0 GB |
+| 4 | `edge_count` in metadata, length validation, no layout change | 15.04 GB | 5.18 GB | 29.0 GB |
+| 5 | `i16` target delta + `u24 dist_mm`, one merged escape table | **11.86 GB** | 5.18 GB | **25.8 GB** |
+| 6 | `name_offset` sparse, 7-byte record | **9.33 GB** | 5.18 GB | **23.3 GB** |
+| ~~7~~ | ~~fused node block header~~ — correct, 10% slower, reverted | 9.33 GB | ~~3.99 GB~~ | ~~22.1 GB~~ |
+
+`intermediate.bin` (8.50 GB), `lanes.bin` (0.04 GB) and `road_names.bin` (0.25 GB) are
+untouched throughout. Every step is **exact** — no quantisation anywhere — so the pass
+condition at each one is byte-identical routing output, not "within tolerance".
+
+Measured on California, reference path: 458,981,307 bytes → **369,839,208**, a 19.4%
+reduction with the per-element dump identical at every step.
+
+### The measurement spike came first
+
+Nothing shipped until `--stats` had run, because the whole design rested on numbers
+nobody had. Measured on California, reference path (E = 16,785,702, N = 6,418,361):
 
 | | |
 |---|---|
@@ -725,7 +746,12 @@ dump over **all** E edges and N+1 node records, which is what later phases are
 verified against instead of the ~35 K vertices 999 sampled routes happen to touch.
 
 `route_diff` also gained a `bench` mode, so the phases that are gated on latency
-rather than correctness have a baseline to be gated against.
+rather than correctness have a baseline to be gated against. It reports routes/sec,
+per-route p50/p90/p99 and peak RSS, separating the first pass from the warm ones, and
+`--cold` evicts the pack from the page cache first with `posix_fadvise` — which,
+unlike `/proc/sys/vm/drop_caches`, needs no root. Every pass also reports a checksum
+over what it routed, so a format change that broke routing shows up as a broken
+checksum rather than as a speedup.
 
 Version 4's own gate: every data file byte-identical to the v3 pack on both collapse
 paths, `metadata.bin` 16 B → 24 B, and `route_diff report` byte-identical to what
@@ -871,6 +897,61 @@ offsets are 1.34 GB rather than 1.62 GB, so the real figure should come in neare
 edge E−1; names either side of the 512-edge rank-block boundary and either side of
 1024, with a distinct offset per named edge so a rank off by one reads a visibly
 wrong value; a pack where no edge is named; and one where every edge is.
+
+### Version 7 was built, measured and abandoned
+
+The remaining idea was to split `nodes.bin` into coordinates plus a fused per-block
+edge-extent header:
+
+```text
+[ { i32 lat_e7, i32 lon_e7 } x (N + 1) ]                          8 B
+[ { u32 edge_base, u8 degree[16] } x (N + 1).div_ceil(16) ]      20 B per 16 nodes
+```
+
+9.25 bytes a node instead of 12, so **−1.19 GB** and a planet at ~22.1 GB. Because
+`degree[v] == edge_ptr(v + 1) − edge_ptr(v)`, `edge_range(v)` needs only `v`'s own
+block: no `v + 1` lookup, no block-boundary case, and one cache miss where the dense
+layout needed two.
+
+It was implemented in full — degree-width pre-pass, `u8`/`u16` widths, sentinel
+integrity check, all of it — and it is **correct**: the per-element dump is identical
+across all 16,785,702 edges and 6,418,362 node records, `report` stays byte-identical
+to the v3 binary's, and `nodes.bin` came out at 59,369,856 bytes against v6's
+77,020,344 (−22.9%), the whole pack at 352,188,721 (−23.3% against v3).
+
+It is also **slower**, and the phase was gated on that:
+
+| | v6 | v7 | | gate |
+|---|---|---|---|---|
+| warm routes/s | 20.2 | 18.1 | −10.4% | ≥97% ✗ |
+| cold routes/s | 19.2 | 17.7 | −7.8% | ≥97% ✗ |
+| warm p50 | 0.953 ms | 1.043 ms | +9.4% | ✗ |
+| cold p99 | 651.2 ms | 710.8 ms | +9.2% | ≥97% ✗ |
+| peak RSS | 484 MB | 466 MB | −3.7% | ✓ |
+
+Three times over the 3% tolerance, so it is reverted.
+
+**The interesting part is why, because the design's cost model was wrong.** The
+reasoning was about *cache misses*: one fused header is one miss where a separate
+base array plus a degree array would be two, and the dense layout read two records.
+That reasoning is sound and the miss count really did improve. What it missed is that
+a within-block prefix sum is a **serial dependency chain of up to fifteen adds**, and
+`edge_range` is the router's hottest read — once per A* pop, and 1,600 times per
+`find_nearest_edge` window scan. On a pack that fits in RAM, where nothing misses,
+that arithmetic is the whole cost and there is no miss saved to pay for it.
+
+Measured on California, which is the *favourable* case: the pack is 370 MB on a 94 GB
+box, so even a `posix_fadvise`-evicted run is reading from local disk in seconds. The
+case v7 was designed for — a planet-sized pack where each node read is a major fault —
+would have to overcome a 10% arithmetic penalty before it broke even, and nothing here
+suggests it would.
+
+A variant storing `u16 prefix[16]` instead of degrees would make `edge_range` two byte
+loads and no loop, at 10.25 bytes a node rather than 9.25 — about **−0.76 GB** instead
+of −1.19 GB, and it reintroduces the block-boundary case for one node in sixteen. That
+is the shape worth trying if the last gigabyte is ever wanted. It was not tried here,
+because the target was already met at v6 and the measurement above is the answer to
+the question that was actually asked.
 
 ## Build-time memory
 
