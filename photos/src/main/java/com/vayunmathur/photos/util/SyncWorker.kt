@@ -26,6 +26,9 @@ import androidx.work.WorkerParameters
 import androidx.work.ListenableWorker.Result as WorkResult
 import com.vayunmathur.library.ocr.OcrEngine
 import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.photos.data.ClipResult
+import com.vayunmathur.photos.data.ExifResult
+import com.vayunmathur.photos.data.OcrResult
 import com.vayunmathur.photos.data.Person
 import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.data.PhotoFace
@@ -39,6 +42,7 @@ import android.graphics.Bitmap
 import android.graphics.ImageDecoder
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
@@ -70,8 +74,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
             syncPhotos(applicationContext, repository, null, if (needsMimeBackfill) 0L else lastGeneration)
         }
         
-        val photos = repository.getAll()
-        setExifData(photos, repository, applicationContext)
+        setExifData(repository, applicationContext)
         
         // OCR and face grouping are both always on (no opt-in). Each worker is
         // inert if its data/model assets are missing.
@@ -311,15 +314,25 @@ private fun Context.syncForegroundInfo(
     return ForegroundInfo(notificationId, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
 }
 
-suspend fun setExifData(photos: List<Photo>, repository: PhotosRepository, context: Context) = coroutineScope {
-    val ps = photos.filter { !it.exifSet }.sortedByDescending { it.date }
-    ps.chunked(50).forEach { photosChunk ->
-        val newPhotos = photosChunk.map { photo ->
+/**
+ * Parse EXIF/XMP for every photo that hasn't been through it yet and write the
+ * geo/panorama columns back.
+ *
+ * Driven off a projection of the un-parsed rows rather than the whole library:
+ * this used to be handed `getAll()` (a `SELECT *` over every photo, embeddings
+ * included) and wrote those same blobs straight back via `upsertAll`. The write
+ * is column-targeted for the same reason — reconstructing a [Photo] from the
+ * projection and upserting it would write NULL over every clipEmbedding.
+ */
+suspend fun setExifData(repository: PhotosRepository, context: Context) = coroutineScope {
+    val targets = repository.getUnscannedForExif()
+    targets.chunked(EXIF_CHUNK).forEach { chunk ->
+        val results = chunk.map { target ->
             async(Dispatchers.IO) {
                 try {
                     val (latLong, panoData) = context.contentResolver.openInputStream(
                         MediaStore.setRequireOriginal(
-                            photo.uri.toUri()
+                            target.uri.toUri()
                         )
                     )?.use { inputStream ->
                         val exif = ExifInterface(inputStream)
@@ -327,20 +340,23 @@ suspend fun setExifData(photos: List<Photo>, repository: PhotosRepository, conte
                         val pano = PanoXmpParser.parse(exif.getAttribute(ExifInterface.TAG_XMP))
                         Pair(ll, pano)
                     } ?: Pair(null, null)
-                    photo.copy(
-                        exifSet = true,
+                    ExifResult(
+                        id = target.id,
                         lat = latLong?.getOrNull(0),
                         long = latLong?.getOrNull(1),
-                        panoData = panoData,
+                        pano = panoData,
                     )
                 } catch (_: Exception) {
-                    photo.copy(exifSet = true) // Mark as set even on error to avoid retry every time
+                    // Mark as set even on error to avoid retry every time.
+                    ExifResult(id = target.id, lat = null, long = null, pano = null)
                 }
             }
         }.awaitAll()
-        repository.upsertAll(newPhotos)
+        repository.setExifResults(results)
     }
 }
+
+private const val EXIF_CHUNK = 50
 
 /**
  * Sustained on-device AI indexing (OCR, CLIP, face models) heats the phone.
@@ -362,7 +378,7 @@ private const val BATCH_COOLDOWN_EVERY = 20
 private const val BATCH_COOLDOWN_MS = 5_000L
 
 suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineScope {
-    val photos = repository.getUnscannedForOCR().sortedByDescending { it.date }
+    val photos = repository.getUnscannedForOCR()
     if (photos.isEmpty()) return@coroutineScope
 
     val ocrEngine = OcrEngine(context)
@@ -370,6 +386,22 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
     if (!ocrEngine.isAvailable()) {
         Log.w("OCRWorker", "OCR models unavailable; skipping OCR")
         return@coroutineScope
+    }
+
+    // Accumulated so a scan invalidates the Photo table once per flush rather
+    // than once per photo. Flushed in a `finally` so cancellation and errors
+    // still persist the work already done.
+    val pendingResults = mutableListOf<OcrResult>()
+    val pendingSkipped = mutableListOf<Long>()
+    suspend fun flush() {
+        if (pendingResults.isNotEmpty()) {
+            repository.setOcrResults(pendingResults.toList())
+            pendingResults.clear()
+        }
+        if (pendingSkipped.isNotEmpty()) {
+            repository.setOcrScanned(pendingSkipped.toList())
+            pendingSkipped.clear()
+        }
     }
 
     var processed = 0
@@ -380,7 +412,8 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
             // Skip tiny images (icons/thumbnails); mark scanned so we don't retry.
             val largestDim = maxOf(photo.width, photo.height)
             if (largestDim in 1 until MIN_OCR_DIM) {
-                repository.upsertAll(listOf(photo.copy(ocrScanned = true)))
+                pendingSkipped += photo.id
+                if (pendingSkipped.size >= INDEX_FLUSH_EVERY) flush()
                 continue
             }
 
@@ -406,11 +439,12 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
 
             // Store result and mark scanned regardless of outcome (mirrors faces).
             val text = result?.text
-            repository.upsertAll(listOf(photo.copy(
-                ocrText = text,
-                ocrBoxes = result?.takeIf { it.boxes.isNotEmpty() }?.toJson(),
-                ocrScanned = true,
-            )))
+            pendingResults += OcrResult(
+                id = photo.id,
+                text = text,
+                boxes = result?.takeIf { it.boxes.isNotEmpty() }?.toJson(),
+            )
+            if (pendingResults.size >= INDEX_FLUSH_EVERY) flush()
             Log.i("OCRWorker", "OCR for ${photo.id}: ${text?.take(50)?.replace("\n", " ")}")
 
             // Short pause between images keeps sustained CPU/battery use low.
@@ -421,8 +455,20 @@ suspend fun runOCR(repository: PhotosRepository, context: Context) = coroutineSc
         }
     } finally {
         ocrEngine.close()
+        // runCatching so a failed flush cannot replace the exception that unwound us
+        // (a CancellationException in particular). Unflushed photos simply stay
+        // unscanned and are picked up by the next run.
+        withContext(NonCancellable) { runCatching { flush() } }
     }
 }
+
+/**
+ * How many indexed photos accumulate before their rows are written. Each flush
+ * is one transaction and therefore one Photo-table invalidation, which every
+ * gallery flow reacts to — at one write per photo the UI spent a scan
+ * recomputing rather than drawing.
+ */
+private const val INDEX_FLUSH_EVERY = 25
 
 private const val OCR_INTER_ITEM_DELAY_MS = 250L
 
@@ -494,40 +540,57 @@ suspend fun runClipIndexing(repository: PhotosRepository, context: Context) = co
         dataStore.setString("clip_model_id", modelId)
     }
 
-    val photos = repository.getUnscannedForClip().sortedByDescending { it.date }
+    val photos = repository.getUnscannedForClip()
     if (photos.isEmpty()) return@coroutineScope
 
+    // See INDEX_FLUSH_EVERY: batched so a scan doesn't invalidate the Photo
+    // table once per embedded photo.
+    val pending = mutableListOf<ClipResult>()
+    suspend fun flush() {
+        if (pending.isEmpty()) return
+        repository.setClipResults(pending.toList())
+        pending.clear()
+    }
+
     var processed = 0
-    for (photo in photos) {
-        ensureActive()
+    try {
+        for (photo in photos) {
+            ensureActive()
 
-        val t0 = System.currentTimeMillis()
-        val embedding = try {
-            ClipEmbedder.imageEmbedding(context, photo.uri.toUri())
-        } catch (e: ClipEmbedder.ImageFailedException) {
-            // The embedder is healthy but this one image couldn't be decoded: mark it scanned
-            // with no vector so we skip it rather than blocking the queue on it forever.
-            Log.w("ClipWorker", "Skipping un-embeddable photo ${photo.id}: ${e.message}")
-            repository.upsertAll(listOf(photo.copy(clipEmbedding = null, clipScanned = true)))
+            val t0 = System.currentTimeMillis()
+            val embedding = try {
+                ClipEmbedder.imageEmbedding(context, photo.uri.toUri())
+            } catch (e: ClipEmbedder.ImageFailedException) {
+                // The embedder is healthy but this one image couldn't be decoded: mark it scanned
+                // with no vector so we skip it rather than blocking the queue on it forever.
+                Log.w("ClipWorker", "Skipping un-embeddable photo ${photo.id}: ${e.message}")
+                pending += ClipResult(id = photo.id, embedding = null)
+                if (pending.size >= INDEX_FLUSH_EVERY) flush()
+                delay(CLIP_INTER_ITEM_DELAY_MS)
+                continue
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Anything else is systemic (model failed to load): stop the run WITHOUT marking
+                // scanned so these photos retry on the next pass.
+                Log.w("ClipWorker", "Embedding unavailable; pausing indexing", e)
+                return@coroutineScope
+            }
+
+            Log.d("ClipWorker", "Embedded photo ${photo.id} (${embedding.size}d) in ${System.currentTimeMillis() - t0}ms")
+            pending += ClipResult(id = photo.id, embedding = ClipEmbedder.floatsToBytes(embedding))
+            if (pending.size >= INDEX_FLUSH_EVERY) flush()
+
+            // Short pause between images keeps sustained CPU/battery use low.
             delay(CLIP_INTER_ITEM_DELAY_MS)
-            continue
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            // Anything else is systemic (model failed to load): stop the run WITHOUT marking
-            // scanned so these photos retry on the next pass.
-            Log.w("ClipWorker", "Embedding unavailable; pausing indexing", e)
-            return@coroutineScope
+            // Longer cooling break every batch so the device can shed heat.
+            processed++
+            coolDownBetweenBatches(processed, "ClipWorker")
         }
-
-        Log.d("ClipWorker", "Embedded photo ${photo.id} (${embedding.size}d) in ${System.currentTimeMillis() - t0}ms")
-        repository.upsertAll(listOf(photo.copy(clipEmbedding = ClipEmbedder.floatsToBytes(embedding), clipScanned = true)))
-
-        // Short pause between images keeps sustained CPU/battery use low.
-        delay(CLIP_INTER_ITEM_DELAY_MS)
-        // Longer cooling break every batch so the device can shed heat.
-        processed++
-        coolDownBetweenBatches(processed, "ClipWorker")
+    } finally {
+        // Covers the systemic-failure return above as well as cancellation, so
+        // photos already embedded in this run are never re-embedded.
+        withContext(NonCancellable) { runCatching { flush() } }
     }
 }
 
@@ -605,60 +668,77 @@ suspend fun runFaceIndexing(repository: PhotosRepository, context: Context) {
         .map { Cluster(it, FaceRecognizer.bytesToFloats(it.centroid)) }
         .toMutableList()
 
-    val photos = repository.getUnscannedForFaces().sortedByDescending { it.date }
+    val photos = repository.getUnscannedForFaces()
     Log.i("FaceWorker", "Face indexing start: ${photos.size} photos to scan, ${clusters.size} existing clusters")
     var facesTotal = 0
     var photosWithFaces = 0
     var decoded = 0
-    for (photo in photos) {
-        currentCoroutineContext().ensureActive()
 
-        var didInference = false
-        try {
-            val bitmap = loadBitmapForFaces(context, photo.uri.toUri())
-            if (bitmap != null) {
-                decoded++
-                didInference = true
-                // Read before recycle: the box columns are normalised against
-                // this bitmap, so its dimensions have to be stored with them.
-                val srcWidth = bitmap.width
-                val srcHeight = bitmap.height
-                val faces = FaceRecognizer.detectAndEmbed(context, bitmap)
-                bitmap.recycle()
-                if (faces.isNotEmpty()) {
-                    photosWithFaces++; facesTotal += faces.size
-                    Log.i("FaceWorker", "photo ${photo.id}: ${faces.size} face(s) (running total: $facesTotal)")
+    // See INDEX_FLUSH_EVERY. Face rows are accumulated alongside the scanned ids and
+    // committed with them in one transaction, so a batch is all-or-nothing: a worker
+    // killed mid-batch cannot leave rows behind that a re-scan would duplicate.
+    val pendingScanned = mutableListOf<Long>()
+    val pendingFaces = mutableListOf<PhotoFace>()
+    suspend fun flush() {
+        if (pendingScanned.isEmpty()) return
+        repository.commitFaceScan(pendingScanned.toList(), pendingFaces.toList())
+        pendingScanned.clear()
+        pendingFaces.clear()
+    }
+
+    try {
+        for (photo in photos) {
+            currentCoroutineContext().ensureActive()
+
+            var didInference = false
+            try {
+                val bitmap = loadBitmapForFaces(context, photo.uri.toUri())
+                if (bitmap != null) {
+                    decoded++
+                    didInference = true
+                    // Read before recycle: the box columns are normalised against
+                    // this bitmap, so its dimensions have to be stored with them.
+                    val srcWidth = bitmap.width
+                    val srcHeight = bitmap.height
+                    val faces = FaceRecognizer.detectAndEmbed(context, bitmap)
+                    bitmap.recycle()
+                    if (faces.isNotEmpty()) {
+                        photosWithFaces++; facesTotal += faces.size
+                        Log.i("FaceWorker", "photo ${photo.id}: ${faces.size} face(s) (running total: $facesTotal)")
+                    }
+                    pendingFaces += faces.map { face ->
+                        val clusterId = assignToCluster(face, clusters, repository)
+                        PhotoFace(
+                            photoId = photo.id,
+                            clusterId = clusterId,
+                            embedding = FaceRecognizer.floatsToBytes(face.embedding),
+                            left = face.left,
+                            top = face.top,
+                            right = face.right,
+                            bottom = face.bottom,
+                            srcWidth = srcWidth,
+                            srcHeight = srcHeight,
+                        )
+                    }
                 }
-                val rows = faces.map { face ->
-                    val clusterId = assignToCluster(face, clusters, repository)
-                    PhotoFace(
-                        photoId = photo.id,
-                        clusterId = clusterId,
-                        embedding = FaceRecognizer.floatsToBytes(face.embedding),
-                        left = face.left,
-                        top = face.top,
-                        right = face.right,
-                        bottom = face.bottom,
-                        srcWidth = srcWidth,
-                        srcHeight = srcHeight,
-                    )
-                }
-                if (rows.isNotEmpty()) repository.insertPhotoFaces(rows)
+            } catch (e: Exception) {
+                Log.e("FaceWorker", "Error scanning faces for photo ${photo.id}", e)
             }
-        } catch (e: Exception) {
-            Log.e("FaceWorker", "Error scanning faces for photo ${photo.id}", e)
-        }
 
-        // Mark scanned regardless of outcome so we don't retry forever.
-        repository.upsertAll(listOf(photo.copy(faceScanned = true)))
+            // Mark scanned regardless of outcome so we don't retry forever.
+            pendingScanned += photo.id
+            if (pendingScanned.size >= INDEX_FLUSH_EVERY) flush()
 
-        // Face indexing runs two ONNX models per photo (detector + embedder), so
-        // pace it like OCR/CLIP: a short pause after each photo we actually ran
-        // inference on, plus a longer cooling break every batch.
-        if (didInference) {
-            delay(FACE_INTER_ITEM_DELAY_MS)
-            coolDownBetweenBatches(decoded, "FaceWorker")
+            // Face indexing runs two ONNX models per photo (detector + embedder), so
+            // pace it like OCR/CLIP: a short pause after each photo we actually ran
+            // inference on, plus a longer cooling break every batch.
+            if (didInference) {
+                delay(FACE_INTER_ITEM_DELAY_MS)
+                coolDownBetweenBatches(decoded, "FaceWorker")
+            }
         }
+    } finally {
+        withContext(NonCancellable) { runCatching { flush() } }
     }
     Log.i("FaceWorker", "Face indexing done: decoded=$decoded/${photos.size}, $facesTotal faces in $photosWithFaces photos, ${repository.getPersons().size} clusters")
 
@@ -703,7 +783,13 @@ private suspend fun assignToCluster(
             centroid = FaceRecognizer.floatsToBytes(best.centroid),
             faceCount = n + 1,
         )
-        repository.updatePerson(best.person)
+        // Column-targeted, so a name the user enters mid-scan is not overwritten
+        // by the null carried in this snapshot (loaded once at scan start).
+        repository.updateClusterCentroid(
+            id = best.person.id,
+            centroid = best.person.centroid,
+            faceCount = best.person.faceCount,
+        )
         return best.person.id
     }
 
@@ -750,7 +836,14 @@ private suspend fun mergeSimilarClusters(repository: PhotosRepository) {
                     name = a.name ?: b.name,
                 )
                 repository.reassignCluster(b.id, a.id)
-                repository.updatePerson(merged)
+                // The name is resolved in SQL against the row's current value, so a
+                // name entered since `persons` was read still wins over this snapshot.
+                repository.mergeClusterInto(
+                    id = a.id,
+                    centroid = merged.centroid,
+                    faceCount = merged.faceCount,
+                    fallbackName = b.name,
+                )
                 repository.deletePerson(b.id)
                 persons[i] = merged
                 persons.removeAt(j)

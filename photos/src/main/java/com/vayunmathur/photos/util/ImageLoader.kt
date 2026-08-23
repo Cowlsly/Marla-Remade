@@ -36,19 +36,35 @@ import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.R
 
 object ImageLoader {
-    private lateinit var imageLoader: LibImageLoader
+    @Volatile
+    private var instance: LibImageLoader? = null
 
+    /**
+     * Built on first use rather than only from `MainActivity.onCreate`.
+     *
+     * [PhotoItem] is reached from entry points that never run MainActivity — the
+     * home-screen widget, the assistant, an incoming ACTION_VIEW — where a
+     * `lateinit` field threw `UninitializedPropertyAccessException`.
+     */
+    private fun loader(context: Context): LibImageLoader =
+        instance ?: synchronized(this) {
+            instance ?: build(context.applicationContext).also { instance = it }
+        }
+
+    /** Warms the loader during app start; not required for correctness. */
     fun init(context: Context) {
-        imageLoader = LibImageLoader.Builder(context)
-            .memoryCache {
-                MemoryCache.Builder(context).maxSizePercent(0.25).build()
-            }
-            .diskCache {
-                DiskCache.Builder().directory(context.cacheDir.resolve("image_cache")).maxSizePercent(0.05).build()
-            }
-            .respectCacheHeaders(false)
-            .build()
+        loader(context)
     }
+
+    private fun build(context: Context): LibImageLoader = LibImageLoader.Builder(context)
+        .memoryCache {
+            MemoryCache.Builder(context).maxSizePercent(0.25).build()
+        }
+        .diskCache {
+            DiskCache.Builder().directory(context.cacheDir.resolve("image_cache")).maxSizePercent(0.05).build()
+        }
+        .respectCacheHeaders(false)
+        .build()
 
     @Composable
     fun PhotoItem(photo: Photo, modifier: Modifier, onClick: (() -> Unit)? = null) {
@@ -72,7 +88,7 @@ object ImageLoader {
                     .crossfade(true)
                     .size(256)
                     .build(),
-                imageLoader = imageLoader,
+                imageLoader = loader(context),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
@@ -122,8 +138,8 @@ object ImageLoader {
         onClick: () -> Unit,
         /**
          * How the tile paints its photo. A preview seam: the default decodes a MediaStore
-         * URI through [imageLoader], which only exists once MainActivity has initialised it,
-         * so the store-listing previews substitute a placeholder here.
+         * URI through the shared loader, which Layoutlib cannot do, so the store-listing
+         * previews substitute a placeholder here.
          */
         thumbnail: @Composable (Photo, Modifier) -> Unit = { p, m -> PhotoItem(p, m) },
     ) {

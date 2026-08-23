@@ -36,7 +36,7 @@ data class PanoData(
 }
 
 @Serializable
-@Entity(indices = [Index(value = ["date"])])
+@Entity(indices = [Index(value = ["date"]), Index(value = ["isTrashed", "duration"])])
 data class Photo(
     @PrimaryKey(autoGenerate = true) override val id: Long = 0,
     val name: String,

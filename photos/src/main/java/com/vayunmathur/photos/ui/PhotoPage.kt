@@ -45,6 +45,7 @@ import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -118,21 +119,21 @@ data class ZoomState(val scale: Float = 1f, val offset: Offset = Offset.Zero)
 @Composable
 fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapViewModel, id: Long, overridePhotosList: List<Photo>?, pendingUri: String? = null, backStack: NavBackStack<Route>? = null) {
     val photosAll by galleryViewModel.photos.collectAsState()
-    val photos = overridePhotosList ?: photosAll.filter { !it.isTrashed }
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
     // Photos deleted from within this viewer, hidden immediately so the pager
     // advances to the next photo without waiting for the MediaStore resync.
     val locallyDeleted = remember { mutableStateListOf<Long>() }
-    val photosSorted = remember(photos, locallyDeleted.toList()) {
-        photos.asSequence()
-            .filter { it.id !in locallyDeleted }
-            .sortedByDescending { it.date }
-            .toList()
+    // One remembered pass instead of an unmemoized filter plus a sort plus two
+    // index scans in the composable body. The sort is gone: the DAO returns rows
+    // newest-first (ORDER BY date DESC) and every list handed in via
+    // overridePhotosList is already date-descending.
+    val photosSorted = remember(photosAll, overridePhotosList, locallyDeleted.toList()) {
+        val source = overridePhotosList ?: photosAll.filter { !it.isTrashed }
+        source.filter { it.id !in locallyDeleted }
     }
     val matchedCounts by galleryViewModel.faceCountByPhoto.collectAsState()
     val faceBoxes by galleryViewModel.faceBoxesByPhoto.collectAsState()
-    val people by galleryViewModel.people.collectAsState()
 
     // In-viewer delete: move the current photo to the system trash via the same
     // MediaStore IntentSender flow the grid uses. MANAGE_MEDIA (enforced at app
@@ -223,10 +224,20 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
                     state = pagerState,
                     modifier = Modifier.fillMaxSize().padding(paddingValues),
                     beyondViewportPageCount = 1,
-                    userScrollEnabled = true
+                    userScrollEnabled = true,
+                    // Without a key, a list change re-associates pages by index, so
+                    // the two neighbours kept composed either side end up holding
+                    // the wrong photo.
+                    key = { photosSorted[it].id },
             ) { pageIndex ->
                 val photo = photosSorted[pageIndex]
-                val zoomState = zoomStates[photo.id] ?: ZoomState()
+                // derivedStateOf rather than a direct map read: reading zoomStates
+                // here would recompose this pager item — and all of
+                // PhotoDetailView — on every frame of a pinch. The state object is
+                // passed down and read only inside draw/layer lambdas.
+                val zoomState = remember(photo.id) {
+                    derivedStateOf { zoomStates[photo.id] ?: ZoomState() }
+                }
 
                 PhotoDetailView(
                         photo = photo,
@@ -240,9 +251,14 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
                         peopleCount = matchedCounts[photo.id] ?: 0,
                         faceBoxes = faceBoxes[photo.id],
                         onOpenPerson = { clusterId ->
-                            // The same navigation the People grid performs.
-                            people.firstOrNull { it.id == clusterId }?.let { cluster ->
-                                backStack?.add(Route.PhotoPage(cluster.coverPhoto.id, cluster.photos))
+                            // Resolved on demand rather than by collecting the whole
+                            // `people` list here, which this screen needed for
+                            // nothing else.
+                            coroutineScope.launch {
+                                val clusterPhotos = galleryViewModel.photosForCluster(clusterId)
+                                clusterPhotos.firstOrNull()?.let { first ->
+                                    backStack?.add(Route.PhotoPage(first.id, clusterPhotos))
+                                }
                             }
                         },
                         onZoomUpdate = { newState -> zoomStates[photo.id] = newState },
@@ -303,7 +319,13 @@ fun PhotoDetailView(
         pageIndex: Int,
         isSettled: Boolean,
         isMetadataVisible: Boolean,
-        currentZoom: ZoomState,
+        /**
+         * Live zoom/pan for this page. A [State] rather than a value so the reads
+         * happen inside gesture handlers and draw/layer lambdas: a pinch then
+         * re-runs the transform without recomposing the image, the overlays or the
+         * metadata card.
+         */
+        currentZoom: State<ZoomState>,
         peopleCount: Int = 0,
         faceBoxes: PhotoFaceBoxes? = null,
         onOpenPerson: (Long) -> Unit = {},
@@ -333,7 +355,15 @@ fun PhotoDetailView(
     }
     var size by remember { mutableStateOf(IntSize.Zero) }
 
-    val updatedZoomState by rememberUpdatedState(currentZoom)
+    // The viewer never shows more than screen resolution, so the decode is capped
+    // to the screen's longest edge rather than the file's. Constant for the life
+    // of the composition, so it can't churn the cache key the way tracking the
+    // measured container size would.
+    val viewerImageSize = remember(context) {
+        val metrics = context.resources.displayMetrics
+        maxOf(metrics.widthPixels, metrics.heightPixels)
+    }
+
     val updatedOnZoomUpdate by rememberUpdatedState(onZoomUpdate)
     val updatedOnToggleMetadata by rememberUpdatedState(onToggleMetadata)
 
@@ -352,7 +382,7 @@ fun PhotoDetailView(
     var ocrClearToken by remember { mutableIntStateOf(0) }
     LaunchedEffect(Unit) {
         snapshotFlow { pageOffset }.filter { it >= 0.99f }.distinctUntilChanged().collect {
-            if (updatedZoomState.scale > 1f) {
+            if (currentZoom.value.scale > 1f) {
                 updatedOnZoomUpdate(ZoomState())
             }
             ocrClearToken++
@@ -366,7 +396,9 @@ fun PhotoDetailView(
     val canHaveOcrText = photo.videoData == null && !photo.isGif
     LaunchedEffect(photo.id, isSettled, canHaveOcrText) {
         if (isSettled && canHaveOcrText) {
-            ocrLayout = OcrBoxStore.layoutFor(context, photo)
+            // layoutFor JSON-decodes every recognised line and quad, which is far
+            // too much to do on Main.immediate on every swipe.
+            ocrLayout = withContext(Dispatchers.Default) { OcrBoxStore.layoutFor(context, photo) }
         }
     }
 
@@ -391,7 +423,7 @@ fun PhotoDetailView(
                                         onTap = { updatedOnToggleMetadata() },
                                         onDoubleTap = {
                                             val newScale =
-                                                    if (updatedZoomState.scale > 1f) 1f else 2.5f
+                                                    if (currentZoom.value.scale > 1f) 1f else 2.5f
                                             updatedOnZoomUpdate(
                                                     ZoomState(
                                                             scale = newScale,
@@ -410,11 +442,12 @@ fun PhotoDetailView(
                                         val panChange = event.calculatePan()
 
                                         val isPinching = zoomChange != 1f
-                                        val isZoomed = updatedZoomState.scale > 1.01f
+                                        val zoom = currentZoom.value
+                                        val isZoomed = zoom.scale > 1.01f
 
                                         if (isZoomed || isPinching) {
                                             val newScale =
-                                                    (updatedZoomState.scale * zoomChange).coerceIn(
+                                                    (zoom.scale * zoomChange).coerceIn(
                                                             1f,
                                                             5f
                                                     )
@@ -423,7 +456,7 @@ fun PhotoDetailView(
                                                 val maxX = (size.width * (newScale - 1) / 2)
                                                 val maxY = (size.height * (newScale - 1) / 2)
 
-                                                val newOffset = updatedZoomState.offset + panChange
+                                                val newOffset = zoom.offset + panChange
 
                                                 val isAtLeftEdge =
                                                         newOffset.x >= maxX && panChange.x > 0
@@ -458,12 +491,15 @@ fun PhotoDetailView(
                             }
     ) {
         // Shared by the image and the OCR text overlay so the two can't drift apart.
+        // Reads currentZoom inside the layer block, so a pinch updates the GPU
+        // transform without recomposing anything in this subtree.
         val zoomModifier =
                 Modifier.graphicsLayer {
-                    scaleX = currentZoom.scale
-                    scaleY = currentZoom.scale
-                    translationX = currentZoom.offset.x
-                    translationY = currentZoom.offset.y
+                    val zoom = currentZoom.value
+                    scaleX = zoom.scale
+                    scaleY = zoom.scale
+                    translationX = zoom.offset.x
+                    translationY = zoom.offset.y
                 }
         if (photo.videoData == null) {
             val imageModifier =
@@ -483,8 +519,19 @@ fun PhotoDetailView(
                         model =
                                 ImageRequest.Builder(context)
                                         .data(photo.uri.toUri())
-                                        .diskCacheKey("thumb_${photo.id}_${photo.dateModified}_$refreshKey")
+                                        // refreshKey stays out of the disk key: it bumps on
+                                        // every ON_RESUME, so including it there made a
+                                        // return from the editor or a share sheet re-fetch
+                                        // and re-write the file. The memory key still
+                                        // carries it, which is the point — the pixels may
+                                        // have been edited.
+                                        .diskCacheKey("thumb_${photo.id}_${photo.dateModified}")
                                         .memoryCacheKey("thumb_${photo.id}_${photo.dateModified}_$refreshKey")
+                                        // Without a size this decodes at full resolution: a
+                                        // 12 MP photo is ~48 MB as ARGB_8888, enough for one
+                                        // opened photo to evict every grid thumbnail from a
+                                        // memory cache measured in tens of MB.
+                                        .size(viewerImageSize)
                                         .build(),
                         contentDescription = null,
                         modifier = imageModifier,
@@ -509,7 +556,7 @@ fun PhotoDetailView(
                         layout = layout,
                         containerSize = size,
                         showOutlines = isMetadataVisible,
-                        zoom = currentZoom.scale,
+                        zoom = { currentZoom.value.scale },
                         modifier = Modifier.fillMaxSize().then(zoomModifier)
                 )
             }
@@ -531,7 +578,7 @@ fun PhotoDetailView(
                 FaceBoxLayer(
                         boxes = boxes,
                         containerSize = size,
-                        zoom = currentZoom.scale,
+                        zoom = { currentZoom.value.scale },
                         onFaceClick = onOpenPerson,
                         modifier = Modifier.fillMaxSize()
                 )

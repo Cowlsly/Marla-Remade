@@ -40,18 +40,18 @@ import kotlinx.coroutines.withContext
 class PhotoGlanceWidget : GlanceAppWidget() {
     override suspend fun provideGlance(context: Context, id: GlanceId) {
 
-        val photos = PhotosRepository.get(context.applicationContext).getAll()
+        val uris = PhotosRepository.get(context.applicationContext).getStillPhotoUris()
 
         provideContent {
-            var photo by remember(photos) { mutableStateOf(photos.filter{it.videoData == null}.randomOrNull()) }
-            val bitmap by produceState<Bitmap?>(initialValue = null, photo) {
+            var uri by remember(uris) { mutableStateOf(uris.randomOrNull()) }
+            val bitmap by produceState<Bitmap?>(initialValue = null, uri) {
                 value = withContext(Dispatchers.IO) {
-                    photo?.let { getResizedBitmap(context, it.uri.toUri(), 600) }
+                    uri?.let { getResizedBitmap(context, it.toUri(), 600) }
                 }
             }
             DynamicThemeGlance(context) {
                 bitmap?.let {
-                    Content(it) { photo = photos.randomOrNull() }
+                    Content(it) { uri = uris.randomOrNull() }
                 }
             }
         }

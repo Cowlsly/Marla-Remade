@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.Delete
 import androidx.room.Query
 import androidx.room.RoomDatabase
+import androidx.room.Transaction
 import androidx.room.Upsert
 import androidx.room.migration.Migration
 import kotlinx.coroutines.flow.Flow
@@ -54,28 +55,118 @@ interface PhotoDao {
     @Query("SELECT count(*) FROM Photo WHERE ocrScanned = 1 AND isTrashed = 0 AND duration IS NULL")
     fun getOCRCountFlow(): Flow<Int>
 
-    /** Photos that count toward OCR indexing (denominator of the progress bar). */
+    /**
+     * Photos that count toward on-device indexing — the denominator shared by the
+     * OCR, CLIP and face progress bars.
+     *
+     * One query rather than three: the OCR/CLIP/face variants were byte-identical,
+     * so every write during a scan re-ran the same full table scan three times for
+     * three observers of the same number.
+     */
     @Query("SELECT count(*) FROM Photo WHERE isTrashed = 0 AND duration IS NULL")
-    fun getOCRTargetCountFlow(): Flow<Int>
+    fun getIndexTargetCountFlow(): Flow<Int>
+
+    // The three getUnscannedFor* queries project into [PhotoScanTarget] rather
+    // than selecting whole rows: a photo awaiting OCR/CLIP/face work has, by
+    // definition, nothing on it worth loading, and `SELECT *` pulled every
+    // already-computed clipEmbedding BLOB along with it. ORDER BY date DESC is
+    // served by index_Photo_date, so the workers no longer sort in memory.
 
     /** Not-yet-OCR'd images (skips videos and trashed items). */
-    @Query("SELECT * FROM Photo WHERE ocrScanned = 0 AND isTrashed = 0 AND duration IS NULL")
-    suspend fun getUnscannedForOCR(): List<Photo>
+    @Query("SELECT id, uri, date, width, height FROM Photo WHERE ocrScanned = 0 AND isTrashed = 0 AND duration IS NULL ORDER BY date DESC")
+    suspend fun getUnscannedForOCR(): List<PhotoScanTarget>
 
-    @Query("SELECT * FROM Photo WHERE faceScanned = 0 AND isTrashed = 0 AND duration IS NULL")
-    suspend fun getUnscannedForFaces(): List<Photo>
+    @Query("SELECT id, uri, date, width, height FROM Photo WHERE faceScanned = 0 AND isTrashed = 0 AND duration IS NULL ORDER BY date DESC")
+    suspend fun getUnscannedForFaces(): List<PhotoScanTarget>
 
     /** Not-yet-CLIP-embedded images (skips videos and trashed items). */
-    @Query("SELECT * FROM Photo WHERE clipScanned = 0 AND isTrashed = 0 AND duration IS NULL")
-    suspend fun getUnscannedForClip(): List<Photo>
+    @Query("SELECT id, uri, date, width, height FROM Photo WHERE clipScanned = 0 AND isTrashed = 0 AND duration IS NULL ORDER BY date DESC")
+    suspend fun getUnscannedForClip(): List<PhotoScanTarget>
+
+    /** Photos still needing EXIF/XMP parsing. */
+    @Query("SELECT id, uri FROM Photo WHERE exifSet = 0 ORDER BY date DESC")
+    suspend fun getUnscannedForExif(): List<PhotoExifTarget>
+
+    // ------------------------------------------------------------------
+    // Targeted indexing writes
+    //
+    // Every one of these used to be `upsertAll(listOf(photo.copy(...)))`, which
+    // rewrites the whole row — including the multi-KB clipEmbedding — to flip a
+    // boolean, and invalidates the Photo table once per photo. They are
+    // column-targeted and batched into a single transaction so a scan invalidates
+    // once per flush instead of once per item.
+    // ------------------------------------------------------------------
+
+    @Query("UPDATE Photo SET ocrScanned = 1 WHERE id IN (:ids)")
+    suspend fun setOcrScanned(ids: List<Long>)
+
+    @Query("UPDATE Photo SET faceScanned = 1 WHERE id IN (:ids)")
+    suspend fun setFaceScanned(ids: List<Long>)
+
+    @Query("UPDATE Photo SET ocrText = :text, ocrBoxes = :boxes, ocrScanned = 1 WHERE id = :id")
+    suspend fun setOcrResult(id: Long, text: String?, boxes: String?)
+
+    @Transaction
+    suspend fun setOcrResults(results: List<OcrResult>) {
+        for (r in results) setOcrResult(r.id, r.text, r.boxes)
+    }
+
+    @Query("UPDATE Photo SET clipEmbedding = :embedding, clipScanned = 1 WHERE id = :id")
+    suspend fun setClipResult(id: Long, embedding: ByteArray?)
+
+    @Transaction
+    suspend fun setClipResults(results: List<ClipResult>) {
+        for (r in results) setClipResult(r.id, r.embedding)
+    }
+
+    /**
+     * Write parsed EXIF/XMP by column.
+     *
+     * Deliberately not an upsert: the projection this is driven from
+     * ([PhotoExifTarget]) has no clipEmbedding, so upserting a reconstructed row
+     * would write NULL over every embedding it touched.
+     */
+    @Query(
+        "UPDATE Photo SET exifSet = 1, lat = :lat, `long` = :long, " +
+            "fullWidth = :fullWidth, fullHeight = :fullHeight, " +
+            "croppedWidth = :croppedWidth, croppedHeight = :croppedHeight, " +
+            "croppedLeft = :croppedLeft, croppedTop = :croppedTop, " +
+            "projectionType = :projectionType WHERE id = :id"
+    )
+    suspend fun setExif(
+        id: Long,
+        lat: Double?,
+        long: Double?,
+        fullWidth: Int?,
+        fullHeight: Int?,
+        croppedWidth: Int?,
+        croppedHeight: Int?,
+        croppedLeft: Int?,
+        croppedTop: Int?,
+        projectionType: String?,
+    )
+
+    @Transaction
+    suspend fun setExifResults(results: List<ExifResult>) {
+        for (r in results) {
+            setExif(
+                id = r.id,
+                lat = r.lat,
+                long = r.long,
+                fullWidth = r.pano?.fullWidth,
+                fullHeight = r.pano?.fullHeight,
+                croppedWidth = r.pano?.croppedWidth,
+                croppedHeight = r.pano?.croppedHeight,
+                croppedLeft = r.pano?.croppedLeft,
+                croppedTop = r.pano?.croppedTop,
+                projectionType = r.pano?.projectionType,
+            )
+        }
+    }
 
     /** Photos with a stored embedding, i.e. actually indexed (progress numerator). */
     @Query("SELECT count(*) FROM Photo WHERE clipEmbedding IS NOT NULL AND isTrashed = 0 AND duration IS NULL")
     fun getClipCountFlow(): Flow<Int>
-
-    /** Photos that count toward CLIP embedding (denominator of the progress bar). */
-    @Query("SELECT count(*) FROM Photo WHERE isTrashed = 0 AND duration IS NULL")
-    fun getClipTargetCountFlow(): Flow<Int>
 
     /** Lightweight (id, embedding) rows for semantic search; excludes trashed. */
     @Query("SELECT id, clipEmbedding FROM Photo WHERE clipEmbedding IS NOT NULL AND isTrashed = 0")
@@ -84,10 +175,6 @@ interface PhotoDao {
     /** Wipe every stored CLIP embedding (used when the model/version changes). */
     @Query("UPDATE Photo SET clipEmbedding = NULL, clipScanned = 0")
     suspend fun resetClipScanned()
-
-    /** Photos that count toward face indexing (denominator of the progress bar). */
-    @Query("SELECT count(*) FROM Photo WHERE isTrashed = 0 AND duration IS NULL")
-    fun getFaceTargetCountFlow(): Flow<Int>
 
     /** Photos already scanned for faces (numerator of the progress bar). */
     @Query("SELECT count(*) FROM Photo WHERE faceScanned = 1 AND isTrashed = 0 AND duration IS NULL")
@@ -107,6 +194,14 @@ interface PhotoDao {
     @Query("SELECT ocrBoxes FROM Photo WHERE id = :id")
     suspend fun getOcrBoxes(id: Long): String?
 
+    /**
+     * URIs of untrashed stills, for the home-screen widget's random pick. The
+     * widget needs nothing else off the row, and pulling whole rows meant loading
+     * every clipEmbedding in the library to choose one photo.
+     */
+    @Query("SELECT uri FROM Photo WHERE isTrashed = 0 AND duration IS NULL")
+    suspend fun getStillPhotoUris(): List<String>
+
     @Query("UPDATE Photo SET ocrBoxes = :json WHERE id = :id")
     suspend fun setOcrBoxes(id: Long, json: String?)
 }
@@ -117,13 +212,52 @@ data class PhotoEmbedding(
     val clipEmbedding: ByteArray,
 )
 
-@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 16, exportSchema = false)
+/**
+ * The columns an indexing worker needs to open, order and size a photo. Notably
+ * excludes clipEmbedding, ocrText and ocrBoxes.
+ */
+data class PhotoScanTarget(
+    val id: Long,
+    val uri: String,
+    val date: Long,
+    val width: Int,
+    val height: Int,
+)
+
+/** The columns the EXIF backfill needs. */
+data class PhotoExifTarget(
+    val id: Long,
+    val uri: String,
+)
+
+/** One photo's OCR output, for the batched write in [PhotoDao.setOcrResults]. */
+data class OcrResult(
+    val id: Long,
+    val text: String?,
+    val boxes: String?,
+)
+
+/** One photo's semantic embedding, for the batched write in [PhotoDao.setClipResults]. */
+data class ClipResult(
+    val id: Long,
+    val embedding: ByteArray?,
+)
+
+/** One photo's parsed EXIF/XMP, for the batched write in [PhotoDao.setExifResults]. */
+data class ExifResult(
+    val id: Long,
+    val lat: Double?,
+    val long: Double?,
+    val pano: PanoData?,
+)
+
+@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 17, exportSchema = false)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     abstract fun faceDao(): FaceDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
+        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16, MIGRATION_16_17)
     }
 }
 
@@ -174,6 +308,14 @@ val MIGRATION_7_8 = Migration(7, 8) {
     it.execSQL("CREATE INDEX IF NOT EXISTS `index_PhotoFace_photoId` ON `PhotoFace` (`photoId`)")
     it.execSQL("CREATE INDEX IF NOT EXISTS `index_PhotoFace_clusterId` ON `PhotoFace` (`clusterId`)")
     it.execSQL("UPDATE Photo SET faceScanned = 0")
+}
+
+val MIGRATION_16_17 = Migration(16, 17) {
+    // Index the predicate every progress count and every getUnscannedFor* query
+    // shares (`isTrashed = 0 AND duration IS NULL`). The only index before this
+    // was on `date`, so all of them full-scanned the table — once per observer,
+    // on every single write a scan made. No data changes.
+    it.execSQL("CREATE INDEX IF NOT EXISTS `index_Photo_isTrashed_duration` ON `Photo` (`isTrashed`, `duration`)")
 }
 
 val MIGRATION_8_9 = Migration(8, 9) {

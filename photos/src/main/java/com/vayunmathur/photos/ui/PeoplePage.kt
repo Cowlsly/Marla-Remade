@@ -68,7 +68,7 @@ fun PeoplePage(
     val people by galleryViewModel.people.collectAsState()
     val indexing by galleryViewModel.faceIndexing.collectAsState()
     val scanned by galleryViewModel.faceScannedCount.collectAsState()
-    val target by galleryViewModel.faceTargetCount.collectAsState()
+    val target by galleryViewModel.indexTargetCount.collectAsState()
     val modelsAvailable = remember { FaceRecognizer.modelsAvailable(context) }
 
     // The contact picker's result carries only the picked contact, with nothing to

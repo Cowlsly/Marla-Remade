@@ -57,10 +57,24 @@ fun AsyncImage(
         }
     }
 
-    val bitmapState = produceState<Bitmap?>(initialValue = null, key1 = request) {
+    // Synchronous memory-cache probe. On a hit the bitmap is available before the
+    // first frame, so a scrolled-in item paints immediately instead of showing an
+    // empty box for a frame and re-running its crossfade over an image that was
+    // already in memory.
+    val seeded = remember(request) { request?.let { loader.peekMemoryCache(it) } }
+
+    val bitmapState = produceState<Bitmap?>(initialValue = seeded, key1 = request) {
         if (request == null) {
             value = null
             onState?.invoke(AsyncImageState.Empty)
+            return@produceState
+        }
+        if (seeded != null) {
+            // Served by the probe. `value` is assigned explicitly because
+            // produceState only applies initialValue on first composition — on a
+            // key change it still holds the previous request's bitmap.
+            value = seeded
+            onState?.invoke(AsyncImageState.Success(BitmapPainter(seeded.asImageBitmap())))
             return@produceState
         }
         onState?.invoke(AsyncImageState.Loading)

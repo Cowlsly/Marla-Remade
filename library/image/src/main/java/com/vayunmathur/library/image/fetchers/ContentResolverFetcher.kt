@@ -1,10 +1,9 @@
 package com.vayunmathur.library.image.fetchers
 
 import android.content.Context
+import android.graphics.ImageDecoder
 import android.net.Uri
 import androidx.core.net.toUri
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
 class ContentResolverFetcher : Fetcher {
     override suspend fun fetch(data: Any?, context: Context): FetchResult? {
@@ -14,14 +13,15 @@ class ContentResolverFetcher : Fetcher {
             else -> return null
         }
         if (uri.scheme != "content") return null
-        return withContext(Dispatchers.IO) {
-            try {
-                context.contentResolver.openInputStream(uri)?.use { it.readBytes() }?.let {
-                    FetchResult.Bytes(it)
-                }
-            } catch (_: Exception) {
-                null
-            }
-        }
+
+        // Handed to the decoder as a source rather than read into a ByteArray:
+        // MediaStore images are multi-MB and the caller usually wants a thumbnail,
+        // so the whole encoded file never needs to exist in memory at once.
+        // Creating the source does no IO, so there is nothing to dispatch here.
+        val resolver = context.contentResolver
+        return FetchResult.Source(
+            decoderSource = ImageDecoder.createSource(resolver, uri),
+            openStream = { try { resolver.openInputStream(uri) } catch (_: Exception) { null } },
+        )
     }
 }

@@ -42,7 +42,13 @@ import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.util.GalleryViewModel
 import com.vayunmathur.photos.util.ImageLoader
 import com.vayunmathur.photos.util.PhotoMapViewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withContext
+import androidx.compose.runtime.snapshotFlow
+import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
 import com.vayunmathur.library.map.RasterMap
 import com.vayunmathur.library.map.TileSource
@@ -55,6 +61,19 @@ data class MapCluster(
     val allPhotos: List<Photo>,
     val count: Int,
 )
+
+/**
+ * The inputs [MapPage]'s per-frame re-projection last ran for, so an unchanged
+ * frame can be skipped. Deliberately not Compose state: `onFrame` runs every
+ * frame, and a state write there would mean a recomposition every frame.
+ */
+private class ProjectionMemo {
+    var position: CameraPosition? = null
+    var source: List<MapCluster>? = null
+}
+
+/** Minimum gap between re-clustering passes while the camera keeps moving. */
+private const val CLUSTER_THROTTLE_MS = 200L
 
 @Composable
 fun MapPage(
@@ -78,22 +97,34 @@ fun MapPage(
     var selectedCluster: MapCluster? by remember { mutableStateOf(null) }
 
     val dpsize = LocalWindowInfo.current.containerDpSize
+    val projectionMemo = remember { ProjectionMemo() }
 
-    LaunchedEffect(photos) {
-        cameraState.awaitProjection()
-        while (true) {
-            val projection = cameraState.projection ?: continue
-            val rawLocations = positions.map { (gps, photo) ->
-                val dpOffset = projection.screenLocationFromPosition(
-                    GeoPoint(gps.second, gps.first)
-                )
-                dpOffset to photo
-            }.filter { (dpOffset, _) ->
-                dpOffset.x.value > 0 && dpOffset.y.value > 0 && dpOffset.x < dpsize.width && dpOffset.y < dpsize.height
+    // Driven by camera movement rather than a fixed 200 ms tick, so an idle map
+    // does no work. This also removes the old `?: continue` on a null projection,
+    // which skipped the delay and spun the main dispatcher without suspending — a
+    // hard UI freeze until the viewport was measured.
+    //
+    // Projection is pure maths over immutable captured values, so the pass is safe
+    // off the main thread. conflate plus the trailing delay throttle a continuous
+    // pan to one pass per interval, dropping superseded camera states.
+    LaunchedEffect(positions, dpsize) {
+        snapshotFlow { cameraState.projection }
+            .filterNotNull()
+            .conflate()
+            .collect { projection ->
+                val rawLocations = withContext(Dispatchers.Default) {
+                    positions.mapNotNull { (gps, photo) ->
+                        val dpOffset = projection.screenLocationFromPosition(
+                            GeoPoint(gps.second, gps.first)
+                        )
+                        val visible = dpOffset.x.value > 0 && dpOffset.y.value > 0 &&
+                            dpOffset.x < dpsize.width && dpOffset.y < dpsize.height
+                        if (visible) dpOffset to photo else null
+                    }
+                }
+                photoMapViewModel.regenerateClusters(rawLocations, 50.dp)
+                delay(CLUSTER_THROTTLE_MS)
             }
-            photoMapViewModel.regenerateClusters(rawLocations, 50.dp)
-            delay(200)
-        }
     }
 
     LaunchedEffect(generatedClusters) {
@@ -115,28 +146,35 @@ fun MapPage(
                 },
                 onFrame = {
                     val projection = cameraState.projection
+                    val position = cameraState.position
 
-                    if (projection != null) {
-                        // FAST PATH: re-project existing clusters every frame to
-                        // prevent markers from drifting when panning/zooming
-                        // between re-clustering intervals.
+                    // FAST PATH: re-project existing clusters so markers don't
+                    // drift when panning/zooming between re-clustering intervals.
+                    // Gated on the inputs actually changing: this runs every frame,
+                    // and assigning `clusters` unconditionally was a state write —
+                    // so a recomposition — on every frame of a still map.
+                    if (projection != null &&
+                        (projectionMemo.position != position || projectionMemo.source !== generatedClusters)
+                    ) {
+                        projectionMemo.position = position
+                        projectionMemo.source = generatedClusters
+
                         val updatedClusters = generatedClusters.mapNotNull { cluster ->
                             val lat = cluster.coverPhoto.lat
                             val long = cluster.coverPhoto.long
-                            val nc = if (lat != null && long != null) {
-                                val newOffset = projection.screenLocationFromPosition(
-                                    GeoPoint(long, lat)
-                                )
-                                cluster.copy(position = newOffset)
-                            } else {
-                                null
-                            }
-                            if (cluster == selectedCluster) {
-                                selectedCluster = nc
-                            }
-                            nc
+                            if (lat == null || long == null) return@mapNotNull null
+                            cluster.copy(
+                                position = projection.screenLocationFromPosition(GeoPoint(long, lat))
+                            )
                         }
                         clusters = updatedClusters
+
+                        // Lifted out of the mapping pass, which mutated it while
+                        // iterating and matched on a value that includes the very
+                        // position being replaced.
+                        selectedCluster = selectedCluster?.let { selected ->
+                            updatedClusters.find { it.coverPhoto.id == selected.coverPhoto.id }
+                        }
                     }
                 }
             )

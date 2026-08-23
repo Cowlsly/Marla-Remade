@@ -6,7 +6,6 @@ import androidx.room.Index
 import androidx.room.Insert
 import androidx.room.PrimaryKey
 import androidx.room.Query
-import androidx.room.Update
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -57,13 +56,29 @@ data class PhotoFace(
     val srcHeight: Int,
 )
 
+/**
+ * A face's geometry without its 512-float [PhotoFace.embedding] BLOB.
+ *
+ * The UI needs where a face is and which cluster it belongs to, never the
+ * vector — and the vector dwarfs everything else on the row. Selecting it for
+ * the three view flows meant shipping the whole embedding table into memory on
+ * every face write during a scan.
+ */
+data class FaceGeometry(
+    val photoId: Long,
+    val clusterId: Long,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
+    val srcWidth: Int,
+    val srcHeight: Int,
+)
+
 @Dao
 interface FaceDao {
     @Insert
     suspend fun insertPerson(person: Person): Long
-
-    @Update
-    suspend fun updatePerson(person: Person)
 
     @Query("SELECT * FROM Person")
     suspend fun getPersons(): List<Person>
@@ -82,6 +97,28 @@ interface FaceDao {
     @Query("UPDATE Person SET name = :name WHERE id = :id")
     suspend fun setPersonName(id: Long, name: String?)
 
+    /**
+     * Update only the columns the clustering pass owns.
+     *
+     * Deliberately not an `@Update` of the whole [Person]: the indexer works
+     * from a snapshot loaded at scan start, so writing the entire row would
+     * clobber a [Person.name] the user entered *while* the scan was running
+     * with the stale null from that snapshot.
+     */
+    @Query("UPDATE Person SET centroid = :centroid, faceCount = :faceCount WHERE id = :id")
+    suspend fun updateClusterCentroid(id: Long, centroid: ByteArray, faceCount: Int)
+
+    /**
+     * Fold a merged cluster into the survivor [id].
+     *
+     * A name is the one thing here the user typed, so the survivor keeps its own
+     * if it has one and otherwise inherits [fallbackName] from the discarded
+     * row. `COALESCE` reads the *current* name rather than a snapshot, for the
+     * same reason [updateClusterCentroid] exists.
+     */
+    @Query("UPDATE Person SET centroid = :centroid, faceCount = :faceCount, name = COALESCE(name, :fallbackName) WHERE id = :id")
+    suspend fun mergeClusterInto(id: Long, centroid: ByteArray, faceCount: Int, fallbackName: String?)
+
     @Insert
     suspend fun insertPhotoFaces(faces: List<PhotoFace>)
 
@@ -95,9 +132,12 @@ interface FaceDao {
     @Query("UPDATE PhotoFace SET clusterId = :newId WHERE clusterId = :oldId")
     suspend fun reassignCluster(oldId: Long, newId: Long)
 
-    /** Every detected face, for grouping photos by cluster in the UI. */
-    @Query("SELECT * FROM PhotoFace")
-    fun allFacesFlow(): Flow<List<PhotoFace>>
+    /**
+     * Every detected face's geometry, for grouping photos by cluster in the UI.
+     * Excludes [PhotoFace.embedding]; see [FaceGeometry].
+     */
+    @Query("SELECT photoId, clusterId, `left`, `top`, `right`, `bottom`, srcWidth, srcHeight FROM PhotoFace")
+    fun faceGeometryFlow(): Flow<List<FaceGeometry>>
 
     @Query("SELECT DISTINCT photoId FROM PhotoFace WHERE clusterId = :clusterId")
     suspend fun photoIdsForCluster(clusterId: Long): List<Long>

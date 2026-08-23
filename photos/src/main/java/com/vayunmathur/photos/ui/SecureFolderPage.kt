@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -141,11 +142,16 @@ fun VaultPhotoItem(
     secureFolderViewModel: SecureFolderViewModel,
     onClick: () -> Unit,
 ) {
-    val thumbnails by secureFolderViewModel.thumbnails.collectAsState()
-    val bitmap = thumbnails[photo.thumbnailPath]
+    val bitmap by remember(photo.thumbnailPath) {
+        secureFolderViewModel.thumbnailState(photo.thumbnailPath)
+    }
 
-    LaunchedEffect(photo.thumbnailPath) {
-        secureFolderViewModel.requestThumbnail(photo.thumbnailPath, password)
+    // Keyed on emptiness as well as path, so a thumbnail the LRU evicted while this
+    // item was still on screen is decrypted again rather than staying a grey box.
+    LaunchedEffect(photo.thumbnailPath, bitmap == null) {
+        if (bitmap == null) {
+            secureFolderViewModel.requestThumbnail(photo.thumbnailPath, password)
+        }
     }
 
     Box(
@@ -162,9 +168,10 @@ fun VaultPhotoItem(
         // Guard against recycled bitmaps - defense in depth for the LRU cache bug.
         // When column count >=4, more thumbnails are visible and cache eviction
         // previously recycled bitmaps still being drawn by Compose.
-        if (bitmap != null && !bitmap.isRecycled) {
+        val currentBitmap = bitmap
+        if (currentBitmap != null && !currentBitmap.isRecycled) {
             Image(
-                bitmap = bitmap.asImageBitmap(),
+                bitmap = currentBitmap.asImageBitmap(),
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()

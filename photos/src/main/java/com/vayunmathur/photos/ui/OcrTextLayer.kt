@@ -53,7 +53,9 @@ import kotlin.math.roundToInt
  * mapped through the `ContentScale.Fit` letterbox this image is drawn in — hence
  * [containerSize] and the layout's own dimensions rather than [com.vayunmathur.photos.data.Photo.width].
  * The caller passes the image's zoom/pan `graphicsLayer` in [modifier] so the
- * text tracks pinch-zoom in lockstep.
+ * text tracks pinch-zoom in lockstep. [zoom] is a lambda so the stroke
+ * counter-scaling reads it in the draw phase, and a pinch redraws without
+ * recomposing.
  *
  * Everything drawn here has to stay legible on top of an arbitrary photo, which
  * rules out theme colours (a dynamic-colour primary is often a pale pastel that
@@ -66,7 +68,7 @@ fun OcrTextLayer(
     layout: OcrLayout,
     containerSize: IntSize,
     showOutlines: Boolean,
-    zoom: Float,
+    zoom: () -> Float,
     modifier: Modifier = Modifier,
 ) {
     if (layout.boxes.isEmpty() || containerSize.width <= 0 || containerSize.height <= 0) return
@@ -125,8 +127,8 @@ fun OcrTextLayer(
                 // The whole layer is inside the image's zoom transform, so the
                 // strokes are pre-divided by it to stay a constant thickness
                 // on screen instead of ballooning as the photo is magnified.
-                val halo = OUTLINE_HALO.toPx() / zoom
-                val line = OUTLINE_STROKE.toPx() / zoom
+                val halo = OUTLINE_HALO.toPx() / zoom()
+                val line = OUTLINE_STROKE.toPx() / zoom()
                 placements.forEach { p ->
                     // Wide dark stroke first, narrow light stroke centred inside it:
                     // one of the two always contrasts, whatever is underneath.

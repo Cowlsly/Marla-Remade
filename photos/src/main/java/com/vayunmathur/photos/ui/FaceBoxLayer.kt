@@ -44,6 +44,10 @@ import kotlin.math.roundToInt
  * things that must hold their on-screen size are counter-scaled by [zoom]: the
  * stroke widths, and the name labels.
  *
+ * [zoom] is a lambda, not a value, so it is read inside the draw and layer
+ * lambdas below rather than during composition — a pinch re-runs those without
+ * recomposing this layer or anything around it.
+ *
  * Colours are fixed rather than themed for the reason spelled out on
  * [OcrTextLayer]: a dynamic-colour pastel vanishes over a bright photo, so every
  * line is a light stroke sitting inside a dark halo.
@@ -52,7 +56,7 @@ import kotlin.math.roundToInt
 fun FaceBoxLayer(
     boxes: PhotoFaceBoxes,
     containerSize: IntSize,
-    zoom: Float,
+    zoom: () -> Float,
     onFaceClick: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -82,9 +86,10 @@ fun FaceBoxLayer(
             // Pre-divided by the zoom this whole layer sits inside, so the lines
             // stay a constant thickness on screen instead of ballooning with the
             // photo.
-            val halo = OUTLINE_HALO.toPx() / zoom
-            val line = OUTLINE_STROKE.toPx() / zoom
-            val corner = CornerRadius(BOX_CORNER.toPx() / zoom)
+            val scale = zoom()
+            val halo = OUTLINE_HALO.toPx() / scale
+            val line = OUTLINE_STROKE.toPx() / scale
+            val corner = CornerRadius(BOX_CORNER.toPx() / scale)
             placements.forEach { p ->
                 // Wide dark stroke first, narrow light stroke centred inside it:
                 // one of the two always contrasts, whatever is underneath.
@@ -135,8 +140,9 @@ fun FaceBoxLayer(
                         // grows with pinch-zoom.
                         .graphicsLayer {
                             transformOrigin = TransformOrigin(0f, 0f)
-                            scaleX = 1f / zoom
-                            scaleY = 1f / zoom
+                            val inverse = 1f / zoom()
+                            scaleX = inverse
+                            scaleY = inverse
                         }
                 ) {
                     Text(

@@ -27,6 +27,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -48,6 +49,8 @@ import com.vayunmathur.photos.data.Photo
 import com.vayunmathur.photos.util.GalleryViewModel
 import com.vayunmathur.photos.util.ImageLoader
 import com.vayunmathur.photos.util.SyncWorker
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -75,8 +78,17 @@ fun TrashPage(backStack: NavBackStack<Route>, galleryViewModel: GalleryViewModel
         }
     }
 
-    val photosGroupedByMonth by remember {
-        derivedStateOf { groupPhotosByMonth(trashedPhotos, resources) }
+    // Grouping is O(N) with a timezone conversion per photo, so it runs on
+    // Dispatchers.Default. The seed is computed once so the grid isn't blank on the
+    // first frame; produceState's initialValue is eagerly evaluated, hence the
+    // remember rather than an inline call.
+    val initialGrouping = remember { groupPhotosByMonth(trashedPhotos, resources) }
+    val photosGroupedByMonth by produceState(
+        initialValue = initialGrouping,
+        trashedPhotos,
+        resources,
+    ) {
+        value = withContext(Dispatchers.Default) { groupPhotosByMonth(trashedPhotos, resources) }
     }
 
     val closeSelection: (() -> Unit)? = if (isSelectionMode) ({ selectedIds.clear() }) else null

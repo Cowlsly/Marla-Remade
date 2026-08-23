@@ -18,8 +18,10 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
@@ -76,15 +78,17 @@ class GalleryViewModel(
 
     val ocrCount: StateFlow<Int> = photoDao.getOCRCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-    val ocrTargetCount: StateFlow<Int> = photoDao.getOCRTargetCountFlow()
+
+    /**
+     * Photos that count toward on-device indexing: the denominator shared by the
+     * OCR, CLIP and face progress bars, which all measure progress over the same
+     * set of photos. One flow, so one observer and one query per write.
+     */
+    val indexTargetCount: StateFlow<Int> = photoDao.getIndexTargetCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     /** Photos already embedded with TinyCLIP for semantic search (progress numerator). */
     val clipCount: StateFlow<Int> = photoDao.getClipCountFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-
-    /** Photos that count toward semantic indexing (progress denominator). */
-    val clipTargetCount: StateFlow<Int> = photoDao.getClipTargetCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     /** True while the face-grouping worker is actively indexing. */
@@ -95,10 +99,6 @@ class GalleryViewModel(
 
     /** Photos already scanned for faces (progress numerator). */
     val faceScannedCount: StateFlow<Int> = photoDao.getFaceScannedCountFlow()
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
-
-    /** Photos that need face scanning in total (progress denominator). */
-    val faceTargetCount: StateFlow<Int> = photoDao.getFaceTargetCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     /**
@@ -116,44 +116,58 @@ class GalleryViewModel(
      * unrelated image.
      */
     val people: StateFlow<List<PersonCluster>> =
-        combine(photoDao.getAllFlow(), faceDao.personsFlow(), faceDao.allFacesFlow()) { allPhotos, persons, faces ->
-            val byId = allPhotos.filter { !it.isTrashed }.associateBy { it.id }
-            val facesByCluster = faces.groupBy { it.clusterId }
-            persons.mapNotNull { person ->
-                val clusterFaces = facesByCluster[person.id].orEmpty()
-                    .mapNotNull { face -> byId[face.photoId]?.let { face to it } }
-                if (clusterFaces.isEmpty()) return@mapNotNull null
-                val (bestFace, bestPhoto) = clusterFaces.maxBy { (face, photo) ->
-                    (face.right - face.left).toDouble() * (face.bottom - face.top) *
-                        photo.width * photo.height
-                }
-                PersonCluster(
-                    id = person.id,
-                    name = person.name,
-                    coverPhoto = bestPhoto,
-                    faceLeft = bestFace.left,
-                    faceTop = bestFace.top,
-                    faceRight = bestFace.right,
-                    faceBottom = bestFace.bottom,
-                    photos = clusterFaces.map { it.second }
-                        .distinctBy { it.id }
-                        .sortedByDescending { it.date },
-                )
-            }.sortedByDescending { it.photos.size }
+        combine(photoDao.getAllFlow(), faceDao.personsFlow(), faceDao.faceGeometryFlow()) { allPhotos, persons, faces ->
+            Triple(allPhotos, persons, faces)
         }
+            // Every per-photo write during indexing re-emits upstream, far faster
+            // than the UI can consume. Conflating ahead of the projection means
+            // superseded snapshots are dropped instead of projected and thrown away.
+            .conflate()
+            .map { (allPhotos, persons, faces) ->
+                val byId = allPhotos.filter { !it.isTrashed }.associateBy { it.id }
+                val facesByCluster = faces.groupBy { it.clusterId }
+                persons.mapNotNull { person ->
+                    val clusterFaces = facesByCluster[person.id].orEmpty()
+                        .mapNotNull { face -> byId[face.photoId]?.let { face to it } }
+                    if (clusterFaces.isEmpty()) return@mapNotNull null
+                    val (bestFace, bestPhoto) = clusterFaces.maxBy { (face, photo) ->
+                        (face.right - face.left).toDouble() * (face.bottom - face.top) *
+                            photo.width * photo.height
+                    }
+                    PersonCluster(
+                        id = person.id,
+                        name = person.name,
+                        coverPhoto = bestPhoto,
+                        faceLeft = bestFace.left,
+                        faceTop = bestFace.top,
+                        faceRight = bestFace.right,
+                        faceBottom = bestFace.bottom,
+                        photos = clusterFaces.map { it.second }
+                            .distinctBy { it.id }
+                            .sortedByDescending { it.date },
+                    )
+                }.sortedByDescending { it.photos.size }
+            }
             // Per-photo writes during indexing re-emit the source flows constantly;
             // drop emissions where the projected cluster list is unchanged (value
             // equality of the PersonCluster data class) so the grid doesn't churn.
             // The representative can legitimately change mid-scan, so real changes
             // still get through.
             .distinctUntilChanged()
+            // Below flowOn, so the O(library) projection *and* the deep list
+            // comparison above both run off the main thread. Without this,
+            // stateIn(viewModelScope) runs every one of them on Main.immediate,
+            // which is what delayed a freshly-entered name from reaching the grid.
+            .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Number of detected faces (i.e. people) per photo, for the photo detail overlay. */
     val faceCountByPhoto: StateFlow<Map<Long, Int>> =
-        faceDao.allFacesFlow().map { faces ->
-            faces.groupBy { it.photoId }.mapValues { (_, list) -> list.size }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+        faceDao.faceGeometryFlow()
+            .conflate()
+            .map { faces -> faces.groupBy { it.photoId }.mapValues { (_, list) -> list.size } }
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /**
      * Face geometry per photo, for the viewer's face overlay. Combined with the
@@ -161,26 +175,32 @@ class GalleryViewModel(
      * not on the face row — which is also why [faceCountByPhoto] can't be reused.
      */
     val faceBoxesByPhoto: StateFlow<Map<Long, PhotoFaceBoxes>> =
-        combine(faceDao.allFacesFlow(), faceDao.personsFlow()) { faces, persons ->
-            val nameByCluster = persons.associate { it.id to it.name }
-            faces.groupBy { it.photoId }.mapValues { (_, rows) ->
-                PhotoFaceBoxes(
-                    // Duplicated across a photo's rows, so any one of them serves.
-                    srcWidth = rows.first().srcWidth,
-                    srcHeight = rows.first().srcHeight,
-                    faces = rows.map { row ->
-                        FaceBox(
-                            clusterId = row.clusterId,
-                            name = nameByCluster[row.clusterId],
-                            left = row.left,
-                            top = row.top,
-                            right = row.right,
-                            bottom = row.bottom,
-                        )
-                    },
-                )
+        combine(faceDao.faceGeometryFlow(), faceDao.personsFlow()) { faces, persons ->
+            faces to persons
+        }
+            .conflate()
+            .map { (faces, persons) ->
+                val nameByCluster = persons.associate { it.id to it.name }
+                faces.groupBy { it.photoId }.mapValues { (_, rows) ->
+                    PhotoFaceBoxes(
+                        // Duplicated across a photo's rows, so any one of them serves.
+                        srcWidth = rows.first().srcWidth,
+                        srcHeight = rows.first().srcHeight,
+                        faces = rows.map { row ->
+                            FaceBox(
+                                clusterId = row.clusterId,
+                                name = nameByCluster[row.clusterId],
+                                left = row.left,
+                                top = row.top,
+                                right = row.right,
+                                bottom = row.bottom,
+                            )
+                        },
+                    )
+                }
             }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     init {
         // Debounced search: re-query whenever the query string changes.
@@ -317,9 +337,25 @@ class GalleryViewModel(
         SyncWorker.enqueue(getApplication())
     }
 
+    /**
+     * The library photos a person-cluster appears in, newest first.
+     *
+     * Resolved on demand so the viewer doesn't have to collect the whole [people]
+     * list (and recompute every cluster's cover photo) just to answer this for the
+     * one face that was tapped.
+     */
+    suspend fun photosForCluster(clusterId: Long): List<Photo> {
+        val ids = repository.photoIdsForCluster(clusterId).toSet()
+        if (ids.isEmpty()) return emptyList()
+        return photos.value.filter { it.id in ids && !it.isTrashed }
+    }
+
     /** Name a person-cluster, or clear its name with null. */
     fun setPersonName(id: Long, name: String?) {
-        viewModelScope.launch(Dispatchers.IO) {
+        // No Dispatchers.IO: Room runs suspend DAO functions on its own
+        // dispatcher already, so naming an IO dispatcher here only queued the
+        // write behind whatever image work was occupying it.
+        viewModelScope.launch {
             repository.setPersonName(id, name)
         }
     }

@@ -21,13 +21,34 @@ object BitmapDecoder {
         request: ImageRequest,
         allowHardware: Boolean,
     ): Bitmap? {
-        // Try ImageDecoder on P+ for better resampling + hardware support
+        val reqSize = request.size
+        val targetW = reqSize?.width ?: -1
+        val targetH = reqSize?.height ?: -1
+
+        val viaImageDecoder = try {
+            decode(ImageDecoder.createSource(ByteBuffer.wrap(bytes)), request, allowHardware)
+        } catch (_: Exception) {
+            null
+        }
+        if (viaImageDecoder != null) return viaImageDecoder
+        return try { decodeWithBitmapFactory(bytes, targetW, targetH, allowHardware) } catch (_: Exception) { null }
+    }
+
+    /**
+     * Decode straight from an [ImageDecoder.Source], so local media never has to be
+     * read into a `ByteArray` first. Downsampling happens inside the decoder, which
+     * is why the target size matters more than where the bytes came from.
+     */
+    fun decode(
+        source: ImageDecoder.Source,
+        request: ImageRequest,
+        allowHardware: Boolean,
+    ): Bitmap? {
         val reqSize = request.size
         val targetW = reqSize?.width ?: -1
         val targetH = reqSize?.height ?: -1
 
         return try {
-            val source = ImageDecoder.createSource(ByteBuffer.wrap(bytes))
             ImageDecoder.decodeBitmap(source) { decoder, info, _ ->
                 val w = info.size.width
                 val h = info.size.height
@@ -45,7 +66,7 @@ object BitmapDecoder {
                 }
             }
         } catch (_: Exception) {
-            try { decodeWithBitmapFactory(bytes, targetW, targetH, allowHardware) } catch (_: Exception) { null }
+            null
         }
     }
 

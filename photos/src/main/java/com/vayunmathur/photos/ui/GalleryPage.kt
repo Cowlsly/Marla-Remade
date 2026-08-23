@@ -40,8 +40,12 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.changedToUp
@@ -81,12 +85,15 @@ internal fun groupPhotosByMonth(
     resources: android.content.res.Resources,
 ): Map<String, List<Photo>> {
     val monthNames = localizedMonthNames(DateNameStyle.SHORT)
+    // No per-group sort: PhotoDao.getAllFlow already returns rows newest-first
+    // (ORDER BY date DESC, served by index_Photo_date) and groupBy preserves that
+    // order within each group, so re-sorting every month was sorting sorted data.
     return photos.groupBy {
         val date = Instant.fromEpochMilliseconds(it.date).toLocalDateTime(TimeZone.currentSystemDefault())
         LocalDate(date.year, date.month, 1)
     }.toSortedMap(compareByDescending { it }).mapKeys {
         resources.getString(R.string.month_year_format, monthNames[it.key.month.ordinal], it.key.year)
-    }.mapValues { pair -> pair.value.sortedByDescending { it.date } }
+    }
 }
 
 /** Binds [GalleryViewModel] to the stateless [GalleryScreen]. */
@@ -107,9 +114,8 @@ fun GalleryPage(
     val searchResults by galleryViewModel.searchResults.collectAsState()
     val searchAiState by galleryViewModel.searchAiState.collectAsState()
     val ocrCount by galleryViewModel.ocrCount.collectAsState()
-    val ocrTargetCount by galleryViewModel.ocrTargetCount.collectAsState()
     val clipCount by galleryViewModel.clipCount.collectAsState()
-    val clipTargetCount by galleryViewModel.clipTargetCount.collectAsState()
+    val indexTargetCount by galleryViewModel.indexTargetCount.collectAsState()
 
     LaunchedEffect(Unit) {
         galleryViewModel.runSync()
@@ -140,44 +146,57 @@ fun GalleryPage(
         }
     }
     
-    val onMoveToSecureClick: () -> Unit = onMoveToSecureClick@{
-        val activity = context as FragmentActivity
-        val selectedPhotos = photos.filter { it.id in selectedIds }
-        
-        secureFolderViewModel.unlock(
-            activity,
-            onSuccess = { _, _ ->
-                secureFolderViewModel.moveToSecure(
-                    photos = selectedPhotos,
-                    sourceRepository = com.vayunmathur.photos.data.PhotosRepository.get(context.applicationContext),
-                ) { urisToDelete ->
-                    // Use MediaStore operations to delete files
-                    // MANAGE_MEDIA permission is required to run the app (checked in PermissionsWrapper)
-                    try {
-                        val pendingIntent = MediaStore.createDeleteRequest(
-                            context.contentResolver,
-                            urisToDelete
-                        )
-                        // With MANAGE_MEDIA permission granted, this will delete without popup
-                        mediaResultLauncher.launch(
-                            IntentSenderRequest.Builder(pendingIntent.intentSender).build()
-                        )
-                    } catch (e: Exception) {
-                        android.util.Log.e("GalleryPage", "MediaStore delete request failed", e)
-                        // Fallback: clear selection and refresh anyway
-                        galleryViewModel.clearSelection()
-                        galleryViewModel.runSync()
-                    }
-                }
-            },
-            onFailure = {},
-        )
-    }
+    // Read through State holders so the lambdas below see current values without
+    // being reallocated each recomposition — which is what lets the `actions`
+    // object be remembered rather than rebuilt (and every grid item lambda
+    // invalidated) on every frame.
+    val currentPhotos by rememberUpdatedState(photos)
+    val currentSelectedIds by rememberUpdatedState(selectedIds)
 
-    val onDeleteClick: () -> Unit = {
-        val uris = photos.filter { it.id in selectedIds }.map { it.uri.toUri() }
-        val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, true)
-        mediaResultLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+    val actions = remember(galleryViewModel, secureFolderViewModel, context) {
+        // The ViewModel is the actions implementation; the two MediaStore operations are
+        // the exception, because they need the launchers created above.
+        object : GalleryActions by galleryViewModel {
+            override fun moveSelectionToSecureFolder() {
+                val activity = context as FragmentActivity
+                val selectedPhotos = currentPhotos.filter { it.id in currentSelectedIds }
+
+                secureFolderViewModel.unlock(
+                    activity,
+                    onSuccess = { _, _ ->
+                        secureFolderViewModel.moveToSecure(
+                            photos = selectedPhotos,
+                            sourceRepository = com.vayunmathur.photos.data.PhotosRepository.get(context.applicationContext),
+                        ) { urisToDelete ->
+                            // Use MediaStore operations to delete files
+                            // MANAGE_MEDIA permission is required to run the app (checked in PermissionsWrapper)
+                            try {
+                                val pendingIntent = MediaStore.createDeleteRequest(
+                                    context.contentResolver,
+                                    urisToDelete
+                                )
+                                // With MANAGE_MEDIA permission granted, this will delete without popup
+                                mediaResultLauncher.launch(
+                                    IntentSenderRequest.Builder(pendingIntent.intentSender).build()
+                                )
+                            } catch (e: Exception) {
+                                android.util.Log.e("GalleryPage", "MediaStore delete request failed", e)
+                                // Fallback: clear selection and refresh anyway
+                                galleryViewModel.clearSelection()
+                                galleryViewModel.runSync()
+                            }
+                        }
+                    },
+                    onFailure = {},
+                )
+            }
+
+            override fun trashSelection() {
+                val uris = currentPhotos.filter { it.id in currentSelectedIds }.map { it.uri.toUri() }
+                val pendingIntent = MediaStore.createTrashRequest(context.contentResolver, uris, true)
+                mediaResultLauncher.launch(IntentSenderRequest.Builder(pendingIntent.intentSender).build())
+            }
+        }
     }
 
     GalleryScreen(
@@ -190,16 +209,11 @@ fun GalleryPage(
             searchResults = searchResults,
             searchAiState = searchAiState,
             ocrCount = ocrCount,
-            ocrTargetCount = ocrTargetCount,
+            ocrTargetCount = indexTargetCount,
             clipCount = clipCount,
-            clipTargetCount = clipTargetCount,
+            clipTargetCount = indexTargetCount,
         ),
-        // The ViewModel is the actions implementation; the two MediaStore operations are
-        // the exception, because they need the launchers created above.
-        actions = object : GalleryActions by galleryViewModel {
-            override fun moveSelectionToSecureFolder() = onMoveToSecureClick()
-            override fun trashSelection() = onDeleteClick()
-        },
+        actions = actions,
     )
 }
 
@@ -228,14 +242,29 @@ fun GalleryScreen(
     var searchActive by remember { mutableStateOf(initialSearchActive) }
     val isSelectionMode = state.selectedIds.isNotEmpty()
 
-    // Keyed on the incoming lists rather than derivedStateOf: `state` is a plain value, so
-    // there is nothing for a derived state to observe.
+    // Grouping is O(library) with a timezone conversion per photo, so it runs on
+    // Dispatchers.Default. The initial value is computed inline so the very first
+    // composition (and a @Preview, which never gets to run the producer) still has
+    // a populated grid; every later change is computed off the main thread while
+    // the previous grouping stays on screen.
+    //
+    // Only the list actually being displayed is grouped — with the search bar
+    // closed, search results are not grouped at all.
     val resources = LocalResources.current
-    val photosGroupedByMonth = remember(state.photos, resources) {
-        groupPhotosByMonth(state.photos, resources)
-    }
-    val searchResultsGroupedByMonth = remember(state.searchResults, resources) {
-        groupPhotosByMonth(state.searchResults, resources)
+    val visiblePhotos =
+        if (searchActive && state.searchQuery.isNotEmpty()) state.searchResults else state.photos
+    // Computed exactly once (no remember keys), for the first frame only — and for a
+    // @Preview, which never gets to run the producer below. It has to be a remember:
+    // produceState's initialValue is an ordinary eagerly-evaluated argument, so
+    // calling groupPhotosByMonth inline there would run the whole grouping on the
+    // main thread on every recomposition and throw the result away.
+    val initialGrouping = remember { groupPhotosByMonth(visiblePhotos, resources) }
+    val groupedPhotos by produceState(
+        initialValue = initialGrouping,
+        visiblePhotos,
+        resources,
+    ) {
+        value = withContext(Dispatchers.Default) { groupPhotosByMonth(visiblePhotos, resources) }
     }
 
     // RAW SCAFFOLD EXCEPTION: top bar is an expandable SearchBar (with in-bar search
@@ -383,8 +412,7 @@ fun GalleryScreen(
                     horizontalArrangement = Arrangement.spacedBy(4.dp),
                     verticalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    val currentGroupedPhotos = if (searchActive && state.searchQuery.isNotEmpty()) searchResultsGroupedByMonth else photosGroupedByMonth
-                    currentGroupedPhotos.forEach { (month, photosInMonth) ->
+                    groupedPhotos.forEach { (month, photosInMonth) ->
                         item(span = { GridItemSpan(maxLineSpan) }) {
                             Text(
                                 month,

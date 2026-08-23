@@ -1,6 +1,7 @@
 package com.vayunmathur.library.image
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.graphics.Bitmap
 import android.util.LruCache
 import com.vayunmathur.library.image.util.maxMemoryBytes
@@ -42,7 +43,13 @@ class MemoryCache internal constructor(
         fun build(): MemoryCache {
             val maxBytes = maxSizeBytes ?: run {
                 val am = context.getSystemService(Context.ACTIVITY_SERVICE) as android.app.ActivityManager
-                val memClass = am.memoryClass * 1024 * 1024
+                // An app that asked for android:largeHeap gets the large heap, so
+                // sizing off memoryClass gave it a cache measured for a heap it
+                // isn't using — small enough that a single full-resolution decode
+                // could evict everything else.
+                val isLargeHeap = (context.applicationInfo.flags and ApplicationInfo.FLAG_LARGE_HEAP) != 0
+                val heapMb = if (isLargeHeap) am.largeMemoryClass else am.memoryClass
+                val memClass = heapMb * 1024 * 1024
                 (memClass * maxSizePercent).toInt().coerceAtLeast(4 * 1024 * 1024)
             }
 
