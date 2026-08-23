@@ -2,6 +2,8 @@ package com.vayunmathur.library.ui
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AcUnit
+import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.filled.Dialpad
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Medication
 import androidx.compose.material.icons.filled.MonitorHeart
@@ -666,6 +668,14 @@ fun IconStarBorder(modifier: Modifier = Modifier, tint: Color = LocalContentColo
 @Composable
 fun IconCall(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Call, "Call", modifier, tint)
+
+@Composable
+fun IconCallEnd(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.CallEnd, "End call", modifier, tint)
+
+@Composable
+fun IconDialpad(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Dialpad, "Keypad", modifier, tint)
 
 @Composable
 fun IconChat(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =

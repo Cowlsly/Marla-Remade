@@ -5,6 +5,7 @@ import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.vayunmathur.communicate.data.signal.e2e.SignalE2E
 import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.data.call.CallCapabilities
 import com.vayunmathur.communicate.data.call.InAppCallController
 import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
@@ -1396,7 +1397,11 @@ object SignalClient {
     ) {
         val current = InAppCallRegistry.state.value
         if (current.phase == InAppCallPhase.Idle && state != SignalCallManager.CallState.Ended) {
-            InAppCallRegistry.bind(CommunicateLine.Signal, signalCallController)
+            InAppCallRegistry.bind(
+                CommunicateLine.Signal,
+                signalCallController,
+                CallCapabilities.AudioAndVideo,
+            )
             InAppCallRegistry.videoController = signalVideoController
             InAppCallRegistry.onCallStarting(
                 line = CommunicateLine.Signal,
@@ -1406,6 +1411,7 @@ object SignalClient {
                 // RingRTC reports Ringing for both directions; an inbound call already has an offer
                 // recorded, which is how we tell them apart.
                 incoming = pendingIncomingCallAci == aci,
+                capabilities = CallCapabilities.AudioAndVideo,
             )
         }
         when (state) {

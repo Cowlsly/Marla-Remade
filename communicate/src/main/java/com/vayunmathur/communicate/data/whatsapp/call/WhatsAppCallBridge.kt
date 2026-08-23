@@ -2,6 +2,7 @@ package com.vayunmathur.communicate.data.whatsapp.call
 
 import android.content.Context
 import com.vayunmathur.communicate.data.CommunicateLine
+import com.vayunmathur.communicate.data.call.CallCapabilities
 import com.vayunmathur.communicate.data.call.InAppCallController
 import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
@@ -35,24 +36,34 @@ object WhatsAppCallBridge {
 
                 when (state.phase) {
                     WhatsAppCallPhase.Outgoing -> {
-                        InAppCallRegistry.bind(CommunicateLine.WhatsApp, controller)
+                        InAppCallRegistry.bind(
+                            CommunicateLine.WhatsApp,
+                            controller,
+                            CallCapabilities.AudioAndVideo,
+                        )
                         InAppCallRegistry.onCallStarting(
                             line = CommunicateLine.WhatsApp,
                             peerId = state.peerJid,
                             peerName = state.peerName.ifBlank { state.peerJid },
                             isVideo = state.isVideo,
                             incoming = false,
+                            capabilities = CallCapabilities.AudioAndVideo,
                         )
                         InAppCallTelecom.addOutgoing(appContext, state.peerJid)
                     }
                     WhatsAppCallPhase.Incoming -> {
-                        InAppCallRegistry.bind(CommunicateLine.WhatsApp, controller)
+                        InAppCallRegistry.bind(
+                            CommunicateLine.WhatsApp,
+                            controller,
+                            CallCapabilities.AudioAndVideo,
+                        )
                         InAppCallRegistry.onCallStarting(
                             line = CommunicateLine.WhatsApp,
                             peerId = state.peerJid,
                             peerName = state.peerName.ifBlank { state.peerJid },
                             isVideo = state.isVideo,
                             incoming = true,
+                            capabilities = CallCapabilities.AudioAndVideo,
                         )
                         InAppCallTelecom.addIncoming(appContext, state.peerJid)
                     }

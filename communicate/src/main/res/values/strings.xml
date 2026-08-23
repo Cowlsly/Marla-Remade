@@ -116,6 +116,8 @@
     <!-- Shared by the WhatsApp and Signal call UI; call_state_incoming is Google Voice specific. -->
     <string name="call_state_connecting">Connecting…</string>
     <string name="call_state_incoming_generic">Incoming call</string>
+    <string name="call_video">Video</string>
+    <string name="call_flip_camera">Flip</string>
     <string name="account_whatsapp">WhatsApp</string>
     <string name="inapp_ongoing_call">Ongoing call</string>
     <string name="inapp_call_channel_name">Calls</string>

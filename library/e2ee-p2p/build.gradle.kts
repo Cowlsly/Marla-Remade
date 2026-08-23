@@ -19,7 +19,9 @@ androidComponents {
 // Native post-quantum crypto (Rust: fips203 ML-KEM-768 + fips204 ML-DSA-65).
 // See library/e2ee-p2p/src/main/rust/. Replaces Bouncy Castle; keys cross as DER,
 // byte-compatible with the previously-deployed BC encoding.
-rustNativeLib("e2ee_pqc", "e2ee-pqc")
+// armeabi-v7a as well as arm64: :cast:tv runs on 32-bit-userspace Google TV hardware
+// and links this .so. Phone apps filter it back out via their arm64-only abiFilters.
+rustNativeLib("e2ee_pqc", "e2ee-pqc", extraAbis = listOf(ABI_ARMV7))
 
 dependencies {
     implementation(libs.cryptography.core)

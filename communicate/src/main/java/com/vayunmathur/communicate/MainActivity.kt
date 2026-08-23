@@ -28,6 +28,7 @@ import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceSession
 import com.vayunmathur.communicate.data.googlevoice.call.CallPhase
+import com.vayunmathur.communicate.data.googlevoice.call.GoogleVoiceCallBridge
 import com.vayunmathur.communicate.data.googlevoice.call.GoogleVoiceCallManager
 import com.vayunmathur.communicate.telephony.GoogleVoiceSyncService
 import com.vayunmathur.communicate.telephony.GoogleVoiceTelecom
@@ -40,7 +41,6 @@ import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
 import com.vayunmathur.communicate.data.whatsapp.call.WhatsAppCallBridge
 import com.vayunmathur.communicate.telephony.InAppCallTelecom
-import com.vayunmathur.communicate.ui.call.CallScreen
 import com.vayunmathur.communicate.ui.call.InAppCallScreen
 import com.vayunmathur.communicate.ui.googlevoice.GoogleVoiceSignInScreen
 import com.vayunmathur.communicate.ui.whatsapp.WhatsAppRegistrationScreen
@@ -107,7 +107,6 @@ private fun CommunicateApp() {
     val waSignedIn by waSession.signedInFlow.collectAsState(initial = false)
     val sigSession = remember { SignalLineSession.get(context) }
     val sigSignedIn by sigSession.signedInFlow.collectAsState(initial = false)
-    val callState by GoogleVoiceCallManager.state.collectAsState()
     val inAppCallState by InAppCallRegistry.state.collectAsState()
 
     // Own the WhatsApp always-on receive state via its foreground sync service (dev-only).
@@ -126,6 +125,8 @@ private fun CommunicateApp() {
     LaunchedEffect(gvSignedIn) {
         GoogleVoiceCallManager.init(context)
         GoogleVoiceCallManager.onIncomingCall = { from -> GoogleVoiceTelecom.addIncoming(context, from) }
+        // Projects Google Voice call state onto the shared call screen.
+        GoogleVoiceCallBridge.ensureStarted()
         if (gvSignedIn) {
             val number = session.phoneNumber() ?: context.getString(R.string.account_google_voice)
             GoogleVoiceTelecom.registerPhoneAccount(context, number)
@@ -215,12 +216,9 @@ private fun CommunicateApp() {
         }
     }
 
-    // In-app call UI overlays everything while a Google Voice VoIP call is in progress.
-    if (callState.phase != CallPhase.Idle) {
-        CallScreen(onClose = { GoogleVoiceCallManager.clearEnded() })
-    } else if (inAppCallState.phase != InAppCallPhase.Idle) {
-        // WhatsApp and Signal share one screen. Google Voice wins a tie: it is a Telecom-owned call that
-        // was already on screen.
+    // One call screen for every in-app line. Google Voice, WhatsApp and Signal all publish into
+    // InAppCallRegistry, and the screen renders whatever the active line supports.
+    if (inAppCallState.phase != InAppCallPhase.Idle) {
         InAppCallScreen(onClose = { InAppCallRegistry.clearEnded() })
     }
 }

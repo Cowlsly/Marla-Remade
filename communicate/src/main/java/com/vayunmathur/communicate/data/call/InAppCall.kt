@@ -5,6 +5,26 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
+/**
+ * What the line behind the active call can actually do.
+ *
+ * The call screen is shared across lines, so it renders from this rather than branching on the line:
+ * Google Voice has a DTMF keypad but no video, WhatsApp and Signal have video but no keypad. A control the
+ * line cannot honour is simply not shown, instead of being present and doing nothing.
+ */
+data class CallCapabilities(
+    val mute: Boolean = true,
+    val speaker: Boolean = true,
+    val video: Boolean = false,
+    val dtmf: Boolean = false,
+) {
+    companion object {
+        val AudioOnly = CallCapabilities()
+        val AudioAndVideo = CallCapabilities(video = true)
+        val AudioAndKeypad = CallCapabilities(dtmf = true)
+    }
+}
+
 /** Phases an in-app VoIP call moves through, shared by every line that isn't handled by the SIM. */
 enum class InAppCallPhase { Idle, Outgoing, Incoming, Connecting, Active, Ended }
 
@@ -22,6 +42,7 @@ data class InAppCallState(
     val peerId: String = "",
     val peerName: String = "",
     val isVideo: Boolean = false,
+    val capabilities: CallCapabilities = CallCapabilities.AudioOnly,
     /** Whether the peer is currently sending video, which is independent of whether we are. */
     val remoteVideoEnabled: Boolean = false,
     /** Whether our own camera is on. */
@@ -55,6 +76,14 @@ interface InAppCallConnectionBridge {
     fun onCallActive()
 
     fun onCallEnded()
+}
+
+/**
+ * Tone dialling, for lines that carry a call to the PSTN. Separate from [InAppCallController] because only
+ * Google Voice can act on it.
+ */
+interface InAppCallDtmfController {
+    fun sendDtmf(digit: String)
 }
 
 /**
@@ -92,13 +121,21 @@ object InAppCallRegistry {
     @Volatile
     var videoController: InAppCallVideoController? = null
 
+    /** Set only by lines that can send tones. */
+    @Volatile
+    var dtmfController: InAppCallDtmfController? = null
+
     /** Set by the Telecom ConnectionService so state changes can be reflected into the system UI. */
     @Volatile
     var connection: InAppCallConnectionBridge? = null
 
-    fun bind(line: CommunicateLine, controller: InAppCallController) {
+    fun bind(
+        line: CommunicateLine,
+        controller: InAppCallController,
+        capabilities: CallCapabilities = CallCapabilities.AudioOnly,
+    ) {
         this.controller = controller
-        _state.value = _state.value.copy(line = line)
+        _state.value = _state.value.copy(line = line, capabilities = capabilities)
     }
 
     /** Called by a line when its call starts, so the UI can appear before any media is up. */
@@ -108,6 +145,7 @@ object InAppCallRegistry {
         peerName: String,
         isVideo: Boolean,
         incoming: Boolean,
+        capabilities: CallCapabilities = _state.value.capabilities,
     ) {
         android.util.Log.i(TAG, "call starting: line=$line incoming=$incoming video=$isVideo peer=$peerId")
         _state.value = InAppCallState(
@@ -116,6 +154,7 @@ object InAppCallRegistry {
             peerId = peerId,
             peerName = peerName.ifBlank { peerId },
             isVideo = isVideo,
+            capabilities = capabilities,
         )
     }
 
@@ -175,12 +214,17 @@ object InAppCallRegistry {
         videoController?.flipCamera()
     }
 
+    fun sendDtmf(digit: String) {
+        dtmfController?.sendDtmf(digit)
+    }
+
     /** Called by the UI once a terminal state has been shown, returning to Idle. */
     fun clearEnded() {
         if (_state.value.phase == InAppCallPhase.Ended) {
             _state.value = InAppCallState()
             controller = null
             videoController = null
+            dtmfController = null
             connection = null
         }
     }
