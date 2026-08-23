@@ -9,4 +9,12 @@
     <string name="enable_keyboard">Włącz klawiaturę</string>
     <string name="choose_keyboard">Wybierz klawiaturę</string>
     <string name="app_name">Klawiatura</string>
+    <string name="keyboard_languages">Języki klawiatury</string>
+    <string name="available_for_english_layouts_only">Dostępne tylko dla układów angielskich</string>
+    <string name="search_emoji">Szukaj emoji</string>
+    <string name="emoji_you_use_show_up_here">Używane przez Ciebie emoji wyświetlają się tutaj</string>
+    <string name="image">Obraz</string>
+    <string name="clear_clipboard">Wyczyść wszystko</string>
+    <string name="clear_clipboard_history">Wyczyść historię schowka</string>
+    <string name="copied_text_shows_up_here">Skopiowany tekst i obrazy są tutaj wyświetlane</string>
 </resources>
