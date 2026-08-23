@@ -1,5 +1,8 @@
 package com.vayunmathur.cast.protocol
 
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -126,5 +129,64 @@ class StreamingSessionTest {
             maxFrameId = FrameId(4),
         )
         assertTrue(assertNotNull(parsed).pictureLoss)
+    }
+
+    @Test
+    fun `recording and feedback from two threads does not blow up the sender`() {
+        // **A regression test for a crash that took the whole cast process down.** `record` runs on the
+        // encoder loop and `onFeedback` on the RTCP loop, and both touch the retransmit buffer while
+        // `onFeedback` *iterates* it - so an insert landing mid-iteration threw
+        // ConcurrentModificationException out of a coroutine with nothing to catch it.
+        //
+        // It stayed hidden for as long as the sender only encoded 1080p, and became a crash within
+        // seconds of 4K going out: four times the packets per frame to pace, and a receiver that
+        // answers a struggling link with far more NACKs, turned two rarely-overlapping windows into
+        // constantly-overlapping ones.
+        //
+        // Inherently probabilistic, as any test of a data race is. Before the fix this did not merely
+        // throw - the unsynchronised `LinkedHashMap` corrupted its own link list and `record` span
+        // forever - so the threads are daemons and the joins are bounded: a regression has to fail this
+        // test, not hang the build.
+        val session = StreamingSession()
+        val failure = AtomicReference<Throwable?>(null)
+        val start = CountDownLatch(1)
+        val rounds = 20_000
+
+        val recorder = Thread {
+            runCatching {
+                start.await()
+                for (id in 0L until rounds) session.record(frame(id))
+            }.onFailure { failure.compareAndSet(null, it) }
+        }.apply { isDaemon = true }
+        val reporter = Thread {
+            runCatching {
+                start.await()
+                for (id in 0L until rounds) {
+                    // A checkpoint that trails the writer, plus a NACK ahead of it: the first makes
+                    // `removeAll` iterate the buffer, the second makes it read from the same map.
+                    session.onFeedback(
+                        feedback(
+                            checkpoint = (id - 30).coerceAtLeast(0),
+                            nacks = listOf(PacketNack(FrameId(id), 0)),
+                        ),
+                    )
+                }
+            }.onFailure { failure.compareAndSet(null, it) }
+        }.apply { isDaemon = true }
+
+        recorder.start()
+        reporter.start()
+        start.countDown()
+        recorder.join(TimeUnit.SECONDS.toMillis(20))
+        reporter.join(TimeUnit.SECONDS.toMillis(20))
+        assertFalse(recorder.isAlive, "the encoder side never finished - the buffer is wedged")
+        assertFalse(reporter.isAlive, "the feedback side never finished - the buffer is wedged")
+        assertNull(failure.get(), "concurrent access failed: ${failure.get()}")
+
+        // And the buffer is still bounded and coherent afterwards, rather than merely un-thrown.
+        assertTrue(
+            session.onFeedback(feedback(checkpoint = 0)).retransmissions.isEmpty(),
+            "a feedback packet with no nacks should ask for nothing",
+        )
     }
 }

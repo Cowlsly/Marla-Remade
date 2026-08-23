@@ -9,8 +9,25 @@ package com.vayunmathur.cast.protocol
  * Smaller than it used to be: OFFER/ANSWER negotiation lived here when the peer was a Cast receiver
  * and had to be asked what it would accept. The handshake settles that now, so what is left is the
  * one thing feedback is actually for - deciding what to resend.
+ *
+ * **Thread-safe, because its two entry points are called from different coroutines.** [record] runs on
+ * the encoder loop as each frame is sent; [onFeedback] runs on the RTCP loop as each feedback packet
+ * arrives. They both touch [retransmitBuffer], and `onFeedback` *iterates* it - so an insert landing
+ * mid-iteration threw `ConcurrentModificationException` and took the whole cast process down.
+ *
+ * The lock is here rather than in `StreamSender`, which has one of its own: that lock is held for the
+ * entire paced emission of a frame, which at 4K is hundreds of datagrams with deliberate pauses
+ * between them. Widening it to cover feedback would stall the RTCP loop for milliseconds at exactly
+ * the moment a receiver is asking for repairs. These critical sections are a few map operations each.
+ *
+ * That race was latent for as long as the sender only ever encoded 1080p. It became a crash within
+ * seconds once 4K was on the wire, because a 4K frame is four times the packets to pace and a
+ * struggling receiver answers with far more NACKs - so the two windows went from rarely overlapping to
+ * overlapping constantly.
  */
 class StreamingSession {
+
+    private val lock = Any()
 
     /**
      * Frames we may still be asked to resend, newest last.
@@ -22,7 +39,7 @@ class StreamingSession {
     private val retransmitBuffer = LinkedHashMap<Long, EncryptedFrame>()
 
     /** Remember a frame in case it has to be resent. */
-    fun record(frame: EncryptedFrame) {
+    fun record(frame: EncryptedFrame) = synchronized(lock) {
         retransmitBuffer[frame.frameId.value] = frame
         while (retransmitBuffer.size > RETRANSMIT_BUFFER_FRAMES) {
             val oldest = retransmitBuffer.keys.first()
@@ -38,7 +55,7 @@ class StreamingSession {
      * for a key frame instead - which is the only thing that lets a receiver recover without the
      * exact bytes it missed.
      */
-    fun onFeedback(feedback: ReceiverFeedback): Recovery {
+    fun onFeedback(feedback: ReceiverFeedback): Recovery = synchronized(lock) {
         retransmitBuffer.keys.removeAll { it <= feedback.checkpoint.value }
         val resend = mutableListOf<Retransmission>()
         var needKeyFrame = false
@@ -57,7 +74,7 @@ class StreamingSession {
                 Retransmission(frame, packetIds = listOf(nack.packetId))
             }
         }
-        return Recovery(mergePacketIds(resend), needKeyFrame)
+        Recovery(mergePacketIds(resend), needKeyFrame)
     }
 
     /** A single frame's worth of NACKs, coalesced. */
