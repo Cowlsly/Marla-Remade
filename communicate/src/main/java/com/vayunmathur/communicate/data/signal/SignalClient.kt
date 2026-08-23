@@ -1414,8 +1414,13 @@ object SignalClient {
     /** Bridges the shared call UI and the system call surface onto RingRTC. */
     private val signalCallController = object : InAppCallController {
         override fun answer() {
-            val id = pendingIncomingCallId ?: return
-            callManager?.accept(id)
+            val id = pendingIncomingCallId
+            if (id == null) {
+                Log.w(TAG, "answer with no pending call id; the caller will keep ringing")
+                return
+            }
+            val accepted = callManager?.accept(id)
+            Log.i(TAG, "accepted call $id: $accepted")
         }
 
         override fun reject() {

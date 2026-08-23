@@ -289,9 +289,18 @@ class SignalCallManager(
         val aci = (remote as? SignalRemote)?.aci ?: return
         Log.i(TAG, "call event for $aci: $event")
         val state = when (event) {
-            CallManager.CallEvent.LOCAL_CONNECTED, CallManager.CallEvent.REMOTE_CONNECTED -> CallState.Connected
+            // Either side accepting is what makes a call active; missing these leaves the UI on "dialing"
+            // while media is already flowing.
+            CallManager.CallEvent.LOCAL_CONNECTED,
+            CallManager.CallEvent.REMOTE_CONNECTED,
+            CallManager.CallEvent.RECONNECTED,
+            -> CallState.Connected
             CallManager.CallEvent.LOCAL_RINGING, CallManager.CallEvent.REMOTE_RINGING -> CallState.Ringing
-            else -> return
+            CallManager.CallEvent.RECONNECTING -> CallState.Connecting
+            else -> {
+                // Media-state and screen-share events do not change the call phase.
+                return
+            }
         }
         signaling.onCallStateChanged(aci, 0, state, false)
     }

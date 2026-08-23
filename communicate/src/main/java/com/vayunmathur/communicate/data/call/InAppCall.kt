@@ -85,6 +85,7 @@ object InAppCallRegistry {
         isVideo: Boolean,
         incoming: Boolean,
     ) {
+        android.util.Log.i(TAG, "call starting: line=$line incoming=$incoming video=$isVideo peer=$peerId")
         _state.value = InAppCallState(
             phase = if (incoming) InAppCallPhase.Incoming else InAppCallPhase.Outgoing,
             line = line,
@@ -96,7 +97,11 @@ object InAppCallRegistry {
 
     fun onPhase(phase: InAppCallPhase) {
         val current = _state.value
-        if (current.phase == InAppCallPhase.Idle && phase != InAppCallPhase.Incoming) return
+        if (current.phase == InAppCallPhase.Idle && phase != InAppCallPhase.Incoming) {
+            android.util.Log.i(TAG, "ignoring phase $phase while idle")
+            return
+        }
+        if (current.phase != phase) android.util.Log.i(TAG, "phase ${current.phase} -> $phase")
         _state.value = current.copy(
             phase = phase,
             // Stamped once, on the transition into Active, so the duration does not restart.
