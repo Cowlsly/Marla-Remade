@@ -31,6 +31,9 @@ android {
 dependencies {
     // The wire format, shared verbatim with the phone. Nothing in this app re-implements it.
     implementation(project(":cast:protocol"))
-    // PqcIdentity: the TV's long-term ML-KEM identity, which the phone seals the session secret to.
     implementation(project(":library:e2ee-p2p"))
+    // App content arrives as media rather than as pixels now, so the TV needs a player. Not
+    // `media3-session`: the TV already has a remote-control path through its own control channel,
+    // and a MediaSession would be a second one competing with it.
+    implementation(libs.androidx.media3.exoplayer)
 }

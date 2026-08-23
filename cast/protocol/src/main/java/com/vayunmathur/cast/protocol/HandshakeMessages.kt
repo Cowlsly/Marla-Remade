@@ -19,8 +19,14 @@ import kotlinx.serialization.json.Json
  * phone on 3 would never send state, so the TV's overlay would be permanently empty, and a TV on 3
  * would drop every command it was sent - both are silent failures, which is exactly what a refused
  * version check is for.
+ *
+ * 5 is where app content stopped being pixels. [ContentSession] and [PlayMedia] replace
+ * `STREAM_CONFIG` for anything with a file behind it: the phone serves the original bytes over HTTPS
+ * and the TV decodes them, so no video is encoded, seeking is a byte offset and audio-only becomes
+ * expressible at all. Screen mirroring keeps the RTP path unchanged, because it has no file to serve.
+ * [StreamConfig.videoCodec] became optional in the same bump, and [DecoderLimits] grew an audio half.
  */
-const val PROTOCOL_VERSION = 4
+const val PROTOCOL_VERSION = 5
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -43,6 +49,17 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *        … RTP over UDP …
  *        PLAYBACK_STATE ─────────────────────►          (app content only, ~2/s while it plays)
  *                          ◄───────────── PLAYBACK_COMMAND (the TV remote, whenever it is pressed)
+ *        BYE ─────────────────────────────────►
+ * ```
+ *
+ * Screen mirroring takes that path. **App content takes a different one from `STREAM_CONFIG`
+ * onward**, because it has a file behind it and does not need to be re-encoded:
+ *
+ * ```
+ *        CONTENT_SESSION ─────────────────────►         (proxy host, port, cert fingerprint, token)
+ *                          ◄───────────── CONTENT_READY (accepted, or refused with a reason)
+ *        PLAY_MEDIA ──────────────────────────►         (which resource, and what is in it)
+ *        … the TV fetches byte ranges over HTTPS and decodes them itself …
  *        BYE ─────────────────────────────────►
  * ```
  *
@@ -307,6 +324,81 @@ data class StreamReady(
     val udpPort: Int,
     val audioSsrc: Long,
     val videoSsrc: Long,
+) : ControlMessage
+
+/**
+ * The phone is serving app content over HTTPS instead of encoding it. Everything the TV needs to
+ * fetch it.
+ *
+ * This is what replaces [StreamConfig] for anything with a file behind it, and the reason the whole
+ * pixel path can go away for app content: the TV fetches byte ranges of the original media and owns
+ * its own decoder, clock and buffer. Seeking becomes an offset instead of a key-frame renegotiation,
+ * a pause is the TV's business alone, and the phone neither decodes nor encodes a frame.
+ *
+ * **The fingerprint is why this can be TLS with no certificate authority.** It arrives here, on a
+ * channel already AES-256-GCM under a key derived from the ML-KEM handshake and bound to the pairing
+ * transcript - so pinning it is strictly stronger than trusting a CA to attest to a name on a LAN.
+ * The TV must pin it and trust nothing else; a permissive trust manager would throw away the only
+ * guarantee the pairing bought.
+ *
+ * [token] is a capability, not an identifier. It goes in the URL path so that it travels with a bare
+ * URL handed to a player, and it is the only thing between another device on the LAN that has found
+ * the port and the user's media.
+ */
+@Serializable
+@SerialName("CONTENT_SESSION")
+data class ContentSession(
+    /** The phone's address on this network, as the TV should dial it. */
+    val host: String,
+    val port: Int,
+    /** Base64 of SHA-256 over the proxy certificate's DER encoding. */
+    val certificateFingerprint: String,
+    val token: String,
+    /**
+     * False for an audio-only session, where there is no picture and the TV shows a now-playing
+     * screen instead of a black surface.
+     */
+    val video: Boolean,
+    /** The app whose content this is, resolved by `:cast` from the picker's `callingPackage`. */
+    val appLabel: String = "",
+) : ControlMessage
+
+/**
+ * Whether the TV can serve a [ContentSession], and if not, why.
+ *
+ * An answer rather than silence because the failures here are the kind that otherwise look like
+ * success: a TV with no Opus decoder would accept an audio-only session and then play nothing, with
+ * no picture to make the fault visible and nothing on screen to explain it. The phone refuses the
+ * session instead and says so, which is the whole argument for the reply existing.
+ */
+@Serializable
+@SerialName("CONTENT_READY")
+data class ContentReady(
+    val accepted: Boolean,
+    /** For the log and for the phone's message to the user. Empty when accepted. */
+    val detail: String = "",
+) : ControlMessage
+
+/**
+ * Play this, from the proxy.
+ *
+ * [resourceId] is the app's own name for it, appended to the proxy's path; the phone maps it back to
+ * a file descriptor when the TV asks. Sent again for each new item, which is how a queue advances -
+ * the queue itself stays on the phone, because it owns the artwork, the metadata and the ordering.
+ */
+@Serializable
+@SerialName("PLAY_MEDIA")
+data class PlayMedia(
+    val resourceId: String,
+    /** What the TV should expect, so its player does not have to sniff before it can start. */
+    val mimeType: String,
+    /**
+     * Length in milliseconds, or 0 when the phone does not know.
+     *
+     * Carried even though the container states it, because the TV's seek bar can then be drawn
+     * before the first byte arrives rather than appearing a moment into playback.
+     */
+    val durationMs: Long = 0,
 ) : ControlMessage
 
 /**
