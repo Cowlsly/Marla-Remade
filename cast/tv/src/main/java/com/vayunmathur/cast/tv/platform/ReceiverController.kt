@@ -664,7 +664,7 @@ object ReceiverController {
                         media.throughputSummary() +
                             " playout=${playout.depth}f/rebased=${playout.rebases}" +
                             " dropped=${active?.framesDropped ?: 0}" +
-                            if (player?.failed == true) " audio=failed" else "",
+                            audioHealth(player),
                     )
                 }
             }
@@ -706,6 +706,20 @@ object ReceiverController {
     /** Video RTP timestamps are 90 kHz; `MediaCodec` wants microseconds. */
     private fun rtpToMicros(rtpTimestamp: Long): Long =
         rtpTimestamp * 1_000_000L / StreamConstants.VIDEO_TIMEBASE
+
+    /**
+     * What the audio path is doing, in the one line that reports everything else.
+     *
+     * A rebuild is worth saying out loud even though it recovered: silence that came back is a fault
+     * that will happen again, and a session that reports nothing looks identical to one that never had
+     * a problem.
+     */
+    private fun audioHealth(player: AudioPlayer?): String = when {
+        player == null -> ""
+        player.failed -> " audio=failed after ${player.restarts} rebuilds"
+        player.restarts > 0 -> " audio=recovered/${player.restarts} rebuilds"
+        else -> ""
+    }
 
     /** Audio is timestamped in samples, so its divisor is the sample rate. */
     private fun audioRtpToMicros(rtpTimestamp: Long): Long =

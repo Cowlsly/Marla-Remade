@@ -24,16 +24,24 @@ private const val TIMEOUT_US = 10_000L
  * `MODE_STREAM` with `PERFORMANCE_MODE_LOW_LATENCY`: the phone's frames are already 20 ms and
  * arriving in real time, so the only thing extra buffering would buy is lip-sync error.
  *
- * **No `csd-0`.** Android's Opus decoder wants an identification header, and the encoder on the phone
- * does not send its codec-config buffer over the wire. So the header is synthesised here from the
+ * **The codec configuration is synthesised.** Android's Opus decoder wants its headers, and the encoder
+ * on the phone does not send its codec-config buffer over the wire. So they are rebuilt here from the
  * parameters both ends already agree on - they are fixed constants in [StreamConstants], not
- * negotiated, which is what makes reconstructing it sound rather than a guess.
+ * negotiated, which is what makes reconstructing them sound rather than a guess.
  *
- * **A failure here is terminal, and that is the fix for a measured disaster.** [play] used to catch
- * every exception and retry on the next packet, so a codec that entered its released state a few
- * seconds in logged a stack trace per 20 ms packet from then on: 2,634 traces in 38,233 logcat lines
- * in one session, on the thread that has to be reading datagrams. The storm cost more than the lost
- * audio ever did, and it was voluminous enough to evict its own root cause from the log buffer.
+ * **Three csd buffers, not one.** The decoder expects `csd-0` = `OpusHead`, `csd-1` = the codec delay
+ * and `csd-2` = the seek pre-roll, the latter two as little-endian nanoseconds - the same three
+ * ExoPlayer builds in `OpusUtil.buildInitializationData`. Only `csd-0` used to be supplied, which
+ * `configure()` accepts without complaint and then leaves the component to make the best of.
+ *
+ * **A failure is survivable, and bounded.** [play] used to catch every exception and retry on the next
+ * packet, so a codec that entered its released state a few seconds in logged a stack trace per 20 ms
+ * packet from then on: 2,634 traces in 38,233 logcat lines in one session, on the thread that has to be
+ * reading datagrams. Giving up for good stopped the storm but overcorrected: one transient error became
+ * a silent session with no way back, which is what hardware then measured - audio died 3 seconds in and
+ * stayed dead while 487 packets arrived to be decoded into nothing. The codec is rebuilt instead, at
+ * most [MAX_RESTARTS] times, and only then given up on. The log stays bounded because the number of
+ * attempts is.
  */
 class AudioPlayer {
 
@@ -50,6 +58,17 @@ class AudioPlayer {
     var failed: Boolean = false
         private set
 
+    /**
+     * How many times the codec has been rebuilt after a failure.
+     *
+     * Counted rather than latched on the first error, so a transient fault costs a gap in the sound
+     * instead of the rest of the session - but bounded, because a codec that is broken for a structural
+     * reason will fail again immediately and rebuilding it per packet would be the log storm the old
+     * latch existed to prevent.
+     */
+    var restarts: Int = 0
+        private set
+
     /** False when this TV has no Opus decoder, which leaves the picture but no sound. */
     fun start(): Boolean {
         val name = decoderName()
@@ -64,7 +83,11 @@ class AudioPlayer {
                 StreamConstants.AUDIO_CHANNELS,
             ).apply {
                 setInteger(MediaFormat.KEY_LOW_LATENCY, 1)
+                // All three, in the order the decoder reads them. csd-0 alone configures without
+                // complaint, which is what made its absence easy to miss.
                 setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(opusIdentificationHeader()))
+                setByteBuffer("csd-1", java.nio.ByteBuffer.wrap(nanosecondsLe(0)))
+                setByteBuffer("csd-2", java.nio.ByteBuffer.wrap(nanosecondsLe(0)))
             }
             val created = MediaCodec.createByCodecName(name)
             // Published before the AudioTrack is built, because the catch below releases through the
@@ -110,8 +133,8 @@ class AudioPlayer {
     /**
      * Queue one Opus packet and write out whatever the decoder finished.
      *
-     * Called from the socket loop, so the cost of failing has to be bounded: the first exception
-     * gives up on audio for the rest of the session rather than being retried per packet.
+     * Called from the socket loop, so the cost of failing has to be bounded - see the class comment for
+     * why that is a rebuild rather than either a per-packet retry or a permanent surrender.
      */
     fun play(data: ByteArray, presentationTimeUs: Long) {
         if (failed) return
@@ -140,11 +163,34 @@ class AudioPlayer {
                 activeCodec.releaseOutputBuffer(out, false)
             }
         } catch (e: Exception) {
-            // One trace, once. Whatever put the codec in this state will not be undone by the next
-            // packet, and a realtime path may not log per packet.
+            recover(e)
+        }
+    }
+
+    /**
+     * Rebuild the codec, or give up if it has already been rebuilt too often.
+     *
+     * One trace per attempt, never per packet. The trace matters as much as the recovery does: the
+     * hardware failure this replaces was a codec found in its *released* state on the very first
+     * `dequeueInputBuffer`, with nothing in the log to say what had released it, so the attempt count
+     * and the codec's own name go in the line to narrow that down next time.
+     */
+    private fun recover(cause: Exception) {
+        release()
+        if (restarts >= MAX_RESTARTS) {
             failed = true
-            Log.w(TAG, "audio playback failed for good; the rest of this session is silent", e)
-            release()
+            Log.w(
+                TAG,
+                "audio failed $MAX_RESTARTS times; the rest of this session is silent",
+                cause,
+            )
+            return
+        }
+        restarts++
+        Log.w(TAG, "audio playback failed; rebuilding the decoder (attempt $restarts)", cause)
+        if (!start()) {
+            failed = true
+            Log.w(TAG, "the rebuilt audio decoder would not start; this session is silent")
         }
     }
 
@@ -160,8 +206,29 @@ class AudioPlayer {
     private companion object {
         const val AUDIO_MIME = MediaFormat.MIMETYPE_AUDIO_OPUS
 
+        /**
+         * How many times the decoder may be rebuilt before audio is given up on.
+         *
+         * Three, because the failure this exists for was a single one: a codec found already released
+         * on its first use, which one rebuild would have cleared. A codec broken structurally fails
+         * again at once, so this is spent in milliseconds and the log stays short either way.
+         */
+        const val MAX_RESTARTS = 3
+
         /** 200 ms of stereo 16-bit at 48 kHz, as a floor under whatever the platform asks for. */
         const val MIN_TRACK_BYTES = 48_000 / 5 * 2 * 2
+
+        /**
+         * `csd-1` and `csd-2`: the codec delay and the seek pre-roll, in little-endian nanoseconds.
+         *
+         * Both zero, for the same reason the identification header's pre-skip is: the phone's encoder
+         * applies neither, and there is no container here whose timestamps would need adjusting for
+         * them. They are supplied rather than omitted because the decoder reads three csd buffers and
+         * silently tolerates being given one.
+         */
+        fun nanosecondsLe(value: Long): ByteArray = ByteArray(8) { i ->
+            ((value ushr (8 * i)) and 0xff).toByte()
+        }
 
         /**
          * The 19-byte `OpusHead`, per RFC 7845 §5.1.

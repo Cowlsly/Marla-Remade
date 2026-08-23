@@ -34,6 +34,19 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     private lateinit var container: FrameLayout
     private lateinit var surfaceView: SurfaceView
 
+    /**
+     * The frame size the sender said it would send, remembered so the letterbox can be recomputed.
+     *
+     * **Load-bearing.** The letterbox used to be computed only when `ReceiverController.state` emitted,
+     * which is once per session - and on this box that emission lands a few milliseconds after
+     * [preferLargestDisplayMode] has asked for 3840x2160 and before the switch has taken effect, so the
+     * panel still measures 1920x1080. The state never changes again, so a stale layout was final: a
+     * 1920x1080 surface left sitting on a 4K panel. Holding the frame size here is what lets the panel
+     * tell us when it has finished resizing.
+     */
+    private var frameWidth = 0
+    private var frameHeight = 0
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MirrorActivity) }
@@ -50,6 +63,13 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         setContentView(container)
         preferLargestDisplayMode()
+        // The display-mode change above is asynchronous, and so is the first layout pass. Either one
+        // finishing is a reason to redo the letterbox against the size the panel actually ended up.
+        container.addOnLayoutChangeListener { _, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom ->
+            if (right - left != oldRight - oldLeft || bottom - top != oldBottom - oldTop) {
+                fitToFrame(frameWidth, frameHeight)
+            }
+        }
         // A TV has no navigation bar to keep clear of, but some launchers still overlay a status bar,
         // and a mirrored screen should be the whole panel.
         WindowCompat.getInsetsController(window, container).apply {
@@ -85,6 +105,8 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         // A rotation or a resolution change hands back a *different* surface, so the controller has
         // to be told again - re-attaching the same one is harmless.
         ReceiverController.attachSurface(holder.surface)
+        // And the panel may be a different size than when the letterbox was last worked out.
+        fitToFrame(frameWidth, frameHeight)
     }
 
     override fun surfaceDestroyed(holder: SurfaceHolder) {
@@ -109,13 +131,15 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
      * Whether that last step actually happens is the composer's decision, not ours, so it has to be
      * checked on the device with `dumpsys SurfaceFlinger` rather than assumed.
      */
-    private fun fitToFrame(frameWidth: Int, frameHeight: Int) {
-        if (frameWidth <= 0 || frameHeight <= 0) return
+    private fun fitToFrame(sourceWidth: Int, sourceHeight: Int) {
+        if (sourceWidth <= 0 || sourceHeight <= 0) return
+        frameWidth = sourceWidth
+        frameHeight = sourceHeight
         container.post {
             val availableWidth = container.width
             val availableHeight = container.height
             if (availableWidth == 0 || availableHeight == 0) return@post
-            val frameAspect = frameWidth.toDouble() / frameHeight
+            val frameAspect = sourceWidth.toDouble() / sourceHeight
             val screenAspect = availableWidth.toDouble() / availableHeight
             val (width, height) = if (frameAspect > screenAspect) {
                 // Wider than the panel: full width, bars top and bottom.
@@ -123,13 +147,21 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             } else {
                 (availableHeight * frameAspect).toInt() to availableHeight
             }
-            surfaceView.holder.setFixedSize(frameWidth, frameHeight)
+            // Nothing to do, and worth checking: this is now called from a layout listener, so
+            // re-applying the same layoutParams would schedule another layout pass and loop.
+            val current = surfaceView.layoutParams
+            if (current != null && current.width == width && current.height == height) return@post
+            surfaceView.holder.setFixedSize(sourceWidth, sourceHeight)
             surfaceView.layoutParams = FrameLayout.LayoutParams(
                 width,
                 height,
                 android.view.Gravity.CENTER,
             )
-            Log.i(TAG, "buffer ${frameWidth}x$frameHeight shown as ${width}x$height")
+            Log.i(
+                TAG,
+                "buffer ${sourceWidth}x$sourceHeight shown as ${width}x$height " +
+                    "on a ${availableWidth}x$availableHeight panel",
+            )
         }
     }
 
