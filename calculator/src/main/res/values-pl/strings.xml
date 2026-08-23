@@ -10,4 +10,25 @@
     <string name="app_name">Kalkulator</string>
     <string name="feature_minimum">minimum</string>
     <string name="feature_maximum">maksimum</string>
+    <string name="units">Jednostki</string>
+    <string name="insert_unit">Wstaw jednostkę</string>
+    <string name="convert_to">Konwertuj na</string>
+    <string name="converter_value">Wartość</string>
+    <string name="converter_from">Z</string>
+    <string name="converter_to">Do</string>
+    <string name="converter_result">Wynik</string>
+    <string name="converter_swap">Zamień jednostki</string>
+    <string name="key_date">Data</string>
+    <string name="key_time">Czas</string>
+    <string name="key_datetime">Data i godzina</string>
+    <string name="select_time">Wybierz czas</string>
+    <string name="ok">OK</string>
+    <string name="currency_loading">Pobieranie kursów wymiany…</string>
+    <string name="currency_unavailable">Kursy wymiany walut są niedostępne</string>
+    <string name="currency_retry">Ponów</string>
+    <string name="calculator_widget_label">Kalkulator</string>
+    <string name="calculator_widget_description">Działająca klawiatura na ekranie głównym - dotknij wyświetlacza, aby otworzyć Kalkulator</string>
+    <string name="units_widget_label">Przelicznik jednostek</string>
+    <string name="units_widget_description">Szybki podgląd i przeliczanie jednostek – dotknij, aby otworzyć konwerter</string>
+    <string name="units_widget_choose_category">Wybierz kategorię jednostki</string>
 </resources>
