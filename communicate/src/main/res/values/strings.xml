@@ -22,6 +22,7 @@
     <string name="grant_permission">Grant permission</string>
     <string name="empty_messages">No conversations yet</string>
     <string name="empty_contacts">No contacts found</string>
+    <string name="empty_contacts_for_digits">No contacts match those keys</string>
     <string name="empty_call_logs">No recent calls found</string>
     <string name="new_message">New message</string>
     <string name="compose_message">Compose message</string>

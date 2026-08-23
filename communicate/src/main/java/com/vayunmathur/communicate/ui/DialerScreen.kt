@@ -40,6 +40,7 @@ import com.vayunmathur.communicate.R
 import com.vayunmathur.communicate.data.CommunicateContact
 import com.vayunmathur.communicate.data.CommunicateRepository
 import com.vayunmathur.communicate.data.LineChoice
+import com.vayunmathur.communicate.data.T9
 import com.vayunmathur.communicate.data.googlevoice.GoogleVoiceSession
 import com.vayunmathur.communicate.data.googlevoice.call.GoogleVoiceCallManager
 import com.vayunmathur.communicate.telephony.GoogleVoiceTelecom
@@ -126,10 +127,24 @@ fun DialerScreen() {
                     val contacts = produceState<List<CommunicateContact>?>(initialValue = null, roleRevision, permissionRevision) {
                         value = withContext(Dispatchers.IO) { CommunicateRepository.loadContacts(context) }
                     }
-                    when (val rows = contacts.value) {
-                        null -> com.vayunmathur.library.ui.LoadingState(Modifier.weight(1f))
-                        emptyList<CommunicateContact>() -> EmptyState(
+                    // Keyed on the contact list only: the query must never re-run the provider query.
+                    val rows = contacts.value
+                    val entries = remember(rows) { rows.orEmpty().map { T9.entryFor(it.name, it.phoneNumber) } }
+                    val query = T9.normalizeQuery(number)
+                    val filtered = remember(rows, query) {
+                        val all = rows.orEmpty()
+                        if (query.isEmpty()) all
+                        else all.filterIndexed { index, _ -> T9.matches(entries[index], query) }
+                    }
+                    when {
+                        rows == null -> com.vayunmathur.library.ui.LoadingState(Modifier.weight(1f))
+                        rows.isEmpty() -> EmptyState(
                             title = stringResource(R.string.empty_contacts),
+                            icon = { IconContacts() },
+                            modifier = Modifier.weight(1f),
+                        )
+                        filtered.isEmpty() -> EmptyState(
+                            title = stringResource(R.string.empty_contacts_for_digits),
                             icon = { IconContacts() },
                             modifier = Modifier.weight(1f),
                         )
@@ -145,7 +160,7 @@ fun DialerScreen() {
                                     fontWeight = FontWeight.SemiBold,
                                 )
                             }
-                            items(rows, key = { "${it.id}-${it.phoneNumber}" }) { contact ->
+                            items(filtered, key = { "${it.id}-${it.phoneNumber}" }) { contact ->
                                 ContactRow(contact) {
                                     place(contact.phoneNumber)
                                 }
@@ -186,11 +201,12 @@ private fun DialPad(
     onPaste: () -> Unit,
     onCall: () -> Unit,
 ) {
+    // Letters are the physical keycap markings from ITU E.161, not translatable copy.
     val keys = listOf(
-        listOf("1", "2", "3"),
-        listOf("4", "5", "6"),
-        listOf("7", "8", "9"),
-        listOf("*", "0", "#"),
+        listOf("1" to "", "2" to "ABC", "3" to "DEF"),
+        listOf("4" to "GHI", "5" to "JKL", "6" to "MNO"),
+        listOf("7" to "PQRS", "8" to "TUV", "9" to "WXYZ"),
+        listOf("*" to "", "0" to "", "#" to ""),
     )
     Surface(
         tonalElevation = 2.dp,
@@ -225,9 +241,10 @@ private fun DialPad(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    row.forEach { digit ->
+                    row.forEach { (digit, letters) ->
                         DialKey(
                             digit = digit,
+                            letters = letters,
                             onClick = { onAppend(digit) },
                             modifier = Modifier.weight(1f),
                         )
@@ -254,15 +271,27 @@ private fun DialPad(
 }
 
 @Composable
-private fun DialKey(digit: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
+private fun DialKey(digit: String, letters: String, onClick: () -> Unit, modifier: Modifier = Modifier) {
     Surface(
         onClick = onClick,
         shape = RoundedCornerShape(14.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
-        modifier = modifier.height(44.dp),
+        modifier = modifier.height(52.dp),
     ) {
-        Box(contentAlignment = Alignment.Center) {
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center,
+        ) {
             Text(digit, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium)
+            if (letters.isNotEmpty()) {
+                Text(
+                    letters,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+            }
         }
     }
 }
