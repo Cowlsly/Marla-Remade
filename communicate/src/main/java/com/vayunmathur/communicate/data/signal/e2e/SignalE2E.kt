@@ -51,19 +51,30 @@ class SignalE2E(
     private val onIdentityChanged: (String, ByteArray) -> Unit = { _, _ -> },
 ) {
     /**
-     * Our own identity public key, taken from the protocol store rather than from preferences.
+     * Our own identity public key in the form RingRTC expects for call key derivation: the **raw 32-byte**
+     * key, not the 33-byte serialized form with its `0x05` type prefix.
      *
-     * These must be byte-identical to what the peer has for us: RingRTC derives the SRTP keys for a call
-     * from both identity keys, so a different encoding — raw 32 bytes versus the 33-byte serialized form —
-     * produces keys that do not match, ICE connects, and every RTP packet is then undecryptable. The store
-     * is the authoritative copy because it is what messaging already uses successfully.
+     * Official passes both identity keys through `ECPublicKey.getPublicKeyBytes()`
+     * (`WebRtcUtil.getPublicKeyBytes`) before handing them to `receivedOffer`/`receivedAnswer`. Passing the
+     * serialized form instead derives SRTP keys that differ from the peer's, so ICE connects and then every
+     * RTP packet — including RingRTC's `Accepted` message — is undecryptable, which looks like a call that
+     * connects but never progresses past ringing.
      */
     val ownIdentityPublicKey: ByteArray
         get() = try {
-            protocolStore.identityKeyPair.publicKey.serialize()
+            // IdentityKeyPair -> IdentityKey -> ECPublicKey -> raw bytes, mirroring official's
+            // getAciIdentityKey().getPublicKey().serialize() passed through getPublicKeyBytes().
+            protocolStore.identityKeyPair.publicKey.publicKey.publicKeyBytes
         } catch (_: Throwable) {
-            b64(auth.identityPublicKey)
+            rawPublicKeyBytes(b64(auth.identityPublicKey))
         }
+
+    /** Strip the type prefix from a serialized EC public key, as RingRTC's key derivation requires. */
+    private fun rawPublicKeyBytes(serialized: ByteArray): ByteArray = try {
+        ECPublicKey(serialized).publicKeyBytes
+    } catch (_: Throwable) {
+        serialized
+    }
     private val ownIdentityPrivate: ByteArray = b64(auth.identityPrivateKey)
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
     private val ownDeviceId: Int = auth.deviceId
@@ -138,6 +149,13 @@ class SignalE2E(
     }
 
     /** The identity key currently recorded for [aci], or null if we have never seen one. */
+    /**
+     * The peer's identity key for call key derivation — raw 32 bytes, matching [ownIdentityPublicKey].
+     * The stored identity is the 33-byte serialized form, so the type prefix has to come off.
+     */
+    fun callIdentityKey(aci: String): ByteArray? =
+        storedIdentityKey(aci)?.let { rawPublicKeyBytes(it) }
+
     fun storedIdentityKey(aci: String): ByteArray? =
         try { protocolStore.getIdentity(signalAddress(aci))?.serialize() } catch (_: Exception) { null }
 

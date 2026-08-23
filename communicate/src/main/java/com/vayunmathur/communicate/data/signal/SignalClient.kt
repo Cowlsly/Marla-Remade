@@ -1246,7 +1246,9 @@ object SignalClient {
                     val e = e2e ?: return null
                     // RingRTC binds the SRTP key derivation to both identity keys, so a call cannot be
                     // set up before a session with this peer exists.
-                    val remote = e.storedIdentityKey(aci) ?: return null
+                    // Raw 32-byte keys, matching official's WebRtcUtil.getPublicKeyBytes; the serialized
+                    // 33-byte form derives different SRTP keys than the peer.
+                    val remote = e.callIdentityKey(aci) ?: return null
                     val local = e.ownIdentityPublicKey
                     // Logged because a size or encoding mismatch here yields SRTP keys that differ from the
                     // peer's, which looks like a connected call that never progresses.
