@@ -1,5 +1,10 @@
 plugins {
     id("common-conventions-app")
+    // androidx.tv, so this app is built on a design system that knows what a D-pad is. Named here
+    // *alongside* the app convention rather than instead of it, even though it applies that itself:
+    // the type-safe `launcherIcon` and `nativeAbis` accessors below are generated from the plugins this
+    // file applies directly.
+    id("common-conventions-tv")
     // No preview-metadata convention. Every screen here is either a full-screen decoder surface or
     // a TV-shaped idle screen, and Layoutlib can render neither into a *phone* listing image -
     // release.sh writes previews into a hardcoded graphics/phone-screenshots. `camera` and

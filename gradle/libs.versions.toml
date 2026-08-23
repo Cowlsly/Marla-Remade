@@ -37,6 +37,8 @@ material3 = "1.5.0-alpha23"
 material3AdaptiveNavigationSuite = "1.5.0-alpha23"
 foundation = "1.12.0-beta02"
 wearComposeMaterial = "1.7.0-alpha05"
+# TV Material: Material Design for a ten-foot UI, where Material 3's focus handling does not reach.
+tv = "1.1.0"
 
 # AndroidX – navigation
 navigation3 = "1.2.0-alpha05"
@@ -195,6 +197,10 @@ androidx-compose-material3-adaptive-navigation-suite = { group = "androidx.compo
 androidx-activity-compose = { group = "androidx.activity", name = "activity-compose", version.ref = "activityCompose" }
 androidx-wear-compose-material = { group = "androidx.wear.compose", name = "compose-material", version.ref = "wearComposeMaterial" }
 androidx-wear-compose-foundation = { group = "androidx.wear.compose", name = "compose-foundation", version.ref = "wearComposeMaterial" }
+# No `tv-foundation` companion: it was deprecated at 1.0.0 and its lazy lists moved into
+# `androidx.compose.foundation`, which the Compose BOM above already provides. Pinning the abandoned
+# artifact would drag compose 1.6 into the resolution for components nothing here uses.
+androidx-tv-material = { group = "androidx.tv", name = "tv-material", version.ref = "tv" }
 
 # AndroidX – navigation
 androidx-navigation3-runtime = { group = "androidx.navigation3", name = "navigation3-runtime", version.ref = "navigation3" }

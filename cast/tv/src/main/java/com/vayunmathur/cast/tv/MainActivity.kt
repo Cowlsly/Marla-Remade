@@ -10,8 +10,8 @@ import com.vayunmathur.cast.tv.platform.MirrorActivity
 import com.vayunmathur.cast.tv.platform.ReceiverController
 import com.vayunmathur.cast.tv.platform.ReceiverPhase
 import com.vayunmathur.cast.tv.service.ReceiverService
+import com.vayunmathur.cast.tv.ui.CastTvTheme
 import com.vayunmathur.cast.tv.ui.ReceiverContent
-import com.vayunmathur.library.ui.DynamicTheme
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.launch
@@ -32,7 +32,7 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         ReceiverService.start(this)
         setContent {
-            DynamicTheme(darkTheme = true) {
+            CastTvTheme {
                 val state by ReceiverController.state.collectAsState()
                 ReceiverContent(state)
             }
