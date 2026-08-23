@@ -81,6 +81,17 @@ class CastClient(context: Context) {
      */
     var onEnded: ((Int) -> Unit)? = null
 
+    /**
+     * Called when somebody presses a button on the television's remote.
+     *
+     * Optional: a client that leaves this null still casts, it simply has no remote - and the TV shows
+     * no overlay either, because the overlay only appears once [reportPlaybackState] has been called.
+     * So the two halves are opt-in together and there is no way to end up with dead buttons on screen.
+     *
+     * Runs on the main thread, like [onEnded], so it can drive a player directly.
+     */
+    var onCommand: ((PlaybackCommand) -> Unit)? = null
+
     private var service: Messenger? = null
     private var bound = false
 
@@ -101,6 +112,12 @@ class CastClient(context: Context) {
                     val reason = msg.data?.getInt(CastContract.KEY_END_REASON)
                         ?: CastContract.REASON_FAILED
                     onSessionEnded(reason)
+                    true
+                }
+                CastContract.MSG_PLAYBACK_COMMAND -> {
+                    // Dropped rather than queued when the session is not live: a command that arrived
+                    // during teardown would drive a player the TV is no longer showing.
+                    if (open) PlaybackCommand.from(msg.data)?.let { onCommand?.invoke(it) }
                     true
                 }
                 else -> false
@@ -192,12 +209,37 @@ class CastClient(context: Context) {
     }
 
     /**
+     * Tell the TV where playback is, so it can draw a seek bar for content only this app can see.
+     *
+     * Call it on any material change and otherwise at a slow heartbeat - twice a second is enough,
+     * because the TV extrapolates between snapshots. Every field is absolute rather than a delta, so a
+     * dropped one costs at most one heartbeat of staleness and needs no retry.
+     *
+     * Silent and non-throwing, unlike everything else here: this is called from a poll loop, so a
+     * failure would be a failure per tick, and there is nothing a caller could usefully do about one.
+     * It is also what mounts the TV's overlay - stop calling it and the remote goes away with it.
+     */
+    fun reportPlaybackState(state: PlaybackState) {
+        if (!open) return
+        val remote = service ?: return
+        val message = Message.obtain(null, CastContract.MSG_PLAYBACK_STATE).apply {
+            data = state.toBundle()
+        }
+        try {
+            remote.send(message)
+        } catch (_: RemoteException) {
+            // Cast is gone; onServiceDisconnected is what says so, and it will.
+        }
+    }
+
+    /**
      * End the session and unbind. Idempotent, and safe if [openSession] never succeeded.
      *
      * [onEnded] is not called: the caller asked for this and already knows.
      */
     fun close() {
         onEnded = null
+        onCommand = null
         pending = null
         if (open) {
             try {

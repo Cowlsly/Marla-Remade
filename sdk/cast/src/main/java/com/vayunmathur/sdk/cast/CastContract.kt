@@ -20,6 +20,8 @@ package com.vayunmathur.sdk.cast
  *       bind the service, MSG_OPEN_SESSION ─►     (width, height, wantAudio)
  *                                    ◄──  MSG_SESSION_READY (Surface, audio pipe, granted size)
  *       … render into the Surface, write PCM into the pipe …
+ *       MSG_PLAYBACK_STATE                ─►     (position, duration, playing, …)
+ *                                    ◄──  MSG_PLAYBACK_COMMAND (the TV remote was pressed)
  *       unbind, or MSG_CLOSE_SESSION      ─►
  *                                    ◄──  MSG_SESSION_ENDED (reason)
  * ```
@@ -54,8 +56,15 @@ object CastContract {
      * Must stay in lockstep with the root `version.txt` value at the build that first shipped
      * [SERVICE_CLASS]. An older Cast has no such service, so binding would fail with nothing to say
      * why; probing the version code first is what turns that into an actionable "update Cast".
+     *
+     * **Bumped for the transport controls, and that is a deliberate refusal rather than a
+     * degradation.** A Cast without [MSG_PLAYBACK_STATE] would stream perfectly and give the
+     * television a remote whose every button did nothing, which is a worse failure than not casting:
+     * the user has no way to tell it apart from a broken TV. So the old app blocks the cast and says
+     * to update, in the same breath as the protocol version bump that already forces both halves to
+     * ship together.
      */
-    const val MIN_CAST_VERSION_CODE = 20260816L
+    const val MIN_CAST_VERSION_CODE = 20260823L
 
     // ---- client → service ----
 
@@ -73,6 +82,17 @@ object CastContract {
      */
     const val MSG_CLOSE_SESSION = 2
 
+    /**
+     * Where playback is, so the television can draw a seek bar for content only it can see.
+     *
+     * Carries [KEY_POSITION_MS] and its neighbours as an absolute snapshot rather than a delta, which
+     * is what makes a dropped one cost nothing. Fire and forget: there is no reply, and a client that
+     * stops sending simply leaves the TV's overlay stale until the session ends.
+     *
+     * Ignored unless a session is open, so a client may send it without tracking readiness itself.
+     */
+    const val MSG_PLAYBACK_STATE = 5
+
     // ---- service → client ----
 
     /**
@@ -83,6 +103,16 @@ object CastContract {
 
     /** The session is over, for the reason in [KEY_END_REASON]. The `Surface` is invalid from here. */
     const val MSG_SESSION_ENDED = 4
+
+    /**
+     * Somebody pressed a button on the television's remote. Carries [KEY_ACTION] and maybe
+     * [KEY_ACTION_VALUE].
+     *
+     * Delivered only for a session this client opened, and only for app content - screen mirroring has
+     * no transport to control. A client that does not handle these is not broken: the TV's overlay
+     * will simply never appear, because it is only mounted once state arrives.
+     */
+    const val MSG_PLAYBACK_COMMAND = 6
 
     // ---- MSG_OPEN_SESSION payload ----
 
@@ -135,6 +165,101 @@ object CastContract {
 
     /** One of the `REASON_` constants. */
     const val KEY_END_REASON = "endReason"
+
+    // ---- MSG_PLAYBACK_STATE payload ----
+
+    /**
+     * Where playback is and where it ends, in milliseconds.
+     *
+     * A duration of zero or less means "no known end", which the TV renders without a bar rather than
+     * as a zero-length one.
+     */
+    const val KEY_POSITION_MS = "positionMs"
+    const val KEY_DURATION_MS = "durationMs"
+
+    /**
+     * Whether media is advancing, which is not the same as whether the user asked for it to.
+     *
+     * Report the player's own "is playing" rather than its play-when-ready flag: the TV extrapolates
+     * position between snapshots, and a stall reported as playing would run its seek bar ahead of the
+     * picture and then jerk it back.
+     */
+    const val KEY_PLAYING = "playing"
+
+    /** For a spinner. Separate from [KEY_PLAYING] because a stall is not a pause. */
+    const val KEY_BUFFERING = "buffering"
+
+    /** Tempo multiplier, 1.0 being normal. */
+    const val KEY_SPEED = "speed"
+
+    /** Media volume as 0..1. The same level on both ends - see [ACTION_SET_VOLUME]. */
+    const val KEY_VOLUME = "volume"
+
+    /**
+     * Whether there is anything to skip to.
+     *
+     * Carried because the TV cannot know: what is next is the client's own idea of a queue, and a
+     * remote that offers a button doing nothing is worse than one that offers none.
+     */
+    const val KEY_HAS_NEXT = "hasNext"
+    const val KEY_HAS_PREVIOUS = "hasPrevious"
+
+    // ---- MSG_PLAYBACK_COMMAND payload ----
+
+    /** One of the `ACTION_` constants. Unknown values must be ignored, not treated as an error. */
+    const val KEY_ACTION = "action"
+
+    /**
+     * The action's argument, for the actions that take one: milliseconds for [ACTION_SEEK_TO], a
+     * multiplier for [ACTION_SET_SPEED], 0..1 for [ACTION_SET_VOLUME]. Absent otherwise.
+     */
+    const val KEY_ACTION_VALUE = "actionValue"
+
+    /**
+     * What the remote asked for.
+     *
+     * **Deliberately a second definition of `:cast:protocol`'s `PlaybackAction`, not a reuse of it.**
+     * This module is the public client contract and every consumer compiles against it; giving it a
+     * dependency on the streaming protocol would hand every casting app the wire format, the crypto
+     * and the RTP packetiser, which is the whole thing brokering exists to avoid. `:cast` depends on
+     * both and owns the mapping between them, so the duplication is one file wide and one function
+     * deep.
+     *
+     * Ints rather than an enum for the same reason [MSG_OPEN_SESSION] is: this crosses a `Bundle`,
+     * and a `Serializable` enum in a `Bundle` is a class-loading problem waiting for a client built
+     * against a different SDK version.
+     */
+    const val ACTION_PLAY = 0
+    const val ACTION_PAUSE = 1
+
+    /**
+     * Whichever of play and pause the client is not currently doing.
+     *
+     * Its own action rather than the TV choosing from its last snapshot: that snapshot can be half a
+     * second old, and two quick presses resolved against it would both send the same thing.
+     */
+    const val ACTION_TOGGLE = 2
+
+    /** [KEY_ACTION_VALUE] is an absolute position in milliseconds. */
+    const val ACTION_SEEK_TO = 3
+
+    /** The client's own skip interval, so the two ends cannot disagree about how far it is. */
+    const val ACTION_SKIP_FORWARD = 4
+    const val ACTION_SKIP_BACK = 5
+
+    const val ACTION_NEXT = 6
+    const val ACTION_PREVIOUS = 7
+
+    /** [KEY_ACTION_VALUE] is a tempo multiplier. */
+    const val ACTION_SET_SPEED = 8
+
+    /**
+     * [KEY_ACTION_VALUE] is 0..1, and is the level for *both* ends.
+     *
+     * The client is expected to move its own media volume to match, so that the level survives the
+     * session ending and local playback resumes where the TV left it.
+     */
+    const val ACTION_SET_VOLUME = 9
 
     /** The app asked, via [MSG_CLOSE_SESSION] or by unbinding. */
     const val REASON_CLIENT_CLOSED = 0

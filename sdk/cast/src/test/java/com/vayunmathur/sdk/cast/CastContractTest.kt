@@ -3,6 +3,7 @@ package com.vayunmathur.sdk.cast
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -39,6 +40,8 @@ class CastContractTest {
             CastContract.MSG_CLOSE_SESSION,
             CastContract.MSG_SESSION_READY,
             CastContract.MSG_SESSION_ENDED,
+            CastContract.MSG_PLAYBACK_STATE,
+            CastContract.MSG_PLAYBACK_COMMAND,
         )
         assertEquals(codes.size, codes.toSet().size, "two Messenger `what` codes are the same")
     }
@@ -58,6 +61,16 @@ class CastContractTest {
             CastContract.KEY_GRANTED_FRAME_RATE,
             CastContract.KEY_RECEIVER_NAME,
             CastContract.KEY_END_REASON,
+            CastContract.KEY_POSITION_MS,
+            CastContract.KEY_DURATION_MS,
+            CastContract.KEY_PLAYING,
+            CastContract.KEY_BUFFERING,
+            CastContract.KEY_SPEED,
+            CastContract.KEY_VOLUME,
+            CastContract.KEY_HAS_NEXT,
+            CastContract.KEY_HAS_PREVIOUS,
+            CastContract.KEY_ACTION,
+            CastContract.KEY_ACTION_VALUE,
         )
         assertEquals(keys.size, keys.toSet().size, "two Bundle keys are the same string")
         assertFalse(keys.any { it.isBlank() })
@@ -88,6 +101,39 @@ class CastContractTest {
     fun `the audio format the pipe expects is the one the RTP timebase uses`() {
         assertEquals(48_000, CastContract.AUDIO_SAMPLE_RATE)
         assertEquals(2, CastContract.AUDIO_CHANNELS)
+    }
+
+    // ---- transport controls ----
+
+    @Test
+    fun `every action has its own code, and the enum covers all of them`() {
+        // The enum is the SDK's face and the ints are what cross the Bundle. A collision would make
+        // two buttons on the remote do the same thing, and a missing entry would make one do nothing -
+        // both only visible with a television in the room.
+        val codes = listOf(
+            CastContract.ACTION_PLAY,
+            CastContract.ACTION_PAUSE,
+            CastContract.ACTION_TOGGLE,
+            CastContract.ACTION_SEEK_TO,
+            CastContract.ACTION_SKIP_FORWARD,
+            CastContract.ACTION_SKIP_BACK,
+            CastContract.ACTION_NEXT,
+            CastContract.ACTION_PREVIOUS,
+            CastContract.ACTION_SET_SPEED,
+            CastContract.ACTION_SET_VOLUME,
+        )
+        assertEquals(codes.size, codes.toSet().size, "two actions are the same int")
+        assertEquals(codes.toSet(), PlaybackAction.entries.map { it.wire }.toSet())
+    }
+
+    @Test
+    fun `an action code this build does not know reads as nothing rather than as the first one`() {
+        // A newer Cast gaining a button must not crash an app built against this SDK, and must not be
+        // mistaken for PLAY - which is what an ordinal-indexed lookup would have done.
+        assertNull(PlaybackAction.of(-1))
+        assertNull(PlaybackAction.of(999))
+        assertEquals(PlaybackAction.Play, PlaybackAction.of(CastContract.ACTION_PLAY))
+        assertEquals(PlaybackAction.SetVolume, PlaybackAction.of(CastContract.ACTION_SET_VOLUME))
     }
 
     // ---- the capability probe ----
