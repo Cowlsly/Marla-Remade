@@ -2,6 +2,7 @@ package com.vayunmathur.library.downloadservice
 
 import android.app.DownloadManager
 import android.content.Context
+import android.util.Log
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,6 +18,8 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.work.WorkInfo
+import androidx.work.WorkManager
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.round
 import kotlinx.coroutines.CancellationException
@@ -37,8 +40,11 @@ import kotlin.coroutines.coroutineContext
  * an optional [sha256] verified after the download completes. Both the plain
  * `Triple(url, fileName, description)` API and the [ModelDownloadItem] API funnel
  * into this so the download loop only deals with one shape.
+ *
+ * [fileName] may contain a subdirectory (`small100/encoder.ncnn.bin`), which the
+ * download loop creates on demand.
  */
-private data class DownloadSpec(
+internal data class DownloadSpec(
     val fileName: String,
     val description: String,
     val url: String,
@@ -108,12 +114,19 @@ private fun InitialDownloadScreen(
 ) {
     val context = LocalContext.current
 
-    // Stream each required file directly into the app's external files dir (no
-    // DownloadManager), writing the same DataStore keys the UI below observes.
-    // When every requested file is present on disk, advance to the main page.
-    LaunchedEffect(Unit) {
-        runDownloadsCore(context, ds, specs)
-        if (allFilesPresent(context, specs)) {
+    // The download runs in a WorkManager job, not in this composition: it used to live in a
+    // LaunchedEffect, so leaving the screen (or a configuration change) cancelled a multi-hundred-MB
+    // transfer. The screen only enqueues and observes now; `.part` files let a stopped run resume.
+    val workName = remember(specs) { ModelDownloadWorker.uniqueName(specs) }
+    LaunchedEffect(specs) { ModelDownloadWorker.enqueue(context, specs) }
+
+    val workInfo by remember(workName) {
+        WorkManager.getInstance(context).getWorkInfosForUniqueWorkFlow(workName)
+    }.collectAsState(emptyList())
+    val state = workInfo.firstOrNull()?.state
+
+    LaunchedEffect(state) {
+        if (state == WorkInfo.State.SUCCEEDED && allFilesPresent(context, specs)) {
             onAllDownloaded()
         }
     }
@@ -137,6 +150,20 @@ private fun InitialDownloadScreen(
             )
 
             Spacer(Modifier.height(32.dp))
+
+            // A silently-stuck screen was the old failure mode: every attempt threw, the loop gave
+            // up, and nothing said so. Offer an explicit retry instead.
+            if (state == WorkInfo.State.FAILED) {
+                Text(
+                    text = stringResource(R.string.download_failed),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.error
+                )
+                Button(onClick = { ModelDownloadWorker.retry(context, specs) }) {
+                    Text(stringResource(R.string.retry))
+                }
+                Spacer(Modifier.height(24.dp))
+            }
 
             LazyColumn(
                 verticalArrangement = Arrangement.spacedBy(20.dp),
@@ -175,12 +202,17 @@ private const val DOWNLOAD_BUFFER_SIZE = 1 shl 16
 private const val CONNECT_TIMEOUT_MS = 30_000
 private const val READ_TIMEOUT_MS = 30_000
 
+private const val TAG = "ModelDownload"
+
 /**
  * Mirror-only on-demand download: fetches each [ModelDownloadItem] from the
  * self-hosted mirror (no third-party fallback), with optional SHA-256
  * verification (supply-chain mitigation #1). Publishes the same `progress_*` /
  * `speed_*` DataStore keys as the initial screen and skips files already present
- * on disk.
+ * on disk. Returns whether every file ended up on disk and verified.
+ *
+ * This runs in the caller's scope, so it is for downloads the caller is already
+ * waiting on; first-launch gating goes through [ModelDownloadWorker] instead.
  */
 suspend fun downloadModels(
     context: Context,
@@ -198,13 +230,18 @@ suspend fun downloadModels(
  * Files are processed sequentially; each publishes `progress_*` / `speed_*` for
  * the UI. On checksum mismatch the download is retried; on final failure any
  * `.part` file is left in place so the next run resumes it.
+ *
+ * Returns true only when every spec ended up on disk and verified, so the caller
+ * ([ModelDownloadWorker]) can ask WorkManager to retry rather than reporting a
+ * success that leaves the app gated forever.
  */
-private suspend fun runDownloadsCore(
+internal suspend fun runDownloadsCore(
     context: Context,
     ds: DataStoreUtils,
     specs: List<DownloadSpec>,
-) = withContext(Dispatchers.IO) {
+): Boolean = withContext(Dispatchers.IO) {
     val dir = context.getExternalFilesDir(null)
+    var allDownloaded = true
     for (spec in specs) {
         // Sever any legacy DownloadManager claim on an already-present file before
         // we treat it as a plain app file (one-time, guarded — see fn docs).
@@ -223,8 +260,9 @@ private suspend fun runDownloadsCore(
                 ds.setDouble("progress_${spec.fileName}", 0.0)
             }
         }
-        downloadSpec(ds, dir, spec)
+        if (!downloadSpec(ds, dir, spec)) allDownloaded = false
     }
+    allDownloaded
 }
 
 /**
@@ -232,13 +270,13 @@ private suspend fun runDownloadsCore(
  * atomically renames it to the final name. Retries transient failures up to
  * [MAX_ATTEMPTS]; on a checksum mismatch the partial is discarded and the file
  * is re-fetched from scratch. On final failure any `.part` is left for the next
- * run to resume (the download screen stays, as before).
+ * run to resume, and false is returned so the caller can surface it.
  */
 private suspend fun downloadSpec(
     ds: DataStoreUtils,
     dir: File?,
     spec: DownloadSpec,
-) {
+): Boolean {
     val finalFile = File(dir, spec.fileName)
     val partFile = File(dir, "${spec.fileName}.part")
 
@@ -247,19 +285,23 @@ private suspend fun downloadSpec(
             streamToPart(ds, spec, partFile)
             if (checksumOk(partFile, spec.sha256)) {
                 finalizeDownload(ds, spec, partFile, finalFile)
-                return
+                return true
             }
             // Corrupt/tampered copy — drop the partial and re-fetch from scratch.
+            Log.w(TAG, "checksum mismatch for ${spec.fileName}; refetching")
             partFile.delete()
         } catch (e: CancellationException) {
-            // Cooperative cancellation (screen left / process paused): keep the
-            // `.part` so the next run resumes via the Range header.
+            // Cooperative cancellation (worker stopped): keep the `.part` so the
+            // next run resumes via the Range header.
             throw e
-        } catch (_: Exception) {
+        } catch (e: Exception) {
             // Transient network error — keep the `.part` for resume and back off.
+            Log.w(TAG, "attempt ${attempt + 1}/$MAX_ATTEMPTS failed for ${spec.fileName}", e)
             if (attempt < MAX_ATTEMPTS - 1) delay(RETRY_DELAY_MS)
         }
     }
+    Log.e(TAG, "giving up on ${spec.fileName} after $MAX_ATTEMPTS attempts")
+    return false
 }
 
 /**
@@ -272,6 +314,10 @@ private suspend fun streamToPart(
     spec: DownloadSpec,
     partFile: File,
 ) {
+    // fileName can name a subdirectory ("small100/encoder.ncnn.bin"). FileOutputStream does not
+    // create missing parents, so without this every attempt died with ENOENT before a single byte
+    // was written — which is exactly how the SMaLL-100 download hung at 0% with no error.
+    partFile.parentFile?.mkdirs()
     var startOffset = if (partFile.exists()) partFile.length() else 0L
     val conn = (URL(spec.url).openConnection() as HttpURLConnection).apply {
         connectTimeout = CONNECT_TIMEOUT_MS

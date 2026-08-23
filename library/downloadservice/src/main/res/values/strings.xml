@@ -9,6 +9,10 @@
     <string name="downloading_required_components_for_this">Downloading required components for this app.</string>
     <!-- Shared library: downloadservice – InitialDownloader: Status label left of percent in progress row when file download is finished -->
     <string name="completed">Completed</string>
-    <!-- Shared library: downloadservice – InitialDownloader: Status label left of percent when download is in progress, includes ellipsis -->
-    <string name="downloading">Downloading…</string>
+    <!-- Shared library: downloadservice - InitialDownloader: Status label left of percent when download is in progress, includes ellipsis -->
+    <string name="downloading">Downloading.</string>
+    <!-- Shared library: downloadservice - InitialDownloader: Error shown on the first-launch blocker screen when the component download gave up. Error color, above a Retry button -->
+    <string name="download_failed">Download failed. Check your connection and try again.</string>
+    <!-- Shared library: downloadservice - InitialDownloader: Button that restarts a failed component download -->
+    <string name="retry">Retry</string>
 </resources>
