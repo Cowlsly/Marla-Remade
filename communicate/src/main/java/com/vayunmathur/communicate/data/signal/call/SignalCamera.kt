@@ -1,6 +1,7 @@
 package com.vayunmathur.communicate.data.signal.call
 
 import android.content.Context
+import android.media.projection.MediaProjection
 import android.util.Log
 import org.signal.ringrtc.CameraControl
 import org.webrtc.Camera2Capturer
@@ -8,7 +9,9 @@ import org.webrtc.Camera2Enumerator
 import org.webrtc.CameraVideoCapturer
 import org.webrtc.CapturerObserver
 import org.webrtc.EglBase
+import org.webrtc.ScreenCapturerAndroid
 import org.webrtc.SurfaceTextureHelper
+import org.webrtc.VideoCapturer
 import org.webrtc.VideoFrame
 
 /**
@@ -30,23 +33,32 @@ class SignalCamera(
     private var capturing = false
     private var frontFacing = true
 
+    /**
+     * RingRTC's sink for captured frames, kept so the capture *source* can be swapped between the camera and
+     * the screen without tearing down the call's video track.
+     */
+    private var observer: CapturerObserver? = null
+    private var surfaceHelper: SurfaceTextureHelper? = null
+    private var screenCapturer: VideoCapturer? = null
+
     /** True whenever the device has a usable camera, matching what the offer expects to negotiate. */
     override fun hasCapturer(): Boolean = capturer != null
 
     override fun initCapturer(observer: CapturerObserver) {
+        this.observer = observer
         val capturer = this.capturer ?: return
         try {
-            capturer.initialize(
-                SurfaceTextureHelper.create("SignalCameraThread", eglBase.eglBaseContext),
-                appContext,
-                observer,
-            )
+            val helper = SurfaceTextureHelper.create("SignalCameraThread", eglBase.eglBaseContext)
+            surfaceHelper = helper
+            capturer.initialize(helper, appContext, observer)
         } catch (t: Throwable) {
             Log.w(TAG, "could not initialize the camera capturer", t)
         }
     }
 
     override fun setEnabled(enable: Boolean) {
+        // While sharing the screen the camera stays off; the screen capturer is the source.
+        if (screenCapturer != null) return
         val capturer = this.capturer ?: return
         try {
             if (enable && !capturing) {
@@ -58,6 +70,66 @@ class SignalCamera(
             }
         } catch (t: Throwable) {
             Log.w(TAG, "could not ${if (enable) "start" else "stop"} video capture", t)
+        }
+    }
+
+    /**
+     * Swap the capture source between the camera and the screen.
+     *
+     * Screen capture reuses RingRTC's existing [CapturerObserver], so the outgoing video track and the
+     * negotiated media stay exactly as they were — only the frames' origin changes. [permission] is the
+     * `MediaProjection` consent result and is required to start.
+     */
+    fun setScreenShare(enabled: Boolean, permission: android.content.Intent?): Boolean {
+        val observer = this.observer ?: run {
+            Log.w(TAG, "no capturer observer yet; cannot share the screen")
+            return false
+        }
+        return if (enabled) startScreenShare(observer, permission) else stopScreenShare()
+    }
+
+    private fun startScreenShare(observer: CapturerObserver, permission: android.content.Intent?): Boolean {
+        if (permission == null) return false
+        if (screenCapturer != null) return true
+        return try {
+            // Stop the camera first: one source at a time feeds the track.
+            if (capturing) {
+                capturer?.stopCapture()
+                capturing = false
+            }
+            val capturer = ScreenCapturerAndroid(
+                permission,
+                object : MediaProjection.Callback() {
+                    override fun onStop() {
+                        Log.i(TAG, "screen capture stopped by the system")
+                    }
+                },
+            )
+            val helper = SurfaceTextureHelper.create("SignalScreenThread", eglBase.eglBaseContext)
+            capturer.initialize(helper, appContext, observer)
+            val metrics = appContext.resources.displayMetrics
+            capturer.startCapture(metrics.widthPixels, metrics.heightPixels, SCREEN_FPS)
+            screenCapturer = capturer
+            Log.i(TAG, "sharing the screen at ${metrics.widthPixels}x${metrics.heightPixels}")
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not start screen capture", t)
+            screenCapturer = null
+            false
+        }
+    }
+
+    private fun stopScreenShare(): Boolean {
+        val capturer = screenCapturer ?: return true
+        return try {
+            capturer.stopCapture()
+            capturer.dispose()
+            screenCapturer = null
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not stop screen capture", t)
+            screenCapturer = null
+            false
         }
     }
 
@@ -73,12 +145,16 @@ class SignalCamera(
     override fun setOrientation(orientation: Int?) = Unit
 
     fun dispose() {
+        stopScreenShare()
         try {
             if (capturing) capturer?.stopCapture()
             capturer?.dispose()
+            surfaceHelper?.dispose()
         } catch (_: Throwable) {
         }
         capturing = false
+        observer = null
+        surfaceHelper = null
     }
 
     override fun onCameraSwitchDone(isFrontCamera: Boolean) {
@@ -118,6 +194,9 @@ class SignalCamera(
         const val CAPTURE_WIDTH = 640
         const val CAPTURE_HEIGHT = 480
         const val CAPTURE_FPS = 30
+
+        /** Screen content is mostly static, so a lower rate keeps text legible at the same bitrate. */
+        const val SCREEN_FPS = 15
     }
 }
 

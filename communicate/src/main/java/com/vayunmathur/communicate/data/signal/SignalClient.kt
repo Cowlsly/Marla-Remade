@@ -1269,6 +1269,10 @@ object SignalClient {
                     InAppCallRegistry.onRemoteVideo(enabled)
                 }
 
+                override fun onRemoteScreenShare(enabled: Boolean) {
+                    InAppCallRegistry.onRemoteScreenShare(enabled)
+                }
+
                 override fun onCallStateChanged(
                     aci: String,
                     callId: Long,
@@ -1442,9 +1446,16 @@ object SignalClient {
 
         override fun eglContext(): org.webrtc.EglBase.Context? = callManager?.eglContext()
 
-        override fun attachRenderers(local: org.webrtc.VideoSink?, remote: org.webrtc.VideoSink?) {
-            callManager?.localVideoSink?.attach(local)
-            callManager?.remoteVideoSink?.attach(remote)
+        override fun attachLocalRenderer(sink: org.webrtc.VideoSink?) {
+            callManager?.localVideoSink?.attach(sink)
+        }
+
+        override fun attachRemoteRenderer(sink: org.webrtc.VideoSink?) {
+            callManager?.remoteVideoSink?.attach(sink)
+        }
+
+        override fun setScreenShareEnabled(enabled: Boolean, permission: android.content.Intent?) {
+            callManager?.setScreenShareEnabled(enabled, permission)
         }
     }
 

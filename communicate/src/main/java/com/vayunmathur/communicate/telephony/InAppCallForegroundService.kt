@@ -67,8 +67,15 @@ class InAppCallForegroundService : Service() {
         } else {
             buildOngoingCallNotification(state.phase, state.peerName)
         }
+        // Screen capture is only permitted while a mediaProjection-typed service is in the foreground.
+        val types = if (state.screenSharing) {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL or
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        } else {
+            ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_PHONE_CALL)
+            startForeground(NOTIFICATION_ID, notification, types)
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }

@@ -61,6 +61,9 @@ class SignalCallManager(
         /** The peer turned their camera on or off. */
         fun onRemoteVideo(enabled: Boolean)
 
+        /** The peer started or stopped sharing their screen. */
+        fun onRemoteScreenShare(enabled: Boolean)
+
         /**
          * TURN/STUN relays for the call. Without them only host candidates are available, so a call fails
          * behind NAT.
@@ -85,6 +88,9 @@ class SignalCallManager(
      * answer must match it; only [SignalCamera.setEnabled] differs between audio and video.
      */
     private var camera: SignalCamera? = null
+
+    /** Tracked so a later video toggle keeps telling RingRTC the source is a screencast. */
+    private var screenSharing = false
 
     /** Exposed so the call UI can attach renderers once it exists. */
     val localVideoSink = SwappableVideoSink()
@@ -136,7 +142,20 @@ class SignalCallManager(
     /** Turn our outgoing video on or off mid-call. */
     fun setVideoEnabled(enabled: Boolean): Boolean = withManager("setVideoEnable") {
         camera?.setEnabled(enabled)
-        it.setVideoEnable(enabled, false)
+        it.setVideoEnable(enabled, screenSharing)
+    }
+
+    /**
+     * Share the screen instead of the camera. RingRTC is told the outgoing video is a screencast so it adapts
+     * the encoder for static content rather than treating it as camera motion.
+     */
+    fun setScreenShareEnabled(enabled: Boolean, permission: android.content.Intent?): Boolean {
+        val started = camera?.setScreenShare(enabled, permission) ?: false
+        if (enabled && !started) return false
+        screenSharing = enabled && started
+        return withManager("setVideoEnable(screenShare)") {
+            it.setVideoEnable(true, screenSharing)
+        }
     }
 
     fun flipCamera() {
@@ -304,6 +323,14 @@ class SignalCallManager(
                 onRemoteVideo(false)
                 return
             }
+            CallManager.CallEvent.REMOTE_SHARING_SCREEN_ENABLE -> {
+                signaling.onRemoteScreenShare(true)
+                return
+            }
+            CallManager.CallEvent.REMOTE_SHARING_SCREEN_DISABLE -> {
+                signaling.onRemoteScreenShare(false)
+                return
+            }
             else -> Unit
         }
         val state = when (event) {
@@ -329,6 +356,7 @@ class SignalCallManager(
 
     override fun onCallConcluded(remote: Remote?) {
         callMediaTypes.clear()
+        screenSharing = false
         camera?.dispose()
         camera = null
         localVideoSink.attach(null)

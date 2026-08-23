@@ -1,5 +1,9 @@
 package com.vayunmathur.communicate.ui.call
 
+import android.app.Activity
+import android.media.projection.MediaProjectionManager
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -33,6 +37,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
@@ -55,6 +60,7 @@ import com.vayunmathur.library.ui.IconDialpad
 import com.vayunmathur.library.ui.IconFlipCamera
 import com.vayunmathur.library.ui.IconMic
 import com.vayunmathur.library.ui.IconMicOff
+import com.vayunmathur.library.ui.IconScreenShare
 import com.vayunmathur.library.ui.IconVideoCamera
 import com.vayunmathur.library.ui.IconVolumeUp
 import com.vayunmathur.library.ui.MaterialTheme
@@ -81,6 +87,17 @@ import org.webrtc.SurfaceViewRenderer
 fun InAppCallScreen(onClose: () -> Unit) {
     val state by InAppCallRegistry.state.collectAsState()
     var showKeypad by remember { mutableStateOf(false) }
+
+    // MediaProjection consent must be granted per share; the result Intent is the capture token.
+    val screenShareConsent = rememberLauncherForActivityResult(
+        ActivityResultContracts.StartActivityForResult(),
+    ) { result ->
+        val permission = result.data
+        if (result.resultCode == Activity.RESULT_OK && permission != null) {
+            InAppCallRegistry.setScreenShare(true, permission)
+        }
+    }
+    val context = LocalContext.current
 
     // A terminal state is held briefly so the outcome is readable, then dismissed.
     LaunchedEffect(state.phase) {
@@ -129,6 +146,14 @@ fun InAppCallScreen(onClose: () -> Unit) {
                         state = state,
                         keypadShown = showKeypad,
                         onToggleKeypad = { showKeypad = !showKeypad },
+                        onToggleScreenShare = {
+                            if (state.screenSharing) {
+                                InAppCallRegistry.setScreenShare(false, null)
+                            } else {
+                                val manager = context.getSystemService(MediaProjectionManager::class.java)
+                                manager?.createScreenCaptureIntent()?.let(screenShareConsent::launch)
+                            }
+                        },
                     )
                 }
                 Spacer(Modifier.height(Spacing.xl))
@@ -224,6 +249,7 @@ private fun OngoingControls(
     state: InAppCallState,
     keypadShown: Boolean,
     onToggleKeypad: () -> Unit,
+    onToggleScreenShare: () -> Unit,
 ) {
     val caps = state.capabilities
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -256,12 +282,20 @@ private fun OngoingControls(
                     if (state.localVideoEnabled) IconVideoCamera(tint = tint) else IconCameraOff(tint = tint)
                 }
             }
-            if (caps.video && state.localVideoEnabled) {
+            // Flipping the camera is meaningless while the source is the screen.
+            if (caps.video && state.localVideoEnabled && !state.screenSharing) {
                 CallToggle(
                     label = stringResource(R.string.call_flip_camera),
                     active = false,
                     onClick = { InAppCallRegistry.flipCamera() },
                 ) { tint -> IconFlipCamera(tint = tint) }
+            }
+            if (caps.screenShare) {
+                CallToggle(
+                    label = stringResource(R.string.call_screen_share),
+                    active = state.screenSharing,
+                    onClick = onToggleScreenShare,
+                ) { tint -> IconScreenShare(tint = tint) }
             }
             if (caps.dtmf) {
                 CallToggle(
@@ -398,17 +432,18 @@ private fun CallVideo(showRemote: Boolean, showLocal: Boolean) {
                 },
                 modifier = Modifier.fillMaxSize(),
                 onRelease = { renderer ->
-                    controller.attachRenderers(local = null, remote = null)
+                    controller.attachRemoteRenderer(null)
                     renderer.release()
                 },
-                update = { renderer -> controller.attachRenderers(local = null, remote = renderer) },
+                update = { renderer -> controller.attachRemoteRenderer(renderer) },
             )
         }
         if (showLocal) {
             SelfView(
                 eglContext = eglContext,
                 bounds = DpSize(maxWidth, maxHeight),
-                onRenderer = { renderer -> controller.attachRenderers(local = renderer, remote = null) },
+                onRenderer = { renderer -> controller.attachLocalRenderer(renderer) },
+                onRelease = { controller.attachLocalRenderer(null) },
             )
         }
     }
@@ -426,6 +461,7 @@ private fun SelfView(
     eglContext: org.webrtc.EglBase.Context,
     bounds: DpSize,
     onRenderer: (SurfaceViewRenderer) -> Unit,
+    onRelease: () -> Unit,
 ) {
     val density = LocalDensity.current
     var scale by remember { mutableFloatStateOf(1f) }
@@ -474,7 +510,10 @@ private fun SelfView(
                 }
             },
             modifier = Modifier.fillMaxSize(),
-            onRelease = { renderer -> renderer.release() },
+            onRelease = { renderer ->
+                onRelease()
+                renderer.release()
+            },
             update = onRenderer,
         )
     }

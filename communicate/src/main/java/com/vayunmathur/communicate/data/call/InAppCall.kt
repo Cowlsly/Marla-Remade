@@ -17,10 +17,11 @@ data class CallCapabilities(
     val speaker: Boolean = true,
     val video: Boolean = false,
     val dtmf: Boolean = false,
+    val screenShare: Boolean = false,
 ) {
     companion object {
         val AudioOnly = CallCapabilities()
-        val AudioAndVideo = CallCapabilities(video = true)
+        val AudioAndVideo = CallCapabilities(video = true, screenShare = true)
         val AudioAndKeypad = CallCapabilities(dtmf = true)
     }
 }
@@ -47,6 +48,10 @@ data class InAppCallState(
     val remoteVideoEnabled: Boolean = false,
     /** Whether our own camera is on. */
     val localVideoEnabled: Boolean = false,
+    /** Whether we are sending the screen rather than the camera. */
+    val screenSharing: Boolean = false,
+    /** Whether the peer is sharing their screen. */
+    val remoteScreenSharing: Boolean = false,
     val muted: Boolean = false,
     val speaker: Boolean = false,
     /** When the call became [InAppCallPhase.Active], for the duration readout. 0 until then. */
@@ -98,7 +103,17 @@ interface InAppCallVideoController {
     /** EGL context the renderers must share with the decoder, or null if video is unavailable. */
     fun eglContext(): org.webrtc.EglBase.Context?
 
-    fun attachRenderers(local: org.webrtc.VideoSink?, remote: org.webrtc.VideoSink?)
+    /**
+     * Attached separately rather than as a pair: the two renderers are created and disposed independently by
+     * the UI, and a combined setter meant whichever recomposed last cleared the other's sink — which showed up
+     * as remote video freezing when the self-view appeared.
+     */
+    fun attachLocalRenderer(sink: org.webrtc.VideoSink?)
+
+    fun attachRemoteRenderer(sink: org.webrtc.VideoSink?)
+
+    /** Share the screen instead of the camera. */
+    fun setScreenShareEnabled(enabled: Boolean, permission: android.content.Intent?)
 }
 
 /**
@@ -200,6 +215,26 @@ object InAppCallRegistry {
         if (_state.value.phase == InAppCallPhase.Idle) return
         android.util.Log.i(TAG, "remote video enabled=$enabled")
         _state.value = _state.value.copy(remoteVideoEnabled = enabled)
+    }
+
+    fun onRemoteScreenShare(enabled: Boolean) {
+        if (_state.value.phase == InAppCallPhase.Idle) return
+        android.util.Log.i(TAG, "remote screen share enabled=$enabled")
+        _state.value = _state.value.copy(remoteScreenSharing = enabled)
+    }
+
+    /**
+     * Start or stop sharing the screen. [permission] is the result of the MediaProjection consent dialog and
+     * is required to start; stopping needs nothing.
+     */
+    fun setScreenShare(enabled: Boolean, permission: android.content.Intent?) {
+        if (enabled && permission == null) return
+        videoController?.setScreenShareEnabled(enabled, permission)
+        _state.value = _state.value.copy(
+            screenSharing = enabled,
+            // Sharing the screen is sending video, so the peer-facing state has to agree.
+            localVideoEnabled = enabled || _state.value.localVideoEnabled,
+        )
     }
 
     fun onLocalVideo(enabled: Boolean) {

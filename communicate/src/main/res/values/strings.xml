@@ -118,6 +118,7 @@
     <string name="call_state_incoming_generic">Incoming call</string>
     <string name="call_video">Video</string>
     <string name="call_flip_camera">Flip</string>
+    <string name="call_screen_share">Share screen</string>
     <string name="contact_create_new">Create new contact</string>
     <string name="contact_add_to_existing">Add to existing contact</string>
     <string name="deep_link_group_unsupported">Group invite links are not supported yet</string>
