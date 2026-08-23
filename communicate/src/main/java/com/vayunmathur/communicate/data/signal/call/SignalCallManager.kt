@@ -385,6 +385,17 @@ class SignalCallManager(
                 Log.w(TAG, "call signaling send failed", t)
                 false
             }
+            Log.i(
+                TAG,
+                "sent ${message::class.simpleName} callId=$callId to $aci device=${deviceId ?: "all"} " +
+                    "urgent=$urgent ok=$ok" +
+                    when (message) {
+                        is SignalCallMessage.Offer -> " opaque=${message.opaque.size}B video=${message.video}"
+                        is SignalCallMessage.Answer -> " opaque=${message.opaque.size}B"
+                        is SignalCallMessage.Ice -> " candidates=${message.candidates.size}"
+                        else -> ""
+                    },
+            )
             reportSendResult(callId, ok)
         }
     }

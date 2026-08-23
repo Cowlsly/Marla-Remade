@@ -272,7 +272,11 @@ object SignalClient {
         else -> System.currentTimeMillis()
     }
 
-    private suspend fun sendContent(destinationAci: String, content: SignalServiceProtos.Content): Boolean {
+    private suspend fun sendContent(
+        destinationAci: String,
+        content: SignalServiceProtos.Content,
+        urgent: Boolean = true,
+    ): Boolean {
         val aci = destinationAci.trim()
         if (aci.isEmpty()) return false
         val padded = SignalProtocol.padMessageBody(content.toByteArray())
@@ -291,12 +295,12 @@ object SignalClient {
             }
             var allOk = true
             for (pid in participants) {
-                if (!sendEncryptedTo(pid, padded, timestamp)) allOk = false
+                if (!sendEncryptedTo(pid, padded, timestamp, urgent)) allOk = false
             }
             return allOk
         }
 
-        return sendEncryptedTo(aci, padded, timestamp)
+        return sendEncryptedTo(aci, padded, timestamp, urgent)
     }
 
     /**
@@ -476,7 +480,12 @@ object SignalClient {
         }
     }
 
-    private suspend fun sendEncryptedTo(destination: String, padded: ByteArray, timestamp: Long): Boolean {
+    private suspend fun sendEncryptedTo(
+        destination: String,
+        padded: ByteArray,
+        timestamp: Long,
+        urgent: Boolean = true,
+    ): Boolean {
         val e = e2e
         if (e == null) {
             Log.w(TAG, "no protocol store, cannot send to $destination")
@@ -536,7 +545,7 @@ object SignalClient {
                 Log.w(TAG, "sending to ${messages.size} of ${targets.size} devices for $aci")
             }
 
-            val body = SignalPayload.buildPutMessagesBody(aci, messages, timestamp)
+            val body = SignalPayload.buildPutMessagesBody(aci, messages, timestamp, urgent = urgent)
             when (val outcome = putMessages(aci, body, sealedSender?.accessKey)) {
                 is SendOutcome.Success -> return true
                 is SendOutcome.Failed -> return false
@@ -1231,7 +1240,7 @@ object SignalClient {
                     deviceId: Int?,
                     message: SignalCallMessage,
                     urgent: Boolean,
-                ): Boolean = sendContent(aci, message.toContent(deviceId))
+                ): Boolean = sendContent(aci, message.toContent(deviceId), urgent = urgent)
 
                 override suspend fun identityKeys(aci: String): SignalCallManager.IdentityKeyPairBytes? {
                     val e = e2e ?: return null
