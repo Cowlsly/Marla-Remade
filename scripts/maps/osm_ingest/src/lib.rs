@@ -18,10 +18,14 @@
 
 pub mod admin;
 pub mod bbox;
+pub mod chains;
+pub mod compact;
 pub mod extract;
 pub mod geojson;
+pub mod geom;
 pub mod graph_build;
 pub mod maxspeed;
+pub mod mem;
 pub mod names;
 pub mod osm;
 pub mod par;

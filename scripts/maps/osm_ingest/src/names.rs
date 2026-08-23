@@ -32,14 +32,30 @@ impl<W: Write> NamePool<W> {
     }
 
     /// Offset of `name`, appending it to the pool the first time it is seen.
+    ///
+    /// Fails rather than wrapping once the pool would pass [`NO_NAME`]: a name
+    /// offset is a `u32` in the on-disk edge record, so the format caps the pool
+    /// at 4 GiB, and a wrapped `next` would hand every later name an offset that
+    /// points into the middle of an earlier string. The failure mode is
+    /// permanently wrong street names on device, which no later stage can detect.
     pub fn intern(&mut self, name: &[u8]) -> io::Result<u32> {
         if let Some(off) = self.offsets.get(name) {
             return Ok(*off);
         }
         let off = self.next;
+        let grown = u32::try_from(name.len() as u64 + 1)
+            .ok()
+            .and_then(|n| off.checked_add(n))
+            .filter(|n| *n < NO_NAME)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("name pool would pass {NO_NAME} bytes at offset {off}"),
+                )
+            })?;
         self.out.write_all(name)?;
         self.out.write_all(&[0])?;
-        self.next += name.len() as u32 + 1;
+        self.next = grown;
         self.offsets.insert(name.to_vec(), off);
         Ok(off)
     }
@@ -55,6 +71,13 @@ impl<W: Write> NamePool<W> {
     pub fn finish(mut self) -> io::Result<W> {
         self.out.flush()?;
         Ok(self.out)
+    }
+
+    /// Start the pool near its ceiling, so the overflow guard can be tested
+    /// without writing 4 GiB of names.
+    #[cfg(test)]
+    fn seek_to(&mut self, next: u32) {
+        self.next = next;
     }
 }
 
@@ -98,6 +121,27 @@ mod tests {
         assert_eq!(pool.unique_count(), 3);
         assert_eq!(pool.byte_len(), 17);
         assert_eq!(pool.finish().unwrap(), b"Main St\0Oak Ave\0\0".to_vec());
+    }
+
+    #[test]
+    fn the_pool_refuses_to_wrap_past_the_u32_offset_ceiling() {
+        let mut pool = NamePool::new(io::sink());
+        pool.seek_to(NO_NAME - 8);
+        // Six bytes plus a NUL lands one short of the sentinel, which is still a
+        // usable offset.
+        assert_eq!(pool.intern(b"Ada St").unwrap(), NO_NAME - 8);
+        assert_eq!(pool.byte_len(), NO_NAME - 1);
+        // The next name would wrap into offsets earlier names already own.
+        let err = pool.intern(b"Bee St").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        // A name that would land exactly on the sentinel is refused too.
+        let mut pool = NamePool::new(io::sink());
+        pool.seek_to(NO_NAME - 1);
+        assert!(pool.intern(b"").is_err());
+        // ...and the pool is unchanged, so the offsets already handed out stay
+        // valid for whatever the caller does with the error.
+        assert_eq!(pool.byte_len(), NO_NAME - 1);
+        assert_eq!(pool.unique_count(), 0);
     }
 
     #[test]

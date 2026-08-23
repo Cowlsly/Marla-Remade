@@ -87,6 +87,11 @@ class MainActivity : ComponentActivity() {
                     Triple("https://data.vayunmathur.com/nodes.bin", "nodes.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/edges.bin", "edges.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/lanes.bin", "lanes.bin", getString(R.string.downloading_road_data)),
+                    // Per-edge geometry. Mandatory: the generator collapses
+                    // degree-2 chains, so one edge is a whole road and this file
+                    // is the only record of its shape. Graph.load refuses a pack
+                    // without it rather than snapping to straight chords.
+                    Triple("https://data.vayunmathur.com/intermediate.bin", "intermediate.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/poi_index.bin", "poi_index.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/poi_names.bin", "poi_names.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data))

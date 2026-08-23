@@ -7,11 +7,15 @@
 //! traffic speeds and the per-square segment cache live in their own locks,
 //! mirroring the C++ globals but made explicit.
 
-mod geometry;
-mod graph;
+// `graph`, `geometry`, `routing` and `state` are `pub` so the host-side
+// route differential (`examples/route_diff.rs`) can drive the real engine
+// instead of reimplementing it. Nothing outside this crate links the cdylib,
+// so the wider surface costs nothing on device.
+pub mod geometry;
+pub mod graph;
 mod mvt;
-mod routing;
-mod state;
+pub mod routing;
+pub mod state;
 mod transit;
 
 use std::collections::{BTreeMap, HashMap};
@@ -190,7 +194,9 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findRouteNat
         ctx
     };
 
-    if ctx.target_node == 0xFFFF_FFFF {
+    // A route that never leaves the edge it snapped to reaches no node, so
+    // `target_node` stays unset; `ctx.direct` is the route in that case.
+    if ctx.target_node == 0xFFFF_FFFF && ctx.direct.is_none() {
         return null;
     }
 
@@ -363,7 +369,7 @@ fn snap_walk_legs(legs: &mut [transit::TransitLeg]) {
             None => continue,
         };
         perform_search_loop(&g, &speeds, &mut no_traffic, WALK, &mut ctx, scratch, heap);
-        if ctx.target_node == 0xFFFF_FFFF {
+        if ctx.target_node == 0xFFFF_FFFF && ctx.direct.is_none() {
             continue;
         }
 

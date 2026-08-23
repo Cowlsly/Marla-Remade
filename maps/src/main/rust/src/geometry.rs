@@ -7,15 +7,31 @@
 use std::collections::HashMap;
 
 use crate::graph::{
-    Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MAX_DRIVING_KMH, MOTORWAY, STEPS,
+    Graph, DEG_TO_RAD, DRIVING, INVALID_EDGE, LIVING_STREET, MAX_DRIVING_KMH, MOTORWAY,
+    REVERSE_GEOMETRY_FLAG, STEPS,
 };
 
 /// Live traffic snapshot: global edge id -> speed (km/h). 0 means "unknown".
 pub type TrafficSpeeds = HashMap<u64, u8>;
 
+/// Bits of an `Edge::type_` byte that carry the OSM road class. The high bits
+/// are flags — [`REVERSE_GEOMETRY_FLAG`] today — so every consumer that treats
+/// `type_` as a road class MUST mask them off first.
+///
+/// This mask used to be `0x7F`, which stripped only bit 7 and let
+/// `REVERSE_GEOMETRY_FLAG` through into the range checks below. A flagged edge
+/// then landed at 65..79, outside both permitted ranges, so it was rejected for
+/// every mode — silently deleting it from snapping (`routing.rs`
+/// `find_nearest_edge`), from A* relaxation (`perform_search_loop`) and from
+/// junction lane inference. Since the generator sets the flag on one edge of
+/// every bidirectional collapsed chain, that would have removed half the road
+/// network. `get_edge_time_10ms` below was already immune only by accident: its
+/// `& 0xF` discards bit 6 as well.
+pub const ROAD_TYPE_MASK: u8 = !(REVERSE_GEOMETRY_FLAG | 0x80);
+
 #[inline]
 pub fn is_mode_allowed(road_type: u8, mode: i32) -> bool {
-    let ty = road_type & 0x7F;
+    let ty = road_type & ROAD_TYPE_MASK;
     if mode == DRIVING {
         return (MOTORWAY..=LIVING_STREET).contains(&ty);
     }
@@ -97,7 +113,8 @@ pub fn get_edge_time_10ms(
             return (dist_mm as f64 / (speed_m_s * 10.0)) as u32;
         }
     }
-    let multiplier = g.edge_time_multipliers[(mode & 0x3) as usize][((type_ & 0x7F) & 0xF) as usize];
+    let multiplier =
+        g.edge_time_multipliers[(mode & 0x3) as usize][((type_ & ROAD_TYPE_MASK) & 0xF) as usize];
     ((dist_mm as u64 * multiplier) >> 32) as u32
 }
 
@@ -189,5 +206,46 @@ pub fn get_projection(
         lat_e7: proj_lat,
         lon_e7: proj_lon,
         dist_mm: fast_dist_mm(g, px, py, proj_lat, proj_lon),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::graph::{BICYCLE, PUBLIC_TRANSIT, REVERSE_GEOMETRY_FLAG, WALK};
+
+    /// The generator sets `REVERSE_GEOMETRY_FLAG` on one edge of every
+    /// bidirectional collapsed chain, so permission checks must ignore it. The
+    /// mask here was `0x7F`, which stripped only bit 7: a flagged residential
+    /// road arrived as 71 rather than 7, fell outside every permitted range, and
+    /// was dropped from snapping, from A* relaxation and from junction lane
+    /// inference. That silently removed half the road network.
+    #[test]
+    fn the_reverse_geometry_flag_does_not_change_permissions() {
+        for ty in 1..=STEPS {
+            for mode in [DRIVING, WALK, BICYCLE, PUBLIC_TRANSIT] {
+                assert_eq!(
+                    is_mode_allowed(ty, mode),
+                    is_mode_allowed(ty | REVERSE_GEOMETRY_FLAG, mode),
+                    "type {ty} mode {mode} changed when flagged"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn driving_stops_at_living_street_but_walking_reaches_steps() {
+        assert!(is_mode_allowed(MOTORWAY, DRIVING));
+        assert!(is_mode_allowed(LIVING_STREET, DRIVING));
+        assert!(!is_mode_allowed(LIVING_STREET + 1, DRIVING));
+        assert!(!is_mode_allowed(STEPS, DRIVING));
+        assert!(is_mode_allowed(STEPS, WALK));
+        // Transit permits exactly what walking does: its road-graph use is the
+        // walking legs of a journey.
+        assert!(is_mode_allowed(STEPS, PUBLIC_TRANSIT));
+        // Type 0 is "not a road" and is never permitted.
+        assert!(!is_mode_allowed(0, DRIVING));
+        assert!(!is_mode_allowed(0, WALK));
+        assert!(!is_mode_allowed(REVERSE_GEOMETRY_FLAG, WALK));
     }
 }

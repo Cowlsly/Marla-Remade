@@ -660,6 +660,115 @@ pub fn write_layers_sample(tag: &str) -> (std::path::PathBuf, std::path::PathBuf
     write_pbf(tag, &pbf_from_block(&layers_block()))
 }
 
+// ---- the dangling-reference fixture --------------------------------------
+//
+// A THIRD fixture, for one hole: a routable way referencing a node the file never
+// defines. Real extracts are full of these — every way clipped at an extract's
+// boundary keeps refs to nodes outside it — and the road graph's whole handling
+// of them is "the pair fails to resolve, so skip it", which nothing tested.
+//
+// It matters more than it looks. The node-id bitset is marked from way refs, so a
+// dangling ref *is* marked, and any scheme that treats the marked set as the node
+// address space hands it a slot. A slot that never receives coordinates reads as
+// (0, 0) — null island — which corrupts distances, spatial keys and polylines
+// while leaving every count plausible.
+
+/// A node id no element in this fixture defines, referenced from the middle of a
+/// routable way.
+pub const DANGLING_REF_ID: i64 = 999;
+pub const DANGLING_WAY_ID: i64 = 103;
+
+/// `(id, lat_e7, lon_e7)` of the nodes this fixture does define.
+pub const DANGLING_NODES: [(i64, i32, i32); 3] = [
+    (1, 370_000_000, -1_220_000_000),
+    (2, 370_010_000, -1_220_000_000),
+    (3, 370_020_000, -1_220_000_000),
+];
+
+/// One routable way over `[1, 2, 999, 3]`, so the dangling ref sits between two
+/// present nodes and breaks two consecutive pairs rather than one.
+fn dangling_block() -> Vec<u8> {
+    let mut st = StringTable::new();
+    let k_hw = st.id("highway");
+    let k_name = st.id("name");
+    let v_residential = st.id("residential");
+    let v_gap = st.id("Gap St");
+
+    let nodes: Vec<FixtureNode> = DANGLING_NODES
+        .iter()
+        .map(|(id, lat, lon)| (*id, *lat, *lon, Vec::new()))
+        .collect();
+    let dense = dense_group(&nodes);
+    let ways = [way(
+        DANGLING_WAY_ID,
+        &[(k_hw, v_residential), (k_name, v_gap)],
+        &[1, 2, DANGLING_REF_ID, 3],
+    )];
+
+    let mut node_group = Vec::new();
+    bytes_field(2, &dense, &mut node_group);
+    let mut way_group = Vec::new();
+    for w in &ways {
+        bytes_field(3, w, &mut way_group);
+    }
+
+    let mut block = Vec::new();
+    bytes_field(1, &st.encode(), &mut block);
+    bytes_field(2, &node_group, &mut block);
+    bytes_field(2, &way_group, &mut block);
+    varint_field(17, 100, &mut block); // granularity
+    block
+}
+
+/// Write the dangling-reference fixture to a unique temp directory.
+pub fn write_dangling_sample(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    write_pbf(tag, &pbf_from_block(&dangling_block()))
+}
+
+// ---- an arbitrary graph shape --------------------------------------------
+//
+// The three fixtures above each say something specific and the tests assert exact
+// counts against them, so growing one to cover a new topology makes every test
+// that reads it slightly less about what it was testing. Chain cutting is all
+// topology, though, and needs many shapes: a ring, a self-touching way, two ways
+// meeting end-to-end, a repeated ref. This builds a PBF from a shape stated
+// directly in the test.
+
+/// A PBF of untagged nodes plus `highway=residential` ways over them.
+///
+/// Deliberately minimal: no names, no lanes, no speed limits and no oneways, so
+/// every way agrees with every other on attributes and the *only* thing deciding
+/// where chains are cut is the graph's shape.
+pub fn write_shape_sample(
+    tag: &str,
+    nodes: &[(i64, i32, i32)],
+    ways: &[(i64, &[i64])],
+) -> (std::path::PathBuf, std::path::PathBuf) {
+    let mut st = StringTable::new();
+    let k_hw = st.id("highway");
+    let v_residential = st.id("residential");
+
+    let fixture: Vec<FixtureNode> = nodes
+        .iter()
+        .map(|(id, lat, lon)| (*id, *lat, *lon, Vec::new()))
+        .collect();
+    let dense = dense_group(&fixture);
+
+    let mut node_group = Vec::new();
+    bytes_field(2, &dense, &mut node_group);
+    let mut way_group = Vec::new();
+    for (id, refs) in ways {
+        bytes_field(3, &way(*id, &[(k_hw, v_residential)], refs), &mut way_group);
+    }
+
+    let mut block = Vec::new();
+    bytes_field(1, &st.encode(), &mut block);
+    bytes_field(2, &node_group, &mut block);
+    bytes_field(2, &way_group, &mut block);
+    varint_field(17, 100, &mut block); // granularity
+    write_pbf(tag, &pbf_from_block(&block))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

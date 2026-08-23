@@ -745,23 +745,45 @@ struct PoiRecord {   // 14 bytes, little-endian
 ## Single global routing graph (P16)
 
 The offline **routing graph** is a **single global graph** — there is no
-per-zone splitting and no separate merge/compaction stage. `osm_ingest`'s
-`road_graph` emits, in one pass, exactly the on-disk layout the Rust router
+per-zone splitting and no separate merge stage. `osm_ingest`'s `road_graph`
+emits, in one pass, exactly the on-disk layout the Rust router
 (`maps/src/main/rust/src/graph.rs`) mmaps:
 
 | File | Contents | Consumed by (graph.rs) |
 |---|---|---|
-| `metadata.bin` | `u32 magic` (`"MARG"` = `0x4752414D`), `u32 version` (1), `u64 node count` — 16 B | `load` |
-| `nodes.bin` | `NodeMaster[node_count + 1]` (16 B: `i32 lat_e7`, `i32 lon_e7`, `u64 edge_ptr`), trailing sentinel | `node` / `get_node` |
+| `metadata.bin` | `u32 magic` (`"MARG"` = `0x4752414D`), `u32 version` (3), `u64 node count` — 16 B | `load` |
+| `nodes.bin` | `NodeRec[node_count + 1]` (**12 B**: `i32 lat_e7`, `i32 lon_e7`, `u32 edge_ptr`), trailing sentinel | `node` / `get_node`, widening into `NodeMaster` |
 | `edges.bin` | `Edge[edge_count]` (14 B: `u32 target`, `u32 dist_mm`, `u32 name_offset`, `u8 type`, `u8 speed_limit`) | `edge` |
-| `lanes.bin` | `u64 offsets[edge_count + 1]` then a `u16` turn-mask blob | `edge_lane_masks` |
+| `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 off) × (n + 1)`, then a `u16` turn-mask blob — **sparse**, only lane-bearing edges are listed | `edge_lane_masks` |
+| `intermediate.bin` | a delta-encoded polyline blob at offset 0, then a trailer: `u64 rank[..]`, `u8 present[..]` (one bit per directed edge), `u64 coarse[..]`, `u16 within[..]` over the `G` edges that store one, and `u64 G`. `off(g) = coarse[g / 32] + within[g]` where `g = rank(k)` | `get_edge_coordinates` |
 | `road_names.bin` | NUL-terminated string pool | `road_name` |
 
-`intermediate.bin` (delta-encoded edge geometry) is **optional** and is not
-produced by this generator; `graph.rs` treats its absence gracefully and the
-router falls back to straight node-to-node segments. It can be added later
-without changing any of the files above. When present it **is** length-validated
-against `edge_count`, since its offset array is sized from it.
+`intermediate.bin` (delta-encoded edge geometry) is **mandatory** and is produced
+by the generator. It became mandatory when `road_graph` started collapsing
+degree-2 chains: an edge is now a whole road between junctions, so its polyline
+is the only record of that road's shape and `Graph::load` refuses a pack without
+it. Its tables are sized from `edge_count` and from the `u64 G` in its last 8
+bytes, and both are cross-checked against the blob — the offset sentinel must equal
+the blob's length and the rank total must equal `G`. `lanes.bin` is validated
+against its own index header instead, since it carries no per-edge table either.
+See `osm_ingest/README.md` for the encoding rules and the `REVERSE_GEOMETRY_FLAG`
+contract.
+
+**Version 2** narrowed `nodes.bin`'s `edge_ptr` to a `u32`, made `lanes.bin` a
+sparse index and gave `intermediate.bin` two-level offsets, which took a projected
+planet pack from 50.8 GB to ~34 GB. **Version 3** gave `intermediate.bin` a
+presence bitmap — 70.4% of directed edges store no polyline — and dropped both
+endpoints of every stored polyline, since the first is always the edge's source node
+and the last its target, taking the projected pack to ~29 GB. There is no dual-path
+reader: an older pack is rejected outright. See
+[osm_ingest/README.md](osm_ingest/README.md#getting-a-planet-under-40-gb) and
+[Getting it under 30](osm_ingest/README.md#getting-it-under-30).
+
+Because the blob now holds only a polyline's *interior*, decoding needs the edge's
+source node: `get_edge_coordinates_from(source, edge_idx, out)` is the real entry
+point and `get_edge_coordinates(edge_idx, out)` is a wrapper that recovers the
+source with a binary search. Every caller iterating a node's edge range should pass
+the source it already holds.
 
 **Why single global (drop graph zoning):** the previous pipeline wrote per-zone
 `*_zone_N.bin` artifacts in a layout `graph.rs` could not load and relied on a
@@ -812,9 +834,17 @@ they are delivered differently:
   fetches the files above from `https://data.vayunmathur.com/<file>` into the
   app's external files dir (the same dir `Graph::load` reads). It is a single
   logical download surfaced once in `DownloadedMapsPage` (not per Morton zone).
-  A planet routing graph is on the order of a few GB (nodes/edges/lanes; far
-  smaller than the tile basemap), so shipping it whole is practical and removes
-  the per-zone bookkeeping.
+  A planet routing graph is about **29 GB** compacted, so shipping it whole is
+  practical and removes the per-zone bookkeeping. That figure is projected from the
+  measured planet counts (431 M nodes, 1.07 G directed edges) under the v3 layout;
+  v2 put it at ~34 GB and v1 at **50.8 GB**, two thirds of which was dense
+  `u64` offset tables in `lanes.bin` and `intermediate.bin` describing edges that
+  had nothing to describe — see
+  [osm_ingest/README.md](osm_ingest/README.md#getting-a-planet-under-40-gb). An
+  earlier revision of this document said "a few GB"; it counted only
+  `nodes.bin`/`edges.bin`/`lanes.bin`, budgeted no edge geometry at all, and
+  assumed a graph with one node per OSM geometry vertex, which uncompacted would
+  have put a planet nearer **140 GB**.
 * **Map tiles — stay zoned.** The vector basemap (`v5.pmtiles`) is ≈137 GB
   (see the size table above), so it can never be one download. Offline tile
   packs remain the 64 Morton-grid `zone_$id.pmtiles` files, downloaded per zone.
@@ -900,11 +930,11 @@ poi_extract:  284,216 POIs (172,448 node, 107,612 closed-way, 4,156 relation),
               188,990 unique names                                    ~5 s
 ```
 
-Verified: `metadata.bin` is the 16-byte `MARG`/v1/`node_count` header;
+Verified: `metadata.bin` is the 16-byte `MARG`/version/`node_count` header;
 `nodes.bin` is `node_count + 1` records with a sentinel whose `edge_ptr` equals
-`edge_count`; `edges.bin` is an exact multiple of 14; `lanes.bin` is
-`(edge_count + 1) × 8` offset bytes plus the `u16` blob; nodes and POI records
-are Morton-ordered. **Both tools are deterministic** — two runs on California
+`edge_count`; `edges.bin` is an exact multiple of 14; `lanes.bin`'s index resolves
+by the same binary search the device uses; nodes and POI records are
+Morton-ordered. **Both tools are deterministic** — two runs on California
 produce byte-identical output for all eight files, which the C++ never did (it
 filled its node array from concurrent workers and interned names in
 thread-scheduling order).

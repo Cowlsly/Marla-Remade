@@ -47,6 +47,37 @@ pub struct RoutingContext {
     pub end: SnappedEdge,
     pub target_node: u32,
     pub iterations: i32,
+    /// A route that stays on the edge it started on, when both ends snapped to
+    /// the same road. See [`direct_path`].
+    pub direct: Option<Direct>,
+}
+
+/// A route from the start projection to the end projection that never leaves the
+/// edge they both snapped to.
+///
+/// Without this, a trip along one road is forced out to a junction and back,
+/// because the A* search can only start and finish at nodes: it is seeded at the
+/// start edge's two endpoints and stops at one of the end edge's two endpoints,
+/// and on a single edge those are the *same* two nodes. The search therefore
+/// "succeeds" immediately at a shared endpoint and the reconstruction walks from
+/// the start projection back to that endpoint and forward again.
+///
+/// Uncompacted, an edge was one pair of adjacent OSM vertices — a few metres —
+/// so the detour was invisible. Once degree-2 chains collapse, an edge is a whole
+/// road between junctions, and a 20 m walk became a 2 km round trip. Measured on
+/// the SLO fixture, 63 of 80 short probes were affected, the worst going from 0 m
+/// to 2 km.
+pub struct Direct {
+    /// Start projection to end projection along the road, inclusive.
+    pub coords: Vec<LatLon>,
+    pub dist_mm: u32,
+    pub time_10ms: u32,
+    pub name_offset: u32,
+    /// Road class with any flag bits already masked off.
+    pub type_: u8,
+    pub speed_limit: u8,
+    /// The directed edge actually travelled, for traffic lookup.
+    pub edge_idx: u64,
 }
 
 /// One coalesced navigation step (pre-localization). Marshaled to Kotlin
@@ -203,7 +234,7 @@ fn junction_lanes(
         }
 
         // Outgoing heading: junction -> first vertex leaving the junction.
-        let (nlat, nlon) = match g.get_edge_coordinates(k, &mut coords) {
+        let (nlat, nlon) = match g.get_edge_coordinates_from(junction, k, &mut coords) {
             Some((count, is_rev)) if count >= 2 => {
                 let p1 = get_pt_at(&coords, count, is_rev, 1);
                 (p1.lat_e7, p1.lon_e7)
@@ -292,7 +323,8 @@ pub fn find_nearest_edge(g: &Graph, lat: f64, lon: f64, mode: i32) -> SnappedEdg
                 continue;
             }
 
-            if let Some((count, is_reversed)) = g.get_edge_coordinates(j, &mut coords) {
+            if let Some((count, is_reversed)) = g.get_edge_coordinates_from(u_global, j, &mut coords)
+            {
                 if count >= 2 {
                     let num_pts = count;
                     let mut current_dist_from_start_mm: u32 = 0;
@@ -394,11 +426,160 @@ pub fn prepare_routing(
     push(start.node_a, start.dist_a_mm, scratch, heap);
     push(start.node_b, start.dist_b_mm, scratch, heap);
 
+    let direct = direct_path(g, traffic, &start, &end, mode);
+
     Some(RoutingContext {
         start,
         end,
         target_node: 0xFFFF_FFFF,
         iterations: 0,
+        direct,
+    })
+}
+
+/// Polyline of `edge_idx` in source-to-target order, falling back to the straight
+/// chord when the edge stores no geometry.
+fn edge_polyline(g: &Graph, edge_idx: u64, source: u32, target: u32) -> Vec<LatLon> {
+    let mut buf = [LatLon { lat_e7: 0, lon_e7: 0 }; 256];
+    if let Some((count, is_reversed)) = g.get_edge_coordinates_from(source, edge_idx, &mut buf) {
+        if count >= 2 {
+            return (0..count).map(|p| get_pt_at(&buf, count, is_reversed, p)).collect();
+        }
+    }
+    let a = g.get_node(source);
+    let b = g.get_node(target);
+    vec![
+        LatLon { lat_e7: a.lat_e7, lon_e7: a.lon_e7 },
+        LatLon { lat_e7: b.lat_e7, lon_e7: b.lon_e7 },
+    ]
+}
+
+/// The other direction of the same road: the *only* edge from `target` back to
+/// `source`, or `None` when there is none or more than one.
+///
+/// Uniqueness is required, not incidental. `graph.rs` resolves
+/// [`REVERSE_GEOMETRY_FLAG`] by taking the first such edge, and the generator's
+/// `twin_is_unique` refuses to set the flag unless exactly one exists — so
+/// accepting the first match here would let a *parallel but different* road
+/// between the same two junctions pass as the twin, and its name, type and speed
+/// limit would then be attached to a polyline belonging to the other road. The
+/// synthetic transit-stop connectors make that shape real: the graph fixture has
+/// two edges from one node to another, a collapsed street and a one-way service
+/// road.
+///
+/// A self-loop (an anchorless ring collapsed to one node) would otherwise match
+/// itself and so claim that its own reverse direction exists.
+fn twin_edge(g: &Graph, source: u32, target: u32) -> Option<u64> {
+    if target >= g.node_count || source == target {
+        return None;
+    }
+    let s = g.node(target).edge_ptr;
+    let e = g.node(target + 1).edge_ptr; // sentinel valid
+    let mut found = None;
+    for k in s..e {
+        if g.edge(k).target == source {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(k);
+        }
+    }
+    found
+}
+
+/// Where a point sits along `poly`: `(segment index, distance from the start)`.
+/// The point is expected to already lie on the polyline, so the nearest segment
+/// is unambiguous.
+fn locate_on(g: &Graph, poly: &[LatLon], lat_e7: i32, lon_e7: i32) -> (usize, u32) {
+    let mut best = (0usize, 0u32);
+    let mut best_off = u32::MAX;
+    let mut acc: u32 = 0;
+    for i in 0..poly.len() - 1 {
+        let (a, b) = (poly[i], poly[i + 1]);
+        let p = get_projection(g, lat_e7, lon_e7, a.lat_e7, a.lon_e7, b.lat_e7, b.lon_e7);
+        if p.dist_mm < best_off {
+            best_off = p.dist_mm;
+            best = (i, acc.saturating_add(fast_dist_mm(g, a.lat_e7, a.lon_e7, p.lat_e7, p.lon_e7)));
+        }
+        acc = acc.saturating_add(fast_dist_mm(g, a.lat_e7, a.lon_e7, b.lat_e7, b.lon_e7));
+    }
+    best
+}
+
+/// The stretch of `poly` between two located points, endpoints included. Always
+/// at least two points: when both project onto the same segment the result is
+/// just the two projections, which for coincident ends is a valid zero-length
+/// route.
+fn sub_polyline(poly: &[LatLon], from: (usize, LatLon), to: (usize, LatLon)) -> Vec<LatLon> {
+    let mut out = vec![from.1];
+    for p in poly.iter().take(to.0 + 1).skip(from.0 + 1) {
+        out.push(*p);
+    }
+    out.push(to.1);
+    out
+}
+
+/// Build the on-edge route when both ends snapped to the same road, or `None`
+/// when they did not or when travelling it in the required direction is not
+/// allowed.
+fn direct_path(
+    g: &Graph,
+    traffic: &TrafficSpeeds,
+    start: &SnappedEdge,
+    end: &SnappedEdge,
+    mode: i32,
+) -> Option<Direct> {
+    if start.edge_idx == INVALID_EDGE || end.edge_idx == INVALID_EDGE {
+        return None;
+    }
+    let twin = twin_edge(g, start.node_a, start.node_b);
+    // Same directed edge, or the one unambiguous other direction of one road.
+    // Anything else — including a second, parallel road between the same pair of
+    // nodes — is left to the search, because its polyline is a different road.
+    if end.edge_idx != start.edge_idx && Some(end.edge_idx) != twin {
+        return None;
+    }
+
+    let poly = edge_polyline(g, start.edge_idx, start.node_a, start.node_b);
+    if poly.len() < 2 {
+        return None;
+    }
+    let s_pt = LatLon { lat_e7: start.proj_lat, lon_e7: start.proj_lon };
+    let e_pt = LatLon { lat_e7: end.proj_lat, lon_e7: end.proj_lon };
+    let s_at = locate_on(g, &poly, s_pt.lat_e7, s_pt.lon_e7);
+    let e_at = locate_on(g, &poly, e_pt.lat_e7, e_pt.lon_e7);
+
+    // Going backwards along the polyline means driving the twin, which only
+    // exists when the road is not one-way.
+    let forward = s_at <= e_at;
+    let edge_idx = if forward { start.edge_idx } else { twin? };
+    let e = g.edge(edge_idx);
+    if !is_mode_allowed(e.type_, mode) {
+        return None;
+    }
+
+    let coords = if forward {
+        sub_polyline(&poly, (s_at.0, s_pt), (e_at.0, e_pt))
+    } else {
+        let mut c = sub_polyline(&poly, (e_at.0, e_pt), (s_at.0, s_pt));
+        c.reverse();
+        c
+    };
+
+    let mut dist_mm: u32 = 0;
+    for w in coords.windows(2) {
+        dist_mm = dist_mm
+            .saturating_add(fast_dist_mm(g, w[0].lat_e7, w[0].lon_e7, w[1].lat_e7, w[1].lon_e7));
+    }
+    let type_ = e.type_ & ROAD_TYPE_MASK;
+    Some(Direct {
+        time_10ms: get_edge_time_10ms(g, traffic, edge_idx, dist_mm, type_, e.speed_limit, mode),
+        coords,
+        dist_mm,
+        name_offset: e.name_offset,
+        type_,
+        speed_limit: e.speed_limit,
+        edge_idx,
     })
 }
 
@@ -414,20 +595,49 @@ pub fn perform_search_loop(
 ) {
     // Cap is a safety net only. The 36M-node CA graph needs ~6.4M expansions for
     // the longest routes (SF->LA), so the old 1M cap aborted them ("no route").
+    // Reaching one end of the destination's edge is not the same as arriving.
+    // The search can only stop at nodes, so it stops at `end.node_a` or
+    // `end.node_b` and `reconstruct_path` then walks the leftover stub to the
+    // projection. Stopping at whichever anchor is reached *first* ignores how
+    // long that stub is, and after compaction the two anchors are a whole road
+    // apart rather than a few metres, so the wrong choice costs the length of
+    // the street. Score both completions and keep the better one.
+    let mut best_total = u32::MAX;
     while !heap.empty() && ctx.iterations < 25_000_000 {
         ctx.iterations += 1;
         let u = heap.pop();
-
-        if u == ctx.end.node_a || u == ctx.end.node_b {
-            ctx.target_node = u;
-            break;
-        }
 
         let u_cost = scratch.get_entry(u).g_fwd;
         if u >= g.node_count {
             continue;
         }
         let n_u = g.node(u);
+
+        // `f` is a lower bound on any route through `u`, and the heap pops in
+        // non-decreasing `f` order, so once it cannot beat a completed route
+        // nothing left can.
+        let f_u = u_cost.saturating_add(heuristic_time_10ms(
+            g, n_u.lat_e7, n_u.lon_e7, ctx.end.proj_lat, ctx.end.proj_lon, mode,
+        ));
+        if f_u >= best_total {
+            break;
+        }
+
+        if u == ctx.end.node_a || u == ctx.end.node_b {
+            let stub = if u == ctx.end.node_a {
+                ctx.end.dist_a_mm
+            } else {
+                ctx.end.dist_b_mm
+            };
+            let total = u_cost.saturating_add(get_edge_time_10ms(
+                g, traffic, INVALID_EDGE, stub, ctx.end.type_, ctx.end.speed_limit, mode,
+            ));
+            if total < best_total {
+                best_total = total;
+                ctx.target_node = u;
+            }
+            // Keep expanding: this anchor may also be on the way to the other.
+        }
 
         if mode == DRIVING {
             ensure_traffic(n_u.lat_e7, n_u.lon_e7);
@@ -581,6 +791,62 @@ impl<'a> StepBuilder<'a> {
     }
 }
 
+/// Total time of the searched route, including the stub from the last node to the
+/// destination projection. [`u32::MAX`] when the search found nothing.
+fn network_time_10ms(
+    g: &Graph,
+    traffic: &TrafficSpeeds,
+    mode: i32,
+    ctx: &RoutingContext,
+    scratch: &mut RoutingScratchpad,
+) -> u32 {
+    if ctx.target_node == INVALID_NODE {
+        return u32::MAX;
+    }
+    let reached = scratch.get_entry(ctx.target_node).g_fwd;
+    // `g_fwd` stops at the node; the walk from there to the projection is the
+    // part `reconstruct_path`'s end stub adds.
+    let stub = if ctx.target_node == ctx.end.node_a {
+        ctx.end.dist_a_mm
+    } else {
+        ctx.end.dist_b_mm
+    };
+    let stub_time = get_edge_time_10ms(
+        g, traffic, INVALID_EDGE, stub, ctx.end.type_, ctx.end.speed_limit, mode,
+    );
+    reached.saturating_add(stub_time)
+}
+
+/// Turn a [`Direct`] route into steps, reusing the same coalescing the searched
+/// path gets so the two are indistinguishable downstream.
+fn direct_steps(g: &Graph, traffic: &TrafficSpeeds, mode: i32, d: &Direct) -> Vec<StepData> {
+    let mut b = StepBuilder {
+        g,
+        traffic,
+        mode,
+        steps: Vec::new(),
+        last_bearing: 0.0,
+        pending_junction: INVALID_NODE,
+        pending_prev: INVALID_NODE,
+        pending_approach: INVALID_EDGE,
+    };
+    for w in d.coords.windows(2) {
+        let dist = fast_dist_mm(g, w[0].lat_e7, w[0].lon_e7, w[1].lat_e7, w[1].lon_e7);
+        b.add_segment(
+            f64::from(w[0].lat_e7) * 1e-7,
+            f64::from(w[0].lon_e7) * 1e-7,
+            f64::from(w[1].lat_e7) * 1e-7,
+            f64::from(w[1].lon_e7) * 1e-7,
+            d.name_offset,
+            d.type_,
+            d.speed_limit,
+            dist,
+            d.edge_idx,
+        );
+    }
+    b.steps
+}
+
 /// Rebuild the step list from `ctx.target_node`. Returns an empty vec if no
 /// path exists.
 pub fn reconstruct_path(
@@ -590,6 +856,16 @@ pub fn reconstruct_path(
     ctx: &RoutingContext,
     scratch: &mut RoutingScratchpad,
 ) -> Vec<StepData> {
+    // Staying on the edge both ends snapped to usually wins, but not always: a
+    // C-shaped road whose two ends meet a straight one is faster left and
+    // rejoined. Take whichever is quicker, and take the on-edge route outright
+    // when the search found nothing at all.
+    if let Some(d) = &ctx.direct {
+        if d.time_10ms <= network_time_10ms(g, traffic, mode, ctx, scratch) {
+            return direct_steps(g, traffic, mode, d);
+        }
+    }
+
     let mut path_nodes: Vec<u32> = Vec::new();
     let mut curr = ctx.target_node;
     let mut safety = 0u32;
@@ -622,7 +898,7 @@ pub fn reconstruct_path(
         let node0 = g.get_node(n0);
         let j = ctx.start.edge_idx;
         let geom = if j != INVALID_EDGE {
-            g.get_edge_coordinates(j, &mut coords)
+            g.get_edge_coordinates_from(ctx.start.node_a, j, &mut coords)
         } else {
             None
         };
@@ -737,8 +1013,9 @@ pub fn reconstruct_path(
         b.pending_approach = prev_edge_idx;
         prev_edge_idx = best_e_idx;
 
-        if let Some((count, is_reversed)) =
-            g.get_edge_coordinates(best_e_idx, &mut coords).filter(|&(c, _)| c >= 2)
+        if let Some((count, is_reversed)) = g
+            .get_edge_coordinates_from(u, best_e_idx, &mut coords)
+            .filter(|&(c, _)| c >= 2)
         {
             for p in 0..count - 1 {
                 let p1 = get_pt_at(&coords, count, is_reversed, p);
@@ -765,7 +1042,7 @@ pub fn reconstruct_path(
         let nodek = g.get_node(nk);
         let j = ctx.end.edge_idx;
         let geom = if j != INVALID_EDGE {
-            g.get_edge_coordinates(j, &mut coords)
+            g.get_edge_coordinates_from(ctx.end.node_a, j, &mut coords)
         } else {
             None
         };

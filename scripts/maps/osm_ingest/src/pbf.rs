@@ -157,6 +157,27 @@ pub fn inflate_blob(blob: &[u8], out: &mut Vec<u8>) -> Result<()> {
     Ok(())
 }
 
+/// Inflate and decode the first data blob, so a file we cannot read fails in
+/// seconds instead of at the end of a multi-hour pass.
+///
+/// Worth its own step because the compression is a property of the whole file:
+/// a planet mirror published with zstd blobs is unreadable here, and finding
+/// that out after an 80 GB download and one full pass is the expensive way to
+/// learn it.
+pub fn probe_compression(path: &Path, blobs: &[BlobLoc]) -> Result<()> {
+    let Some(first) = blobs.first() else {
+        return Ok(());
+    };
+    let mut file =
+        File::open(path).map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
+    let mut compressed = Vec::new();
+    let mut inflated = Vec::new();
+    read_exact_at(&mut file, first, &mut compressed)?;
+    inflate_blob(&compressed, &mut inflated)?;
+    PrimitiveBlock::decode(&inflated)?;
+    Ok(())
+}
+
 /// One decoded `PrimitiveBlock`. Strings and group bodies are borrowed from the
 /// inflated buffer, so decoding a block allocates only the two index vectors.
 pub struct PrimitiveBlock<'a> {
@@ -223,16 +244,31 @@ impl<'a> PrimitiveBlock<'a> {
     }
 }
 
-/// Run one pass over the file in parallel.
+/// Run one pass over the file in parallel, folding each chunk's accumulator as
+/// soon as it is complete.
 ///
-/// `make` builds a fresh accumulator per chunk; `body` is called once per blob
-/// with that chunk's accumulator and must return the kind bits the blob held.
-/// Accumulators come back in chunk order, so merging them is deterministic.
+/// `make` builds a fresh accumulator per chunk, `body` is called once per blob
+/// with that chunk's accumulator and must return the kind bits the blob held, and
+/// `sink` receives finished accumulators **in chunk order** so merging stays
+/// deterministic.
+///
+/// Prefer this to [`run_pass`] for anything whose accumulators are large. A
+/// planet-scale pass cannot afford `run_pass`'s contract of handing back every
+/// chunk at once: on California the pass-2 node accumulators are about a
+/// gigabyte, and the caller then folds them into a second copy, so the two peak
+/// together. Here a chunk is folded and freed while its neighbours are still
+/// being decoded, which also overlaps the merge with the I/O.
+///
+/// `sink` is called under a lock, so it is serialised against the workers. That
+/// is the same single-threaded merge [`run_pass`]'s callers already do, only
+/// earlier.
 ///
 /// `blob_kinds` (from a previous full pass) lets later passes skip blobs that
 /// hold nothing they want — a real win because a PBF stores all nodes first,
-/// then ways, then relations.
-pub fn run_pass<S, F, G>(
+/// then ways, then relations. A skipped blob's incoming kinds are carried into
+/// the returned mask, so a filtered pass's mask is still a complete description
+/// of the file and can be fed to the pass after it.
+pub fn run_pass_sink<S, F, G, H>(
     path: &Path,
     blobs: &[BlobLoc],
     blob_kinds: Option<&[u8]>,
@@ -240,14 +276,21 @@ pub fn run_pass<S, F, G>(
     label: &str,
     make: F,
     body: G,
-) -> Result<(Vec<S>, Vec<u8>)>
+    sink: H,
+) -> Result<Vec<u8>>
 where
     S: Send,
     F: Fn() -> S + Sync,
     G: Fn(&mut S, &PrimitiveBlock) -> Result<u8> + Sync,
+    H: FnMut(S) -> Result<()> + Send,
 {
     let n_chunks = blobs.len().div_ceil(CHUNK_BLOBS).max(1);
-    let slots: Mutex<Vec<Option<S>>> = Mutex::new((0..n_chunks).map(|_| None).collect());
+    let drain: Mutex<Drain<S, H>> = Mutex::new(Drain {
+        slots: (0..n_chunks).map(|_| None).collect(),
+        next: 0,
+        sink,
+        err: None,
+    });
     let kinds: Vec<AtomicU8> = (0..blobs.len()).map(|_| AtomicU8::new(0)).collect();
 
     let next_chunk = AtomicUsize::new(0);
@@ -274,17 +317,19 @@ where
                     let mut state = make();
                     for (i, loc) in blobs[start..end].iter().enumerate() {
                         let idx = start + i;
-                        let skip = blob_kinds.is_some_and(|k| k[idx] & want == 0);
-                        if !skip {
-                            read_exact_at(&mut file, loc, &mut compressed)?;
-                            inflate_blob(&compressed, &mut inflated)?;
-                            let block = PrimitiveBlock::decode(&inflated)?;
-                            let seen = body(&mut state, &block)?;
-                            kinds[idx].store(seen, Ordering::Relaxed);
+                        match blob_kinds.filter(|k| k[idx] & want == 0) {
+                            Some(k) => kinds[idx].store(k[idx], Ordering::Relaxed),
+                            None => {
+                                read_exact_at(&mut file, loc, &mut compressed)?;
+                                inflate_blob(&compressed, &mut inflated)?;
+                                let block = PrimitiveBlock::decode(&inflated)?;
+                                let seen = body(&mut state, &block)?;
+                                kinds[idx].store(seen, Ordering::Relaxed);
+                            }
                         }
                         report(label, &done_blobs, &last_pct, blobs.len());
                     }
-                    slots.lock().expect("chunk slot mutex")[chunk] = Some(state);
+                    drain.lock().expect("chunk slot mutex").deposit(chunk, state);
                 }
             }));
         }
@@ -308,14 +353,70 @@ where
     if let Some(e) = first_err {
         return Err(e);
     }
+    let mut d = drain.into_inner().expect("chunk slot mutex");
+    if let Some(e) = d.err.take() {
+        return Err(e);
+    }
+    // Every chunk was deposited, and deposits drain in order, so nothing can be
+    // left behind unless a sink call failed above.
+    debug_assert_eq!(d.next, n_chunks, "chunks left undrained");
     println!("\r{label:<28} [100%]");
-    let out: Vec<S> = slots
-        .into_inner()
-        .expect("chunk slot mutex")
-        .into_iter()
-        .flatten()
-        .collect();
-    Ok((out, kinds.iter().map(|k| k.load(Ordering::Relaxed)).collect()))
+    Ok(kinds.iter().map(|k| k.load(Ordering::Relaxed)).collect())
+}
+
+/// Holds finished chunks until their turn comes, so the sink sees chunk order
+/// however the workers finish.
+struct Drain<S, H> {
+    slots: Vec<Option<S>>,
+    next: usize,
+    sink: H,
+    err: Option<Error>,
+}
+
+impl<S, H: FnMut(S) -> Result<()>> Drain<S, H> {
+    fn deposit(&mut self, chunk: usize, state: S) {
+        self.slots[chunk] = Some(state);
+        while self.next < self.slots.len() {
+            let Some(s) = self.slots[self.next].take() else {
+                break;
+            };
+            self.next += 1;
+            // Keep draining after a failure: the pass reports the first error at
+            // the end, and stopping here would strand the remaining chunks.
+            if let Err(e) = (self.sink)(s) {
+                if self.err.is_none() {
+                    self.err = Some(e);
+                }
+            }
+        }
+    }
+}
+
+/// Run one pass over the file in parallel, returning every chunk's accumulator.
+///
+/// Convenience over [`run_pass_sink`] for passes whose accumulators are small
+/// enough that holding them all costs nothing. Accumulators come back in chunk
+/// order, so merging them is deterministic.
+pub fn run_pass<S, F, G>(
+    path: &Path,
+    blobs: &[BlobLoc],
+    blob_kinds: Option<&[u8]>,
+    want: u8,
+    label: &str,
+    make: F,
+    body: G,
+) -> Result<(Vec<S>, Vec<u8>)>
+where
+    S: Send,
+    F: Fn() -> S + Sync,
+    G: Fn(&mut S, &PrimitiveBlock) -> Result<u8> + Sync,
+{
+    let mut out: Vec<S> = Vec::new();
+    let kinds = run_pass_sink(path, blobs, blob_kinds, want, label, make, body, |s| {
+        out.push(s);
+        Ok(())
+    })?;
+    Ok((out, kinds))
 }
 
 fn read_exact_at(file: &mut File, loc: &BlobLoc, out: &mut Vec<u8>) -> Result<()> {
@@ -409,6 +510,65 @@ mod tests {
         )
         .unwrap();
         assert_eq!(states.iter().sum::<usize>(), 0);
+    }
+
+    #[test]
+    fn a_skipped_blob_keeps_its_kinds_in_the_returned_mask() {
+        let (path, _dir) = testpbf::write_sample("pbf_carry");
+        let blobs = scan_blobs(&path).unwrap();
+        let all = KIND_NODES | KIND_WAYS | KIND_RELATIONS;
+        // A relations-only pass skips this nodes-and-ways-and-relations blob only
+        // if we lie about its contents; do that, and check the lie comes back
+        // rather than a zero. A pass that dropped the kinds would make its own
+        // returned mask useless to the pass after it.
+        let (_, kinds) = run_pass(
+            &path,
+            &blobs,
+            Some(&[KIND_NODES]),
+            KIND_WAYS,
+            "test",
+            || (),
+            |_: &mut (), _| Ok(all),
+        )
+        .unwrap();
+        assert_eq!(kinds, vec![KIND_NODES]);
+
+        // A blob the pass does read reports what it actually saw.
+        let (_, kinds) = run_pass(
+            &path,
+            &blobs,
+            Some(&[KIND_WAYS]),
+            KIND_WAYS,
+            "test",
+            || (),
+            |_: &mut (), _| Ok(all),
+        )
+        .unwrap();
+        assert_eq!(kinds, vec![all]);
+    }
+
+    #[test]
+    fn the_compression_probe_accepts_zlib_and_rejects_zstd() {
+        let (path, dir) = testpbf::write_sample("pbf_probe");
+        let blobs = scan_blobs(&path).unwrap();
+        probe_compression(&path, &blobs).unwrap();
+
+        // One OSMData blob whose only field is `zstd_data`.
+        let blob = [7 << 3 | WIRE_BYTES, 1, 0];
+        let mut header = vec![1 << 3 | WIRE_BYTES, 7];
+        header.extend_from_slice(b"OSMData");
+        header.extend_from_slice(&[3 << 3 | proto::WIRE_VARINT, blob.len() as u8]);
+        let mut file = Vec::new();
+        file.extend_from_slice(&(header.len() as u32).to_be_bytes());
+        file.extend_from_slice(&header);
+        file.extend_from_slice(&blob);
+        let zstd_path = dir.join("zstd.osm.pbf");
+        std::fs::write(&zstd_path, &file).unwrap();
+
+        let blobs = scan_blobs(&zstd_path).unwrap();
+        assert_eq!(blobs.len(), 1);
+        let err = probe_compression(&zstd_path, &blobs).unwrap_err();
+        assert!(err.0.contains("zstd"), "{}", err.0);
     }
 
     #[test]
