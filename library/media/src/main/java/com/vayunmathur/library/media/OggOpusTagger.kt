@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import java.io.ByteArrayOutputStream
 import java.nio.ByteBuffer
@@ -8,8 +8,8 @@ import java.nio.ByteOrder
  * Everything the Ogg/Opus tagger will write. Null/blank fields are simply omitted.
  *
  * No release-track id: the catalogue carries no per-track MBID, so there was never a value
- * to write. [com.vayunmathur.musicbrainz.data.library.TagReader] still reads that tag, because
- * files downloaded before the switch carry it and have to keep matching.
+ * to write. Readers still parse that tag, because files downloaded before the switch carry
+ * it and have to keep matching.
  */
 data class VorbisTags(
     val title: String? = null,
@@ -32,9 +32,9 @@ data class VorbisTags(
  *
  * A `.opus` file is a chain of Ogg pages: the first carries the `OpusHead` identification
  * packet, the second carries the `OpusTags` comment packet, and the rest carry audio. This
- * replaces that comment packet with one holding the track's metadata - the same keys
- * [com.vayunmathur.musicbrainz.data.library.TagReader] reads back, so a download is recognised
- * as owned on the next library scan - plus the cover art and synced lyrics.
+ * replaces that comment packet with one holding the track's metadata - the standard keys a
+ * tag reader looks for, so a download is recognised as owned on the next library scan - plus
+ * the cover art and synced lyrics.
  *
  * Embedded art can push the comment packet past a single Ogg page, so the packet is
  * re-paged from scratch: segment tables are rebuilt, the per-page CRC is recomputed, and

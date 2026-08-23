@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 /**
  * The Opus identification header, and the packet arithmetic the Ogg writer needs.

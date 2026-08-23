@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import java.nio.ByteBuffer
 import java.nio.ByteOrder

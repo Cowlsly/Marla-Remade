@@ -1,5 +1,7 @@
 package com.vayunmathur.musicbrainz.data.download
 
+import com.vayunmathur.library.media.OggOpusTagger
+import com.vayunmathur.library.media.VorbisTags
 import com.vayunmathur.musicbrainz.data.library.TagReader
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream

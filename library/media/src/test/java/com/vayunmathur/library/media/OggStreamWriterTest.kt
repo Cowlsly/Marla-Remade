@@ -1,7 +1,5 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
-import java.io.ByteArrayInputStream
-import com.vayunmathur.musicbrainz.data.library.TagReader
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -14,9 +12,11 @@ import kotlin.test.assertTrue
  * Nothing here can be checked on a device from a unit test, and a malformed page is the kind
  * of mistake a player rejects silently, so the framing is pinned down byte by byte: the
  * magic, the flags, contiguous page sequence numbers, the granule positions that decide the
- * reported duration, and a CRC that a reader will actually verify. The strongest check is the
- * last one - a stream built here, retagged by [OggOpusTagger] and read back by [TagReader] -
- * because that is exactly the path a download takes.
+ * reported duration, and a CRC that a reader will actually verify.
+ *
+ * A stream written here also has to survive being retagged and read back by a tag parser,
+ * which is the path a real download takes. That reader belongs to the consuming app rather
+ * than to this module, so the round trip is asserted by `:musicbrainz`'s `OggOpusTaggerTest`.
  */
 class OggStreamWriterTest {
 
@@ -244,7 +244,7 @@ class OggStreamWriterTest {
     }
 
     @Test
-    fun `writes a stream the tagger can retag and the library can read`() {
+    fun `stays a valid stream after the tagger has rewritten its pages`() {
         val tagged = assertNotNull(
             OggOpusTagger.tag(
                 stream(packets = 50),
@@ -252,17 +252,10 @@ class OggStreamWriterTest {
                     title = "Weightless",
                     artist = "Marconi Union",
                     album = "Ambient Transmissions",
-                    recordingId = "12345678-1234-1234-1234-123456789abc",
                 ),
             ),
             "the tagger should recognise a stream this writer produced",
         )
-
-        val tags = TagReader.readOgg(ByteArrayInputStream(tagged))
-        assertEquals("Weightless", tags.title)
-        assertEquals("Marconi Union", tags.artist)
-        assertEquals("Ambient Transmissions", tags.album)
-        assertEquals("12345678-1234-1234-1234-123456789abc", tags.recordingId)
 
         // Retagging must leave the audio pages valid, or the file plays the tags and nothing
         // else. Page numbering and CRCs are recomputed, so both are checked again.

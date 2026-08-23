@@ -17,6 +17,7 @@ android {
 dependencies {
     implementation(project(":library:network"))
     implementation(project(":library:image"))
+    implementation(project(":library:media"))
     // The vendored NewPipe fork. Only the JVM extractor is used - the SABR/PO-token
     // machinery that needs QuickJS and a WebView lives in :youpipe itself, and audio
     // resolution works without it.

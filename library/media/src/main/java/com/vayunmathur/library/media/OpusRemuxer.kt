@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import android.content.Context
 import android.media.MediaCodec
@@ -22,7 +22,7 @@ import java.nio.ByteBuffer
  */
 object OpusRemuxer {
 
-    private const val TAG = "MBDownload"
+    private const val TAG = "OpusRemuxer"
     private const val INITIAL_BUFFER_SIZE = 1 * 1024 * 1024
 
     /**

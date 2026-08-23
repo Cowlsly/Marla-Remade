@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import java.io.ByteArrayOutputStream
 

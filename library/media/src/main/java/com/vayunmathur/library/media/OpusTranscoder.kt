@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import android.media.AudioFormat
 import android.media.MediaCodec
@@ -32,7 +32,7 @@ import kotlin.random.Random
  */
 object OpusTranscoder {
 
-    internal const val TAG = "MBDownload"
+    internal const val TAG = "OpusTranscoder"
 
     /**
      * Well past Opus transparency, and still about a third the size of the FLAC it replaces.

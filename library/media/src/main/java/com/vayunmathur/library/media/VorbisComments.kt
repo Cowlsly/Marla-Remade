@@ -1,4 +1,4 @@
-package com.vayunmathur.musicbrainz.data.download
+package com.vayunmathur.library.media
 
 import java.io.ByteArrayOutputStream
 import java.util.Base64
@@ -8,16 +8,16 @@ import java.util.Base64
  *
  * A `.opus` file carries its metadata as a Vorbis comment list, with the cover art
  * base64-encoded into a `METADATA_BLOCK_PICTURE` comment wrapping a FLAC-style picture
- * block. The keys match what [com.vayunmathur.musicbrainz.data.library.TagReader] reads back,
- * so a download is recognised as owned on the next library scan.
+ * block. The keys are the standard ones a tag reader looks for, so a download is recognised
+ * as owned on the next library scan.
  *
  * `MUSICBRAINZ_RELEASETRACKID` is deliberately not among them: the catalogue carries no
- * per-track MBID, so there is never a value to write. TagReader still reads it, because
- * files downloaded before the switch carry it and must keep matching.
+ * per-track MBID, so there is never a value to write. Readers still parse it, because files
+ * downloaded before the switch carry it and must keep matching.
  */
 internal object VorbisComments {
 
-    const val VENDOR = "ModernApps musicbrainz"
+    const val VENDOR = "ModernApps"
 
     /**
      * Builds the comment list: vendor string, a count, then each `KEY=value` entry, all with
