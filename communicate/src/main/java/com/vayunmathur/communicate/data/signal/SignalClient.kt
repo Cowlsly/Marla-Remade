@@ -877,7 +877,12 @@ object SignalClient {
      * Encrypt, upload, and send an attachment. Returns null on any failure — the plaintext never leaves
      * the device unencrypted, so a failed upload simply means no message.
      */
-    suspend fun sendMedia(recipient: String, bytes: ByteArray, mimeType: String): String? {
+    suspend fun sendMedia(
+        recipient: String,
+        bytes: ByteArray,
+        mimeType: String,
+        fileName: String? = null,
+    ): String? {
         val encrypted = try {
             SignalAttachmentCipher.encrypt(bytes)
         } catch (t: Throwable) {
@@ -903,6 +908,11 @@ object SignalClient {
             .setSize(encrypted.plaintextSize)
             .setKey(com.google.protobuf.ByteString.copyFrom(encrypted.key))
             .setDigest(com.google.protobuf.ByteString.copyFrom(encrypted.digest))
+            .apply {
+                // Without a name a document arrives untitled on a real Signal client; images and videos are
+                // rendered inline so a name is optional there.
+                if (!fileName.isNullOrBlank()) setFileName(fileName)
+            }
             .build()
         val (mediaGroupKey, mediaGroupRev) = groupContextFor(recipient)
         val dm = SignalPayload.buildDataMessage(
@@ -2226,6 +2236,40 @@ object SignalClient {
         db?.conversationDao()?.getConversation(SignalProtocol.groupConversationId(groupId))
     } catch (_: Exception) {
         null
+    }
+
+    /**
+     * Share a contact card.
+     *
+     * Sent as `DataMessage.contact` rather than as a text blob or a vCard attachment, so the recipient can save
+     * or call it directly.
+     */
+    suspend fun sendContactCard(
+        conversationId: String,
+        givenName: String,
+        familyName: String?,
+        phoneNumbers: List<Pair<String, String?>>,
+        emails: List<String>,
+    ): Boolean {
+        val contact = SignalPayload.buildSharedContact(
+            givenName = givenName,
+            familyName = familyName,
+            phoneNumbers = phoneNumbers,
+            emails = emails,
+        ) ?: run {
+            Log.w(TAG, "refusing to share a contact with no name and no numbers")
+            return false
+        }
+        val ts = System.currentTimeMillis()
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val dm = SignalPayload.buildDataMessage(
+            body = "",
+            timestamp = ts,
+            contact = contact,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
+        return sendContent(conversationId, SignalPayload.buildContentWithDataMessage(dm))
     }
 
     /**

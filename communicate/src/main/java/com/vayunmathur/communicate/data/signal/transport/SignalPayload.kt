@@ -174,6 +174,54 @@ object SignalPayload {
 
     // ---- Content / DataMessage builders (plaintext, before E2E encrypt) ----
 
+    /**
+     * A shared contact card (`DataMessage.contact`).
+     *
+     * Phone numbers are the useful part — a recipient offers to message or call them — so a card with no numbers
+     * is refused rather than sent as an empty name.
+     */
+    fun buildSharedContact(
+        givenName: String,
+        familyName: String? = null,
+        phoneNumbers: List<Pair<String, String?>> = emptyList(),
+        emails: List<String> = emptyList(),
+        organization: String? = null,
+    ): SignalServiceProtos.DataMessage.Contact? {
+        if (givenName.isBlank() && phoneNumbers.isEmpty()) return null
+        val builder = SignalServiceProtos.DataMessage.Contact.newBuilder()
+        builder.setName(
+            SignalServiceProtos.DataMessage.Contact.Name.newBuilder()
+                .setGivenName(givenName)
+                .apply { if (!familyName.isNullOrBlank()) setFamilyName(familyName) },
+        )
+        phoneNumbers.forEach { (number, label) ->
+            if (number.isBlank()) return@forEach
+            builder.addNumber(
+                SignalServiceProtos.DataMessage.Contact.Phone.newBuilder()
+                    .setValue(number)
+                    // MOBILE unless the address book gave us a label to pass through as CUSTOM.
+                    .setType(
+                        if (label.isNullOrBlank()) {
+                            SignalServiceProtos.DataMessage.Contact.Phone.Type.MOBILE
+                        } else {
+                            SignalServiceProtos.DataMessage.Contact.Phone.Type.CUSTOM
+                        },
+                    )
+                    .apply { if (!label.isNullOrBlank()) setLabel(label) },
+            )
+        }
+        emails.forEach { email ->
+            if (email.isBlank()) return@forEach
+            builder.addEmail(
+                SignalServiceProtos.DataMessage.Contact.Email.newBuilder()
+                    .setValue(email)
+                    .setType(SignalServiceProtos.DataMessage.Contact.Email.Type.HOME),
+            )
+        }
+        if (!organization.isNullOrBlank()) builder.setOrganization(organization)
+        return builder.build()
+    }
+
     fun buildDataMessage(
         body: String,
         timestamp: Long = System.currentTimeMillis(),
@@ -190,6 +238,8 @@ object SignalPayload {
         pollTerminate: SignalServiceProtos.DataMessage.PollTerminate? = null,
         expireTimer: Int? = null,
         profileKey: ByteArray? = null,
+        /** A shared contact card; recipients render it as a saveable contact rather than as text. */
+        contact: SignalServiceProtos.DataMessage.Contact? = null,
         /**
          * The minimum protocol version a recipient needs to render this message. Claiming more than the
          * message actually uses makes older clients reject it outright as unsupported, so it is derived
@@ -218,6 +268,7 @@ object SignalPayload {
         if (pollTerminate != null) b.setPollTerminate(pollTerminate)
         if (expireTimer != null) b.setExpireTimer(expireTimer)
         if (profileKey != null) b.setProfileKey(ByteString.copyFrom(profileKey))
+        if (contact != null) b.addContact(contact)
         // Derived, not trusted from the caller: only the features actually present raise the floor.
         // REACTIONS = 4 and POLLS = 8 per DataMessage.ProtocolVersion; everything else is 0.
         val derivedVersion = requiredProtocolVersion ?: when {

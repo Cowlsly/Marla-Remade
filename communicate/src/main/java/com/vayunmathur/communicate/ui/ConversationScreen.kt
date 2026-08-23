@@ -102,6 +102,28 @@ fun ConversationScreen(
                 ?: LineChoice.Sim(subscriptionId ?: -1, context.getString(R.string.line_sim))
         }
     }
+    // Poll composer and contact picker, offered only on lines that support them.
+    var showPollComposer by remember { mutableStateOf(false) }
+    val contactPicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickContact(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val shared = withContext(Dispatchers.IO) { readSharedContact(context, uri) }
+            if (shared == null) {
+                AppMessages.show(context.getString(R.string.contact_share_failed))
+                return@launch
+            }
+            val ok = CommunicateRepository.shareContact(
+                context = context,
+                line = line,
+                conversationId = remoteId ?: address,
+                contact = shared,
+            )
+            if (!ok) AppMessages.show(context.getString(R.string.contact_share_failed))
+        }
+    }
+
     val attachmentPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
         selectedAttachments = uris.map { uri ->
             runCatching {
@@ -110,6 +132,7 @@ fun ConversationScreen(
             CommunicateAttachment(
                 contentUri = uri.toString(),
                 mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream",
+                fileName = displayNameOf(context, uri),
             )
         }
     }
@@ -358,7 +381,20 @@ fun ConversationScreen(
                 draft = draft,
                 onDraftChange = { draft = it },
                 attachments = selectedAttachments,
-                onAttach = { attachmentPicker.launch(arrayOf("image/*", "video/*")) },
+                // Media and documents both: every line's send path already accepts an arbitrary content type,
+                // only this filter was stopping documents from being picked.
+                onAttachMedia = { attachmentPicker.launch(arrayOf("image/*", "video/*")) },
+                onAttachFile = { attachmentPicker.launch(arrayOf("*/*")) },
+                onCreatePoll = if (CommunicateRepository.canSendPoll(line)) {
+                    { showPollComposer = true }
+                } else {
+                    null
+                },
+                onShareContact = if (CommunicateRepository.canShareContact(line)) {
+                    { contactPicker.launch(null) }
+                } else {
+                    null
+                },
                 onRemoveAttachment = { attachment ->
                     selectedAttachments = selectedAttachments.filterNot { it.contentUri == attachment.contentUri }
                 },
@@ -385,6 +421,23 @@ fun ConversationScreen(
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
+        if (showPollComposer) {
+            PollComposerDialog(
+                onDismiss = { showPollComposer = false },
+                onCreate = { question, options ->
+                    scope.launch {
+                        val ok = CommunicateRepository.sendPoll(
+                            context = context,
+                            line = line,
+                            conversationId = remoteId ?: address,
+                            question = question,
+                            options = options,
+                        )
+                        if (ok) refresh++ else AppMessages.show(context.getString(R.string.poll_send_failed))
+                    }
+                },
+            )
+        }
         // A changed Signal identity key blocks sending until the user verifies it, so the warning has to
         // be in front of them here rather than only in a notification.
         var safetyNumber by remember(remoteId, address) { mutableStateOf<Pair<String, String>?>(null) }
@@ -586,12 +639,26 @@ private fun MessagesContent(padding: PaddingValues, rows: List<SmsMessage>?) {
     }
 }
 
+/** The picker's display name for a document, so a shared file arrives titled rather than as a blob. */
+private fun displayNameOf(context: android.content.Context, uri: android.net.Uri): String? = try {
+    context.contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+        val index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME)
+        if (index >= 0 && cursor.moveToFirst()) cursor.getString(index) else null
+    }
+} catch (_: Throwable) {
+    null
+}
+
 @Composable
 private fun ComposeSmsRow(
     draft: String,
     onDraftChange: (String) -> Unit,
     attachments: List<CommunicateAttachment>,
-    onAttach: () -> Unit,
+    onAttachMedia: () -> Unit,
+    onAttachFile: () -> Unit,
+    /** Null when the line has no polls, so the option is not offered rather than failing. */
+    onCreatePoll: (() -> Unit)?,
+    onShareContact: (() -> Unit)?,
     onRemoveAttachment: (CommunicateAttachment) -> Unit,
     onSend: () -> Unit,
 ) {
@@ -624,8 +691,31 @@ private fun ComposeSmsRow(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                IconButton(onClick = onAttach) {
-                    IconAttachment()
+                com.vayunmathur.library.ui.OverflowMenu(icon = { IconAttachment() }) {
+                    Item(
+                        text = stringResource(R.string.attach_media),
+                        leadingIcon = { com.vayunmathur.library.ui.IconImage() },
+                        onClick = onAttachMedia,
+                    )
+                    Item(
+                        text = stringResource(R.string.attach_file),
+                        leadingIcon = { IconAttachment() },
+                        onClick = onAttachFile,
+                    )
+                    onCreatePoll?.let { create ->
+                        Item(
+                            text = stringResource(R.string.attach_poll),
+                            leadingIcon = { com.vayunmathur.library.ui.IconPoll() },
+                            onClick = create,
+                        )
+                    }
+                    onShareContact?.let { share ->
+                        Item(
+                            text = stringResource(R.string.attach_contact),
+                            leadingIcon = { com.vayunmathur.library.ui.IconPerson() },
+                            onClick = share,
+                        )
+                    }
                 }
                 OutlinedTextField(
                     value = draft,

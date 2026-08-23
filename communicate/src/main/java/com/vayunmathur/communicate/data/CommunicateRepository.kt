@@ -620,8 +620,13 @@ object CommunicateRepository {
                 val sentId = if (attachments.isEmpty()) {
                     WhatsAppClient.sendMessage(jid, body)
                 } else {
-                    // Media send goes through the dedicated path; here just send any caption text.
-                    if (body.isNotBlank()) WhatsAppClient.sendMessage(jid, body) else ""
+                    // Attachments are sent here rather than left to a separate call: previously this branch
+                    // returned success while sending nothing, so picking a photo silently did nothing.
+                    val mediaOk = sendAttachments(context, attachments) { bytes, mime, name ->
+                        WhatsAppClient.sendMedia(jid, bytes, mime, name)
+                    }
+                    val captionId = if (body.isNotBlank()) WhatsAppClient.sendMessage(jid, body) else ""
+                    if (mediaOk) captionId else null
                 }
                 // Echo the outgoing message into the local cache so it shows in our own thread
                 // (a primary-only line gets no server echo of its own sends). Cache under the real
@@ -635,12 +640,20 @@ object CommunicateRepository {
         LineChoice.Signal -> withContext(Dispatchers.IO) {
             runCatching {
                 val recipient = threadRemoteId ?: toSignalRecipient(context, address)
-                // Media path delegates to sendMedia; text via sendMessage. Attachments handled via Signal delegates below.
                 val sentId = if (attachments.isEmpty()) {
                     if (body.isBlank()) null else SignalClient.get(context).sendMessage(recipient, body)
                 } else {
-                    // For media messages, send caption text if any; actual media via sendSignalMedia.
-                    if (body.isNotBlank()) SignalClient.get(context).sendMessage(recipient, body) else ""
+                    // As with WhatsApp: send the attachments here, rather than reporting success and
+                    // dropping them.
+                    val mediaOk = sendAttachments(context, attachments) { bytes, mime, name ->
+                        SignalClient.get(context).sendMedia(recipient, bytes, mime, name) != null
+                    }
+                    val captionId = if (body.isNotBlank()) {
+                        SignalClient.get(context).sendMessage(recipient, body)
+                    } else {
+                        ""
+                    }
+                    if (mediaOk) captionId else null
                 }
                 if (sentId != null && body.isNotBlank()) {
                     cacheOutgoingSignal(context, recipient, body, sentId.ifBlank { "local-${java.util.UUID.randomUUID()}" })
@@ -961,6 +974,145 @@ object CommunicateRepository {
         selectableCount: Int = 0,
     ): String? = withContext(Dispatchers.IO) {
         WhatsAppClient.sendPollCreation(jid, question, options, selectableCount)
+    }
+
+    /**
+     * Read each attachment and hand its bytes to [send], returning false if any failed.
+     *
+     * Reading happens here rather than in each line's client so the content-resolver work is done once, and so a
+     * line that cannot read a uri fails visibly instead of silently sending nothing.
+     */
+    private suspend fun sendAttachments(
+        context: Context,
+        attachments: List<CommunicateAttachment>,
+        send: suspend (ByteArray, String, String?) -> Boolean,
+    ): Boolean = withContext(Dispatchers.IO) {
+        var allOk = attachments.isNotEmpty()
+        for (attachment in attachments) {
+            val bytes = try {
+                context.contentResolver.openInputStream(Uri.parse(attachment.contentUri))?.use { it.readBytes() }
+            } catch (_: Throwable) {
+                null
+            }
+            if (bytes == null || bytes.isEmpty()) {
+                allOk = false
+                continue
+            }
+            val ok = try {
+                send(bytes, attachment.mimeType, attachment.fileName)
+            } catch (_: Throwable) {
+                false
+            }
+            if (!ok) allOk = false
+        }
+        allOk
+    }
+
+    /** Whether [line] can send a poll. Only the two in-app protocols have one. */
+    fun canSendPoll(line: CommunicateLine): Boolean = when (line) {
+        CommunicateLine.WhatsApp -> com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled
+        CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
+        else -> false
+    }
+
+    /**
+     * Whether [line] can share a contact. MMS could carry a vCard, but inbound vCard parts are currently
+     * discarded, so offering it there would send something the recipient cannot open.
+     */
+    fun canShareContact(line: CommunicateLine): Boolean = when (line) {
+        CommunicateLine.WhatsApp -> com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled
+        CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
+        else -> false
+    }
+
+    /** Send a poll on whichever line owns [conversationId]. */
+    suspend fun sendPoll(
+        context: Context,
+        line: CommunicateLine,
+        conversationId: String,
+        question: String,
+        options: List<String>,
+    ): Boolean = withContext(Dispatchers.IO) {
+        when (line) {
+            CommunicateLine.WhatsApp -> WhatsAppClient.sendPoll(conversationId, question, options, false) != null
+            CommunicateLine.Signal ->
+                SignalClient.get(context).poll(conversationId, question, options) != null
+            else -> false
+        }
+    }
+
+    /**
+     * Vote in a poll. [selectedOptions] are option names, which is what both protocols hash or index.
+     *
+     * WhatsApp additionally binds a vote to the poll's creator, so [pollCreatorId] and [pollFromMe] are required
+     * there; Signal identifies the poll by its message id alone.
+     */
+    suspend fun sendPollVote(
+        context: Context,
+        line: CommunicateLine,
+        conversationId: String,
+        pollMessageId: String,
+        selectedOptions: List<String>,
+        pollCreatorId: String? = null,
+        pollFromMe: Boolean = false,
+    ): Boolean = withContext(Dispatchers.IO) {
+        when (line) {
+            CommunicateLine.WhatsApp -> WhatsAppClient.sendPollVote(
+                conversationId,
+                pollMessageId,
+                pollCreatorId ?: conversationId,
+                pollFromMe,
+                selectedOptions,
+            )
+            CommunicateLine.Signal ->
+                SignalClient.get(context).sendPollVote(conversationId, pollMessageId, selectedOptions)
+            else -> false
+        }
+    }
+
+    /** Share a contact card on whichever line owns the conversation. */
+    suspend fun shareContact(
+        context: Context,
+        line: CommunicateLine,
+        conversationId: String,
+        contact: com.vayunmathur.communicate.ui.SharedContactCard,
+    ): Boolean = withContext(Dispatchers.IO) {
+        when (line) {
+            CommunicateLine.Signal -> SignalClient.get(context).sendContactCard(
+                conversationId = conversationId,
+                givenName = contact.givenName,
+                familyName = contact.familyName,
+                phoneNumbers = contact.phoneNumbers,
+                emails = contact.emails,
+            )
+            CommunicateLine.WhatsApp -> {
+                // WhatsApp carries a vCard rather than a structured card.
+                val display = listOfNotNull(contact.givenName, contact.familyName)
+                    .filter { it.isNotBlank() }
+                    .joinToString(" ")
+                WhatsAppClient.sendContact(conversationId, display, buildVCard(contact))
+            }
+            else -> false
+        }
+    }
+
+    /** Minimal vCard 3.0 — what WhatsApp expects for a shared contact. */
+    private fun buildVCard(contact: com.vayunmathur.communicate.ui.SharedContactCard): String {
+        val display = listOfNotNull(contact.givenName, contact.familyName)
+            .filter { it.isNotBlank() }
+            .joinToString(" ")
+        return buildString {
+            appendLine("BEGIN:VCARD")
+            appendLine("VERSION:3.0")
+            appendLine("N:${contact.familyName.orEmpty()};${contact.givenName};;;")
+            appendLine("FN:$display")
+            contact.phoneNumbers.forEach { (number, label) ->
+                val type = label?.takeIf { it.isNotBlank() } ?: "CELL"
+                appendLine("TEL;TYPE=$type:$number")
+            }
+            contact.emails.forEach { appendLine("EMAIL:$it") }
+            append("END:VCARD")
+        }
     }
 
     suspend fun sendWhatsAppMedia(jid: String, bytes: ByteArray, mimeType: String, fileName: String?): Boolean =

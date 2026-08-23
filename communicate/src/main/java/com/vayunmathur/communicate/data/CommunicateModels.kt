@@ -77,6 +77,13 @@ data class CommunicateCallLogEntry(
 data class CommunicateAttachment(
     val contentUri: String,
     val mimeType: String,
+    /**
+     * The document's display name, where the picker gave us one.
+     *
+     * Needed for anything that is not an image or video: a recipient shows a document by name, so without it a
+     * PDF arrives as an untitled blob.
+     */
+    val fileName: String? = null,
 )
 
 data class SmsThread(
