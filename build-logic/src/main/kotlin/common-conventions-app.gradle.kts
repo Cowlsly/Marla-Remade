@@ -39,6 +39,12 @@ val launcherIcon = extensions.create("launcherIcon", LauncherIconExtension::clas
 val materialSymbolsRef = "819d78680a849ceef4c78f863d8753e3160b7c89"
 val materialSymbolsCache = File(gradle.gradleUserHomeDir, "material-symbols-cache")
 
+// Apps are arm64-only unless they opt in with `nativeAbis { armv7 = true }`
+// (see NativeAbisExtension). Read in finalizeDsl below, not here.
+val nativeAbis = extensions.create("nativeAbis", NativeAbisExtension::class.java).apply {
+    armv7.convention(false)
+}
+
 extensions.configure<com.android.build.api.variant.ApplicationAndroidComponentsExtension> {
     // Only `dev` and `release` ship. AGP always creates a `debug` build type and
     // forbids removing it, so disable its variants instead — no debug variant means
@@ -46,6 +52,15 @@ extensions.configure<com.android.build.api.variant.ApplicationAndroidComponentsE
     // config is untouched; `release` still falls back to it, and testBuildType = "dev".)
     beforeVariants(selector().withBuildType("debug")) { variant ->
         variant.enable = false
+    }
+    // abiFilters is a plain Set rather than a lazy Provider, so the opt-in can only be
+    // read once the app's own build file has been evaluated — reading nativeAbis.armv7
+    // straight from the defaultConfig block below would always observe the convention.
+    finalizeDsl { ext ->
+        if (nativeAbis.armv7.get()) {
+            ext.defaultConfig.ndk.abiFilters.add(ABI_ARMV7)
+            ext.buildTypes.getByName("dev").ndk.abiFilters.add(ABI_ARMV7)
+        }
     }
     onVariants { variant ->
         val gen = tasks.register(
@@ -109,11 +124,12 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
         versionCode = appVersionCode
         versionName = appVersionName
         targetSdk = 37
-        // Only arm64-v8a — all physical devices + Apple Silicon emulator are arm64.
-        // AGP otherwise configures buildCMakeDebug for armeabi-v7a/x86/x86_64 which
-        // wastes time and broke when offline router's sqlite3.c was removed.
+        // arm64-v8a only by default — all phones/tablets + Apple Silicon emulator are
+        // arm64. AGP otherwise configures buildCMakeDebug for armeabi-v7a/x86/x86_64
+        // which wastes time and broke when offline router's sqlite3.c was removed.
+        // 32-bit devices (Google TV) opt in with `nativeAbis { armv7 = true }`.
         ndk {
-            abiFilters.add("arm64-v8a")
+            abiFilters.add(ABI_ARM64)
         }
     }
 
@@ -167,7 +183,7 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
             matchingFallbacks += listOf("release")
             ndk {
                 abiFilters.clear()
-                abiFilters.add("arm64-v8a")
+                abiFilters.add(ABI_ARM64)
             }
             // initWith(release) copied DEV_BUILD=false; dev is a developer build, so flip it on.
             buildConfigField("boolean", "DEV_BUILD", "true")

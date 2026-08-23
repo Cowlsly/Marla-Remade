@@ -16,20 +16,42 @@ import java.util.Properties
 abstract class RustToolchainLock : BuildService<BuildServiceParameters.None>
 
 /**
- * Registers the per-ABI cargo cross-compile of a Rust cdylib (arm64-v8a only)
- * into `build/rustJniLibs`, wired ahead of `preBuild`. This consolidates the
- * ~80 lines of NDK-toolchain + cargo + reproducible-build boilerplate that used
- * to be copy-pasted across every native module (pdf, camera, weather, passwords,
- * e2ee-p2p). The caller still registers `build/rustJniLibs` as a jniLibs source
- * dir in its own `android { }` block.
+ * An Android ABI paired with the Rust target triple and the NDK clang-wrapper prefix
+ * used to cross-compile for it.
  *
- * Prereq: `rustup target add aarch64-linux-android`.
+ * @param clangPrefix deliberately separate from [triple]: for armeabi-v7a the NDK ships
+ *   `armv7a-linux-androideabi<api>-clang` (note the `a`) while the Rust triple is
+ *   `armv7-linux-androideabi`, so deriving one from the other silently misses the wrapper.
+ */
+data class RustAbi(val abiDir: String, val triple: String, val clangPrefix: String)
+
+private val KNOWN_RUST_ABIS = listOf(
+    RustAbi(ABI_ARM64, "aarch64-linux-android", "aarch64-linux-android"),
+    RustAbi(ABI_ARMV7, "armv7-linux-androideabi", "armv7a-linux-androideabi"),
+)
+
+/**
+ * Registers the per-ABI cargo cross-compile of a Rust cdylib into `build/rustJniLibs`,
+ * wired ahead of `preBuild`. This consolidates the ~80 lines of NDK-toolchain + cargo +
+ * reproducible-build boilerplate that used to be copy-pasted across every native module
+ * (pdf, camera, weather, passwords, e2ee-p2p). The caller still registers
+ * `build/rustJniLibs` as a jniLibs source dir in its own `android { }` block.
+ *
+ * Prereq: `rustup target add` for every triple built (see `rust-toolchain.toml`).
  *
  * @param crate      cargo package lib name → produces `lib<crate>.so`
  * @param remapLabel `--remap-path-prefix` label baked in for reproducible builds
  *                   (defaults to [crate]).
+ * @param extraAbis  ABIs to build in addition to [ABI_ARM64]. Opt-in per module so only
+ *                   the modules that need a second ABI pay for the extra cargo build;
+ *                   pass [ABI_ARMV7] for libraries consumed by an app that sets
+ *                   `nativeAbis { armv7 = true }`.
  */
-fun Project.rustNativeLib(crate: String, remapLabel: String = crate) {
+fun Project.rustNativeLib(
+    crate: String,
+    remapLabel: String = crate,
+    extraAbis: List<String> = emptyList(),
+) {
     // Serialize cargoBuild across all Rust modules to avoid concurrent rustup installs.
     val rustLock = gradle.sharedServices.registerIfAbsent(
         "rustToolchainLock",
@@ -60,10 +82,17 @@ fun Project.rustNativeLib(crate: String, remapLabel: String = crate) {
     val ndkBin = "$ndkRoot/toolchains/llvm/prebuilt/$hostTag/bin"
     val ndkSysroot = "$ndkRoot/toolchains/llvm/prebuilt/$hostTag/sysroot"
 
-    // arm64-v8a only — all physical devices + the Apple-Silicon emulator are arm64.
-    val rustAbis = listOf("arm64-v8a" to "aarch64-linux-android")
+    // arm64-v8a always; anything else is opt-in via extraAbis.
+    val rustAbis = (listOf(ABI_ARM64) + extraAbis).distinct().map { abiDir ->
+        KNOWN_RUST_ABIS.firstOrNull { it.abiDir == abiDir }
+            ?: error(
+                "rustNativeLib($crate): unknown ABI '$abiDir'. " +
+                    "Known: ${KNOWN_RUST_ABIS.joinToString { it.abiDir }}"
+            )
+    }
 
-    val perAbi = rustAbis.map { (abiDir, triple) ->
+    val perAbi = rustAbis.map { abi ->
+        val (abiDir, triple) = abi
         tasks.register<Exec>("cargoBuild_${abiDir.replace('-', '_')}") {
             usesService(rustLock)
             description = "Cross-compiles lib$crate for $abiDir."
@@ -73,8 +102,8 @@ fun Project.rustNativeLib(crate: String, remapLabel: String = crate) {
             val isWindows = OperatingSystem.current().isWindows
             val exeExt = if (isWindows) ".exe" else ""
             val clangExt = if (isWindows) ".cmd" else ""
-            val clang = "$ndkBin/$triple$androidApiLevel-clang$clangExt"
-            val clangpp = "$ndkBin/$triple$androidApiLevel-clang++$clangExt"
+            val clang = "$ndkBin/${abi.clangPrefix}$androidApiLevel-clang$clangExt"
+            val clangpp = "$ndkBin/${abi.clangPrefix}$androidApiLevel-clang++$clangExt"
             val linkerVar = "CARGO_TARGET_${triple.uppercase().replace('-', '_')}_LINKER"
             // Per-crate target (may exist from older isolated builds) and workspace root target
             // (current scheme since Cargo.toml workspace unified to root).
