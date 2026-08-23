@@ -104,6 +104,7 @@ fun ContactList(
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val showAccountLabels by viewModel.showAccountLabels.collectAsStateWithLifecycle()
     val searchQuery by viewModel.searchQuery.collectAsStateWithLifecycle()
+    val hasLoadedContacts by viewModel.hasLoadedContacts.collectAsStateWithLifecycle()
 
     val last = backStack.last()
 
@@ -119,6 +120,7 @@ fun ContactList(
                 else -> null
             },
             showAddButton = last !is Route.EditContact,
+            isLoading = !hasLoadedContacts,
         ),
         actions = object : ContactsActions by viewModel {
             override fun openContact(contact: Contact) = onContactClick(contact)
@@ -265,6 +267,24 @@ fun ContactListScreen(state: ContactListUiState, actions: ContactsActions) {
         verticalArrangement = Arrangement.spacedBy(8.dp),
         scrollBehavior = appBarScrollBehavior(),
     ) {
+        if (contacts.isEmpty()) {
+            item(key = "contacts-empty") {
+                when {
+                    state.searchQuery.isNotEmpty() -> EmptyState(
+                        title = stringResource(R.string.no_contacts_found),
+                        modifier = Modifier.fillParentMaxSize(),
+                    )
+                    state.isLoading -> LoadingState(modifier = Modifier.fillParentMaxSize())
+                    else -> EmptyState(
+                        title = stringResource(R.string.no_contacts_yet),
+                        modifier = Modifier.fillParentMaxSize(),
+                        message = stringResource(R.string.no_contacts_yet_message),
+                        icon = { IconPerson() },
+                    )
+                }
+            }
+        }
+
         if (favorites.isNotEmpty()) {
             item(key = "favorites-header") { FavoritesHeader() }
             item(key = "favorites-card") {

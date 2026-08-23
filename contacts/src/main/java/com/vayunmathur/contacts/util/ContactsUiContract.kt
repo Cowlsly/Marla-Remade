@@ -19,6 +19,8 @@ data class ContactListUiState(
     /** Contact open in the detail pane, highlighted in the list on a wide screen. */
     val openContactId: Long? = null,
     val showAddButton: Boolean = true,
+    /** True until the first sync from the provider finishes, so an empty list isn't mistaken for "no contacts". */
+    val isLoading: Boolean = false,
 )
 
 /** Everything the contact details page draws. */
@@ -33,6 +35,8 @@ data class ContactDetailsUiState(
 /** Everything the groups page draws. */
 data class GroupsUiState(
     val groups: List<GroupWithContacts> = emptyList(),
+    /** True until the first sync from the provider finishes. */
+    val isLoading: Boolean = false,
 )
 
 /**

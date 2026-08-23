@@ -84,6 +84,11 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
     private val _searchQuery = MutableStateFlow("")
     val searchQuery = _searchQuery.asStateFlow()
 
+    // The contact list starts empty and fills in asynchronously, so screens need to tell
+    // "nothing loaded yet" apart from "there really are no contacts".
+    private val _hasLoadedContacts = MutableStateFlow(false)
+    val hasLoadedContacts: StateFlow<Boolean> = _hasLoadedContacts.asStateFlow()
+
     val hiddenAccounts: StateFlow<Set<String>> = dataStore.stringSetFlow("hidden_accounts")
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptySet())
 
@@ -272,6 +277,8 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             launch { loadAccountsInternal() }
         } catch (e: Exception) {
             Log.e("ContactViewModel", "Error loading contacts", e)
+        } finally {
+            _hasLoadedContacts.value = true
         }
     }
 

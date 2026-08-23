@@ -223,4 +223,14 @@
     <string name="sim_limited_fields_hint">SIM contacts only store name, phone, and email.</string>
     <string name="save_failed">Save failed</string>
     <string name="importing">Importing…</string>
+
+    <!-- Empty states -->
+    <!-- Contacts tab, shown on a first run or when every account is hidden -->
+    <string name="no_contacts_yet">No contacts yet</string>
+    <!-- Supporting text under no_contacts_yet, pointing at the add button -->
+    <string name="no_contacts_yet_message">Tap the add button to create your first contact.</string>
+    <!-- Groups tab, shown when the user has not created any group -->
+    <string name="no_groups_yet">No groups yet</string>
+    <!-- Supporting text under no_groups_yet, pointing at the add button -->
+    <string name="no_groups_yet_message">Tap the add button to group contacts together.</string>
 </resources>

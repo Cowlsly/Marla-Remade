@@ -37,6 +37,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 fun GroupsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>, expandGroupId: Long? = null) {
     val groups by viewModel.groups.collectAsStateWithLifecycle()
     val contacts by viewModel.contacts.collectAsStateWithLifecycle()
+    val hasLoadedContacts by viewModel.hasLoadedContacts.collectAsStateWithLifecycle()
 
     // Membership is already part of every contact, so the rows are derived here rather
     // than collected per group — a stateless screen cannot subscribe to one flow per row.
@@ -47,7 +48,7 @@ fun GroupsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>, expa
     }
 
     GroupsScreen(
-        state = GroupsUiState(groups = groupsWithContacts),
+        state = GroupsUiState(groups = groupsWithContacts, isLoading = !hasLoadedContacts),
         actions = object : ContactsActions by viewModel {
             override fun openContact(contact: com.vayunmathur.contacts.data.Contact) {
                 backStack.add(Route.ContactDetail(contact.id))
@@ -86,6 +87,21 @@ fun GroupsScreen(state: GroupsUiState, actions: ContactsActions, expandGroupId: 
         verticalArrangement = Arrangement.spacedBy(4.dp),
         scrollBehavior = appBarScrollBehavior(),
     ) {
+            if (state.groups.isEmpty()) {
+                item(key = "groups-empty") {
+                    if (state.isLoading) {
+                        LoadingState(modifier = Modifier.fillParentMaxSize())
+                    } else {
+                        EmptyState(
+                            title = stringResource(R.string.no_groups_yet),
+                            modifier = Modifier.fillParentMaxSize(),
+                            message = stringResource(R.string.no_groups_yet_message),
+                            icon = { IconGroup() },
+                        )
+                    }
+                }
+            }
+
             state.groups.forEach { (group, contactsInGroup) ->
                 val isExpanded = group.id in expandedGroups
                 // Combine each group's header + (optional) expanded contacts
