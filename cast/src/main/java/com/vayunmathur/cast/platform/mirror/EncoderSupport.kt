@@ -41,35 +41,44 @@ object EncoderSupport {
     }
 
     /**
-     * Every codec this phone has a hardware surface encoder for, as the envelope that encoder
-     * advertises.
+     * Every codec this phone has a hardware surface encoder for, with each one's frame rate stated
+     * **for [width] x [height]** rather than for the easiest frame in its envelope.
      *
      * This is one half of what [CodecNegotiation.choose] intersects; the other comes off the wire.
      * An empty list means this device cannot mirror at all, which is a named refusal rather than a
      * fallback - there is no H.264 to drop back to any more.
+     *
+     * **The geometry is a parameter because a rate without one means nothing.**
+     * `supportedFrameRates` is the ceiling for the *smallest* frame the encoder accepts: on the
+     * Pixel 9 Pro XL AV1 reports 480 there while holding around 10 fps at 4K. Since
+     * [CodecNegotiation.choose] enforces the 30 fps floor against this list, an envelope-wide figure
+     * meant AV1 was selected for a frame it cannot encode, and all the downstream clamp could do
+     * about it was give up resolution instead.
      */
-    fun videoCodecs(): List<CodecLimits> = CodecNegotiation.PREFERENCE.mapNotNull { codec ->
-        val info = hardwareSurfaceEncoder(codec) ?: run {
-            Log.i(TAG, "no hardware surface encoder for ${codec.label} (${codec.mimeType})")
-            return@mapNotNull null
-        }
-        val video = info.videoCapabilities(codec) ?: return@mapNotNull null
-        val limits = runCatching {
-            CodecLimits(
-                codec = codec,
-                maxWidth = video.supportedWidths.upper,
-                maxHeight = video.supportedHeights.upper,
-                maxFrameRate = video.supportedFrameRates.upper.toInt(),
-                maxBitRate = video.bitrateRange.upper,
+    fun videoCodecs(width: Int, height: Int): List<CodecLimits> =
+        CodecNegotiation.PREFERENCE.mapNotNull { codec ->
+            val info = hardwareSurfaceEncoder(codec) ?: run {
+                Log.i(TAG, "no hardware surface encoder for ${codec.label} (${codec.mimeType})")
+                return@mapNotNull null
+            }
+            val video = info.videoCapabilities(codec) ?: return@mapNotNull null
+            val limits = runCatching {
+                CodecLimits(
+                    codec = codec,
+                    maxWidth = video.supportedWidths.upper,
+                    maxHeight = video.supportedHeights.upper,
+                    maxFrameRate = video.sustainableFrameRate(width, height),
+                    maxBitRate = video.bitrateRange.upper,
+                )
+            }.getOrNull() ?: return@mapNotNull null
+            Log.i(
+                TAG,
+                "${codec.label} encodes up to ${limits.maxWidth}x${limits.maxHeight} and holds " +
+                    "${limits.maxFrameRate}fps at ${width}x$height, " +
+                    "${limits.maxBitRate / 1_000_000.0} Mbit/s on ${info.name}",
             )
-        }.getOrNull() ?: return@mapNotNull null
-        Log.i(
-            TAG,
-            "${codec.label} encodes up to ${limits.maxWidth}x${limits.maxHeight} @ " +
-                "${limits.maxFrameRate}fps, ${limits.maxBitRate / 1_000_000.0} Mbit/s on ${info.name}",
-        )
-        limits
-    }
+            limits
+        }
 
     /**
      * The hardware encoder [codec] will be instantiated on.
@@ -133,9 +142,7 @@ object EncoderSupport {
         // 1344x2992 against a landscape-only envelope therefore rides the ladder down to something
         // that fits, which costs resolution and is logged rather than silent.
         if (video.realtime(width, height, frameRate)) return width to height
-        val ceiling = runCatching {
-            video.getSupportedFrameRatesFor(width, height).upper
-        }.getOrNull()
+        val ceiling = video.sustainableFrameRate(width, height).takeIf { it > 0 }
         var scale = 1.0
         repeat(MAX_CLAMP_STEPS) {
             scale *= CLAMP_STEP
@@ -164,21 +171,30 @@ object EncoderSupport {
     /**
      * Whether this encoder will do [width] x [height] at [frameRate] *in realtime*.
      *
-     * **Performance points where they exist, and `areSizeAndRateSupported` only as a fallback.** The
-     * size-and-rate answer is derived from a macroblock-throughput figure, which software codecs
-     * publish generously - it is exactly why a software AV1 encoder would say yes to 1344x2992@30.
-     * `getSupportedPerformancePoints` is the platform's own statement of what it can sustain, and it
-     * compares orientation-independently, so a landscape-only list still covers a portrait frame.
+     * **Measured rates first, because the advertised ones are optimistic.** This used to argue that
+     * `getSupportedPerformancePoints` was the platform's own honest statement of what it could
+     * sustain. On the Pixel 9 Pro XL it is not: the performance points put `c2.google.av1.encoder`
+     * at 180 fps for 1080p and 60 fps for 4K, while the same device's `measured-frame-rate-*` data
+     * says 40 fps at 1080p, which interpolates to around 10 at 4K. `c2.exynos.hevc.encoder` measures
+     * 45-54 fps at 4K. AV1 is first in [CodecNegotiation.PREFERENCE], so believing the performance
+     * points hands 4K to the one encoder that cannot hold 30 fps at it.
      *
-     * A null list is "this codec did not say", which is treated as allowed - the hardware filter has
-     * already run by the time anything asks, so the remaining risk is a hardware encoder being
-     * refused a size it would in fact have taken.
+     * So the three tests run in order of how much each was actually measured: [achievableFrameRate],
+     * then the performance points, then `areSizeAndRateSupported` - which is derived from a
+     * macroblock-throughput figure and is exactly why a software AV1 encoder would say yes to
+     * 1344x2992@30.
+     *
+     * **An unmeasured geometry defers to the next test rather than being refused.** Measured data is
+     * optional and some encoders publish none at all; treating silence as a no would exclude codecs
+     * that are fine. The hardware filter has already run by the time anything asks, so the remaining
+     * risk is the mild one - a hardware encoder refused a size it would in fact have taken.
      */
     private fun MediaCodecInfo.VideoCapabilities.realtime(
         width: Int,
         height: Int,
         frameRate: Int,
     ): Boolean = runCatching {
+        achievableFrameRate(width, height)?.let { return@runCatching it >= frameRate }
         val points = supportedPerformancePoints
         if (points.isNullOrEmpty()) {
             areSizeAndRateSupported(width, height, frameRate.toDouble())
@@ -187,6 +203,43 @@ object EncoderSupport {
             points.any { it.covers(wanted) }
         }
     }.getOrDefault(false)
+
+    /**
+     * The rate this encoder holds at [width] x [height], from the most measured source with an
+     * answer.
+     *
+     * [achievableFrameRate] first for the reason [realtime] gives. `getSupportedFrameRatesFor` is
+     * next because it is at least size-aware, generous though it is. `supportedFrameRates` is the
+     * last resort and is only truthful for very small frames - it is what this used to hand
+     * [CodecNegotiation.choose] for every geometry.
+     */
+    private fun MediaCodecInfo.VideoCapabilities.sustainableFrameRate(
+        width: Int,
+        height: Int,
+    ): Int {
+        if (width <= 0 || height <= 0) return supportedFrameRates.upper.toInt()
+        achievableFrameRate(width, height)?.let { return it.toInt() }
+        runCatching { getSupportedFrameRatesFor(width, height).upper }.getOrNull()?.let {
+            return it.toInt()
+        }
+        return supportedFrameRates.upper.toInt()
+    }
+
+    /**
+     * What this device *measured* this encoder doing at [width] x [height], or null if it has no
+     * measurement to interpolate from.
+     *
+     * `getAchievableFrameRatesFor` reads the `measured-frame-rate-*` entries of the platform's media
+     * codec profile and scales them by block count to sizes that were never measured directly, which
+     * is what turns "AV1 manages 40 fps at 1080p" into the ~10 fps it gets at four times the pixels.
+     *
+     * A throw is the same answer as a null - "no measurement", not "refused" - because a size that
+     * genuinely cannot be encoded is still caught by the tests that follow.
+     */
+    private fun MediaCodecInfo.VideoCapabilities.achievableFrameRate(
+        width: Int,
+        height: Int,
+    ): Double? = runCatching { getAchievableFrameRatesFor(width, height)?.upper }.getOrNull()
 
     private fun Int.alignedDown(alignment: Int): Int =
         if (alignment <= 1) this / 2 * 2 else this / alignment * alignment

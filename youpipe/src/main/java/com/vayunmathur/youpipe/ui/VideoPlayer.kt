@@ -402,10 +402,8 @@ fun VideoPlayer(
             return@rememberLauncherForActivityResult
         }
         scope.launch {
-            // 1080 tall in the video's own shape: the receiver letterboxes, so the aspect ratio is
-            // ours to choose, and Cast clamps whatever the TV cannot decode.
-            val requestedWidth = (CAST_REQUEST_HEIGHT * aspectRatio).toInt().coerceAtLeast(2)
-            if (CastPlayback.open(context, requestedWidth, CAST_REQUEST_HEIGHT) != null) {
+            val (requestedWidth, requestedHeight) = castRequestSize(currentVideoStream, aspectRatio)
+            if (CastPlayback.open(context, requestedWidth, requestedHeight) != null) {
                 AppMessages.show(castFailedMessage)
             }
         }
@@ -941,12 +939,34 @@ private const val HISTORY_UPSERT_INTERVAL_MS = 5000L
 private const val CONTROLS_AUTO_HIDE_DELAY_MS = 2000L
 
 /**
- * The frame height asked of Cast, with the width taken from the video's own aspect ratio.
+ * The fallback frame height asked of Cast, used only when the stream does not report its own size.
  *
  * A request, not a decision: Cast clamps it to what the TV reported it can decode and to what this
  * phone's encoder will take, and answers with the real numbers.
  */
 private const val CAST_REQUEST_HEIGHT = 1080
+
+/**
+ * The frame size to ask Cast for, taken from the stream that is actually playing.
+ *
+ * **This used to be `CAST_REQUEST_HEIGHT * aspectRatio` by `CAST_REQUEST_HEIGHT`, which asked for
+ * 1920x1080 for every video ever cast.** `aspectRatio` is a ratio: it carries shape and no magnitude,
+ * so a 360p stream was asked to fill 1080 lines and a 4K one was thrown away on the way out. The real
+ * numbers were in scope at the call site the whole time, and YouPipe deliberately does not filter
+ * streams above 1080p, so there was nothing to gain from the cap.
+ *
+ * **Both dimensions are rounded down to even.** 4:2:0 chroma cannot represent an odd width or height,
+ * and several encoders refuse such a size outright rather than rounding it themselves.
+ *
+ * A stream that reports no size falls back to the old fixed height in the measured aspect ratio -
+ * that path is a guess either way, and the receiver letterboxes, so the shape is ours to choose.
+ */
+private fun castRequestSize(stream: VideoStream, aspectRatio: Float): Pair<Int, Int> {
+    if (stream.width > 0 && stream.height > 0) return stream.width.evenDown() to stream.height.evenDown()
+    return (CAST_REQUEST_HEIGHT * aspectRatio).toInt().evenDown() to CAST_REQUEST_HEIGHT
+}
+
+private fun Int.evenDown(): Int = (this - (this and 1)).coerceAtLeast(2)
 
 /**
  * What the player shows once the video is on the TV.

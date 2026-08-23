@@ -667,7 +667,8 @@ object CastController {
      * Both ends' hardware is intersected by [CodecNegotiation], which is a pure function so the rule
      * can be unit-tested; everything device-specific is in the two lists handed to it. [width] and
      * [height] are the *unfitted* frame, because a codec is only viable if it takes the frame after the
-     * TV's own envelope has scaled it.
+     * TV's own envelope has scaled it - and because this phone's own sustainable frame rate is only
+     * meaningful for a stated geometry, which is what [EncoderSupport.videoCodecs] needs them for.
      */
     private suspend fun chooseCodec(
         context: Context,
@@ -685,7 +686,7 @@ object CastController {
             )
         }
         val selection = CodecNegotiation.choose(
-            senderCodecs = EncoderSupport.videoCodecs(),
+            senderCodecs = EncoderSupport.videoCodecs(width, height),
             receiver = activeClient.limits ?: DecoderLimits(),
             width = width,
             height = height,

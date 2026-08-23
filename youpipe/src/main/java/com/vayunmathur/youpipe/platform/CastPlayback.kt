@@ -49,12 +49,19 @@ object CastPlayback {
         /**
          * On the TV. [surface] is what the player must render into, and it belongs to Cast - it must
          * not be released here, which is what would break the *next* cast rather than this one.
+         *
+         * [width], [height] and [frameRate] are what Cast **granted**, not what was asked for. They
+         * are carried rather than dropped so that a clamp shows up in the log next to the request
+         * that provoked it: a session silently downscaled is indistinguishable from one that was
+         * never asked for the resolution in the first place, which is how the 1080p cap survived as
+         * long as it did.
          */
         data class Casting(
             val surface: Surface,
             val receiverName: String,
             val width: Int,
             val height: Int,
+            val frameRate: Int,
         ) : State
     }
 
@@ -91,11 +98,21 @@ object CastPlayback {
                 close()
             }
             CastAudioTap.attach(session.audio)
+            if (session.width != width || session.height != height) {
+                Log.i(
+                    TAG,
+                    "asked ${width}x$height, granted ${session.width}x${session.height} " +
+                        "@ ${session.frameRate}fps on '${session.receiverName}'",
+                )
+            } else {
+                Log.i(TAG, "casting ${width}x$height @ ${session.frameRate}fps as asked")
+            }
             _state.value = State.Casting(
                 surface = session.surface,
                 receiverName = session.receiverName,
                 width = session.width,
                 height = session.height,
+                frameRate = session.frameRate,
             )
             null
         } catch (e: CastException) {
