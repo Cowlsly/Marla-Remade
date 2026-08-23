@@ -22,6 +22,10 @@ data class InAppCallState(
     val peerId: String = "",
     val peerName: String = "",
     val isVideo: Boolean = false,
+    /** Whether the peer is currently sending video, which is independent of whether we are. */
+    val remoteVideoEnabled: Boolean = false,
+    /** Whether our own camera is on. */
+    val localVideoEnabled: Boolean = false,
     val muted: Boolean = false,
     val speaker: Boolean = false,
     /** When the call became [InAppCallPhase.Active], for the duration readout. 0 until then. */
@@ -49,7 +53,23 @@ interface InAppCallController {
 /** Implemented by the Telecom `Connection` so a line's manager can drive the system call surface. */
 interface InAppCallConnectionBridge {
     fun onCallActive()
+
     fun onCallEnded()
+}
+
+/**
+ * Video capability, separate from [InAppCallController] because not every line has it and the shared screen
+ * should only offer the control when something can act on it.
+ */
+interface InAppCallVideoController {
+    fun setVideoEnabled(enabled: Boolean)
+
+    fun flipCamera()
+
+    /** EGL context the renderers must share with the decoder, or null if video is unavailable. */
+    fun eglContext(): org.webrtc.EglBase.Context?
+
+    fun attachRenderers(local: org.webrtc.VideoSink?, remote: org.webrtc.VideoSink?)
 }
 
 /**
@@ -67,6 +87,10 @@ object InAppCallRegistry {
 
     @Volatile
     private var controller: InAppCallController? = null
+
+    /** Set only by lines that can carry video, so the UI can offer the control. */
+    @Volatile
+    var videoController: InAppCallVideoController? = null
 
     /** Set by the Telecom ConnectionService so state changes can be reflected into the system UI. */
     @Volatile
@@ -129,11 +153,34 @@ object InAppCallRegistry {
         _state.value = _state.value.copy(speaker = on)
     }
 
+    fun onRemoteVideo(enabled: Boolean) {
+        if (_state.value.phase == InAppCallPhase.Idle) return
+        android.util.Log.i(TAG, "remote video enabled=$enabled")
+        _state.value = _state.value.copy(remoteVideoEnabled = enabled)
+    }
+
+    fun onLocalVideo(enabled: Boolean) {
+        if (_state.value.phase == InAppCallPhase.Idle) return
+        _state.value = _state.value.copy(localVideoEnabled = enabled, isVideo = _state.value.isVideo || enabled)
+    }
+
+    /** Turn our own camera on or off mid-call. */
+    fun toggleVideo() {
+        val next = !_state.value.localVideoEnabled
+        videoController?.setVideoEnabled(next)
+        onLocalVideo(next)
+    }
+
+    fun flipCamera() {
+        videoController?.flipCamera()
+    }
+
     /** Called by the UI once a terminal state has been shown, returning to Idle. */
     fun clearEnded() {
         if (_state.value.phase == InAppCallPhase.Ended) {
             _state.value = InAppCallState()
             controller = null
+            videoController = null
             connection = null
         }
     }

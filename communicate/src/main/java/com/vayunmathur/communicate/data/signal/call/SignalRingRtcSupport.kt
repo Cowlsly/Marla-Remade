@@ -48,8 +48,6 @@ object NoCameraControl : CameraControl {
 
     override fun setOrientation(orientation: Int?) = Unit
 }
-
-/** Field trials RingRTC expects; `initialize` merges its own defaults over these. */
 internal fun ringRtcFieldTrials(): Map<String, String> = emptyMap()
 
 internal fun CallManager.CallMediaType.isVideo(): Boolean =

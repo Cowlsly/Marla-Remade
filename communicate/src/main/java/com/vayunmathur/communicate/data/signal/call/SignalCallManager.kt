@@ -58,6 +58,9 @@ class SignalCallManager(
         /** The identity keys RingRTC binds the SRTP key derivation to. */
         suspend fun identityKeys(aci: String): IdentityKeyPairBytes?
 
+        /** The peer turned their camera on or off. */
+        fun onRemoteVideo(enabled: Boolean)
+
         /**
          * TURN/STUN relays for the call. Without them only host candidates are available, so a call fails
          * behind NAT.
@@ -126,6 +129,9 @@ class SignalCallManager(
     fun accept(callId: Long): Boolean = withManager("accept") { it.acceptCall(CallId(callId)) }
 
     fun hangup(): Boolean = withManager("hangup") { it.hangup() }
+
+    /** The EGL context renderers must share with the decoder, so frames can be drawn. */
+    fun eglContext(): EglBase.Context? = eglBase?.eglBaseContext
 
     /** Turn our outgoing video on or off mid-call. */
     fun setVideoEnabled(enabled: Boolean): Boolean = withManager("setVideoEnable") {
@@ -288,6 +294,18 @@ class SignalCallManager(
     override fun onCallEvent(remote: Remote?, event: CallManager.CallEvent?) {
         val aci = (remote as? SignalRemote)?.aci ?: return
         Log.i(TAG, "call event for $aci: $event")
+        // Media-state events change what the UI renders without changing the call phase.
+        when (event) {
+            CallManager.CallEvent.REMOTE_VIDEO_ENABLE -> {
+                onRemoteVideo(true)
+                return
+            }
+            CallManager.CallEvent.REMOTE_VIDEO_DISABLE -> {
+                onRemoteVideo(false)
+                return
+            }
+            else -> Unit
+        }
         val state = when (event) {
             // Either side accepting is what makes a call active; missing these leaves the UI on "dialing"
             // while media is already flowing.
@@ -303,6 +321,10 @@ class SignalCallManager(
             }
         }
         signaling.onCallStateChanged(aci, 0, state, false)
+    }
+
+    private fun onRemoteVideo(enabled: Boolean) {
+        signaling.onRemoteVideo(enabled)
     }
 
     override fun onCallConcluded(remote: Remote?) {

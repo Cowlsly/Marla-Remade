@@ -126,6 +126,11 @@ class SignalCamera(
  *
  * RingRTC needs a sink at `proceed()` time, but the UI that renders video does not exist until later (and
  * not at all for an audio call), so the destination is swappable.
+ *
+ * Note it must **not** release frames: the producer (`SurfaceTextureHelper`) releases its own reference
+ * once `onFrame` returns, so releasing here drops the refcount below zero and crashes the decoder thread
+ * with "release() called on an object with refcount < 1". A sink that wants to keep a frame calls
+ * `retain()`; a sink that wants to drop one simply returns.
  */
 class SwappableVideoSink : org.webrtc.VideoSink {
     @Volatile
@@ -136,11 +141,6 @@ class SwappableVideoSink : org.webrtc.VideoSink {
     }
 
     override fun onFrame(frame: VideoFrame?) {
-        val target = delegate
-        if (target == null) {
-            frame?.release()
-        } else {
-            target.onFrame(frame)
-        }
+        delegate?.onFrame(frame)
     }
 }

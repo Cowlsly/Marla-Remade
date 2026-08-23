@@ -8,6 +8,7 @@ import com.vayunmathur.communicate.data.CommunicateLine
 import com.vayunmathur.communicate.data.call.InAppCallController
 import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
+import com.vayunmathur.communicate.data.call.InAppCallVideoController
 import com.vayunmathur.communicate.data.signal.call.SignalCallManager
 import com.vayunmathur.communicate.data.signal.call.SignalCallMessage
 import com.vayunmathur.communicate.data.signal.call.toContent
@@ -1263,6 +1264,10 @@ object SignalClient {
                 override suspend fun iceServers(): List<PeerConnection.IceServer> =
                     SignalCallingApi.fetchIceServers(basicAuthHeader(), signalTls())
 
+                override fun onRemoteVideo(enabled: Boolean) {
+                    InAppCallRegistry.onRemoteVideo(enabled)
+                }
+
                 override fun onCallStateChanged(
                     aci: String,
                     callId: Long,
@@ -1392,6 +1397,7 @@ object SignalClient {
         val current = InAppCallRegistry.state.value
         if (current.phase == InAppCallPhase.Idle && state != SignalCallManager.CallState.Ended) {
             InAppCallRegistry.bind(CommunicateLine.Signal, signalCallController)
+            InAppCallRegistry.videoController = signalVideoController
             InAppCallRegistry.onCallStarting(
                 line = CommunicateLine.Signal,
                 peerId = aci,
@@ -1415,6 +1421,24 @@ object SignalClient {
                 InAppCallRegistry.onEnded(null)
                 pendingIncomingCallAci = null
             }
+        }
+    }
+
+    /** Video capability for the shared call screen. */
+    private val signalVideoController = object : InAppCallVideoController {
+        override fun setVideoEnabled(enabled: Boolean) {
+            callManager?.setVideoEnabled(enabled)
+        }
+
+        override fun flipCamera() {
+            callManager?.flipCamera()
+        }
+
+        override fun eglContext(): org.webrtc.EglBase.Context? = callManager?.eglContext()
+
+        override fun attachRenderers(local: org.webrtc.VideoSink?, remote: org.webrtc.VideoSink?) {
+            callManager?.localVideoSink?.attach(local)
+            callManager?.remoteVideoSink?.attach(remote)
         }
     }
 
