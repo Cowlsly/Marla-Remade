@@ -18,6 +18,7 @@
 #include <zephyr/drivers/spi.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/sys/atomic.h>
 
 #include <string.h>
 
@@ -46,6 +47,26 @@ static struct qspi the_spi;
 /* Number of opening transfers to hexdump, which is enough to cover the device-id probe. */
 #define TRACE_XFERS 4
 static unsigned int traced;
+
+/*
+ * Whether any transfer runs in ISR context, which is what the qgpio deferral exists to
+ * eliminate. The error line reports context only when a transfer FAILS; these count every
+ * transfer, so "none from ISR" becomes a positive observation rather than an inference from an
+ * absence. The total is the control: without it a zero ISR count cannot be distinguished from
+ * a counter that never ran.
+ */
+static atomic_t xfers_total;
+static atomic_t xfers_in_isr;
+
+void ff_qorvo_spi_isr_stats(uint32_t *total, uint32_t *in_isr)
+{
+	if (total != NULL) {
+		*total = (uint32_t)atomic_get(&xfers_total);
+	}
+	if (in_isr != NULL) {
+		*in_isr = (uint32_t)atomic_get(&xfers_in_isr);
+	}
+}
 
 struct qspi *qspi_open(const struct qspi_instance *instance)
 {
@@ -128,10 +149,17 @@ enum qerr qspi_transceive(struct qspi *spi, const struct qspi_transfer *xfer)
 	struct spi_buf rx_buf;
 	struct spi_buf_set tx_set = { .buffers = &tx_buf, .count = 1 };
 	struct spi_buf_set rx_set = { .buffers = &rx_buf, .count = 1 };
+	bool in_isr;
 	int rc;
 
 	if (spi == NULL || xfer == NULL || spi->dev == NULL) {
 		return QERR_EINVAL;
+	}
+
+	in_isr = k_is_in_isr();
+	atomic_inc(&xfers_total);
+	if (in_isr) {
+		atomic_inc(&xfers_in_isr);
 	}
 
 	tx_buf.buf = xfer->tx_buf;
@@ -143,7 +171,14 @@ enum qerr qspi_transceive(struct qspi *spi, const struct qspi_transfer *xfer)
 			    xfer->tx_buf ? &tx_set : NULL,
 			    xfer->rx_buf ? &rx_set : NULL);
 	if (rc < 0) {
-		LOG_ERR("spi_transceive failed: %d", rc);
+		/*
+		 * isr= is the attribution: Zephyr's spi_transceive() completes via
+		 * k_sem_take, so a failure with isr=1 is an ISR-context path that should have
+		 * been deferred, while isr=0 is an ordinary bus error. The line carries no
+		 * caller otherwise, and thread-id prefixing would not help — in an ISR that
+		 * records whichever thread was interrupted.
+		 */
+		LOG_ERR("spi_transceive failed: %d (isr=%d)", rc, (int)in_isr);
 		return QERR_EIO;
 	}
 

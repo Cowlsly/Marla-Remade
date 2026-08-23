@@ -139,12 +139,38 @@ void qrtc_resync_rtc_systime(int64_t *rtc_us, uint32_t *systime)
 	}
 	if (systime) {
 		/*
-		 * "systime" is the DW3000's own 32-bit system-time counter. The driver
-		 * reads it directly, so there is nothing to correlate here beyond
-		 * reporting the current RTC; a deep-sleep-across-reset resync would need
-		 * the persistent_time machinery this deliberately does not use.
+		 * llhw stores this as the anchor tying the DW3110's own timestamp counter to
+		 * its DTU timeline (llhw_resync_dtu_systime keeps it, llhw_systime_to_dtu
+		 * converts against it). Reporting a constant here does not mean "unused": it
+		 * offsets every hardware timestamp by the whole real counter value, and since
+		 * the session is time-scheduled, every RX window the MAC computes then refers
+		 * to a fiction. The vendor reads the counter for exactly this reason
+		 * (qhal/src/nrfx/persistent_time.c, persistent_time_resync_rtc_systime).
+		 *
+		 * Correlation quality. The two reads are adjacent but NOT atomic, and cannot be
+		 * made so here:
+		 *  - qrtc_get_us() is tick-granular, so rtc_us alone carries up to one tick,
+		 *    30.5 us at 32768 Hz.
+		 *  - this read is a blocking SPI transfer. The caller pends on the SPIM
+		 *    completion, so the thread YIELDS between the pair, and anything runnable
+		 *    then runs: BLE RX (cooperative -8), the transceiver dispatch thread (-1),
+		 *    log processing (3). The window is bounded by other work, not by the
+		 *    transfer.
+		 * At 15.6 DTU/us the best case (tick + transfer, ~50 us) is ~800 DTU; with
+		 * preemption it can reach milliseconds, so tens of thousands of DTU.
+		 *
+		 * Nothing available here closes that. irq_lock() deadlocks, since it masks the
+		 * very SPIM completion this read waits on. k_sched_lock() does not help either:
+		 * it prevents preemption but not the switch that blocking itself causes. Only a
+		 * polling SPI path would, which is what the vendor's nrfx backend has (it
+		 * busy-waits on a volatile flag) and ours deliberately does not.
+		 *
+		 * Tolerable because llhw re-anchors on every MCPS op and every wakeup, so a bad
+		 * sample is replaced rather than accumulated, and because the error this
+		 * replaces was the entire value of the counter. If ranging proves intermittent
+		 * rather than broken, suspect this first.
 		 */
-		*systime = 0;
+		*systime = dwt_readsystimestamphi32();
 	}
 }
 

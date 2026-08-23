@@ -97,6 +97,16 @@ const struct spi_dt_spec *ff_qorvo_spi_spec(void)
 	return &uwb_bus;
 }
 
+/*
+ * Bring-up diagnostic: the current level of the transceiver IRQ line, read through the same
+ * devicetree spec the stack itself uses. The overlay declares irq-gpios GPIO_ACTIVE_HIGH, so
+ * this logical read equals the physical level on P1.02.
+ */
+int ff_qorvo_irq_pin_level(void)
+{
+	return gpio_pin_get_dt(&irq_pin_spec);
+}
+
 uint32_t ff_qorvo_read_dev_id(void)
 {
 	uint8_t tx[5] = { 0x00, 0x00, 0x00, 0x00, 0x00 };

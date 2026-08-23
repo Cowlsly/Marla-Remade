@@ -136,6 +136,40 @@ extern struct l1_config_platform_ops l1_config_platform_ops;
 uint32_t ff_qorvo_read_dev_id(void);
 
 /*
+ * Bring-up instrumentation for the DW3110 interrupt (firmware/qorvo-uwb). llhw arms the
+ * interrupt inside llhw_init(), before any session exists. If the line is already asserted by
+ * the time it is armed, the rising-edge trigger can never fire and the MAC is never told a
+ * frame arrived - which is indistinguishable, in a capture, from a radio that heard nothing.
+ * Reported at three fixed points rather than periodically, so it cannot flood the capture.
+ */
+int ff_qorvo_irq_pin_level(void);
+void ff_qorvo_gpio_irq_stats(uint32_t *events, uint32_t *arm_calls);
+void ff_qorvo_spi_isr_stats(uint32_t *total, uint32_t *in_isr);
+void ff_qorvo_timer_stats(uint32_t *starts, uint32_t *stops, uint32_t *expiries,
+			  uint32_t *last_us);
+
+static void log_irq_diag(const char *when)
+{
+	uint32_t events = 0;
+	uint32_t arm_calls = 0;
+	uint32_t xfers = 0;
+	uint32_t xfers_isr = 0;
+	uint32_t t_starts = 0;
+	uint32_t t_stops = 0;
+	uint32_t t_expiries = 0;
+	uint32_t t_last_us = 0;
+
+	ff_qorvo_gpio_irq_stats(&events, &arm_calls);
+	ff_qorvo_spi_isr_stats(&xfers, &xfers_isr);
+	ff_qorvo_timer_stats(&t_starts, &t_stops, &t_expiries, &t_last_us);
+	LOG_INF("IRQ diag (%s): line level=%d, armed %u time(s), ISR entries=%u, "
+		"spi xfers=%u (%u from ISR)", when, ff_qorvo_irq_pin_level(), arm_calls,
+		events, xfers, xfers_isr);
+	LOG_INF("IRQ diag (%s): timer starts=%u stops=%u expiries=%u last_us=%u", when,
+		t_starts, t_stops, t_expiries, t_last_us);
+}
+
+/*
  * Decoders for the two enums that distinguish the failures this bring-up has to tell
  * apart: "never heard anything" (RX_TIMEOUT) from "heard it, STS wrong"
  * (RX_PHY_STS_FAILED) from "the region rejected a parameter" (the ERROR_INVALID_* reason
@@ -444,6 +478,7 @@ int ff_uwb_init(void)
 
 	stack_ready = true;
 	LOG_INF("Qorvo uwbstack up; DW3110 identified");
+	log_irq_diag("after llhw_init");
 
 	k_thread_create(&uwb_session_thread_data, uwb_session_stack,
 			UWB_SESSION_THREAD_STACK_SIZE, uwb_session_thread, NULL, NULL, NULL,
@@ -689,6 +724,7 @@ int ff_uwb_start(const struct ff_uwb_params *params, const uint8_t *secret)
 		goto close;
 	}
 	LOG_INF("FiRa session started");
+	log_irq_diag("session started");
 
 	session_active = true;
 	atomic_set(&last_activity_ms, (atomic_val_t)k_uptime_get_32());
@@ -712,6 +748,8 @@ void ff_uwb_stop(void)
 	if (!session_active) {
 		return;
 	}
+	/* Before teardown, so this reports the state at the end of the ACTIVE window. */
+	log_irq_diag("session teardown");
 	(void)fira_helper_stop_session(&fira_ctx, session_handle);
 	(void)fira_helper_deinit_session(&fira_ctx, session_handle);
 	/*
