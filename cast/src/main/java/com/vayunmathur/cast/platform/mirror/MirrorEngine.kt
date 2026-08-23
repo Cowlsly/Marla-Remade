@@ -36,6 +36,15 @@ private const val RTCP_POLL_MS = 20L
 private const val STATS_LOG_INTERVAL_MS = 1_000L
 
 /**
+ * The most often the encoder may be asked for a key frame.
+ *
+ * Matches the receiver's own resync interval: it reports every 50 ms, so an unsynchronised session asks
+ * twenty times a second, and every one of those is a `setParameters` call on a hardware encoder that
+ * can produce at most one key frame per ask anyway.
+ */
+private const val KEY_FRAME_REQUEST_INTERVAL_MS = 500L
+
+/**
  * How long a codec that needs its configuration sent out of band has to produce it, **measured from
  * the encoder's first output rather than from `start()`.**
  *
@@ -162,6 +171,16 @@ class MirrorEngine(
     /** Counts inbound RTCP so a run can be told apart from one where nothing came back. */
     private var feedbackPackets = 0L
     private var unmatchedPackets = 0L
+
+    /**
+     * When a key frame was last actually asked of the encoder, and how many asks were folded into it.
+     *
+     * The count is logged rather than dropped silently: a run of thousands means the receiver is
+     * unsynchronised and staying that way, which is a different fault from ordinary packet loss and
+     * would otherwise be invisible now that the per-request log line is gone.
+     */
+    private var lastKeyFrameRequest = 0L
+    private var coalescedKeyFrameRequests = 0L
 
     fun start(): Boolean {
         val udp = CastUdpTransport(receiverHost, negotiation.udpPort)
@@ -335,8 +354,14 @@ class MirrorEngine(
                     Log.i(
                         TAG,
                         "$summary feedback=$feedbackPackets unmatchedRtcp=$unmatchedPackets " +
-                            "sendFailures=${udp.sendFailures}",
+                            "sendFailures=${udp.sendFailures}" +
+                            if (coalescedKeyFrameRequests > 0) {
+                                " keyFrameAsks=$coalescedKeyFrameRequests coalesced"
+                            } else {
+                                ""
+                            },
                     )
+                    coalescedKeyFrameRequests = 0
                 }
                 var packet = udp.receive()
                 while (packet != null) {
@@ -387,8 +412,21 @@ class MirrorEngine(
             ) {
                 // Either the receiver asked outright (PLI) or it has fallen further behind than the
                 // retransmit buffer can repair. A key frame is the only way out of both.
-                Log.i(TAG, "key frame requested (pli=${feedback.pictureLoss})")
-                videoEncoder?.requestKeyFrame()
+                //
+                // **Coalesced, because a receiver can ask far faster than an encoder can answer.** The
+                // receiver reports every 50 ms, so a session it considers unsynchronised produces
+                // twenty of these a second - and each one is a `setParameters` on the encoder.
+                // Measured: fifteen seconds of that while playback was paused left the encoder
+                // unable to produce a picture even after frames started arriving again. One request
+                // per interval is all an encoder can act on anyway; the rest are the same request.
+                val now = System.currentTimeMillis()
+                if (now - lastKeyFrameRequest >= KEY_FRAME_REQUEST_INTERVAL_MS) {
+                    lastKeyFrameRequest = now
+                    Log.i(TAG, "key frame requested (pli=${feedback.pictureLoss})")
+                    videoEncoder?.requestKeyFrame()
+                } else {
+                    coalescedKeyFrameRequests++
+                }
             }
             return
         }

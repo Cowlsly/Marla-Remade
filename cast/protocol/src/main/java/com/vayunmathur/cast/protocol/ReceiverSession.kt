@@ -111,10 +111,21 @@ class ReceiverSession(
      * Called on a timer rather than per packet, because feedback is only useful at about the rate the
      * sender can act on it. A PLI rides in the same datagram as the feedback block - RTCP is compound
      * by design, and sending them separately doubles the chance of losing the one that mattered.
+     *
+     * **[senderIdle] suppresses the PLI, and without it a paused cast never recovers.** Every
+     * key-frame condition here means "the sender is producing frames and they are not reaching me".
+     * None of them is true of a sender that has deliberately stopped: once transport controls existed,
+     * pausing on the television left [synchronised] false with no key frame coming, so a PLI went out
+     * on *every* round - measured at twenty a second for fifteen seconds - and the sender answered each
+     * one by reconfiguring an encoder that had no input. The picture did not come back when playback
+     * resumed. A frozen frame is the correct thing to show while paused; asking for a new one is not.
+     *
+     * The stall and starve counters are left alone rather than reset, so a genuine gap that existed
+     * before the pause is still remembered when playback resumes.
      */
-    fun feedback(): ByteArray {
+    fun feedback(senderIdle: Boolean = false): ByteArray {
         val nacks = assembler.missingPackets(after = checkpoint)
-        val needsKeyFrame = !synchronised || isStalled() || isStarved()
+        val needsKeyFrame = !senderIdle && (!synchronised || isStalled() || isStarved())
         if (needsKeyFrame && synchronised) {
             // The gap has outlived the sender's retransmit buffer, or nothing is completing at all.
             // Nothing else will unblock either, so give up: resynchronise on the next key frame

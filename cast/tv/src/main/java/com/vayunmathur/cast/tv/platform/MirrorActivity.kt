@@ -8,6 +8,7 @@ import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -77,8 +78,21 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
      * on the control channel and into an ExoPlayer that is simultaneously feeding a hardware encoder;
      * holding a local preview and sending one `SeekTo` at the end is both kinder and what the user
      * means by holding the button down.
+     *
+     * Held past the commit until the phone's own answer arrives - see [scrubCommittedAtMs].
      */
     private var scrubPreviewMs by mutableLongStateOf(NO_SCRUB)
+
+    /**
+     * When the last scrub was committed, so its preview can be held until the phone confirms.
+     *
+     * Dropping the preview the instant the seek went out made the bar jump backwards: snapshots arrive
+     * twice a second, so for up to half a second the newest one still described the *pre-seek*
+     * position, and the bar snapped back there before the next one pulled it forward. Keeping the
+     * preview until a snapshot that postdates the commit arrives makes the bar move once, to where the
+     * user put it.
+     */
+    private var scrubCommittedAtMs = 0L
 
     private var hideJob: Job? = null
 
@@ -143,6 +157,15 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             CastTvTheme {
                 val state by ReceiverController.state.collectAsState()
                 val playback = state.playback
+                // Released in an effect rather than inline: writing state during composition is how a
+                // recomposition loop starts.
+                LaunchedEffect(playback?.receivedAtMs) {
+                    val arrivedAt = playback?.receivedAtMs ?: return@LaunchedEffect
+                    if (scrubCommittedAtMs != 0L && arrivedAt > scrubCommittedAtMs) {
+                        scrubCommittedAtMs = 0L
+                        scrubPreviewMs = NO_SCRUB
+                    }
+                }
                 if (playback != null && overlayVisible) {
                     TransportOverlay(
                         snapshot = playback,
@@ -246,14 +269,14 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun commitScrub() {
         val target = scrubPreviewMs
-        scrubPreviewMs = NO_SCRUB
         if (target == NO_SCRUB) return
+        // The preview is *kept*, and released by the composition above once a snapshot postdating this
+        // moment arrives. A seek the phone refuses - which it does while its own slider is under a
+        // thumb - is therefore corrected by the next heartbeat rather than left showing for ever.
+        scrubCommittedAtMs = System.currentTimeMillis()
         ReceiverController.send(
             PlaybackCommand(PlaybackAction.SeekTo, value = target.toDouble()),
         )
-        // The preview is dropped here rather than held until the phone confirms: the next snapshot is
-        // at most half a second away, and holding a stale preview would freeze the bar if the seek was
-        // refused - which the phone does while its own slider is under a thumb.
         revealOverlay()
     }
 
@@ -271,6 +294,7 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         hideJob?.cancel()
         hideJob = null
         scrubPreviewMs = NO_SCRUB
+        scrubCommittedAtMs = 0L
         overlayVisible = false
     }
 

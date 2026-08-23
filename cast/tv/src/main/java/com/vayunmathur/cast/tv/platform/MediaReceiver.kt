@@ -107,11 +107,14 @@ class MediaReceiver(
      * Sent even before anything has been decoded - that first report is a PLI, and it is what tells
      * the sender to produce a key frame now rather than at its next scheduled one. Nothing goes out
      * before the first datagram arrives, because until then there is no address to send it to.
+     *
+     * [senderIdle] is true when the phone has told us playback is paused, and suppresses the key-frame
+     * request - see [ReceiverSession.feedback] for why a paused cast otherwise never recovers.
      */
-    fun sendFeedback() {
+    fun sendFeedback(senderIdle: Boolean = false) {
         val address = senderAddress ?: return
         for (session in sessions.values) {
-            val packet = session.feedback()
+            val packet = session.feedback(senderIdle)
             try {
                 socket.send(DatagramPacket(packet, packet.size, address, senderPort))
             } catch (e: Exception) {

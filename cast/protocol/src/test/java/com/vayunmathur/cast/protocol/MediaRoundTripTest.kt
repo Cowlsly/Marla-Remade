@@ -4,6 +4,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
@@ -273,6 +274,46 @@ class MediaRoundTripTest {
         assertTrue(receiver.onPacket(good.copyOf().also { it[12] = 0b0100_0001 }).isEmpty())
         // The marker bit disagreeing with the packet ids.
         assertTrue(receiver.onPacket(good.copyOf().also { it[1] = 96 }).isEmpty())
+    }
+
+    @Test
+    fun `a paused sender is not asked for key frames it cannot produce`() {
+        // **The bug this guards against froze a 4K cast for good.** Pausing from the television means
+        // the encoder legitimately produces nothing - but every key-frame condition here reads "frames
+        // are being sent and are not reaching me", so an unsynchronised session asked for one on every
+        // 50 ms round. Measured on hardware: twenty picture-loss indicators a second for fifteen
+        // seconds, each answered by reconfiguring an encoder with no input, and no picture when
+        // playback resumed. A frozen frame is the right thing to show while paused; asking for a fresh
+        // one is not.
+        val receiver = ReceiverSession(videoStream())
+
+        // Nothing decoded yet, so the session is unsynchronised - which is exactly the state that used
+        // to produce the storm.
+        val whilePlaying = Rtcp.parse(
+            receiver.feedback(senderIdle = false),
+            RECEIVER_SSRC,
+            SENDER_SSRC,
+            FrameId(0),
+        )
+        assertTrue(assertNotNull(whilePlaying).pictureLoss, "a live sender should still be asked")
+
+        val whilePaused = Rtcp.parse(
+            receiver.feedback(senderIdle = true),
+            RECEIVER_SSRC,
+            SENDER_SSRC,
+            FrameId(0),
+        )
+        assertFalse(assertNotNull(whilePaused).pictureLoss, "a paused sender must not be asked")
+
+        // And the suppression is not a latch: resuming asks again, because the receiver still has no
+        // key frame and now there is an encoder that can answer.
+        val afterResume = Rtcp.parse(
+            receiver.feedback(senderIdle = false),
+            RECEIVER_SSRC,
+            SENDER_SSRC,
+            FrameId(0),
+        )
+        assertTrue(assertNotNull(afterResume).pictureLoss, "resuming must ask again")
     }
 
     private fun videoStream() = NegotiatedStream(

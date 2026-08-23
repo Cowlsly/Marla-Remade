@@ -738,7 +738,7 @@ object ReceiverController {
                             rtpToMicros(frame.rtpTimestamp),
                             frame.isKeyFrame,
                         )
-                        if (!queued && now - lastResync >= RESYNC_INTERVAL_MS) {
+                        if (!queued && now - lastResync >= RESYNC_INTERVAL_MS && !senderIdle()) {
                             // The session counted this frame as delivered, so its checkpoint has
                             // moved past a frame the decoder never got: every delta frame behind it
                             // now references something that does not exist. Only a key frame
@@ -767,7 +767,7 @@ object ReceiverController {
                 }
                 if (now - lastFeedback >= FEEDBACK_INTERVAL_MS) {
                     lastFeedback = now
-                    media.sendFeedback()
+                    media.sendFeedback(senderIdle = senderIdle())
                 }
                 if (now - lastStatsLog >= STATS_LOG_INTERVAL_MS) {
                     lastStatsLog = now
@@ -788,6 +788,17 @@ object ReceiverController {
             media.close()
         }
     }
+
+    /**
+     * Whether the phone has told us it is deliberately not producing frames.
+     *
+     * The one thing that distinguishes "paused" from "broken", and the pipeline had no way to know it
+     * until the phone started reporting playback: a paused sender and a dead link look identical from
+     * here - no frames arriving - and every recovery mechanism is built for the second. False for screen
+     * mirroring, which never reports playback and can never be paused, so its behaviour is unchanged.
+     */
+    private fun senderIdle(): Boolean =
+        _state.value.playback?.state?.let { !it.playing && !it.buffering } == true
 
     /**
      * Stop the media loop.
