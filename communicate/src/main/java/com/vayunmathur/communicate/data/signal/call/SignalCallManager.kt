@@ -299,9 +299,23 @@ class SignalCallManager(
                 "proceed ok for call $callId with ${iceServers.size} ICE servers, " +
                     "camera=${cameraControl.hasCapturer()} video=${mediaType.isVideo()}",
             )
+            // proceed()'s enableCamera only starts the local track: it calls the inner
+            // CallContext.setVideoEnabled, not ringrtcSetVideoEnable, so the peer is never told we are
+            // sending video and shows nothing. The public setVideoEnable is what emits the sender status.
+            if (mediaType.isVideo()) assertOutgoingVideo(true)
         } catch (t: Throwable) {
             Log.w(TAG, "proceed failed for call $callId", t)
         }
+    }
+
+    /**
+     * Tell the peer whether we are sending video.
+     *
+     * The sender status travels over the RTP data channel, so it only reaches the peer once the connection is
+     * up — which is why it is re-asserted on connect rather than only when the call is set up.
+     */
+    private fun assertOutgoingVideo(enabled: Boolean) {
+        withManager("setVideoEnable") { it.setVideoEnable(enabled, screenSharing) }
     }
 
     override fun onCallEnded(remote: Remote?, reason: CallManager.CallEndReason, summary: CallSummary) {
@@ -339,7 +353,12 @@ class SignalCallManager(
             CallManager.CallEvent.LOCAL_CONNECTED,
             CallManager.CallEvent.REMOTE_CONNECTED,
             CallManager.CallEvent.RECONNECTED,
-            -> CallState.Connected
+            -> {
+                // The data channel exists now, so re-state what we are sending. Without this a video call
+                // that was set up before the connection came up shows no video at the far end.
+                if (callMediaTypes.values.any { it.isVideo() } || screenSharing) assertOutgoingVideo(true)
+                CallState.Connected
+            }
             CallManager.CallEvent.LOCAL_RINGING, CallManager.CallEvent.REMOTE_RINGING -> CallState.Ringing
             CallManager.CallEvent.RECONNECTING -> CallState.Connecting
             else -> {
