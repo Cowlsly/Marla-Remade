@@ -5,10 +5,13 @@
 //!   tile_join --out OUT.pmtiles IN1.pmtiles IN2.pmtiles [...]
 //!
 //! Later inputs win a layer-name collision, so a freshly built layer replaces a
-//! stale copy of itself in the base archive. Inputs are read wholly into memory,
-//! which is fine for the layers we build but NOT for the 1.5 GB published basemap
-//! — see the note in the README about compositing that on the machine that builds
-//! it.
+//! stale copy of itself.
+//!
+//! Inputs are read wholly into memory, which bounds what can be joined at the size
+//! of the largest input. That is ample for the overlays (a few GB combined at planet
+//! scale) and hopeless for a planet base (~127 GB) - which is why the base is not
+//! joined at all. Build overlay-only archives with `build_v5_pmtiles.sh --no-base`
+//! and let the app mount them alongside the published base.
 
 use std::process::ExitCode;
 use tile_build::pmtiles::Archive;

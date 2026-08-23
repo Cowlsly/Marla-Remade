@@ -113,16 +113,34 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 ///
 /// Both the decode and the re-encode are lossless for geometry, which is what lets
 /// the base tileset's lines and polygons survive a merge untouched.
+/// Zoom range, bounds, centre and the `vector_layers` list are all derived from every
+/// input rather than taken from any one of them. That matters because the header is
+/// what a client reads to decide which tiles to even ask for: an overlay-only merge
+/// has no base to inherit a world-sized envelope from, so whichever overlay happened
+/// to be listed first would otherwise clip every other layer to its own extent — and
+/// point a viewer at its own centre.
 pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0u8;
+    // (west, south, east, north), in e7 degrees.
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
     // tile_id -> the tile's MVT from each input, in input order.
     let mut collected: HashMap<u64, Vec<Vec<u8>>> = HashMap::new();
     for a in inputs {
-        min_zoom = min_zoom.min(a.header.min_zoom);
-        max_zoom = max_zoom.max(a.header.max_zoom);
+        let h = &a.header;
+        min_zoom = min_zoom.min(h.min_zoom);
+        max_zoom = max_zoom.max(h.max_zoom);
+        bounds = Some(match bounds {
+            None => (h.min_lon_e7, h.min_lat_e7, h.max_lon_e7, h.max_lat_e7),
+            Some((w, s, e, n)) => (
+                w.min(h.min_lon_e7),
+                s.min(h.min_lat_e7),
+                e.max(h.max_lon_e7),
+                n.max(h.max_lat_e7),
+            ),
+        });
         for (id, raw) in a.iter_tiles()? {
-            let body = match a.header.tile_compression {
+            let body = match h.tile_compression {
                 pmtiles::COMPRESSION_NONE => raw.to_vec(),
                 _ => crate::gz::decompress(raw)?,
             };
@@ -130,19 +148,23 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
         }
     }
 
-    let first = inputs.first();
     let mut b = Builder::new();
     b.min_zoom = if min_zoom == u8::MAX { 0 } else { min_zoom };
     b.max_zoom = max_zoom;
-    if let Some(a) = first {
-        b.metadata = a.metadata.clone();
-        b.min_lon_e7 = a.header.min_lon_e7;
-        b.min_lat_e7 = a.header.min_lat_e7;
-        b.max_lon_e7 = a.header.max_lon_e7;
-        b.max_lat_e7 = a.header.max_lat_e7;
-        b.center_zoom = a.header.center_zoom;
-        b.center_lon_e7 = a.header.center_lon_e7;
-        b.center_lat_e7 = a.header.center_lat_e7;
+    // Shallowest zoom any input holds, matching what every layer builder sets for
+    // itself. Inheriting the first input's would pair a unioned bbox with an
+    // unrelated zoom.
+    b.center_zoom = b.min_zoom;
+    if let Some((w, s, e, n)) = bounds {
+        b.min_lon_e7 = w;
+        b.min_lat_e7 = s;
+        b.max_lon_e7 = e;
+        b.max_lat_e7 = n;
+        b.center_lon_e7 = midpoint_e7(w, e);
+        b.center_lat_e7 = midpoint_e7(s, n);
+    }
+    if inputs.first().is_some() {
+        b.metadata = merge_metadata(inputs);
     }
 
     let mut ids: Vec<u64> = collected.keys().copied().collect();
@@ -159,6 +181,238 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
         b.add_tile_raw(id, crate::gz::compress(&merged));
     }
     b.build()
+}
+
+/// Widened to i64 first: two e7 longitudes at opposite edges of the world sum to
+/// 3.6e9, which an i32 cannot hold.
+fn midpoint_e7(a: i32, b: i32) -> i32 {
+    ((a as i64 + b as i64) / 2) as i32
+}
+
+/// Graft every input's `vector_layers` entries into the first input's metadata.
+///
+/// The list is how a reader learns which layers an archive holds, so publishing one
+/// input's copy of it would advertise a fraction of the merge. Keeping the first
+/// input as the template preserves a base archive's other keys (name, attribution,
+/// tilestats) instead of discarding them.
+///
+/// Hand-rolled because this crate deliberately carries no JSON dependency. Only the
+/// one array is interpreted; every other byte is passed through verbatim.
+fn merge_metadata(inputs: &[&Archive]) -> Vec<u8> {
+    let texts: Vec<String> = inputs
+        .iter()
+        .map(|a| String::from_utf8_lossy(&a.metadata).into_owned())
+        .collect();
+
+    let mut layers: Vec<(String, String)> = Vec::new();
+    for text in &texts {
+        let Some(span) = vector_layers_span(text) else { continue };
+        for obj in array_elements(text, span) {
+            let id = object_string_field(&obj, "id");
+            // An entry with no string `id` cannot be matched against, so it is kept
+            // rather than deduplicated. Folding them all onto one empty key would
+            // make several id-less layers collapse into a single advertised one.
+            let slot = id
+                .as_ref()
+                .and_then(|id| layers.iter_mut().find(|(seen, _)| seen == id));
+            match slot {
+                // Later inputs win, exactly as they do for the tiles themselves.
+                Some(slot) => slot.1 = obj,
+                None => layers.push((id.unwrap_or_default(), obj)),
+            }
+        }
+    }
+
+    let template = texts.first().map(String::as_str).unwrap_or("");
+    let inner: Vec<&str> = layers.iter().map(|(_, o)| o.as_str()).collect();
+    splice_vector_layers(template, &inner.join(",")).into_bytes()
+}
+
+/// Byte range of the `vector_layers` array, brackets included.
+fn vector_layers_span(text: &str) -> Option<(usize, usize)> {
+    let b = text.as_bytes();
+    let value = vector_layers_value_start(text)?;
+    if b.get(value) != Some(&b'[') {
+        return None;
+    }
+    balanced_end(b, value).map(|e| (value, e))
+}
+
+/// First byte of whatever `vector_layers` is set to, array or not.
+///
+/// Walks strings properly rather than scanning for the key, so a `"vector_layers"`
+/// mentioned inside some layer's description cannot be mistaken for the real key.
+fn vector_layers_value_start(text: &str) -> Option<usize> {
+    let b = text.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'"' {
+            i += 1;
+            continue;
+        }
+        let key_end = string_end(b, i)?;
+        let is_key = &b[i + 1..key_end] == b"vector_layers";
+        i = key_end + 1;
+        if !is_key {
+            continue;
+        }
+        let j = skip_ws(b, i);
+        if b.get(j) != Some(&b':') {
+            continue;
+        }
+        return Some(skip_ws(b, j + 1));
+    }
+    None
+}
+
+/// The top-level elements of the array at `span`, each as its own raw JSON text.
+fn array_elements(text: &str, span: (usize, usize)) -> Vec<String> {
+    let b = text.as_bytes();
+    let close = span.1 - 1;
+    let mut out = Vec::new();
+    let mut i = skip_ws(b, span.0 + 1);
+    while i < close {
+        let stop = match b[i] {
+            b'{' | b'[' => match balanced_end(b, i) {
+                Some(e) => e,
+                None => break,
+            },
+            b'"' => match string_end(b, i) {
+                Some(e) => e + 1,
+                None => break,
+            },
+            _ => {
+                let mut k = i;
+                while k < close && b[k] != b',' {
+                    k += 1;
+                }
+                k
+            }
+        };
+        let element = text[i..stop].trim();
+        if !element.is_empty() {
+            out.push(element.to_string());
+        }
+        i = skip_ws(b, stop);
+        if b.get(i) == Some(&b',') {
+            i = skip_ws(b, i + 1);
+        }
+    }
+    out
+}
+
+/// A JSON object's own string field. Nested values are skipped rather than
+/// descended into, so a layer's `fields` map cannot supply the layer's `id`.
+fn object_string_field(text: &str, key: &str) -> Option<String> {
+    let b = text.as_bytes();
+    if b.first() != Some(&b'{') {
+        return None;
+    }
+    let mut i = skip_ws(b, 1);
+    while i < b.len() && b[i] != b'}' {
+        if b[i] != b'"' {
+            return None;
+        }
+        let key_end = string_end(b, i)?;
+        let matched = &b[i + 1..key_end] == key.as_bytes();
+        let mut j = skip_ws(b, key_end + 1);
+        if b.get(j) != Some(&b':') {
+            return None;
+        }
+        j = skip_ws(b, j + 1);
+        if matched {
+            return match b.get(j) {
+                Some(b'"') => {
+                    let value_end = string_end(b, j)?;
+                    Some(text[j + 1..value_end].to_string())
+                }
+                _ => None,
+            };
+        }
+        i = match b.get(j)? {
+            b'{' | b'[' => balanced_end(b, j)?,
+            b'"' => string_end(b, j)? + 1,
+            _ => {
+                let mut k = j;
+                while k < b.len() && b[k] != b',' && b[k] != b'}' {
+                    k += 1;
+                }
+                k
+            }
+        };
+        i = skip_ws(b, i);
+        if b.get(i) == Some(&b',') {
+            i = skip_ws(b, i + 1);
+        }
+    }
+    None
+}
+
+/// Replace the metadata's `vector_layers` with `inner`, or add one if it had none.
+fn splice_vector_layers(template: &str, inner: &str) -> String {
+    let array = format!("[{inner}]");
+    if let Some((start, end)) = vector_layers_span(template) {
+        return format!("{}{}{}", &template[..start], array, &template[end..]);
+    }
+    // A template that sets `vector_layers` to something that is not an array cannot
+    // be spliced, and grafting a second copy of the key would emit duplicate keys.
+    // Nor can an unparseable template be preserved. Either way our list is the part
+    // that has to be right.
+    let t = template.trim();
+    if vector_layers_value_start(template).is_some() {
+        return format!("{{\"vector_layers\":{array}}}");
+    }
+    let body = t
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .map(str::trim)
+        .unwrap_or("");
+    if body.is_empty() {
+        format!("{{\"vector_layers\":{array}}}")
+    } else {
+        format!("{{\"vector_layers\":{array},{body}}}")
+    }
+}
+
+/// Index of the quote closing the string that opens at `open`, honouring `\"`.
+fn string_end(b: &[u8], open: usize) -> Option<usize> {
+    let mut i = open + 1;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 2,
+            b'"' => return Some(i),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// Index just past the bracket or brace matching the one at `open`.
+fn balanced_end(b: &[u8], open: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut i = open;
+    while i < b.len() {
+        match b[i] {
+            b'"' => i = string_end(b, i)?,
+            b'[' | b'{' => depth += 1,
+            b']' | b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn skip_ws(b: &[u8], mut i: usize) -> usize {
+    while i < b.len() && b[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    i
 }
 
 /// Union the layers of several MVT bodies for the same tile. Later bodies win a
@@ -196,6 +450,51 @@ mod tests {
         // San Francisco at z11 is a well-known tile: x=327, y=791.
         let (fx, fy) = project(-122.4194, 37.7749, 11);
         assert_eq!((fx.floor() as u64, fy.floor() as u64), (327, 791));
+    }
+
+    /// A minimal one-tile archive carrying `metadata` verbatim.
+    fn meta_archive(metadata: &str) -> Vec<u8> {
+        let mut b = Builder::new();
+        b.min_zoom = 1;
+        b.max_zoom = 1;
+        b.metadata = metadata.as_bytes().to_vec();
+        b.add_tile(1, 0, 0, &one_point_tile("x"));
+        b.build().unwrap()
+    }
+
+    /// A one-tile archive with real bounds, as every layer builder produces.
+    /// `bounds` is `(west, south, east, north)` in e7 degrees.
+    fn bounded_archive(
+        layer: &str,
+        bounds: (i32, i32, i32, i32),
+        min_zoom: u8,
+        max_zoom: u8,
+    ) -> Vec<u8> {
+        let (w, s, e, n) = bounds;
+        let mut b = Builder::new();
+        b.min_zoom = min_zoom;
+        b.max_zoom = max_zoom;
+        b.center_zoom = min_zoom;
+        b.min_lon_e7 = w;
+        b.min_lat_e7 = s;
+        b.max_lon_e7 = e;
+        b.max_lat_e7 = n;
+        b.center_lon_e7 = midpoint_e7(w, e);
+        b.center_lat_e7 = midpoint_e7(s, n);
+        b.metadata = point_metadata(layer, min_zoom, max_zoom).into_bytes();
+        b.add_tile(min_zoom, 0, 0, &one_point_tile(layer));
+        b.build().unwrap()
+    }
+
+    fn one_point_tile(layer: &str) -> Vec<u8> {
+        let mut l = Layer::new(layer);
+        l.features.push(Feature {
+            id: None,
+            geom_type: GeomType::Point,
+            geometry: mvt::encode_points(&[(1, 1)]),
+            props: vec![],
+        });
+        Tile { layers: vec![l] }.encode()
     }
 
     #[test]
@@ -386,10 +685,167 @@ mod tests {
         let merged = merge_archives(&[&a]).unwrap();
         let m = Archive::parse(&merged).unwrap();
         assert_eq!(m.header.addressed_tiles, a.header.addressed_tiles);
+        assert_eq!(m.metadata, a.metadata, "metadata round-trips unchanged");
         let (fx, fy) = project(-122.4194, 37.7749, 11);
         assert_eq!(
             m.tile(11, fx.floor() as u64, fy.floor() as u64).unwrap(),
             a.tile(11, fx.floor() as u64, fy.floor() as u64).unwrap(),
+        );
+    }
+
+    /// The overlay-only case: no input covers the whole extent, so the merged
+    /// envelope has to be the union or the narrowest input would clip the rest.
+    ///
+    /// The fixtures set their bounds explicitly. `build_point_archive` leaves the
+    /// builder's whole-world default in place, so using it here would make every
+    /// assertion pass under "take the first input" too.
+    #[test]
+    fn merging_unions_zoom_and_bounds_across_inputs() {
+        // San Francisco, z10-16.
+        let west = bounded_archive(
+            "safety",
+            (-1_224_200_000, 377_000_000, -1_223_800_000, 377_900_000),
+            10,
+            16,
+        );
+        // New York, z12-14 - east of, and north of, the other one.
+        let east = bounded_archive(
+            "ma_pois",
+            (-740_200_000, 407_000_000, -739_800_000, 407_900_000),
+            12,
+            14,
+        );
+        let (wa, ea) = (Archive::parse(&west).unwrap(), Archive::parse(&east).unwrap());
+
+        let merged = merge_archives(&[&wa, &ea]).unwrap();
+        let m = Archive::parse(&merged).unwrap();
+
+        assert_eq!((m.header.min_zoom, m.header.max_zoom), (10, 16));
+        assert_eq!(m.header.min_lon_e7, -1_224_200_000, "west edge from SF");
+        assert_eq!(m.header.max_lon_e7, -739_800_000, "east edge from NYC");
+        assert_eq!(m.header.min_lat_e7, 377_000_000, "south edge from SF");
+        assert_eq!(m.header.max_lat_e7, 407_900_000, "north edge from NYC");
+        // Neither input's own centre, which is the point.
+        assert_eq!(m.header.center_lon_e7, (-1_224_200_000 + -739_800_000) / 2);
+        assert_eq!(m.header.center_lat_e7, (377_000_000 + 407_900_000) / 2);
+        assert_eq!(m.header.center_zoom, 10, "the shallowest zoom on offer");
+    }
+
+    /// Two e7 longitudes at opposite edges of the world sum past `i32::MAX`, so the
+    /// midpoint has to widen before it adds.
+    #[test]
+    fn the_merged_centre_survives_a_world_wide_envelope() {
+        let west = bounded_archive("a", (-1_800_000_000, -850_000_000, -1_700_000_000, -840_000_000), 1, 2);
+        let east = bounded_archive("b", (1_700_000_000, 840_000_000, 1_800_000_000, 850_000_000), 1, 2);
+        let (wa, ea) = (Archive::parse(&west).unwrap(), Archive::parse(&east).unwrap());
+
+        let m = Archive::parse(&merge_archives(&[&wa, &ea]).unwrap()).unwrap();
+        assert_eq!(m.header.min_lon_e7, -1_800_000_000);
+        assert_eq!(m.header.max_lon_e7, 1_800_000_000);
+        assert_eq!(m.header.center_lon_e7, 0);
+        assert_eq!(m.header.center_lat_e7, 0);
+    }
+
+    #[test]
+    fn merging_unions_the_vector_layers_list() {
+        let a = build_point_archive("safety", &[pt(-122.4, 37.7, "a")], 10, 16).unwrap();
+        let b = build_point_archive("ma_pois", &[pt(-122.4, 37.7, "b")], 12, 16).unwrap();
+        let (aa, ba) = (Archive::parse(&a).unwrap(), Archive::parse(&b).unwrap());
+
+        let merged = merge_archives(&[&aa, &ba]).unwrap();
+        let meta = String::from_utf8(Archive::parse(&merged).unwrap().metadata).unwrap();
+
+        assert_eq!(
+            meta,
+            "{\"vector_layers\":[\
+             {\"id\":\"safety\",\"minzoom\":10,\"maxzoom\":16},\
+             {\"id\":\"ma_pois\",\"minzoom\":12,\"maxzoom\":16}]}",
+            "both layers advertised, in input order"
+        );
+    }
+
+    /// A base archive's other metadata keys are what carry attribution, so the
+    /// splice has to leave everything it does not understand alone.
+    #[test]
+    fn splicing_preserves_the_templates_other_keys() {
+        let spliced = splice_vector_layers(
+            "{\"name\":\"v5\",\"vector_layers\":[{\"id\":\"water\"}],\"attribution\":\"OSM\"}",
+            "{\"id\":\"safety\"}",
+        );
+        assert_eq!(
+            spliced,
+            "{\"name\":\"v5\",\"vector_layers\":[{\"id\":\"safety\"}],\"attribution\":\"OSM\"}"
+        );
+    }
+
+    #[test]
+    fn splicing_grafts_a_list_onto_metadata_that_lacks_one() {
+        assert_eq!(
+            splice_vector_layers("{\"name\":\"v5\"}", "{\"id\":\"safety\"}"),
+            "{\"vector_layers\":[{\"id\":\"safety\"}],\"name\":\"v5\"}"
+        );
+        assert_eq!(
+            splice_vector_layers("", "{\"id\":\"safety\"}"),
+            "{\"vector_layers\":[{\"id\":\"safety\"}]}"
+        );
+    }
+
+    /// A `vector_layers` that is not an array cannot be spliced, and keeping the
+    /// template would emit the key twice.
+    #[test]
+    fn a_non_array_vector_layers_is_replaced_rather_than_duplicated() {
+        assert_eq!(
+            splice_vector_layers("{\"vector_layers\":5,\"name\":\"v5\"}", "{\"id\":\"safety\"}"),
+            "{\"vector_layers\":[{\"id\":\"safety\"}]}"
+        );
+    }
+
+    /// The scanner walks strings rather than searching for the key, so a decoy
+    /// inside a value cannot misdirect it.
+    #[test]
+    fn the_metadata_scanner_ignores_decoys_inside_strings() {
+        let text = r#"{"note":"see \"vector_layers\": [bogus]","vector_layers":[{"id":"real"}]}"#;
+        let span = vector_layers_span(text).expect("the real key");
+        assert_eq!(array_elements(text, span), vec![r#"{"id":"real"}"#]);
+    }
+
+    #[test]
+    fn an_id_is_read_past_a_nested_field_map() {
+        let obj = "{\"fields\":{\"id\":\"decoy\"},\"id\":\"real\",\"minzoom\":3}";
+        assert_eq!(object_string_field(obj, "id").as_deref(), Some("real"));
+        assert_eq!(object_string_field(obj, "missing"), None);
+    }
+
+    /// Entries with no string `id` cannot be matched against, so they must be kept
+    /// side by side rather than folded onto one empty key and collapsed into one.
+    #[test]
+    fn id_less_layer_entries_are_kept_rather_than_deduplicated() {
+        let a = meta_archive("{\"vector_layers\":[{\"minzoom\":1},{\"minzoom\":2}]}");
+        let b = meta_archive("{\"vector_layers\":[{\"minzoom\":3}]}");
+        let (aa, ba) = (Archive::parse(&a).unwrap(), Archive::parse(&b).unwrap());
+
+        let merged = merge_archives(&[&aa, &ba]).unwrap();
+        let meta = String::from_utf8(Archive::parse(&merged).unwrap().metadata).unwrap();
+
+        assert_eq!(
+            meta,
+            "{\"vector_layers\":[{\"minzoom\":1},{\"minzoom\":2},{\"minzoom\":3}]}"
+        );
+    }
+
+    #[test]
+    fn a_colliding_layer_id_keeps_only_the_later_description() {
+        let stale = build_point_archive("ma_pois", &[pt(-122.4, 37.7, "a")], 12, 14).unwrap();
+        let fresh = build_point_archive("ma_pois", &[pt(-122.4, 37.7, "b")], 12, 16).unwrap();
+        let (sa, fa) = (Archive::parse(&stale).unwrap(), Archive::parse(&fresh).unwrap());
+
+        let merged = merge_archives(&[&sa, &fa]).unwrap();
+        let meta = String::from_utf8(Archive::parse(&merged).unwrap().metadata).unwrap();
+
+        assert_eq!(
+            meta,
+            "{\"vector_layers\":[{\"id\":\"ma_pois\",\"minzoom\":12,\"maxzoom\":16}]}",
+            "listed once, at the rebuilt layer's zoom range"
         );
     }
 }
