@@ -24,7 +24,9 @@ import com.vayunmathur.cast.protocol.ByeReason
 import com.vayunmathur.cast.protocol.CodecNegotiation
 import com.vayunmathur.cast.protocol.CodecSelection
 import com.vayunmathur.cast.protocol.DecoderLimits
+import com.vayunmathur.cast.protocol.MediaResourceResolver
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
+import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.StreamConstants
@@ -71,6 +73,18 @@ sealed interface ContentSessionResult {
 
     /** [reason] is one of `CastContract`'s `REASON_` values, ready to send straight back. */
     class Failed(val reason: Int) : ContentSessionResult
+
+    /**
+     * Live, and served rather than encoded.
+     *
+     * No surface and no pipe, because nothing is being encoded: the TV fetches byte ranges of the
+     * app's own media from the proxy and decodes them itself. No geometry either - the TV plays the
+     * media at its own size, which is what stops this phone having to choose a frame it can encode.
+     */
+    class Serving(
+        val receiverName: String,
+        val hasVideo: Boolean,
+    ) : ContentSessionResult
 }
 
 /**
@@ -118,6 +132,15 @@ object CastController {
 
     /** The running mirror. Its retransmit buffers live per-stream inside it. */
     private var engine: MirrorEngine? = null
+
+    /**
+     * The HTTPS listener serving a content session, or null when there is not one.
+     *
+     * Beside [engine] rather than inside it, because the two are alternatives: a served session
+     * starts no encoder at all. Torn down through the same paths, so a session that ends leaves no
+     * open port behind.
+     */
+    private var proxy: MediaProxyServer? = null
 
     /**
      * The codec the running engine is encoding with.
@@ -466,6 +489,8 @@ object CastController {
         height: Int,
         wantAudio: Boolean,
         appLabel: String,
+        wantVideo: Boolean = true,
+        resources: MediaResourceResolver? = null,
     ): ContentSessionResult = withContext(Dispatchers.IO) {
         val appContext = context.applicationContext
         val activeClient = client
@@ -482,6 +507,17 @@ object CastController {
         _mirrorPhase.value = MirrorPhase.Negotiating
         _degradation.value = MirrorDegradation()
         _failure.value = null
+
+        if (resources != null) {
+            return@withContext startServedSession(
+                context = appContext,
+                device = device,
+                activeClient = activeClient,
+                resources = resources,
+                wantVideo = wantVideo,
+                appLabel = appLabel,
+            )
+        }
 
         val codec = when (val choice = chooseCodec(appContext, device, activeClient, width, height)) {
             is CodecOutcome.Refused -> {
@@ -565,11 +601,93 @@ object CastController {
      * to control, so it is not merely that the overlay should not appear on the TV - there is nothing
      * a command could be applied to on this end either.
      */
+    /**
+     * Start serving app content instead of encoding it.
+     *
+     * This is the whole architectural change on this end. The proxy binds an ephemeral HTTPS port,
+     * the fingerprint of its throwaway certificate goes to the TV over the already-encrypted control
+     * channel, and the TV fetches byte ranges from it. No encoder is created, no codec is negotiated
+     * and no geometry is chosen: the file is already encoded, and the TV can decode it.
+     *
+     * The audio decoder *is* checked, before anything is started. A TV with no Opus decoder used to
+     * accept an audio-only session and then play silence with nothing to explain it, and that is the
+     * one refusal worth making early.
+     */
+    private suspend fun startServedSession(
+        context: Context,
+        device: CastDevice,
+        activeClient: MirrorClient,
+        resources: MediaResourceResolver,
+        wantVideo: Boolean,
+        appLabel: String,
+    ): ContentSessionResult {
+        val limits = activeClient.limits ?: DecoderLimits()
+        if (!CodecNegotiation.canPlayAudio(limits)) {
+            Log.w(TAG, "refusing a served session: '${device.friendlyName}' advertised no Opus decoder")
+            _failure.value = context.getString(R.string.cast_mirror_tv_no_audio)
+            _mirrorPhase.value = MirrorPhase.Failed
+            return ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+
+        // The address the kernel chose to reach this TV, not whichever interface happens to be first:
+        // a phone can be on Wi-Fi, a VPN and a tethering bridge at once, and only one of those is
+        // reachable back from the television.
+        val host = socket?.localAddress
+        if (host == null || host.hostAddress == null) {
+            Log.w(TAG, "no local address on the control channel; nothing could be served")
+            _mirrorPhase.value = MirrorPhase.Failed
+            return ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+
+        val token = MediaProxyServer.randomToken()
+        val server = MediaProxyServer(token, resources)
+        val endpoint = server.start(listOf(host))
+        if (endpoint == null) {
+            _mirrorPhase.value = MirrorPhase.Failed
+            return ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+        proxy = server
+
+        val outcome = mutex.withLock {
+            activeClient.openContentSession(
+                host = host.hostAddress!!,
+                port = endpoint.port,
+                certificateFingerprint = endpoint.certificateFingerprint,
+                token = token,
+                video = wantVideo,
+                appLabel = appLabel,
+            )
+        }
+        if (outcome is ContentOutcome.Refused) {
+            // Nothing is going to fetch from it, and an open port outlives the session that needed it.
+            server.stop()
+            proxy = null
+            _failure.value = outcome.detail.ifBlank { context.getString(R.string.cast_mirror_tv_no_audio) }
+            _mirrorPhase.value = MirrorPhase.Failed
+            return ContentSessionResult.Failed(CastContract.REASON_FAILED)
+        }
+
+        _mirrorPhase.value = MirrorPhase.Mirroring
+        _sessionState.update { it.copy(phase = ClientPhase.Streaming) }
+        startWatch(context, activeClient, device, codec = null, transportControls = true)
+        return ContentSessionResult.Serving(
+            receiverName = activeClient.receiverName ?: device.friendlyName,
+            hasVideo = wantVideo,
+        )
+    }
+
+    /** Tell the TV to play a resource the app will be asked for. */
+    fun playMedia(media: PlayMedia) {
+        val activeClient = client ?: return
+        scope.launch { mutex.withLock { activeClient.playMedia(media) } }
+    }
+
     private fun startWatch(
         appContext: Context,
         activeClient: MirrorClient,
         device: CastDevice,
-        codec: VideoCodec,
+        /** Null for a served session, where nothing was encoded and there is no codec to demote. */
+        codec: VideoCodec?,
         transportControls: Boolean = false,
     ) {
         watchJob = scope.launch {
@@ -598,7 +716,7 @@ object CastController {
             teardown()
             // Published *after* the teardown, which resets the phase and clears the failure - the
             // order matters, and setting either first would only have it wiped.
-            val message = if (reason == ByeReason.MISSING_CODEC_CONFIG) {
+            val message = if (reason == ByeReason.MISSING_CODEC_CONFIG && codec != null) {
                 Log.w(TAG, "'${device.friendlyName}' never got ${codec.label}'s codec config")
                 MirrorPreferences.demoteCodec(appContext, receiverId, codec)
                 appContext.getString(R.string.cast_mirror_codec_config_failed)
@@ -789,6 +907,10 @@ object CastController {
         engine?.stop()
         engine = null
         activeCodec = null
+        // The served session's other half. An open HTTPS port outliving the session it belonged to
+        // would serve a token that is no longer anybody's.
+        proxy?.stop()
+        proxy = null
     }
 
     /**

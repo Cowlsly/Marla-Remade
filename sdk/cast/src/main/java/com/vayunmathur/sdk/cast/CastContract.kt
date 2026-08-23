@@ -171,6 +171,16 @@ object CastContract {
      */
     const val KEY_WANT_VIDEO = "wantVideo"
 
+    /**
+     * Whether the client will answer [MSG_RESOURCE_REQUEST], which is what asks to be served rather
+     * than encoded.
+     *
+     * Its own flag rather than inferred from the other fields: a served session and a `Surface`
+     * session differ in what Cast *does*, not in what was asked for, and guessing from a geometry of
+     * zero would make a client that simply forgot to state a size get a session with no picture.
+     */
+    const val KEY_SERVE_RESOURCES = "serveResources"
+
     // ---- MSG_SESSION_READY payload ----
 
     /**

@@ -57,6 +57,7 @@ class CastContractTest {
             CastContract.KEY_HEIGHT,
             CastContract.KEY_WANT_AUDIO,
             CastContract.KEY_WANT_VIDEO,
+            CastContract.KEY_SERVE_RESOURCES,
             CastContract.KEY_SURFACE,
             CastContract.KEY_AUDIO_FD,
             CastContract.KEY_GRANTED_WIDTH,

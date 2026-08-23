@@ -121,6 +121,10 @@ class ContentCastService : Service() {
         val width = data?.getInt(CastContract.KEY_WIDTH) ?: 0
         val height = data?.getInt(CastContract.KEY_HEIGHT) ?: 0
         val wantAudio = data?.getBoolean(CastContract.KEY_WANT_AUDIO) ?: false
+        // Absent means video, so a client written against the older contract still means what it did.
+        val wantVideo = data?.getBoolean(CastContract.KEY_WANT_VIDEO, true) ?: true
+        // A client that will answer resource requests is asking to be served rather than encoded.
+        val served = data?.getBoolean(CastContract.KEY_SERVE_RESOURCES) == true
 
         scope.launch {
             val result = CastController.startContentSession(
@@ -130,6 +134,8 @@ class ContentCastService : Service() {
                 wantAudio = wantAudio,
                 // Established by the picker from callingPackage, not by anything the client sent.
                 appLabel = CastController.contentAppLabel,
+                wantVideo = wantVideo,
+                resources = if (served) resources else null,
             )
             when (result) {
                 is ContentSessionResult.Failed -> send(sessionEnded(result.reason))
@@ -147,8 +153,34 @@ class ContentCastService : Service() {
                     }
                     sendReady(result)
                 }
+                is ContentSessionResult.Serving -> {
+                    sessionOpen = true
+                    CastController.onContentSessionEnded = { reason ->
+                        scope.launch { closeSession(reason, notify = true) }
+                    }
+                    CastController.onPlaybackCommand = { command ->
+                        scope.launch { send(playbackCommand(command)) }
+                    }
+                    sendServing(result)
+                }
             }
         }
+    }
+
+    /**
+     * Answer a served session: a name, and no surface.
+     *
+     * The absence of `KEY_SURFACE` is the signal, and it is why `CastClient.openContentSession` does
+     * not look for one - there is nothing to draw into because nothing is being encoded.
+     */
+    private fun sendServing(serving: ContentSessionResult.Serving) {
+        val message = Message.obtain(null, CastContract.MSG_SESSION_READY).apply {
+            data = Bundle().apply {
+                putString(CastContract.KEY_RECEIVER_NAME, serving.receiverName)
+                putBoolean(CastContract.KEY_WANT_VIDEO, serving.hasVideo)
+            }
+        }
+        if (!send(message)) closeSession(CastContract.REASON_CLIENT_CLOSED, notify = false)
     }
 
     /**

@@ -42,6 +42,16 @@ class ControlSocket(private val host: String, private val port: Int) {
 
     val codec = ControlCodec()
 
+    /**
+     * Our own address on the interface that reaches the TV.
+     *
+     * The media proxy has to tell the TV where to fetch from, and a phone can have several
+     * addresses - Wi-Fi, a VPN, a tethering bridge. This is the one the kernel actually chose to
+     * reach this TV, so it is the only one guaranteed to be reachable back.
+     */
+    val localAddress: java.net.InetAddress?
+        get() = socket?.localAddress
+
     /** Throws when the TV is not reachable, which the caller turns into a user-facing message. */
     fun connect() {
         val plain = Socket()

@@ -6,6 +6,8 @@ import com.vayunmathur.cast.domain.ClientFailure
 import com.vayunmathur.cast.network.ControlSocket
 import com.vayunmathur.cast.protocol.Bye
 import com.vayunmathur.cast.protocol.ByeReason
+import com.vayunmathur.cast.protocol.ContentReady
+import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.Hello
 import com.vayunmathur.cast.protocol.Negotiation
@@ -15,6 +17,7 @@ import com.vayunmathur.cast.protocol.PairFailed
 import com.vayunmathur.cast.protocol.PairOk
 import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
+import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.ProtocolBase64
@@ -31,6 +34,21 @@ import com.vayunmathur.cast.protocol.VideoCodecConfig
 import java.security.SecureRandom
 
 private const val TAG = "MirrorClient"
+
+/** Whether the TV took a content session, and why not if it did not. */
+sealed interface ContentOutcome {
+
+    data object Accepted : ContentOutcome
+
+    /**
+     * [detail] is the TV's own words, so the phone can say something true rather than "failed".
+     *
+     * The refusal that matters is a TV with no Opus decoder on an audio-only session: before it was
+     * negotiated, that TV accepted the session and played silence, which is the failure this whole
+     * reply exists to make visible.
+     */
+    data class Refused(val detail: String) : ContentOutcome
+}
 
 /** What a handshake step produced, or why it stopped. */
 sealed interface HandshakeOutcome {
@@ -251,6 +269,58 @@ class MirrorClient(
         }
         Log.i(TAG, "streaming ${videoCodec.label} ${width}x$height to udp ${ready.udpPort}")
         return HandshakeOutcome.Ready(Negotiation.of(config, ready, sessionKeys))
+    }
+
+    /**
+     * `CONTENT_SESSION` → `CONTENT_READY`, for app content that has a file behind it.
+     *
+     * The replacement for [configureStream] on that path, and there is no `STREAM_READY` and no UDP
+     * port because there is no RTP: the TV fetches byte ranges from the proxy instead. Nothing here
+     * negotiates a codec, because nothing is being encoded - the TV decodes whatever the file already
+     * is, which is the entire point.
+     *
+     * [certificateFingerprint] travels on this channel precisely because it is already encrypted and
+     * bound to the pairing transcript. That is what lets the TV pin one certificate instead of
+     * trusting an authority to vouch for an address on a LAN.
+     */
+    fun openContentSession(
+        host: String,
+        port: Int,
+        certificateFingerprint: ByteArray,
+        token: String,
+        video: Boolean,
+        appLabel: String,
+    ): ContentOutcome {
+        socket.send(
+            ContentSession(
+                host = host,
+                port = port,
+                certificateFingerprint = ProtocolBase64.encode(certificateFingerprint),
+                token = token,
+                video = video,
+                appLabel = appLabel,
+            ),
+        )
+        val ready = socket.receive()?.message as? ContentReady
+            ?: return ContentOutcome.Refused("the TV did not answer")
+        if (!ready.accepted) {
+            Log.w(TAG, "the TV refused a content session: ${ready.detail}")
+            return ContentOutcome.Refused(ready.detail)
+        }
+        Log.i(TAG, "serving ${if (video) "audio and video" else "audio"} from $host:$port")
+        return ContentOutcome.Accepted
+    }
+
+    /**
+     * Tell the TV what to play next from the proxy.
+     *
+     * Sent once per item rather than as a playlist, because the queue stays on the phone: it owns the
+     * ordering, the artwork and the metadata, so "next" is a decision this end makes and then reports.
+     */
+    fun playMedia(media: PlayMedia) {
+        Log.i(TAG, "asking the TV to play ${media.resourceId}")
+        runCatching { socket.send(media) }
+            .onFailure { Log.w(TAG, "could not send the play request", it) }
     }
 
     /**

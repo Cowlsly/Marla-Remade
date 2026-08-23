@@ -49,6 +49,7 @@
     <string name="cast_mirror_negotiation_failed">The TV refused to start a stream</string>
     <string name="cast_mirror_udp_failed">Could not reach the TV to send video</string>
     <string name="cast_mirror_no_encoder">This device has no usable screen encoder</string>
+    <string name="cast_mirror_tv_no_audio">This TV cannot play Opus audio, so it cannot play music from this phone</string>
     <string name="cast_mirror_receiver_gone">The TV stopped accepting the stream</string>
     <!-- Naming the codecs is the point of these three. Mirroring needs hardware H.265 or AV1 and has
          no H.264 fallback, so a device that cannot do either will never work - and a message that did

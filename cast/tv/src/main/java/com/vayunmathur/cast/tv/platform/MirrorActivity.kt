@@ -99,16 +99,23 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         surfaceView = SurfaceView(this).apply { holder.addCallback(this@MirrorActivity) }
+        // An audio-only session has nothing to draw. The surface is not merely hidden but never
+        // added: an unattached SurfaceView creates no surface, so `surfaceCreated` never fires and
+        // the receiver is never handed somewhere to draw. A full-screen black rectangle over silence
+        // would read as a fault rather than as music.
+        val hasVideo = (ReceiverController.state.value.phase as? ReceiverPhase.Mirroring)?.hasVideo != false
         container = FrameLayout(this).apply {
             setBackgroundColor(android.graphics.Color.BLACK)
-            addView(
-                surfaceView,
-                FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    android.view.Gravity.CENTER,
-                ),
-            )
+            if (hasVideo) {
+                addView(
+                    surfaceView,
+                    FrameLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        android.view.Gravity.CENTER,
+                    ),
+                )
+            }
             addView(overlayView(), FrameLayout.LayoutParams(MATCH_PARENT, MATCH_PARENT))
         }
         setContentView(container)

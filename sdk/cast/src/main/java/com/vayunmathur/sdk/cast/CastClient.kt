@@ -369,6 +369,7 @@ class CastClient(context: Context) {
                 putInt(CastContract.KEY_HEIGHT, requestedHeight)
                 putBoolean(CastContract.KEY_WANT_AUDIO, requestedAudio)
                 putBoolean(CastContract.KEY_WANT_VIDEO, requestedVideo)
+                putBoolean(CastContract.KEY_SERVE_RESOURCES, resources != null)
             }
         }
         try {

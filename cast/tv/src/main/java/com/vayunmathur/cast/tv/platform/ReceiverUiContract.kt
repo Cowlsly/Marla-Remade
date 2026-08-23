@@ -41,6 +41,13 @@ sealed interface ReceiverPhase {
          * itself.
          */
         val appLabel: String = "",
+        /**
+         * False for an audio-only session, where there is nothing to draw.
+         *
+         * `MirrorActivity` adds no `SurfaceView` at all in that case and fills the window with a
+         * now-playing screen instead - a black surface over silence would look like a fault.
+         */
+        val hasVideo: Boolean = true,
     ) : ReceiverPhase {
         /**
          * Who to name on screen: the app if there is one, otherwise the phone.

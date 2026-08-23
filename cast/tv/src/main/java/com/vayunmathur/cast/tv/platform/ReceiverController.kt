@@ -6,6 +6,8 @@ import android.util.Log
 import android.view.Surface
 import com.vayunmathur.cast.protocol.Bye
 import com.vayunmathur.cast.protocol.ByeReason
+import com.vayunmathur.cast.protocol.ContentReady
+import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecodableFrame
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.Hello
@@ -18,6 +20,7 @@ import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
 import com.vayunmathur.cast.protocol.PairResult
 import com.vayunmathur.cast.protocol.PairingGate
+import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackAction
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.protocol.PlaybackState
@@ -44,7 +47,9 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withContext
 import java.net.DatagramSocket
 import java.net.ServerSocket
 import java.security.SecureRandom
@@ -123,6 +128,16 @@ object ReceiverController {
      */
     @Volatile
     private var surface: Surface? = null
+
+    /**
+     * The player for a served content session, or null when there is not one.
+     *
+     * Volatile because the Activity's surface callbacks read it while the session coroutine writes
+     * it. Its own field rather than a branch inside the media loop: a served session has no RTP, no
+     * decoder and no playout queue, so there is nothing for that loop to do.
+     */
+    @Volatile
+    private var contentPlayer: ContentPlayer? = null
 
     /** The frame size the phone said it would send, so the Activity can letterbox to it. */
     @Volatile
@@ -239,6 +254,9 @@ object ReceiverController {
     /** Called by `MirrorActivity` once its `SurfaceView` has a surface to draw into. */
     fun attachSurface(newSurface: Surface) {
         surface = newSurface
+        // A served session hands the surface straight to its player. Nothing is being decoded here,
+        // so there is no media loop to notice one appearing.
+        contentPlayer?.setSurface(newSurface)
     }
 
     /**
@@ -249,6 +267,9 @@ object ReceiverController {
      * call in flight.
      */
     fun detachSurface() {
+        // Taken off the player first: handing a released surface to ExoPlayer is what breaks the
+        // *next* session rather than this one.
+        contentPlayer?.setSurface(null)
         surface = null
     }
 
@@ -313,7 +334,7 @@ object ReceiverController {
             this@ReceiverController.channel = channel
             sessionJob = scope.launch {
                 try {
-                    runSession(channel, store, identity, deviceId, name, limits)
+                    runSession(context, channel, store, identity, deviceId, name, limits)
                 } catch (e: Exception) {
                     Log.w(TAG, "session ended", e)
                 } finally {
@@ -343,6 +364,7 @@ object ReceiverController {
     // ---- one session ----
 
     private suspend fun runSession(
+        context: Context,
         channel: ControlChannel,
         store: PairingStore,
         identity: PqcIdentity,
@@ -396,7 +418,17 @@ object ReceiverController {
         _state.update { it.copy(phase = ReceiverPhase.Connected(greeting.senderName)) }
 
         val configured = channel.receive() ?: return
-        val config = configured.message as? StreamConfig ?: return
+        // The fork between the two kinds of session. Screen mirroring has no file behind it and keeps
+        // the RTP path; anything with a file is served over HTTPS and decoded here, which is why
+        // seeking becomes an offset and a pause is nobody's business but this end's.
+        val config = when (val first = configured.message) {
+            is StreamConfig -> first
+            is ContentSession -> {
+                serveContent(context, channel, first, greeting.senderName)
+                return
+            }
+            else -> return
+        }
         startStreaming(channel, keys, config, greeting.senderName)
 
         // The session now lives in the UDP loop; this coroutine stays here so a BYE or a dropped
@@ -415,6 +447,84 @@ object ReceiverController {
                 is PlaybackState -> onPlaybackState(message)
                 else -> Unit
             }
+        }
+    }
+
+    /**
+     * Serve a content session: the phone has the bytes, this end has the player.
+     *
+     * The whole of the new arrangement on this side. Nothing is decoded from RTP, nothing waits for a
+     * key frame, and there is no picture-loss indicator to send because there are no lost pictures.
+     * What is left is a URL, a pinned certificate and a player that owns its own clock.
+     *
+     * ExoPlayer must be built and driven from the thread whose looper it took, so every call into it
+     * hops to the main thread. The control channel stays on this coroutine, because it is the same
+     * blocking read it always was.
+     */
+    private suspend fun serveContent(
+        context: Context,
+        channel: ControlChannel,
+        session: ContentSession,
+        senderName: String,
+    ) {
+        if (!session.video && AudioPlayer.limits().isEmpty()) {
+            // The failure that used to be silence. A TV with no Opus decoder and no picture to fall
+            // back on has to say so, and the phone has to be told rather than left streaming into it.
+            Log.w(TAG, "refusing an audio-only session: this TV has no Opus decoder")
+            channel.send(ContentReady(accepted = false, detail = "this TV has no Opus decoder"))
+            _state.update { it.copy(phase = ReceiverPhase.Failed(ReceiverFailure.NoAudioDecoder)) }
+            return
+        }
+
+        val player = withContext(Dispatchers.Main) { ContentPlayer(context, session) }
+        val started = withContext(Dispatchers.Main) {
+            player.start { detail -> Log.w(TAG, "the served stream failed: $detail") }
+        }
+        if (!started) {
+            channel.send(ContentReady(accepted = false, detail = "the player could not be built"))
+            _state.update { it.copy(phase = ReceiverPhase.Failed(ReceiverFailure.Handshake)) }
+            withContext(NonCancellable + Dispatchers.Main) { player.release() }
+            return
+        }
+
+        contentPlayer = player
+        // A surface may already exist from a previous session's Activity; an audio-only session wants
+        // none, and handing it one would put a black rectangle over the now-playing screen.
+        if (session.video) surface?.let { withContext(Dispatchers.Main) { player.setSurface(it) } }
+        channel.send(ContentReady(accepted = true))
+        _state.update {
+            it.copy(
+                phase = ReceiverPhase.Mirroring(
+                    senderName = senderName,
+                    // No frame size to letterbox to: the TV plays the media at its own size, which is
+                    // the point of not squeezing it through an encoder first.
+                    width = 0,
+                    height = 0,
+                    appLabel = session.appLabel,
+                    hasVideo = session.video,
+                ),
+            )
+        }
+        Log.i(TAG, "serving content from ${session.host}:${session.port} for '${session.appLabel}'")
+
+        try {
+            while (true) {
+                val next = channel.receive() ?: break
+                when (val message = next.message) {
+                    is Bye -> {
+                        Log.i(TAG, "'$senderName' said goodbye")
+                        return
+                    }
+                    is PlayMedia -> withContext(Dispatchers.Main) { player.play(message) }
+                    is PlaybackState -> onPlaybackState(message)
+                    else -> Unit
+                }
+            }
+        } finally {
+            contentPlayer = null
+            // NonCancellable because this is the teardown path a cancelled session takes, and an
+            // ExoPlayer left unreleased holds a codec the next session will ask for.
+            withContext(NonCancellable + Dispatchers.Main) { player.release() }
         }
     }
 
