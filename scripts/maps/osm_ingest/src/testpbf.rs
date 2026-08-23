@@ -155,6 +155,14 @@ fn dense_nodes(st: &mut StringTable) -> Vec<u8> {
     let cafe_tags = [
         (st.id("amenity"), st.id("cafe")),
         (st.id("name"), st.id("Corner Cafe")),
+        // Sidecar attributes (poi_attrs.bin). `24/7` earns its place here: it used
+        // to parse as permanently closed, so it is the case worth pinning.
+        (st.id("opening_hours"), st.id("24/7")),
+        (st.id("contact:phone"), st.id("+1-555-0100")),
+        (st.id("website"), st.id("https://cafe.example")),
+        (st.id("addr:housenumber"), st.id("120")),
+        (st.id("addr:street"), st.id("Market St")),
+        (st.id("cuisine"), st.id("coffee_shop")),
     ];
 
     let mut keys_vals: Vec<u32> = Vec::new();

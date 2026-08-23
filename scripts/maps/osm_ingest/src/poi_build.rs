@@ -1,8 +1,8 @@
 //! POI extraction: `.osm.pbf` -> a geojsonseq for tippecanoe plus
-//! `poi_names.bin` and `poi_index.bin`.
+//! `poi_names.bin`, `poi_index.bin` and `poi_attrs.bin`.
 //!
-//! A port of the former `scripts/maps/poi_extract.cpp`. The three outputs are
-//! mutually consistent — same POI set, same coordinates:
+//! A port of the former `scripts/maps/poi_extract.cpp`. The four outputs are
+//! mutually consistent — same POI set, same order, same coordinates:
 //!
 //! 1. **geojsonseq** newline-delimited GeoJSON `Point` features, fed to
 //!    tippecanoe to build the `ma_pois` source layer. Properties: `name`
@@ -15,6 +15,11 @@
 //!    Morton key of `(lat, lon)`, so the app can mmap and binary-scan a spatial
 //!    range. The record contract lives in
 //!    `maps/src/main/java/com/vayunmathur/maps/util/PoiIndex.kt`.
+//! 4. **`poi_attrs.bin`** the attribute sidecar: opening hours, phone, website,
+//!    address, cuisine and wheelchair access, indexed by the ORDINAL of the
+//!    matching `poi_index.bin` record. See [`crate::poi_attrs`] for the layout.
+//!    Kept separate because the 14-byte record is full and its width is load
+//!    bearing in three places.
 //!
 //! A POI is any node, or closed-way / multipolygon area, carrying BOTH a `name`
 //! and one of the recognised POI keys (see [`crate::tags::classify`]). Area
@@ -40,6 +45,7 @@ use crate::geojson::json_escape;
 use crate::names::NamePool;
 use crate::osm::{self, visit_block, Element, MEMBER_WAY};
 use crate::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
+use crate::poi_attrs::AttrPool;
 use crate::proto::{Error, Result};
 use crate::spatial::spatial_from_e7;
 use crate::tags::{self, PoiTags};
@@ -57,6 +63,10 @@ pub struct Stats {
     pub from_nodes: usize,
     pub from_ways: usize,
     pub from_relations: usize,
+    /// POIs carrying at least one sidecar attribute.
+    pub with_attrs: usize,
+    pub unique_attrs: usize,
+    pub attr_bytes: usize,
 }
 
 struct Poi {
@@ -68,6 +78,8 @@ struct Poi {
     type_: u16,
     osm_id: i64,
     name: Vec<u8>,
+    /// Encoded sidecar record body, empty when the POI has no attributes.
+    attrs: Vec<u8>,
 }
 
 /// A `type=multipolygon`/`boundary` relation that is itself a POI.
@@ -75,6 +87,7 @@ struct RelArea {
     id: i64,
     type_: u16,
     name: Vec<u8>,
+    attrs: Vec<u8>,
     outer_ways: Vec<i64>,
 }
 
@@ -88,6 +101,7 @@ struct WayArea {
     id: i64,
     type_: u16,
     name: Vec<u8>,
+    attrs: Vec<u8>,
     refs: Vec<i64>,
 }
 
@@ -105,10 +119,16 @@ struct NodePass {
     locs: Vec<(u32, i32, i32)>,
 }
 
-pub fn build(input: &Path, geojson: &Path, names: &Path, index: &Path) -> Result<Stats> {
+pub fn build(
+    input: &Path,
+    geojson: &Path,
+    names: &Path,
+    index: &Path,
+    attrs: &Path,
+) -> Result<Stats> {
     // Fail before the three passes rather than after them if an output path is
     // unwritable.
-    for path in [geojson, names, index] {
+    for path in [geojson, names, index, attrs] {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
@@ -203,7 +223,7 @@ pub fn build(input: &Path, geojson: &Path, names: &Path, index: &Path) -> Result
         // node.
         if let Some(poi) = ring_centroid(area.refs[..area.refs.len() - 1].iter().copied(), &location)
         {
-            pois.push(make_poi(poi, area.type_, area.id, &area.name));
+            pois.push(make_poi(poi, area.type_, area.id, &area.name, area.attrs.clone()));
         }
     }
     let from_ways = pois.len() - from_nodes;
@@ -222,7 +242,7 @@ pub fn build(input: &Path, geojson: &Path, names: &Path, index: &Path) -> Result
         refs.sort_unstable();
         refs.dedup();
         if let Some(poi) = ring_centroid(refs.iter().copied(), &location) {
-            pois.push(make_poi(poi, area.type_, -area.id, &area.name));
+            pois.push(make_poi(poi, area.type_, -area.id, &area.name, area.attrs.clone()));
         }
     }
     let from_relations = pois.len() - from_nodes - from_ways;
@@ -235,14 +255,17 @@ pub fn build(input: &Path, geojson: &Path, names: &Path, index: &Path) -> Result
     // are stable across runs.
     pois.sort_by_key(|p| (p.morton, p.osm_id));
 
-    let written = write_outputs(&pois, geojson, names, index)?;
+    let written = write_outputs(&pois, geojson, names, index, attrs)?;
     Ok(Stats {
-        records: written.0,
-        unique_names: written.1,
-        name_bytes: written.2,
+        records: written.records,
+        unique_names: written.unique_names,
+        name_bytes: written.name_bytes,
         from_nodes,
         from_ways,
         from_relations,
+        with_attrs: written.with_attrs,
+        unique_attrs: written.unique_attrs,
+        attr_bytes: written.attr_bytes,
     })
 }
 
@@ -279,6 +302,7 @@ fn relation_blob(state: &mut RelPass, block: &pbf::PrimitiveBlock) -> Result<u8>
                     id: r.id,
                     type_,
                     name: name.to_vec(),
+                    attrs: crate::poi_attrs::encode(|k| r.tags.get(k)),
                     outer_ways: r
                         .members
                         .iter()
@@ -324,6 +348,7 @@ fn way_blob(
                     id: w.id,
                     type_,
                     name: name.to_vec(),
+                    attrs: crate::poi_attrs::encode(|k| w.tags.get(k)),
                     refs: w.refs.to_vec(),
                 });
             }
@@ -353,6 +378,7 @@ fn node_blob(state: &mut NodePass, block: &pbf::PrimitiveBlock, needed: &[i64]) 
                     type_,
                     n.id,
                     name,
+                    crate::poi_attrs::encode(|k| n.tags.get(k)),
                 ));
             }
         }
@@ -396,7 +422,13 @@ where
     Some((sum_lat / (n + 1) as f64, sum_lon / (n + 1) as f64))
 }
 
-fn make_poi((lat, lon): (f64, f64), type_: u16, osm_id: i64, name: &[u8]) -> Poi {
+fn make_poi(
+    (lat, lon): (f64, f64),
+    type_: u16,
+    osm_id: i64,
+    name: &[u8],
+    attrs: Vec<u8>,
+) -> Poi {
     let lat_e7 = (lat * 1e7).round() as i32;
     let lon_e7 = (lon * 1e7).round() as i32;
     Poi {
@@ -410,19 +442,33 @@ fn make_poi((lat, lon): (f64, f64), type_: u16, osm_id: i64, name: &[u8]) -> Poi
         type_,
         osm_id,
         name: name.to_vec(),
+        attrs,
     }
 }
 
-/// Returns `(records, unique_names, name_bytes)`.
+struct Written {
+    records: usize,
+    unique_names: usize,
+    name_bytes: u32,
+    with_attrs: usize,
+    unique_attrs: usize,
+    attr_bytes: usize,
+}
+
 fn write_outputs(
     pois: &[Poi],
     geojson: &Path,
     names: &Path,
     index: &Path,
-) -> Result<(usize, usize, u32)> {
+    attrs: &Path,
+) -> Result<Written> {
     let mut pool = NamePool::new(BufWriter::new(create(names)?));
     let mut index_out = BufWriter::new(create(index)?);
     let mut geojson_out = BufWriter::new(create(geojson)?);
+    // The sidecar is indexed by record ordinal, so it is filled in this same loop
+    // over the same Morton-sorted vector. Any second pass over `pois` would be an
+    // opportunity for the two files to disagree.
+    let mut attr_pool = AttrPool::new();
     let mut line: Vec<u8> = Vec::new();
 
     for p in pois {
@@ -431,6 +477,7 @@ fn write_outputs(
         index_out.write_all(&p.lon_e7.to_le_bytes()).map_err(io_err)?;
         index_out.write_all(&off.to_le_bytes()).map_err(io_err)?;
         index_out.write_all(&p.type_.to_le_bytes()).map_err(io_err)?;
+        attr_pool.push(&p.attrs).map_err(io_err)?;
 
         line.clear();
         write!(
@@ -444,6 +491,10 @@ fn write_outputs(
         geojson_out.write_all(&line).map_err(io_err)?;
     }
 
+    let mut attrs_out = BufWriter::new(create(attrs)?);
+    attr_pool.write(&mut attrs_out).map_err(io_err)?;
+    attrs_out.flush().map_err(io_err)?;
+
     index_out.flush().map_err(io_err)?;
     geojson_out.flush().map_err(io_err)?;
     let unique = pool.unique_count();
@@ -453,7 +504,20 @@ fn write_outputs(
         "Wrote {} record(s), {unique} unique name(s), {bytes} name byte(s)",
         pois.len()
     );
-    Ok((pois.len(), unique, bytes))
+    println!(
+        "Wrote {} POI(s) with attributes, {} unique record(s), {} sidecar byte(s)",
+        attr_pool.with_attrs(),
+        attr_pool.unique_count(),
+        attr_pool.total_len()
+    );
+    Ok(Written {
+        records: pois.len(),
+        unique_names: unique,
+        name_bytes: bytes,
+        with_attrs: attr_pool.with_attrs(),
+        unique_attrs: attr_pool.unique_count(),
+        attr_bytes: attr_pool.total_len(),
+    })
 }
 
 fn create(path: &Path) -> Result<File> {
@@ -469,18 +533,24 @@ pub struct Args {
     pub geojson: PathBuf,
     pub names: PathBuf,
     pub index: PathBuf,
+    pub attrs: PathBuf,
 }
 
-/// `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE`
+/// `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE [--attrs FILE]`
+///
+/// `--attrs` defaults to `poi_attrs.bin` beside `--index`, so a caller that predates
+/// the sidecar keeps working and still emits it. Making it required would break
+/// build_pois_layer.sh and build_all.* on the same commit.
 pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
     let mut input: Option<PathBuf> = None;
     let mut geojson: Option<PathBuf> = None;
     let mut names: Option<PathBuf> = None;
     let mut index: Option<PathBuf> = None;
+    let mut attrs: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            flag @ ("--geojson" | "--names" | "--index") => {
+            flag @ ("--geojson" | "--names" | "--index" | "--attrs") => {
                 let flag = flag.to_string();
                 i += 1;
                 let value = args
@@ -490,6 +560,7 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
                 match flag.as_str() {
                     "--geojson" => geojson = Some(value),
                     "--names" => names = Some(value),
+                    "--attrs" => attrs = Some(value),
                     _ => index = Some(value),
                 }
             }
@@ -503,11 +574,19 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
         }
         i += 1;
     }
+    // Resolved in the order the usage line lists them, so a bare `in.pbf` still
+    // complains about the first thing it is missing.
+    let input = input.ok_or_else(|| "missing IN.osm.pbf".to_string())?;
+    let geojson = geojson.ok_or_else(|| "--geojson is required".to_string())?;
+    let names = names.ok_or_else(|| "--names is required".to_string())?;
+    let index = index.ok_or_else(|| "--index is required".to_string())?;
+    let attrs = attrs.unwrap_or_else(|| index.with_file_name("poi_attrs.bin"));
     Ok(Args {
-        input: input.ok_or_else(|| "missing IN.osm.pbf".to_string())?,
-        geojson: geojson.ok_or_else(|| "--geojson is required".to_string())?,
-        names: names.ok_or_else(|| "--names is required".to_string())?,
-        index: index.ok_or_else(|| "--index is required".to_string())?,
+        input,
+        geojson,
+        names,
+        index,
+        attrs,
     })
 }
 
@@ -545,16 +624,56 @@ mod tests {
         (records, lines)
     }
 
-    #[test]
-    fn extracts_nodes_closed_ways_and_relations() {
-        let (pbf_path, dir) = testpbf::write_sample("poi_build");
+    /// Decode `poi_attrs.bin` the way [`crate::poi_attrs`] documents it: one
+    /// `(key, value)` list per record ordinal, empty where the POI had nothing.
+    fn read_attrs(dir: &Path) -> Vec<Vec<(u8, String)>> {
+        use crate::poi_attrs::{HEADER_BYTES, MAGIC, NO_ATTRS, VERSION};
+        let bytes = std::fs::read(dir.join("poi_attrs.bin")).unwrap();
+        assert_eq!(&bytes[0..4], &MAGIC);
+        assert_eq!(bytes[4], VERSION);
+        let count = u32::from_le_bytes(bytes[8..12].try_into().unwrap()) as usize;
+        let blob = &bytes[HEADER_BYTES + 4 * count..];
+        (0..count)
+            .map(|i| {
+                let at = HEADER_BYTES + 4 * i;
+                let off = u32::from_le_bytes(bytes[at..at + 4].try_into().unwrap());
+                if off == NO_ATTRS {
+                    return Vec::new();
+                }
+                let at = off as usize;
+                let len = u16::from_le_bytes(blob[at..at + 2].try_into().unwrap()) as usize;
+                let body = &blob[at + 2..at + 2 + len];
+                let mut out = Vec::new();
+                let mut j = 0;
+                while j + 3 <= body.len() {
+                    let vlen = u16::from_le_bytes(body[j + 1..j + 3].try_into().unwrap()) as usize;
+                    out.push((
+                        body[j],
+                        String::from_utf8(body[j + 3..j + 3 + vlen].to_vec()).unwrap(),
+                    ));
+                    j += 3 + vlen;
+                }
+                out
+            })
+            .collect()
+    }
+
+    fn build_sample(tag: &str) -> (Stats, PathBuf) {
+        let (pbf_path, dir) = testpbf::write_sample(tag);
         let stats = build(
             &pbf_path,
             &dir.join("pois.geojsonseq"),
             &dir.join("poi_names.bin"),
             &dir.join("poi_index.bin"),
+            &dir.join("poi_attrs.bin"),
         )
         .unwrap();
+        (stats, dir)
+    }
+
+    #[test]
+    fn extracts_nodes_closed_ways_and_relations() {
+        let (stats, dir) = build_sample("poi_build");
 
         // The cafe node, the closed "Plaza" way and the "Riverside Park"
         // relation. The bus stop node has a name but `highway=bus_stop` is not a
@@ -659,6 +778,7 @@ mod tests {
                 &dir.join(format!("pois{suffix}.geojsonseq")),
                 &dir.join(format!("names{suffix}.bin")),
                 &dir.join(format!("index{suffix}.bin")),
+                &dir.join(format!("attrs{suffix}.bin")),
             )
             .unwrap();
         };
@@ -668,6 +788,7 @@ mod tests {
             ("poisa.geojsonseq", "poisb.geojsonseq"),
             ("namesa.bin", "namesb.bin"),
             ("indexa.bin", "indexb.bin"),
+            ("attrsa.bin", "attrsb.bin"),
         ] {
             assert_eq!(
                 std::fs::read(dir.join(a)).unwrap(),
@@ -675,6 +796,52 @@ mod tests {
                 "{a} differs between runs"
             );
         }
+    }
+
+    /// The sidecar's join to `poi_index.bin` is by ordinal, so the two files have to
+    /// have exactly the same length in records and agree row for row.
+    #[test]
+    fn the_attribute_sidecar_lines_up_with_the_index_by_ordinal() {
+        use crate::poi_attrs::{
+            KEY_CUISINE, KEY_HOUSENUMBER, KEY_OPENING_HOURS, KEY_PHONE, KEY_STREET, KEY_WEBSITE,
+        };
+        let (stats, dir) = build_sample("poi_attrs_join");
+        let (records, _) = read_records(&dir);
+        let attrs = read_attrs(&dir);
+
+        assert_eq!(attrs.len(), records.len(), "one slot per index record");
+        assert_eq!(stats.with_attrs, 1, "only the cafe node carries any");
+        assert_eq!(stats.unique_attrs, 1);
+
+        let cafe = records.iter().position(|r| r.name == "Corner Cafe").unwrap();
+        assert_eq!(
+            attrs[cafe],
+            vec![
+                (KEY_OPENING_HOURS, "24/7".to_string()),
+                // The fixture tags `contact:phone` rather than `phone`, so the alias
+                // has to be read.
+                (KEY_PHONE, "+1-555-0100".to_string()),
+                (KEY_WEBSITE, "https://cafe.example".to_string()),
+                (KEY_HOUSENUMBER, "120".to_string()),
+                (KEY_STREET, "Market St".to_string()),
+                (KEY_CUISINE, "coffee_shop".to_string()),
+            ]
+        );
+
+        for (i, a) in attrs.iter().enumerate() {
+            if i != cafe {
+                assert!(a.is_empty(), "{} has no attributes", records[i].name);
+            }
+        }
+    }
+
+    /// Adding the sidecar must not have widened the record everything else measures
+    /// the file by. `record_count = filesize / 14` is asserted in the README too.
+    #[test]
+    fn the_index_record_is_still_fourteen_bytes() {
+        let (stats, dir) = build_sample("poi_width");
+        let index = std::fs::read(dir.join("poi_index.bin")).unwrap();
+        assert_eq!(index.len(), stats.records * 14);
     }
 
     #[test]
@@ -686,12 +853,32 @@ mod tests {
             "--names".into(),
             "n".into(),
             "--index".into(),
-            "i".into(),
+            "out/poi_index.bin".into(),
         ])
         .unwrap();
         assert_eq!(ok.input, PathBuf::from("in.pbf"));
-        assert_eq!(ok.index, PathBuf::from("i"));
+        assert_eq!(ok.index, PathBuf::from("out/poi_index.bin"));
+        // Defaulted beside the index, so a caller written before the sidecar existed
+        // still emits one rather than silently skipping it.
+        assert_eq!(ok.attrs, PathBuf::from("out/poi_attrs.bin"));
         assert!(parse_args(&["in.pbf".into()]).is_err());
         assert!(parse_args(&["in.pbf".into(), "--geojson".into()]).is_err());
+    }
+
+    #[test]
+    fn an_explicit_attrs_path_overrides_the_default() {
+        let ok = parse_args(&[
+            "in.pbf".into(),
+            "--geojson".into(),
+            "g".into(),
+            "--names".into(),
+            "n".into(),
+            "--index".into(),
+            "i".into(),
+            "--attrs".into(),
+            "elsewhere/a.bin".into(),
+        ])
+        .unwrap();
+        assert_eq!(ok.attrs, PathBuf::from("elsewhere/a.bin"));
     }
 }

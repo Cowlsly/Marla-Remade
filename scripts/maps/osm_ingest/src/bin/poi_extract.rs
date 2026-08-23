@@ -1,12 +1,12 @@
-//! `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE`
+//! `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE [--attrs FILE]`
 //!
 //! Replaces `scripts/maps/poi_extract.cpp`. See `osm_ingest::poi_build` for the
 //! POI type map and the on-disk record layout.
 
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "Usage: poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE";
+const USAGE: &str = "Usage: poi_extract IN.osm.pbf --geojson FILE --names FILE \
+                     --index FILE [--attrs FILE]";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -19,7 +19,13 @@ fn main() -> ExitCode {
     };
 
     let started = std::time::Instant::now();
-    match osm_ingest::poi_build::build(&args.input, &args.geojson, &args.names, &args.index) {
+    match osm_ingest::poi_build::build(
+        &args.input,
+        &args.geojson,
+        &args.names,
+        &args.index,
+        &args.attrs,
+    ) {
         Ok(stats) => {
             println!(
                 "{} POI(s) ({} node, {} closed-way, {} relation), {} unique name(s) \
@@ -33,10 +39,15 @@ fn main() -> ExitCode {
                 started.elapsed().as_secs_f64()
             );
             println!(
-                "Wrote {}, {}, {}",
+                "{} POI(s) with attributes, {} unique record(s), {} sidecar byte(s)",
+                stats.with_attrs, stats.unique_attrs, stats.attr_bytes
+            );
+            println!(
+                "Wrote {}, {}, {}, {}",
                 args.geojson.display(),
                 args.names.display(),
-                args.index.display()
+                args.index.display(),
+                args.attrs.display()
             );
             ExitCode::SUCCESS
         }

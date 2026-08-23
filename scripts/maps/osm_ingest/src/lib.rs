@@ -30,6 +30,7 @@ pub mod names;
 pub mod osm;
 pub mod par;
 pub mod pbf;
+pub mod poi_attrs;
 pub mod poi_build;
 pub mod proto;
 pub mod rings;
