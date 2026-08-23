@@ -112,10 +112,11 @@ class StylePatcherTest {
     fun `the original sources are replaced, not merged`() {
         val sources = patch()["sources"]!!.jsonObject
         assertEquals(setOf("protomaps_base", "protomaps_hybrid"), sources.keys)
-        // Both capped at 15: the base data stops there while the merged archive advertises 16,
-        // so without the cap base layers vanish at max zoom instead of overzooming.
+        // No maxzoom cap: the base archive advertises its own, so MapLibre overzooms
+        // past it. The cap only existed to correct a merged archive that claimed the
+        // overlays' z16 while its base tiles stopped at z15.
         for (name in sources.keys) {
-            assertEquals(15, sources[name]!!.jsonObject["maxzoom"]!!.jsonPrimitive.content.toInt())
+            assertNull(sources[name]!!.jsonObject["maxzoom"], "$name must not cap zoom")
         }
     }
 

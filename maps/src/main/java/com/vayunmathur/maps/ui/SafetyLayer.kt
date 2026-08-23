@@ -19,18 +19,18 @@ import org.maplibre.compose.sources.rememberVectorSource
 import org.maplibre.compose.util.MaplibreComposable
 
 /**
- * Safety / road-furniture data source (P13). The features are baked into the v5
- * basemap PMTiles (source-layer [SOURCE_LAYER]), so the overlay reads the same
- * [MapTileCache.BASEMAP_PMTILES_URL] as everything else — switching to the
- * global v5 file is a one-line change in [MapTileCache].
+ * Safety / road-furniture data source (P13). The features are baked into the
+ * overlay PMTiles archive (source-layer [SOURCE_LAYER]), so the overlay reads
+ * [MapTileCache.OVERLAY_PMTILES_URL] — switching to the global overlay file is a
+ * one-line change in [MapTileCache].
  *
  * Each `safety` feature carries a `kind` in [KIND_SPEED_CAMERA],
  * [KIND_ALPR], [KIND_SURVEILLANCE], [KIND_STOP_SIGN], [KIND_TRAFFIC_SIGNALS],
  * which drives the category icon in [SafetyLayer].
  */
 object SafetyLayersSource {
-    /** Baked into the v5 basemap PMTiles — read from the shared base URL. */
-    val PMTILES_URL: String get() = MapTileCache.BASEMAP_PMTILES_URL
+    /** Baked into the overlay PMTiles — read from the shared overlay URL. */
+    val PMTILES_URL: String get() = MapTileCache.OVERLAY_PMTILES_URL
     const val SOURCE_LAYER: String = "safety"
     const val LAYER_ID: String = "safety-icons"
 
@@ -45,7 +45,7 @@ object SafetyLayersSource {
 
 /**
  * Mount the safety-layers overlay when [enabled] (the P6 LayersSheet toggle) and
- * the v5 tileset exists. A single [SymbolLayer] over the `safety` vector source
+ * the overlay tileset exists. A single [SymbolLayer] over the `safety` vector source
  * draws a data-driven category icon per feature `kind` (speed camera / ALPR /
  * surveillance / stop sign / traffic signals). No-op while browsing with the
  * toggle off.

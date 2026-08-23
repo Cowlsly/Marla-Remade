@@ -36,8 +36,9 @@ import javax.net.ssl.SSLException
 /**
  * Disk cache for the streamed protomaps basemap tiles.
  *
- * The basemap is streamed live from [BASEMAP_PMTILES_URL] via pmtiles-over-HTTP
- * range requests. MapLibre routes every HTTP resource load through the
+ * The basemap is streamed live from [BASEMAP_PMTILES_URL], and our overlays from
+ * [OVERLAY_PMTILES_URL], via pmtiles-over-HTTP range requests. MapLibre routes
+ * every HTTP resource load through the
  * [HttpRequest] produced by its [ModuleProvider]; we install our own provider
  * via [MapLibre.setModuleProvider] so the whole map stack runs on
  * `library:network` (HttpURLConnection) instead of MapLibre's bundled OkHttp
@@ -56,18 +57,28 @@ object MapTileCache {
     /**
      * The single source of truth for the streamed basemap PMTiles URL.
      *
-     * v5 (P13) bakes the safety/road-furniture and admin border layers into the
-     * same file as the base schema, so the base style source, the maxspeed probe
-     * ([com.vayunmathur.maps.ui.MaxspeedSource]), the safety overlay
-     * ([com.vayunmathur.maps.ui.SafetyLayersSource]) and the admin
-     * search-highlight all read from THIS one URL.
-     *
-     * Currently the California test build (`v5-ca.pmtiles`, hosted + verified).
-     * To ship globally, swap this one line to `v5.pmtiles` once the planet build
-     * is hosted (same pipeline, bigger bbox) — nothing else needs to change.
+     * Base schema ONLY — the Protomaps layers `style.json` draws. Our own overlays
+     * live in [OVERLAY_PMTILES_URL], a separate archive, because at planet scale the
+     * base is ~127 GB and the overlays are a couple of GB: joining them would make
+     * the merge impossible for the sake of a file 97% of which never changes.
+     * See `scripts/maps/build_v5_pmtiles.sh --no-base`.
      */
     const val BASEMAP_PMTILES_URL =
-        "pmtiles://https://data.vayunmathur.com/v5-ca.pmtiles"
+        "pmtiles://https://data.vayunmathur.com/v4.pmtiles"
+
+    /**
+     * Our overlay archive: `safety`, `maxspeed`, `transit_lines`, `ma_pois`,
+     * `transit_stops` and the three `admin_*` levels, with no base layers.
+     *
+     * Read by the maxspeed probe ([com.vayunmathur.maps.ui.MaxspeedSource]), the
+     * safety overlay ([com.vayunmathur.maps.ui.SafetyLayersSource]), the ambient POI
+     * layer, the transit line/stop overlays and the admin search-highlight.
+     *
+     * Currently the California test build (`v5-ca-overlay.pmtiles`). Shipping
+     * globally is a one-line change here once the planet overlay build is hosted.
+     */
+    const val OVERLAY_PMTILES_URL =
+        "pmtiles://https://data.vayunmathur.com/v5-ca-overlay.pmtiles"
 
     internal const val TILE_HOST = "data.vayunmathur.com"
     private val REFRESH_INTERVAL_MS = 24.hours.inWholeMilliseconds
@@ -77,14 +88,20 @@ object MapTileCache {
     internal const val TAG = "MapTileCache"
 
     /**
-     * Marker written into the cache dir. Entries are wiped when it changes, so
-     * it carries the origin host, a format revision, AND the exact pmtiles URL:
-     * if [BASEMAP_PMTILES_URL] is repointed (or its bytes are regenerated under
-     * the same name), every cached range keyed off the old file is dropped so we
-     * can never serve a stale/short chunk from a previous build. v3 also only
-     * ever stores validated 206 partials (see [CachingHttpRequest.load]).
+     * Marker written into the cache dir. Entries are wiped when it changes, so it
+     * carries the origin host, a format revision, AND both pmtiles URLs: if either
+     * is repointed (or its bytes are regenerated under the same name), every cached
+     * range keyed off the old files is dropped so we can never serve a stale/short
+     * chunk from a previous build. v3 also only ever stores validated 206 partials
+     * (see [CachingHttpRequest.load]).
+     *
+     * BOTH urls have to be in here. The overlays are the half that gets rebuilt —
+     * the base is republished almost never — so a marker naming only the basemap
+     * would leave a republished overlay serving byte ranges from the previous
+     * build's directory, which is the exact failure this marker exists to prevent.
      */
-    private const val CACHE_ORIGIN = "$TILE_HOST/v3/$BASEMAP_PMTILES_URL"
+    private const val CACHE_ORIGIN =
+        "$TILE_HOST/v3/$BASEMAP_PMTILES_URL|$OVERLAY_PMTILES_URL"
 
     @Volatile private var installed = false
 

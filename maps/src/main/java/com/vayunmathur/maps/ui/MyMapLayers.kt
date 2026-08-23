@@ -98,11 +98,11 @@ fun MyMapLayers(
         var routeSource by remember { mutableStateOf<GeoJsonSource?>(null) }
         var userSource by remember { mutableStateOf<GeoJsonSource?>(null) }
 
-        // Admin borders (country/region/city) and the OSM transit lines are baked
-        // into the v5 basemap PMTiles (P13/P22), replacing the old admin0/admin1
-        // FlatGeobuf assets. This one vector source feeds the search/selection
-        // highlight below AND the transit-lines overlay.
-        val adminSource = rememberVectorSource(MapTileCache.BASEMAP_PMTILES_URL)
+        // Every one of our baked overlays lives in the overlay PMTiles archive
+        // (P13/P22/P27) rather than the base: admin borders, transit lines, POIs and
+        // GTFS stops. One vector source feeds all of them, which is enough because
+        // they are all layers of the same file.
+        val overlaySource = rememberVectorSource(MapTileCache.OVERLAY_PMTILES_URL)
 
         LaunchedEffect(Unit) {
             userSource = GeoJsonSource(
@@ -153,23 +153,20 @@ fun MyMapLayers(
         SafetyLayer(safetyEnabled)
 
         // P22: OSM transit-lines overlay — rail/subway/light_rail/tram/monorail
-        // baked into the v5 basemap PMTiles as the `transit_lines` source-layer.
+        // baked into the overlay PMTiles as the `transit_lines` source-layer.
         // Shown with the P6 "Transit" toggle (alongside the P10 Transitous
-        // stops). Harmless no-op while the layer is absent (until v5 is
-        // regenerated with it).
+        // stops). Harmless no-op while the layer is absent.
         if (transitEnabled) {
-            TransitLinesLayer(adminSource, tokens)
+            TransitLinesLayer(overlaySource, tokens)
         }
 
         // Ambient POI overlay (P29): rendered NATIVELY from the baked `ma_pois`
-        // PMTiles source-layer (P27) via the EXISTING single vector source
-        // (`adminSource`) — the same one the admin/transit overlays reuse. This
-        // avoids the second-source "PMTiles directory" parse error that broke the
-        // original overlay, and it removes the slow per-viewport offline-index
-        // GeoJSON pins path. Google is still hit only on tap for rich details
-        // (see MapPage.onMapClick -> toSelectedMaPoi). A non-null [poiFilterTypes]
-        // (set by tapping a category chip) filters the layer to those OSM types.
-        MaPoisLayer(adminSource, poiFilterTypes)
+        // source-layer (P27) via the shared [overlaySource]. Replaces the slow
+        // per-viewport offline-index GeoJSON pins path. Google is still hit only on
+        // tap for rich details (see MapPage.onMapClick -> toSelectedMaPoi). A
+        // non-null [poiFilterTypes] (set by tapping a category chip) filters the
+        // layer to those OSM types.
+        MaPoisLayer(overlaySource, poiFilterTypes)
 
         // Saved-place pins (Home / Work / starred list). Tap re-selects the
         // place → PlaceSheet (Vela's SavedPin).
@@ -185,9 +182,7 @@ fun MyMapLayers(
         if (transitEnabled) {
             // Baked GTFS stop pins (P10). Shown only when the Transit layer is on;
             // tap a stop → live departure board (handled in MapPage.onMapClick).
-            // Same shared source as the admin/POI overlays — a second VectorSource
-            // on the same PMTiles triggers a directory parse error.
-            TransitStopsLayer(adminSource)
+            TransitStopsLayer(overlaySource)
         }
 
         // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
@@ -238,15 +233,15 @@ fun MyMapLayers(
                 is SpecificFeature.Admin0Label ->
                     // Country highlight: filter the v5 admin_country layer by
                     // ISO_A2 (the key CountryMap.getAdmin0 matched on the FGB).
-                    AdminHighlight(adminSource, "admin_country", "ISO_A2", selectedFeature.iso)
+                    AdminHighlight(overlaySource, "admin_country", "ISO_A2", selectedFeature.iso)
                 is SpecificFeature.Admin1Label ->
                     // Region/state highlight: filter admin_region by iso_3166_2
                     // (the key CountryMap.getAdmin1 matched on the FGB).
-                    AdminHighlight(adminSource, "admin_region", "iso_3166_2", selectedFeature.iso)
+                    AdminHighlight(overlaySource, "admin_region", "iso_3166_2", selectedFeature.iso)
                 is SpecificFeature.Admin2Label ->
                     // City highlight: admin_city carries no ISO code, so match the
                     // English name — the same value parse() read off the label.
-                    AdminHighlight(adminSource, "admin_city", "name_en", selectedFeature.name)
+                    AdminHighlight(overlaySource, "admin_city", "name_en", selectedFeature.name)
                 is SpecificFeature.Route -> {
                     if (route != null) {
                         LaunchedEffect(
@@ -280,7 +275,7 @@ fun MyMapLayers(
 
 /**
  * OSM transit-lines overlay (P22-APP): draws the `transit_lines` source-layer
- * baked into the v5 basemap PMTiles by the generator. Each feature carries
+ * baked into the overlay PMTiles archive by the generator. Each feature carries
  * `kind` (rail/subway/light_rail/tram/monorail/train), plus optional `name`,
  * `ref` and `colour`. Lines are colored by the feature's own `colour` when the
  * generator provides one, otherwise by a per-[kind] palette. Rendered only when

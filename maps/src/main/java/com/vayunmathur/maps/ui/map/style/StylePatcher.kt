@@ -12,8 +12,11 @@ import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
 
 /**
- * Native basemap layers suppressed at runtime — amenities are Google-only now
- * (custom overlay layer). Keeping this in code (vs editing style.json) makes it
+ * Native basemap layers suppressed at runtime.
+ *
+ * The base archive still carries Protomaps' own `pois`, but we draw POIs ourselves
+ * from the baked `ma_pois` overlay (see MaPoisLayer), so leaving the base layer on
+ * would double every pin. Keeping this in code (vs editing style.json) makes it
  * OTA-swappable per Decision D1.
  */
 private val SUPPRESSED_LAYERS = setOf("pois")
@@ -37,6 +40,11 @@ private const val PATCHED_MARKER = "ma:patched"
  * colour keys are swapped for [BasemapPalette] values, so we do not carry a second copy of a
  * 3544-line style file.
  *
+ * Neither source declares a `maxzoom`. It used to: the merged v5 archive unioned its inputs'
+ * zoom ranges, so it advertised the overlays' z16 while its base tiles stopped at z15, and base
+ * layers vanished at max zoom. The overlays now live in their own archive, so the base
+ * advertises its own true maxzoom and MapLibre overzooms past it on its own.
+ *
  * Returns [jsonString] unchanged if it has already been patched. A theme flip re-patches from
  * the *original* asset, not from the previous output.
  */
@@ -57,17 +65,10 @@ fun patchStyleForHybrid(
         putJsonObject("protomaps_base") {
             put("type", "vector")
             put("url", baseLocalUrl)
-            // The v5-ca base data stops at z15 but the merged pmtiles advertise
-            // maxzoom 16, so base layers vanish at z16 while the separate overlay
-            // sources (safety/maxspeed/transit_lines/admin) keep rendering. Cap the
-            // source at 15 so MapLibre OVERZOOMS z15 tiles past z15, keeping the
-            // base visible at max zoom.
-            put("maxzoom", 15)
         }
         putJsonObject("protomaps_hybrid") {
             put("type", "vector")
             put("url", hybridUrl)
-            put("maxzoom", 15)
         }
     }
 
@@ -78,10 +79,11 @@ fun patchStyleForHybrid(
             val id = layer["id"]?.jsonPrimitive?.content ?: ""
             val type = layer["type"]?.jsonPrimitive?.content ?: ""
 
-            // Suppress native basemap POIs at runtime (Decision D1) — amenities
-            // are Google-only now, rendered on the custom overlay layer. Dropping
-            // the source layer here (rather than editing style.json) keeps it
-            // OTA-swappable. Also drops the would-be _base/_hybrid variants.
+            // Suppress the base archive's own POIs at runtime (Decision D1): we draw
+            // them from the baked `ma_pois` overlay instead, so keeping both would
+            // double every pin. Dropping the source layer here (rather than editing
+            // style.json) keeps it OTA-swappable. Also drops the would-be
+            // _base/_hybrid variants.
             if (id in SUPPRESSED_LAYERS) return@forEach
 
             // Dark palette (P14): recolor the base Protomaps paint at runtime so

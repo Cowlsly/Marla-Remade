@@ -31,7 +31,7 @@ private const val TRANSIT_STOP_DOT_LAYER_ID = "transit-stop-dots"
 
 /**
  * Baked GTFS stop layer. Placement, name, `motis_id` and `route_type` come from
- * the `transit_stops` source-layer in the v5 basemap PMTiles, written by
+ * the `transit_stops` source-layer in the overlay PMTiles archive, written by
  * `scripts/maps/build_transit_stops_layer.sh`.
  *
  * This replaced a per-viewport `GET /api/v1/map/stops` fetch. Stops are static
@@ -55,9 +55,8 @@ private val TRANSIT_FERRY_COLOR = Color(0xFF0277BD)
 
 /**
  * Draw the `transit_stops` source-layer: a [CircleLayer] dot with a [SymbolLayer]
- * glyph on top, from z10 up. Takes the SAME shared [VectorSource] the admin and
- * POI overlays use — a second source on the same PMTiles triggers a directory
- * parse error (see the note at [MaPoisLayer]).
+ * glyph on top, from z10 up. Takes the shared overlay [VectorSource] the admin and
+ * POI overlays also read, since they are all layers of the same archive.
  *
  * The marker is a runtime Canvas bitmap rather than a sprite asset, so it renders
  * even while the style's remote glyphs 404; [MaPoisLayer] does the same.

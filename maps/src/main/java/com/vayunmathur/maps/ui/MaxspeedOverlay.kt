@@ -21,15 +21,15 @@ import org.maplibre.spatialk.geojson.Position
  * under the puck (see [queryPostedLimit]) and shows the parsed value on the
  * speed widget.
  *
- * The maxspeed data is baked into the v5 PMTiles (P13), so the probe reads the
- * same file as the basemap — [MaxspeedSource.PMTILES_URL] delegates to the
- * single [com.vayunmathur.maps.util.MapTileCache.BASEMAP_PMTILES_URL] source of
- * truth (source-layer [SOURCE_LAYER], feature property [PROP]). Switching to the
- * global v5 file is therefore a one-line change in [MapTileCache].
+ * The maxspeed data is baked into our overlay PMTiles archive (P13), so the probe
+ * reads [MaxspeedSource.PMTILES_URL], which delegates to the single
+ * [com.vayunmathur.maps.util.MapTileCache.OVERLAY_PMTILES_URL] source of truth
+ * (source-layer [SOURCE_LAYER], feature property [PROP]). Switching to the global
+ * overlay file is therefore a one-line change in [MapTileCache].
  */
 object MaxspeedSource {
-    /** Baked into the v5 basemap PMTiles — read from the shared base URL. */
-    val PMTILES_URL: String get() = com.vayunmathur.maps.util.MapTileCache.BASEMAP_PMTILES_URL
+    /** Baked into the overlay PMTiles — read from the shared overlay URL. */
+    val PMTILES_URL: String get() = com.vayunmathur.maps.util.MapTileCache.OVERLAY_PMTILES_URL
     const val LAYER_ID: String = "maxspeed-probe"
     const val SOURCE_LAYER: String = "maxspeed"
     const val PROP: String = "maxspeed"
