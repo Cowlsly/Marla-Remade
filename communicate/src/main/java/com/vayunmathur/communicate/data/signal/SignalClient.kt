@@ -274,6 +274,18 @@ object SignalClient {
         else -> System.currentTimeMillis()
     }
 
+    /**
+     * The `groupV2` context for [conversationId], or nulls when it is not a group.
+     *
+     * Every DataMessage sent to a group needs this or the recipient files it as a 1:1 message from the sender —
+     * which is how reactions, edits, deletes and polls used to escape their group thread.
+     */
+    private suspend fun groupContextFor(conversationId: String): Pair<ByteArray?, Int?> {
+        if (!SignalProtocol.isGroupConversation(conversationId)) return null to null
+        val masterKey = groupMasterKeyForConversation(conversationId) ?: return null to null
+        return masterKey to groupRevisionForConversation(conversationId)
+    }
+
     private suspend fun sendContent(
         destinationAci: String,
         content: SignalServiceProtos.Content,
@@ -888,10 +900,13 @@ object SignalClient {
             .setKey(com.google.protobuf.ByteString.copyFrom(encrypted.key))
             .setDigest(com.google.protobuf.ByteString.copyFrom(encrypted.digest))
             .build()
+        val (mediaGroupKey, mediaGroupRev) = groupContextFor(recipient)
         val dm = SignalPayload.buildDataMessage(
             body = "",
             timestamp = ts,
             attachments = listOf(pointer),
+            groupV2MasterKey = mediaGroupKey,
+            groupV2Revision = mediaGroupRev,
         )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         if (!sendContent(recipient, content)) {
@@ -981,7 +996,14 @@ object SignalClient {
             targetAuthorAciBinary = targetAuthorBinary,
             targetSentTimestamp = targetTimestamp,
         )
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = ts, reaction = reaction)
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val dm = SignalPayload.buildDataMessage(
+            body = "",
+            timestamp = ts,
+            reaction = reaction,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         val ok = sendContent(conversationId, content)
         if (isRemove) {
@@ -998,7 +1020,13 @@ object SignalClient {
         val ts = System.currentTimeMillis()
         val cached = try { db?.cachedMessageDao()?.get(targetMessageId) } catch (_: Exception) { null }
         val targetTs = cached?.timestamp ?: ts
-        val newDm = SignalPayload.buildDataMessage(body = newBody, timestamp = ts)
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val newDm = SignalPayload.buildDataMessage(
+            body = newBody,
+            timestamp = ts,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
         val content = SignalPayload.buildContentForEdit(targetSentTimestamp = targetTs, newDataMessage = newDm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         try { db?.cachedMessageDao()?.markEdited(targetMessageId, newBody) } catch (_: Exception) {}
@@ -1010,7 +1038,14 @@ object SignalClient {
         val cached = try { db?.cachedMessageDao()?.get(targetMessageId) } catch (_: Exception) { null }
         val targetTs = cached?.timestamp ?: System.currentTimeMillis()
         val del = SignalPayload.buildDelete(targetSentTimestamp = targetTs)
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), delete = del)
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val dm = SignalPayload.buildDataMessage(
+            body = "",
+            timestamp = System.currentTimeMillis(),
+            delete = del,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         try { db?.cachedMessageDao()?.markRevoked(targetMessageId) } catch (_: Exception) {}
@@ -1022,7 +1057,14 @@ object SignalClient {
         val ts = System.currentTimeMillis()
         val id = SignalProtocol.generateMessageId()
         val pollCreate = SignalPayload.buildPollCreate(question, options, allowMultiple = false)
-        val dm = SignalPayload.buildDataMessage(body = question, timestamp = ts, pollCreate = pollCreate)
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val dm = SignalPayload.buildDataMessage(
+            body = question,
+            timestamp = ts,
+            pollCreate = pollCreate,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         val sd = SignalServiceData(pollQuestion = question, pollOptions = options.map { SignalPollOptionData(it) }, senderId = authData?.aci)
@@ -1047,7 +1089,14 @@ object SignalClient {
             optionIndexes = indexes,
             voteCount = selectedOptions.size,
         )
-        val dm = SignalPayload.buildDataMessage(body = "", timestamp = System.currentTimeMillis(), pollVote = pollVote)
+        val (groupKey, groupRev) = groupContextFor(conversationId)
+        val dm = SignalPayload.buildDataMessage(
+            body = "",
+            timestamp = System.currentTimeMillis(),
+            pollVote = pollVote,
+            groupV2MasterKey = groupKey,
+            groupV2Revision = groupRev,
+        )
         val content = SignalPayload.buildContentWithDataMessage(dm)
         try { sendContent(conversationId, content) } catch (_: Exception) {}
         _events.emit(SignalEvent.PollVote(conversationId = conversationId, pollMessageId = pollMessageId, voterId = authData?.aci ?: "", optionNames = selectedOptions))
@@ -1131,7 +1180,11 @@ object SignalClient {
             } catch (e: Exception) { Log.w(TAG, "setGroupName failed", e) }
         }
         _events.emit(SignalEvent.ConversationNameChanged(conversationId = conversationId, newName = name))
-        try { db?.conversationDao()?.upsert(existing.copy(name = name)) } catch (_: Exception) {}
+        // Persist the bumped revision too: every outgoing message quotes it, and dropping it meant every
+        // group send claimed revision 0 forever.
+        try {
+            db?.conversationDao()?.upsert(existing.copy(name = name, groupRevision = existing.groupRevision + 1))
+        } catch (_: Exception) {}
         return true
     }
 
@@ -1714,6 +1767,11 @@ object SignalClient {
         }
         val senderDisplayName = displayNameFor(env.sourceAci)
         val senderAci = env.sourceAci
+        // Remember the group's identity so a reply can be sent. Without this the conversation is created with
+        // no master key or members and every reply is refused or silently dropped.
+        if (masterKeyFromData != null) {
+            rememberInboundGroup(conversationId, masterKeyFromData, env.sourceAci)
+        }
         val senderDevice = env.sourceDevice
         val serverGuid = env.serverGuid ?: SignalProtocol.generateMessageId()
         val timestamp = env.timestamp
@@ -1998,6 +2056,38 @@ object SignalClient {
      */
     private suspend fun conversationIdFor(serviceId: String): String =
         contactFor(serviceId)?.phoneE164?.takeIf { it.isNotBlank() } ?: serviceId
+
+    /**
+     * Record a group we received a message from, so we can reply to it.
+     *
+     * Membership is learned incrementally from whoever has spoken: the envelope names only its sender, and the
+     * full member list comes from the server's group state. Until that is fetched, a reply reaches everyone we
+     * have heard from rather than everyone in the group — which is a real limitation, but strictly better than
+     * refusing to send at all.
+     */
+    private suspend fun rememberInboundGroup(conversationId: String, masterKey: ByteArray, senderAci: String) {
+        val dao = db?.conversationDao() ?: return
+        try {
+            val existing = dao.getConversation(conversationId)
+            val members = buildSet {
+                existing?.participants?.split(",")?.forEach { entry ->
+                    entry.trim().takeIf { it.isNotEmpty() }?.let { add(it) }
+                }
+                add(senderAci)
+                // Ourselves: a fan-out send skips our own address, but membership should still be accurate.
+                authData?.aci?.takeIf { it.isNotEmpty() }?.let { add(it) }
+            }
+            dao.upsert(
+                (existing ?: SignalConversation(chatId = conversationId)).copy(
+                    isGroup = true,
+                    groupMasterKey = masterKey,
+                    participants = members.joinToString(","),
+                ),
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not record the group behind $conversationId", t)
+        }
+    }
 
     private suspend fun emitReadSync(timestamp: Long, fallbackConversationId: String) {
         val cached = try { db?.cachedMessageDao()?.getByTimestamp(timestamp) } catch (_: Exception) { null }
