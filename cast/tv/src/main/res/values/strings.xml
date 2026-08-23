@@ -27,6 +27,10 @@
     <string name="tv_no_decoder">This TV has no usable H.265 or AV1 decoder</string>
     <string name="tv_missing_codec_config">Your phone did not send the video settings this TV needed. Try mirroring again.</string>
     <string name="tv_stream_failed">The stream stopped</string>
+    <!-- Transport overlay, driven from the TV remote -->
+    <string name="tv_transport_speed">%1$s×</string>
+    <string name="tv_transport_hint">OK to play or pause · ◀ ▶ to seek · ▲ ▼ for volume</string>
+    <string name="tv_transport_volume">Volume %1$d%%</string>
 
     <!-- Foreground service -->
     <string name="tv_notification_channel_name">Receiving</string>

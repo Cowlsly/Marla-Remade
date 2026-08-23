@@ -1,5 +1,7 @@
 package com.vayunmathur.cast.tv.platform
 
+import com.vayunmathur.cast.protocol.PlaybackState
+
 /** Where the receiver is, from the point of view of a screen. */
 sealed interface ReceiverPhase {
 
@@ -90,4 +92,36 @@ data class ReceiverUiState(
      * the fix is a permission rather than opening the app on the phone.
      */
     val localNetworkBlocked: Boolean = false,
+    /**
+     * The last thing the phone said about its playback, or null if it has never said anything.
+     *
+     * **Beside [phase] rather than inside [ReceiverPhase.Mirroring], deliberately.** A phase change
+     * replaces the whole object, and playback outlives several of them - the display mode settling,
+     * a surface being handed back after a resize. Nesting it would throw the seek bar's anchor away
+     * every time something unrelated happened.
+     *
+     * Null is also the gate on the whole feature: screen mirroring never sends a snapshot, so an
+     * overlay that only exists when this is non-null cannot appear over a mirrored phone screen.
+     */
+    val playback: PlaybackSnapshot? = null,
 )
+
+/**
+ * One playback snapshot, with the moment it landed.
+ *
+ * **The wall clock is the missing half of the message.** The phone reports twice a second and the
+ * panel redraws sixty times a second, so a bar plotted at the reported position would step visibly.
+ * What makes it smooth is knowing *when* the number was true, and the interpolation itself lives in
+ * `:cast:protocol` beside the message - a pure function of a snapshot and an elapsed time, which is
+ * the one part of this feature provable without a television.
+ *
+ * The TV never computes position authoritatively and cannot: what it holds is a 150 ms RTP jitter
+ * buffer, which is a smoothing device and not a content clock. Every fresh snapshot re-anchors, so
+ * error is bounded by one reporting interval rather than accumulating.
+ */
+data class PlaybackSnapshot(
+    val state: PlaybackState,
+    val receivedAtMs: Long,
+) {
+    fun positionAt(nowMs: Long): Long = state.interpolated(nowMs - receivedAtMs)
+}

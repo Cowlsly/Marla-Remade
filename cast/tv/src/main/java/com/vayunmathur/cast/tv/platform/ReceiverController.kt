@@ -18,6 +18,9 @@ import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
 import com.vayunmathur.cast.protocol.PairResult
 import com.vayunmathur.cast.protocol.PairingGate
+import com.vayunmathur.cast.protocol.PlaybackAction
+import com.vayunmathur.cast.protocol.PlaybackCommand
+import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.ProtocolBase64
 import com.vayunmathur.cast.protocol.SealedSecret
 import com.vayunmathur.cast.protocol.SecretSealing
@@ -141,6 +144,34 @@ object ReceiverController {
 
     private val pairingGate = PairingGate()
 
+    /**
+     * The live control channel, for sending back up it.
+     *
+     * The handshake reads and writes this channel from one coroutine, which is why it was never a
+     * field before. A remote press is the first thing that originates on *this* end at an arbitrary
+     * moment, so it needs a way in - [ControlChannel.send] is synchronised for the same reason.
+     * Volatile because the UI thread reads it while the session coroutine writes it.
+     */
+    @Volatile
+    private var channel: ControlChannel? = null
+
+    /**
+     * Ask the phone to do something. Dropped silently with no session, which is the honest answer:
+     * the remote was pressed at a screen with nothing playing on it.
+     */
+    fun send(command: PlaybackCommand) {
+        val live = channel ?: return
+        scope.launch {
+            runCatching { live.send(command) }
+                .onFailure { Log.w(TAG, "could not send ${command.action}", it) }
+        }
+    }
+
+    /** Skip forward or back by the phone's own interval, which is the phone's to decide. */
+    fun skip(forward: Boolean) {
+        send(PlaybackCommand(if (forward) PlaybackAction.SkipForward else PlaybackAction.SkipBack))
+    }
+
     fun start(context: Context) {
         if (acceptJob != null) return
         val appContext = context.applicationContext
@@ -158,7 +189,7 @@ object ReceiverController {
         advertiser = null
         runCatching { serverSocket?.close() }
         serverSocket = null
-        _state.update { it.copy(phase = ReceiverPhase.Starting) }
+        _state.update { it.copy(phase = ReceiverPhase.Starting, playback = null) }
     }
 
     /** Called by `MirrorActivity` once its `SurfaceView` has a surface to draw into. */
@@ -221,10 +252,16 @@ object ReceiverController {
             }
             val channel = ControlChannel(socket)
             // A failure from the previous session has been on screen long enough; the phone connecting
-            // now is what the user cares about.
+            // now is what the user cares about. The previous session's playback goes with it, or the
+            // next phone would inherit a seek bar describing something that is no longer playing.
             _state.update {
-                if (it.phase is ReceiverPhase.Failed) it.copy(phase = ReceiverPhase.Advertising) else it
+                if (it.phase is ReceiverPhase.Failed) {
+                    it.copy(phase = ReceiverPhase.Advertising, playback = null)
+                } else {
+                    it.copy(playback = null)
+                }
             }
+            this@ReceiverController.channel = channel
             sessionJob = scope.launch {
                 try {
                     runSession(channel, store, identity, deviceId, name, limits)
@@ -232,6 +269,7 @@ object ReceiverController {
                     Log.w(TAG, "session ended", e)
                 } finally {
                     channel.close()
+                    this@ReceiverController.channel = null
                     endMedia()
                     // A failure the user has to read is *not* overwritten with "ready" - it stays until
                     // the next phone tries, which is when it stops being the useful thing to show.
@@ -243,6 +281,9 @@ object ReceiverController {
                                 it.copy(
                                     phase = ReceiverPhase.Advertising,
                                     localNetworkBlocked = nsd.localNetworkBlocked,
+                                    // The overlay is gated on this being non-null, so clearing it is
+                                    // what takes the transport controls away with the session.
+                                    playback = null,
                                 )
                             }
                         }
@@ -314,7 +355,8 @@ object ReceiverController {
         // The session now lives in the UDP loop; this coroutine stays here so a BYE or a dropped
         // socket tears everything down through the same path. It is also where the codec configuration
         // arrives, which for AV1 is what the media loop is waiting on before it can start a decoder at
-        // all - it is repeated on every key-frame request, so this handles it more than once.
+        // all - it is repeated on every key-frame request, so this handles it more than once. And it is
+        // where playback snapshots arrive, twice a second, for as long as an app is casting content.
         while (true) {
             val next = channel.receive() ?: break
             when (val message = next.message) {
@@ -323,8 +365,30 @@ object ReceiverController {
                     return
                 }
                 is VideoCodecConfig -> onVideoCodecConfig(message, config)
+                is PlaybackState -> onPlaybackState(message)
                 else -> Unit
             }
+        }
+    }
+
+    /**
+     * Take a playback snapshot, and stamp it with the moment it arrived.
+     *
+     * The timestamp is taken here rather than in the UI because this is the closest thing to "when the
+     * phone said so" that exists on this side - anything later would fold recomposition delay into the
+     * seek bar's anchor.
+     *
+     * Not logged. Two of these a second would drown the once-a-second throughput line that everything
+     * else about a session is diagnosed from.
+     */
+    private fun onPlaybackState(message: PlaybackState) {
+        _state.update {
+            it.copy(
+                playback = PlaybackSnapshot(
+                    state = message,
+                    receivedAtMs = System.currentTimeMillis(),
+                ),
+            )
         }
     }
 

@@ -34,12 +34,19 @@ class ControlChannel(private val socket: Socket) {
         socket.soTimeout = READ_TIMEOUT_MS
     }
 
-    /** Returns the body bytes, for the transcript. */
-    fun send(message: ControlMessage): ByteArray {
+    /**
+     * Returns the body bytes, for the transcript.
+     *
+     * Synchronised because there are now three writers: the session coroutine, the media loop's `Bye`
+     * path, and the UI thread whenever the remote is pressed. Two encodes interleaving would also
+     * advance the cipher's nonce twice for one frame, which is not a corrupted message but an
+     * undecryptable one.
+     */
+    fun send(message: ControlMessage): ByteArray = synchronized(output) {
         val body = codec.encode(message)
         output.write(ControlFraming.encode(body))
         output.flush()
-        return body
+        body
     }
 
     /**
