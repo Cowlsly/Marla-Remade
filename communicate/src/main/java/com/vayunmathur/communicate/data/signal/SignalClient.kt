@@ -1299,6 +1299,18 @@ object SignalClient {
             cm.hasOffer() -> {
                 val offer = cm.offer
                 val isVideo = offer.type == SignalServiceProtos.CallMessage.Offer.Type.OFFER_VIDEO_CALL
+                // Logged in full so an inbound offer from official Signal can be compared against what we
+                // send: our own offers are accepted by the server but never ring, and our side reports
+                // success, so the difference has to be in the message itself.
+                val ageSec = ((env.serverTimestamp - env.timestamp).coerceAtLeast(0L)) / 1000
+                Log.i(
+                    TAG,
+                    "inbound Offer callId=${offer.id} from $senderAci:$senderDeviceId " +
+                        "opaque=${offer.opaque.size()}B type=${offer.type} " +
+                        "hasDestinationDeviceId=${cm.hasDestinationDeviceId()} " +
+                        "destinationDeviceId=${cm.destinationDeviceId} ageSec=$ageSec " +
+                        "urgent=${env.urgent}",
+                )
                 // Recorded before RingRTC reports Ringing, which is how the shared registry tells an
                 // inbound call from an outbound one, and what `answer()` needs.
                 pendingIncomingCallAci = senderAci
@@ -1315,8 +1327,6 @@ object SignalClient {
                 )
                 // Hand the call to the system so it owns ringing, audio focus and routing.
                 appContext?.let { ctx -> InAppCallTelecom.addIncoming(ctx, senderAci) }
-                // Age matters: RingRTC drops offers that sat in the queue too long to still be ringing.
-                val ageSec = ((env.serverTimestamp - env.timestamp).coerceAtLeast(0L)) / 1000
                 manager.receivedOffer(
                     callId = offer.id,
                     senderAci = senderAci,

@@ -34,10 +34,8 @@ class SignalRingRtcLogger : RingRtcLog.Logger {
 }
 
 /**
- * Camera control for audio-only calling: reports no capturer so RingRTC never tries to drive one.
- *
- * Video calls need a real implementation backed by `Camera2Enumerator`; until then an outgoing video
- * call would negotiate video and then send nothing.
+ * Camera control for a device with no usable camera. Reports no capturer, which makes RingRTC negotiate
+ * without video — only safe when the peer's offer also has no video m-line, so [SignalCamera] is preferred.
  */
 object NoCameraControl : CameraControl {
     override fun hasCapturer(): Boolean = false

@@ -43,13 +43,21 @@ object SignalKeysApi {
      *
      * @throws UnregisteredUserException on 404.
      */
+    /**
+     * Fetch pre-key bundles for [aci].
+     *
+     * [allDevices] uses the `*` specifier, which is what you want for a peer — but note the server does not
+     * return the **requesting** device in a `*` lookup, so checking our own keys must ask for the explicit
+     * device id instead.
+     */
     suspend fun fetchPreKeys(
         aci: String,
         deviceId: Int,
         authHeader: String,
         sslSocketFactory: SSLSocketFactory?,
+        allDevices: Boolean = true,
     ): List<DeviceBundle> {
-        val specifier = if (deviceId == 1) "*" else deviceId.toString()
+        val specifier = if (allDevices && deviceId == 1) "*" else deviceId.toString()
         val resp = NetworkClient.execute(
             "https://chat.signal.org/v2/keys/$aci/$specifier",
             method = "GET",

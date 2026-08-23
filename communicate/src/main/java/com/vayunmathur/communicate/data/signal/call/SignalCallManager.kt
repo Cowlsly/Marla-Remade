@@ -77,6 +77,16 @@ class SignalCallManager(
     private var callManager: CallManager? = null
     private var eglBase: EglBase? = null
 
+    /**
+     * Created per call. Present even for audio, because Signal's offer always carries a video m-line and an
+     * answer must match it; only [SignalCamera.setEnabled] differs between audio and video.
+     */
+    private var camera: SignalCamera? = null
+
+    /** Exposed so the call UI can attach renderers once it exists. */
+    val localVideoSink = SwappableVideoSink()
+    val remoteVideoSink = SwappableVideoSink()
+
     /** Media type per call, so an answer knows whether video was offered. */
     private val callMediaTypes = java.util.concurrent.ConcurrentHashMap<Long, CallManager.CallMediaType>()
 
@@ -116,6 +126,16 @@ class SignalCallManager(
     fun accept(callId: Long): Boolean = withManager("accept") { it.acceptCall(CallId(callId)) }
 
     fun hangup(): Boolean = withManager("hangup") { it.hangup() }
+
+    /** Turn our outgoing video on or off mid-call. */
+    fun setVideoEnabled(enabled: Boolean): Boolean = withManager("setVideoEnable") {
+        camera?.setEnabled(enabled)
+        it.setVideoEnable(enabled, false)
+    }
+
+    fun flipCamera() {
+        camera?.flip()
+    }
 
     fun setAudioEnabled(enabled: Boolean): Boolean =
         withManager("setAudioEnable") { it.setAudioEnable(enabled) }
@@ -230,6 +250,7 @@ class SignalCallManager(
         if (iceServers.isEmpty()) {
             Log.w(TAG, "proceeding with no ICE servers; expect connection failure unless both ends are local")
         }
+        val cameraControl = camera ?: SignalCamera(appContext, egl).also { camera = it }
         try {
             manager.proceed(
                 CallId(callId),
@@ -237,9 +258,9 @@ class SignalCallManager(
                 egl,
                 org.signal.ringrtc.AudioConfig(),
                 org.signal.ringrtc.VideoConfig(),
-                NoVideoSink,
-                NoVideoSink,
-                NoCameraControl,
+                localVideoSink,
+                remoteVideoSink,
+                cameraControl,
                 iceServers,
                 false,
                 CallManager.DataMode.NORMAL,
@@ -248,7 +269,11 @@ class SignalCallManager(
                 mediaType.isVideo(),
                 null,
             )
-            Log.i(TAG, "proceed ok for call $callId with ${iceServers.size} ICE servers")
+            Log.i(
+                TAG,
+                "proceed ok for call $callId with ${iceServers.size} ICE servers, " +
+                    "camera=${cameraControl.hasCapturer()} video=${mediaType.isVideo()}",
+            )
         } catch (t: Throwable) {
             Log.w(TAG, "proceed failed for call $callId", t)
         }
@@ -273,6 +298,10 @@ class SignalCallManager(
 
     override fun onCallConcluded(remote: Remote?) {
         callMediaTypes.clear()
+        camera?.dispose()
+        camera = null
+        localVideoSink.attach(null)
+        remoteVideoSink.attach(null)
     }
 
     override fun onNetworkRouteChanged(remote: Remote?, networkRoute: NetworkRoute?) = Unit
@@ -486,13 +515,6 @@ class SignalCallManager(
         } catch (t: Throwable) {
             Log.w(TAG, "$what failed", t)
             false
-        }
-    }
-
-    /** Media is audio-only for now, so nothing renders video frames. */
-    private object NoVideoSink : VideoSink {
-        override fun onFrame(frame: org.webrtc.VideoFrame?) {
-            frame?.release()
         }
     }
 
