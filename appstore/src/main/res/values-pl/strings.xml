@@ -165,7 +165,7 @@
     <string name="section_accrescent_subtitle">Aplikacje podpisane przez deweloperów z listy podpisanych aplikacji Accrescent</string>
     <string name="action_install_all">Zainstaluj wszystko</string>
     <string name="setting_auto_install_updates_title">Automatyczna instalacja aktualizacji</string>
-    <string name="setting_auto_install_updates_summary">Samodzielnie sprawdzaj i instaluj aktualizacje, bez dotykania. Dotyczy to tylko aplikacji zainstalowanych w tym sklepie i mogących aktualizować się po cichu; wszystkie inne aplikacje nadal będą Cię powiadamiać.</string>
+    <string name="setting_auto_install_updates_summary">Instaluj aktualizacje automatycznie zaraz po ich wykryciu. Gdy opcja jest wyłączona, wymagane jest ręczne kliknięcie „Aktualizuj”. W obu przypadkach aplikacje z tego sklepu aktualizują się bez pytania o zgodę; dla innych pozycji otrzymasz tylko powiadomienie.</string>
     <plurals name="updates_installing">
         <item quantity="one">Instalowanie %1$d aktualizacji…</item>
         <item quantity="few">Instalowanie %1$d aktualizacji…</item>
