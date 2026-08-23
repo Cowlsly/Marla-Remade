@@ -49,6 +49,7 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             )
         }
         setContentView(container)
+        preferLargestDisplayMode()
         // A TV has no navigation bar to keep clear of, but some launchers still overlay a status bar,
         // and a mirrored screen should be the whole panel.
         WindowCompat.getInsetsController(window, container).apply {
@@ -94,9 +95,19 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     /**
      * Size the surface to the sender's aspect ratio, centred, with black either side.
      *
-     * `MediaCodec` scales its output to whatever the surface is, so the only thing that decides
-     * whether the picture is stretched is these layout params. A portrait phone therefore appears as
-     * a tall strip in the middle of the panel, which is what mirroring a phone should look like.
+     * Two different sizes are set here and the distinction is the whole point:
+     *
+     *  - The **layout** size is the letterbox. A portrait phone appears as a tall strip in the middle
+     *    of the panel, which is what mirroring a phone should look like.
+     *  - The **buffer** size, via [SurfaceHolder.setFixedSize], stays at the sender's own
+     *    resolution. Without it the surface buffer is the view's size, so a 1344x2992 frame was
+     *    squeezed into roughly 486x1080 by `MediaCodec` before it ever reached the panel - the
+     *    phone's extra resolution was encoded, transmitted, and then thrown away on arrival. With it
+     *    the composer scales a full-resolution buffer to the output instead, and can put it on a
+     *    hardware overlay rather than through the 1080p UI framebuffer.
+     *
+     * Whether that last step actually happens is the composer's decision, not ours, so it has to be
+     * checked on the device with `dumpsys SurfaceFlinger` rather than assumed.
      */
     private fun fitToFrame(frameWidth: Int, frameHeight: Int) {
         if (frameWidth <= 0 || frameHeight <= 0) return
@@ -112,11 +123,36 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             } else {
                 (availableHeight * frameAspect).toInt() to availableHeight
             }
+            surfaceView.holder.setFixedSize(frameWidth, frameHeight)
             surfaceView.layoutParams = FrameLayout.LayoutParams(
                 width,
                 height,
                 android.view.Gravity.CENTER,
             )
+            Log.i(TAG, "buffer ${frameWidth}x$frameHeight shown as ${width}x$height")
         }
+    }
+
+    /**
+     * Ask for the largest display mode the panel offers, best effort.
+     *
+     * **A no-op on the box this was written for**, which exposes exactly one mode (3840x2160 at
+     * 59.94 Hz), so there is nothing to choose and nothing changes. It is set anyway because a box
+     * that does offer a choice would otherwise be left on whatever mode the launcher happened to
+     * pick, and a mirror asking for the whole panel is the one case where the largest is right.
+     *
+     * Deliberately does not filter by refresh rate: the source is 30 fps, every mode a TV offers is a
+     * multiple or near-multiple of that, and a mode switch mid-session blanks the panel for a second.
+     */
+    private fun preferLargestDisplayMode() {
+        val modes = display?.supportedModes ?: return
+        if (modes.size <= 1) return
+        val largest = modes.maxByOrNull { it.physicalWidth.toLong() * it.physicalHeight } ?: return
+        window.attributes = window.attributes.apply { preferredDisplayModeId = largest.modeId }
+        Log.i(
+            TAG,
+            "asked for ${largest.physicalWidth}x${largest.physicalHeight} " +
+                "@ ${largest.refreshRate}Hz of ${modes.size} modes",
+        )
     }
 }

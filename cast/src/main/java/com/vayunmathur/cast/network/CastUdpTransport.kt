@@ -3,6 +3,7 @@ package com.vayunmathur.cast.network
 import android.util.Log
 import java.net.InetSocketAddress
 import java.net.PortUnreachableException
+import java.net.StandardSocketOptions
 import java.nio.ByteBuffer
 import java.nio.channels.DatagramChannel
 
@@ -30,9 +31,15 @@ class CastUdpTransport(private val host: String, private val port: Int) {
     fun open(): Boolean = try {
         channel = DatagramChannel.open().apply {
             configureBlocking(false)
+            // An IDR at native resolution is a few hundred packets handed to the kernel at once,
+            // and a non-blocking write into a full send buffer silently does not go out. Best
+            // effort: the kernel clamps to its own maximum, so the granted size is read back and
+            // logged.
+            runCatching { setOption(StandardSocketOptions.SO_SNDBUF, SEND_BUFFER_BYTES) }
             connect(InetSocketAddress(host, port))
         }
-        Log.i(TAG, "udp connected to $host:$port")
+        val granted = runCatching { channel?.getOption(StandardSocketOptions.SO_SNDBUF) }.getOrNull()
+        Log.i(TAG, "udp connected to $host:$port with sndbuf=${granted}B")
         true
     } catch (e: Exception) {
         Log.w(TAG, "could not open a udp socket to $host:$port", e)
@@ -51,6 +58,19 @@ class CastUdpTransport(private val host: String, private val port: Int) {
 
     private var unreachableCount = 0
 
+    /**
+     * Packets the kernel would not take, and the last time that was said out loud.
+     *
+     * This was the pipeline's largest diagnostic blind spot: a full send buffer made [send] return
+     * false and the packet simply vanished - uncounted, unlogged, and recovered only if the receiver
+     * happened to NACK it. Rate-limited to one line, because a burst that overruns the buffer
+     * overruns it for hundreds of packets at a time.
+     */
+    var sendFailures: Long = 0
+        private set
+
+    private var lastFailureLogMs = 0L
+
     fun send(packet: ByteArray): Boolean {
         val active = channel ?: return false
         if (hexDump) Log.i(TAG, "-> ${packet.size}B ${packet.toHexPreview()}")
@@ -60,6 +80,7 @@ class CastUdpTransport(private val host: String, private val port: Int) {
             // would inflate the sender report and skew the receiver's loss estimate.
             val wrote = active.write(ByteBuffer.wrap(packet)) == packet.size
             unreachableCount = 0
+            if (!wrote) countFailure()
             wrote
         } catch (e: PortUnreachableException) {
             // Counted rather than logged per packet: at 30 fps this would be thousands of identical
@@ -71,8 +92,17 @@ class CastUdpTransport(private val host: String, private val port: Int) {
             false
         } catch (e: Exception) {
             Log.w(TAG, "udp send failed", e)
+            countFailure()
             false
         }
+    }
+
+    private fun countFailure() {
+        sendFailures++
+        val now = System.currentTimeMillis()
+        if (now - lastFailureLogMs < FAILURE_LOG_INTERVAL_MS) return
+        lastFailureLogMs = now
+        Log.w(TAG, "the send buffer is full; $sendFailures packets dropped before they left")
     }
 
     /** One datagram, or null when nothing is waiting. Never blocks. */
@@ -103,7 +133,13 @@ class CastUdpTransport(private val host: String, private val port: Int) {
     private companion object {
         const val MAX_DATAGRAM = 2048
 
+        /** Room for one native-resolution IDR burst, so a frame is not lost to its own size. */
+        const val SEND_BUFFER_BYTES = 2 * 1024 * 1024
+
         /** One unreachable reply can precede the receiver binding; a run of them cannot. */
         const val UNREACHABLE_THRESHOLD = 30
+
+        /** Send failures come in bursts, so they are summarised rather than reported. */
+        const val FAILURE_LOG_INTERVAL_MS = 1_000L
     }
 }

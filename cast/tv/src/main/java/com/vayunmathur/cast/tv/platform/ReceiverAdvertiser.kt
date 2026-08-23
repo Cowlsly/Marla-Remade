@@ -11,6 +11,32 @@ import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
 private const val TAG = "ReceiverAdvertiser"
 
 /**
+ * How many instance names to try before giving up.
+ *
+ * Only reachable on platforms that actually report a failed registration; see [instanceLabel] for
+ * the conflict that Android 14 swallows.
+ */
+private const val MAX_NAME_ATTEMPTS = 5
+
+/**
+ * Distinguishes our mDNS instance name from the device name.
+ *
+ * Android 14's `MdnsRecordRepository.addService` rejects a registration whose *instance name* is
+ * already taken **without comparing the service type**, and `MdnsAdvertiser` then swallows the
+ * `NameConflictException` - so `onRegistrationFailed` is never called and the app cannot tell it is
+ * invisible. Every Google TV box hits this: the system's Android TV Remote service registers
+ * `_androidtvremote2._tcp` under the device name, which is exactly what `defaultName()` returns from
+ * `Build.MODEL`. Suffixing the instance name sidesteps it, and costs nothing visible because the
+ * phone renders TXT `fn` (see `CastDiscoveryManager.toCastDevice`) and only falls back to the
+ * instance name when that attribute is missing.
+ */
+private const val INSTANCE_TAG = "MA Cast"
+
+/** The mDNS instance name for [friendlyName] on the [attempt]th try. */
+private fun instanceLabel(friendlyName: String, attempt: Int): String =
+    if (attempt <= 1) "$friendlyName ($INSTANCE_TAG)" else "$friendlyName ($INSTANCE_TAG $attempt)"
+
+/**
  * TXT attributes on the registration.
  *
  * The phone needs a readable name before it connects to anything, and it needs to know this is a
@@ -38,6 +64,12 @@ class ReceiverAdvertiser(context: Context) {
 
     private var listener: NsdManager.RegistrationListener? = null
 
+    /**
+     * Bumped by [unadvertise] so a conflict retry scheduled by a registration we have since torn
+     * down cannot resurrect it.
+     */
+    private var generation = 0
+
     /** True when the platform refused the registration, not when nothing has connected. */
     var localNetworkBlocked: Boolean = false
         private set
@@ -59,8 +91,26 @@ class ReceiverAdvertiser(context: Context) {
             return
         }
         unadvertise()
+        register(manager, friendlyName, deviceId, port, limits, attempt = 1)
+    }
+
+    /**
+     * Register the [attempt]th candidate instance name, retrying under a numbered variant when the
+     * platform reports a conflict. Only the mDNS instance name varies - TXT `fn` always carries
+     * [friendlyName], which is what the phone displays, so renaming is invisible to the user.
+     */
+    private fun register(
+        manager: NsdManager,
+        friendlyName: String,
+        deviceId: String,
+        port: Int,
+        limits: DecoderLimits,
+        attempt: Int,
+    ) {
+        val issuedAt = generation
+        val instanceName = instanceLabel(friendlyName, attempt)
         val serviceInfo = NsdServiceInfo().apply {
-            serviceName = friendlyName
+            serviceName = instanceName
             serviceType = MACAST_SERVICE_TYPE
             setPort(port)
             setAttribute(TXT_FRIENDLY_NAME, friendlyName)
@@ -74,13 +124,25 @@ class ReceiverAdvertiser(context: Context) {
                 Log.i(
                     TAG,
                     "advertised $MACAST_SERVICE_TYPE as ${info.serviceName} on port $port " +
-                        "(up to ${limits.maxWidth}x${limits.maxHeight} @ ${limits.maxFrameRate}fps)",
+                        "(decoding ${limits.codecs.joinToString { it.label }.ifEmpty { "nothing" }})",
                 )
             }
 
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
-                Log.w(TAG, "registration failed: $errorCode")
                 registeredName = null
+                if (issuedAt != generation) return
+                if (attempt >= MAX_NAME_ATTEMPTS) {
+                    Log.w(
+                        TAG,
+                        "registration failed: $errorCode - gave up after $attempt names, " +
+                            "so this TV is invisible",
+                    )
+                    listener = null
+                    return
+                }
+                val next = instanceLabel(friendlyName, attempt + 1)
+                Log.w(TAG, "registration failed: $errorCode for '$instanceName', retrying as '$next'")
+                register(manager, friendlyName, deviceId, port, limits, attempt + 1)
             }
 
             override fun onServiceUnregistered(serviceInfo: NsdServiceInfo) = Unit
@@ -106,6 +168,7 @@ class ReceiverAdvertiser(context: Context) {
     }
 
     fun unadvertise() {
+        generation++
         val manager = nsdManager ?: return
         val active = listener ?: return
         try {

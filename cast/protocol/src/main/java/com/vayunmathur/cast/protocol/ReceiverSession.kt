@@ -66,6 +66,11 @@ class ReceiverSession(
     /** Feedback rounds where a gap blocked delivery while frames beyond it kept arriving. */
     private var stalledRounds = 0
 
+    /** Feedback rounds where packets kept arriving and nothing at all became decodable. */
+    private var starvedRounds = 0
+    private var packetsAtLastFeedback = 0L
+    private var framesAtLastFeedback = 0L
+
     /** Counters, so the receiver's log can be read against the sender's. */
     var packetsReceived: Long = 0
         private set
@@ -109,14 +114,12 @@ class ReceiverSession(
      */
     fun feedback(): ByteArray {
         val nacks = assembler.missingPackets(after = checkpoint)
-        val needsKeyFrame = !synchronised || isStalled()
+        val needsKeyFrame = !synchronised || isStalled() || isStarved()
         if (needsKeyFrame && synchronised) {
-            // The gap has outlived the sender's retransmit buffer. Nothing else will unblock it, so
-            // give up on it: resynchronise on the next key frame rather than stalling for ever.
-            synchronised = false
-            ready.clear()
-            assembler.reset()
-            stalledRounds = 0
+            // The gap has outlived the sender's retransmit buffer, or nothing is completing at all.
+            // Nothing else will unblock either, so give up: resynchronise on the next key frame
+            // rather than stalling for ever.
+            requestKeyFrame()
         }
         val block = Rtcp.feedback(
             receiverSsrc = stream.receiverSsrc,
@@ -141,6 +144,24 @@ class ReceiverSession(
         Rtcp.parseSenderReport(datagram, stream.senderSsrc)
 
     /**
+     * Give up on what we hold and resynchronise on the next key frame.
+     *
+     * Used by [feedback] when a gap has outlived the sender's retransmit buffer, and callable from
+     * outside for the case this session cannot see: a frame it counted as delivered that the decoder
+     * then refused. The checkpoint has already advanced past it, so every delta frame behind it
+     * references something the decoder does not have - and without this the session stays
+     * "synchronised", no PLI ever goes out, and the corruption lasts until the sender's next
+     * scheduled IDR.
+     */
+    fun requestKeyFrame() {
+        synchronised = false
+        ready.clear()
+        assembler.reset()
+        stalledRounds = 0
+        starvedRounds = 0
+    }
+
+    /**
      * A gap is blocking delivery while frames beyond it keep arriving.
      *
      * Counted in feedback rounds rather than milliseconds: the count only advances when feedback goes
@@ -154,6 +175,34 @@ class ReceiverSession(
         }
         stalledRounds++
         return stalledRounds > STALL_ROUNDS
+    }
+
+    /**
+     * Packets are arriving and *nothing* is completing.
+     *
+     * [isStalled] cannot see this case, because it asks whether frames are queued behind a gap - and
+     * under heavy loss no frame ever completes, so [ready] stays empty, `stalledRounds` keeps
+     * resetting, and the session concludes it is healthy while the picture is frozen. Measured: 18
+     * seconds of a frozen mirror at 8.5% packet loss during which not one key frame was asked for,
+     * because by this class's own definition nothing was wrong.
+     *
+     * Counted in feedback rounds like [isStalled], and only while packets are actually arriving: a
+     * sender that has genuinely stopped is the control channel's problem, not something a key frame
+     * would fix.
+     */
+    private fun isStarved(): Boolean {
+        if (framesDelivered != framesAtLastFeedback) {
+            framesAtLastFeedback = framesDelivered
+            packetsAtLastFeedback = packetsReceived
+            starvedRounds = 0
+            return false
+        }
+        starvedRounds++
+        // Packets since the **last delivered frame**, not since the last round. Asking whether a
+        // packet arrived in this particular 50 ms window meant the counter reset on every quiet
+        // round, so at the ~25 packets/s a struggling sender produces it could never reach the
+        // threshold: measured, the picture stayed frozen and this never fired once.
+        return packetsReceived != packetsAtLastFeedback && starvedRounds > STARVED_ROUNDS
     }
 
     /**
@@ -197,5 +246,16 @@ class ReceiverSession(
          * enough that a picture never freezes for a noticeable time.
          */
         const val STALL_ROUNDS = 3
+
+        /**
+         * Longer than [STALL_ROUNDS], because this is the blunter instrument.
+         *
+         * A gap with frames piled behind it is unambiguous after three rounds. "Nothing completed"
+         * only becomes conclusive once retransmission has had a fair chance, and the answer - throwing
+         * away every partial frame the assembler holds - discards work that NACKs might still have
+         * repaired. Ten rounds is half a second of frozen picture, against the 18 seconds this
+         * replaces.
+         */
+        const val STARVED_ROUNDS = 10
     }
 }

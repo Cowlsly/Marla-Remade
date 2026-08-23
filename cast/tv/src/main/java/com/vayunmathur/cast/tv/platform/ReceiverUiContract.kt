@@ -56,8 +56,17 @@ sealed interface ReceiverPhase {
 
 /** The failures worth distinguishing, because each has a different answer. */
 enum class ReceiverFailure {
-    /** No H.264 decoder. Nothing about the phone or the network will help. */
+    /** No hardware H.265 or AV1 decoder. Nothing about the phone or the network will help. */
     NoDecoder,
+
+    /**
+     * There is a decoder and somewhere to draw, and the codec settings it needed never arrived.
+     *
+     * Distinct from [NoDecoder] on purpose: both look like a black screen, and they send anyone
+     * debugging one in opposite directions. This one means the phone's side of the AV1 handover did
+     * not happen, and the phone has been told so it can use H.265 next time.
+     */
+    MissingCodecConfig,
 
     /** The phone sealed a secret to an identity that is not ours, or spoke a version we do not. */
     Handshake,

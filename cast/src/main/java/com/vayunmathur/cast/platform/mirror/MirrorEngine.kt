@@ -2,6 +2,7 @@ package com.vayunmathur.cast.platform.mirror
 
 import android.content.Context
 import android.os.ParcelFileDescriptor
+import android.os.SystemClock
 import android.util.Log
 import android.view.Surface
 import com.vayunmathur.cast.network.CastUdpTransport
@@ -10,6 +11,7 @@ import com.vayunmathur.cast.protocol.Negotiation
 import com.vayunmathur.cast.protocol.Rtcp
 import com.vayunmathur.cast.protocol.StreamKind
 import com.vayunmathur.cast.protocol.StreamingSession
+import com.vayunmathur.cast.protocol.VideoCodec
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,6 +35,21 @@ private const val FRAME_POLL_MS = 4L
 private const val RTCP_POLL_MS = 20L
 private const val STATS_LOG_INTERVAL_MS = 1_000L
 
+/**
+ * How long a codec that needs its configuration sent out of band has to produce it, **measured from
+ * the encoder's first output rather than from `start()`.**
+ *
+ * A surface-input encoder produces nothing at all until a frame has been drawn into its surface, so a
+ * clock started at `start()` would be timing the *content*, not the codec. For screen mirroring that is
+ * milliseconds - the `VirtualDisplay` is attached immediately - but a [MirrorSource.Content] session
+ * hands its surface out over Binder and the client may legitimately take seconds to draw its first
+ * frame, which would fail a perfectly healthy AV1 session and demote AV1 for that TV.
+ *
+ * Timed from the first frame instead, the condition is the one that is actually wrong: frames are
+ * flowing and no configuration came with them.
+ */
+private const val CODEC_CONFIG_TIMEOUT_MS = 2_000L
+
 /** What could not be started, so the UI can say so rather than looking broken. */
 data class MirrorDegradation(
     val videoUnavailable: Boolean = false,
@@ -40,7 +57,19 @@ data class MirrorDegradation(
 )
 
 /** Why mirroring could not start, or stopped. */
-enum class MirrorStopReason { Udp, NoEncoders, ReceiverGone }
+enum class MirrorStopReason {
+    Udp,
+    NoEncoders,
+    ReceiverGone,
+
+    /**
+     * The encoder never produced the codec configuration the chosen codec needs sent out of band.
+     *
+     * Distinct from [NoEncoders] because the answer is different: the encoder started, so the codec is
+     * the thing at fault, and the recovery is to remember that and start the next session at H.265.
+     */
+    CodecConfig,
+}
 
 /**
  * The running mirror: capture and encode in, RTP out, RTCP back.
@@ -68,10 +97,19 @@ class MirrorEngine(
     private val receiverHost: String,
     private val negotiation: Negotiation,
     private val geometry: CaptureGeometry,
+    /** The negotiated codec, chosen against both ends' hardware before the stream was configured. */
+    private val videoCodec: VideoCodec,
     /** The negotiated frame rate, which is the TV's cap rather than a fixed 30. */
     private val frameRate: Int,
     private val onDegraded: (MirrorDegradation) -> Unit,
     private val onStopped: (MirrorStopReason) -> Unit,
+    /**
+     * The video codec configuration, to be put on the control channel.
+     *
+     * Called from the encoder loop when it first appears and from the RTCP loop on every key-frame
+     * request, so the implementation has to serialise its own access to the socket.
+     */
+    private val onCodecConfig: (ByteArray) -> Unit = {},
 ) {
 
     private val appContext: Context = context.applicationContext
@@ -153,10 +191,12 @@ class MirrorEngine(
 
     private fun startVideo(stream: NegotiatedStream, udp: CastUdpTransport): Boolean {
         val encoder = VideoEncoder(
+            codec = videoCodec,
             width = geometry.width,
             height = geometry.height,
             frameRate = frameRate,
             bitRate = geometry.bitRate,
+            onCodecConfig = onCodecConfig,
         )
         if (!encoder.start()) return false
         val surface = encoder.inputSurface
@@ -179,7 +219,7 @@ class MirrorEngine(
         }
         Log.i(
             TAG,
-            "streaming ${geometry.width}x${geometry.height} " +
+            "streaming ${videoCodec.label} ${geometry.width}x${geometry.height} " +
                 "@ ${geometry.bitRate / 1_000_000.0} Mbit/s" +
                 if (source.appLabel.isEmpty()) "" else " from ${source.appLabel}",
         )
@@ -187,11 +227,30 @@ class MirrorEngine(
         val sender = StreamSender(stream, udp, StreamingSession())
         senders[StreamKind.Video] = sender
         videoJob = scope.launch {
+            // When the encoder first produced anything, which is what the codec-config watchdog is
+            // timed from. Zero until then, so a session whose content has not started drawing yet is
+            // simply waiting rather than failing.
+            var firstOutputAt = 0L
             while (isActive) {
                 val chunks = encoder.drain()
                 if (chunks.isEmpty()) {
                     delay(FRAME_POLL_MS)
                     continue
+                }
+                if (firstOutputAt == 0L) firstOutputAt = SystemClock.elapsedRealtime()
+                // Checked here rather than in a coroutine of its own, because this loop is already
+                // running at frame cadence and the encoder it is draining is the thing being watched.
+                if (videoCodec.needsCodecConfig &&
+                    !encoder.hasCodecConfig &&
+                    SystemClock.elapsedRealtime() - firstOutputAt >= CODEC_CONFIG_TIMEOUT_MS
+                ) {
+                    Log.w(
+                        TAG,
+                        "${videoCodec.label} has produced ${CODEC_CONFIG_TIMEOUT_MS}ms of frames " +
+                            "and no codec config; the TV can never start its decoder",
+                    )
+                    onStopped(MirrorStopReason.CodecConfig)
+                    return@launch
                 }
                 for (chunk in chunks) sender.send(chunk)
             }
@@ -275,7 +334,8 @@ class MirrorEngine(
                     }
                     Log.i(
                         TAG,
-                        "$summary feedback=$feedbackPackets unmatchedRtcp=$unmatchedPackets",
+                        "$summary feedback=$feedbackPackets unmatchedRtcp=$unmatchedPackets " +
+                            "sendFailures=${udp.sendFailures}",
                     )
                 }
                 var packet = udp.receive()

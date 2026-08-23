@@ -50,6 +50,14 @@
     <string name="cast_mirror_udp_failed">Could not reach the TV to send video</string>
     <string name="cast_mirror_no_encoder">This device has no usable screen encoder</string>
     <string name="cast_mirror_receiver_gone">The TV stopped accepting the stream</string>
+    <!-- Naming the codecs is the point of these three. Mirroring needs hardware H.265 or AV1 and has
+         no H.264 fallback, so a device that cannot do either will never work - and a message that did
+         not say which codec was missing would leave no way to find that out. -->
+    <string name="cast_mirror_phone_no_codec">This phone has no hardware video encoder. Mirroring needs %1$s.</string>
+    <string name="cast_mirror_tv_no_codec">This TV has no hardware video decoder. Mirroring needs %1$s.</string>
+    <string name="cast_mirror_no_common_codec">This phone can send %1$s and this TV can decode %2$s, but nothing they share works at this screen size.</string>
+    <string name="cast_mirror_codec_demoted">%1$s did not work with this TV before, and there is no other codec you both support. Pair with this TV again to retry it.</string>
+    <string name="cast_mirror_codec_config_failed">The TV could not be given the video settings it needed. The next attempt will use a different codec.</string>
 
     <!-- Quick Settings tile -->
     <string name="cast_tile_label">Mirror screen</string>

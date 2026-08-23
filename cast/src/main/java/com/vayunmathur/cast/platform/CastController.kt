@@ -12,6 +12,7 @@ import com.vayunmathur.cast.domain.ClientPhase
 import com.vayunmathur.cast.domain.ClientState
 import com.vayunmathur.cast.network.ControlSocket
 import com.vayunmathur.cast.platform.discovery.CastDiscoveryManager
+import com.vayunmathur.cast.platform.mirror.EncoderSupport
 import com.vayunmathur.cast.platform.mirror.MirrorConsentActivity
 import com.vayunmathur.cast.platform.mirror.MirrorDegradation
 import com.vayunmathur.cast.platform.mirror.MirrorEngine
@@ -19,8 +20,14 @@ import com.vayunmathur.cast.platform.mirror.MirrorGeometry
 import com.vayunmathur.cast.platform.mirror.MirrorPreferences
 import com.vayunmathur.cast.platform.mirror.MirrorSource
 import com.vayunmathur.cast.platform.mirror.MirrorStopReason
+import com.vayunmathur.cast.protocol.ByeReason
+import com.vayunmathur.cast.protocol.CodecNegotiation
+import com.vayunmathur.cast.protocol.CodecSelection
+import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
+import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.StreamingSession
+import com.vayunmathur.cast.protocol.VideoCodec
 import com.vayunmathur.cast.service.CastService
 import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.util.AppMessages
@@ -33,6 +40,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -64,6 +72,23 @@ sealed interface ContentSessionResult {
 }
 
 /**
+ * The codec a session will use, or why it will not run.
+ *
+ * A two-case result rather than a nullable codec, because the refusal carries a sentence the user has
+ * to read: with no H.264 fallback, "this phone cannot encode H.265 or AV1" is the whole answer and
+ * there is nothing else to try.
+ */
+private sealed interface CodecOutcome {
+
+    /** Everything the geometry and the bitrate are computed from. */
+    data class Chosen(val selection: CodecSelection.Chosen) : CodecOutcome {
+        val codec: VideoCodec get() = selection.codec
+    }
+
+    data class Refused(val message: String) : CodecOutcome
+}
+
+/**
  * The single owner of the live session.
  *
  * An object rather than ViewModel-owned state, because both [CastViewModel] and [CastService] act on
@@ -91,6 +116,15 @@ object CastController {
 
     /** The running mirror. Its retransmit buffers live per-stream inside it. */
     private var engine: MirrorEngine? = null
+
+    /**
+     * The codec the running engine is encoding with.
+     *
+     * Kept so a failure can be attributed to it and remembered against this TV: [MirrorStopReason] is
+     * a cause rather than a codec, and by the time it arrives the geometry that chose the codec is
+     * gone.
+     */
+    private var activeCodec: VideoCodec? = null
 
     private val _mirrorPhase = MutableStateFlow(MirrorPhase.Idle)
     val mirrorPhase: StateFlow<MirrorPhase> = _mirrorPhase.asStateFlow()
@@ -269,7 +303,13 @@ object CastController {
         // Persisted against the TV's own id rather than the mDNS instance name, so renaming the TV does
         // not make the phone ask for a code again.
         if (deviceKey != null) {
-            MirrorPreferences.rememberDeviceKey(context, activeClient.receiverId ?: device.id, deviceKey)
+            val receiverId = activeClient.receiverId ?: device.id
+            MirrorPreferences.rememberDeviceKey(context, receiverId, deviceKey)
+            // A code pairing is a fresh start with this TV - it has been reset, or reinstalled, or is
+            // simply a different box on the same name - so a codec remembered as broken against the old
+            // one has nothing to say about this one. It is also the only reset a user can reach, which
+            // is why the refusal message tells them to re-pair.
+            MirrorPreferences.clearDemotedCodecs(context, receiverId)
         }
         _sessionState.value = ClientState(
             phase = ClientPhase.Paired,
@@ -322,16 +362,33 @@ object CastController {
             _degradation.value = MirrorDegradation()
             _failure.value = null
 
+            // The codec comes first, because everything else is chosen against it: the frame size fits
+            // *that* codec's envelope on the TV, and the bitrate is that codec's efficiency applied to
+            // the H.264 reference. There is no H.264 fallback behind this - a phone or a TV without one
+            // of the two hardware codecs is told which were missing and mirroring stops here.
+            val (screenWidth, screenHeight) = MirrorGeometry.screenSize(appContext)
+            val codec = when (
+                val choice = chooseCodec(appContext, device, activeClient, screenWidth, screenHeight)
+            ) {
+                is CodecOutcome.Refused -> {
+                    Log.w(TAG, "refusing to mirror: ${choice.message}")
+                    abandonMirroring(appContext, projection, choice.message)
+                    return@launch
+                }
+                is CodecOutcome.Chosen -> choice
+            }
+
             // The frame size is chosen from the TV's own reported limits, and it is the phone's real
             // aspect ratio: the receiver letterboxes, so none of the encoded frame is wasted on bars.
-            val geometry = MirrorGeometry.forDisplay(appContext, activeClient.limits)
-            val frameRate = MirrorGeometry.frameRateFor(activeClient.limits)
+            val geometry = MirrorGeometry.forDisplay(appContext, codec.selection)
+            val frameRate = MirrorGeometry.frameRateFor(codec.selection.receiverLimits)
             val outcome = mutex.withLock {
                 activeClient.configureStream(
                     width = geometry.width,
                     height = geometry.height,
                     frameRate = frameRate,
                     bitRate = geometry.bitRate,
+                    videoCodec = codec.codec,
                     audio = true,
                     video = true,
                 )
@@ -353,21 +410,25 @@ object CastController {
                 receiverHost = device.host,
                 negotiation = ready.negotiation,
                 geometry = geometry,
+                videoCodec = codec.codec,
                 frameRate = frameRate,
                 onDegraded = { _degradation.value = it },
                 onStopped = { reason -> onEngineStopped(appContext, reason) },
+                onCodecConfig = { csd -> sendCodecConfig(activeClient, csd) },
             ).apply { hexDump = verboseStreamLogging }
             engine = newEngine
+            activeCodec = codec.codec
             if (newEngine.start()) {
                 _mirrorPhase.value = MirrorPhase.Mirroring
                 _sessionState.update {
                     it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
                 }
-                startWatch(appContext, activeClient)
+                startWatch(appContext, activeClient, device, codec.codec)
             } else {
                 // start() already called onStopped, which set the message and the phase; all that is
                 // left is to make sure nothing keeps holding the screen.
                 engine = null
+                activeCodec = null
                 runCatching { projection.stop() }
             }
         }
@@ -408,14 +469,24 @@ object CastController {
         _degradation.value = MirrorDegradation()
         _failure.value = null
 
-        val geometry = MirrorGeometry.forContent(width, height, activeClient.limits)
-        val frameRate = MirrorGeometry.frameRateFor(activeClient.limits)
+        val codec = when (val choice = chooseCodec(appContext, device, activeClient, width, height)) {
+            is CodecOutcome.Refused -> {
+                Log.w(TAG, "refusing an app-content session: ${choice.message}")
+                _mirrorPhase.value = MirrorPhase.Failed
+                _failure.value = choice.message
+                return@withContext ContentSessionResult.Failed(CastContract.REASON_FAILED)
+            }
+            is CodecOutcome.Chosen -> choice
+        }
+        val geometry = MirrorGeometry.forContent(width, height, codec.selection)
+        val frameRate = MirrorGeometry.frameRateFor(codec.selection.receiverLimits)
         val outcome = mutex.withLock {
             activeClient.configureStream(
                 width = geometry.width,
                 height = geometry.height,
                 frameRate = frameRate,
                 bitRate = geometry.bitRate,
+                videoCodec = codec.codec,
                 audio = wantAudio,
                 video = true,
                 appLabel = appLabel,
@@ -435,17 +506,21 @@ object CastController {
             receiverHost = device.host,
             negotiation = ready.negotiation,
             geometry = geometry,
+            videoCodec = codec.codec,
             frameRate = frameRate,
             onDegraded = { _degradation.value = it },
             onStopped = { reason -> onEngineStopped(appContext, reason) },
+            onCodecConfig = { csd -> sendCodecConfig(activeClient, csd) },
         ).apply { hexDump = verboseStreamLogging }
         engine = newEngine
+        activeCodec = codec.codec
         // No surface means there is nowhere for the app to draw, which for an SDK session is the whole
         // point - unlike mirroring, it cannot usefully degrade to audio only.
         val surface = if (newEngine.start()) newEngine.contentSurface else null
         if (surface == null) {
             newEngine.stop()
             engine = null
+            activeCodec = null
             _mirrorPhase.value = MirrorPhase.Failed
             return@withContext ContentSessionResult.Failed(CastContract.REASON_FAILED)
         }
@@ -453,7 +528,7 @@ object CastController {
         _sessionState.update {
             it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
         }
-        startWatch(appContext, activeClient)
+        startWatch(appContext, activeClient, device, codec.codec)
         ContentSessionResult.Started(
             surface = surface,
             audioWriteEnd = newEngine.audioWriteEnd,
@@ -472,13 +547,41 @@ object CastController {
      * negotiation is waiting for. Until this starts, a dead TV surfaces as a failed `configureStream`,
      * which is just as prompt.
      */
-    private fun startWatch(appContext: Context, activeClient: MirrorClient) {
+    private fun startWatch(
+        appContext: Context,
+        activeClient: MirrorClient,
+        device: CastDevice,
+        codec: VideoCodec,
+    ) {
         watchJob = scope.launch {
-            activeClient.awaitEnd()
+            val reason = activeClient.awaitEnd()
+            // **Another path may already own this teardown.** Closing the socket is what unblocks the
+            // read above, and [endCodecConfigFailure] closes it deliberately - so a return from
+            // `awaitEnd` is not proof that the TV ended the session. Whoever cancelled this job is
+            // publishing its own failure, and a second teardown here would clear it.
+            if (!isActive) return@launch
             Log.i(TAG, "the control channel closed")
+            val receiverId = activeClient.receiverId ?: device.id
+            // Read before the teardown clears it, so a failure already on screen survives a socket that
+            // then closed without a reason of its own - otherwise the message a user has to read would
+            // be replaced by a blank idle state.
+            val standing = _failure.value
             // Cleared first: teardown cancels watchJob, and this coroutine *is* watchJob.
             watchJob = null
             teardown()
+            // Published *after* the teardown, which resets the phase and clears the failure - the
+            // order matters, and setting either first would only have it wiped.
+            val message = if (reason == ByeReason.MISSING_CODEC_CONFIG) {
+                Log.w(TAG, "'${device.friendlyName}' never got ${codec.label}'s codec config")
+                MirrorPreferences.demoteCodec(appContext, receiverId, codec)
+                appContext.getString(R.string.cast_mirror_codec_config_failed)
+            } else {
+                standing
+            }
+            if (message != null) {
+                _failure.value = message
+                _mirrorPhase.value = MirrorPhase.Failed
+            }
             CastService.stop(appContext)
         }
     }
@@ -516,21 +619,133 @@ object CastController {
     }
 
     private fun onEngineStopped(context: Context, reason: MirrorStopReason) {
-        _failure.value = context.getString(
-            when (reason) {
-                MirrorStopReason.Udp -> R.string.cast_mirror_udp_failed
-                MirrorStopReason.NoEncoders -> R.string.cast_mirror_no_encoder
-                MirrorStopReason.ReceiverGone -> R.string.cast_mirror_receiver_gone
-            },
-        )
+        val codec = activeCodec
+        _failure.value = when (reason) {
+            MirrorStopReason.Udp -> context.getString(R.string.cast_mirror_udp_failed)
+            MirrorStopReason.NoEncoders -> context.getString(R.string.cast_mirror_no_encoder)
+            MirrorStopReason.ReceiverGone -> context.getString(R.string.cast_mirror_receiver_gone)
+            MirrorStopReason.CodecConfig ->
+                context.getString(R.string.cast_mirror_codec_config_failed)
+        }
         _mirrorPhase.value = MirrorPhase.Failed
         endContentSession(CastContract.REASON_FAILED)
         CastService.stopMirroring(context)
+        if (reason == MirrorStopReason.CodecConfig && codec != null) {
+            endCodecConfigFailure(context, codec)
+        }
+    }
+
+    /**
+     * End the whole session, not just the mirror, and remember the codec that did it.
+     *
+     * **Unlike every other stop reason, this one leaves a perfectly healthy control channel.** Nothing
+     * would tear the session down, so `_sessionState` would sit at [ClientPhase.Streaming] - and
+     * [connect] treats that as live, so tapping the same TV again would return early and do nothing.
+     * The user would be left unable to retry the very TV that just failed, which is exactly the retry
+     * the demotion exists to make work.
+     *
+     * Launched rather than run inline because this is called from the engine's own video coroutine, and
+     * [stopEngine] joins that coroutine - doing it here would be waiting on ourselves.
+     */
+    private fun endCodecConfigFailure(context: Context, codec: VideoCodec) {
+        val receiverId = client?.receiverId ?: _device.value?.id
+        val message = context.getString(R.string.cast_mirror_codec_config_failed)
+        scope.launch {
+            if (receiverId != null) MirrorPreferences.demoteCodec(context, receiverId, codec)
+            client?.let { mutex.withLock { it.sayGoodbye("no codec config") } }
+            teardown()
+            // After the teardown, which resets both of these - see startWatch for the same ordering.
+            _failure.value = message
+            _mirrorPhase.value = MirrorPhase.Failed
+            CastService.stop(context)
+        }
+    }
+
+    /**
+     * Which codec this session will use, or the sentence explaining why there is none.
+     *
+     * Both ends' hardware is intersected by [CodecNegotiation], which is a pure function so the rule
+     * can be unit-tested; everything device-specific is in the two lists handed to it. [width] and
+     * [height] are the *unfitted* frame, because a codec is only viable if it takes the frame after the
+     * TV's own envelope has scaled it.
+     */
+    private suspend fun chooseCodec(
+        context: Context,
+        device: CastDevice,
+        activeClient: MirrorClient,
+        width: Int,
+        height: Int,
+    ): CodecOutcome {
+        val receiverId = activeClient.receiverId ?: device.id
+        val demoted = MirrorPreferences.demotedCodecs(context, receiverId)
+        if (demoted.isNotEmpty()) {
+            Log.i(
+                TAG,
+                "skipping ${demoted.joinToString { it.label }} - it has already failed on this TV",
+            )
+        }
+        val selection = CodecNegotiation.choose(
+            senderCodecs = EncoderSupport.videoCodecs(),
+            receiver = activeClient.limits ?: DecoderLimits(),
+            width = width,
+            height = height,
+            // The rate is a floor, not a target: a codec that cannot hold it is excluded rather than
+            // accepted at whatever it manages. Resolution is what yields.
+            frameRate = StreamConstants.VIDEO_MAX_FRAME_RATE,
+            demoted = demoted,
+        )
+        return when (selection) {
+            is CodecSelection.Chosen -> {
+                Log.i(TAG, "chose ${selection.codec.label} for '${device.friendlyName}'")
+                CodecOutcome.Chosen(selection)
+            }
+            is CodecSelection.None -> CodecOutcome.Refused(refusal(context, selection))
+        }
+    }
+
+    /**
+     * Which end was short, named.
+     *
+     * The reason there is no H.264 fallback is the reason this has to be specific: "mirroring failed"
+     * would leave a user with a device that will never work and no way to find out why. The demotion
+     * case gets its own sentence for the same reason - the two ends *do* share a codec there, and a
+     * message built from the offers alone would deny it.
+     */
+    private fun refusal(context: Context, none: CodecSelection.None): String {
+        val labels = { codecs: Collection<VideoCodec> -> codecs.joinToString(" or ") { it.label } }
+        val both = labels(CodecNegotiation.PREFERENCE)
+        val blockedByDemotion = none.demoted.filter {
+            it in none.senderOffered && it in none.receiverOffered
+        }
+        return when {
+            blockedByDemotion.isNotEmpty() ->
+                context.getString(R.string.cast_mirror_codec_demoted, labels(blockedByDemotion))
+            none.senderOffered.isEmpty() ->
+                context.getString(R.string.cast_mirror_phone_no_codec, both)
+            none.receiverOffered.isEmpty() ->
+                context.getString(R.string.cast_mirror_tv_no_codec, both)
+            else -> context.getString(
+                R.string.cast_mirror_no_common_codec,
+                labels(none.senderOffered),
+                labels(none.receiverOffered),
+            )
+        }
+    }
+
+    /**
+     * Put the codec configuration on the control channel.
+     *
+     * Under [mutex] because the encoder loop and the RTCP loop both call this while [startWatch] is
+     * reading the same socket, and two writers interleaving would corrupt a frame.
+     */
+    private fun sendCodecConfig(activeClient: MirrorClient, csd: ByteArray) {
+        scope.launch { mutex.withLock { activeClient.sendCodecConfig(csd) } }
     }
 
     private fun stopEngine() {
         engine?.stop()
         engine = null
+        activeCodec = null
     }
 
     /**

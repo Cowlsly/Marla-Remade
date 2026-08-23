@@ -96,6 +96,8 @@ fun ReceiverContent(state: ReceiverUiState, modifier: Modifier = Modifier) {
                     stringResource(
                         when (phase.reason) {
                             ReceiverFailure.NoDecoder -> R.string.tv_no_decoder
+                            ReceiverFailure.MissingCodecConfig ->
+                                R.string.tv_missing_codec_config
                             ReceiverFailure.Handshake -> R.string.tv_stream_failed
                             ReceiverFailure.StreamEnded -> R.string.tv_stream_failed
                         },

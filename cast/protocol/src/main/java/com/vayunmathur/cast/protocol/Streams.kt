@@ -30,10 +30,16 @@ object StreamConstants {
     /**
      * How long the receiver buffers before playing, in ms.
      *
-     * `kDefaultTargetPlayoutDelay` from openscreen. It is the budget a retransmission has to arrive
-     * within to still be useful, which is why the sender's retransmit buffer is sized against it.
+     * It is the budget a retransmission has to arrive within to still be useful, which is why the
+     * sender's retransmit buffer is sized against it, and it is advertised in every RTCP report.
+     *
+     * **Deliberately not openscreen's `kDefaultTargetPlayoutDelay` of 400.** That figure was carried
+     * over from a Cast receiver and then advertised by a receiver that implemented no buffer at all -
+     * frames were presented at network-arrival spacing, so jitter became judder. 150 ms is what the
+     * receiver's playout queue actually holds: deep enough to absorb Wi-Fi jitter and leave a NACK
+     * time to be answered, shallow enough that mirroring still feels interactive.
      */
-    const val TARGET_DELAY_MS = 400
+    const val TARGET_DELAY_MS = 150
 
     /**
      * SSRC ranges from openscreen `cast/streaming/ssrc.cc`. Audio is "high priority" and video is

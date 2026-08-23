@@ -10,8 +10,12 @@ import kotlinx.serialization.json.Json
  * Checked on both sides and refused on mismatch, rather than negotiated down. Two of our own builds
  * that disagree about the wire format are a bug to fix, not a compatibility matrix to maintain -
  * both halves ship from this repo at the same version.
+ *
+ * 3 is where H.264 stopped being the only codec. [DecoderLimits] became a per-codec list and
+ * [StreamConfig] gained a required codec, both reshaped rather than extended with compatibility
+ * defaults - a mismatch is refused outright anyway, so the bump is the honest signal.
  */
-const val PROTOCOL_VERSION = 2
+const val PROTOCOL_VERSION = 3
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -30,6 +34,7 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *
  *        STREAM_CONFIG ───────────────────────►         (chosen to fit the reported limits)
  *                          ◄───────────── STREAM_READY  (udp port + receiver SSRCs)
+ *        VIDEO_CODEC_CONFIG ─────────────────►          (AV1 only, and repeated on every PLI)
  *        … RTP over UDP …
  *        BYE ─────────────────────────────────►
  * ```
@@ -81,14 +86,85 @@ data class TvIdentity(
  * by hand - wasting most of the frame. These come from the TV's real
  * `MediaCodecInfo.VideoCapabilities`, so the sender can send the phone's own aspect ratio at
  * whatever size fits and let the TV pad it.
+ *
+ * **One envelope per codec, and no flat AVC-shaped fields.** Those four numbers were
+ * `getCapabilitiesForType(AVC)` output; with AVC gone they would be a lie, and an H.265 decoder's
+ * ceiling is not an AV1 decoder's. An empty list is a receiver that could enumerate no hardware
+ * decoder at all, and the phone refuses with a named failure rather than guessing.
  */
 @Serializable
 data class DecoderLimits(
+    val videoCodecs: List<CodecLimits> = emptyList(),
+) {
+    fun forCodec(codec: VideoCodec): CodecLimits? = videoCodecs.firstOrNull { it.codec == codec }
+
+    val codecs: List<VideoCodec> get() = videoCodecs.map { it.codec }
+}
+
+/**
+ * The video codecs this protocol carries, in no particular order - [CodecNegotiation] holds the
+ * preference.
+ *
+ * **H.264 is deliberately absent.** H.265 and AV1 reach the same quality at roughly half the
+ * bitrate, and on a link that answered 24 Mbit/s with 8.5% packet loss the codec is what buys back
+ * the headroom. A device with neither hardware codec refuses to mirror and says which were missing,
+ * rather than falling back to the thing that caused the problem.
+ *
+ * [mimeType] is spelled out rather than taken from `MediaFormat`: this module is an Android library
+ * only because [SecretSealing] needs one, and every test in it runs on a plain JVM.
+ */
+@Serializable
+enum class VideoCodec(val mimeType: String, val label: String) {
+    @SerialName("H265")
+    Hevc("video/hevc", "H.265"),
+
+    @SerialName("AV1")
+    Av1("video/av01", "AV1"),
+    ;
+
+    /**
+     * Whether the decoder must be handed its codec configuration out of band, through
+     * [VideoCodecConfig], before it can be configured at all.
+     *
+     * H.265 inherits the H.264 contract unchanged: VPS/SPS/PPS are Annex-B start-code units, so the
+     * sender prepends them to the first IDR and the receiver finds them in the stream. AV1's
+     * sequence header is an OBU that `MediaCodec` expects as `csd-0`, and the receiver configures its
+     * decoder *before* any frame arrives - so for AV1 there is nowhere in the stream to read it from.
+     */
+    val needsCodecConfig: Boolean get() = this == Av1
+}
+
+/** One codec's envelope, as reported by whichever end owns the codec. */
+@Serializable
+data class CodecLimits(
+    val codec: VideoCodec,
     val maxWidth: Int,
     val maxHeight: Int,
     val maxFrameRate: Int,
     val maxBitRate: Int,
-)
+) {
+    /**
+     * The largest frame with [width] x [height]'s aspect ratio that fits this envelope.
+     *
+     * Both dimensions are checked independently, because a decoder's limits are not necessarily the
+     * same shape as a phone's screen: a 3840x2160 decoder still cannot take a 1440x3120 portrait
+     * frame unrotated, and scaling by the tighter of the two ratios is what respects both.
+     *
+     * Lives here rather than in the sender so codec selection can be a pure function - the choice
+     * depends on the *fitted* frame, and a copy of this arithmetic on each side would be a copy that
+     * could disagree.
+     */
+    fun fit(width: Int, height: Int): Pair<Int, Int> {
+        if (maxWidth <= 0 || maxHeight <= 0) return width to height
+        if (width <= maxWidth && height <= maxHeight) return width to height
+        val scale = minOf(maxWidth.toDouble() / width, maxHeight.toDouble() / height)
+        return (width * scale).toInt() to (height * scale).toInt()
+    }
+
+    /** Whether this envelope takes exactly [width] x [height] at [frameRate]. */
+    fun admits(width: Int, height: Int, frameRate: Int): Boolean =
+        width in 1..maxWidth && height in 1..maxHeight && frameRate <= maxFrameRate
+}
 
 /** The session secret, sealed to [TvIdentity.publicBundle]. Base64 of [SecretSealing.seal]. */
 @Serializable
@@ -163,6 +239,15 @@ data class StreamConfig(
     val audioSsrc: Long,
     val videoSsrc: Long,
     /**
+     * The codec the payload is in.
+     *
+     * Required, with no default: the version bump is what makes that safe, and a defaulted codec
+     * would be a build silently agreeing to decode something it was never told about. The receiver
+     * builds its decoder from this, so it is also what decides whether a [VideoCodecConfig] has to
+     * arrive before the picture can start.
+     */
+    val videoCodec: VideoCodec,
+    /**
      * The name of the app whose content this is, or empty for screen mirroring.
      *
      * The receiver shows it instead of the phone's name, so "Receiving from YouPipe" rather than
@@ -183,6 +268,22 @@ data class StreamReady(
 ) : ControlMessage
 
 /**
+ * The video decoder's configuration bytes, phone to TV, for a codec that cannot carry them in-band.
+ *
+ * [csd] is Base64 of whatever `MediaCodec` handed the sender in its `BUFFER_FLAG_CODEC_CONFIG`
+ * buffer, passed through untouched: for AV1 that is an `av1C` configuration record or a raw sequence
+ * header OBU, and which one it is turns out to be a device fact rather than an API fact. The receiver
+ * installs it as `csd-0`.
+ *
+ * **Re-sent on every key-frame request, not delivered once.** `CODEC_CONFIG` is emitted only at
+ * `start()`, so a single-shot delivery has no repair path and losing it would be a permanent black
+ * screen. Re-sending keeps PLI as the one repair primitive for both codecs.
+ */
+@Serializable
+@SerialName("VIDEO_CODEC_CONFIG")
+data class VideoCodecConfig(val csd: String) : ControlMessage
+
+/**
  * Either end, at any point after the secret is established.
  *
  * Sent rather than just closing the socket, so the TV can return to its idle screen instead of
@@ -191,6 +292,18 @@ data class StreamReady(
 @Serializable
 @SerialName("BYE")
 data class Bye(val reason: String = "") : ControlMessage
+
+/**
+ * The [Bye.reason] values the *phone* acts on rather than only logs.
+ *
+ * A free-text reason is right for everything a human reads in a log, but an AV1 failure has to reach
+ * the sender as a decision: it is what makes the next session start at H.265 instead. Naming the
+ * string here is what stops the two ends from disagreeing about its spelling.
+ */
+object ByeReason {
+    /** The TV had a decoder and a surface, and the codec config it needed never arrived. */
+    const val MISSING_CODEC_CONFIG = "missing codec config"
+}
 
 /**
  * Strict on the way in, complete on the way out.

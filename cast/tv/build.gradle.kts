@@ -11,6 +11,12 @@ launcherIcon {
     symbol = "cast"
 }
 
+// Google TV hardware (the onn 4K Streaming Box and friends) runs a 32-bit userspace and
+// reports only `armeabi-v7a,armeabi`, so an arm64-only APK is rejected at install time.
+nativeAbis {
+    armv7 = true
+}
+
 android {
     defaultConfig {
         applicationId = "com.vayunmathur.cast.tv"

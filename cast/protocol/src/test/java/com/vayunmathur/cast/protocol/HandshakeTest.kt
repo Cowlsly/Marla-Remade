@@ -24,10 +24,10 @@ class HandshakeTest {
     private val secret = ByteArray(SessionKeys.SECRET_BYTES) { (it * 5 + 1).toByte() }
 
     private val limits = DecoderLimits(
-        maxWidth = 3840,
-        maxHeight = 2160,
-        maxFrameRate = 60,
-        maxBitRate = 40_000_000,
+        videoCodecs = listOf(
+            CodecLimits(VideoCodec.Av1, 3840, 2160, 60, 40_000_000),
+            CodecLimits(VideoCodec.Hevc, 3840, 2160, 60, 40_000_000),
+        ),
     )
 
     // ---- framing ----
@@ -89,6 +89,7 @@ class HandshakeTest {
                 video = true,
                 audioSsrc = 1_234,
                 videoSsrc = 50_002,
+                videoCodec = VideoCodec.Av1,
             ),
             // Screen mirroring leaves the label empty; an SDK session names the app. Both have to
             // survive the round trip, and the empty case is the one `encodeDefaults` could eat.
@@ -101,10 +102,15 @@ class HandshakeTest {
                 video = true,
                 audioSsrc = 1_235,
                 videoSsrc = 50_003,
+                videoCodec = VideoCodec.Hevc,
                 appLabel = "YouPipe",
             ),
             StreamReady(udpPort = 47_505, audioSsrc = 4_321, videoSsrc = 50_009),
+            // The AV1 handover. Base64 rather than a byte array because it is the one message whose
+            // payload is opaque to this protocol - whatever `MediaCodec` produced, passed through.
+            VideoCodecConfig(csd = ProtocolBase64.encode(ByteArray(48) { (it * 3).toByte() })),
             Bye(reason = "user stopped"),
+            Bye(reason = ByeReason.MISSING_CODEC_CONFIG),
         )
         val codec = ControlCodec()
         for (message in messages) {
@@ -124,6 +130,46 @@ class HandshakeTest {
     fun `an absent device key stays absent rather than becoming null`() {
         val body = ControlCodec().encode(PairOk(deviceKey = null)).toString(Charsets.UTF_8)
         assertFalse(body.contains("deviceKey"), body)
+    }
+
+    @Test
+    fun `codec names on the wire are the stable ones, not the Kotlin identifiers`() {
+        // The enum is `Hevc` and `Av1` in Kotlin and `H265` and `AV1` on the wire. Renaming either
+        // constant would otherwise change the wire format silently, and the failure would be a TV
+        // that decodes nothing while both ends agree they are on version 3.
+        val body = ControlCodec()
+            .encode(
+                StreamConfig(
+                    width = 1920,
+                    height = 1080,
+                    frameRate = 30,
+                    bitRate = 6_000_000,
+                    audio = false,
+                    video = true,
+                    audioSsrc = 1,
+                    videoSsrc = 50_001,
+                    videoCodec = VideoCodec.Hevc,
+                ),
+            )
+            .toString(Charsets.UTF_8)
+        assertTrue(body.contains("\"videoCodec\":\"H265\""), body)
+    }
+
+    @Test
+    fun `a TV that can decode nothing advertises an empty list rather than a guess`() {
+        // The deleted FALLBACK_LIMITS. Guessing "1080p30 H.264" was defensible while H.264 was
+        // universal; it would now be a fabrication, and the phone has to be able to see the absence.
+        val empty = DecoderLimits()
+        assertTrue(empty.videoCodecs.isEmpty())
+        assertNull(empty.forCodec(VideoCodec.Av1))
+        val codec = ControlCodec()
+        val identity = TvIdentity(
+            receiverName = "Living Room TV",
+            receiverId = "tv-1",
+            publicBundle = ProtocolBase64.encode(ByteArray(8)),
+            limits = empty,
+        )
+        assertEquals(identity, codec.decode(codec.encode(identity)))
     }
 
     @Test
@@ -366,6 +412,7 @@ class HandshakeTest {
             video = true,
             audioSsrc = 1_234,
             videoSsrc = 50_002,
+            videoCodec = VideoCodec.Av1,
         )
         val ready = StreamReady(udpPort = 47_505, audioSsrc = 4_321, videoSsrc = 50_009)
         val negotiation = Negotiation.of(config, ready, keys)

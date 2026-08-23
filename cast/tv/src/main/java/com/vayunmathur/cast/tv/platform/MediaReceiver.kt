@@ -45,17 +45,17 @@ class MediaReceiver(
     val port: Int get() = socket.localPort
 
     init {
-        // Bounded so the loop can check for a stop request rather than parking for ever, and so a
-        // sender that dies is noticed instead of leaving a thread blocked in recv. This is also the
-        // feedback cadence: a timeout is what tells the caller to report.
+        // Bounded so the loop can check for a stop request rather than parking for ever, so a sender
+        // that dies is noticed instead of leaving a thread blocked in recv, and so the caller gets
+        // back often enough to service its playout deadlines.
         socket.soTimeout = RECEIVE_TIMEOUT_MS
     }
 
     /**
      * Block for one datagram and handle it.
      *
-     * Returns false on a timeout, which the caller uses as its cue to send feedback and check whether
-     * it has been asked to stop - so the loop needs no separate timer.
+     * Returns false on a timeout, which tells the caller nothing arrived - it runs its own feedback
+     * and playout timers either way, so a quiet socket is not a reason to stop looping.
      */
     fun pump(): Boolean {
         val buffer = ByteArray(MAX_DATAGRAM)
@@ -122,6 +122,16 @@ class MediaReceiver(
     }
 
     /**
+     * Give up on one stream's reference chain, so the next feedback asks for a key frame.
+     *
+     * The caller's decoder is the only thing that knows a frame this session counted as delivered was
+     * refused, and a decoder missing a reference produces a smear rather than an error.
+     */
+    fun requestKeyFrame(kind: StreamKind) {
+        sessions[kind]?.requestKeyFrame()
+    }
+
+    /**
      * The line that has been missing all project: the receiver saying what it sees.
      *
      * The sender already logs packets sent and feedback received once a second. Reading the two
@@ -138,11 +148,13 @@ class MediaReceiver(
 
     private companion object {
         /**
-         * Also the feedback interval, since a timeout is what triggers a report.
+         * Short, because the caller has playout deadlines to meet.
          *
-         * 50 ms is well inside the 400 ms target playout delay, so a NACK still has time to be
-         * answered and played, and slow enough that reports are a rounding error next to the video.
+         * It used to double as the feedback interval - a timeout was what triggered a report - and no
+         * longer does: the caller keeps its own feedback timer, so this only has to be short enough
+         * that a frame due for presentation is not held behind a socket read. 10 ms is a third of a
+         * frame interval at 30 fps.
          */
-        const val RECEIVE_TIMEOUT_MS = 50
+        const val RECEIVE_TIMEOUT_MS = 10
     }
 }

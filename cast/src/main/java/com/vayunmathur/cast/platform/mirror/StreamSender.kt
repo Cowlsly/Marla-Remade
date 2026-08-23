@@ -10,6 +10,7 @@ import com.vayunmathur.cast.protocol.Recovery
 import com.vayunmathur.cast.protocol.Retransmission
 import com.vayunmathur.cast.protocol.RtpPacketizer
 import com.vayunmathur.cast.protocol.StreamingSession
+import java.util.concurrent.locks.LockSupport
 
 /**
  * One stream's send path: encrypt, packetize, count.
@@ -106,10 +107,26 @@ class StreamSender(
     /** [packetIds] null means every packet of the frame; otherwise only those listed. */
     private fun emit(frame: EncryptedFrame, packetIds: List<Int>?) {
         val packets = packetizer.packetize(frame)
+        // **Paced, not dumped.** A key frame at native resolution is a few hundred packets, and
+        // handing them to the kernel in one tight loop overruns the send buffer, the Wi-Fi driver's
+        // queue, or the receiver's - and an overrun drops the packets at the front of the burst,
+        // which are the ones carrying the parameter sets. Small frames, and every audio frame, are
+        // one burst and never pause.
+        val paced = packets.size > BURST_PACKETS
+        var sinceRest = 0
         var sent = 0L
         var octets = 0L
         packets.forEachIndexed { index, packet ->
             if (packetIds != null && index !in packetIds) return@forEachIndexed
+            if (paced && sinceRest == BURST_PACKETS) {
+                sinceRest = 0
+                // Blocking, and deliberately so: this runs under [lock], which the RTP sequence
+                // counter needs held for the whole frame. The caller is a coroutine on the IO
+                // dispatcher, where parking a thread for a fraction of a millisecond is what that
+                // dispatcher is for.
+                LockSupport.parkNanos(BURST_PAUSE_NANOS)
+            }
+            sinceRest++
             // Only a datagram the kernel actually accepted is counted: a sender report that
             // over-reports what was sent makes the receiver's loss estimate wrong.
             if (udp.send(packet)) {
@@ -118,6 +135,20 @@ class StreamSender(
             }
         }
         stats = stats.copy(packets = stats.packets + sent, octets = stats.octets + octets)
+    }
+
+    private companion object {
+        /**
+         * Packets per burst, and how long to rest between them.
+         *
+         * 8 packets is about 12 KB - well inside any send buffer - and 500 us between bursts
+         * spreads a 300-packet IDR across roughly 20 ms, so it arrives over most of a frame interval
+         * instead of instantaneously. Both are pacing hints rather than a rate limit:
+         * [LockSupport.parkNanos] may return early, and the only cost of that is less pacing than
+         * intended.
+         */
+        const val BURST_PACKETS = 8
+        const val BURST_PAUSE_NANOS = 500_000L
     }
 }
 

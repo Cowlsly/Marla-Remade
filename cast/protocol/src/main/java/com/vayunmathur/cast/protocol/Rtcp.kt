@@ -276,6 +276,14 @@ object Rtcp {
      * and is expanded against it, exactly as `ExpandLessThanOrEqual` does. Without that the
      * checkpoint would appear to jump backwards every 256 frames.
      *
+     * **Every sub-packet is checked against this stream's SSRC pair, the PLI included.** A receiver
+     * sends one datagram per stream, and the sender tries each stream in turn until one parses. A PLI
+     * accepted without that check made the *audio* stream claim a datagram carrying video's key-frame
+     * request: the audio stream ignores picture loss, and the sender stopped looking, so the video
+     * stream never saw its own feedback. Measured: a receiver PLI-ing for ten seconds while the sender
+     * logged not one key-frame request, and no video NACKs answered either, because exactly the
+     * datagrams sent when the receiver was in trouble were the ones thrown away.
+     *
      * Returns null when the datagram contains nothing addressed to this stream.
      */
     fun parse(
@@ -297,7 +305,10 @@ object Rtcp {
                         senderSsrc,
                         maxFrameId,
                     )?.let { feedback = it }
-                    SUBTYPE_PICTURE_LOSS_INDICATOR -> pictureLoss = true
+                    SUBTYPE_PICTURE_LOSS_INDICATOR ->
+                        if (namesStream(packet, start, size, receiverSsrc, senderSsrc)) {
+                            pictureLoss = true
+                        }
                 }
             }
         }
@@ -339,6 +350,23 @@ object Rtcp {
             block(type, countOrSubtype, payloadStart, payloadSize)
             offset = payloadStart + payloadSize
         }
+    }
+
+    /**
+     * True when a sub-packet's leading SSRC pair names this stream.
+     *
+     * Both the PLI and the feedback block start with receiver-then-sender, so one check serves both.
+     */
+    private fun namesStream(
+        packet: ByteArray,
+        start: Int,
+        size: Int,
+        receiverSsrc: Long,
+        senderSsrc: Long,
+    ): Boolean {
+        if (size < 8) return false
+        return packet.getInt(start) == receiverSsrc and 0xffff_ffffL &&
+            packet.getInt(start + 4) == senderSsrc and 0xffff_ffffL
     }
 
     /**

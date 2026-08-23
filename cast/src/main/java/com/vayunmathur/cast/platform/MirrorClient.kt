@@ -5,6 +5,7 @@ import android.util.Log
 import com.vayunmathur.cast.domain.ClientFailure
 import com.vayunmathur.cast.network.ControlSocket
 import com.vayunmathur.cast.protocol.Bye
+import com.vayunmathur.cast.protocol.ByeReason
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.Hello
 import com.vayunmathur.cast.protocol.Negotiation
@@ -23,6 +24,8 @@ import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.StreamReady
 import com.vayunmathur.cast.protocol.Transcript
 import com.vayunmathur.cast.protocol.TvIdentity
+import com.vayunmathur.cast.protocol.VideoCodec
+import com.vayunmathur.cast.protocol.VideoCodecConfig
 import java.security.SecureRandom
 
 private const val TAG = "MirrorClient"
@@ -90,7 +93,7 @@ class MirrorClient(
     var receiverId: String? = null
         private set
 
-    /** The TV's real decoder limits, which is what the frame size is chosen against. */
+    /** The TV's real decoder limits, one envelope per codec, which the frame size is chosen against. */
     var limits: DecoderLimits? = null
         private set
 
@@ -124,12 +127,19 @@ class MirrorClient(
         receiverName = identity.receiverName
         receiverId = identity.receiverId
         limits = identity.limits
-        Log.i(
-            TAG,
-            "'${identity.receiverName}' decodes up to ${identity.limits.maxWidth}x" +
-                "${identity.limits.maxHeight} @ ${identity.limits.maxFrameRate}fps, " +
-                "${identity.limits.maxBitRate / 1_000_000.0} Mbit/s",
-        )
+        if (identity.limits.videoCodecs.isEmpty()) {
+            // Not a failure here - CastController names the codecs it checked - but the log is where
+            // it would be diagnosed, and "the TV advertised nothing" is invisible otherwise.
+            Log.w(TAG, "'${identity.receiverName}' advertised no hardware video decoder at all")
+        }
+        for (codec in identity.limits.videoCodecs) {
+            Log.i(
+                TAG,
+                "'${identity.receiverName}' decodes ${codec.codec.label} up to " +
+                    "${codec.maxWidth}x${codec.maxHeight} @ ${codec.maxFrameRate}fps, " +
+                    "${codec.maxBitRate / 1_000_000.0} Mbit/s",
+            )
+        }
 
         val bundle = ProtocolBase64.decode(identity.publicBundle)
             ?: return HandshakeOutcome.Failed(ClientFailure.Protocol)
@@ -211,6 +221,7 @@ class MirrorClient(
         height: Int,
         frameRate: Int,
         bitRate: Int,
+        videoCodec: VideoCodec,
         audio: Boolean,
         video: Boolean,
         appLabel: String = "",
@@ -226,6 +237,7 @@ class MirrorClient(
             video = video,
             audioSsrc = random.ssrc(StreamConstants.AUDIO_SSRC_MIN, StreamConstants.AUDIO_SSRC_MAX),
             videoSsrc = random.ssrc(StreamConstants.VIDEO_SSRC_MIN, StreamConstants.VIDEO_SSRC_MAX),
+            videoCodec = videoCodec,
             appLabel = appLabel,
         )
         socket.send(config)
@@ -235,8 +247,22 @@ class MirrorClient(
             Log.w(TAG, "the TV named udp port ${ready.udpPort}")
             return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
         }
-        Log.i(TAG, "streaming ${width}x$height to udp ${ready.udpPort}")
+        Log.i(TAG, "streaming ${videoCodec.label} ${width}x$height to udp ${ready.udpPort}")
         return HandshakeOutcome.Ready(Negotiation.of(config, ready, sessionKeys))
+    }
+
+    /**
+     * Hand the TV the video codec configuration, for a codec that cannot carry it in-band.
+     *
+     * Sent on the already-open control channel rather than in a media packet, because the receiver
+     * needs it *before* it configures its decoder - there is no frame yet to attach it to. Called
+     * repeatedly and idempotent: every key-frame request re-sends it, which is what gives it a repair
+     * path at all.
+     */
+    fun sendCodecConfig(csd: ByteArray) {
+        Log.i(TAG, "sending codec config: ${csd.size} bytes")
+        runCatching { socket.send(VideoCodecConfig(csd = ProtocolBase64.encode(csd))) }
+            .onFailure { Log.w(TAG, "could not send the codec config", it) }
     }
 
     /**
@@ -245,13 +271,18 @@ class MirrorClient(
      * Held open for the whole session so that a TV going away is noticed at once, rather than only
      * when UDP starts failing - a control channel nobody reads is a control channel that cannot report
      * anything.
+     *
+     * Returns the `BYE` reason, or null when the socket died without one. The reason is carried back
+     * rather than only logged because one of them - [ByeReason.MISSING_CODEC_CONFIG] - is a decision
+     * the caller has to act on, not a note for a human.
      */
-    fun awaitEnd() {
+    fun awaitEnd(): String? {
         while (true) {
-            val next = socket.receive() ?: return
-            if (next.message is Bye) {
-                Log.i(TAG, "'$receiverName' said goodbye")
-                return
+            val next = socket.receive() ?: return null
+            val message = next.message
+            if (message is Bye) {
+                Log.i(TAG, "'$receiverName' said goodbye: ${message.reason.ifBlank { "no reason" }}")
+                return message.reason
             }
         }
     }

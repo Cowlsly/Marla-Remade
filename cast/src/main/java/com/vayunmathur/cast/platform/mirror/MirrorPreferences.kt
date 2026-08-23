@@ -2,6 +2,7 @@ package com.vayunmathur.cast.platform.mirror
 
 import com.vayunmathur.cast.domain.CastDevice
 import android.content.Context
+import com.vayunmathur.cast.protocol.VideoCodec
 import com.vayunmathur.library.util.DataStoreUtils
 import java.util.UUID
 
@@ -77,5 +78,42 @@ object MirrorPreferences {
         DataStoreUtils.getInstance(context).setByteArray(deviceKeyName(receiverId), deviceKey)
     }
 
+    /**
+     * The codecs that have already failed against [receiverId], so the next session skips them.
+     *
+     * **This is the recovery path, and it is deliberately not a mid-session renegotiation.** By the
+     * time an AV1 failure is visible the codec is baked into `StreamConfig` and the encoder, the
+     * `ScreenCapture` and the `VirtualDisplay` are all live; unpicking that safely is a great deal of
+     * machinery for something that can be answered by remembering the answer instead. Recorded per TV
+     * rather than globally because the failure may be either end's, and a phone that met one bad
+     * decoder should not give up AV1 for every TV it ever sees.
+     */
+    suspend fun demotedCodecs(context: Context, receiverId: String): Set<VideoCodec> {
+        val stored = DataStoreUtils.getInstance(context).getStringAwait(demotedName(receiverId))
+            ?: return emptySet()
+        return stored.split(',')
+            .mapNotNull { name -> VideoCodec.entries.firstOrNull { it.name == name } }
+            .toSet()
+    }
+
+    suspend fun demoteCodec(context: Context, receiverId: String, codec: VideoCodec) {
+        val next = demotedCodecs(context, receiverId) + codec
+        DataStoreUtils.getInstance(context)
+            .setString(demotedName(receiverId), next.joinToString(",") { it.name })
+    }
+
+    /**
+     * Forget what failed against [receiverId].
+     *
+     * Called on a fresh code pairing, which is the one point at which the TV might genuinely be a
+     * different box - and the only reset a user can reach without a setting nobody would find. Without
+     * it a single transient failure would pin a pairing to H.265 for good.
+     */
+    suspend fun clearDemotedCodecs(context: Context, receiverId: String) {
+        DataStoreUtils.getInstance(context).setString(demotedName(receiverId), "")
+    }
+
     private fun deviceKeyName(receiverId: String): String = "cast_paired_$receiverId"
+
+    private fun demotedName(receiverId: String): String = "cast_demoted_codecs_$receiverId"
 }

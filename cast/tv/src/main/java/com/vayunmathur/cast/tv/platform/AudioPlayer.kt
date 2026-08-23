@@ -28,11 +28,27 @@ private const val TIMEOUT_US = 10_000L
  * does not send its codec-config buffer over the wire. So the header is synthesised here from the
  * parameters both ends already agree on - they are fixed constants in [StreamConstants], not
  * negotiated, which is what makes reconstructing it sound rather than a guess.
+ *
+ * **A failure here is terminal, and that is the fix for a measured disaster.** [play] used to catch
+ * every exception and retry on the next packet, so a codec that entered its released state a few
+ * seconds in logged a stack trace per 20 ms packet from then on: 2,634 traces in 38,233 logcat lines
+ * in one session, on the thread that has to be reading datagrams. The storm cost more than the lost
+ * audio ever did, and it was voluminous enough to evict its own root cause from the log buffer.
  */
 class AudioPlayer {
 
+    // Volatile so the lifecycle is explicit rather than resting on the loop thread happening to be
+    // the only reader: [release] can run while a stale reference is still in a local.
+    @Volatile
     private var codec: MediaCodec? = null
+
+    @Volatile
     private var track: AudioTrack? = null
+
+    /** Once set, this session has no sound and [play] is a no-op. */
+    @Volatile
+    var failed: Boolean = false
+        private set
 
     /** False when this TV has no Opus decoder, which leaves the picture but no sound. */
     fun start(): Boolean {
@@ -51,6 +67,9 @@ class AudioPlayer {
                 setByteBuffer("csd-0", java.nio.ByteBuffer.wrap(opusIdentificationHeader()))
             }
             val created = MediaCodec.createByCodecName(name)
+            // Published before the AudioTrack is built, because the catch below releases through the
+            // fields: a throw from AudioTrack.Builder would otherwise leak a started MediaCodec.
+            codec = created
             created.configure(format, null, null, 0)
             created.start()
 
@@ -78,10 +97,8 @@ class AudioPlayer {
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
                 .build()
-            output.play()
-
-            codec = created
             track = output
+            output.play()
             true
         } catch (e: Exception) {
             Log.w(TAG, "could not start audio playback", e)
@@ -90,8 +107,14 @@ class AudioPlayer {
         }
     }
 
-    /** Queue one Opus packet and write out whatever the decoder finished. */
+    /**
+     * Queue one Opus packet and write out whatever the decoder finished.
+     *
+     * Called from the socket loop, so the cost of failing has to be bounded: the first exception
+     * gives up on audio for the rest of the session rather than being retried per packet.
+     */
     fun play(data: ByteArray, presentationTimeUs: Long) {
+        if (failed) return
         val activeCodec = codec ?: return
         val activeTrack = track ?: return
         try {
@@ -117,7 +140,11 @@ class AudioPlayer {
                 activeCodec.releaseOutputBuffer(out, false)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "audio playback failed", e)
+            // One trace, once. Whatever put the codec in this state will not be undone by the next
+            // packet, and a realtime path may not log per packet.
+            failed = true
+            Log.w(TAG, "audio playback failed for good; the rest of this session is silent", e)
+            release()
         }
     }
 

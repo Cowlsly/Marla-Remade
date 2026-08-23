@@ -24,7 +24,8 @@
 
     <!-- Mirroring -->
     <string name="tv_mirroring">Receiving from %1$s</string>
-    <string name="tv_no_decoder">This TV has no usable H.264 decoder</string>
+    <string name="tv_no_decoder">This TV has no usable H.265 or AV1 decoder</string>
+    <string name="tv_missing_codec_config">Your phone did not send the video settings this TV needed. Try mirroring again.</string>
     <string name="tv_stream_failed">The stream stopped</string>
 
     <!-- Foreground service -->

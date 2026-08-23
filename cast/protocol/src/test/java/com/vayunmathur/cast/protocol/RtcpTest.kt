@@ -324,6 +324,22 @@ class RtcpTest {
     }
 
     @Test
+    fun `a picture loss indicator for another stream is not this stream's`() {
+        // The exact shape a real session produces: the receiver sends one datagram per stream, and
+        // the sender tries each stream in turn until one parses. This is a *video* datagram, and the
+        // audio stream must not claim it - the audio stream ignores picture loss and the sender stops
+        // looking, so accepting it here throws away the video stream's key-frame request and every
+        // NACK riding with it. That cost ten seconds of frozen picture per occurrence.
+        val otherReceiver = RECEIVER_SSRC + 1_000
+        val otherSender = SENDER_SSRC + 1_000
+        val videoDatagram = Rtcp.compound(
+            Rtcp.pictureLossIndicator(otherReceiver, otherSender),
+            Rtcp.feedback(otherReceiver, otherSender, FrameId(3), 400),
+        )
+        assertNull(parse(videoDatagram, FrameId(3)))
+    }
+
+    @Test
     fun `a sender report we build is one the receiver parses`() {
         val built = Rtcp.senderReport(
             senderSsrc = SENDER_SSRC,
