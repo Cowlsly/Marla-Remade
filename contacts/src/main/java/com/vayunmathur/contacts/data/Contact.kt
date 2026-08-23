@@ -253,7 +253,8 @@ data class Contact(
     val note: Note
         get() = details.notes.first()
 
-    fun save(context: Context, newDetails: ContactDetails, oldDetails: ContactDetails) {
+    /** Returns false if the provider rejected the batch; never throws. */
+    fun save(context: Context, newDetails: ContactDetails, oldDetails: ContactDetails): Boolean {
         val ops = ArrayList<ContentProviderOperation>()
         if (id == 0L) {
             ops += ContentProviderOperation.newInsert(ContactsContract.RawContacts.CONTENT_URI)
@@ -274,7 +275,13 @@ data class Contact(
             // details
             ops += handleDetailUpdates(oldDetails.all(), newDetails.all(), id.toString())
         }
-        context.contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+        return try {
+            context.contentResolver.applyBatch(ContactsContract.AUTHORITY, ops)
+            true
+        } catch (e: Exception) {
+            Log.e("Contact", "Error saving contact", e)
+            false
+        }
     }
 
     private fun handleDetailUpdates(currentDetails: List<ContactDetail<*>>, newDetails: List<ContactDetail<*>>, rawContactID: String): List<ContentProviderOperation> {

@@ -40,6 +40,15 @@ fun isSimAccountType(type: String?): Boolean = type == SIM_ACCOUNT_TYPE
  */
 fun isLocalAccountType(type: String?): Boolean = type.isNullOrBlank() || type == LOCAL_ACCOUNT_TYPE
 
+/**
+ * True for the implicit device-local account, which the provider identifies by having
+ * *neither* an account name nor a type. It cannot be renamed: the provider requires an
+ * account to specify both fields or neither, so a name-only rename leaves rows it
+ * rejects on the next insert.
+ */
+fun isDefaultLocalAccount(name: String?, type: String?): Boolean =
+    name.isNullOrBlank() && type.isNullOrBlank()
+
 object SimContactsDataSource {
 
     private const val TAG = "SimContacts"

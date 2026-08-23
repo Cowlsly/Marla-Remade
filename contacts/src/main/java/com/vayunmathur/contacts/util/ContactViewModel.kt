@@ -37,6 +37,7 @@ import com.vayunmathur.contacts.data.LOCAL_ACCOUNT_TYPE
 import com.vayunmathur.contacts.data.SimContact
 import com.vayunmathur.contacts.data.SimContactsDataSource
 import com.vayunmathur.contacts.data.isSimAccountType
+import com.vayunmathur.contacts.data.isDefaultLocalAccount
 import com.vayunmathur.contacts.data.isLocalAccountType
 import com.vayunmathur.library.util.DataStoreUtils
 import kotlinx.coroutines.Dispatchers
@@ -422,6 +423,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                 withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
                 return@launch
             }
+            if (isDefaultLocalAccount(account.name, account.type)) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
+                return@launch
+            }
             if (trimmed.isEmpty()) {
                 withContext(Dispatchers.Main) { onResult?.invoke(false, "blank") }
                 return@launch
@@ -486,6 +491,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
     ) {
         viewModelScope.launch {
             if (!isLocalAccountType(account.type)) {
+                withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
+                return@launch
+            }
+            if (isDefaultLocalAccount(account.name, account.type)) {
                 withContext(Dispatchers.Main) { onResult?.invoke(false, "not_local") }
                 return@launch
             }
@@ -649,7 +658,11 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                     .withValue(ContactsContract.CommonDataKinds.GroupMembership.GROUP_ROW_ID, groupId)
                     .build())
             }
-            resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+            try {
+                resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+            } catch (e: Exception) {
+                Log.e("ContactViewModel", "Error adding contacts to group", e)
+            }
         }
     }
 
@@ -663,7 +676,11 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
                         arrayOf(contactId.toString(), ContactsContract.CommonDataKinds.GroupMembership.CONTENT_ITEM_TYPE, groupId.toString()))
                     .build())
             }
-            resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+            try {
+                resolver.applyBatch(ContactsContract.AUTHORITY, ops)
+            } catch (e: Exception) {
+                Log.e("ContactViewModel", "Error removing contacts from group", e)
+            }
         }
     }
 
@@ -679,41 +696,44 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
     }
 
     override fun saveContact(contact: com.vayunmathur.contacts.data.Contact) {
-        viewModelScope.launch(Dispatchers.IO) {
-            if (isSimAccountType(contact.accountType)) {
-                val subId = contact.accountName?.toIntOrNull()
-                val name = contact.name.value.trim().ifEmpty { contact.nickname.nickname.trim().ifEmpty { contact.details.phoneNumbers.firstOrNull()?.number?.trim() ?: "" } }
-                val number = contact.details.phoneNumbers.firstOrNull()?.number?.trim() ?: ""
-                val email = contact.details.emails.firstOrNull()?.address?.trim()?.takeIf { it.isNotEmpty() }
-                if (name.isBlank() && number.isBlank()) {
-                    Log.w("ContactViewModel", "SIM save skipped: name and number empty")
-                    return@launch
-                }
-                val isExisting = contact.id < 0
-                var oldSc: SimContact? = null
-                if (isExisting) {
-                    oldSc = SimContactsDataSource.listSimContacts(getApplication()).firstOrNull { SimContactsDataSource.syntheticIdFor(it) == contact.id }
-                    if (oldSc == null) oldSc = SimContactsDataSource.findBackingSimContact(getApplication(), contact)
-                    if (oldSc != null) {
-                        // Skip if no actual change
-                        if (oldSc.name == name && oldSc.number == number && oldSc.emails == email && oldSc.subscriptionId == subId) {
-                            return@launch
-                        }
-                        SimContactsDataSource.deleteSimContact(getApplication(), oldSc)
-                    }
-                }
-                val ok = SimContactsDataSource.insertSimContact(getApplication(), name, number, email, subId)
-                if (!ok) Log.e("ContactViewModel", "Failed to insert SIM contact")
-                syncFromSystem()
-            } else {
-                val contactId = contact.id
-                val details = contact.details
-                val oldDetails = contacts.value.find { it.id == contactId }?.details
-                    ?: _allContacts.value.find { it.id == contactId }?.details
-                    ?: com.vayunmathur.contacts.data.ContactDetails.empty()
-                contact.save(getApplication(), details, oldDetails)
+        viewModelScope.launch(Dispatchers.IO) { persistContact(contact) }
+    }
+
+    /** Writes [contact] to the SIM or the contacts provider. Returns false if the write failed. */
+    private suspend fun persistContact(contact: com.vayunmathur.contacts.data.Contact): Boolean {
+        if (isSimAccountType(contact.accountType)) {
+            val subId = contact.accountName?.toIntOrNull()
+            val name = contact.name.value.trim().ifEmpty { contact.nickname.nickname.trim().ifEmpty { contact.details.phoneNumbers.firstOrNull()?.number?.trim() ?: "" } }
+            val number = contact.details.phoneNumbers.firstOrNull()?.number?.trim() ?: ""
+            val email = contact.details.emails.firstOrNull()?.address?.trim()?.takeIf { it.isNotEmpty() }
+            if (name.isBlank() && number.isBlank()) {
+                Log.w("ContactViewModel", "SIM save skipped: name and number empty")
+                return false
             }
+            val isExisting = contact.id < 0
+            var oldSc: SimContact? = null
+            if (isExisting) {
+                oldSc = SimContactsDataSource.listSimContacts(getApplication()).firstOrNull { SimContactsDataSource.syntheticIdFor(it) == contact.id }
+                if (oldSc == null) oldSc = SimContactsDataSource.findBackingSimContact(getApplication(), contact)
+                if (oldSc != null) {
+                    // Skip if no actual change
+                    if (oldSc.name == name && oldSc.number == number && oldSc.emails == email && oldSc.subscriptionId == subId) {
+                        return true
+                    }
+                    SimContactsDataSource.deleteSimContact(getApplication(), oldSc)
+                }
+            }
+            val ok = SimContactsDataSource.insertSimContact(getApplication(), name, number, email, subId)
+            if (!ok) Log.e("ContactViewModel", "Failed to insert SIM contact")
+            syncFromSystem()
+            return ok
         }
+        val contactId = contact.id
+        val details = contact.details
+        val oldDetails = contacts.value.find { it.id == contactId }?.details
+            ?: _allContacts.value.find { it.id == contactId }?.details
+            ?: com.vayunmathur.contacts.data.ContactDetails.empty()
+        return contact.save(getApplication(), details, oldDetails)
     }
 
     // ---------------------------------------------------------------------
@@ -989,20 +1009,26 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             ),
             groups = draft.groupMemberships
         )
-        // For existing SIM contacts, keep synthetic id so saveContact can locate old row
+        // For existing SIM contacts, keep synthetic id so saveContact can locate old row.
+        // The provider requires an account to name both fields or neither, so a draft pointing at
+        // a half-renamed account saves to device-local rather than being rejected.
+        val accountType = draft.accountType.ifEmpty { null }
+        val accountName = if (accountType == null) null else draft.accountName.ifEmpty { null }
         val newContact = original?.copy(
-            accountType = draft.accountType.ifEmpty { null }?.let { it },
-            accountName = draft.accountName.ifEmpty { null },
+            accountType = accountType,
+            accountName = accountName,
             details = details
         ) ?: Contact(
             id = 0,
-            accountType = draft.accountType.ifEmpty { null },
-            accountName = draft.accountName.ifEmpty { null },
+            accountType = accountType,
+            accountName = accountName,
             isFavorite = false,
             details = details
         )
-        saveContact(newContact)
-        clearEditDraft()
-        onResult?.invoke(true, null)
+        viewModelScope.launch {
+            val ok = withContext(Dispatchers.IO) { persistContact(newContact) }
+            if (ok) clearEditDraft()
+            onResult?.invoke(ok, null)
+        }
     }
 }

@@ -25,6 +25,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import com.vayunmathur.contacts.data.isDefaultLocalAccount
 import com.vayunmathur.contacts.data.isLocalAccountType
 import com.vayunmathur.contacts.util.ContactAccount
 import com.vayunmathur.contacts.util.ContactViewModel
@@ -217,7 +218,9 @@ fun SettingsPage(viewModel: ContactViewModel, backStack: NavBackStack<Route>) {
                     supportingContent = { Text(account.type) },
                     trailingContent = {
                         Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (isLocalAccountType(account.type)) {
+                            if (isLocalAccountType(account.type) &&
+                                !isDefaultLocalAccount(account.name, account.type)
+                            ) {
                                 OverflowMenu(icon = { IconMoreVert() }) {
                                     Item(
                                         text = stringResource(UiR.string.rename),
