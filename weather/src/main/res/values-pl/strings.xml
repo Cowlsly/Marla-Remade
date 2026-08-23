@@ -32,7 +32,7 @@
     <string name="condition_rain">Deszcz</string>
     <string name="condition_snow">Śnieg</string>
     <string name="condition_thunderstorm">Burza</string>
-    <string name="condition_unknown">Brak danych</string>
+    <string name="condition_unknown">Nieznany</string>
     <string name="metric_temperature">Temperatura</string>
     <string name="metric_feels_like">Temperatura odczuwalna</string>
     <string name="metric_humidity">Wilgotność</string>
@@ -53,7 +53,7 @@
     <string name="today">Dzisiaj</string>
     <string name="today_short">Dzi</string>
     <string name="tomorrow_short">Jut</string>
-    <string name="level_none">Żaden</string>
+    <string name="level_none">Brak</string>
     <string name="level_low">Niski</string>
     <string name="level_medium">Średni</string>
     <string name="level_moderate">Umiarkowany</string>
