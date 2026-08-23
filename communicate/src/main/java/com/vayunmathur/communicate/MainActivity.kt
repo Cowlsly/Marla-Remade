@@ -1,9 +1,11 @@
 package com.vayunmathur.communicate
 
 import android.Manifest
+import android.app.PictureInPictureParams
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Rational
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -90,6 +92,25 @@ class MainActivity : ComponentActivity() {
             DynamicTheme {
                 CommunicateApp()
             }
+        }
+    }
+
+    /**
+     * Shrink a video call into picture-in-picture when leaving the app, so the far end stays visible.
+     *
+     * Only for video: an audio call has nothing to show, and the ongoing-call notification already covers it.
+     */
+    override fun onUserLeaveHint() {
+        super.onUserLeaveHint()
+        val call = InAppCallRegistry.state.value
+        val videoActive = call.remoteVideoEnabled || call.localVideoEnabled
+        if (!videoActive || call.phase == InAppCallPhase.Idle || call.phase == InAppCallPhase.Ended) return
+        runCatching {
+            enterPictureInPictureMode(
+                PictureInPictureParams.Builder()
+                    .setAspectRatio(Rational(9, 16))
+                    .build(),
+            )
         }
     }
 

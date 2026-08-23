@@ -1397,6 +1397,16 @@ object CommunicateRepository {
         CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
     }
 
+    /**
+     * Whether [line] can place a **video** call. Only the in-app WebRTC lines can; SIM and Google Voice hand
+     * the call to Telecom, which carries audio only.
+     */
+    fun canPlaceVideoCall(line: CommunicateLine): Boolean = when (line) {
+        CommunicateLine.WhatsApp -> com.vayunmathur.communicate.data.whatsapp.WhatsAppFeature.enabled
+        CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
+        else -> false
+    }
+
     suspend fun createSignalGroup(
         context: Context,
         subject: String,

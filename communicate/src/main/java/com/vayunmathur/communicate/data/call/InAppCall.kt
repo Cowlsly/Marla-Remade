@@ -154,6 +154,10 @@ object InAppCallRegistry {
             peerId = peerId,
             peerName = peerName.ifBlank { peerId },
             isVideo = isVideo,
+            // A call placed as video starts with the camera and speaker on; RingRTC is told the same via
+            // proceed()'s enableCamera, so the UI must not claim otherwise.
+            localVideoEnabled = isVideo && !incoming,
+            speaker = isVideo && !incoming,
             capabilities = capabilities,
         )
     }
@@ -208,6 +212,12 @@ object InAppCallRegistry {
         val next = !_state.value.localVideoEnabled
         videoController?.setVideoEnabled(next)
         onLocalVideo(next)
+        // Sending video implies hands-free: nobody holds a phone to their ear to be seen. The speaker
+        // control is hidden while video is on, so the route is forced here rather than left stale.
+        if (next && !_state.value.speaker) {
+            controller?.setSpeaker(true)
+            onSpeaker(true)
+        }
     }
 
     fun flipCamera() {

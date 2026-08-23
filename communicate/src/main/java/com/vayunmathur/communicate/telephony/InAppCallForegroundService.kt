@@ -3,6 +3,7 @@ package com.vayunmathur.communicate.telephony
 import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.app.Person
 import android.app.Service
 import android.content.Context
 import android.content.Intent
@@ -85,48 +86,50 @@ class InAppCallForegroundService : Service() {
         }
     }
 
-    private fun buildIncomingCallNotification(peerName: String): Notification =
-        Notification.Builder(this, INCOMING_CHANNEL_ID)
-            .setContentTitle(getString(R.string.call_state_incoming_generic))
-            .setContentText(peerName)
+    /**
+     * Incoming-call notification using [Notification.CallStyle], which is what gives the system's standard
+     * green answer / red decline buttons and full-screen ringing treatment. Hand-built actions would render
+     * in the app's theme colours instead, which reads as an ordinary notification rather than a ringing call.
+     */
+    private fun buildIncomingCallNotification(peerName: String): Notification {
+        val caller = Person.Builder()
+            .setName(peerName.ifBlank { getString(R.string.call_state_incoming_generic) })
+            .setImportant(true)
+            .build()
+        return Notification.Builder(this, INCOMING_CHANNEL_ID)
+            .setStyle(
+                Notification.CallStyle.forIncomingCall(
+                    caller,
+                    serviceActionIntent(ACTION_HANGUP, 3),
+                    serviceActionIntent(ACTION_ANSWER, 2),
+                ),
+            )
             .setSmallIcon(android.R.drawable.sym_call_incoming)
             .setCategory(Notification.CATEGORY_CALL)
-            .setPriority(Notification.PRIORITY_MAX)
+            // Colorized plus CallStyle is what promotes it to the ringing treatment.
+            .setColorized(true)
             .setVisibility(Notification.VISIBILITY_PUBLIC)
             .setOngoing(true)
             .setAutoCancel(false)
-            .setContentIntent(callActivityIntent(0))
             .setFullScreenIntent(callActivityIntent(1), true)
-            .addAction(
-                android.R.drawable.sym_call_incoming,
-                getString(R.string.call_answer),
-                serviceActionIntent(ACTION_ANSWER, 2),
-            )
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                getString(R.string.call_decline),
-                serviceActionIntent(ACTION_HANGUP, 3),
-            )
             .build()
+    }
 
     private fun buildOngoingCallNotification(phase: InAppCallPhase, peerName: String): Notification {
+        val caller = Person.Builder().setName(peerName).setImportant(true).build()
         val title = when (phase) {
             InAppCallPhase.Outgoing -> getString(R.string.call_state_dialing)
             InAppCallPhase.Connecting -> getString(R.string.call_state_connecting)
             else -> getString(R.string.inapp_ongoing_call)
         }
         return Notification.Builder(this, CHANNEL_ID)
+            .setStyle(Notification.CallStyle.forOngoingCall(caller, serviceActionIntent(ACTION_HANGUP, 3)))
             .setContentTitle(title)
-            .setContentText(peerName)
             .setSmallIcon(android.R.drawable.sym_action_call)
             .setCategory(Notification.CATEGORY_CALL)
+            .setColorized(true)
             .setOngoing(true)
             .setContentIntent(callActivityIntent(0))
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                getString(R.string.call_end),
-                serviceActionIntent(ACTION_HANGUP, 3),
-            )
             .build()
     }
 

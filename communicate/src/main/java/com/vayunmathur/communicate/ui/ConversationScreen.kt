@@ -299,6 +299,21 @@ fun ConversationScreen(
                         if (!placed) AppMessages.show(context.getString(R.string.call_failed))
                     }
                 }) { com.vayunmathur.library.ui.IconCall() }
+                // Only the in-app WebRTC lines can carry video; Telecom lines cannot.
+                if (CommunicateRepository.canPlaceVideoCall(line)) {
+                    IconButton(onClick = {
+                        scope.launch {
+                            val placed = CommunicateRepository.placeCallForLine(
+                                context = context,
+                                line = line,
+                                address = address,
+                                remoteId = remoteId,
+                                video = true,
+                            )
+                            if (!placed) AppMessages.show(context.getString(R.string.call_failed))
+                        }
+                    }) { com.vayunmathur.library.ui.IconVideoCamera() }
+                }
             }
             if (line == CommunicateLine.GoogleVoice && remoteId != null) {
                 IconButton(onClick = {
