@@ -15,6 +15,8 @@ import com.vayunmathur.cast.protocol.PairFailed
 import com.vayunmathur.cast.protocol.PairOk
 import com.vayunmathur.cast.protocol.PairProof
 import com.vayunmathur.cast.protocol.PairRequired
+import com.vayunmathur.cast.protocol.PlaybackCommand
+import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.ProtocolBase64
 import com.vayunmathur.cast.protocol.SealedSecret
 import com.vayunmathur.cast.protocol.SecretSealing
@@ -266,7 +268,22 @@ class MirrorClient(
     }
 
     /**
-     * Wait for the TV to say goodbye, or for the socket to die.
+     * Put a playback snapshot on the control channel, for the TV's seek bar.
+     *
+     * Follows [sendCodecConfig] in being non-throwing, and for the same kind of reason: this is called
+     * from a poll loop, so a failure would recur every tick and there is nothing useful to do about
+     * one. A socket that has actually died is [awaitEnd]'s business and it will say so.
+     *
+     * Not logged per send. Two of these a second would bury everything else in the log, which is the
+     * opposite of what the logging in this class is for.
+     */
+    fun sendPlaybackState(state: PlaybackState) {
+        runCatching { socket.send(state) }
+            .onFailure { Log.w(TAG, "could not send the playback state", it) }
+    }
+
+    /**
+     * Wait for the TV to say goodbye, or for the socket to die, acting on anything else it sends.
      *
      * Held open for the whole session so that a TV going away is noticed at once, rather than only
      * when UDP starts failing - a control channel nobody reads is a control channel that cannot report
@@ -275,14 +292,34 @@ class MirrorClient(
      * Returns the `BYE` reason, or null when the socket died without one. The reason is carried back
      * rather than only logged because one of them - [ByeReason.MISSING_CODEC_CONFIG] - is a decision
      * the caller has to act on, not a note for a human.
+     *
+     * **A dispatch loop rather than a drain.** This used to discard everything that was not a `Bye`,
+     * which was right while the TV had nothing else to say. It has a remote now, and its
+     * [PlaybackCommand]s arrive on this same socket - and cannot arrive anywhere else, because there
+     * is one socket with one read position and this is already the only reader.
+     *
+     * [onCommand] is null for screen mirroring, which has no transport to control. A command that
+     * turns up anyway is logged and dropped rather than acted on.
      */
-    fun awaitEnd(): String? {
+    fun awaitEnd(onCommand: ((PlaybackCommand) -> Unit)? = null): String? {
         while (true) {
             val next = socket.receive() ?: return null
-            val message = next.message
-            if (message is Bye) {
-                Log.i(TAG, "'$receiverName' said goodbye: ${message.reason.ifBlank { "no reason" }}")
-                return message.reason
+            when (val message = next.message) {
+                is Bye -> {
+                    Log.i(TAG, "'$receiverName' said goodbye: ${message.reason.ifBlank { "no reason" }}")
+                    return message.reason
+                }
+                is PlaybackCommand -> {
+                    val argument = message.value?.let { " $it" }.orEmpty()
+                    if (onCommand == null) {
+                        Log.w(TAG, "'$receiverName' asked for ${message.action}$argument, " +
+                            "but there is no transport to control")
+                    } else {
+                        Log.i(TAG, "'$receiverName' asked for ${message.action}$argument")
+                        onCommand(message)
+                    }
+                }
+                else -> {}
             }
         }
     }

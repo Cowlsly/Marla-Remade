@@ -13,6 +13,9 @@ import android.os.RemoteException
 import android.util.Log
 import com.vayunmathur.cast.platform.CastController
 import com.vayunmathur.cast.platform.ContentSessionResult
+import com.vayunmathur.cast.protocol.PlaybackAction
+import com.vayunmathur.cast.protocol.PlaybackCommand
+import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.sdk.cast.CastContract
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -45,7 +48,7 @@ class ContentCastService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    /** Where [CastContract.MSG_SESSION_READY] and `MSG_SESSION_ENDED` go. */
+    /** Where `MSG_SESSION_READY`, `MSG_SESSION_ENDED` and `MSG_PLAYBACK_COMMAND` go. */
     private var client: Messenger? = null
 
     /** True between a successful open and the session ending, so nothing is reported twice. */
@@ -60,6 +63,14 @@ class ContentCastService : Service() {
                 }
                 CastContract.MSG_CLOSE_SESSION -> {
                     closeSession(CastContract.REASON_CLIENT_CLOSED, notify = true)
+                    true
+                }
+                CastContract.MSG_PLAYBACK_STATE -> {
+                    // Dropped rather than queued with no session: there is no TV to draw it on, and a
+                    // client is free to keep polling for a tick or two after the session ended.
+                    if (sessionOpen) {
+                        msg.data?.let { CastController.reportPlaybackState(it.toPlaybackState()) }
+                    }
                     true
                 }
                 else -> false
@@ -116,6 +127,11 @@ class ContentCastService : Service() {
                     CastController.onContentSessionEnded = { reason ->
                         scope.launch { closeSession(reason, notify = true) }
                     }
+                    CastController.onPlaybackCommand = { command ->
+                        // Hopped to the main thread because `awaitEnd` runs on IO and the client's
+                        // callback drives a player.
+                        scope.launch { send(playbackCommand(command)) }
+                    }
                     sendReady(result)
                 }
             }
@@ -152,6 +168,7 @@ class ContentCastService : Service() {
         if (!sessionOpen) return
         sessionOpen = false
         CastController.onContentSessionEnded = null
+        CastController.onPlaybackCommand = null
         // Back to a paired-but-idle TV rather than a dropped session: the pairing is per device and
         // worth keeping, and the user may well cast again straight away.
         CastController.stopMirroring(this)
@@ -178,3 +195,55 @@ class ContentCastService : Service() {
         runCatching { pfd?.close() }
     }
 }
+
+/**
+ * The `Bundle` a client sent, as the message the TV understands.
+ *
+ * **This is the whole of the deliberate duplication between `:sdk:cast` and `:cast:protocol`, and it
+ * lives here because this is the only place that depends on both.** `:sdk:cast` is what every casting
+ * app compiles against, so it must not pull in the wire format, the crypto or the packetiser; the
+ * protocol module is what the TV shares. Two definitions and one translation is the price, and this
+ * file is where it is paid.
+ *
+ * Defaults rather than refusals for the optional fields: a client that never sets a speed is playing
+ * at 1x, and a TV drawing 0x would be wrong in a way nothing would explain.
+ */
+private fun Bundle.toPlaybackState(): PlaybackState = PlaybackState(
+    positionMs = getLong(CastContract.KEY_POSITION_MS),
+    durationMs = getLong(CastContract.KEY_DURATION_MS),
+    playing = getBoolean(CastContract.KEY_PLAYING),
+    buffering = getBoolean(CastContract.KEY_BUFFERING),
+    speed = getFloat(CastContract.KEY_SPEED, 1f),
+    volume = getFloat(CastContract.KEY_VOLUME, 1f),
+    hasNext = getBoolean(CastContract.KEY_HAS_NEXT),
+    hasPrevious = getBoolean(CastContract.KEY_HAS_PREVIOUS),
+)
+
+/** The command the TV sent, as the `Message` the SDK reads. See [Bundle.toPlaybackState]. */
+private fun playbackCommand(command: PlaybackCommand): Message =
+    Message.obtain(null, CastContract.MSG_PLAYBACK_COMMAND).apply {
+        data = Bundle().apply {
+            putInt(CastContract.KEY_ACTION, command.action.sdkAction)
+            command.value?.let { putDouble(CastContract.KEY_ACTION_VALUE, it) }
+        }
+    }
+
+/**
+ * The SDK's int for a protocol action.
+ *
+ * Exhaustive with no else branch on purpose: adding an action to the protocol enum should fail to
+ * compile here rather than silently arrive at the client as whatever the fallback was.
+ */
+private val PlaybackAction.sdkAction: Int
+    get() = when (this) {
+        PlaybackAction.Play -> CastContract.ACTION_PLAY
+        PlaybackAction.Pause -> CastContract.ACTION_PAUSE
+        PlaybackAction.Toggle -> CastContract.ACTION_TOGGLE
+        PlaybackAction.SeekTo -> CastContract.ACTION_SEEK_TO
+        PlaybackAction.SkipForward -> CastContract.ACTION_SKIP_FORWARD
+        PlaybackAction.SkipBack -> CastContract.ACTION_SKIP_BACK
+        PlaybackAction.Next -> CastContract.ACTION_NEXT
+        PlaybackAction.Previous -> CastContract.ACTION_PREVIOUS
+        PlaybackAction.SetSpeed -> CastContract.ACTION_SET_SPEED
+        PlaybackAction.SetVolume -> CastContract.ACTION_SET_VOLUME
+    }

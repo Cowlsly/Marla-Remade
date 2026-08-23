@@ -25,6 +25,8 @@ import com.vayunmathur.cast.protocol.CodecNegotiation
 import com.vayunmathur.cast.protocol.CodecSelection
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
+import com.vayunmathur.cast.protocol.PlaybackCommand
+import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.StreamConstants
 import com.vayunmathur.cast.protocol.StreamingSession
 import com.vayunmathur.cast.protocol.VideoCodec
@@ -166,6 +168,18 @@ object CastController {
      * once rather than be a current value.
      */
     var onContentSessionEnded: ((Int) -> Unit)? = null
+
+    /**
+     * Notified when the television's remote is pressed during an SDK session.
+     *
+     * Set and cleared by `ContentCastService` alongside [onContentSessionEnded], and for the same
+     * reasons: one session, one callback, and a command has to reach the app once rather than be a
+     * current value worth observing.
+     *
+     * Null during screen mirroring, which has no transport to control - and [startWatch] does not even
+     * offer the dispatch in that case, so a stray command never reaches this far.
+     */
+    var onPlaybackCommand: ((PlaybackCommand) -> Unit)? = null
 
     /**
      * The name of the app that last completed `CastPickerActivity`, resolved from its
@@ -528,7 +542,7 @@ object CastController {
         _sessionState.update {
             it.copy(phase = ClientPhase.Streaming, negotiation = ready.negotiation)
         }
-        startWatch(appContext, activeClient, device, codec.codec)
+        startWatch(appContext, activeClient, device, codec.codec, transportControls = true)
         ContentSessionResult.Started(
             surface = surface,
             audioWriteEnd = newEngine.audioWriteEnd,
@@ -546,15 +560,28 @@ object CastController {
      * a request/response to do on it - a second reader would consume the `STREAM_READY` that
      * negotiation is waiting for. Until this starts, a dead TV surfaces as a failed `configureStream`,
      * which is just as prompt.
+     *
+     * [transportControls] is what gates the remote to app content. Screen mirroring has no transport
+     * to control, so it is not merely that the overlay should not appear on the TV - there is nothing
+     * a command could be applied to on this end either.
      */
     private fun startWatch(
         appContext: Context,
         activeClient: MirrorClient,
         device: CastDevice,
         codec: VideoCodec,
+        transportControls: Boolean = false,
     ) {
         watchJob = scope.launch {
-            val reason = activeClient.awaitEnd()
+            // Read late rather than captured: `ContentCastService` registers its callback only after
+            // `startContentSession` returns, which is after this job has already started - the same
+            // ordering `onContentSessionEnded` has.
+            val dispatch: ((PlaybackCommand) -> Unit)? = if (transportControls) {
+                { command -> onPlaybackCommand?.invoke(command) }
+            } else {
+                null
+            }
+            val reason = activeClient.awaitEnd(dispatch)
             // **Another path may already own this teardown.** Closing the socket is what unblocks the
             // read above, and [endCodecConfigFailure] closes it deliberately - so a return from
             // `awaitEnd` is not proof that the TV ended the session. Whoever cancelled this job is
@@ -743,6 +770,21 @@ object CastController {
         scope.launch { mutex.withLock { activeClient.sendCodecConfig(csd) } }
     }
 
+    /**
+     * Put a playback snapshot on the control channel, so the TV can draw a seek bar.
+     *
+     * Under [mutex] for exactly the reason [sendCodecConfig] is, with one more writer to serialise
+     * against than before: the encoder loop, the RTCP loop and now a twice-a-second heartbeat all write
+     * to the one socket.
+     *
+     * Silently does nothing with no session, rather than reporting it. The caller is a poll loop that
+     * cannot know precisely when the session ended, and there is nothing for it to do about the answer.
+     */
+    fun reportPlaybackState(state: PlaybackState) {
+        val activeClient = client ?: return
+        scope.launch { mutex.withLock { activeClient.sendPlaybackState(state) } }
+    }
+
     private fun stopEngine() {
         engine?.stop()
         engine = null
@@ -758,6 +800,7 @@ object CastController {
     private fun endContentSession(reason: Int) {
         val notify = onContentSessionEnded ?: return
         onContentSessionEnded = null
+        onPlaybackCommand = null
         notify(reason)
     }
 
