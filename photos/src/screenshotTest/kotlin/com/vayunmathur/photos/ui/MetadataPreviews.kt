@@ -186,12 +186,18 @@ private fun samplePhoto(id: Long, name: String, date: Long): Photo = Photo(
     panoData = null,
 )
 
-/** Face clusters, ordered largest first the way the ViewModel emits them. */
+/**
+ * Face clusters, ordered largest first the way the ViewModel emits them. The first
+ * few are named and the rest are not, so the grid's name label renders in both
+ * states.
+ */
 private fun samplePeople(): List<PersonCluster> {
     val photos = samplePhotos()
+    val names = listOf("Ana Ruiz", "Priya Nair", "Tom Baker", null, null, null)
     return listOf(9, 7, 6, 5, 3, 2).mapIndexed { i, count ->
         PersonCluster(
             id = i + 1L,
+            name = names[i],
             coverPhoto = photos[i * 3],
             faceLeft = 0.31f,
             faceTop = 0.18f,

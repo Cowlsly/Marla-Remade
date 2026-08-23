@@ -62,6 +62,8 @@
         <item quantity="one"><xliff:g id="count" example="12">%1$d</xliff:g> photo</item>
         <item quantity="other"><xliff:g id="count" example="12">%1$d</xliff:g> photos</item>
     </plurals>
+    <!-- Label under a person grid cell with no name yet; tapping it opens the contact picker. Adjective -->
+    <string name="people_unnamed">Unnamed</string>
     <!-- Photo detail badge: number of people in this photo. Plural handling. %1$d = count -->
     <plurals name="people_in_photo">
         <!-- Singular: one person in photo -->

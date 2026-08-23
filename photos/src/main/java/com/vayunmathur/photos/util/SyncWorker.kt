@@ -570,7 +570,7 @@ class FaceWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 /**
  * Scan any not-yet-scanned library photos for faces, then group each detected
  * face into a [Person] cluster by cosine similarity of its embedding — all
- * on-device, unsupervised, and unnamed.
+ * on-device and unsupervised.
  *
  * Clustering is greedy and incremental: each face joins the nearest existing
  * cluster if similarity >= [FaceRecognizer.CLUSTER_THRESHOLD], otherwise it
@@ -619,6 +619,10 @@ suspend fun runFaceIndexing(repository: PhotosRepository, context: Context) {
             if (bitmap != null) {
                 decoded++
                 didInference = true
+                // Read before recycle: the box columns are normalised against
+                // this bitmap, so its dimensions have to be stored with them.
+                val srcWidth = bitmap.width
+                val srcHeight = bitmap.height
                 val faces = FaceRecognizer.detectAndEmbed(context, bitmap)
                 bitmap.recycle()
                 if (faces.isNotEmpty()) {
@@ -626,11 +630,17 @@ suspend fun runFaceIndexing(repository: PhotosRepository, context: Context) {
                     Log.i("FaceWorker", "photo ${photo.id}: ${faces.size} face(s) (running total: $facesTotal)")
                 }
                 val rows = faces.map { face ->
-                    val clusterId = assignToCluster(face, photo, clusters, repository)
+                    val clusterId = assignToCluster(face, clusters, repository)
                     PhotoFace(
                         photoId = photo.id,
                         clusterId = clusterId,
                         embedding = FaceRecognizer.floatsToBytes(face.embedding),
+                        left = face.left,
+                        top = face.top,
+                        right = face.right,
+                        bottom = face.bottom,
+                        srcWidth = srcWidth,
+                        srcHeight = srcHeight,
                     )
                 }
                 if (rows.isNotEmpty()) repository.insertPhotoFaces(rows)
@@ -669,7 +679,6 @@ private const val FACE_INTER_ITEM_DELAY_MS = 250L
  */
 private suspend fun assignToCluster(
     face: FaceRecognizer.DetectedFace,
-    photo: Photo,
     clusters: MutableList<Cluster>,
     repository: PhotosRepository,
 ): Long {
@@ -701,11 +710,7 @@ private suspend fun assignToCluster(
     val person = Person(
         centroid = FaceRecognizer.floatsToBytes(face.embedding),
         faceCount = 1,
-        repPhotoId = photo.id,
-        repLeft = face.left,
-        repTop = face.top,
-        repRight = face.right,
-        repBottom = face.bottom,
+        name = null,
     )
     val id = repository.insertPerson(person)
     clusters += Cluster(person.copy(id = id), face.embedding.copyOf())
@@ -739,6 +744,10 @@ private suspend fun mergeSimilarClusters(repository: PhotosRepository) {
                 val merged = a.copy(
                     centroid = FaceRecognizer.floatsToBytes(FaceRecognizer.l2Normalize(mean)),
                     faceCount = na + nb,
+                    // A name is the one thing here the user typed, so the survivor
+                    // inherits it from whichever side has one rather than losing it
+                    // with the discarded row.
+                    name = a.name ?: b.name,
                 )
                 repository.reassignCluster(b.id, a.id)
                 repository.updatePerson(merged)

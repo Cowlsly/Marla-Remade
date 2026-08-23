@@ -117,13 +117,13 @@ data class PhotoEmbedding(
     val clipEmbedding: ByteArray,
 )
 
-@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 15, exportSchema = false)
+@Database(entities = [Photo::class, Person::class, PhotoFace::class], version = 16, exportSchema = false)
 abstract class PhotoDatabase : RoomDatabase() {
     abstract fun photoDao(): PhotoDao
     abstract fun faceDao(): FaceDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15)
+        override val migrations: List<Migration> = listOf(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5, MIGRATION_5_6, MIGRATION_6_7, MIGRATION_7_8, MIGRATION_8_9, MIGRATION_9_10, MIGRATION_10_11, MIGRATION_11_12, MIGRATION_12_13, MIGRATION_13_14, MIGRATION_14_15, MIGRATION_15_16)
     }
 }
 
@@ -245,4 +245,26 @@ val MIGRATION_14_15 = Migration(14, 15) {
     // was already found while the re-index runs; each row's text is overwritten
     // as it is rescanned.
     it.execSQL("UPDATE Photo SET ocrScanned = 0, ocrBoxes = NULL")
+}
+
+val MIGRATION_15_16 = Migration(15, 16) {
+    // Faces now store their own geometry, so a cluster's best face can be picked
+    // at read time (largest in source pixels) and the viewer can outline faces;
+    // Person drops its single representative face and gains a user-chosen name.
+    // Existing face rows have no geometry to backfill, so both tables are
+    // dropped, recreated and re-derived by the background indexer — the same
+    // drop-recreate-reset MIGRATION_7_8 did, for the same reason. Photo, OCR and
+    // CLIP data are untouched. Nothing is lost: no names exist before this.
+    //
+    // Names live on the cluster row, so a future FaceRecognizer.EMBEDDER_VERSION
+    // bump (which clears clusters) will clear them too. Accepted.
+    //
+    // SQL mirrors Room's generated schema exactly so schema validation passes.
+    it.execSQL("DROP TABLE IF EXISTS Person")
+    it.execSQL("DROP TABLE IF EXISTS PhotoFace")
+    it.execSQL("CREATE TABLE IF NOT EXISTS `Person` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `centroid` BLOB NOT NULL, `faceCount` INTEGER NOT NULL, `name` TEXT)")
+    it.execSQL("CREATE TABLE IF NOT EXISTS `PhotoFace` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `photoId` INTEGER NOT NULL, `clusterId` INTEGER NOT NULL, `embedding` BLOB NOT NULL, `left` REAL NOT NULL, `top` REAL NOT NULL, `right` REAL NOT NULL, `bottom` REAL NOT NULL, `srcWidth` INTEGER NOT NULL, `srcHeight` INTEGER NOT NULL)")
+    it.execSQL("CREATE INDEX IF NOT EXISTS `index_PhotoFace_photoId` ON `PhotoFace` (`photoId`)")
+    it.execSQL("CREATE INDEX IF NOT EXISTS `index_PhotoFace_clusterId` ON `PhotoFace` (`clusterId`)")
+    it.execSQL("UPDATE Photo SET faceScanned = 0")
 }

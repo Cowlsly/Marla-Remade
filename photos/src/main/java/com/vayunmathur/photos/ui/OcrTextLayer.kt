@@ -231,12 +231,10 @@ private fun placeBoxes(
     measure: (String) -> IntSize,
 ): List<OcrPlacement> {
     // ContentScale.Fit + Alignment.Center: uniform scale, letterboxed and centred.
-    val fit = minOf(
-        containerSize.width.toFloat() / layout.w,
-        containerSize.height.toFloat() / layout.h,
-    )
-    val originX = (containerSize.width - layout.w * fit) / 2f
-    val originY = (containerSize.height - layout.h * fit) / 2f
+    val transform = imageFitTransform(layout.w, layout.h, containerSize) ?: return emptyList()
+    val fit = transform.scale
+    val originX = transform.originX
+    val originY = transform.originY
 
     return layout.boxes.mapNotNull { box ->
         // The letterbox is a uniform scale, so mapping the corners through it

@@ -101,32 +101,51 @@ class GalleryViewModel(
     val faceTargetCount: StateFlow<Int> = photoDao.getFaceTargetCountFlow()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
-    /** Photos grouped by unnamed person-cluster, for the People view. */
+    /**
+     * Photos grouped by person-cluster, for the People view.
+     *
+     * A cluster's representative is derived here rather than stored: whichever of
+     * its faces covers the most *source* pixels, which is the one that survives
+     * being cropped into a thumbnail. Area is
+     * `(right-left) * (bottom-top) * photo.width * photo.height`, and those two
+     * fractions multiply against both dimensions, so the ranking is unaffected by
+     * MediaStore's width/height being transposed for EXIF-rotated JPEGs.
+     *
+     * Deriving it also means the cover photo and the box always come from the
+     * same face, so a trashed photo can no longer leave a box cropping an
+     * unrelated image.
+     */
     val people: StateFlow<List<PersonCluster>> =
         combine(photoDao.getAllFlow(), faceDao.personsFlow(), faceDao.allFacesFlow()) { allPhotos, persons, faces ->
             val byId = allPhotos.filter { !it.isTrashed }.associateBy { it.id }
             val facesByCluster = faces.groupBy { it.clusterId }
             persons.mapNotNull { person ->
-                val personPhotos = facesByCluster[person.id].orEmpty()
-                    .mapNotNull { byId[it.photoId] }
-                    .distinctBy { it.id }
-                    .sortedByDescending { it.date }
-                if (personPhotos.isEmpty()) return@mapNotNull null
-                val cover = byId[person.repPhotoId] ?: personPhotos.first()
+                val clusterFaces = facesByCluster[person.id].orEmpty()
+                    .mapNotNull { face -> byId[face.photoId]?.let { face to it } }
+                if (clusterFaces.isEmpty()) return@mapNotNull null
+                val (bestFace, bestPhoto) = clusterFaces.maxBy { (face, photo) ->
+                    (face.right - face.left).toDouble() * (face.bottom - face.top) *
+                        photo.width * photo.height
+                }
                 PersonCluster(
                     id = person.id,
-                    coverPhoto = cover,
-                    faceLeft = person.repLeft,
-                    faceTop = person.repTop,
-                    faceRight = person.repRight,
-                    faceBottom = person.repBottom,
-                    photos = personPhotos,
+                    name = person.name,
+                    coverPhoto = bestPhoto,
+                    faceLeft = bestFace.left,
+                    faceTop = bestFace.top,
+                    faceRight = bestFace.right,
+                    faceBottom = bestFace.bottom,
+                    photos = clusterFaces.map { it.second }
+                        .distinctBy { it.id }
+                        .sortedByDescending { it.date },
                 )
             }.sortedByDescending { it.photos.size }
         }
             // Per-photo writes during indexing re-emit the source flows constantly;
             // drop emissions where the projected cluster list is unchanged (value
             // equality of the PersonCluster data class) so the grid doesn't churn.
+            // The representative can legitimately change mid-scan, so real changes
+            // still get through.
             .distinctUntilChanged()
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -134,6 +153,33 @@ class GalleryViewModel(
     val faceCountByPhoto: StateFlow<Map<Long, Int>> =
         faceDao.allFacesFlow().map { faces ->
             faces.groupBy { it.photoId }.mapValues { (_, list) -> list.size }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /**
+     * Face geometry per photo, for the viewer's face overlay. Combined with the
+     * clusters because the label text lives on [com.vayunmathur.photos.data.Person],
+     * not on the face row — which is also why [faceCountByPhoto] can't be reused.
+     */
+    val faceBoxesByPhoto: StateFlow<Map<Long, PhotoFaceBoxes>> =
+        combine(faceDao.allFacesFlow(), faceDao.personsFlow()) { faces, persons ->
+            val nameByCluster = persons.associate { it.id to it.name }
+            faces.groupBy { it.photoId }.mapValues { (_, rows) ->
+                PhotoFaceBoxes(
+                    // Duplicated across a photo's rows, so any one of them serves.
+                    srcWidth = rows.first().srcWidth,
+                    srcHeight = rows.first().srcHeight,
+                    faces = rows.map { row ->
+                        FaceBox(
+                            clusterId = row.clusterId,
+                            name = nameByCluster[row.clusterId],
+                            left = row.left,
+                            top = row.top,
+                            right = row.right,
+                            bottom = row.bottom,
+                        )
+                    },
+                )
+            }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     init {
@@ -271,6 +317,13 @@ class GalleryViewModel(
         SyncWorker.enqueue(getApplication())
     }
 
+    /** Name a person-cluster, or clear its name with null. */
+    fun setPersonName(id: Long, name: String?) {
+        viewModelScope.launch(Dispatchers.IO) {
+            repository.setPersonName(id, name)
+        }
+    }
+
     companion object {
         private const val TAG = "GalleryViewModel"
 
@@ -308,15 +361,38 @@ fun GalleryViewModelFactory(
     return GalleryViewModelFactory(application, repo)
 }
 
-/** An unnamed person-cluster and the library photos they appear in. */
+/** A person-cluster and the library photos they appear in. */
 data class PersonCluster(
     val id: Long,
+    /** The name the user picked from their contacts, or null while unnamed. */
+    val name: String?,
     val coverPhoto: Photo,
     val faceLeft: Float,
     val faceTop: Float,
     val faceRight: Float,
     val faceBottom: Float,
     val photos: List<Photo>,
+)
+
+/**
+ * The faces detected in one photo, plus the dimensions their boxes are
+ * normalised against — the display-orientation dimensions of the detection
+ * bitmap, which is what the overlay needs to rebuild the letterbox rect.
+ */
+data class PhotoFaceBoxes(
+    val srcWidth: Int,
+    val srcHeight: Int,
+    val faces: List<FaceBox>,
+)
+
+/** One face box (normalised 0..1) and the cluster it was grouped into. */
+data class FaceBox(
+    val clusterId: Long,
+    val name: String?,
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float,
 )
 
 /** Availability of on-device semantic search, for the search UI. */

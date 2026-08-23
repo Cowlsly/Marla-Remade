@@ -59,6 +59,7 @@ class PhotosRepository private constructor(context: Context) :
     suspend fun getPersons(): List<Person> = faceDao.getPersons()
     suspend fun clearPersons() = faceDao.clearPersons()
     suspend fun deletePerson(id: Long) = faceDao.deletePerson(id)
+    suspend fun setPersonName(id: Long, name: String?) = faceDao.setPersonName(id, name)
     suspend fun insertPhotoFaces(faces: List<PhotoFace>) = faceDao.insertPhotoFaces(faces)
     suspend fun deletePhotoFacesByPhotoIds(photoIds: List<Long>) = faceDao.deletePhotoFacesByPhotoIds(photoIds)
     suspend fun clearPhotoFaces() = faceDao.clearPhotoFaces()

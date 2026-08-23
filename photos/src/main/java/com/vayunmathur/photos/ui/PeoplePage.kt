@@ -1,5 +1,11 @@
 package com.vayunmathur.photos.ui
 
+import android.content.Context
+import android.net.Uri
+import android.provider.ContactsContract
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,7 +27,10 @@ import com.vayunmathur.library.ui.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -29,6 +38,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import com.vayunmathur.library.image.compose.AsyncImage
@@ -43,6 +53,9 @@ import com.vayunmathur.photos.util.FaceRecognizer
 import com.vayunmathur.photos.util.GalleryViewModel
 import com.vayunmathur.photos.util.PeopleUiState
 import com.vayunmathur.photos.util.PersonCluster
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /** Binds [GalleryViewModel] to the stateless [PeopleScreen]. */
 @Composable
@@ -51,11 +64,29 @@ fun PeoplePage(
     galleryViewModel: GalleryViewModel,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val people by galleryViewModel.people.collectAsState()
     val indexing by galleryViewModel.faceIndexing.collectAsState()
     val scanned by galleryViewModel.faceScannedCount.collectAsState()
     val target by galleryViewModel.faceTargetCount.collectAsState()
     val modelsAvailable = remember { FaceRecognizer.modelsAvailable(context) }
+
+    // The contact picker's result carries only the picked contact, with nothing to
+    // say which cluster was being named, so the cluster id is parked here across
+    // the launch — the same pending-state shape PhotoPage's delete flow uses.
+    // An activity-result launcher can't live on a ViewModel, so it lives here in
+    // the binder and PeopleScreen just gets a lambda (see GalleryActions' KDoc).
+    var pendingClusterId by remember { mutableStateOf<Long?>(null) }
+    val pickContact = rememberLauncherForActivityResult(ActivityResultContracts.PickContact()) { uri ->
+        val clusterId = pendingClusterId
+        pendingClusterId = null
+        // A cancelled picker returns null; nothing to do.
+        if (uri == null || clusterId == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            val name = withContext(Dispatchers.IO) { contactDisplayName(context, uri) }
+            if (name != null) galleryViewModel.setPersonName(clusterId, name)
+        }
+    }
 
     PeopleScreen(
         backStack = backStack,
@@ -66,13 +97,33 @@ fun PeoplePage(
             faceScannedCount = scanned,
             faceTargetCount = target,
         ),
+        onNameClick = { person ->
+            pendingClusterId = person.id
+            pickContact.launch(null)
+        },
     )
+}
+
+/**
+ * The display name behind a URI from [ActivityResultContracts.PickContact], which
+ * grants read access to that one contact — so this works without READ_CONTACTS.
+ */
+private fun contactDisplayName(context: Context, uri: Uri): String? = try {
+    context.contentResolver.query(
+        uri,
+        arrayOf(ContactsContract.Contacts.DISPLAY_NAME),
+        null, null, null,
+    )?.use { cursor ->
+        if (cursor.moveToFirst()) cursor.getString(0)?.takeIf { it.isNotBlank() } else null
+    }
+} catch (e: Exception) {
+    Log.w("PeoplePage", "Could not read the picked contact's name", e)
+    null
 }
 
 /**
  * The people grid, with no dependency on the ViewModel so it can be rendered from a
  * `@Preview` — see `src/screenshotTest`, which is where the store listing images come from.
- * Navigation is the screen's only callback, so there is no actions interface.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -84,6 +135,12 @@ fun PeopleScreen(
      * one crops a MediaStore image, which Layoutlib cannot decode.
      */
     faceThumbnail: @Composable (PersonCluster, Modifier) -> Unit = { person, modifier -> FaceThumbnail(person, modifier) },
+    /**
+     * Name (or rename) a cluster. Opens the contact picker, which needs an
+     * activity-result launcher, so the binder owns it — a preview renders the
+     * labels fine with the no-op default.
+     */
+    onNameClick: (PersonCluster) -> Unit = {},
 ) {
     // Show progress while there are still photos left to scan (or the worker is
     // actively running); it disappears on its own once everything is scanned.
@@ -114,6 +171,7 @@ fun PeopleScreen(
                             people = state.people,
                             modifier = Modifier.weight(1f),
                             faceThumbnail = faceThumbnail,
+                            onNameClick = onNameClick,
                         ) { person ->
                             backStack.add(Route.PhotoPage(person.coverPhoto.id, person.photos))
                         }
@@ -155,6 +213,7 @@ private fun PeopleGrid(
     people: List<PersonCluster>,
     modifier: Modifier = Modifier,
     faceThumbnail: @Composable (PersonCluster, Modifier) -> Unit,
+    onNameClick: (PersonCluster) -> Unit,
     onClick: (PersonCluster) -> Unit,
 ) {
     LazyVerticalGrid(
@@ -175,41 +234,62 @@ private fun PeopleGrid(
                         .clip(CircleShape)
                         .invisibleClickable { onClick(person) },
                 )
+                // The name is its own tap target: the avatar keeps opening the
+                // person's photos, and tapping an existing name is how renaming
+                // works (it just reopens the picker).
+                Text(
+                    text = person.name ?: stringResource(R.string.people_unnamed),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .padding(top = 4.dp)
+                        .invisibleClickable { onNameClick(person) },
+                )
                 Text(
                     text = pluralStringResource(R.plurals.people_photo_count, person.photos.size, person.photos.size),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 4.dp),
                 )
             }
         }
     }
 }
 
-/** The representative face of a cluster, cropped from its cover photo. Unnamed. */
+/** The representative face of a cluster, cropped from its cover photo. */
 @Composable
 private fun FaceThumbnail(person: PersonCluster, modifier: Modifier) {
     val context = LocalContext.current
-    // Remember the Coil request keyed only on the STABLE face identity (cluster
-    // id + source file + face box). This keeps the model identity and cache keys
-    // constant across re-emissions, so the same face is never re-decoded/re-fetched
-    // (no flashing) even when the surrounding list re-emits during indexing.
-    val cacheKey = "face_${person.id}_${person.coverPhoto.dateModified}"
-    val request = remember(
-        person.id,
-        person.coverPhoto.uri,
-        person.coverPhoto.dateModified,
-        person.faceLeft, person.faceTop, person.faceRight, person.faceBottom,
-    ) {
+    // `size` downsamples at *decode* time and transformations run after it, so
+    // asking for 256 would decode the whole photo to 256px and only then cut the
+    // face out — a face spanning 15% of the frame would arrive as ~38px stretched
+    // across a full-width circle. Scaling the request up by the box fraction puts
+    // the cropped result near TARGET_FACE_PX instead; the clamp stops a tiny face
+    // asking for an enormous decode.
+    val boxFraction = minOf(person.faceRight - person.faceLeft, person.faceBottom - person.faceTop)
+    val requestSize = remember(boxFraction) {
+        if (boxFraction <= 0f) TARGET_FACE_PX
+        else (TARGET_FACE_PX / boxFraction).toInt().coerceIn(TARGET_FACE_PX, MAX_FACE_DECODE_PX)
+    }
+    // The representative face changes as indexing finds a better one, so the
+    // memory key has to carry the box and the decode size or a stale crop would be
+    // served forever. The disk cache holds the *pre-transform* fetched bytes (the
+    // original file, see ImageLoader), so its key is photo identity alone —
+    // including the box or the size there would just store the same file twice.
+    val diskKey = "face_src_${person.coverPhoto.id}_${person.coverPhoto.dateModified}"
+    val memoryKey = "face_${person.id}_${diskKey}_${person.faceLeft}_${person.faceTop}_" +
+        "${person.faceRight}_${person.faceBottom}_$requestSize"
+    val request = remember(person.coverPhoto.uri, memoryKey, diskKey, requestSize) {
         ImageRequest.Builder(context)
             .data(person.coverPhoto.uri.toUri())
             .transformations(
                 FaceCropTransformation(person.faceLeft, person.faceTop, person.faceRight, person.faceBottom)
             )
-            .diskCacheKey(cacheKey)
-            .memoryCacheKey(cacheKey)
+            .diskCacheKey(diskKey)
+            .memoryCacheKey(memoryKey)
             .crossfade(false)
-            .size(256)
+            .size(requestSize)
             .build()
     }
     AsyncImage(
@@ -219,3 +299,9 @@ private fun FaceThumbnail(person: PersonCluster, modifier: Modifier) {
         modifier = modifier,
     )
 }
+
+/** Roughly the on-screen size of a face circle in the 3-column grid. */
+private const val TARGET_FACE_PX = 256
+
+/** Ceiling on the decode a small face may ask for, to bound memory and time. */
+private const val MAX_FACE_DECODE_PX = 1536

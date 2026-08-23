@@ -98,6 +98,7 @@ import com.vayunmathur.photos.domain.OcrBoxStore
 import com.vayunmathur.photos.util.GalleryViewModel
 import com.vayunmathur.photos.util.LiveWallpaperLauncher
 import com.vayunmathur.photos.util.PhotoMapViewModel
+import com.vayunmathur.photos.util.PhotoFaceBoxes
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -130,6 +131,8 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
             .toList()
     }
     val matchedCounts by galleryViewModel.faceCountByPhoto.collectAsState()
+    val faceBoxes by galleryViewModel.faceBoxesByPhoto.collectAsState()
+    val people by galleryViewModel.people.collectAsState()
 
     // In-viewer delete: move the current photo to the system trash via the same
     // MediaStore IntentSender flow the grid uses. MANAGE_MEDIA (enforced at app
@@ -235,6 +238,13 @@ fun PhotoPage(galleryViewModel: GalleryViewModel, photoMapViewModel: PhotoMapVie
                         isMetadataVisible = isMetadataVisible,
                         currentZoom = zoomState,
                         peopleCount = matchedCounts[photo.id] ?: 0,
+                        faceBoxes = faceBoxes[photo.id],
+                        onOpenPerson = { clusterId ->
+                            // The same navigation the People grid performs.
+                            people.firstOrNull { it.id == clusterId }?.let { cluster ->
+                                backStack?.add(Route.PhotoPage(cluster.coverPhoto.id, cluster.photos))
+                            }
+                        },
                         onZoomUpdate = { newState -> zoomStates[photo.id] = newState },
                         onToggleMetadata = { isMetadataVisible = !isMetadataVisible },
                         refreshKey = refreshKey,
@@ -295,6 +305,8 @@ fun PhotoDetailView(
         isMetadataVisible: Boolean,
         currentZoom: ZoomState,
         peopleCount: Int = 0,
+        faceBoxes: PhotoFaceBoxes? = null,
+        onOpenPerson: (Long) -> Unit = {},
         onZoomUpdate: (ZoomState) -> Unit,
         onToggleMetadata: () -> Unit,
         refreshKey: Int = 0,
@@ -499,6 +511,29 @@ fun PhotoDetailView(
                         showOutlines = isMetadataVisible,
                         zoom = currentZoom.scale,
                         modifier = Modifier.fillMaxSize().then(zoomModifier)
+                )
+            }
+        }
+
+        // Above the OCR layer so a face tap wins over the selection container's
+        // invisible text. The tradeoff is that text selection is blocked inside a
+        // face rect; faces and text rarely overlap, and the other way round — the
+        // selection layer eating face taps — is worse. Gated so the layer is not
+        // composed while the chrome is hidden, or its tap targets would swallow
+        // the single tap that brings the chrome back.
+        faceBoxes?.takeIf { isSettled && size != IntSize.Zero }?.let { boxes ->
+            AnimatedVisibility(
+                    visible = isMetadataVisible,
+                    enter = fadeIn(),
+                    exit = fadeOut(),
+                    modifier = Modifier.fillMaxSize().then(zoomModifier)
+            ) {
+                FaceBoxLayer(
+                        boxes = boxes,
+                        containerSize = size,
+                        zoom = currentZoom.scale,
+                        onFaceClick = onOpenPerson,
+                        modifier = Modifier.fillMaxSize()
                 )
             }
         }
