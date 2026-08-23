@@ -112,4 +112,14 @@ object CodecNegotiation {
         theirs <= 0 -> mine
         else -> minOf(mine, theirs)
     }
+
+    /**
+     * Whether the TV can decode the one audio codec this protocol carries.
+     *
+     * Not part of [choose], because it is not a choice: there is one audio codec, so the only
+     * question is whether the receiver has it. It matters on its own because an audio-only session
+     * stands or falls on the answer - and a TV that cannot decode Opus has to be refused by name
+     * rather than sent a stream it will silently drop.
+     */
+    fun canPlayAudio(receiver: DecoderLimits): Boolean = AudioCodec.Opus in receiver.audioCodecs
 }

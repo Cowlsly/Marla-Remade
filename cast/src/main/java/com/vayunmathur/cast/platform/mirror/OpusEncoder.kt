@@ -3,6 +3,7 @@ package com.vayunmathur.cast.platform.mirror
 import android.media.MediaCodec
 import android.media.MediaFormat
 import android.util.Log
+import com.vayunmathur.cast.protocol.StreamConstants
 
 private const val TAG = "OpusEncoder"
 
@@ -111,10 +112,18 @@ class OpusEncoder {
         get() = samplesWritten * 1_000_000L / SAMPLE_RATE
 
     companion object {
-        /** Matches the OFFER's `1/48000` timebase, and `CastContract.AUDIO_SAMPLE_RATE`. */
-        const val SAMPLE_RATE = 48_000
-        const val CHANNELS = 2
-        const val BIT_RATE = 128_000
+        /**
+         * The protocol's audio format, not a third copy of it.
+         *
+         * `StreamConstants` already had to state the sample rate because the RTP timebase *is* the
+         * sample rate, and the channel count and bitrate with it. This encoder producing its own
+         * numbers meant two definitions that had to agree and nothing that would notice if they
+         * stopped. `CastContract` still states them separately, and has to: `:sdk:cast` may not
+         * depend on the protocol, which is the whole point of brokering.
+         */
+        const val SAMPLE_RATE = StreamConstants.AUDIO_TIMEBASE
+        const val CHANNELS = StreamConstants.AUDIO_CHANNELS
+        const val BIT_RATE = StreamConstants.AUDIO_BITRATE
 
         /** 20 ms of stereo 16-bit PCM, which is the frame size Opus wants. */
         const val FRAME_BYTES = SAMPLE_RATE / 50 * 2 * CHANNELS

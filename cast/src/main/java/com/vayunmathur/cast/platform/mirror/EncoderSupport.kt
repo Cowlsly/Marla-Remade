@@ -2,8 +2,8 @@ package com.vayunmathur.cast.platform.mirror
 
 import android.media.MediaCodecInfo
 import android.media.MediaCodecList
-import android.media.MediaFormat
 import android.util.Log
+import com.vayunmathur.cast.protocol.AudioCodec
 import com.vayunmathur.cast.protocol.CodecLimits
 import com.vayunmathur.cast.protocol.CodecNegotiation
 import com.vayunmathur.cast.protocol.VideoCodec
@@ -29,7 +29,14 @@ private const val TAG = "EncoderSupport"
  */
 object EncoderSupport {
 
-    const val AUDIO_MIME = MediaFormat.MIMETYPE_AUDIO_OPUS
+    /**
+     * From the protocol rather than from `MediaFormat`.
+     *
+     * The TV looks up its decoder by the same name, and the two used to be written out
+     * independently on each side - one agreement kept in two places, which is one place too many.
+     * A `val` rather than a `const` because the protocol's enum is where it now lives.
+     */
+    val AUDIO_MIME = AudioCodec.Opus.mimeType
 
     fun audioEncoderName(): String? {
         val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos

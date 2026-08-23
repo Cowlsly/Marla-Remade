@@ -102,10 +102,44 @@ data class TvIdentity(
 @Serializable
 data class DecoderLimits(
     val videoCodecs: List<CodecLimits> = emptyList(),
+    /**
+     * The audio codecs this TV can decode, which until now nothing asked about.
+     *
+     * Audio used to need no negotiation because it was never the only thing in a session: a TV with
+     * no Opus decoder simply played no sound over a picture that still worked. An audio-only session
+     * has no picture to carry it, so the same TV would sit in silence with nothing to explain it -
+     * and there was no failure state to report, because there was never a question.
+     *
+     * Empty means the TV enumerated no audio decoder, and an audio-only session is refused by name.
+     * Defaulted so a TV built against the older contract still parses; it will advertise nothing,
+     * which is the honest reading of a receiver that was never asked.
+     */
+    val audioCodecs: List<AudioCodec> = emptyList(),
 ) {
     fun forCodec(codec: VideoCodec): CodecLimits? = videoCodecs.firstOrNull { it.codec == codec }
 
     val codecs: List<VideoCodec> get() = videoCodecs.map { it.codec }
+}
+
+/**
+ * The audio codecs this protocol carries, which is one.
+ *
+ * Every audio path in the repo already ends at 48 kHz Opus - `:musicbrainz` normalises its downloads
+ * to it, the RTP timebase *is* its sample rate, and the phone's encoder produces nothing else - so a
+ * list of one is not a placeholder for a negotiation that never happened. It is an enum rather than
+ * a boolean because it is the wire form of "which", and a boolean would have to be renamed the day a
+ * second codec appears.
+ *
+ * It is also the single definition of the Opus MIME type, which was previously written out
+ * independently on each side: the phone's encoder support and the TV's decoder lookup are the two
+ * ends of one agreement, and two literals could drift.
+ *
+ * [mimeType] is spelled out rather than taken from `MediaFormat`, for the reason [VideoCodec] gives.
+ */
+@Serializable
+enum class AudioCodec(val mimeType: String, val label: String) {
+    @SerialName("OPUS")
+    Opus("audio/opus", "Opus"),
 }
 
 /**
@@ -246,14 +280,15 @@ data class StreamConfig(
     val audioSsrc: Long,
     val videoSsrc: Long,
     /**
-     * The codec the payload is in.
+     * The codec the payload is in, or null when the session carries no video.
      *
-     * Required, with no default: the version bump is what makes that safe, and a defaulted codec
-     * would be a build silently agreeing to decode something it was never told about. The receiver
-     * builds its decoder from this, so it is also what decides whether a [VideoCodecConfig] has to
-     * arrive before the picture can start.
+     * Non-null exactly when [video] is set. Nullable rather than absent because an audio-only
+     * session has no video codec to name and a defaulted one would be a receiver silently agreeing
+     * to decode something nobody mentioned - the failure the required field was added to prevent.
+     * The receiver builds its decoder from this, so it is also what decides whether a
+     * [VideoCodecConfig] has to arrive before the picture can start.
      */
-    val videoCodec: VideoCodec,
+    val videoCodec: VideoCodec? = null,
     /**
      * The name of the app whose content this is, or empty for screen mirroring.
      *

@@ -7,6 +7,7 @@ import android.media.MediaCodec
 import android.media.MediaCodecList
 import android.media.MediaFormat
 import android.util.Log
+import com.vayunmathur.cast.protocol.AudioCodec
 import com.vayunmathur.cast.protocol.StreamConstants
 
 private const val TAG = "AudioPlayer"
@@ -221,8 +222,17 @@ class AudioPlayer {
         codec = null
     }
 
-    private companion object {
-        const val AUDIO_MIME = MediaFormat.MIMETYPE_AUDIO_OPUS
+    /**
+     * Not private, unlike it used to be.
+     *
+     * Everything in here is still an implementation detail except the two capability lookups at the
+     * bottom, and those had to become reachable: `ReceiverController` cannot advertise an Opus
+     * decoder it is not allowed to ask about, and until it could, an audio-only session had no way
+     * to be refused.
+     */
+    companion object {
+        /** 200 ms of stereo 16-bit at 48 kHz, as a floor under whatever the platform asks for. */
+        private const val MIN_TRACK_BYTES = 48_000 / 5 * 2 * 2
 
         /**
          * How many times the decoder may be rebuilt before audio is given up on.
@@ -231,10 +241,7 @@ class AudioPlayer {
          * on its first use, which one rebuild would have cleared. A codec broken structurally fails
          * again at once, so this is spent in milliseconds and the log stays short either way.
          */
-        const val MAX_RESTARTS = 3
-
-        /** 200 ms of stereo 16-bit at 48 kHz, as a floor under whatever the platform asks for. */
-        const val MIN_TRACK_BYTES = 48_000 / 5 * 2 * 2
+        private const val MAX_RESTARTS = 3
 
         /**
          * `csd-1` and `csd-2`: the codec delay and the seek pre-roll, in little-endian nanoseconds.
@@ -244,7 +251,7 @@ class AudioPlayer {
          * them. They are supplied rather than omitted because the decoder reads three csd buffers and
          * silently tolerates being given one.
          */
-        fun nanosecondsLe(value: Long): ByteArray = ByteArray(8) { i ->
+        private fun nanosecondsLe(value: Long): ByteArray = ByteArray(8) { i ->
             ((value ushr (8 * i)) and 0xff).toByte()
         }
 
@@ -258,7 +265,7 @@ class AudioPlayer {
          * Pre-skip 0 and output gain 0 because the phone's encoder applies neither, and channel
          * mapping family 0 because two channels are plain stereo.
          */
-        fun opusIdentificationHeader(): ByteArray {
+        private fun opusIdentificationHeader(): ByteArray {
             val rate = StreamConstants.AUDIO_TIMEBASE
             return byteArrayOf(
                 'O'.code.toByte(), 'p'.code.toByte(), 'u'.code.toByte(), 's'.code.toByte(),
@@ -274,6 +281,20 @@ class AudioPlayer {
                 0,
             )
         }
+
+        /** From the protocol, so the phone's encoder and this decoder cannot look for different things. */
+        val AUDIO_MIME = AudioCodec.Opus.mimeType
+
+        /**
+         * What this TV can decode, for `TV_IDENTITY`.
+         *
+         * Mirrors `VideoDecoder.limits()`, and exists for the same reason: the phone has to be able
+         * to refuse a session it cannot serve, by name, before starting one. Until audio-only was
+         * possible nobody asked - a TV with no Opus decoder just played a silent picture - so an
+         * audio-only session would have sat in silence with no failure to report.
+         */
+        fun limits(): List<AudioCodec> =
+            if (decoderName() != null) listOf(AudioCodec.Opus) else emptyList()
 
         fun decoderName(): String? {
             val codecs = MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos

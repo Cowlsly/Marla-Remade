@@ -62,6 +62,17 @@ enum class ReceiverFailure {
     NoDecoder,
 
     /**
+     * No Opus decoder, on a session that is nothing but audio.
+     *
+     * Its own failure rather than [NoDecoder]'s, because the answer is different and because the
+     * alternative was the worst outcome available: before audio was negotiated at all, this TV
+     * would have accepted the session and then sat in total silence with nothing on screen to say
+     * why. A video session with no sound is still worth having, so this is reported only when sound
+     * was the whole session.
+     */
+    NoAudioDecoder,
+
+    /**
      * There is a decoder and somewhere to draw, and the codec settings it needed never arrived.
      *
      * Distinct from [NoDecoder] on purpose: both look like a black screen, and they send anyone

@@ -259,7 +259,11 @@ object ReceiverController {
         val identity = PqcIdentity.loadOrCreate(store, prefix = "castTv")
         val deviceId = store.deviceId()
         val name = store.friendlyName(fallback = defaultName())
-        val limits = VideoDecoder.limits()
+        // Audio is advertised alongside video for the first time. It never needed negotiating while
+        // every session had a picture - a TV with no Opus decoder simply played silence - but an
+        // audio-only session stands or falls on it, and the phone can only refuse by name if it was
+        // told.
+        val limits = VideoDecoder.limits().copy(audioCodecs = AudioPlayer.limits())
 
         val server = try {
             ServerSocket(0)
@@ -446,6 +450,13 @@ object ReceiverController {
      * record (marker 1, version 1); `0x0a` leads a sequence header OBU with a size field.
      */
     private fun onVideoCodecConfig(message: VideoCodecConfig, config: StreamConfig) {
+        val codec = config.videoCodec
+        if (codec == null) {
+            // An audio-only session has no decoder to configure. Ignored rather than treated as a
+            // fault: it means the phone sent one anyway, which is harmless and says nothing useful.
+            Log.w(TAG, "a codec config arrived for a session with no video")
+            return
+        }
         val csd = ProtocolBase64.decode(message.csd)
         if (csd == null || csd.isEmpty()) {
             Log.w(TAG, "the phone sent an unreadable codec config")
@@ -458,7 +469,7 @@ object ReceiverController {
         }
         Log.i(
             TAG,
-            "codec config for ${config.videoCodec.label}: ${csd.size} bytes, $shape, " +
+            "codec config for ${codec.label}: ${csd.size} bytes, $shape, " +
                 "[${csd.take(16).joinToString(" ") { "%02x".format(it) }}]; " +
                 "the stream is ${config.width}x${config.height}",
         )
@@ -597,12 +608,12 @@ object ReceiverController {
         }
         Log.i(
             TAG,
-            "receiving ${config.videoCodec.label} ${config.width}x${config.height} @ " +
+            "receiving ${config.videoCodec?.label ?: "audio only"} ${config.width}x${config.height} @ " +
                 "${config.frameRate}fps (${config.bitRate / 1_000_000.0} Mbit/s) on udp " +
                 "${socket.localPort}, " +
                 "rcvbuf=${runCatching { socket.receiveBufferSize }.getOrDefault(0)}B, " +
                 "playout=${StreamConstants.TARGET_DELAY_MS}ms" +
-                if (config.videoCodec.needsCodecConfig) "; waiting for its codec config" else "",
+                if (config.videoCodec?.needsCodecConfig == true) "; waiting for its codec config" else "",
         )
         mediaJob = scope.launch { pump(socket, negotiation, config, channel) }
     }
@@ -632,6 +643,10 @@ object ReceiverController {
         channel: ControlChannel,
     ) {
         var decoder: VideoDecoder? = null
+        // Hoisted into a local because the property comes from another module, where Kotlin will not
+        // smart-cast it - and every use below is inside a branch that has already established there
+        // is video.
+        val videoCodec = config.videoCodec
         val player = if (config.audio) AudioPlayer().takeIf { it.start() } else null
         val playout = PlayoutQueue(
             targetDelayMs = StreamConstants.TARGET_DELAY_MS.toLong(),
@@ -676,13 +691,13 @@ object ReceiverController {
                         playout.clear()
                         media.requestKeyFrame(StreamKind.Video)
                     }
-                } else if (decoder == null && negotiation.hasVideo) {
+                } else if (decoder == null && negotiation.hasVideo && videoCodec != null) {
                     // Only consulted for a codec that needs it. An H.265 session finds its parameter
                     // sets in the stream, and installing a `csd-0` it was not expecting would fail the
                     // configure - so the field is read through the codec's own contract rather than
                     // passed on because it happened to be set.
-                    val codecConfig = videoCodecConfig.takeIf { config.videoCodec.needsCodecConfig }
-                    if (config.videoCodec.needsCodecConfig && codecConfig == null) {
+                    val codecConfig = videoCodecConfig.takeIf { videoCodec.needsCodecConfig }
+                    if (videoCodec.needsCodecConfig && codecConfig == null) {
                         // **The one genuinely new wait.** This widens the entry condition of a state
                         // the pipeline already survives - `decoder == null`, which `MediaReceiver`'s
                         // pre-session video drop, `ReceiverSession.synchronised` and PLI already make
@@ -692,12 +707,12 @@ object ReceiverController {
                             codecConfigWaitStartedAt = waiting
                             Log.i(
                                 TAG,
-                                "surface ready; waiting for ${config.videoCodec.label}'s codec config",
+                                "surface ready; waiting for ${videoCodec.label}'s codec config",
                             )
                         } else if (waiting - codecConfigWaitStartedAt >= CODEC_CONFIG_TIMEOUT_MS) {
                             Log.w(
                                 TAG,
-                                "no ${config.videoCodec.label} codec config after " +
+                                "no ${videoCodec.label} codec config after " +
                                     "${CODEC_CONFIG_TIMEOUT_MS}ms; nothing can be decoded",
                             )
                             // Named so the phone can remember it and start the next session on the
@@ -715,7 +730,7 @@ object ReceiverController {
                             return
                         }
                     } else {
-                        val started = VideoDecoder(activeSurface, config.videoCodec)
+                        val started = VideoDecoder(activeSurface, videoCodec)
                         if (started.start(config.width, config.height, codecConfig)) {
                             decoder = started
                             Log.i(TAG, "decoder up; the picture starts at the next key frame")
