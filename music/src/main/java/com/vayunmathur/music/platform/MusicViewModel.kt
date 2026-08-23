@@ -15,6 +15,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
 import com.vayunmathur.library.util.ManyManyMatching
 import com.vayunmathur.music.R
 import com.vayunmathur.music.data.Album
@@ -69,6 +70,7 @@ class MusicViewModel(
     val currentMediaItem: StateFlow<MediaItem?> = playbackManager.currentMediaItem
     val currentSource: StateFlow<String?> = playbackManager.currentSource
     val currentSourceName: StateFlow<String?> = playbackManager.currentSourceName
+    val player: StateFlow<Player?> = playbackManager.player
 
     override fun playSong(songs: List<Music>, startWithIndex: Int, sourceId: String?, sourceName: String?) =
         playbackManager.playSong(songs, startWithIndex, sourceId, sourceName)

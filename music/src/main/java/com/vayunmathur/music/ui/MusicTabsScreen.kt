@@ -1,29 +1,35 @@
 package com.vayunmathur.music.ui
 
-import com.vayunmathur.library.ui.IconAlbum
-import com.vayunmathur.library.ui.IconLibraryMusic
-import com.vayunmathur.library.ui.IconPerson
-import com.vayunmathur.library.ui.PagerTab
-import com.vayunmathur.library.ui.TabStyle
-import com.vayunmathur.library.ui.TabbedPagerScaffold
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.runtime.Composable
-import com.vayunmathur.music.ui.components.PlayingBottomBar
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.util.NavBackStack
-import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.platform.MusicViewModel
 import com.vayunmathur.music.platform.SyncWorker
+import com.vayunmathur.music.ui.components.MusicTabsBar
+import com.vayunmathur.music.ui.components.PlayingBottomBar
+import kotlinx.coroutines.launch
 
 /**
  * Hosts the four main tabs (Songs / Albums / Artists / Playlists) in a swipeable
  * pager, with the now-playing controls and the tab bar pinned across all four.
  *
- * Tab selection lives in the pager's own state (owned by [TabbedPagerScaffold]),
- * NOT in the nav backstack - so deep navigation (tap an album → AlbumDetail →
- * back) returns the user to whatever tab they were on, scroll position intact.
+ * A plain [Column] rather than a scaffold: each tab page brings its own, and
+ * `MainNavigation` already owns the outer one, so a third would only nest.
+ *
+ * Tab selection lives in the pager's own state, NOT in the nav backstack - so deep
+ * navigation (tap an album → AlbumDetail → back) returns the user to whatever tab
+ * they were on, scroll position intact.
  */
 @Composable
 fun MusicTabsScreen(
@@ -39,24 +45,33 @@ fun MusicTabsScreen(
         SyncWorker.enqueue(context)
     }
 
-    val tabs = listOf(
-        PagerTab(stringResource(R.string.nav_home), { IconLibraryMusic() }) {
-            HomeTabContent(backStack, musicViewModel)
-        },
-        PagerTab(stringResource(R.string.nav_albums), { IconAlbum() }) {
-            AlbumsTabContent(backStack, musicViewModel)
-        },
-        PagerTab(stringResource(R.string.nav_artists), { IconPerson() }) {
-            ArtistsTabContent(backStack, musicViewModel)
-        },
-        PagerTab(stringResource(R.string.nav_playlists), { IconLibraryMusic() }) {
-            PlaylistsTabContent(backStack, musicViewModel)
-        },
-    )
+    val pagerState = rememberPagerState(pageCount = { 4 })
+    val scope = rememberCoroutineScope()
 
-    TabbedPagerScaffold(
-        tabs = tabs,
-        tabStyle = TabStyle.BottomNav,
-        leadingBottomBar = { PlayingBottomBar(musicViewModel, backStack) },
-    )
+    Column(Modifier.fillMaxSize()) {
+        HorizontalPager(
+            state = pagerState,
+            // The bars below already cover the navigation bar, so a page's own
+            // scaffold must not inset for it again and leave a gap.
+            modifier = Modifier
+                .weight(1f)
+                .consumeWindowInsets(WindowInsets.navigationBars),
+        ) { page ->
+            when (page) {
+                0 -> HomeTabContent(backStack, musicViewModel)
+                1 -> AlbumsTabContent(backStack, musicViewModel)
+                2 -> ArtistsTabContent(backStack, musicViewModel)
+                else -> PlaylistsTabContent(backStack, musicViewModel)
+            }
+        }
+        PlayingBottomBar(musicViewModel, backStack)
+        MusicTabsBar(
+            selectedTab = pagerState.currentPage,
+            onSelectTab = { index ->
+                if (pagerState.currentPage != index) {
+                    scope.launch { pagerState.animateScrollToPage(index) }
+                }
+            },
+        )
+    }
 }

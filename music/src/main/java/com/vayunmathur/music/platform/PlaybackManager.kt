@@ -2,6 +2,7 @@ package com.vayunmathur.music.platform
 import android.annotation.SuppressLint
 import android.content.ComponentName
 import android.content.Context
+import android.net.Uri
 import androidx.core.net.toUri
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -10,6 +11,7 @@ import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import com.google.common.util.concurrent.MoreExecutors
 import com.vayunmathur.music.data.Music
+import com.vayunmathur.music.data.MusicRepository
 import com.vayunmathur.music.service.PlaybackService
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -79,6 +81,13 @@ class PlaybackManager private constructor(context: Context) {
     private val _currentSourceName = MutableStateFlow<String?>(null)
     val currentSourceName = _currentSourceName.asStateFlow()
 
+    private val _player = MutableStateFlow<Player?>(null)
+    /** The session player, once the controller has connected. */
+    val player = _player.asStateFlow()
+
+    /** Album id -> art uri, mirrored from the library so queue items carry the cover. */
+    @Volatile private var albumArt: Map<Long, String> = emptyMap()
+
     init {
         val appContext = context.applicationContext
         val sessionToken = SessionToken(appContext, ComponentName(appContext, PlaybackService::class.java))
@@ -104,12 +113,22 @@ class PlaybackManager private constructor(context: Context) {
                         }
                     })
                 }
+                _player.value = controller
                 startProgressUpdateLoop()
             } catch (e: Exception) {
                 android.util.Log.e("PlaybackManager", "Error initializing MediaController", e)
             }
         }, MoreExecutors.directExecutor())
+
+        scope.launch {
+            MusicRepository.get(appContext).albums.collect { albums ->
+                albumArt = albums.associate { it.id to it.uri }
+            }
+        }
     }
+
+    private fun artworkFor(song: Music): Uri =
+        (albumArt[song.albumId]?.takeIf { it.isNotBlank() } ?: song.uri).toUri()
 
     private fun startProgressUpdateLoop() {
         scope.launch {
@@ -156,7 +175,7 @@ class PlaybackManager private constructor(context: Context) {
                     MediaMetadata.Builder()
                         .setTitle(song.title)
                         .setArtist(song.artist)
-                        .setArtworkUri(song.uri.toUri())
+                        .setArtworkUri(artworkFor(song))
                         .build()
                 )
                 .build()

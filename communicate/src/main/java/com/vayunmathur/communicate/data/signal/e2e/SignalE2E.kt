@@ -18,12 +18,15 @@ import org.signal.libsignal.protocol.SessionBuilder
 import org.signal.libsignal.protocol.SessionCipher
 import org.signal.libsignal.protocol.SignalProtocolAddress
 import org.signal.libsignal.protocol.ecc.ECKeyPair
+import org.signal.libsignal.protocol.groups.GroupCipher
+import org.signal.libsignal.protocol.groups.GroupSessionBuilder
 import org.signal.libsignal.protocol.ecc.ECPrivateKey
 import org.signal.libsignal.protocol.ecc.ECPublicKey
 import org.signal.libsignal.protocol.kem.KEMKeyPair
 import org.signal.libsignal.protocol.kem.KEMKeyType
 import org.signal.libsignal.protocol.kem.KEMPublicKey
 import org.signal.libsignal.protocol.message.PreKeySignalMessage
+import org.signal.libsignal.protocol.message.SenderKeyDistributionMessage
 import org.signal.libsignal.protocol.state.KyberPreKeyRecord
 import org.signal.libsignal.protocol.state.PreKeyBundle
 import org.signal.libsignal.protocol.state.PreKeyRecord
@@ -280,35 +283,45 @@ class SignalE2E(
         }
     }
 
-    fun createSenderKeyDistribution(groupId: String): ByteArray {
-        val created = RustSignalCrypto.createSenderKeySplit()
-        runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(ownAci, ownDeviceId, groupId, created.state)) }
-        return created.skdm
+    /**
+     * Sender keys, via libsignal.
+     *
+     * Previously these went through a bespoke Rust ratchet whose records shared the `signal_e2e_sender_keys`
+     * table with libsignal's `SenderKeyStore` but used a different serialization and a different key (the group
+     * id rather than the distribution UUID). Only libsignal's format interoperates with real Signal clients,
+     * and `SealedSessionCipher` already dispatches inbound `SENDERKEY_TYPE` through `GroupCipher` using this
+     * same store — so using it here is what makes group traffic decrypt at all.
+     */
+    fun createSenderKeyDistribution(distributionId: UUID): ByteArray =
+        GroupSessionBuilder(protocolStore).create(localAddress(), distributionId).serialize()
+
+    /**
+     * Store a peer's sender key. The distribution id comes from the message itself, not from the group: each
+     * sender picks their own, and a recipient must file it under the sender's.
+     */
+    fun processSenderKeyDistribution(senderAci: String, senderDeviceId: Int, skdmBytes: ByteArray) {
+        val skdm = SenderKeyDistributionMessage(skdmBytes)
+        GroupSessionBuilder(protocolStore).process(signalAddress(senderAci, senderDeviceId), skdm)
     }
 
-    fun processSenderKeyDistribution(groupId: String, senderAci: String, senderDeviceId: Int, skdmBytes: ByteArray) {
-        val stateBytes = RustSignalCrypto.processSenderKey(skdmBytes) ?: throw RuntimeException("processSenderKey returned null")
-        runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(senderAci, senderDeviceId, groupId, stateBytes)) }
+    /** Encrypt once for the whole group. The result is a `SenderKeyMessage`. */
+    fun encryptGroup(distributionId: UUID, paddedPlaintext: ByteArray): EncResult {
+        val message = GroupCipher(protocolStore, localAddress()).encrypt(distributionId, paddedPlaintext)
+        return EncResult(
+            ciphertextType = message.type,
+            remoteRegistrationId = 0,
+            data = message.serialize(),
+        )
     }
 
-    fun encryptGroup(groupId: String, paddedPlaintext: ByteArray): ByteArray {
-        var entity = runBlocking { db.e2eSenderKeyDao().get(ownAci, ownDeviceId, groupId) }
-        if (entity == null) {
-            val created = RustSignalCrypto.createSenderKeySplit()
-            runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(ownAci, ownDeviceId, groupId, created.state)) }
-            entity = runBlocking { db.e2eSenderKeyDao().get(ownAci, ownDeviceId, groupId) } ?: throw RuntimeException("Failed to create sender key")
-        }
-        val encrypted = RustSignalCrypto.encryptGroupSplit(entity.record, paddedPlaintext)
-        runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(ownAci, ownDeviceId, groupId, encrypted.newState)) }
-        return encrypted.data
-    }
-
-    fun decryptGroup(groupId: String, senderAci: String, senderDeviceId: Int, ciphertext: ByteArray): ByteArray {
-        val entity = runBlocking { db.e2eSenderKeyDao().get(senderAci, senderDeviceId, groupId) } ?: throw RuntimeException("No sender key for $senderAci:$senderDeviceId in $groupId")
-        val decrypted = RustSignalCrypto.decryptGroupSplit(entity.record, ciphertext)
-        runBlocking { db.e2eSenderKeyDao().insert(SignalE2ESenderKey(senderAci, senderDeviceId, groupId, decrypted.newState)) }
-        return decrypted.data
-    }
+    /**
+     * Decrypt a group message from [senderAci].
+     *
+     * Rarely needed directly: real group traffic arrives sealed, and `SealedSessionCipher` unwraps
+     * `SENDERKEY_TYPE` itself. This covers an unsealed sender-key message.
+     */
+    fun decryptGroup(senderAci: String, senderDeviceId: Int, ciphertext: ByteArray): ByteArray =
+        GroupCipher(protocolStore, signalAddress(senderAci, senderDeviceId)).decrypt(ciphertext)
 
     /** Sealed-sender encrypt. Returns the message plus the registration id the envelope needs. */
     fun sealedSenderEncrypt(

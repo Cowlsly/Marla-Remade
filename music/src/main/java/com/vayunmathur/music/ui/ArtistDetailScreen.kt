@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -70,7 +71,7 @@ fun ArtistDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicView
     DetailLazyColumn(
         title = {},
         onNavigateBack = { backStack.pop() },
-        bottomBar = { PlayingBottomBar(musicViewModel, backStack) },
+        bottomBar = { PlayingBottomBar(musicViewModel, backStack, Modifier.navigationBarsPadding()) },
         scrollBehavior = appBarScrollBehavior(),
     ) {
             // Header: Album Art

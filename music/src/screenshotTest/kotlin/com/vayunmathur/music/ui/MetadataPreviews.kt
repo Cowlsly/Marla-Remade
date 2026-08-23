@@ -91,6 +91,13 @@ class MetadataPreviews {
 
     private val backStack = NavBackStack<Route>(arrayOf(Route.Home))
 
+    private val nowPlayingPlayer = PreviewPlayer(
+        title = nowPlaying.title,
+        artist = nowPlaying.artist,
+        durationMs = nowPlaying.durationMs,
+        positionMs = nowPlaying.positionMs,
+    )
+
     /**
      * The tab scaffolding [MusicTabsScreen] puts around every tab: the mini player docked
      * over the four-tab bar. Rebuilt here rather than reused because the real one owns a
@@ -102,7 +109,7 @@ class MetadataPreviews {
             Scaffold(
                 bottomBar = {
                     Column(Modifier.fillMaxWidth()) {
-                        NowPlayingBar(nowPlaying, MusicActions.Noop, onOpen = {})
+                        NowPlayingBar(nowPlayingPlayer, onOpen = {})
                         MusicTabsBar(selectedTab = selectedTab, onSelectTab = {})
                     }
                 },
@@ -163,7 +170,7 @@ class MetadataPreviews {
                 ),
                 actions = MusicActions.Noop,
                 backStack = backStack,
-                bottomBar = { NowPlayingBar(nowPlaying, MusicActions.Noop, onOpen = {}) },
+                bottomBar = { NowPlayingBar(nowPlayingPlayer, onOpen = {}) },
             )
         }
     }

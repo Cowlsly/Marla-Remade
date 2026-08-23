@@ -159,23 +159,7 @@ object RustSignalCrypto {
         return DecryptResult(out[0], out[1])
     }
 
-    data class SenderKeyCreateResult(val state: ByteArray, val skdm: ByteArray)
-    fun createSenderKeySplit(): SenderKeyCreateResult {
-        val out = createSenderKey() ?: throw RuntimeException("Rust createSenderKey null")
-        if (out.size != 2) throw RuntimeException("createSenderKey expected 2 parts")
-        return SenderKeyCreateResult(out[0], out[1])
-    }
-
-    data class GroupCipherResult(val data: ByteArray, val newState: ByteArray)
-    fun encryptGroupSplit(stateBytes: ByteArray, plaintext: ByteArray): GroupCipherResult {
-        val out = encryptGroup(stateBytes, plaintext) ?: throw RuntimeException("Rust encryptGroup null")
-        if (out.size != 2) throw RuntimeException("encryptGroup expected 2 parts")
-        return GroupCipherResult(out[0], out[1])
-    }
-
-    fun decryptGroupSplit(stateBytes: ByteArray, ciphertext: ByteArray): GroupCipherResult {
-        val out = decryptGroup(stateBytes, ciphertext) ?: throw RuntimeException("Rust decryptGroup null")
-        if (out.size != 2) throw RuntimeException("decryptGroup expected 2 parts")
-        return GroupCipherResult(out[0], out[1])
-    }
+    // The sender-key wrappers that used to live here are gone: group traffic now goes through libsignal's
+    // GroupCipher/GroupSessionBuilder, which is the only format real Signal clients interoperate with, and
+    // which SealedSessionCipher already dispatches inbound SENDERKEY_TYPE through.
 }

@@ -1772,6 +1772,22 @@ object SignalClient {
         if (masterKeyFromData != null) {
             rememberInboundGroup(conversationId, masterKeyFromData, env.sourceAci)
         }
+        // A sender key can arrive on its own Content, with no DataMessage attached — official treats it as its
+        // own case for exactly that reason. Storing it is what lets this sender's later group messages decrypt,
+        // so it must happen before any early return in the content dispatch below.
+        if (content.hasSenderKeyDistributionMessage()) {
+            try {
+                e2e?.processSenderKeyDistribution(
+                    env.sourceAci,
+                    env.sourceDevice,
+                    content.senderKeyDistributionMessage.toByteArray(),
+                )
+                Log.i(TAG, "stored a sender key from ${env.sourceAci}:${env.sourceDevice}")
+            } catch (t: Throwable) {
+                // Losing this means later group messages from this sender cannot be decrypted.
+                Log.w(TAG, "failed to store sender key distribution from ${env.sourceAci}", t)
+            }
+        }
         val senderDevice = env.sourceDevice
         val serverGuid = env.serverGuid ?: SignalProtocol.generateMessageId()
         val timestamp = env.timestamp
@@ -1823,15 +1839,7 @@ object SignalClient {
                     else -> {
                         val body = dm.body
                         if (body.isBlank() && dm.attachmentsCount == 0 && !dm.hasGroupV2()) return true
-                        // senderKeyDistributionMessage
-                        if (content.hasSenderKeyDistributionMessage()) {
-                            try {
-                                e2e?.processSenderKeyDistribution(groupIdFor(dm), senderAci, senderDevice, content.senderKeyDistributionMessage.toByteArray())
-                            } catch (t: Throwable) {
-                                // Losing this means later group messages from this sender won't decrypt.
-                                Log.w(TAG, "failed to store sender key distribution from $senderAci", t)
-                            }
-                        }
+                        // senderKeyDistributionMessage is handled above, before content dispatch.
                         val sd = SignalServiceData(senderId = senderAci, senderName = senderDisplayName, isGroup = masterKeyFromData != null)
                         _events.emit(
                             SignalEvent.IncomingMessage(

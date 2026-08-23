@@ -1,9 +1,11 @@
 package com.vayunmathur.music.ui
 
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
 import androidx.core.net.toUri
 import com.vayunmathur.library.util.NavBackStack
@@ -57,6 +59,6 @@ fun AlbumDetailScreen(backStack: NavBackStack<Route>, musicViewModel: MusicViewM
         ),
         actions = musicViewModel,
         backStack = backStack,
-        bottomBar = { PlayingBottomBar(musicViewModel, backStack) },
+        bottomBar = { PlayingBottomBar(musicViewModel, backStack, Modifier.navigationBarsPadding()) },
     )
 }
