@@ -54,6 +54,15 @@ class ContentCastService : Service() {
     /** True between a successful open and the session ending, so nothing is reported twice. */
     private var sessionOpen = false
 
+    /**
+     * Where the media proxy gets its bytes.
+     *
+     * Held here rather than by `CastController` because the app is only reachable through this
+     * binding, and the binding is the session's lifetime. The proxy is handed this when a content
+     * session starts.
+     */
+    val resources = ClientResourceResolver { send(it) }
+
     private val incoming = Messenger(
         Handler(Looper.getMainLooper()) { msg ->
             when (msg.what) {
@@ -71,6 +80,10 @@ class ContentCastService : Service() {
                     if (sessionOpen) {
                         msg.data?.let { CastController.reportPlaybackState(it.toPlaybackState()) }
                     }
+                    true
+                }
+                CastContract.MSG_RESOURCE_RESPONSE -> {
+                    resources.onResponse(msg.data)
                     true
                 }
                 else -> false
@@ -169,6 +182,8 @@ class ContentCastService : Service() {
         sessionOpen = false
         CastController.onContentSessionEnded = null
         CastController.onPlaybackCommand = null
+        // The app's descriptors are ours until the session ends, and nothing else will close them.
+        resources.close()
         // Back to a paired-but-idle TV rather than a dropped session: the pairing is per device and
         // worth keeping, and the user may well cast again straight away.
         CastController.stopMirroring(this)

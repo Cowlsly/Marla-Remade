@@ -25,6 +25,20 @@ package com.vayunmathur.sdk.cast
  *       unbind, or MSG_CLOSE_SESSION      ─►
  *                                    ◄──  MSG_SESSION_ENDED (reason)
  * ```
+ *
+ * A **content session** replaces the middle of that. Instead of drawing into a `Surface`, the app
+ * says what it wants played and then answers requests for the bytes:
+ *
+ * ```
+ *       MSG_OPEN_SESSION                  ─►     (wantAudio, wantVideo = false for audio only)
+ *                                    ◄──  MSG_SESSION_READY (no Surface)
+ *                                    ◄──  MSG_RESOURCE_REQUEST (resourceId)
+ *       MSG_RESOURCE_RESPONSE             ─►     (a seekable fd, length, MIME type)
+ *       … Cast serves byte ranges of that fd to the TV, which decodes them itself …
+ * ```
+ *
+ * Which is what lets an app cast with no encoder on the phone at all - and what lets an audio-only
+ * app cast, which the `Surface` path could not do in any form.
  */
 object CastContract {
 
@@ -93,6 +107,15 @@ object CastContract {
      */
     const val MSG_PLAYBACK_STATE = 5
 
+    /**
+     * The bytes behind a [MSG_RESOURCE_REQUEST], as a seekable descriptor.
+     *
+     * Carries [KEY_REQUEST_ID] so the answer can be matched to the question - Cast may have more
+     * than one outstanding, because the TV fetches audio, video and captions independently.
+     * [KEY_RESOURCE_FD] absent means the app has no such resource, which the TV sees as a `404`.
+     */
+    const val MSG_RESOURCE_RESPONSE = 8
+
     // ---- service → client ----
 
     /**
@@ -114,6 +137,18 @@ object CastContract {
      */
     const val MSG_PLAYBACK_COMMAND = 6
 
+    /**
+     * Cast needs the bytes behind [KEY_RESOURCE_ID], and expects a [MSG_RESOURCE_RESPONSE].
+     *
+     * Sent only for a content session, and only for ids the app itself named. Cast asks once per
+     * resource per session and then serves byte ranges out of the descriptor, so this is not on
+     * the hot path - it happens when a track changes or a caption track is switched to.
+     *
+     * A client that never answers stalls the TV's fetch until Cast times it out, which the TV sees
+     * as a failed load rather than as a hang.
+     */
+    const val MSG_RESOURCE_REQUEST = 7
+
     // ---- MSG_OPEN_SESSION payload ----
 
     /** Requested frame width in pixels. Clamped; read the granted size back, do not assume it. */
@@ -122,6 +157,19 @@ object CastContract {
 
     /** Whether the app intends to write PCM. False means video only and no pipe is created. */
     const val KEY_WANT_AUDIO = "wantAudio"
+
+    /**
+     * Whether the session carries video at all. Absent means it does.
+     *
+     * False is how an audio-only app casts, and it is not a degradation of a video session: no
+     * video codec is negotiated with the TV, no `Surface` comes back, and the TV shows a
+     * now-playing screen rather than a black picture. Absent rather than required so that a client
+     * written against the older contract keeps meaning what it meant.
+     *
+     * A TV with no audio decoder refuses an audio-only session outright, because silence with no
+     * explanation is the worst available outcome.
+     */
+    const val KEY_WANT_VIDEO = "wantVideo"
 
     // ---- MSG_SESSION_READY payload ----
 
@@ -160,6 +208,39 @@ object CastContract {
 
     /** The TV's name, for a "Playing on <TV>" panel where the video used to be. */
     const val KEY_RECEIVER_NAME = "receiverName"
+
+    // ---- MSG_RESOURCE_REQUEST / MSG_RESOURCE_RESPONSE payload ----
+
+    /**
+     * Which resource, in the app's own naming.
+     *
+     * Opaque to Cast beyond being a path segment: it is whatever the app used when it said what to
+     * play. May contain slashes, so a segment can be addressed as `<itag>/<sequence>`.
+     */
+    const val KEY_RESOURCE_ID = "resourceId"
+
+    /**
+     * Matches a response to its request.
+     *
+     * Needed because more than one can be outstanding: the TV's player fetches audio, video and
+     * captions independently, and answering them in a different order than they were asked is
+     * normal rather than exceptional.
+     */
+    const val KEY_REQUEST_ID = "requestId"
+
+    /**
+     * A seekable read-only descriptor for the resource, or absent for "no such resource".
+     *
+     * Seekable is a requirement: Cast reads at offsets because the TV asks for byte ranges. A pipe
+     * would make every seek a stall. Cast closes its copy when the session ends.
+     */
+    const val KEY_RESOURCE_FD = "resourceFd"
+
+    /** The resource's total length in bytes, stated by the app rather than measured. */
+    const val KEY_RESOURCE_LENGTH = "resourceLength"
+
+    /** The resource's MIME type, which decides which extractor the TV's player reaches for. */
+    const val KEY_RESOURCE_TYPE = "resourceType"
 
     // ---- MSG_SESSION_ENDED payload ----
 

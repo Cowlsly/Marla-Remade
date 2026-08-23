@@ -42,6 +42,8 @@ class CastContractTest {
             CastContract.MSG_SESSION_ENDED,
             CastContract.MSG_PLAYBACK_STATE,
             CastContract.MSG_PLAYBACK_COMMAND,
+            CastContract.MSG_RESOURCE_REQUEST,
+            CastContract.MSG_RESOURCE_RESPONSE,
         )
         assertEquals(codes.size, codes.toSet().size, "two Messenger `what` codes are the same")
     }
@@ -54,6 +56,7 @@ class CastContractTest {
             CastContract.KEY_WIDTH,
             CastContract.KEY_HEIGHT,
             CastContract.KEY_WANT_AUDIO,
+            CastContract.KEY_WANT_VIDEO,
             CastContract.KEY_SURFACE,
             CastContract.KEY_AUDIO_FD,
             CastContract.KEY_GRANTED_WIDTH,
@@ -71,6 +74,11 @@ class CastContractTest {
             CastContract.KEY_HAS_PREVIOUS,
             CastContract.KEY_ACTION,
             CastContract.KEY_ACTION_VALUE,
+            CastContract.KEY_RESOURCE_ID,
+            CastContract.KEY_REQUEST_ID,
+            CastContract.KEY_RESOURCE_FD,
+            CastContract.KEY_RESOURCE_LENGTH,
+            CastContract.KEY_RESOURCE_TYPE,
         )
         assertEquals(keys.size, keys.toSet().size, "two Bundle keys are the same string")
         assertFalse(keys.any { it.isBlank() })

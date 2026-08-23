@@ -15,6 +15,8 @@ import android.os.RemoteException
 import android.view.Surface
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withTimeout
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 import kotlin.coroutines.resumeWithException
 
@@ -76,6 +78,23 @@ class CastClient(context: Context) {
     )
 
     /**
+     * A live content session: Cast is serving this app's own media to the TV.
+     *
+     * Nothing to draw into and nothing to write, because nothing is being encoded. The TV fetches
+     * byte ranges of whatever the app named and decodes them itself, so the app's only remaining
+     * job is to answer [CastResourceProvider] and to keep sending [reportPlaybackState].
+     *
+     * There is no granted geometry either: the TV plays the media at its own size, which is the
+     * point - the frame is no longer being squeezed through an encoder this phone had to choose.
+     */
+    class ContentSession(
+        /** For a "Playing on <name>" panel where the local player used to be. */
+        val receiverName: String,
+        /** False for an audio-only session, where the TV shows a now-playing screen. */
+        val hasVideo: Boolean,
+    )
+
+    /**
      * Called when Cast ends the session on its own - the TV went away, screen mirroring took the
      * slot - with one of [CastContract]'s `REASON_` values. Not called for a [close].
      */
@@ -98,8 +117,8 @@ class CastClient(context: Context) {
     /** Set once [MSG_SESSION_READY][CastContract.MSG_SESSION_READY] has been answered. */
     private var open = false
 
-    /** Non-null only while [openSession] is waiting, so a failure can be reported to it. */
-    private var pending: ((Result<Session>) -> Unit)? = null
+    /** Non-null only while an open is waiting, so a failure can be reported to it. */
+    private var pending: ((Result<Bundle>) -> Unit)? = null
 
     private val incoming = Messenger(
         Handler(Looper.getMainLooper()) { msg ->
@@ -118,6 +137,10 @@ class CastClient(context: Context) {
                     // Dropped rather than queued when the session is not live: a command that arrived
                     // during teardown would drive a player the TV is no longer showing.
                     if (open) PlaybackCommand.from(msg.data)?.let { onCommand?.invoke(it) }
+                    true
+                }
+                CastContract.MSG_RESOURCE_REQUEST -> {
+                    onResourceRequest(msg.data)
                     true
                 }
                 else -> false
@@ -143,6 +166,20 @@ class CastClient(context: Context) {
     private var requestedWidth = 0
     private var requestedHeight = 0
     private var requestedAudio = false
+    private var requestedVideo = true
+
+    /** Set for a content session, and what makes a missing `Surface` expected rather than a failure. */
+    private var resources: CastResourceProvider? = null
+
+    /**
+     * Serialises resource opens off the main thread.
+     *
+     * Opening a MediaStore descriptor is disk I/O, and the request arrives on a `Handler` bound to
+     * the main looper. Answering there would put a file open on the main thread of every app that
+     * casts. One thread rather than a pool because the calls are rare - once per resource per
+     * session - and ordering them keeps a provider from needing to be thread-safe.
+     */
+    private var resourceExecutor: ExecutorService? = null
 
     /**
      * Whether Cast can serve a session, from the installed package's `versionCode` alone.
@@ -171,14 +208,72 @@ class CastClient(context: Context) {
      * @throws CastSessionFailedException Cast could not start the stream.
      */
     suspend fun openSession(width: Int, height: Int, wantAudio: Boolean): Session {
+        requestedWidth = width
+        requestedHeight = height
+        requestedAudio = wantAudio
+        requestedVideo = true
+        resources = null
+        val ready = awaitReady()
+        @Suppress("DEPRECATION")
+        val surface = ready.getParcelable(CastContract.KEY_SURFACE) as? Surface
+            ?: throw CastSessionFailedException(CastContract.REASON_FAILED)
+        @Suppress("DEPRECATION")
+        val audio = ready.getParcelable(CastContract.KEY_AUDIO_FD) as? ParcelFileDescriptor
+        return Session(
+            surface = surface,
+            audio = audio,
+            width = ready.getInt(CastContract.KEY_GRANTED_WIDTH, requestedWidth),
+            height = ready.getInt(CastContract.KEY_GRANTED_HEIGHT, requestedHeight),
+            frameRate = ready.getInt(CastContract.KEY_GRANTED_FRAME_RATE, DEFAULT_FRAME_RATE),
+            receiverName = ready.getString(CastContract.KEY_RECEIVER_NAME).orEmpty(),
+        )
+    }
+
+    /**
+     * Bind Cast and open a session it serves this app's own media into.
+     *
+     * Nothing is encoded on this phone: Cast asks [resources] for a descriptor per resource and the
+     * TV fetches byte ranges of it. So there is no size to request and no `Surface` to draw into -
+     * seeking becomes a byte offset, and the TV owns the clock.
+     *
+     * [video] false opens an audio-only session, which the `Surface` path could not express at all.
+     * The TV negotiates no video codec and shows a now-playing screen; a TV with no audio decoder
+     * refuses outright rather than playing silence.
+     *
+     * Throws exactly what [openSession] throws.
+     */
+    suspend fun openContentSession(
+        resources: CastResourceProvider,
+        video: Boolean = true,
+        wantAudio: Boolean = true,
+    ): ContentSession {
+        requestedWidth = 0
+        requestedHeight = 0
+        requestedAudio = wantAudio
+        requestedVideo = video
+        this.resources = resources
+        resourceExecutor = Executors.newSingleThreadExecutor { runnable ->
+            Thread(runnable, "cast-resources").apply { isDaemon = true }
+        }
+        val ready = awaitReady()
+        return ContentSession(
+            receiverName = ready.getString(CastContract.KEY_RECEIVER_NAME).orEmpty(),
+            hasVideo = video,
+        )
+    }
+
+    /**
+     * Binds Cast and suspends until it answers `MSG_SESSION_READY`, or fails.
+     *
+     * Shared by both kinds of session because the binding, the timeout and every failure path are
+     * identical; only what the caller makes of the answer differs.
+     */
+    private suspend fun awaitReady(): Bundle {
         when (support()) {
             Support.NOT_INSTALLED -> throw CastNotInstalledException()
             Support.NEEDS_UPDATE -> throw CastNeedsUpdateException()
             Support.READY -> {}
         }
-        requestedWidth = width
-        requestedHeight = height
-        requestedAudio = wantAudio
         return withTimeout(OPEN_TIMEOUT_MS) {
             suspendCancellableCoroutine { continuation ->
                 pending = { result ->
@@ -241,6 +336,11 @@ class CastClient(context: Context) {
         onEnded = null
         onCommand = null
         pending = null
+        resources = null
+        // Shut down after clearing the provider so a request already in flight finds nothing to
+        // open and answers with a 404 rather than handing out a descriptor nobody will read.
+        resourceExecutor?.shutdown()
+        resourceExecutor = null
         if (open) {
             try {
                 service?.send(Message.obtain(null, CastContract.MSG_CLOSE_SESSION))
@@ -268,6 +368,7 @@ class CastClient(context: Context) {
                 putInt(CastContract.KEY_WIDTH, requestedWidth)
                 putInt(CastContract.KEY_HEIGHT, requestedHeight)
                 putBoolean(CastContract.KEY_WANT_AUDIO, requestedAudio)
+                putBoolean(CastContract.KEY_WANT_VIDEO, requestedVideo)
             }
         }
         try {
@@ -277,28 +378,55 @@ class CastClient(context: Context) {
         }
     }
 
+    /**
+     * Answers Cast's request for the bytes behind a resource id.
+     *
+     * Always answers, even when there is no provider or the provider declines: Cast is holding a
+     * request open for the TV, and a silent client turns into a stalled fetch rather than a `404`.
+     *
+     * Our copy of the descriptor is closed once sent. The Binder transaction duplicates it, so
+     * keeping ours would leak one file descriptor per resource for the life of the session - and it
+     * is the app's own descriptor, so the leak would be the app's.
+     */
+    private fun onResourceRequest(payload: Bundle?) {
+        val requestId = payload?.getInt(CastContract.KEY_REQUEST_ID) ?: return
+        val resourceId = payload.getString(CastContract.KEY_RESOURCE_ID) ?: return
+        val provider = resources
+        val executor = resourceExecutor ?: return
+        executor.execute {
+            val resource = provider?.let { runCatching { it.open(resourceId) }.getOrNull() }
+            val reply = Message.obtain(null, CastContract.MSG_RESOURCE_RESPONSE).apply {
+                data = Bundle().apply {
+                    putInt(CastContract.KEY_REQUEST_ID, requestId)
+                    if (resource != null) {
+                        putParcelable(CastContract.KEY_RESOURCE_FD, resource.descriptor)
+                        putLong(CastContract.KEY_RESOURCE_LENGTH, resource.length)
+                        putString(CastContract.KEY_RESOURCE_TYPE, resource.contentType)
+                    }
+                }
+            }
+            try {
+                service?.send(reply)
+            } catch (_: RemoteException) {
+                // Cast is gone; onServiceDisconnected reports it.
+            }
+            runCatching { resource?.descriptor?.close() }
+        }
+    }
+
+    /**
+     * Cast has a session. What is in the answer depends on which kind, so it is handed on whole.
+     *
+     * A content session has no `Surface` in it, so the check that one arrived belongs to
+     * [openSession] rather than here.
+     */
     private fun onReady(data: Bundle?) {
-        @Suppress("DEPRECATION")
-        val surface = data?.getParcelable(CastContract.KEY_SURFACE) as? Surface
-        if (surface == null) {
+        if (data == null) {
             finish(Result.failure(CastSessionFailedException(CastContract.REASON_FAILED)))
             return
         }
-        @Suppress("DEPRECATION")
-        val audio = data.getParcelable(CastContract.KEY_AUDIO_FD) as? ParcelFileDescriptor
         open = true
-        finish(
-            Result.success(
-                Session(
-                    surface = surface,
-                    audio = audio,
-                    width = data.getInt(CastContract.KEY_GRANTED_WIDTH, requestedWidth),
-                    height = data.getInt(CastContract.KEY_GRANTED_HEIGHT, requestedHeight),
-                    frameRate = data.getInt(CastContract.KEY_GRANTED_FRAME_RATE, DEFAULT_FRAME_RATE),
-                    receiverName = data.getString(CastContract.KEY_RECEIVER_NAME).orEmpty(),
-                ),
-            ),
-        )
+        finish(Result.success(data))
     }
 
     private fun onSessionEnded(reason: Int) {
@@ -320,8 +448,8 @@ class CastClient(context: Context) {
         onEnded?.invoke(reason)
     }
 
-    /** Hand one outcome to a waiting [openSession], unbinding first if it was a failure. */
-    private fun finish(result: Result<Session>) {
+    /** Hand one outcome to a waiting open, unbinding first if it was a failure. */
+    private fun finish(result: Result<Bundle>) {
         if (result.isFailure) {
             // Nothing is going to arrive on this binding, and leaving it up would keep Cast alive.
             if (bound) {
