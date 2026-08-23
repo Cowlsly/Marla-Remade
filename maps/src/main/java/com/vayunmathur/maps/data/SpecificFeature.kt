@@ -1,5 +1,6 @@
 package com.vayunmathur.maps.data
 
+import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.Wikidata
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
@@ -32,9 +33,37 @@ sealed interface SpecificFeature {
                           override val position: Position): RoutableFeature
     @Serializable
     data class GenericPlace(override val name: String, val phone: String?, val website: String?, val openingHours: OpeningHours?,
-                          override val position: Position, val poiType: Int? = null): RoutableFeature
+                          override val position: Position, val poiType: Int? = null,
+                          /** Street address from the OSM `addr:*` tags, when we have them. */
+                          val address: String? = null): RoutableFeature
     @Serializable
     data class Route(val waypoints: List<RoutableFeature?>) : SpecificFeature
+}
+
+/**
+ * A place built from a coordinate, with whatever `poi_attrs.bin` knows about it.
+ *
+ * Every path that turns a name and a coordinate into a sheet goes through here, so
+ * an offline search result opens the same populated sheet a tapped pin does — which
+ * it did not before: search built these with every field null, so an offline result
+ * showed a title and nothing else.
+ *
+ * Returns a bare place when the sidecar is absent or the point is not one of ours,
+ * which is the same thing every caller used to produce unconditionally.
+ */
+fun osmPlace(name: String, position: Position, poiType: Int? = null): SpecificFeature.GenericPlace {
+    val attrs = PoiIndex.attributesNear(position.latitude, position.longitude, name)
+    return SpecificFeature.GenericPlace(
+        name = name,
+        phone = attrs?.phone,
+        website = attrs?.website,
+        // A string we could not parse would render as a confident week of "Closed",
+        // so it is dropped in favour of whatever Google has.
+        openingHours = attrs?.openingHours?.let(OpeningHours::from)?.takeIf { it.hasRules },
+        position = position,
+        poiType = poiType,
+        address = attrs?.address,
+    )
 }
 
 typealias Feature1 = Feature<Geometry, JsonObject?>

@@ -64,7 +64,7 @@ import kotlin.time.Clock
  * reviews section) so the full set is reachable without stretching the sheet.
  */
 @Composable
-fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle: Boolean = true) {
+fun GooglePoiEnrichment(info: GooglePoiInfo, showHours: Boolean, showSubtitle: Boolean = true) {
     if (info.isEmpty) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Price · category subtitle (rating itself is shown by the caller's header).
@@ -81,10 +81,10 @@ fun GooglePoiEnrichment(info: GooglePoiInfo, hasOsmHours: Boolean, showSubtitle:
             Text(it, style = MaterialTheme.typography.bodyMedium, fontStyle = FontStyle.Italic, maxLines = 3)
         }
 
-        // Google's weekly hours — only when OSM didn't already provide them, to
-        // avoid showing the same schedule twice. Collapsed to TODAY's line by
+        // Google's weekly hours, which win when it has them (the OSM block is
+        // suppressed by the caller in that case). Collapsed to TODAY's line by
         // default (tap to expand all 7 days) so the sheet stays short.
-        if (!hasOsmHours && info.hours.isNotEmpty()) {
+        if (showHours && info.hours.isNotEmpty()) {
             var showAllHours by remember { mutableStateOf(false) }
             val todayName = Clock.System.now()
                 .toLocalDateTime(TimeZone.currentSystemDefault())

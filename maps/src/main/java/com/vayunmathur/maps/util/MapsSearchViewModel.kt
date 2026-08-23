@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.maps.data.RecentSearchStore
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.osmPlace
 import com.vayunmathur.maps.data.google.GoogleSearchDataSource
 import com.vayunmathur.maps.data.google.GoogleSearchResult
 import kotlinx.coroutines.Dispatchers
@@ -196,11 +197,8 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
             val hit = GoogleSearchDataSource.search(address, nearLat, nearLon).firstOrNull()
             onResolved(
                 hit?.let {
-                    SpecificFeature.GenericPlace(
+                    osmPlace(
                         name = it.name.ifBlank { it.address ?: address },
-                        phone = null,
-                        website = null,
-                        openingHours = null,
                         position = Position(it.lng, it.lat),
                     )
                 }
@@ -229,15 +227,13 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
      * through the same selection path as a tapped map pin, so
      * `SelectedFeatureViewModel.currentPoiInfo` then fetches the Google
      * enrichment for the sheet.
+     *
+     * The sidecar lookup matters most here: an offline result has no Google
+     * enrichment coming, so without it the sheet opens with a title and nothing
+     * else.
      */
     fun toFeature(result: SearchResult): SpecificFeature.GenericPlace =
-        SpecificFeature.GenericPlace(
-            name = result.title,
-            phone = null,
-            website = null,
-            openingHours = null,
-            position = Position(result.lon, result.lat),
-        )
+        osmPlace(name = result.title, position = Position(result.lon, result.lat))
 
     /**
      * Reverse-geocode [lat],[lon] to the nearest addressable place and hand it
@@ -250,11 +246,8 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
             val hit = GoogleSearchDataSource.reverseGeocode(lat, lon)
             onResult(
                 hit?.let {
-                    SpecificFeature.GenericPlace(
+                    osmPlace(
                         name = it.name.ifBlank { it.address ?: "" },
-                        phone = null,
-                        website = null,
-                        openingHours = null,
                         position = Position(it.lng, it.lat),
                     )
                 }

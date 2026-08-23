@@ -13,6 +13,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
 import com.vayunmathur.maps.data.google.GooglePoiPin
+import com.vayunmathur.maps.data.osmPlace
 import com.vayunmathur.maps.data.string
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -130,7 +131,7 @@ fun Feature1.toSelectedGooglePoi(): SpecificFeature? {
     val name = props.string("name")?.ifBlank { null } ?: return null
     val lat = props["lat"]?.jsonPrimitive?.doubleOrNull ?: return null
     val lng = props["lng"]?.jsonPrimitive?.doubleOrNull ?: return null
-    return SpecificFeature.GenericPlace(name, null, null, null, Position(lng, lat))
+    return osmPlace(name, Position(lng, lat))
 }
 
 /** Category → pin colour, mirroring Vela's `PoiIcons.colorFor(group)` grouping. */

@@ -17,6 +17,7 @@ import androidx.compose.ui.unit.LayoutDirection
 import com.vayunmathur.library.ui.MapsPoiVectors
 import com.vayunmathur.maps.data.Feature1
 import com.vayunmathur.maps.data.SpecificFeature
+import com.vayunmathur.maps.data.osmPlace
 import com.vayunmathur.maps.data.string
 import com.vayunmathur.maps.util.MapTileCache
 import com.vayunmathur.maps.util.PoiCategories
@@ -46,25 +47,25 @@ const val MA_POIS_LAYER_ID = "ma-pois-icons"
 
 /**
  * OUR baked OSM POI layer (P27). Placement / name / type come from the
- * `ma_pois` source-layer baked into the v5 basemap PMTiles by the generator
+ * `ma_pois` source-layer baked into the overlay PMTiles archive by the generator
  * (z12–z16), replacing the runtime Google viewport scrape for ambient pins —
  * Google is now hit only for rich details when a POI is tapped
  * (see [Feature1.toSelectedMaPoi] + SelectedFeatureViewModel.currentPoiInfo).
  */
 object MaPoisSource {
-    /** Baked into the v5 basemap PMTiles — read from the shared base URL. */
-    val PMTILES_URL: String get() = MapTileCache.BASEMAP_PMTILES_URL
+    /** Baked into the overlay PMTiles — read from the shared overlay URL. */
+    val PMTILES_URL: String get() = MapTileCache.OVERLAY_PMTILES_URL
     const val SOURCE_LAYER: String = "ma_pois"
     val available: Boolean get() = PMTILES_URL.isNotBlank()
 }
 
 /**
  * Draw the `ma_pois` source-layer: a category icon per feature (data-driven off
- * the numeric `type`, see [PoiCategories]), from z12 up. Reads the SAME shared
- * [VectorSource] the admin/transit overlays use (single source — a second source
- * on the same PMTiles triggers a directory parse error). The disc icons are
- * runtime Canvas bitmaps (no sprite/glyph assets needed), so this renders even
- * while the style's remote glyphs 404; the POI NAME is shown in the sheet on tap.
+ * the numeric `type`, see [PoiCategories]), from z12 up. Takes the shared overlay
+ * [VectorSource] the admin/transit overlays also read, since they are all layers
+ * of the same archive. The disc icons are runtime Canvas bitmaps (no sprite/glyph
+ * assets needed), so this renders even while the style's remote glyphs 404; the
+ * POI NAME is shown in the sheet on tap.
  *
  * When [filterTypes] is non-null and non-empty the layer is filtered to just
  * those numeric types (the browse category chips, see MapPage); null shows all.
@@ -128,13 +129,16 @@ fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
  * reuse [SpecificFeature.GenericPlace] (name + position) so the existing
  * `SelectedFeatureViewModel.currentPoiInfo` flow fetches the Google enrichment
  * and `GooglePoiEnrichment` renders in the sheet — no new detail path needed.
+ *
+ * [osmPlace] folds in the sidecar's hours / phone / website / address, so the sheet
+ * has something to show before (and without) any Google response.
  */
 fun Feature1.toSelectedMaPoi(): SpecificFeature? {
     val props = properties ?: return null
     val name = props.string("name")?.ifBlank { null } ?: return null
     val pos = (geometry as? Point)?.coordinates ?: return null
     val type = props.string("type")?.toIntOrNull()
-    return SpecificFeature.GenericPlace(name, null, null, null, Position(pos.longitude, pos.latitude), poiType = type)
+    return osmPlace(name, Position(pos.longitude, pos.latitude), poiType = type)
 }
 
 /** Build one category disc bitmap per POI type: a white-ringed colour disc with

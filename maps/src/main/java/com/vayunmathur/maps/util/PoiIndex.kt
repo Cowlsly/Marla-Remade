@@ -20,16 +20,23 @@ import java.nio.channels.FileChannel
  *    `{ int32 lat_e7; int32 lon_e7; uint32 name_off; uint16 type }`,
  *    `count = filesize / 14`, sorted ascending by the 64-bit Morton(lat,lon)
  *    key (the key itself is not stored).
+ *  * `poi_attrs.bin` — OPTIONAL attribute sidecar (opening hours, phone,
+ *    website, address, cuisine, wheelchair), indexed by the ORDINAL of the
+ *    matching `poi_index.bin` record. See `scripts/maps/osm_ingest/src/poi_attrs.rs`
+ *    for the layout.
  *
  * It exposes a name search (prefix/substring over the deduped name pool) and a
  * spatial nearest lookup, so a POI query can resolve locally without a Google
  * call. Everything is a harmless no-op until both files are present (they ship
- * from the same host as the graph); queries then return empty lists.
+ * from the same host as the graph); queries then return empty lists. The sidecar
+ * is separately optional: an install that has the index but not the attributes
+ * keeps working, and every attribute reads as null.
  */
 object PoiIndex {
     private const val TAG = "PoiIndex"
     const val INDEX_FILE = "poi_index.bin"
     const val NAMES_FILE = "poi_names.bin"
+    const val ATTRS_FILE = "poi_attrs.bin"
 
     /** Bytes per record: int32 lat_e7 + int32 lon_e7 + uint32 name_off + uint16 type. */
     private const val RECORD_BYTES = 14
@@ -38,15 +45,75 @@ object PoiIndex {
      *  blow up memory on a broad substring match. */
     private const val CANDIDATE_CAP = 2_000
 
+    // --- poi_attrs.bin layout (see poi_attrs.rs) ---------------------------
+    private val ATTRS_MAGIC =
+        byteArrayOf('M'.code.toByte(), 'A'.code.toByte(), 'P'.code.toByte(), 'A'.code.toByte())
+    private const val ATTRS_VERSION = 1
+    private const val ATTRS_HEADER_BYTES = 12
+    /** `attr_off` for a POI that carries no attributes. */
+    private const val NO_ATTRS = -1
+
+    private const val KEY_OPENING_HOURS = 1
+    private const val KEY_PHONE = 2
+    private const val KEY_WEBSITE = 3
+    private const val KEY_HOUSENUMBER = 4
+    private const val KEY_STREET = 5
+    private const val KEY_CITY = 6
+    private const val KEY_POSTCODE = 7
+    private const val KEY_CUISINE = 8
+    private const val KEY_WHEELCHAIR = 9
+
     /** A single POI resolved from the index. */
     data class PoiRecord(
         val latE7: Int,
         val lonE7: Int,
         val type: Int,
         val name: String,
+        /**
+         * Position in `poi_index.bin`, which is also this POI's key into the
+         * attribute sidecar. -1 for a record not read from the index.
+         */
+        val ordinal: Int = -1,
     ) {
         val lat: Double get() = latE7 / 1e7
         val lon: Double get() = lonE7 / 1e7
+    }
+
+    /**
+     * The OSM tags a place sheet wants, for one POI. Every field is null when OSM
+     * did not tag it — which is the common case for most of them.
+     */
+    data class PoiAttributes(
+        val openingHours: String? = null,
+        val phone: String? = null,
+        val website: String? = null,
+        val houseNumber: String? = null,
+        val street: String? = null,
+        val city: String? = null,
+        val postcode: String? = null,
+        val cuisine: String? = null,
+        val wheelchair: String? = null,
+    ) {
+        /**
+         * The `addr:*` tags as one display line, or null when there are none.
+         *
+         * House number joins the street with a space and the rest with commas, so a
+         * partial address (very common in OSM — a street with no city) still reads
+         * as an address rather than as a fragment.
+         */
+        val address: String?
+            get() {
+                val line = listOfNotNull(houseNumber, street)
+                    .joinToString(" ")
+                    .ifEmpty { null }
+                return listOfNotNull(line, city, postcode)
+                    .joinToString(", ")
+                    .ifEmpty { null }
+            }
+
+        val isEmpty: Boolean
+            get() = openingHours == null && phone == null && website == null &&
+                address == null && cuisine == null && wheelchair == null
     }
 
     private var index: MappedByteBuffer? = null
@@ -56,8 +123,16 @@ object PoiIndex {
     private var loaded = false
     private var tried = false
 
+    /** The attribute sidecar, or null when it is absent or does not match. */
+    private var attrs: MappedByteBuffer? = null
+    /** Byte offset of the blob, i.e. just past the offset array. */
+    private var attrsBlobStart: Int = 0
+
     /** True once both side files were mapped successfully. */
     val available: Boolean get() = loaded
+
+    /** True when the optional attribute sidecar is mapped and usable. */
+    val attributesAvailable: Boolean get() = attrs != null
 
     /** Number of POI records available offline (0 when not loaded). */
     val recordCount: Int get() = count
@@ -88,6 +163,9 @@ object PoiIndex {
             count = (indexFile.length() / RECORD_BYTES).toInt()
             loaded = true
             Log.d(TAG, "Loaded $count POI records, names=${namesLen}B")
+            // Separate and optional: a failure here leaves the index perfectly
+            // usable, just without attributes.
+            openAttrs(File(dir, ATTRS_FILE))
             true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to map POI side files", e)
@@ -103,7 +181,59 @@ object PoiIndex {
         tried = false
         index = null
         names = null
+        attrs = null
         return initialize(context)
+    }
+
+    /**
+     * Map the attribute sidecar, leaving [attrs] null if anything is off.
+     *
+     * The record-count check is the one that matters: the sidecar joins to the
+     * index purely by position, so a sidecar from a different build would hand
+     * every place someone else's phone number. Refusing the file is the only safe
+     * response, and there is no way to detect the mismatch later.
+     */
+    private fun openAttrs(file: File) {
+        attrs = null
+        if (!file.isFile) {
+            Log.d(TAG, "POI attribute sidecar absent")
+            return
+        }
+        try {
+            val buf = mapReadOnly(file).also { it.order(ByteOrder.LITTLE_ENDIAN) }
+            if (buf.capacity() < ATTRS_HEADER_BYTES) {
+                Log.w(TAG, "$ATTRS_FILE is truncated")
+                return
+            }
+            for (i in ATTRS_MAGIC.indices) {
+                if (buf.get(i) != ATTRS_MAGIC[i]) {
+                    Log.w(TAG, "$ATTRS_FILE has the wrong magic")
+                    return
+                }
+            }
+            // Not a gate: the length prefixes let this reader step over a key added
+            // by a later version, so a newer file is readable. A version it has
+            // never heard of is worth a line in the log all the same.
+            val version = buf.get(4).toInt()
+            if (version != ATTRS_VERSION) {
+                Log.d(TAG, "$ATTRS_FILE is version $version, expected $ATTRS_VERSION")
+            }
+            val attrCount = buf.getInt(8)
+            if (attrCount != count) {
+                Log.w(TAG, "$ATTRS_FILE has $attrCount slots but the index has $count; ignoring it")
+                return
+            }
+            val blobStart = ATTRS_HEADER_BYTES + 4 * attrCount
+            if (blobStart > buf.capacity()) {
+                Log.w(TAG, "$ATTRS_FILE offset array runs past the file")
+                return
+            }
+            attrsBlobStart = blobStart
+            attrs = buf
+            Log.d(TAG, "Loaded POI attributes for $attrCount record(s)")
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to map $ATTRS_FILE", e)
+        }
     }
 
     private fun mapReadOnly(file: File): MappedByteBuffer =
@@ -186,7 +316,7 @@ object PoiIndex {
                 val lonE7 = recLonE7(i)
                 out.add(
                     Ranked(
-                        PoiRecord(latE7, lonE7, recType(i), name),
+                        PoiRecord(latE7, lonE7, recType(i), name, i),
                         rank,
                         distanceSq(latE7 / 1e7, lonE7 / 1e7, nearLat, nearLon),
                     )
@@ -236,6 +366,7 @@ object PoiIndex {
                 recLonE7(h.idx),
                 recType(h.idx),
                 nameAt(recNameOff(h.idx)) ?: "",
+                h.idx,
             )
         }
     }
@@ -266,7 +397,7 @@ object PoiIndex {
             val latE7 = recLatE7(i)
             val lonE7 = recLonE7(i)
             if (latE7 in minLatE7..maxLatE7 && lonE7 in minLonE7..maxLonE7) {
-                out.add(PoiRecord(latE7, lonE7, recType(i), nameAt(recNameOff(i)) ?: ""))
+                out.add(PoiRecord(latE7, lonE7, recType(i), nameAt(recNameOff(i)) ?: "", i))
             }
             i++
         }
@@ -275,6 +406,126 @@ object PoiIndex {
 
     private class Ranked(val record: PoiRecord, val rank: Int, val distSq: Double)
     private class Hit(val idx: Int, val distSq: Double)
+
+    /**
+     * The attributes of the [ordinal]th index record, or null when there are none.
+     *
+     * Two indexed reads and a short decode, no scan. Deliberately NOT called while
+     * building viewport or search result lists, where it would decode hundreds of
+     * records nobody looks at.
+     *
+     * Every offset is treated as untrusted. The file arrives over the network and a
+     * truncated download must read as "no attributes", not throw out of a tap.
+     */
+    @Synchronized
+    fun attributesAt(ordinal: Int): PoiAttributes? {
+        val buf = attrs ?: return null
+        if (ordinal < 0 || ordinal >= count) return null
+        val off = buf.getInt(ATTRS_HEADER_BYTES + 4 * ordinal)
+        if (off == NO_ATTRS || off < 0) return null
+        // Bounded before the add, not after: `attrsBlobStart + off` can wrap negative
+        // for a large positive off, and a negative index passes an `at + 2 > capacity`
+        // test on its way to an IndexOutOfBoundsException.
+        val blobLen = buf.capacity() - attrsBlobStart
+        if (off > blobLen - 2) return null
+        val at = attrsBlobStart + off
+        val bodyLen = buf.getShort(at).toInt() and 0xFFFF
+        val body = at + 2
+        if (bodyLen > buf.capacity() - body) return null
+        return decodeAttributes(buf, body, body + bodyLen)
+    }
+
+    /**
+     * The attributes of the POI named [name] nearest to ([lat],[lon]), or null.
+     *
+     * This is the join a tapped tile feature needs, and the reason it is not an
+     * exact coordinate match: the `ma_pois` tile layer quantises every point to its
+     * tile's 4096-step grid (about 0.15 m at z16), so a tap's coordinate is close to
+     * the side file's `lat_e7`/`lon_e7` but never equal to it.
+     *
+     * The name is matched too, not just the distance. A mall and a cafe inside it
+     * can share a coordinate to within a metre, and attaching one's phone number to
+     * the other is the kind of wrong that looks right.
+     *
+     * Costs one [nearest] call, which is a linear scan of the whole record array —
+     * the same cost model [inViewport] documents and runs per viewport idle. If that
+     * ever stops being affordable it is a limitation of all three, not of this one.
+     */
+    @Synchronized
+    fun attributesNear(
+        lat: Double,
+        lon: Double,
+        name: String,
+        maxMeters: Double = 25.0,
+    ): PoiAttributes? {
+        if (attrs == null || name.isBlank()) return null
+        val match = nearest(lat, lon, limit = 8, maxMeters = maxMeters)
+            .firstOrNull { it.name == name }
+            ?: return null
+        return attributesAt(match.ordinal)
+    }
+
+    /**
+     * Walk one record's `u8 key, u16 len, value` fields.
+     *
+     * A key this build does not know is stepped over using its length rather than
+     * abandoning the record, which is the whole reason the values are
+     * length-prefixed: a device on an older build must still read the keys it does
+     * understand out of a newer file.
+     */
+    private fun decodeAttributes(buf: MappedByteBuffer, from: Int, to: Int): PoiAttributes? {
+        var openingHours: String? = null
+        var phone: String? = null
+        var website: String? = null
+        var houseNumber: String? = null
+        var street: String? = null
+        var city: String? = null
+        var postcode: String? = null
+        var cuisine: String? = null
+        var wheelchair: String? = null
+
+        var i = from
+        while (i + 3 <= to) {
+            val key = buf.get(i).toInt() and 0xFF
+            val len = buf.getShort(i + 1).toInt() and 0xFFFF
+            val start = i + 3
+            if (start + len > to) break
+            // Only decode the bytes of a key we are going to keep.
+            val value: String? = when (key) {
+                KEY_OPENING_HOURS, KEY_PHONE, KEY_WEBSITE, KEY_HOUSENUMBER, KEY_STREET,
+                KEY_CITY, KEY_POSTCODE, KEY_CUISINE, KEY_WHEELCHAIR ->
+                    stringAt(buf, start, len)
+                else -> null
+            }
+            when (key) {
+                KEY_OPENING_HOURS -> openingHours = value
+                KEY_PHONE -> phone = value
+                KEY_WEBSITE -> website = value
+                KEY_HOUSENUMBER -> houseNumber = value
+                KEY_STREET -> street = value
+                KEY_CITY -> city = value
+                KEY_POSTCODE -> postcode = value
+                KEY_CUISINE -> cuisine = value
+                KEY_WHEELCHAIR -> wheelchair = value
+            }
+            i = start + len
+        }
+
+        val decoded = PoiAttributes(
+            openingHours, phone, website, houseNumber, street, city, postcode, cuisine, wheelchair,
+        )
+        return decoded.takeUnless { it.isEmpty }
+    }
+
+    private fun stringAt(buf: MappedByteBuffer, off: Int, len: Int): String? {
+        if (len <= 0) return null
+        val bytes = ByteArray(len)
+        // Absolute reads via a duplicate, so the shared buffer's position is untouched.
+        val dup = buf.duplicate()
+        dup.position(off)
+        dup.get(bytes, 0, len)
+        return String(bytes, Charsets.UTF_8)
+    }
 
     /** Cheap squared planar distance (deg², lon scaled by cos lat) for ranking. */
     private fun distanceSq(aLat: Double, aLon: Double, bLat: Double, bLon: Double): Double {

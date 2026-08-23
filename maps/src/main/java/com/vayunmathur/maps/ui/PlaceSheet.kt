@@ -3,6 +3,7 @@ import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.util.DateNameStyle
 import com.vayunmathur.library.util.localizedDayOfWeekNames
 import kotlinx.datetime.isoDayNumber
+import android.content.ClipData
 import android.content.Context
 import android.content.Intent
 import androidx.compose.foundation.clickable
@@ -23,6 +24,7 @@ import com.vayunmathur.library.ui.IconCall
 import com.vayunmathur.library.ui.IconDirections
 import com.vayunmathur.library.ui.IconDirectionsWalk
 import com.vayunmathur.library.ui.IconGlobe
+import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.IconMenuBook
 import com.vayunmathur.library.ui.IconSave
 import com.vayunmathur.library.ui.IconSchedule
@@ -41,12 +43,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.platform.ClipEntry
+import androidx.compose.ui.platform.LocalClipboard
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
@@ -68,6 +73,7 @@ import com.vayunmathur.maps.ui.streetview.StreetViewScreen
 import com.vayunmathur.maps.data.timeFormat
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import kotlinx.coroutines.launch
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.format
 import kotlinx.datetime.toLocalDateTime
@@ -116,7 +122,8 @@ fun PlaceSheet(
 ) = PlaceSheetContent(
     viewModel, savedPlacesViewModel, inactiveNavigation, feature,
     phone = feature.phone, website = feature.website, menu = null,
-    openingHours = feature.openingHours, onDepartures = onDepartures,
+    openingHours = feature.openingHours, address = feature.address,
+    onDepartures = onDepartures,
     requestDirections = requestDirections,
 )
 
@@ -130,6 +137,7 @@ private fun PlaceSheetContent(
     website: String?,
     menu: String?,
     openingHours: OpeningHours?,
+    address: String? = null,
     onDepartures: (() -> Unit)? = null,
     requestDirections: () -> Unit,
 ) {
@@ -138,12 +146,25 @@ private fun PlaceSheetContent(
     // If this is a restaurant/food place, ask fooddelivery whether it's orderable
     // (off the main thread, null-safe). Absent/not-orderable → null → no Order button.
     val orderDeepLink by rememberOrderDeepLink(context, feature, poi?.category)
+
+    // Google wins on hours when it has them, and OSM fills in otherwise — including
+    // offline, where the fetch simply returns nothing (there is no connectivity
+    // check anywhere in this module, and none is needed: a failed request is
+    // indistinguishable from "no data", which is exactly the behaviour wanted).
+    val googleHours = poi?.hours.orEmpty()
+    val osmHours = openingHours?.takeIf { googleHours.isEmpty() }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        PlaceHeader(feature.name, poi, hasOsmHours = openingHours != null)
+        // The OSM block carries its own open/closed line, so the header only shows
+        // Google's status when that block is absent — otherwise the sheet says the
+        // same thing twice, in two different voices.
+        PlaceHeader(feature.name, poi, showStatus = osmHours == null)
         PlaceActionRow(
             feature = feature,
-            phone = phone,
-            website = website,
+            // OSM first, Google as the fallback. These used to be handed the OSM
+            // values only, which were always null — so Call and Website were dead
+            // buttons even when the enrichment had both.
+            phone = phone ?: poi?.phone,
+            website = website ?: poi?.website,
             inactiveNavigation = inactiveNavigation,
             savedPlacesViewModel = savedPlacesViewModel,
             requestDirections = requestDirections,
@@ -157,12 +178,31 @@ private fun PlaceSheetContent(
         menu?.let {
             RestaurantItem({ IconMenuBook() }, stringResource(R.string.menu_label)) { goto(context, it) }
         }
-        openingHours?.let { OsmHours(it) }
+        address?.let { AddressRow(it) }
+        osmHours?.let { OsmHours(it) }
         StreetViewEntry(feature)
         // Reuse the existing enrichment sections (editorial / photos / popular
         // times / reviews). The header already shows category · price, so the
         // enrichment's own subtitle is suppressed to avoid duplication.
-        poi?.let { GooglePoiEnrichment(it, hasOsmHours = openingHours != null, showSubtitle = false) }
+        poi?.let { GooglePoiEnrichment(it, showHours = osmHours == null, showSubtitle = false) }
+    }
+}
+
+/**
+ * The `addr:*` tags as one tappable row.
+ *
+ * New surface: nothing displayed an address before, because nothing had one —
+ * `GoogleSearchResult.address` only ever appeared as a search-row subtitle. Tapping
+ * copies it, which is what an address on a sheet is usually for.
+ */
+@Composable
+private fun AddressRow(address: String) {
+    val clipboard = LocalClipboard.current
+    val scope = rememberCoroutineScope()
+    RestaurantItem({ IconLocationOn() }, address) {
+        scope.launch {
+            clipboard.setClipEntry(ClipEntry(ClipData.newPlainText("address", address)))
+        }
     }
 }
 
@@ -195,7 +235,7 @@ private fun StreetViewEntry(feature: SpecificFeature.RoutableFeature) {
 }
 
 @Composable
-private fun PlaceHeader(name: String, poi: GooglePoiInfo?, hasOsmHours: Boolean, modifier: Modifier = Modifier) {
+private fun PlaceHeader(name: String, poi: GooglePoiInfo?, showStatus: Boolean, modifier: Modifier = Modifier) {
     Column(modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text(name, style = MaterialTheme.typography.titleLarge)
 
@@ -216,10 +256,11 @@ private fun PlaceHeader(name: String, poi: GooglePoiInfo?, hasOsmHours: Boolean,
             }
         }
 
-        // Open-now status. When OSM opening hours are present the expandable
-        // hours block below shows this instead, so only surface Google's status
-        // string when we have nothing better.
-        if (!hasOsmHours) {
+        // Open-now status, from Google when it has one. When the OSM hours block is
+        // shown instead it carries its own status line, computed from a parsed
+        // schedule rather than by string-matching English prose — so the caller
+        // suppresses this to avoid saying it twice.
+        if (showStatus) {
             poi?.statusText?.ifBlank { null }?.let { status ->
                 val color = when (poi.openNow) {
                     true -> MaterialTheme.colorScheme.tertiary

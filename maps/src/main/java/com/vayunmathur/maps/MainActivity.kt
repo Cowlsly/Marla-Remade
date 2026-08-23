@@ -94,6 +94,14 @@ class MainActivity : ComponentActivity() {
                     Triple("https://data.vayunmathur.com/intermediate.bin", "intermediate.bin", getString(R.string.downloading_road_data)),
                     Triple("https://data.vayunmathur.com/poi_index.bin", "poi_index.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/poi_names.bin", "poi_names.bin", getString(R.string.downloading_poi_data)),
+                    // The POI attribute sidecar (opening hours / phone / website /
+                    // address). REQUIRED here like the other two, so it must be
+                    // hosted BEFORE this app version ships: InitialDownloadChecker
+                    // gates on every file being present, and an entry with nothing
+                    // behind it strands users on the download screen. PoiIndex
+                    // itself treats the file as optional, so a device that somehow
+                    // lacks it degrades to no attributes rather than breaking.
+                    Triple("https://data.vayunmathur.com/poi_attrs.bin", "poi_attrs.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data))
                 )) {
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
