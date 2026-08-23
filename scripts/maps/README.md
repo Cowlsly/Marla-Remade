@@ -98,7 +98,8 @@ tap). It deliberately does **not** reuse the base Protomaps `pois` layer (which
 the app suppresses). It is built by [`build_pois_layer.sh`](build_pois_layer.sh)
 (→ [`osm_ingest`](osm_ingest/)'s `poi_extract`) at zooms **z12–z16**. The same
 pass also
-emits two compact side files (`poi_names.bin` + `poi_index.bin`, formats below)
+emits three compact side files (`poi_names.bin` + `poi_index.bin` +
+`poi_attrs.bin`, formats below)
 so the app can mmap + binary-scan POIs; the layer and the side files are
 mutually consistent (same POI set, same coordinates). See
 [POI layer & side files (P27)](#poi-layer--side-files-p27) below.
@@ -146,7 +147,7 @@ mutually consistent (same POI set, same coordinates). See
   (Rust, reads `.osm.pbf` natively) — nodes are read directly, closed ways use
   their own node ring, and `type=multipolygon`/`boundary` relations use the node
   locations of their `outer`-role member ways. The same pass emits the tile
-  layer's geojsonseq AND the two side files, so all three are mutually
+  layer's geojsonseq AND the three side files, so all four are mutually
   consistent.
 * **Admin borders**:
   * country + region → **Natural Earth 10m** (`ne_10m_admin_0_countries`,
@@ -163,7 +164,7 @@ mutually consistent (same POI set, same coordinates). See
 
 | File | Purpose |
 |---|---|
-| `build_all.sh` | **The superscript**: one command from `.osm.pbf` + GTFS to all 9 runtime artifacts, with per-stage stamps and a `manifest.txt` of sizes and SHA-256s. Chains graph → pois → transit → tiles |
+| `build_all.sh` | **The superscript**: one command from `.osm.pbf` + GTFS to all 11 runtime artifacts, with per-stage stamps and a `manifest.txt` of sizes and SHA-256s. Chains graph → pois → transit → tiles. Overlay-only by default; `--with-base` merges a base in |
 | `build_all.ps1` | **Windows twin** of the above. Stages graph/pois/transit are complete; the tiles stage composites only the cargo-only layers onto a `-BaseArchive` (see [Caveats](#caveats--known-limitations)) |
 | `run_generator.sh` | **Deprecated** thin wrapper over `build_all.sh` (graph + pois + publish) |
 | `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
@@ -177,7 +178,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_admin_layers.sh` | `admin_city`: **`--engine-city rust`** (default) is `osm_extract`'s own ring assembler → `tile_polygons`, cargo-only; `legacy` is osmium → `normalize_admin.py` → tippecanoe. `admin_country`/`admin_region`: Natural Earth → `normalize_admin.py` → tippecanoe, with **no rust engine** — OSM cannot supply them. `--only-city` builds the one admin layer a cargo-only box can |
 | `build_transit_stops_layer.sh` | GTFS dirs → `gtfs_ingest` `transit_stops` → geojsonseq → `tile_build` `tile_points` → `transit_stops.pmtiles`. **No tippecanoe, no osmium** |
 | `build_transit_stops_layer.ps1` | **Windows** entry point for the same layer (cargo-only) |
-| `gtfs_ingest/` | Rust GTFS crate (detached, **zero dependencies**): `gtfs_ingest` (the on-device `.transit` pack), `transit_stops` (the basemap stop layer) and `resolve_feeds` (resolves the Transitous registry against transitland-atlas into a download plan whose feeds carry MOTIS ids). TRX2 on-disk format documented in `src/index.rs`, the resolution rules in `src/registry.rs` |
+| `gtfs_ingest/` | Rust GTFS crate (detached, **zero dependencies**): `gtfs_ingest` (the on-device `.transit` pack) and `transit_stops` (the basemap stop layer). Feeds now come from Transitous' own published `gtfs/` directory, mirrored once by `build_world_transit.sh`, so nothing resolves per-agency upstream URLs any more. TRX2 on-disk format documented in `src/index.rs` |
 | `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe, tile-join and go-pmtiles**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_extract` (subset by bbox, zoom and layer — the `go-pmtiles extract` replacement and the admin layer lift), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
@@ -406,10 +407,14 @@ That is why `tile_build` exists rather than shelling out to tippecanoe: there is
 no Windows path for it (see the note at `build_graph.ps1:29`), which would
 otherwise have left `transit_stops` unbuildable on the dev box.
 
-> **`tile_join` memory.** It reads every input archive wholly into memory. That is
-> fine for the overlay layers (tens of MB each) but **not** for compositing against
-> the full 1.5 GB published basemap — do that on a machine with the RAM for it, or
-> merge the overlays first and composite once.
+> **`tile_join` memory.** It reads every input archive wholly into memory, which
+> bounds a merge at the size of its largest input. That is ample for the overlays
+> (a few GB combined at planet scale) and hopeless for a planet base (~127 GB) —
+> which is why the base is not merged at all. Build overlay-only archives with
+> `build_v5_pmtiles.sh --no-base` and let the app mount them alongside the
+> published base (`MapTileCache.OVERLAY_PMTILES_URL` beside
+> `BASEMAP_PMTILES_URL`). The layer namespaces are disjoint by construction, so
+> nothing has to be renamed for the split.
 
 Install
 
@@ -428,9 +433,14 @@ The **dry-run test** needs only `python3`.
 
 ### 0. Everything, in one command
 
-`build_all.sh` is the entry point. It builds all 9 artifacts in dependency order,
+`build_all.sh` is the entry point. It builds all 11 artifacts in dependency order,
 stamps each stage so a re-run is cheap, and writes a `manifest.txt` of sizes and
 SHA-256s that should be identical across two runs of the same inputs.
+
+The tile archive is **overlay-only** by default (`v5-overlay.pmtiles`), which is the
+shape the app expects and the only one that fits in `tile_join`'s memory at planet
+scale. `--with-base` merges a Protomaps base in and names the output `v5.pmtiles`;
+that is only sane for a metro-sized extract.
 
 ```bash
 # see the plan without touching anything
@@ -440,7 +450,7 @@ SHA-256s that should be identical across two runs of the same inputs.
 ./build_all.sh --geofabrik north-america/us/california \
     --gtfs-region 'us-ca' --out-dir ./ca_build --out ./ca_build/v5-ca.pmtiles
 
-# then publish all 9
+# then publish all 11
 ./build_all.sh <same args> --publish
 ```
 
@@ -496,6 +506,18 @@ pmtiles show v5-sf.pmtiles          # lists layers: ... safety admin_country ...
 
 ### 2. Full planet build
 
+At planet scale the shippable shape is **overlays only**: the base is ~127 GB of
+the 137 GB total, and `tile_join` holds every input in memory. `--no-base` skips
+building a base and leaves it out of the merge, so the result is a few GB that the
+app mounts alongside the published base archive.
+
+```bash
+./build_v5_pmtiles.sh --pbf planet-latest.osm.pbf --no-base --out v5-overlay.pmtiles
+```
+
+A single archive containing both is still buildable if you have the RAM for a
+137 GB join:
+
 ```bash
 # Base built from OSM with Planetiler (reproducible):
 ./build_v5_pmtiles.sh \
@@ -505,7 +527,7 @@ pmtiles show v5-sf.pmtiles          # lists layers: ... safety admin_country ...
     --base-area planet \
     --out v5.pmtiles
 
-# …or reuse the upstream prebuilt base and only refresh overlays (much faster):
+# …or reuse the upstream prebuilt base and only refresh overlays:
 ./build_v5_pmtiles.sh --pbf planet-latest.osm.pbf --base-mode reuse --out v5.pmtiles
 ```
 
@@ -521,12 +543,19 @@ Individual layers can also be built standalone — see each script's `--help`.
 | `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
 | `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
 | `ma_pois.pmtiles` | planet | ~0.5–2 GB (named POI points) |
-| `poi_names.bin` + `poi_index.bin` | planet | ~0.2–1 GB combined (side files) |
+| `poi_names.bin` + `poi_index.bin` + `poi_attrs.bin` | planet | ~0.5–2 GB combined (side files) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
-| **`v5.pmtiles`** | planet | ≈ **137 GB** (dominated by the base; overlays add < 3%) |
+| **`v5-overlay.pmtiles`** | planet | ~**2–7 GB** (every overlay, no base) |
+| `v5.pmtiles` | planet | ≈ **137 GB** (base + overlays; the base is > 97% of it) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
 
-The base dominates; the safety + admin overlays are a rounding error on top.
+The base dominates so completely that publishing it together with the overlays
+means re-uploading 127 GB of unchanged bytes to ship a POI fix. Hence the split.
+
+The side-file budget grew with `poi_attrs.bin`. Its offset array alone is
+`4 × record_count` — about 90 MB against 22.6 M planet POIs — before the
+deduplicated attribute blob. Recheck it against a real planet run rather than
+trusting this estimate.
 
 ---
 
@@ -610,15 +639,17 @@ to discover POIs — Google is queried only for rich details when the user taps 
 POI. It is built by [`build_pois_layer.sh`](build_pois_layer.sh) →
 [`osm_ingest`](osm_ingest/)'s `poi_extract` and merged into `v5.pmtiles` by
 `build_v5_pmtiles.sh` (skip with `--skip-pois`). The **same** `poi_extract` pass
-emits two compact side files **next to `--out`** so the app can `mmap` +
+emits three compact side files **next to `--out`** so the app can `mmap` +
 binary-scan POIs without opening the tileset:
 
 ```
 poi_names.bin
 poi_index.bin
+poi_attrs.bin
 ```
 
-Both are added to `run_generator.sh`'s R2 upload list so they ship from the same
+All three are published by `build_all.sh --publish` (they are in its artifact list,
+so `publish_r2.sh` keys each by basename) and ship from the same
 `data.vayunmathur.com` host as the routing graph.
 
 ### `ma_pois` source-layer
@@ -739,6 +770,75 @@ struct PoiRecord {   // 14 bytes, little-endian
 };
 #pragma pack(pop)
 ```
+
+The 14-byte record is **full** and its width is load-bearing in three places that
+must not drift: the writer, the `index.len() % 14` assertion in `poi_build.rs`'s
+tests, and `record_count = filesize / 14` above. New per-POI data goes in the
+sidecar below, never in a wider record.
+
+### `poi_attrs.bin` — attribute sidecar
+
+The OSM tag values a place sheet wants, which `poi_index.bin` has no room for.
+Written by the same pass, so the two agree by construction. See
+`osm_ingest/src/poi_attrs.rs` for the authoritative layout and
+`maps/.../util/PoiIndex.kt` for the reader.
+
+```
+0..4                     magic "MAPA"
+4                        uint8  version (1)
+5..8                     reserved, zero (keeps the offset array 4-aligned)
+8..12                    uint32 record_count
+12..12+4*record_count    uint32 attr_off[]   byte offset into the blob below,
+                                             or 0xFFFFFFFF for "no attributes"
+then                     the blob
+```
+
+**Indexed by record ordinal**, not by `osm_id` (which is not in `poi_index.bin` at
+all) and not by coordinate: `attr_off[i]` describes the `i`th `poi_index.bin`
+record. Both files come out of one loop over the same Morton-sorted vector, so
+alignment is free and neither format needed a join key added.
+
+`record_count` **must** equal `poi_index.bin`'s. A reader that finds otherwise has
+a sidecar from a different build and has to refuse the file outright, because a
+positional join to the wrong file hands every place someone else's phone number
+and nothing downstream can detect it.
+
+A blob record is a `uint16` body length followed by that many bytes of
+`uint8 key, uint16 value_len, value` triples, ascending by key. Values are UTF-8
+and not NUL-terminated. The length prefixes are the compatibility mechanism: a
+reader built against version 1 steps over a key added in version 2 rather than
+losing the rest of the record, which is why the version byte does not gate reading.
+
+Records are deduplicated whole, the way `poi_names.bin` dedupes names — chains
+repeat their entire attribute set, and `Mo-Su 00:00-24:00` is one of the most
+common strings in OSM. A POI with none of these tags gets the sentinel offset
+rather than an empty record.
+
+Attribute keys — **never renumber an existing value, only append**, exactly as for
+the POI type map. A code is baked into every published sidecar, so reusing one
+relabels data already on devices:
+
+| # | key | OSM tags read (first match wins) |
+|---|---|---|
+| 1 | opening_hours | `opening_hours` |
+| 2 | phone | `phone`, `contact:phone` |
+| 3 | website | `website`, `contact:website` |
+| 4 | housenumber | `addr:housenumber` |
+| 5 | street | `addr:street` |
+| 6 | city | `addr:city` |
+| 7 | postcode | `addr:postcode` |
+| 8 | cuisine | `cuisine` |
+| 9 | wheelchair | `wheelchair` |
+
+The set is deliberately small: every key costs bytes 22.6 million times over at
+planet scale, so a tag earns its place by being something the place sheet shows.
+
+Joining a **tapped tile feature** to its record is the one non-obvious part. The
+`ma_pois` tile quantises every point to its tile's 4096-step grid (~0.15 m at z16),
+so the tap's coordinate is close to the record's `lat_e7`/`lon_e7` but never equal
+to it — an exact match does not work. `PoiIndex.attributesNear` takes the nearest
+record within a few metres **whose name also matches**, because a mall and a cafe
+inside it can share a coordinate to within a metre.
 
 ---
 
