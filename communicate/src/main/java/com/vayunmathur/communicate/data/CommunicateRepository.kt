@@ -422,6 +422,21 @@ object CommunicateRepository {
         else -> MessageStatus.Sent // STATUS_PENDING / STATUS_NONE → single tick
     }
 
+    /**
+     * Whether [number] is a real phone number that no contact claims.
+     *
+     * Distinct from `findContactName(...) == null`, which is also null when READ_CONTACTS is denied or the
+     * address is not a number at all — offering "add to contacts" in those cases would be wrong.
+     */
+    fun isUnknownContact(context: Context, number: String): Boolean {
+        if (number.isBlank()) return false
+        // Service ids (ACI/PNI UUIDs, JIDs) are not dialable and cannot be saved as a phone number.
+        if (!number.any { it.isDigit() }) return false
+        if (number.contains('@') || number.count { it == '-' } >= 4) return false
+        if (!context.hasPermission(Manifest.permission.READ_CONTACTS)) return false
+        return findContactName(context, number) == null
+    }
+
     fun findContactName(context: Context, number: String): String? {
         if (!context.hasPermission(Manifest.permission.READ_CONTACTS) || number.isBlank()) return null
         return runCatching {

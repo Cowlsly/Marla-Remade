@@ -1,0 +1,116 @@
+package com.vayunmathur.communicate
+
+import android.content.Intent
+import android.net.Uri
+import com.vayunmathur.communicate.data.CommunicateLine
+
+/**
+ * What an incoming intent asked us to open.
+ *
+ * The app previously declared `sms:`/`smsto:`/`tel:` filters and then ignored the intent entirely, so every
+ * launch landed on the thread list. This turns an intent into a destination.
+ */
+sealed interface DeepLink {
+    /** Open (or start) a conversation with [address] on [line]. */
+    data class Conversation(val address: String, val line: CommunicateLine, val body: String? = null) : DeepLink
+
+    /** A group invite we can't join yet, but shouldn't silently swallow either. */
+    data class UnsupportedGroupInvite(val line: CommunicateLine) : DeepLink
+}
+
+/**
+ * Parses share/deep-link intents into a [DeepLink].
+ *
+ * Vendor links are matched by host so the app can be a target for `wa.me` and `signal.me` links, which is
+ * what makes "message this number on WhatsApp/Signal" from a browser or another app land here. The line is
+ * taken from the link, since the same phone number can exist on several.
+ */
+object DeepLinks {
+    fun parse(intent: Intent?): DeepLink? {
+        val intent = intent ?: return null
+        val data = intent.data ?: return null
+        return when (intent.action) {
+            Intent.ACTION_VIEW, Intent.ACTION_SENDTO, Intent.ACTION_DIAL, Intent.ACTION_CALL ->
+                fromUri(data, intent.getStringExtra(Intent.EXTRA_TEXT))
+            else -> null
+        }
+    }
+
+    internal fun fromUri(uri: Uri, body: String? = null): DeepLink? = resolve(
+        scheme = uri.scheme,
+        host = uri.host,
+        path = uri.path,
+        fragment = uri.fragment,
+        opaque = uri.schemeSpecificPart,
+        query = { name -> runCatching { uri.getQueryParameter(name) }.getOrNull() },
+        body = body,
+    )
+
+    /**
+     * The parsing itself, over plain URI components.
+     *
+     * Split out from [Uri] so it is unit-testable: `android.net.Uri` is a stub on the JVM, and this is exactly
+     * the logic worth testing since each vendor hides the number somewhere different.
+     */
+    internal fun resolve(
+        scheme: String?,
+        host: String?,
+        path: String?,
+        fragment: String?,
+        opaque: String?,
+        query: (String) -> String?,
+        body: String? = null,
+    ): DeepLink? {
+        val scheme = scheme?.lowercase()
+        val host = host?.lowercase()
+        return when {
+            // sms:/smsto:/mms: — the default-SMS-app entry point.
+            scheme in SMS_SCHEMES || scheme == "tel" ->
+                addressOf(opaque, path)?.let { DeepLink.Conversation(it, CommunicateLine.Sim, body) }
+
+            // WhatsApp: wa.me/<number>, api.whatsapp.com/send?phone=, whatsapp://send?phone=
+            host == "wa.me" || host == "api.whatsapp.com" || scheme == "whatsapp" ->
+                whatsAppNumber(path, query)?.let {
+                    DeepLink.Conversation(it, CommunicateLine.WhatsApp, query("text") ?: body)
+                }
+            host == "chat.whatsapp.com" -> DeepLink.UnsupportedGroupInvite(CommunicateLine.WhatsApp)
+
+            // Signal: signal.me/#p/<e164>, sgnl://signal.me/#p/<e164>
+            host == "signal.me" -> signalNumber(fragment)?.let {
+                DeepLink.Conversation(it, CommunicateLine.Signal, body)
+            }
+            host == "signal.group" -> DeepLink.UnsupportedGroupInvite(CommunicateLine.Signal)
+            else -> null
+        }
+    }
+
+    /** `sms:+1555…?body=hi` keeps the number in the opaque part or the path depending on the sender. */
+    private fun addressOf(opaque: String?, path: String?): String? {
+        val raw = opaque ?: path
+        return raw?.substringBefore('?')?.trim()?.takeIf { it.isNotEmpty() }
+    }
+
+    /** `wa.me/15551234567` puts it in the path; `api.whatsapp.com/send?phone=` in a query parameter. */
+    private fun whatsAppNumber(path: String?, query: (String) -> String?): String? {
+        query("phone")?.trim()?.takeIf { it.isNotEmpty() }?.let { return normalise(it) }
+        val fromPath = path?.trim('/')?.takeIf { it.isNotEmpty() && it.any(Char::isDigit) }
+        return fromPath?.let { normalise(it) }
+    }
+
+    /**
+     * `https://signal.me/#p/+15551234567` — the number is in the fragment, not the path, so the path is empty
+     * and the fragment has to be read directly.
+     */
+    private fun signalNumber(fragment: String?): String? {
+        val value = fragment?.trim()?.removePrefix("p/")?.trim()
+        return value?.takeIf { it.any(Char::isDigit) }?.let { normalise(it) }
+    }
+
+    /** Vendor links often omit the leading `+` even though the digits are international. */
+    private fun normalise(raw: String): String {
+        val digits = raw.filter { it.isDigit() || it == '+' }
+        return if (digits.startsWith("+") || digits.isEmpty()) digits else "+$digits"
+    }
+
+    private val SMS_SCHEMES = setOf("sms", "smsto", "mms", "mmsto")
+}

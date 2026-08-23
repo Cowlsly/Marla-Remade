@@ -8,6 +8,7 @@ import android.telephony.TelephonyManager
 import android.util.Base64 as AndroidBase64
 import android.util.Log
 import com.google.i18n.phonenumbers.PhoneNumberUtil
+import com.vayunmathur.communicate.data.ContactPlatformRows
 import com.vayunmathur.communicate.data.signal.transport.SignalCdsi
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
 import com.vayunmathur.library.network.NetworkClient
@@ -164,6 +165,18 @@ object SignalContactSync {
                 "new=${new.size} registered=$onSignal " +
                 "withAci=${result.discovered.count { it.aci != null }}",
         )
+        // Publish reachability into the contacts provider, so the contacts app can offer "message on Signal"
+        // for these numbers using the vendor's own mimetypes.
+        try {
+            ContactPlatformRows.publish(
+                context,
+                toUpsert.filter { it.onSignal }.map {
+                    ContactPlatformRows.Reachability(e164 = it.phoneE164, whatsApp = false, signal = true)
+                },
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not publish Signal reachability to contacts", t)
+        }
         return SyncResult(device.size, byE164.size, onSignal)
     }
 }

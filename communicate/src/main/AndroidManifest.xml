@@ -62,6 +62,38 @@
             android:exported="true"
             android:supportsPictureInPicture="true"
             android:theme="@style/Theme.General">
+            <!-- WhatsApp and Signal contact links, so "message this number" from a browser or another app
+                 lands here. autoVerify claims them as App Links where the host allows it. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" android:host="wa.me" />
+                <data android:scheme="https" android:host="api.whatsapp.com" />
+                <data android:scheme="https" android:host="chat.whatsapp.com" />
+                <data android:scheme="https" android:host="signal.me" />
+                <data android:scheme="https" android:host="signal.group" />
+            </intent-filter>
+            <!-- The vendors' own private schemes, which are not verifiable App Links. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="whatsapp" />
+                <data android:scheme="sgnl" />
+            </intent-filter>
+            <!-- Contact rows we write into the provider. The contacts app opens a platform row with
+                 ACTION_VIEW on its content URI, so our own rows must resolve back to us. -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.com.whatsapp.profile" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.com.whatsapp.voip.call" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.com.whatsapp.video.call" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.org.thoughtcrime.securesms.contact" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.org.thoughtcrime.securesms.call" />
+                <data android:mimeType="vnd.android.cursor.item/vnd.org.thoughtcrime.securesms.video.call" />
+            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

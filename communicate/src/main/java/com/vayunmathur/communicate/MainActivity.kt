@@ -2,6 +2,7 @@ package com.vayunmathur.communicate
 
 import android.Manifest
 import android.app.PictureInPictureParams
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -14,7 +15,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.res.stringResource
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.IconCall
@@ -78,9 +81,13 @@ sealed interface Route : NavKey {
 }
 
 class MainActivity : ComponentActivity() {
+    /** The deep link the app was opened with, or the most recent one delivered to a running instance. */
+    private var pendingDeepLink by mutableStateOf<DeepLink?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        pendingDeepLink = DeepLinks.parse(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -90,9 +97,19 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             DynamicTheme {
-                CommunicateApp()
+                CommunicateApp(initialDeepLink = pendingDeepLink)
             }
         }
+    }
+
+    /**
+     * A deep link that arrived while the activity was already running. Held in state so the composition picks
+     * it up, rather than being lost — the app declared `sms:`/`tel:` filters for a long time and ignored them.
+     */
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        pendingDeepLink = DeepLinks.parse(intent)
     }
 
     /**
@@ -120,7 +137,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun CommunicateApp() {
+private fun CommunicateApp(initialDeepLink: DeepLink? = null) {
     val context = LocalContext.current
     val session = remember { GoogleVoiceSession.get(context) }
     val gvSignedIn by session.signedInFlow.collectAsState(initial = false)
@@ -173,6 +190,25 @@ private fun CommunicateApp() {
     }
 
     val backStack = rememberNavBackStack<Route>(Route.Main)
+
+    // Deep links open the conversation they name. Keyed on the link so a second link to a running instance
+    // navigates again rather than being ignored.
+    LaunchedEffect(initialDeepLink) {
+        when (val link = initialDeepLink) {
+            is DeepLink.Conversation -> backStack.add(
+                Route.Conversation(
+                    threadId = -1L,
+                    address = link.address,
+                    line = link.line,
+                ),
+            )
+            is DeepLink.UnsupportedGroupInvite ->
+                com.vayunmathur.library.util.AppMessages.show(
+                    context.getString(R.string.deep_link_group_unsupported),
+                )
+            null -> Unit
+        }
+    }
 
     MainNavigation(backStack) {
         entry<Route.Main> {

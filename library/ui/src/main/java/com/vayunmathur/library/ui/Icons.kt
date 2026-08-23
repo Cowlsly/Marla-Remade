@@ -4,6 +4,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.AcUnit
 import androidx.compose.material.icons.filled.CallEnd
 import androidx.compose.material.icons.filled.Dialpad
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Medication
 import androidx.compose.material.icons.filled.MonitorHeart
@@ -656,6 +657,10 @@ fun IconHourglass(modifier: Modifier = Modifier, tint: Color = LocalContentColor
 @Composable
 fun IconPerson(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.Person, "Person", modifier, tint)
+
+@Composable
+fun IconPersonAdd(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.PersonAdd, "Add contact", modifier, tint)
 
 @Composable
 fun IconGroup(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =

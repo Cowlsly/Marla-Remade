@@ -134,6 +134,10 @@ fun ConversationScreen(
                 ?: address.ifBlank { context.getString(R.string.conversation_title) }
         }
     }
+    // Offer "save this number" only for an address that is genuinely an unsaved phone number.
+    val isUnknownContact by produceState(initialValue = false, address) {
+        value = withContext(Dispatchers.IO) { CommunicateRepository.isUnknownContact(context, address) }
+    }
     // For groups, resolve a "Alice, Bob +N" subtitle from the participant addresses (contact names
     // where available). Cheap: runs once off the main thread.
     val groupSubtitle = produceState<String?>(initialValue = null, isGroup, participants) {
@@ -327,6 +331,19 @@ fun ConversationScreen(
                 }) { IconArchive() }
             }
             com.vayunmathur.library.ui.OverflowMenu(icon = { com.vayunmathur.library.ui.IconMoreVert() }) {
+                // Only worth offering when the address is a bare number we could not resolve to a contact.
+                if (!isGroup && isUnknownContact) {
+                    Item(
+                        text = stringResource(R.string.contact_create_new),
+                        leadingIcon = { com.vayunmathur.library.ui.IconPersonAdd() },
+                        onClick = { ContactIntents.createNew(context, address) },
+                    )
+                    Item(
+                        text = stringResource(R.string.contact_add_to_existing),
+                        leadingIcon = { com.vayunmathur.library.ui.IconPerson() },
+                        onClick = { ContactIntents.addToExisting(context, address) },
+                    )
+                }
                 Item(
                     text = stringResource(com.vayunmathur.library.ui.R.string.delete),
                     leadingIcon = { com.vayunmathur.library.ui.IconDelete() },
