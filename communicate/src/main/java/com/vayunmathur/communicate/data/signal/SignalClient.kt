@@ -1247,10 +1247,15 @@ object SignalClient {
                     // RingRTC binds the SRTP key derivation to both identity keys, so a call cannot be
                     // set up before a session with this peer exists.
                     val remote = e.storedIdentityKey(aci) ?: return null
-                    return SignalCallManager.IdentityKeyPairBytes(
-                        local = e.ownIdentityPublicKey,
-                        remote = remote,
+                    val local = e.ownIdentityPublicKey
+                    // Logged because a size or encoding mismatch here yields SRTP keys that differ from the
+                    // peer's, which looks like a connected call that never progresses.
+                    Log.i(
+                        TAG,
+                        "call identity keys for $aci: local=${local.size}B(0x${"%02x".format(local.firstOrNull() ?: 0)}) " +
+                            "remote=${remote.size}B(0x${"%02x".format(remote.firstOrNull() ?: 0)})",
                     )
+                    return SignalCallManager.IdentityKeyPairBytes(local = local, remote = remote)
                 }
 
                 override suspend fun iceServers(): List<PeerConnection.IceServer> =

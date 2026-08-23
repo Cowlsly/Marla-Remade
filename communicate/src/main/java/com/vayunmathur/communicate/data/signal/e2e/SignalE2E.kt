@@ -50,7 +50,20 @@ class SignalE2E(
     /** See [PersistentSignalProtocolStore.onIdentityChanged]. */
     private val onIdentityChanged: (String, ByteArray) -> Unit = { _, _ -> },
 ) {
-    val ownIdentityPublicKey: ByteArray = b64(auth.identityPublicKey)
+    /**
+     * Our own identity public key, taken from the protocol store rather than from preferences.
+     *
+     * These must be byte-identical to what the peer has for us: RingRTC derives the SRTP keys for a call
+     * from both identity keys, so a different encoding — raw 32 bytes versus the 33-byte serialized form —
+     * produces keys that do not match, ICE connects, and every RTP packet is then undecryptable. The store
+     * is the authoritative copy because it is what messaging already uses successfully.
+     */
+    val ownIdentityPublicKey: ByteArray
+        get() = try {
+            protocolStore.identityKeyPair.publicKey.serialize()
+        } catch (_: Throwable) {
+            b64(auth.identityPublicKey)
+        }
     private val ownIdentityPrivate: ByteArray = b64(auth.identityPrivateKey)
     private val ownAci: String = auth.aci.ifEmpty { auth.phoneNumber }
     private val ownDeviceId: Int = auth.deviceId
