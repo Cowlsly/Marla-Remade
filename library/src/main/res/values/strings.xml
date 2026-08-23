@@ -1,4 +1,14 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <!-- Shared library: Core utilities - App name placeholder, required by manifest, not user-visible -->
     <string name="app_name">App</string>
+
+    <!-- Shared daily-puzzle reminder, used by every game with a daily challenge -->
+    <!-- Notification channel name, shown in system notification settings. Noun -->
+    <string name="daily_reminder_channel_name">Daily puzzle reminder</string>
+    <!-- Notification channel description, shown in system notification settings. Sentence -->
+    <string name="daily_reminder_channel_description">A daily nudge when you haven\'t played today\'s puzzle.</string>
+    <!-- Reminder notification title. Sentence -->
+    <string name="daily_reminder_title">Today\'s puzzle is waiting</string>
+    <!-- Reminder notification body. %1$s = app name e.g. Wordmaker. Sentence -->
+    <string name="daily_reminder_text">You haven\'t finished today\'s <xliff:g id="app_name" example="Wordmaker">%1$s</xliff:g> puzzle yet.</string>
 </resources>

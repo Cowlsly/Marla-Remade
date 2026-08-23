@@ -3,6 +3,7 @@
 
     <uses-permission android:name="com.vayunmathur.games.hub.permission.READ_GAME_DATA" />
     <uses-permission android:name="com.vayunmathur.games.hub.permission.WRITE_GAME_DATA" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:allowBackup="true"
@@ -20,8 +21,11 @@
             android:theme="@style/Theme.General">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.APPLICATION_PREFERENCES" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
     </application>

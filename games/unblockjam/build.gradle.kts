@@ -17,4 +17,5 @@ android {
 
 dependencies {
     implementation(project(":sdk:games"))
+    implementation(project(":library:work"))
 }

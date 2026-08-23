@@ -55,3 +55,20 @@ interface GameActions {
         val Noop: GameActions = object : GameActions {}
     }
 }
+
+/** What the settings screen draws. */
+data class SettingsUiState(
+    val reminderEnabled: Boolean = false,
+    val reminderHour: Int = 20,
+    val reminderMinute: Int = 0,
+)
+
+/** Settings callbacks. Same no-op-default arrangement as [GameActions]. */
+interface SettingsActions {
+    fun setReminderEnabled(enabled: Boolean) {}
+    fun setReminderTime(hour: Int, minute: Int) {}
+
+    companion object {
+        val Noop: SettingsActions = object : SettingsActions {}
+    }
+}

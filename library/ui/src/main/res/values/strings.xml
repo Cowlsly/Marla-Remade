@@ -82,6 +82,15 @@
     <string name="clear">Clear</string>
     <string name="share">Share</string>
     <string name="undo">Undo</string>
+    <!-- Daily-puzzle reminder settings rows, shared by every game with a daily challenge. -->
+    <!-- Settings section header. Noun -->
+    <string name="settings_reminders">Reminders</string>
+    <!-- Settings row: toggle for the opt-in daily reminder. Label -->
+    <string name="setting_daily_reminder">Daily puzzle reminder</string>
+    <!-- Settings row subtitle explaining when the reminder fires. Sentence -->
+    <string name="setting_daily_reminder_hint">Notify me if I haven\'t played today\'s puzzle</string>
+    <!-- Settings row: opens a time picker for the reminder. Label -->
+    <string name="setting_daily_reminder_time">Reminder time</string>
     <!-- Shared library: UI – CompassCalibrationBanner: Emphasized title line shown when the magnetometer reports low accuracy -->
     <string name="compass_low_accuracy_title">Low compass accuracy</string>
     <!-- Shared library: UI - CompassCalibrationBanner: Instruction line telling the user how to recalibrate the compass -->

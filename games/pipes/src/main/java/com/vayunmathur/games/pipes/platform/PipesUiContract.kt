@@ -58,8 +58,26 @@ interface PipesActions {
     fun commitDraw() {}
     fun onUndo() {}
     fun onRestart() {}
-
     companion object {
         val Noop: PipesActions = object : PipesActions {}
+    }
+}
+
+/** What the settings screen draws. */
+data class SettingsUiState(
+    val colorblind: Boolean = false,
+    val reminderEnabled: Boolean = false,
+    val reminderHour: Int = 20,
+    val reminderMinute: Int = 0,
+)
+
+/** Settings callbacks. Same no-op-default arrangement as [PipesActions]. */
+interface SettingsActions {
+    fun setColorblind(enabled: Boolean) {}
+    fun setReminderEnabled(enabled: Boolean) {}
+    fun setReminderTime(hour: Int, minute: Int) {}
+
+    companion object {
+        val Noop: SettingsActions = object : SettingsActions {}
     }
 }

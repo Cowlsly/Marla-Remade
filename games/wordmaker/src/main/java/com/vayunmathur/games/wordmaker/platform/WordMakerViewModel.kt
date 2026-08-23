@@ -13,6 +13,8 @@ import com.vayunmathur.games.wordmaker.domain.CompetitiveLevelGenerator
 import com.vayunmathur.games.wordmaker.domain.Dictionary
 import com.vayunmathur.library.util.DailyChallengeStore
 import com.vayunmathur.library.util.DailyStreakReporter
+import com.vayunmathur.library.work.DailyPuzzleReminder
+import com.vayunmathur.library.work.DailyReminderSettings
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -50,6 +52,14 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
 
     val tapToSpell: StateFlow<Boolean> = levelDataStore.tapToSpell
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    private val reminderSettings = DailyReminderSettings(application, DAILY_KEY_PREFIX)
+
+    val reminderEnabled: StateFlow<Boolean> = reminderSettings.enabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val reminderMinutesOfDay: StateFlow<Long> = reminderSettings.minutesOfDay
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DailyPuzzleReminder.DEFAULT_MINUTES_OF_DAY)
 
     private val _hintCooldownEnd = MutableStateFlow(System.currentTimeMillis() + 30_000L)
     val hintCooldownEnd: StateFlow<Long> = _hintCooldownEnd.asStateFlow()
@@ -90,7 +100,7 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
 
     // ---- Daily challenge state ----
 
-    private val dailyStore = DailyChallengeStore(application, "wordmaker_daily")
+    private val dailyStore = DailyChallengeStore(application, DAILY_KEY_PREFIX)
 
     private val _dailyDay = MutableStateFlow(dailyStore.todayEpochDay())
     val dailyDay: StateFlow<Long> = _dailyDay.asStateFlow()
@@ -343,6 +353,32 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
         viewModelScope.launch { levelDataStore.setTapToSpell(enabled) }
     }
 
+    fun setReminderEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            reminderSettings.setEnabled(enabled)
+            rescheduleReminder(enabled, reminderMinutesOfDay.value)
+        }
+    }
+
+    fun setReminderTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            val minutes = (hour * 60 + minute).toLong()
+            reminderSettings.setMinutesOfDay(minutes)
+            rescheduleReminder(reminderEnabled.value, minutes)
+        }
+    }
+
+    private fun rescheduleReminder(enabled: Boolean, minutesOfDay: Long) {
+        DailyPuzzleReminder.update(
+            context = getApplication(),
+            keyPrefix = DAILY_KEY_PREFIX,
+            notificationId = REMINDER_NOTIFICATION_ID,
+            enabled = enabled,
+            hour = (minutesOfDay / 60).toInt(),
+            minute = (minutesOfDay % 60).toInt(),
+        )
+    }
+
     override fun revealHint(crosswordData: CrosswordData, foundWords: Set<String>, revealedHints: Set<Pair<Int, Int>>) {
         val revealed = foundWords.flatMapTo(mutableSetOf()) { word ->
             crosswordData.letterPositions[word]?.flatten().orEmpty()
@@ -372,6 +408,11 @@ class WordMakerViewModel(application: Application) : AndroidViewModel(applicatio
     }
 
     companion object {
+        /** Namespace shared by the daily-challenge store and its reminder. */
+        const val DAILY_KEY_PREFIX = "wordmaker_daily"
+
+        private const val REMINDER_NOTIFICATION_ID = 5101
+
         /** Highest level shipped as a designed asset; higher levels are generated at runtime. */
         const val MAX_DESIGNED_LEVEL = 8000
 

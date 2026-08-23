@@ -1,5 +1,7 @@
 package com.vayunmathur.games.unblockjam
 
+import android.Manifest
+import android.os.Build
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -48,6 +50,8 @@ import com.vayunmathur.games.unblockjam.platform.AppBackupAgent
 import com.vayunmathur.games.unblockjam.platform.DailyProgress
 import com.vayunmathur.games.unblockjam.platform.GameActions
 import com.vayunmathur.games.unblockjam.platform.GameUiState
+import com.vayunmathur.games.unblockjam.platform.SettingsActions
+import com.vayunmathur.games.unblockjam.platform.SettingsUiState
 import com.vayunmathur.games.unblockjam.platform.UnblockJamViewModel
 import com.vayunmathur.games.unblockjam.platform.blockDragGestures
 import com.vayunmathur.games.unblockjam.ui.UnblockJamTheme
@@ -56,21 +60,26 @@ import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.CardDefaults
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.DailyReminderSettingsSection
+import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.ui.Icon
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCheck
+import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.rememberPermissionRequest
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.MainNavigation
 import com.vayunmathur.library.util.NavBackStack
+import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.ui.R as UiR
 import java.time.LocalDate
@@ -80,6 +89,7 @@ import java.time.format.FormatStyle
 @Composable
 fun Navigation(viewModel: UnblockJamViewModel) {
     val backStack = rememberNavBackStack<Route>(Route.PackSelector)
+    backStack.openSettingsIfRequested(Route.Settings)
     val newAchievement by viewModel.achievementsManager.newAchievement.collectAsState()
 
     GameHubComposeHook("unblockjam", viewModel.achievementsManager)
@@ -87,7 +97,12 @@ fun Navigation(viewModel: UnblockJamViewModel) {
     Box(Modifier.fillMaxSize()) {
         MainNavigation(backStack) {
             entry<Route.PackSelector> {
-                PackPage(backStack, viewModel, onOpenGameCenter = { backStack.add(Route.GameCenter) })
+                PackPage(
+                    backStack,
+                    viewModel,
+                    onOpenGameCenter = { backStack.add(Route.GameCenter) },
+                    onOpenSettings = { backStack.add(Route.Settings) },
+                )
             }
             entry<Route.LevelSelector> {
                 val pack = LevelPack.PACKS[it.packIndex]
@@ -114,6 +129,9 @@ fun Navigation(viewModel: UnblockJamViewModel) {
                     onBack = { backStack.pop() }
                 )
             }
+            entry<Route.Settings> {
+                SettingsPage(viewModel, onBack = { backStack.pop() })
+            }
         }
 
         newAchievement?.let {
@@ -125,7 +143,12 @@ fun Navigation(viewModel: UnblockJamViewModel) {
 }
 /** Binds [UnblockJamViewModel] to the stateless [PackScreen]. */
 @Composable
-fun PackPage(backStack: NavBackStack<Route>, viewModel: UnblockJamViewModel, onOpenGameCenter: () -> Unit) {
+fun PackPage(
+    backStack: NavBackStack<Route>,
+    viewModel: UnblockJamViewModel,
+    onOpenGameCenter: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
     val dailyCompleted by viewModel.dailyCompleted.collectAsState()
     val dailyDay by viewModel.dailyDay.collectAsState()
     val dailyStreak by viewModel.dailyStreak.collectAsState()
@@ -141,7 +164,57 @@ fun PackPage(backStack: NavBackStack<Route>, viewModel: UnblockJamViewModel, onO
         onOpenPack = { backStack.add(Route.LevelSelector(it)) },
         onOpenDaily = { backStack.add(Route.DailySelector) },
         onOpenGameCenter = onOpenGameCenter,
+        onOpenSettings = onOpenSettings,
     )
+}
+
+/** Binds [UnblockJamViewModel] to the stateless [SettingsScreen]. */
+@Composable
+fun SettingsPage(viewModel: UnblockJamViewModel, onBack: () -> Unit) {
+    val reminderEnabled by viewModel.reminderEnabled.collectAsState()
+    val reminderMinutes by viewModel.reminderMinutesOfDay.collectAsState()
+
+    val requestNotifications = rememberPermissionRequest(Manifest.permission.POST_NOTIFICATIONS)
+
+    SettingsScreen(
+        state = SettingsUiState(
+            reminderEnabled = reminderEnabled,
+            reminderHour = (reminderMinutes / 60).toInt(),
+            reminderMinute = (reminderMinutes % 60).toInt(),
+        ),
+        actions = object : SettingsActions {
+            override fun setReminderEnabled(enabled: Boolean) {
+                // Asked for lazily, on opt-in only, so the screen never blocks on a prompt.
+                if (enabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    requestNotifications()
+                }
+                viewModel.setReminderEnabled(enabled)
+            }
+
+            override fun setReminderTime(hour: Int, minute: Int) =
+                viewModel.setReminderTime(hour, minute)
+        },
+        onBack = onBack,
+    )
+}
+
+/** The settings screen, ViewModel-free so a preview can render it. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun SettingsScreen(state: SettingsUiState, actions: SettingsActions, onBack: () -> Unit) {
+    DetailScaffold(
+        title = stringResource(UiR.string.settings),
+        onNavigateBack = onBack,
+        scrollBehavior = appBarScrollBehavior(),
+    ) {
+        DailyReminderSettingsSection(
+            enabled = state.reminderEnabled,
+            hour = state.reminderHour,
+            minute = state.reminderMinute,
+            onEnabledChange = { actions.setReminderEnabled(it) },
+            onTimeChange = { hour, minute -> actions.setReminderTime(hour, minute) },
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -152,10 +225,14 @@ fun PackScreen(
     onOpenGameCenter: () -> Unit,
     daily: DailyProgress? = null,
     onOpenDaily: () -> Unit = {},
+    onOpenSettings: () -> Unit = {},
 ) {
     AppScaffold(
         title = stringResource(R.string.pack_selector),
         actions = {
+            IconButton(onClick = onOpenSettings) {
+                IconSettings()
+            }
             IconButton(onClick = onOpenGameCenter) {
                 Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
             }

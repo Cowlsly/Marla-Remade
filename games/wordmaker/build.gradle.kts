@@ -18,6 +18,7 @@ android {
 
 dependencies {
     implementation(project(":sdk:games"))
+    implementation(project(":library:work"))
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.brotli.dec)
 }

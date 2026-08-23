@@ -11,6 +11,8 @@ import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.DailyChallengeStore
 import com.vayunmathur.library.util.DailyStreakReporter
+import com.vayunmathur.library.work.DailyPuzzleReminder
+import com.vayunmathur.library.work.DailyReminderSettings
 import com.vayunmathur.library.util.LevelStatsRepository
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -76,7 +78,41 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
      */
     private val dailyRepository = LevelStatsRepository(application, "daily_stats")
 
-    private val dailyStore = DailyChallengeStore(application, "unblockjam_daily")
+    private val dailyStore = DailyChallengeStore(application, DAILY_KEY_PREFIX)
+
+    private val reminderSettings = DailyReminderSettings(application, DAILY_KEY_PREFIX)
+
+    val reminderEnabled: StateFlow<Boolean> = reminderSettings.enabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val reminderMinutesOfDay: StateFlow<Long> = reminderSettings.minutesOfDay
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DailyPuzzleReminder.DEFAULT_MINUTES_OF_DAY)
+
+    fun setReminderEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            reminderSettings.setEnabled(enabled)
+            rescheduleReminder(enabled, reminderMinutesOfDay.value)
+        }
+    }
+
+    fun setReminderTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            val minutes = (hour * 60 + minute).toLong()
+            reminderSettings.setMinutesOfDay(minutes)
+            rescheduleReminder(reminderEnabled.value, minutes)
+        }
+    }
+
+    private fun rescheduleReminder(enabled: Boolean, minutesOfDay: Long) {
+        DailyPuzzleReminder.update(
+            context = getApplication(),
+            keyPrefix = DAILY_KEY_PREFIX,
+            notificationId = REMINDER_NOTIFICATION_ID,
+            enabled = enabled,
+            hour = (minutesOfDay / 60).toInt(),
+            minute = (minutesOfDay % 60).toInt(),
+        )
+    }
 
     private val _dailyDay = MutableStateFlow(dailyStore.todayEpochDay())
     val dailyDay: StateFlow<Long> = _dailyDay.asStateFlow()
@@ -286,6 +322,11 @@ class UnblockJamViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     companion object {
+        /** Namespace shared by the daily-challenge store and its reminder. */
+        const val DAILY_KEY_PREFIX = "unblockjam_daily"
+
+        private const val REMINDER_NOTIFICATION_ID = 5103
+
         /** Sentinel [UnblockJamUiState.packIndex] for the date-generated daily pack. */
         const val DAILY_PACK_INDEX = -2
 

@@ -12,6 +12,8 @@ import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.library.util.DailyChallengeStore
 import com.vayunmathur.library.util.DailyStreakReporter
+import com.vayunmathur.library.work.DailyPuzzleReminder
+import com.vayunmathur.library.work.DailyReminderSettings
 import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.library.util.LevelStatsRepository
 import kotlinx.coroutines.Dispatchers
@@ -70,7 +72,7 @@ class PipesViewModel(application: Application) : AndroidViewModel(application), 
      */
     private val dailyRepository = LevelStatsRepository(application, "daily_stats")
 
-    private val dailyStore = DailyChallengeStore(application, "pipes_daily")
+    private val dailyStore = DailyChallengeStore(application, DAILY_KEY_PREFIX)
 
     private val _dailyDay = MutableStateFlow(dailyStore.todayEpochDay())
     val dailyDay: StateFlow<Long> = _dailyDay.asStateFlow()
@@ -96,6 +98,40 @@ class PipesViewModel(application: Application) : AndroidViewModel(application), 
 
     fun setColorblind(value: Boolean) {
         viewModelScope.launch { ds.setBoolean(KEY_COLORBLIND, value) }
+    }
+
+    private val reminderSettings = DailyReminderSettings(application, DAILY_KEY_PREFIX)
+
+    val reminderEnabled: StateFlow<Boolean> = reminderSettings.enabled
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    val reminderMinutesOfDay: StateFlow<Long> = reminderSettings.minutesOfDay
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), DailyPuzzleReminder.DEFAULT_MINUTES_OF_DAY)
+
+    fun setReminderEnabled(enabled: Boolean) {
+        viewModelScope.launch {
+            reminderSettings.setEnabled(enabled)
+            rescheduleReminder(enabled, reminderMinutesOfDay.value)
+        }
+    }
+
+    fun setReminderTime(hour: Int, minute: Int) {
+        viewModelScope.launch {
+            val minutes = (hour * 60 + minute).toLong()
+            reminderSettings.setMinutesOfDay(minutes)
+            rescheduleReminder(reminderEnabled.value, minutes)
+        }
+    }
+
+    private fun rescheduleReminder(enabled: Boolean, minutesOfDay: Long) {
+        DailyPuzzleReminder.update(
+            context = getApplication(),
+            keyPrefix = DAILY_KEY_PREFIX,
+            notificationId = REMINDER_NOTIFICATION_ID,
+            enabled = enabled,
+            hour = (minutesOfDay / 60).toInt(),
+            minute = (minutesOfDay % 60).toInt(),
+        )
     }
 
     init {
@@ -404,6 +440,11 @@ class PipesViewModel(application: Application) : AndroidViewModel(application), 
 
     companion object {
         const val KEY_COLORBLIND = "pipes_colorblind"
+
+        /** Namespace shared by the daily-challenge store and its reminder. */
+        const val DAILY_KEY_PREFIX = "pipes_daily"
+
+        private const val REMINDER_NOTIFICATION_ID = 5102
 
         /** Sentinel [PipesUiState.packIndex] for the date-generated daily pack. */
         const val DAILY_PACK_INDEX = -2

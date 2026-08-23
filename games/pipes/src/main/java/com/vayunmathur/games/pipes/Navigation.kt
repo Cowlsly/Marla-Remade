@@ -12,7 +12,7 @@ import com.vayunmathur.games.pipes.ui.DailyLevelScreen
 import com.vayunmathur.games.pipes.ui.GameScreen
 import com.vayunmathur.games.pipes.ui.LevelScreen
 import com.vayunmathur.games.pipes.ui.PackScreen
-import com.vayunmathur.games.pipes.ui.SettingsScreen
+import com.vayunmathur.games.pipes.ui.SettingsPage
 import com.vayunmathur.library.ui.AchievementNotification
 import com.vayunmathur.library.ui.GameCenterScreen
 import com.vayunmathur.library.util.GameHubComposeHook
@@ -34,7 +34,7 @@ fun Navigation(viewModel: PipesViewModel) {
             entry<Route.DailySelector> { DailyLevelScreen(backStack, viewModel) }
             entry<Route.DailyGame> { GameScreen(backStack, viewModel, PipesViewModel.DAILY_PACK_INDEX, it.levelIndex) }
             entry<Route.GameCenter> { GameCenterScreen(backupAgent = AppBackupAgent(), manager = viewModel.achievementsManager, onBack = { backStack.pop() }) }
-            entry<Route.Settings> { SettingsScreen(backStack, viewModel) }
+            entry<Route.Settings> { SettingsPage(backStack, viewModel) }
         }
         newAchievement?.let { AchievementNotification(it) { viewModel.dismissAchievementNotification() } }
     }

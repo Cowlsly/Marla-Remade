@@ -76,6 +76,11 @@ class DataStoreUtils private constructor(context: Context) {
         return dataStore.data.first()[booleanPreferencesKey(name)] ?: default
     }
 
+    /** Defaulted variant: unlike [booleanFlow], emits before the key is first written. */
+    fun booleanFlow(name: String, default: Boolean): Flow<Boolean> {
+        return dataStore.data.map { it[booleanPreferencesKey(name)] ?: default }.distinctUntilChanged()
+    }
+
     suspend fun setBoolean(name: String, value: Boolean) {
         dataStore.edit {
             it[booleanPreferencesKey(name)] = value

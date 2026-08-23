@@ -17,4 +17,6 @@ sealed interface Route : NavKey {
     data class DailyGame(val levelIndex: Int) : Route
     @Serializable
     data object GameCenter : Route
+    @Serializable
+    data object Settings : Route
 }

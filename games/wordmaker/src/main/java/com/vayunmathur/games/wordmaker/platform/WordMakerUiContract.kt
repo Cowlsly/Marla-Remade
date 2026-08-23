@@ -79,3 +79,22 @@ interface CompetitiveLobbyActions {
         val Noop: CompetitiveLobbyActions = object : CompetitiveLobbyActions {}
     }
 }
+
+/** What the settings screen draws. */
+data class SettingsUiState(
+    val tapToSpell: Boolean = false,
+    val reminderEnabled: Boolean = false,
+    val reminderHour: Int = 20,
+    val reminderMinute: Int = 0,
+)
+
+/** Settings callbacks. Same no-op-default arrangement as [WordGameActions]. */
+interface SettingsActions {
+    fun setTapToSpell(enabled: Boolean) {}
+    fun setReminderEnabled(enabled: Boolean) {}
+    fun setReminderTime(hour: Int, minute: Int) {}
+
+    companion object {
+        val Noop: SettingsActions = object : SettingsActions {}
+    }
+}

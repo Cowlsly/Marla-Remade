@@ -4,4 +4,5 @@ plugins {
 
 dependencies {
     api(libs.androidx.work.runtime.ktx)
+    implementation(project(":library"))
 }
