@@ -7,14 +7,14 @@
 //!
 //! | File | Layout |
 //! |---|---|
-//! | `metadata.bin` | `u32 magic "MARG"`, `u32 version`, `u64 node_count`, `u64 edge_count` (24 B) |
+//! | `metadata.bin` | `u32 magic "MARG"`, `u32 version`, `u64 node_count`, `u64 edge_count`, `u64 escape_count`, `u64 named_edges` (40 B) |
 //! | `nodes.bin` | `NodeRec[node_count + 1]`, **12 bytes each**: `i32 lat_e7, i32 lon_e7, u32 edge_ptr`; the trailing sentinel's `edge_ptr` is `edge_count` |
-//! | `edges.bin` | `Edge[edge_count]`, **14 bytes each**: `u32 target, u32 dist_mm, u32 name_offset, u8 type, u8 speed_limit` |
+//! | `edges.bin` | `EdgeRec[edge_count]`, **7 bytes each**: `i16 target_delta, u24 dist_mm, u8 type, u8 speed_limit`; then padding, `u32 escape_first[E.div_ceil(1024) + 1]`, `(u32 edge_idx, u32 target, u32 dist_mm) x escape_count`, padding, and the sparse name table — a presence bitmap with a rank index plus `u32 name_off[named_edges]`. See [`EdgeFile`] |
 //! | `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 blob_byte_off) x (n + 1)` ascending by `edge_idx`, then the packed `u16` mask blob — **sparse**, only lane-bearing edges appear |
 //! | `intermediate.bin` | the delta-encoded polyline blob ([`crate::geom`]) at offset 0, then a trailer: `u64 rank[..]`, `u8 present[..]` (one bit per directed edge), `u64 coarse[..]`, `u16 within[..]` over the *geometry* edges, and `u64 G`. See [`GeomFile`] |
 //! | `road_names.bin` | deduped NUL-terminated string pool |
 //!
-//! Every file's length is now an exact function of `metadata.bin`'s two counts, and
+//! Every file's length is now an exact function of `metadata.bin`'s counts, and
 //! the reader checks each one. `road_names.bin` is the exception: it is a byte pool
 //! with no count of its own, and reads into it are bounds-checked instead.
 //!
@@ -75,11 +75,13 @@ pub const BITSET_SIZE: u64 = 20_000_000_000;
 
 /// `"MARG"` little-endian — `GRAPH_MAGIC` in `graph.rs`.
 const GRAPH_MAGIC: u32 = 0x4752_414D;
-/// Version 4 adds `edge_count` to `metadata.bin`. No layout changed; the point is
-/// that the reader stops deriving the edge count from `edges.bin`'s *length*, which
-/// the next round of record narrowing would silently invalidate — and which sizes
-/// `intermediate.bin`'s trailer.
-const GRAPH_VERSION: u32 = 4;
+/// Version 5 narrows an `edges.bin` record from 14 bytes to 11: `target` becomes an
+/// `i16` delta from the edge's source and `dist_mm` a `u24`, with one escape table
+/// behind the record array for the 0.3% that do not fit. Planet goes ~29.0 -> ~25.8
+/// GB, and every value stays *exact*.
+/// Version 6 moves `name_offset` out of the record into a sparse side table — two
+/// thirds of edges have no name — taking the record to 7 bytes and planet to ~23.3 GB.
+const GRAPH_VERSION: u32 = 6;
 
 /// Geometry edges per coarse block in `intermediate.bin`'s two-level offset table
 /// — `INTERMEDIATE_BLOCK` in `graph.rs`, and the two must agree.
@@ -127,8 +129,8 @@ const UNNAMED_STOP: &[u8] = b"OSM_STOP";
 /// Sentinel in a narrowed `target` delta meaning "this record's `target` and
 /// `dist_mm` both live in the escape table".
 ///
-/// A future `edges.bin` record stores `target` as an `i16` delta from the edge's
-/// own source rather than absolutely, which is only possible because the nodes are
+/// An `edges.bin` record stores `target` as an `i16` delta from the edge's own
+/// source rather than absolutely, which is only possible because the nodes are
 /// sorted by a space-filling curve and an edge is short: [`Census`] measures how
 /// often that fails. `i16::MIN` is reserved rather than used, so the representable
 /// range is symmetric at ±32767.
@@ -142,11 +144,29 @@ const TARGET_DELTA_ESCAPE: i16 = i16::MIN;
 /// extra table.
 const DIST_MM_ESCAPE: u32 = 0xFF_FFFF;
 
-/// `target - source` when it fits the `i16` a narrowed record stores, `None` when
-/// the edge has to escape.
+/// Bytes per `edges.bin` record — `EdgeRec` in `graph.rs`, and an on-disk contract
+/// with it: `i16 target_delta, u24 dist_mm, u8 type_, u8 speed_limit`. `name_offset`
+/// is not a field; it is a sparse side table behind the record array.
+const EDGE_REC_BYTES: u64 = 7;
+
+/// Directed edges per entry of `edges.bin`'s escape block index — `ESCAPE_BLOCK` in
+/// `graph.rs`, and the two must agree.
+const ESCAPE_BLOCK: u64 = 1024;
+
+/// Alignment each section of a multi-section file starts on — `SECTION_ALIGN` in
+/// `graph.rs`.
+const SECTION_ALIGN: u64 = 8;
+
+/// Round `n` up to the next multiple of `align`, which must be a power of two.
+const fn align_up(n: u64, align: u64) -> u64 {
+    (n + align - 1) & !(align - 1)
+}
+
+/// `target - source` when it fits the `i16` a record stores, `None` when the edge
+/// has to escape.
 ///
-/// This is *the* escape predicate: [`Census`] counts with it and the encoder will
-/// narrow with it, so the two cannot disagree by one and produce a pack that loads
+/// This is *the* escape predicate: [`Census`] counts with it and [`EdgeFile::push`]
+/// narrows with it, so the two cannot disagree by one and produce a pack that loads
 /// while reading the wrong node.
 #[inline]
 fn target_delta(source: u32, target: u32) -> Option<i16> {
@@ -276,6 +296,11 @@ pub struct Stats {
     /// Edges deferring to their twin's polyline.
     pub reversed_edges: u64,
     pub intermediate_bytes: u64,
+    pub edges_bytes: u64,
+    /// Edges whose `target` or `dist_mm` needed the escape table.
+    pub escape_count: u64,
+    /// Edges with a name at all, i.e. the length of the sparse name table.
+    pub named_edges: u64,
     /// What a narrower record would cost. Always collected — it is a handful of
     /// adds per edge — and reported by `--stats`.
     pub census: Census,
@@ -713,6 +738,9 @@ pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> 
         geometry_edges: written.geometry_edges,
         reversed_edges: written.reversed_edges,
         intermediate_bytes: written.intermediate_bytes,
+        edges_bytes: written.edges_bytes,
+        escape_count: written.escape_count,
+        named_edges: written.named_edges,
         census: written.census,
     })
 }
@@ -1420,6 +1448,9 @@ struct Written {
     geometry_edges: u64,
     reversed_edges: u64,
     intermediate_bytes: u64,
+    edges_bytes: u64,
+    escape_count: u64,
+    named_edges: u64,
     census: Census,
 }
 
@@ -1464,7 +1495,7 @@ fn write_graph(
     println!("Writing {edge_count} edge(s) in {rounds} round(s)...");
 
     let mut nodes_out = BufWriter::new(create(&out_dir.join("nodes.bin"))?);
-    let mut edges_out = BufWriter::new(create(&out_dir.join("edges.bin"))?);
+    let mut edges_out = EdgeFile::create(out_dir, "edges.bin", edge_count)?;
 
     // `intermediate.bin` puts its blob at offset 0 and everything that indexes it
     // in a trailer, so it is written strictly forwards with no scratch file at all
@@ -1598,7 +1629,7 @@ fn write_graph(
                     inter.skip();
                 }
 
-                write_edge(&mut edges_out, e, type_).map_err(io_err)?;
+                edges_out.push(e, type_)?;
                 if e.lane_count > 0 && e.lane_off != NO_LANES {
                     let start = e.lane_off as usize;
                     lane_bytes.clear();
@@ -1624,7 +1655,9 @@ fn write_graph(
     // node v's edge range.
     write_node(&mut nodes_out, 0, 0, edge_ptr as u32).map_err(io_err)?;
     nodes_out.flush().map_err(io_err)?;
-    edges_out.flush().map_err(io_err)?;
+    let escape_count = edges_out.escapes.len() as u64;
+    let named_edges = edges_out.name_offsets.len() as u64;
+    let edges_bytes = edges_out.finish(edge_count)?;
 
     let intermediate_bytes = inter.finish(edge_count)?;
     lanes.finish()?;
@@ -1637,6 +1670,8 @@ fn write_graph(
     meta.write_all(&GRAPH_VERSION.to_le_bytes()).map_err(io_err)?;
     meta.write_all(&u64::from(kept).to_le_bytes()).map_err(io_err)?;
     meta.write_all(&edge_count.to_le_bytes()).map_err(io_err)?;
+    meta.write_all(&escape_count.to_le_bytes()).map_err(io_err)?;
+    meta.write_all(&named_edges.to_le_bytes()).map_err(io_err)?;
     meta.flush().map_err(io_err)?;
 
     Ok(Written {
@@ -1644,6 +1679,9 @@ fn write_graph(
         geometry_edges,
         reversed_edges,
         intermediate_bytes,
+        edges_bytes,
+        escape_count,
+        named_edges,
         census,
     })
 }
@@ -1732,7 +1770,7 @@ struct GeomFile {
     out: BufWriter<File>,
     blob_len: u64,
     /// One bit per directed edge, sized up front from the edge count.
-    present: Vec<u8>,
+    present: PresenceBitmap,
     coarse: Vec<u64>,
     within: Vec<u16>,
     /// Blob offset of the first geometry edge in the block being filled, i.e. the
@@ -1749,8 +1787,7 @@ impl GeomFile {
     /// `geometry_edges` store a polyline. The reader sizes it the same way, from
     /// `edges.bin`'s length and the final `u64`.
     fn trailer_bytes(edge_count: u64, geometry_edges: u64) -> u64 {
-        (edge_count.div_ceil(RANK_BLOCK_BITS) + 1) * 8
-            + edge_count.div_ceil(8)
+        PresenceBitmap::bytes(edge_count)
             + (geometry_edges.div_ceil(INTERMEDIATE_BLOCK) + 1) * 8
             + (geometry_edges + 1) * 2
             + 8
@@ -1762,7 +1799,7 @@ impl GeomFile {
             out: BufWriter::new(create(&path)?),
             path,
             blob_len: 0,
-            present: vec![0u8; edge_count.div_ceil(8) as usize],
+            present: PresenceBitmap::new(edge_count),
             coarse: Vec::new(),
             within: Vec::new(),
             block_base: 0,
@@ -1785,7 +1822,7 @@ impl GeomFile {
             !bytes.is_empty(),
             "an interior-only blob of no bytes is the chord, which needs no presence bit"
         );
-        self.present[(self.pushed / 8) as usize] |= 1u8 << (self.pushed % 8);
+        self.present.set(self.pushed);
         self.push_entry();
         self.out.write_all(bytes).map_err(io_err)?;
         self.blob_len += bytes.len() as u64;
@@ -1830,29 +1867,11 @@ impl GeomFile {
             self.coarse.push(self.blob_len);
         }
 
-        // Rank over the presence bitmap, laid out exactly like `Bitset`'s: set
-        // bits before each block, with the total appended. That total is `G`,
-        // which is what lets the reader cross-check the two halves of the trailer
-        // against each other.
-        let blocks = self.present.len().div_ceil(RANK_BLOCK_BYTES);
-        let mut rank = Vec::with_capacity(blocks + 1);
-        let mut total = 0u64;
-        for b in 0..blocks {
-            rank.push(total);
-            let start = b * RANK_BLOCK_BYTES;
-            let end = (start + RANK_BLOCK_BYTES).min(self.present.len());
-            total += self.present[start..end]
-                .iter()
-                .map(|byte| u64::from(byte.count_ones()))
-                .sum::<u64>();
-        }
-        rank.push(total);
+        // The presence bitmap and its rank index, the same pair `edges.bin`'s names
+        // use. The rank total is `G`, which is what lets the reader cross-check the
+        // two halves of the trailer against each other.
+        let total = self.present.write(&mut self.out)?;
         debug_assert_eq!(total, self.stored, "the presence bitmap disagrees with G");
-
-        for r in &rank {
-            self.out.write_all(&r.to_le_bytes()).map_err(io_err)?;
-        }
-        self.out.write_all(&self.present).map_err(io_err)?;
         for c in &self.coarse {
             self.out.write_all(&c.to_le_bytes()).map_err(io_err)?;
         }
@@ -1873,6 +1892,246 @@ impl GeomFile {
             )));
         }
         Ok(want)
+    }
+}
+
+/// A presence bitmap over the directed edges, built in memory and written with a
+/// rank index in front of it.
+///
+/// The writer half of `graph.rs`'s `EdgeBitmap`, and an on-disk contract with it:
+///
+/// ```text
+/// [ u64 rank[E.div_ceil(512) + 1] ]   set bits before each 64-byte block, total appended
+/// [ u8  present[E.div_ceil(8)] ]      one bit per directed edge
+/// ```
+///
+/// Used twice, for the same reason the reader's is: `intermediate.bin`'s stored
+/// polylines and `edges.bin`'s names are both per-edge fields most edges do not have.
+struct PresenceBitmap {
+    bits: Vec<u8>,
+    /// Bits set so far, i.e. the length of the side table this indexes.
+    set: u64,
+}
+
+impl PresenceBitmap {
+    /// Byte size of the rank index plus the bitmap for `edge_count` edges. The reader
+    /// sizes them the same way.
+    fn bytes(edge_count: u64) -> u64 {
+        (edge_count.div_ceil(RANK_BLOCK_BITS) + 1) * 8 + edge_count.div_ceil(8)
+    }
+
+    fn new(edge_count: u64) -> PresenceBitmap {
+        PresenceBitmap {
+            bits: vec![0u8; edge_count.div_ceil(8) as usize],
+            set: 0,
+        }
+    }
+
+    /// Mark edge `idx` as having one. Must be called in ascending `idx`, which every
+    /// caller satisfies because the rounds ascend and each round writes its edges in
+    /// index order.
+    fn set(&mut self, idx: u64) {
+        debug_assert!(
+            self.bits[(idx / 8) as usize] & (1u8 << (idx % 8)) == 0,
+            "edge {idx} was already marked"
+        );
+        self.bits[(idx / 8) as usize] |= 1u8 << (idx % 8);
+        self.set += 1;
+    }
+
+    /// Write the rank index then the bitmap. Returns the number of set bits, which is
+    /// the rank index's appended total and the length the side table must have.
+    fn write<W: Write>(&self, out: &mut W) -> Result<u64> {
+        // Set bits before each block, with the total appended. That total is what
+        // lets the reader tie the index to the table it indexes.
+        let blocks = self.bits.len().div_ceil(RANK_BLOCK_BYTES);
+        let mut total = 0u64;
+        for b in 0..blocks {
+            out.write_all(&total.to_le_bytes()).map_err(io_err)?;
+            let start = b * RANK_BLOCK_BYTES;
+            let end = (start + RANK_BLOCK_BYTES).min(self.bits.len());
+            total += self.bits[start..end]
+                .iter()
+                .map(|byte| u64::from(byte.count_ones()))
+                .sum::<u64>();
+        }
+        out.write_all(&total.to_le_bytes()).map_err(io_err)?;
+        out.write_all(&self.bits).map_err(io_err)?;
+        debug_assert_eq!(total, self.set, "the bitmap disagrees with its own counter");
+        Ok(total)
+    }
+}
+
+/// `edges.bin`, in five sections:
+///
+/// ```text
+/// [ EdgeRec[E] ]                     7 B: i16 target_delta, u24 dist_mm,
+///                                         u8 type_, u8 speed_limit
+/// [ pad to SECTION_ALIGN ]
+/// [ u32 escape_first[E.div_ceil(1024) + 1] ]   first escape row of each block
+/// [ { u32 edge_idx, u32 target, u32 dist_mm } x escapes ]   ascending by edge_idx
+/// [ pad to SECTION_ALIGN ]
+/// [ u64 name rank[E.div_ceil(512) + 1] ][ u8 name present[E.div_ceil(8)] ]
+/// [ u32 name_off[named_edges] ]                indexed by rank in the bitmap
+/// ```
+///
+/// `target` is a signed delta from the edge's own source, which is affordable only
+/// because the nodes are sorted by a space-filling curve: 99.699% of California's
+/// deltas fit an `i16`. `dist_mm` is a `u24`, exact below 16.78 km, which is
+/// 99.999% of edges. Either field's sentinel means *both* come from one escape row,
+/// so the reader takes one branch and the table stays single.
+///
+/// `name_offset` is sparse rather than a field, because two thirds of edges have no
+/// name — 62.3% of California's, 68.9% of Europe's — and it is read when an
+/// instruction is emitted, never in the A* relaxation.
+///
+/// # Why the tables come last, and why they fit in memory
+///
+/// Neither the escape count nor the named-edge count is known until the final round
+/// has run, so a reserved prefix cannot be sized. But unlike `intermediate.bin` the
+/// record array is a fixed stride, so this needs no trailer to be self-locating: the
+/// reader computes all five offsets from `metadata.bin`'s counts. The escape rows
+/// accumulate in memory — 39 MB at planet scale against `edges.bin`'s 8.6 GB — as do
+/// the name offsets (1.6 GB, the largest of them) and the bitmap (134 MB).
+struct EdgeFile {
+    path: PathBuf,
+    out: BufWriter<File>,
+    /// `(edge_idx, target, dist_mm)` for the edges a record cannot hold, in
+    /// ascending `edge_idx` — which is the order they are pushed in, because the
+    /// rounds ascend and each round writes its edges in index order.
+    escapes: Vec<(u32, u32, u32)>,
+    /// Which edges have a name, and the pool offsets of the ones that do, in the
+    /// same order.
+    named: PresenceBitmap,
+    name_offsets: Vec<u32>,
+    /// Directed edges written so far, which is the index the next call describes.
+    pushed: u64,
+}
+
+impl EdgeFile {
+    /// Byte size of the whole file. The reader computes it the same way, from
+    /// `metadata.bin`.
+    fn total_bytes(edge_count: u64, escapes: u64, named: u64) -> u64 {
+        let rows = align_up(edge_count * EDGE_REC_BYTES, SECTION_ALIGN)
+            + (edge_count.div_ceil(ESCAPE_BLOCK) + 1) * 4
+            + escapes * 12;
+        align_up(rows, SECTION_ALIGN) + PresenceBitmap::bytes(edge_count) + named * 4
+    }
+
+    fn create(dir: &Path, name: &str, edge_count: u64) -> Result<EdgeFile> {
+        let path = dir.join(name);
+        Ok(EdgeFile {
+            out: BufWriter::new(create(&path)?),
+            path,
+            escapes: Vec::new(),
+            named: PresenceBitmap::new(edge_count),
+            name_offsets: Vec::new(),
+            pushed: 0,
+        })
+    }
+
+    /// Write one directed edge's record, escaping it if either field will not fit and
+    /// recording its name if it has one.
+    fn push(&mut self, e: &TmpEdge, type_: u8) -> Result<()> {
+        let (delta, dist) = match target_delta(e.source, e.target) {
+            Some(d) if e.dist_mm < DIST_MM_ESCAPE => (d, e.dist_mm),
+            // Both sentinels, not just the one that failed: the reader tests either,
+            // so writing both keeps the two tests in agreement whichever field a
+            // future caller happens to have in hand.
+            _ => {
+                let idx = cap_u32("escaped edge index", self.pushed)?;
+                self.escapes.push((idx, e.target, e.dist_mm));
+                (TARGET_DELTA_ESCAPE, DIST_MM_ESCAPE)
+            }
+        };
+        self.out.write_all(&delta.to_le_bytes()).map_err(io_err)?;
+        self.out.write_all(&dist.to_le_bytes()[..3]).map_err(io_err)?;
+        self.out.write_all(&[type_, e.speed_limit]).map_err(io_err)?;
+        if e.name_offset != NO_NAME {
+            self.named.set(self.pushed);
+            self.name_offsets.push(e.name_offset);
+        }
+        self.pushed += 1;
+        Ok(())
+    }
+
+    /// Pad to the section boundary, then append the block index, the escape rows, the
+    /// name bitmap and the name offsets. Returns the finished file's size.
+    fn finish(mut self, edge_count: u64) -> Result<u64> {
+        if self.pushed != edge_count {
+            return Err(Error(format!(
+                "{} holds {} edge(s), not the {edge_count} the pack is sized for",
+                self.path.display(),
+                self.pushed
+            )));
+        }
+        let mut at = edge_count * EDGE_REC_BYTES;
+        at = self.pad_to(at)?;
+
+        // `escape_first[b]` is the index of the first row in block `b`, i.e. the
+        // count of rows below `b * ESCAPE_BLOCK`. The rows ascend, so one walk over
+        // them fills the whole array, and the final entry is the row total — which is
+        // what lets the reader tie the index to the section it indexes.
+        let blocks = edge_count.div_ceil(ESCAPE_BLOCK) + 1;
+        let mut row = 0usize;
+        for b in 0..blocks {
+            let limit = b * ESCAPE_BLOCK;
+            while row < self.escapes.len() && u64::from(self.escapes[row].0) < limit {
+                row += 1;
+            }
+            self.out.write_all(&(row as u32).to_le_bytes()).map_err(io_err)?;
+        }
+        if row != self.escapes.len() {
+            return Err(Error(format!(
+                "{}: the block index reached row {row} of {}, so a row is past the \
+                 last block",
+                self.path.display(),
+                self.escapes.len()
+            )));
+        }
+        at += blocks * 4;
+
+        for (idx, target, dist_mm) in &self.escapes {
+            self.out.write_all(&idx.to_le_bytes()).map_err(io_err)?;
+            self.out.write_all(&target.to_le_bytes()).map_err(io_err)?;
+            self.out.write_all(&dist_mm.to_le_bytes()).map_err(io_err)?;
+        }
+        at += self.escapes.len() as u64 * 12;
+        self.pad_to(at)?;
+
+        let named = self.named.write(&mut self.out)?;
+        if named != self.name_offsets.len() as u64 {
+            return Err(Error(format!(
+                "{}: the name bitmap has {named} bit(s) set but {} offset(s) were \
+                 collected",
+                self.path.display(),
+                self.name_offsets.len()
+            )));
+        }
+        for off in &self.name_offsets {
+            self.out.write_all(&off.to_le_bytes()).map_err(io_err)?;
+        }
+        self.out.flush().map_err(io_err)?;
+
+        let want = EdgeFile::total_bytes(edge_count, self.escapes.len() as u64, named);
+        let got = std::fs::metadata(&self.path)
+            .map_err(|e| Error(format!("cannot stat {}: {e}", self.path.display())))?
+            .len();
+        if got != want {
+            return Err(Error(format!(
+                "{} came out {got} byte(s) long, not the {want} the reader will compute",
+                self.path.display()
+            )));
+        }
+        Ok(want)
+    }
+
+    /// Write zeroes up to the next section boundary, returning the new offset.
+    fn pad_to(&mut self, at: u64) -> Result<u64> {
+        let aligned = align_up(at, SECTION_ALIGN);
+        let zeroes = [0u8; SECTION_ALIGN as usize];
+        self.out.write_all(&zeroes[..(aligned - at) as usize]).map_err(io_err)?;
+        Ok(aligned)
     }
 }
 
@@ -1989,13 +2248,6 @@ fn write_node<W: Write>(
     out.write_all(&edge_ptr.to_le_bytes())
 }
 
-fn write_edge<W: Write>(out: &mut W, e: &TmpEdge, type_: u8) -> std::io::Result<()> {
-    out.write_all(&e.target.to_le_bytes())?;
-    out.write_all(&e.dist_mm.to_le_bytes())?;
-    out.write_all(&e.name_offset.to_le_bytes())?;
-    out.write_all(&[type_, e.speed_limit])
-}
-
 fn create(path: &Path) -> Result<File> {
     File::create(path).map_err(|e| Error(format!("cannot write {}: {e}", path.display())))
 }
@@ -2103,15 +2355,145 @@ mod tests {
         )
     }
 
+    /// A `u64` field of `metadata.bin` at byte `at`.
+    fn meta_u64(o: &Outputs, at: usize) -> u64 {
+        u64::from_le_bytes(o.meta[at..at + 8].try_into().unwrap())
+    }
+
+    /// `edges.bin`, located and decoded exactly as `graph.rs::load` does: the record
+    /// array sized from `edge_count`, padding to the section boundary, the escape
+    /// block index and the rows.
+    ///
+    /// Every accessor below is a literal mirror of the device's, which is what makes
+    /// these contract tests rather than a re-read of our own tables.
+    struct Edges<'a> {
+        bytes: &'a [u8],
+        edge_count: u64,
+        first_at: usize,
+        rows_at: usize,
+        /// The name presence bitmap's rank index, then the bitmap, then the offsets.
+        name_rank_at: usize,
+        name_present_at: usize,
+        name_off_at: usize,
+        named_edges: u64,
+    }
+
+    impl<'a> Edges<'a> {
+        fn new(
+            bytes: &'a [u8],
+            edge_count: u64,
+            escape_count: u64,
+            named_edges: u64,
+        ) -> Edges<'a> {
+            let first_at = align_up(edge_count * EDGE_REC_BYTES, SECTION_ALIGN) as usize;
+            let blocks = edge_count.div_ceil(ESCAPE_BLOCK) + 1;
+            let rows_at = first_at + (blocks * 4) as usize;
+            let name_rank_at =
+                align_up(rows_at as u64 + escape_count * 12, SECTION_ALIGN) as usize;
+            let rank_bytes = ((edge_count.div_ceil(RANK_BLOCK_BITS) + 1) * 8) as usize;
+            Edges {
+                bytes,
+                edge_count,
+                first_at,
+                rows_at,
+                name_rank_at,
+                name_present_at: name_rank_at + rank_bytes,
+                name_off_at: name_rank_at + PresenceBitmap::bytes(edge_count) as usize,
+                named_edges,
+            }
+        }
+
+        fn of(o: &'a Outputs) -> Edges<'a> {
+            Edges::new(&o.edges, meta_u64(o, 16), meta_u64(o, 24), meta_u64(o, 32))
+        }
+
+        /// What the reader will compute the file's length to be.
+        fn total_bytes(&self) -> usize {
+            self.name_off_at + (self.named_edges * 4) as usize
+        }
+
+        /// True when edge `idx` has a name, from the presence bitmap.
+        fn named(&self, idx: u64) -> bool {
+            self.bytes[self.name_present_at + (idx / 8) as usize] & (1u8 << (idx % 8)) != 0
+        }
+
+        /// Edge `idx`'s rank in the name bitmap, computed as `graph.rs` does: the
+        /// block's stored count plus a popcount of the bytes below it.
+        fn name_rank(&self, idx: u64) -> u64 {
+            let byte = (idx / 8) as usize;
+            let block = byte / RANK_BLOCK_BYTES;
+            let at = self.name_rank_at + block * 8;
+            let mut n = u64::from_le_bytes(self.bytes[at..at + 8].try_into().unwrap());
+            for b in block * RANK_BLOCK_BYTES..byte {
+                n += u64::from(self.bytes[self.name_present_at + b].count_ones());
+            }
+            let partial = self.bytes[self.name_present_at + byte] & ((1u8 << (idx % 8)) - 1);
+            n + u64::from(partial.count_ones())
+        }
+
+        /// Edge `idx`'s name offset, or [`NO_NAME`] when it has none.
+        fn name_offset(&self, idx: u64) -> u32 {
+            if !self.named(idx) {
+                return NO_NAME;
+            }
+            let at = self.name_off_at + (self.name_rank(idx) * 4) as usize;
+            u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap())
+        }
+
+        fn escape_first(&self, block: u64) -> u32 {
+            let at = self.first_at + (block * 4) as usize;
+            u32::from_le_bytes(self.bytes[at..at + 4].try_into().unwrap())
+        }
+
+        /// `(edge_idx, target, dist_mm)` of escape row `r`.
+        fn row(&self, r: u64) -> (u32, u32, u32) {
+            let b = &self.bytes[self.rows_at + (r * 12) as usize..];
+            (
+                u32::from_le_bytes(b[0..4].try_into().unwrap()),
+                u32::from_le_bytes(b[4..8].try_into().unwrap()),
+                u32::from_le_bytes(b[8..12].try_into().unwrap()),
+            )
+        }
+
+        /// `(target, dist_mm, name_offset, type_, speed_limit)` of edge `idx`, whose
+        /// source is `source` — decoded as `Graph::edge` and
+        /// `Graph::edge_name_offset` do, escape table and name bitmap included.
+        fn get(&self, source: u32, idx: u64) -> (u32, u32, u32, u8, u8) {
+            assert!(idx < self.edge_count, "edge {idx} is past the pack");
+            let b = &self.bytes[(idx * EDGE_REC_BYTES) as usize..];
+            let delta = i16::from_le_bytes([b[0], b[1]]);
+            let dist = u32::from_le_bytes([b[2], b[3], b[4], 0]);
+            let (type_, speed) = (b[5], b[6]);
+            let name = self.name_offset(idx);
+            if delta == TARGET_DELTA_ESCAPE || dist == DIST_MM_ESCAPE {
+                let block = idx / ESCAPE_BLOCK;
+                for r in self.escape_first(block)..self.escape_first(block + 1) {
+                    let (row_idx, target, dist_mm) = self.row(u64::from(r));
+                    if u64::from(row_idx) == idx {
+                        return (target, dist_mm, name, type_, speed);
+                    }
+                }
+                panic!("edge {idx} carries a sentinel but has no escape row");
+            }
+            (source.wrapping_add_signed(i32::from(delta)), dist, name, type_, speed)
+        }
+    }
+
+    /// The edge's source: the **largest** node index whose `edge_ptr <= idx`, which
+    /// is how `find_node_idx_for_edge` defines it. Taking the first such node instead
+    /// would land on an empty range wherever degree-0 nodes share an `edge_ptr`.
+    fn source_of(o: &Outputs, idx: u64) -> u32 {
+        (0..node_count(o))
+            .rev()
+            .find(|v| node_at(o, *v).2 <= idx)
+            .unwrap_or(0) as u32
+    }
+
+    /// `(target, dist_mm, name_offset, type_, speed_limit)` of edge `i`, with the
+    /// source recovered from `nodes.bin`. Keeps every existing caller unchanged
+    /// across the delta encoding, and exercises the source recovery as a side effect.
     fn edge_at(o: &Outputs, i: usize) -> (u32, u32, u32, u8, u8) {
-        let b = &o.edges[i * 14..i * 14 + 14];
-        (
-            u32::from_le_bytes(b[0..4].try_into().unwrap()),
-            u32::from_le_bytes(b[4..8].try_into().unwrap()),
-            u32::from_le_bytes(b[8..12].try_into().unwrap()),
-            b[12],
-            b[13],
-        )
+        Edges::of(o).get(source_of(o, i as u64), i as u64)
     }
 
     fn name_at(o: &Outputs, off: u32) -> String {
@@ -2121,7 +2503,7 @@ mod tests {
     }
 
     fn edge_count(o: &Outputs) -> u64 {
-        (o.edges.len() / 14) as u64
+        meta_u64(o, 16)
     }
 
     fn node_count(o: &Outputs) -> usize {
@@ -2371,13 +2753,21 @@ mod tests {
             want.extend(GRAPH_VERSION.to_le_bytes());
             want.extend(4u64.to_le_bytes());
             want.extend(stats.edge_count.to_le_bytes());
+            want.extend(stats.escape_count.to_le_bytes());
+            want.extend(stats.named_edges.to_le_bytes());
             want
         });
 
-        // nodes.bin holds node_count + 1 12-byte records; edges.bin is a multiple
-        // of 14.
+        // nodes.bin holds node_count + 1 12-byte records; edges.bin is the record
+        // array padded to a section boundary, then the escape index and rows, then
+        // the sparse name table — exactly the length the reader computes, not merely
+        // a multiple of anything.
         assert_eq!(o.nodes.len(), 12 * 5);
-        assert_eq!(o.edges.len() % 14, 0);
+        assert_eq!(o.edges.len(), Edges::of(&o).total_bytes());
+        assert_eq!(stats.escape_count, 0, "no fixture edge is long enough to escape");
+        // Main St runs 1-2 and 2-4 in both directions; the service road and the two
+        // synthetic stop connectors carry no name.
+        assert_eq!(stats.named_edges, 4);
         let edge_count = edge_count(&o);
         assert_eq!(edge_count, stats.edge_count);
         // Uncompacted this was 3 bidirectional segments + 1 oneway = 7 directed
@@ -3022,12 +3412,270 @@ mod tests {
             // entry and the `u64 G` trailer; plus `nodes.bin`'s trailing sentinel and
             // a lane index holding only its own header and sentinel.
             assert_eq!(o.nodes.len(), 12);
-            assert!(o.edges.is_empty());
+            // `edges.bin` is not empty even with no edges: the escape block index and
+            // the name rank index each carry their final entry, which are the totals
+            // the reader cross-checks `escape_count` and `named_edges` against. Four
+            // bytes of "no escapes", padding, then eight of "no names".
+            assert_eq!(o.edges.len() as u64, EdgeFile::total_bytes(0, 0, 0));
+            assert_eq!(o.edges.len(), 4 + 4 + 8);
+            assert!(o.edges.iter().all(|b| *b == 0), "every count is zero");
+            assert_eq!(stats.escape_count, 0);
+            assert_eq!(stats.named_edges, 0);
             assert_eq!(o.inter.len(), 8 + 8 + 2 + 8, "rank, coarse, within, G");
             assert_eq!(o.inter.len() as u64, GeomFile::trailer_bytes(0, 0));
             assert_eq!(o.lanes.len(), 4 + 8);
             assert_eq!(lane_index(&o).0, vec![(u32::MAX, 0)]);
             assert!(o.names.is_empty());
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // edges.bin narrowing: the boundaries no real extract contains
+    // ---------------------------------------------------------------------
+
+    fn tmp_edge(source: u32, target: u32, dist_mm: u32) -> TmpEdge {
+        TmpEdge {
+            source,
+            target,
+            dist_mm,
+            name_offset: NO_NAME,
+            type_: 1,
+            speed_limit: 50,
+            lane_off: NO_LANES,
+            lane_count: 0,
+            chain: NO_CHAIN,
+            chain_rev: false,
+            pts_start: 0,
+            pts_len: 0,
+        }
+    }
+
+    /// Push `spec` — `(source, target, dist_mm)` — through the real [`EdgeFile`] and
+    /// read every record back through the mirror of `graph.rs`'s decode.
+    ///
+    /// The delta encoding's boundaries are unreachable from a PBF fixture: putting
+    /// two nodes exactly 32,768 apart in Morton order would mean choosing
+    /// coordinates for 32,767 nodes in between. So the encoder and the decoder are
+    /// exercised as a pair directly, which is also where the off-by-one would be.
+    fn roundtrip_edges(
+        tag: &str,
+        spec: &[(u32, u32, u32)],
+    ) -> (Vec<(u32, u32, u32, u8, u8)>, Vec<u8>, u64) {
+        let dir = std::env::temp_dir().join(format!("osm_ingest_edges_{tag}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let count = spec.len() as u64;
+        let mut f = EdgeFile::create(&dir, "edges.bin", count).unwrap();
+        for (source, target, dist) in spec {
+            f.push(&tmp_edge(*source, *target, *dist), 1).unwrap();
+        }
+        let escapes = f.escapes.len() as u64;
+        let named = f.name_offsets.len() as u64;
+        let total = f.finish(count).unwrap();
+        let bytes = std::fs::read(dir.join("edges.bin")).unwrap();
+        assert_eq!(bytes.len() as u64, total, "finish() lied about the length");
+        assert_eq!(total, EdgeFile::total_bytes(count, escapes, named));
+        let e = Edges::new(&bytes, count, escapes, named);
+        // The block index's last entry is the row total, which is what the reader
+        // cross-checks `escape_count` against.
+        let blocks = count.div_ceil(ESCAPE_BLOCK) + 1;
+        assert_eq!(
+            u64::from(e.escape_first(blocks - 1)),
+            escapes,
+            "the block index total disagrees with the row count"
+        );
+        let decoded = spec
+            .iter()
+            .enumerate()
+            .map(|(i, (source, _, _))| e.get(*source, i as u64))
+            .collect();
+        (decoded, bytes, escapes)
+    }
+
+    #[test]
+    fn every_target_delta_boundary_round_trips() {
+        // Far enough from zero that every delta below is a representable u32 target.
+        let source = 1_000_000u32;
+        let deltas: [i64; 11] = [0, 1, -1, 32766, -32766, 32767, -32767, 32768, -32768, -32769, 40000];
+        let spec: Vec<(u32, u32, u32)> = deltas
+            .iter()
+            .map(|d| (source, (i64::from(source) + d) as u32, 1234))
+            .collect();
+        let (decoded, _, escapes) = roundtrip_edges("deltas", &spec);
+        for (i, d) in deltas.iter().enumerate() {
+            assert_eq!(decoded[i].0, spec[i].1, "delta {d} did not round-trip");
+            assert_eq!(decoded[i].1, 1234, "delta {d} disturbed dist_mm");
+        }
+        // ±32767 fit. ±32768, −32769 and +40000 do not — and −32768 is `i16::MIN`,
+        // which is the sentinel, so it escapes even though its magnitude would fit.
+        // That reservation is what keeps the representable range symmetric.
+        assert_eq!(escapes, 4, "expected 32768, -32768, -32769 and 40000 to escape");
+    }
+
+    #[test]
+    fn every_dist_mm_boundary_round_trips() {
+        let source = 5u32;
+        let dists = [0u32, 1, 0xFF_FFFE, 0xFF_FFFF, 0x100_0000, u32::MAX];
+        let spec: Vec<(u32, u32, u32)> =
+            dists.iter().map(|d| (source, source + 1, *d)).collect();
+        let (decoded, _, escapes) = roundtrip_edges("dists", &spec);
+        for (i, d) in dists.iter().enumerate() {
+            assert_eq!(decoded[i].1, *d, "dist {d} did not round-trip");
+            assert_eq!(decoded[i].0, source + 1, "dist {d} disturbed the target");
+        }
+        // 0xFFFFFE is the largest a u24 can hold and be a value; 0xFFFFFF is the
+        // sentinel, so it escapes despite fitting. The escape keeps every distance
+        // *exact* — the alternative considered was centimetres, which needs no table
+        // but quantises all 1.07 G edges.
+        assert_eq!(escapes, 3);
+    }
+
+    #[test]
+    fn an_edge_that_fails_both_tests_is_one_row_not_two() {
+        let spec = vec![(0u32, 500_000u32, 0x200_0000u32)];
+        let (decoded, _, escapes) = roundtrip_edges("both", &spec);
+        assert_eq!(escapes, 1, "one row serves both fields");
+        assert_eq!(decoded[0].0, 500_000);
+        assert_eq!(decoded[0].1, 0x200_0000);
+    }
+
+    #[test]
+    fn an_escape_at_either_end_of_the_pack_is_found() {
+        // The block index is a prefix-count array, so the first and last edge are
+        // where an off-by-one in it shows up.
+        let far = 200_000u32;
+        let spec = vec![
+            (far, 0, 10),
+            (far, far + 1, 20),
+            (far, far + 2, 30),
+            (far, 0, 40),
+        ];
+        let (decoded, _, escapes) = roundtrip_edges("ends", &spec);
+        assert_eq!(escapes, 2);
+        let got: Vec<(u32, u32)> = decoded.iter().map(|d| (d.0, d.1)).collect();
+        assert_eq!(got, vec![(0, 10), (far + 1, 20), (far + 2, 30), (0, 40)]);
+    }
+
+    #[test]
+    fn a_pack_with_no_escapes_is_records_padding_and_an_index_sentinel() {
+        let spec: Vec<(u32, u32, u32)> = (0..100u32).map(|i| (1000, 1000 + i, i)).collect();
+        let (decoded, bytes, escapes) = roundtrip_edges("no_escapes", &spec);
+        assert_eq!(escapes, 0);
+        // Only padding separates the record array from the block index, so it is the
+        // only thing keeping a wide load of the last record in bounds.
+        let records = 100 * EDGE_REC_BYTES;
+        let pad = align_up(records, SECTION_ALIGN) - records;
+        assert_eq!(pad, 4, "100 x 7 = 700, which is 4 short of a multiple of 8");
+        assert!(
+            bytes[records as usize..(records + pad) as usize].iter().all(|b| *b == 0),
+            "the padding must be zeroed, not whatever the buffer held"
+        );
+        assert_eq!(bytes.len() as u64, EdgeFile::total_bytes(100, 0, 0));
+        for (i, d) in decoded.iter().enumerate() {
+            assert_eq!((d.0, d.1), (1000 + i as u32, i as u32));
+            assert_eq!(d.2, NO_NAME, "no fixture edge is named");
+        }
+    }
+
+    #[test]
+    fn escape_rows_spanning_block_boundaries_are_all_found() {
+        // Every side of every block boundary a 1024-edge block has, plus both ends.
+        let far = 500_000u32;
+        let n = 3000u32;
+        let escaping = [0u32, 1023, 1024, 1025, 2047, 2048, 2049, n - 1];
+        let spec: Vec<(u32, u32, u32)> = (0..n)
+            .map(|i| {
+                // An escaping edge points a long way back; the rest are a short
+                // forward delta.
+                let target = if escaping.contains(&i) { i } else { far + i };
+                (far, target, 1000 + i)
+            })
+            .collect();
+        let (decoded, _, escapes) = roundtrip_edges("blocks", &spec);
+        assert_eq!(escapes, escaping.len() as u64);
+        for i in 0..n as usize {
+            assert_eq!(
+                (decoded[i].0, decoded[i].1),
+                (spec[i].1, spec[i].2),
+                "edge {i} decoded wrongly"
+            );
+        }
+    }
+
+    /// Named at edge 0 and E−1, unnamed either side of a rank-block boundary, and a
+    /// name offset at both ends of the `u32` range.
+    ///
+    /// The rank index covers 512 edges an entry, so the boundary at 511/512 is where
+    /// a rank computed from the wrong block would show up — and it is a boundary a
+    /// small fixture never reaches.
+    #[test]
+    fn the_sparse_name_table_survives_every_boundary() {
+        let dir = std::env::temp_dir().join("osm_ingest_edges_names");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let n = 1200u64;
+        // Which edges get a name, and what offset. Deliberately includes both ends,
+        // both sides of the 512-edge rank boundary and both sides of 1024.
+        let named: Vec<u64> = vec![0, 1, 510, 511, 512, 513, 1022, 1023, 1024, 1025, n - 1];
+        let mut f = EdgeFile::create(&dir, "edges.bin", n).unwrap();
+        for i in 0..n {
+            let mut e = tmp_edge(0, i as u32, 7);
+            e.speed_limit = 90;
+            if let Some(k) = named.iter().position(|x| *x == i) {
+                // A distinct offset per named edge, so a rank off by one reads a
+                // visibly wrong value rather than a plausible one.
+                e.name_offset = (k as u32) * 17;
+            }
+            f.push(&e, REVERSE_GEOMETRY_FLAG | 3).unwrap();
+        }
+        let escapes = f.escapes.len() as u64;
+        let named_count = f.name_offsets.len() as u64;
+        assert_eq!(named_count, named.len() as u64);
+        let total = f.finish(n).unwrap();
+        let bytes = std::fs::read(dir.join("edges.bin")).unwrap();
+        assert_eq!(bytes.len() as u64, total);
+        let e = Edges::new(&bytes, n, escapes, named_count);
+        for i in 0..n {
+            let (target, dist, name, type_, speed) = e.get(0, i);
+            assert_eq!(target, i as u32);
+            assert_eq!(dist, 7);
+            assert_eq!(type_, REVERSE_GEOMETRY_FLAG | 3, "edge {i}");
+            assert_eq!(speed, 90, "edge {i}");
+            let want = match named.iter().position(|x| *x == i) {
+                Some(k) => (k as u32) * 17,
+                None => NO_NAME,
+            };
+            assert_eq!(name, want, "edge {i}'s name offset");
+        }
+    }
+
+    #[test]
+    fn a_pack_where_no_edge_is_named_and_one_where_every_edge_is() {
+        for all_named in [false, true] {
+            let dir = std::env::temp_dir()
+                .join(format!("osm_ingest_edges_named_{all_named}"));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let n = 600u64;
+            let mut f = EdgeFile::create(&dir, "edges.bin", n).unwrap();
+            for i in 0..n {
+                let mut e = tmp_edge(0, i as u32, 1);
+                if all_named {
+                    e.name_offset = i as u32 * 3;
+                }
+                f.push(&e, 1).unwrap();
+            }
+            let named_count = f.name_offsets.len() as u64;
+            assert_eq!(named_count, if all_named { n } else { 0 });
+            let total = f.finish(n).unwrap();
+            let bytes = std::fs::read(dir.join("edges.bin")).unwrap();
+            assert_eq!(bytes.len() as u64, total);
+            assert_eq!(total, EdgeFile::total_bytes(n, 0, named_count));
+            let e = Edges::new(&bytes, n, 0, named_count);
+            for i in 0..n {
+                let want = if all_named { i as u32 * 3 } else { NO_NAME };
+                assert_eq!(e.get(0, i).2, want, "edge {i} with all_named={all_named}");
+            }
         }
     }
 

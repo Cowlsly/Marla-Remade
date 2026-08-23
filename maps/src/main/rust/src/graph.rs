@@ -73,11 +73,15 @@ pub const GRAPH_MAGIC: u32 = 0x4752_414D;
 /// index and gave `intermediate.bin` two-level offsets — 50.8 GB of planet became
 /// 34 GB. Version 3 gave `intermediate.bin` a presence bitmap and dropped both
 /// endpoints of every stored polyline, taking it to ~29 GB. Version 4 changes no
+/// polyline. Version 4 changes no
 /// layout at all: it adds `edge_count` to `metadata.bin` so that nothing is
 /// derived from a file's *length*, which is what the next round of record
-/// narrowing would silently invalidate. There is no dual-path reader: an older
-/// pack is rejected.
-pub const GRAPH_VERSION: u32 = 4;
+/// narrowing would silently invalidate. Version 5 is that narrowing: an
+/// `edges.bin` record is 11 bytes rather than 14, taking planet to ~25.8 GB.
+/// Version 6 moves `name_offset` out of the record into a sparse side table, since
+/// two thirds of edges are unnamed, taking the record to 7 bytes and planet to
+/// ~23.3 GB. There is no dual-path reader: an older pack is rejected.
+pub const GRAPH_VERSION: u32 = 6;
 
 /// Sentinel `name_offset` meaning "this edge has no name".
 ///
@@ -85,6 +89,57 @@ pub const GRAPH_VERSION: u32 = 4;
 /// prefer [`Graph::edge_name_offset`], which spells absence as `None`; this exists
 /// for the places that have to put a `u32` in a struct crossing the JNI boundary.
 pub const NO_NAME: u32 = 0xFFFF_FFFF;
+
+/// Sentinel in an [`EdgeRec`]'s `target_delta` meaning "this edge's `target` and
+/// `dist_mm` are both in the escape table".
+///
+/// Reserved rather than used, so the representable delta range is symmetric at
+/// ±32767.
+const TARGET_DELTA_ESCAPE: i16 = i16::MIN;
+
+/// Sentinel in an [`EdgeRec`]'s `u24 dist_mm` meaning the same thing.
+///
+/// # Why one escape table and not two
+///
+/// Either sentinel means *both* fields come from the escape row, so one branch in
+/// the A* relaxation covers both. Two sentinels with two tables would cost two
+/// branches, two metadata fields and two sets of off-by-one risk to keep a 39 MB
+/// table apart from an 85 KB one.
+///
+/// Merging also makes the `dist_mm` escape rate irrelevant to the design, which
+/// matters because it is the *least* transferable number available: California has
+/// 166 edges past 16.78 km, and collapsed chains in Siberia or the Australian
+/// Outback will be far longer. A hundredfold miss just rides along in the same
+/// table.
+const DIST_MM_ESCAPE: u32 = 0xFF_FFFF;
+
+/// Directed edges per entry of `edges.bin`'s escape block index.
+///
+/// # Why a block index and not a binary search
+///
+/// The inline sentinel already *is* the presence bit — it is in a register that was
+/// just loaded — so a v3-style presence bitmap would spend 134 MB duplicating it.
+/// All that is missing is edge index → row, and `u32 escape_first[E/1024 + 1]` is
+/// 4.2 MB at planet scale: one load from a largely cache-resident array, then a scan
+/// of the ~3 rows a block holds at a 0.3% escape rate, usually one cache line. A
+/// binary search over 3.24 M rows would be 12–15 misses instead.
+///
+/// `lanes.bin` does binary-search its sparse index, and its doc comment justifies
+/// that by being "called once per maneuver rather than per edge". `target` is read
+/// on every relaxation, so that precedent does not transfer.
+pub const ESCAPE_BLOCK: u64 = 1024;
+
+/// Alignment every section of a multi-section file starts on.
+///
+/// Eight rather than four so that a section's first entry is naturally aligned
+/// whatever its width, and so that section offsets do not depend on `E mod 8`.
+const SECTION_ALIGN: u64 = 8;
+
+/// Round `n` up to the next multiple of `align`, which must be a power of two.
+#[inline]
+const fn align_up(n: u64, align: u64) -> u64 {
+    (n + align - 1) & !(align - 1)
+}
 
 /// Geometry edges per coarse block in `intermediate.bin`'s two-level offset table.
 ///
@@ -96,11 +151,77 @@ pub const NO_NAME: u32 = 0xFFFF_FFFF;
 /// entry in a block describes a real blob.
 pub const INTERMEDIATE_BLOCK: u64 = 32;
 
-/// Bytes of presence bitmap one entry of `intermediate.bin`'s rank index covers.
-/// 64 bytes is 512 edges and one cache line, so a rank costs one `u64` load plus
-/// at most eight `popcount`s. `RANK_BLOCK_BYTES` in the generator, and the two
-/// must agree.
-pub const GEOMETRY_RANK_BLOCK_BYTES: u64 = 64;
+/// Bytes of presence bitmap one entry of a rank index covers.
+///
+/// 64 bytes is 512 edges and one cache line, so a rank costs one `u64` load plus at
+/// most eight `popcount`s, while the index is a 64th of the bitmap it indexes.
+/// `RANK_BLOCK_BYTES` in the generator, and the two must agree.
+pub const RANK_BLOCK_BYTES: u64 = 64;
+
+/// A presence bitmap over the directed edges, plus a rank index over it.
+///
+/// Answers two questions: does edge `idx` have one of these, and if so which one is
+/// it. That is what makes a per-edge field sparse — the edges without one own no
+/// bytes at all — and it is used twice: for `intermediate.bin`'s stored polylines
+/// (70.4% of a planet's edges store none) and for `edges.bin`'s names (62.3% to 68.9%
+/// are unnamed, and the fraction *falls* with scale). One type rather than two
+/// transcriptions of the same eight lines.
+///
+/// ```text
+/// [ u64 rank[E.div_ceil(512) + 1] ]   set bits before each 64-byte block, total appended
+/// [ u8  present[E.div_ceil(8)] ]      one bit per directed edge
+/// ```
+#[derive(Clone, Copy)]
+struct EdgeBitmap {
+    rank: *const u8,
+    present: *const u8,
+}
+
+impl EdgeBitmap {
+    /// Byte size of both tables for `edge_count` directed edges. The generator sizes
+    /// them the same way.
+    const fn bytes(edge_count: u64) -> u64 {
+        (edge_count.div_ceil(RANK_BLOCK_BYTES * 8) + 1) * std::mem::size_of::<u64>() as u64
+            + edge_count.div_ceil(8)
+    }
+
+    /// Offset of `present` within the pair, i.e. the size of `rank` alone.
+    const fn present_offset(edge_count: u64) -> u64 {
+        (edge_count.div_ceil(RANK_BLOCK_BYTES * 8) + 1) * std::mem::size_of::<u64>() as u64
+    }
+
+    /// True when edge `idx` has one.
+    #[inline]
+    fn contains(&self, idx: u64) -> bool {
+        let byte = unsafe { read_at::<u8>(self.present, (idx / 8) as usize) };
+        byte & (1u8 << (idx % 8)) != 0
+    }
+
+    /// How many edges below `idx` have one, i.e. the side-table index of edge `idx`
+    /// itself when its own bit is set.
+    ///
+    /// Only meaningful for an edge whose bit *is* set, so callers must test
+    /// [`EdgeBitmap::contains`] first or they will read another edge's entry.
+    #[inline]
+    fn rank_of(&self, idx: u64) -> u64 {
+        let byte = idx / 8;
+        let block = byte / RANK_BLOCK_BYTES;
+        let mut n = unsafe { read_at::<u64>(self.rank, block as usize) };
+        for b in block * RANK_BLOCK_BYTES..byte {
+            n += u64::from(unsafe { read_at::<u8>(self.present, b as usize) }.count_ones());
+        }
+        let partial = unsafe { read_at::<u8>(self.present, byte as usize) };
+        n + u64::from((partial & ((1u8 << (idx % 8)) - 1)).count_ones())
+    }
+
+    /// The rank index's appended total, which must equal the side table's length.
+    /// Cheap, and it ties the index to the table it indexes rather than trusting both
+    /// to have come from the same run.
+    #[inline]
+    fn total(&self, edge_count: u64) -> u64 {
+        unsafe { read_at::<u64>(self.rank, edge_count.div_ceil(RANK_BLOCK_BYTES * 8) as usize) }
+    }
+}
 
 // --- On-disk packed structs ---
 // `#[repr(C, packed)]` reproduces the exact byte strides the generator writes
@@ -130,18 +251,60 @@ struct LaneEntry {
     blob_off: u32,
 }
 
-/// An `edges.bin` record as the generator writes it: 14 bytes.
+/// An `edges.bin` record as the generator writes it: 11 bytes.
 ///
 /// Private, so a layout change stays inside this file. [`Graph::edge`] widens it
 /// into [`Edge`].
+///
+/// `target` is stored as a signed delta from the edge's own source rather than
+/// absolutely, which is only affordable because the nodes are sorted by a
+/// space-filling curve and an edge is short: measured on California, 99.699% of
+/// deltas fit an `i16`. `dist_mm` is a `u24`, which is exact for anything under
+/// 16.78 km — 99.999% of edges. The rest escape; see [`TARGET_DELTA_ESCAPE`].
+///
+/// `name_offset` is *not* a field. Two thirds of edges are unnamed — 62.3% of
+/// California's, 68.9% of Europe's — so it lives in a sparse side table reached
+/// through [`Graph::edge_name_offset`], and the four bytes it used to cost every
+/// edge are now four bytes for the third that have one. It is read on the
+/// instruction-emission path and never in the A* relaxation, which is what makes
+/// three loads instead of one affordable there and not here.
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct EdgeRec {
-    target: u32,
-    dist_mm: u32,
-    name_offset: u32,
+    target_delta: i16,
+    /// `dist_mm` as three little-endian bytes. Assembled by [`EdgeRec::dist_mm`]
+    /// rather than by loading a `u32` and masking, so the read can never run past
+    /// the end of the array.
+    dist: [u8; 3],
     type_: u8,
     speed_limit: u8,
+}
+
+impl EdgeRec {
+    #[inline]
+    fn dist_mm(&self) -> u32 {
+        let d = self.dist;
+        u32::from_le_bytes([d[0], d[1], d[2], 0])
+    }
+
+    /// True when `target` and `dist_mm` both live in the escape table.
+    #[inline]
+    fn escaped(&self) -> bool {
+        // Read into a local first: `self.target_delta` is a field of a packed
+        // struct, so taking a reference to it is not allowed.
+        let delta = self.target_delta;
+        delta == TARGET_DELTA_ESCAPE || self.dist_mm() == DIST_MM_ESCAPE
+    }
+}
+
+/// One row of `edges.bin`'s escape table: the fields an 11-byte record could not
+/// hold, for the 0.3% of edges that need them. Ascending by `edge_idx`.
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct EscapeRow {
+    edge_idx: u32,
+    target: u32,
+    dist_mm: u32,
 }
 
 /// The in-memory view of an `edges.bin` record, the same widening
@@ -189,7 +352,8 @@ const _: () = {
     // validation in `Graph::load` derives from these, so they are also what makes
     // that validation mean anything.
     assert!(std::mem::size_of::<NodeRec>() == 12);
-    assert!(std::mem::size_of::<EdgeRec>() == 14);
+    assert!(std::mem::size_of::<EdgeRec>() == 7);
+    assert!(std::mem::size_of::<EscapeRow>() == 12);
     assert!(std::mem::size_of::<LaneEntry>() == 8);
 };
 
@@ -278,17 +442,31 @@ pub struct Graph {
 
     nodes: *const u8,
     pub node_count: u32, // real nodes; nodes.bin has node_count + 1 (sentinel)
-    edges: *const u8,
     pub edge_count: u64,
+
+    // `edges.bin`, in five sections:
+    //   [ EdgeRec[E] ][ pad ][ u32 escape_first[E/1024 + 1] ][ EscapeRow[escapes] ]
+    //   [ pad ][ u64 name rank[..] ][ u8 name present[..] ][ u32 name_off[named] ]
+    // The records hold `target` as an i16 delta and `dist_mm` as a u24; either
+    // field's sentinel sends both to the escape table. See `EdgeRec`.
+    edges: *const u8,
+    escape_first: *const u8, // u32[E.div_ceil(ESCAPE_BLOCK) + 1]
+    escapes: *const u8,      // EscapeRow[escape_count], ascending by edge_idx
+    /// Edges whose `target` or `dist_mm` came out of the escape table rather than
+    /// the record. Validated against the block index's total at load.
+    pub escape_count: u64,
+    names: EdgeBitmap,
+    name_off: *const u8, // u32[named_edges], indexed by rank in `names`
+    /// Edges with a name at all. Validated against the rank index's total at load.
+    pub named_edges: u64,
 
     // `intermediate.bin`, blob first and every table in a trailer. `off(g) =
     // coarse[g / INTERMEDIATE_BLOCK] + within[g]` for the g-th *geometry* edge,
-    // where g is the edge's rank in `present`.
-    intermediate_data: *const u8,    // delta-encoded coordinate bytes, at offset 0
-    intermediate_rank: *const u8,    // u64[E.div_ceil(512) + 1]
-    intermediate_present: *const u8, // u8[E.div_ceil(8)], one bit per directed edge
-    intermediate_coarse: *const u8,  // u64[G.div_ceil(BLOCK) + 1]
-    intermediate_within: *const u8,  // u16[G + 1]
+    // where g is the edge's rank in `geometry`.
+    intermediate_data: *const u8,   // delta-encoded coordinate bytes, at offset 0
+    geometry: EdgeBitmap,           // which edges store a polyline, and their rank
+    intermediate_coarse: *const u8, // u64[G.div_ceil(BLOCK) + 1]
+    intermediate_within: *const u8, // u16[G + 1]
 
     // Real OSM turn-lane data (see `edge_lane_masks`). Sparse: only the edges that
     // actually carry `turn:lanes` appear, which on a planet is 2.9 M of 1.07 G.
@@ -344,11 +522,16 @@ impl Graph {
             base.push('/');
         }
 
-        // metadata.bin: u32 magic, u32 version, u64 node_count, u64 edge_count.
-        // Scoped so the mapping is released before the big regions are mapped.
-        let (node_count, edge_count) = {
+        // metadata.bin: u32 magic, u32 version, then a u64 count per section that
+        // needs one — node_count, edge_count, escape_count, named_edges. Scoped so
+        // the mapping is released before the big regions are mapped.
+        //
+        // Explicit count fields rather than a generic section directory: each
+        // version adds one, and a named field is more debuggable than speculative
+        // generality.
+        let (node_count, edge_count, escape_count, named_edges) = {
             let meta = MmapRegion::map(&format!("{base}metadata.bin"))?;
-            if meta.len < 24 {
+            if meta.len < 40 {
                 return None;
             }
             let magic = unsafe { read_at::<u32>(meta.base(), 0) };
@@ -358,19 +541,22 @@ impl Graph {
             }
             let nodes = unsafe { read_at::<u64>(meta.base().add(8), 0) };
             let edges = unsafe { read_at::<u64>(meta.base().add(16), 0) };
+            let escapes = unsafe { read_at::<u64>(meta.base().add(24), 0) };
+            let named = unsafe { read_at::<u64>(meta.base().add(32), 0) };
             // `edge_ptr` is a `u32`, so an edge count past that ceiling would have
             // wrapped in the writer and pointed a node at another node's range. The
-            // generator refuses to produce one; this refuses to read one.
-            if u32::try_from(edges).is_err() {
+            // generator refuses to produce one; this refuses to read one. Neither
+            // sparse table can describe more edges than exist.
+            if u32::try_from(edges).is_err() || escapes > edges || named > edges {
                 return None;
             }
-            (u32::try_from(nodes).ok()?, edges)
+            (u32::try_from(nodes).ok()?, edges, escapes, named)
         };
 
         // `edge_count` now comes from the header rather than from `edges.bin`'s
-        // length. That is the point of version 4: every later version narrows the
-        // record, and a derived count would change silently with the stride and
-        // mis-size `intermediate.bin`'s trailer — which is computed from it.
+        // length. That is the point of version 4, and 5 and 6 are why: the record is
+        // 7 bytes and the file has four more sections behind it, so its length is no
+        // longer any simple multiple of anything.
         let nodes_region = MmapRegion::map(&format!("{base}nodes.bin"))?;
         let edges_region = MmapRegion::map(&format!("{base}edges.bin"))?;
         // nodes.bin is `NodeRec[node_count + 1]`: one sentinel record past the real
@@ -380,8 +566,51 @@ impl Graph {
         if nodes_region.len as u64 != want_nodes {
             return None;
         }
-        if edges_region.len as u64 != edge_count * std::mem::size_of::<EdgeRec>() as u64 {
+
+        // edges.bin's five sections, computed forwards from the metadata counts.
+        // The total-length assertion below is what replaces v3's self-locating
+        // trailer: if the computed sections do not exactly consume the region, the
+        // file is not the one these counts describe.
+        let escape_blocks = edge_count.div_ceil(ESCAPE_BLOCK) + 1;
+        let escape_first_off =
+            align_up(edge_count * std::mem::size_of::<EdgeRec>() as u64, SECTION_ALIGN);
+        let escapes_off =
+            escape_first_off + escape_blocks * std::mem::size_of::<u32>() as u64;
+        let names_off = align_up(
+            escapes_off + escape_count * std::mem::size_of::<EscapeRow>() as u64,
+            SECTION_ALIGN,
+        );
+        let name_off_off = names_off + EdgeBitmap::bytes(edge_count);
+        let want_edges = name_off_off + named_edges * std::mem::size_of::<u32>() as u64;
+        if edges_region.len as u64 != want_edges {
             return None;
+        }
+        let edges = edges_region.base();
+        let escape_first = unsafe { edges.add(escape_first_off as usize) };
+        let escapes = unsafe { edges.add(escapes_off as usize) };
+        let names = EdgeBitmap {
+            rank: unsafe { edges.add(names_off as usize) },
+            present: unsafe {
+                edges.add((names_off + EdgeBitmap::present_offset(edge_count)) as usize)
+            },
+        };
+        let name_off = unsafe { edges.add(name_off_off as usize) };
+        // The block index's last entry is the row total, and the rank index's is the
+        // named-edge total. Both are the direct analogue of `intermediate.bin`'s
+        // `rank_total == geometry_edges` check: they tie an index to the section it
+        // indexes rather than trusting both to have been written by the same run.
+        if unsafe { read_at::<u32>(escape_first, (escape_blocks - 1) as usize) } as u64
+            != escape_count
+            || names.total(edge_count) != named_edges
+        {
+            return None;
+        }
+        // Rows ascend, so bounding the last one bounds them all.
+        if escape_count > 0 {
+            let last = unsafe { read_at::<EscapeRow>(escapes, (escape_count - 1) as usize) };
+            if u64::from(last.edge_idx) >= edge_count {
+                return None;
+            }
         }
 
         // intermediate.bin:
@@ -404,21 +633,24 @@ impl Graph {
         if geometry_edges > edge_count {
             return None;
         }
-        let rank_bytes = (edge_count.div_ceil(GEOMETRY_RANK_BLOCK_BYTES * 8) + 1)
-            * std::mem::size_of::<u64>() as u64;
-        let present_bytes = edge_count.div_ceil(8);
+        let bitmap_bytes = EdgeBitmap::bytes(edge_count);
         let coarse_bytes = (geometry_edges.div_ceil(INTERMEDIATE_BLOCK) + 1)
             * std::mem::size_of::<u64>() as u64;
         let within_bytes = (geometry_edges + 1) * std::mem::size_of::<u16>() as u64;
-        let trailer = rank_bytes + present_bytes + coarse_bytes + within_bytes + 8;
+        let trailer = bitmap_bytes + coarse_bytes + within_bytes + 8;
         if inter_len < trailer {
             return None;
         }
         let blob_bytes = inter_len - trailer;
         let intermediate_data = intermediate_region.base();
-        let intermediate_rank = unsafe { intermediate_data.add(blob_bytes as usize) };
-        let intermediate_present = unsafe { intermediate_rank.add(rank_bytes as usize) };
-        let intermediate_coarse = unsafe { intermediate_present.add(present_bytes as usize) };
+        let geometry = EdgeBitmap {
+            rank: unsafe { intermediate_data.add(blob_bytes as usize) },
+            present: unsafe {
+                intermediate_data
+                    .add((blob_bytes + EdgeBitmap::present_offset(edge_count)) as usize)
+            },
+        };
+        let intermediate_coarse = unsafe { intermediate_data.add((blob_bytes + bitmap_bytes) as usize) };
         let intermediate_within = unsafe { intermediate_coarse.add(coarse_bytes as usize) };
         // The two halves of the trailer have to agree with each other and with the
         // blob: the sentinel offset is the blob's length, and the rank total is
@@ -430,16 +662,7 @@ impl Graph {
                 (geometry_edges / INTERMEDIATE_BLOCK) as usize,
             ) + u64::from(read_at::<u16>(intermediate_within, geometry_edges as usize))
         };
-        if sentinel != blob_bytes {
-            return None;
-        }
-        let rank_total = unsafe {
-            read_at::<u64>(
-                intermediate_rank,
-                (edge_count.div_ceil(GEOMETRY_RANK_BLOCK_BYTES * 8)) as usize,
-            )
-        };
-        if rank_total != geometry_edges {
+        if sentinel != blob_bytes || geometry.total(edge_count) != geometry_edges {
             return None;
         }
 
@@ -488,8 +711,6 @@ impl Graph {
         let (lane_index, lane_edges, lane_data) = lanes.unwrap_or((ptr::null(), 0, ptr::null()));
 
         let nodes = nodes_region.base();
-        let edges = edges_region.base();
-
         // --- Derived tables (identical formulas to the C++ init) ---
         let mut lon_to_mm_scale = [0u32; 4096];
         for (i, scale) in lon_to_mm_scale.iter_mut().enumerate() {
@@ -542,11 +763,16 @@ impl Graph {
             _lanes_region: lanes_region,
             nodes,
             node_count,
-            edges,
             edge_count,
+            edges,
+            escape_first,
+            escapes,
+            escape_count,
+            names,
+            name_off,
+            named_edges,
             intermediate_data,
-            intermediate_rank,
-            intermediate_present,
+            geometry,
             intermediate_coarse,
             intermediate_within,
             lane_index,
@@ -624,12 +850,10 @@ impl Graph {
 
     /// Edge `idx`, which must be one of node `source`'s outgoing edges.
     ///
-    /// `source` is not needed to find the record today. It is in the signature
-    /// because the record will stop storing `target` absolutely — a delta from the
-    /// source is three bytes smaller — and because passing it makes the
-    /// debug assertion below possible, which is the cheapest available guard
-    /// against the one bug class that change introduces: decoding an edge against
-    /// the wrong source produces a plausible node id, not a crash.
+    /// `source` is what makes the record readable at all: it stores `target` as a
+    /// signed delta from it. Passing the wrong one produces a plausible node id
+    /// rather than a crash, which is why the debug assertion below exists — it is the
+    /// cheapest available guard against the one bug class delta coding introduces.
     #[inline]
     pub fn edge(&self, source: u32, idx: u64) -> Edge {
         debug_assert!(
@@ -641,21 +865,55 @@ impl Graph {
             self.edge_range(source)
         );
         let r = unsafe { read_at::<EdgeRec>(self.edges, idx as usize) };
+        let (target, dist_mm) = if r.escaped() {
+            self.escaped_fields(idx)
+        } else {
+            (
+                source.wrapping_add_signed(i32::from(r.target_delta)),
+                r.dist_mm(),
+            )
+        };
         Edge {
-            target: r.target,
-            dist_mm: r.dist_mm,
+            target,
+            dist_mm,
             type_: r.type_,
             speed_limit: r.speed_limit,
         }
     }
 
+    /// `(target, dist_mm)` from the escape table, for an edge whose record carries a
+    /// sentinel.
+    ///
+    /// One load from the block index, then a scan of that block's rows — ~3 of them
+    /// at a 0.3% escape rate, usually within one cache line. See [`ESCAPE_BLOCK`].
+    ///
+    /// A record with a sentinel and no matching row is a corrupt pack that the load-
+    /// time checks cannot catch without an O(E) scan. It returns `u32::MAX` as the
+    /// target, which every caller already rejects as out of range, so the edge is
+    /// skipped rather than followed somewhere arbitrary.
+    #[cold]
+    fn escaped_fields(&self, idx: u64) -> (u32, u32) {
+        let block = (idx / ESCAPE_BLOCK) as usize;
+        let lo = unsafe { read_at::<u32>(self.escape_first, block) };
+        let hi = unsafe { read_at::<u32>(self.escape_first, block + 1) };
+        for r in lo..hi {
+            let row = unsafe { read_at::<EscapeRow>(self.escapes, r as usize) };
+            if u64::from(row.edge_idx) == idx {
+                return (row.target, row.dist_mm);
+            }
+        }
+        debug_assert!(false, "edge {idx} is escaped but has no escape row");
+        (u32::MAX, DIST_MM_ESCAPE)
+    }
+
     /// Whether edge `idx` of node `source` points at `want`.
     ///
-    /// Four call sites scan a node's edge range looking for the one edge that
-    /// reaches a given node and never use the target as a value. Once `target` is
-    /// stored as a delta they can answer that without widening the field at all, so
-    /// the comparison lives here rather than being hand-inlined four times against
-    /// whatever the record happens to hold.
+    /// Four call sites scan a node's edge range looking for the one edge that reaches
+    /// a given node and never use the target as a value. Delegating to [`Graph::edge`]
+    /// rather than comparing in delta space keeps the escape handling in one place:
+    /// the delta form would have to handle both an escaped record that could still
+    /// match and a `want − source` outside `i16` range, and the saving over one
+    /// sign-extend and one add is nothing.
     #[inline]
     pub fn edge_targets(&self, idx: u64, source: u32, want: u32) -> bool {
         self.edge(source, idx).target == want
@@ -664,14 +922,22 @@ impl Graph {
     /// Byte offset of edge `idx`'s name in the string pool, or `None` when it has
     /// none.
     ///
-    /// Separate from [`Edge`] because 62% of a planet's edges are unnamed and this
-    /// is read on the instruction-emission path, never in the A* relaxation — so the
-    /// field can become a sparse side table without any hot-path cost. Being the
-    /// sole reader is what makes that possible.
+    /// Separate from [`Edge`] because two thirds of edges are unnamed — 62.3% of
+    /// California's, 68.9% of Europe's — and this is read on the
+    /// instruction-emission path, never in the A* relaxation. So the field is a
+    /// sparse side table: three loads instead of one, for the third of edges that
+    /// have a name and nothing at all for the rest.
+    ///
+    /// Being the *sole* reader is what made that possible. The A* relaxation used to
+    /// copy this into the scratchpad on every improving edge — into a field nothing
+    /// ever read — and until that store went away no sparse representation was
+    /// affordable.
     #[inline]
     pub fn edge_name_offset(&self, idx: u64) -> Option<u32> {
-        let r = unsafe { read_at::<EdgeRec>(self.edges, idx as usize) };
-        (r.name_offset != NO_NAME).then_some(r.name_offset)
+        if !self.names.contains(idx) {
+            return None;
+        }
+        Some(unsafe { read_at::<u32>(self.name_off, self.names.rank_of(idx) as usize) })
     }
 
     /// Real OSM per-lane turn-indication masks for directed edge `idx`, ordered
@@ -719,35 +985,6 @@ impl Graph {
         Some(out)
     }
 
-    /// True when edge `idx` stores a polyline of its own.
-    ///
-    /// 70.4% of a planet's directed edges do not: their polyline is either their
-    /// twin's (see [`REVERSE_GEOMETRY_FLAG`]) or nothing but the chord between
-    /// their endpoints, which needs no bytes to say.
-    #[inline]
-    fn stores_geometry(&self, idx: u64) -> bool {
-        let byte = unsafe { read_at::<u8>(self.intermediate_present, (idx / 8) as usize) };
-        byte & (1u8 << (idx % 8)) != 0
-    }
-
-    /// How many edges below `idx` store a polyline, i.e. the offset-table index of
-    /// edge `idx` itself when its own bit is set.
-    ///
-    /// One `u64` load for the block, then at most 64 bytes of `popcount`. Only ever
-    /// meaningful for an edge whose bit *is* set, so callers must test
-    /// [`Graph::stores_geometry`] first or they will read another edge's blob.
-    #[inline]
-    fn geometry_rank(&self, idx: u64) -> u64 {
-        let byte = idx / 8;
-        let block = byte / GEOMETRY_RANK_BLOCK_BYTES;
-        let mut n = unsafe { read_at::<u64>(self.intermediate_rank, block as usize) };
-        for b in block * GEOMETRY_RANK_BLOCK_BYTES..byte {
-            n += u64::from(unsafe { read_at::<u8>(self.intermediate_present, b as usize) }.count_ones());
-        }
-        let partial = unsafe { read_at::<u8>(self.intermediate_present, byte as usize) };
-        n + u64::from((partial & ((1u8 << (idx % 8)) - 1)).count_ones())
-    }
-
     /// Byte offset of the `g`-th geometry edge's polyline in the intermediate blob.
     ///
     /// Two loads instead of one: a `u64` per [`INTERMEDIATE_BLOCK`] geometry edges
@@ -765,10 +1002,10 @@ impl Graph {
     /// stores none.
     #[inline]
     fn intermediate_range(&self, idx: u64) -> Option<(u64, u32)> {
-        if !self.stores_geometry(idx) {
+        if !self.geometry.contains(idx) {
             return None;
         }
-        let g = self.geometry_rank(idx);
+        let g = self.geometry.rank_of(idx);
         let start = self.geometry_offset(g);
         let end = self.geometry_offset(g + 1);
         Some((start, (end - start) as u32))

@@ -129,16 +129,16 @@ changing its reader produces a graph that loads as garbage, which is why
 
 | File | Layout | Reader |
 |---|---|---|
-| `metadata.bin` | `u32 magic "MARG"`, `u32 version 4`, `u64 node_count`, `u64 edge_count` (24 B) | `graph.rs` `GRAPH_MAGIC`/`GRAPH_VERSION` |
+| `metadata.bin` | `u32 magic "MARG"`, `u32 version 5`, `u64 node_count`, `u64 edge_count`, `u64 escape_count` (32 B) | `graph.rs` `GRAPH_MAGIC`/`GRAPH_VERSION` |
 | `nodes.bin` | `NodeRec[node_count + 1]`, **12 bytes**: `i32 lat_e7, i32 lon_e7, u32 edge_ptr`; Morton-sorted, trailing sentinel whose `edge_ptr == edge_count` | `graph.rs` — widened into `NodeMaster` by `node()` |
-| `edges.bin` | `EdgeRec[edge_count]`, **14 bytes**: `u32 target, u32 dist_mm, u32 name_offset, u8 type, u8 speed_limit` | `graph.rs` — widened into `Edge` by `edge()`; `name_offset` reached only through `edge_name_offset()` |
+| `edges.bin` | `EdgeRec[edge_count]`, **11 bytes**: `i16 target_delta, u24 dist_mm, u8 type, u8 speed_limit, u32 name_offset`; then padding to an 8-byte boundary, `u32 escape_first[E.div_ceil(1024) + 1]`, and `(u32 edge_idx, u32 target, u32 dist_mm) × escape_count` ascending by `edge_idx` | `graph.rs` — widened into `Edge` by `edge(source, idx)`; `name_offset` reached only through `edge_name_offset()` |
 | `lanes.bin` | `u32 n`, then `(u32 edge_idx, u32 blob_byte_off) × (n + 1)` ascending by `edge_idx`, then the packed `u16` per-lane turn masks. **Sparse**: only lane-bearing edges appear | `graph.rs` `edge_lane_masks` |
 | `intermediate.bin` | the delta-encoded polyline blob at **offset 0** — per storing edge, `i16 dlat, i16 dlon` per *interior* point — then a trailer: `u64 rank[E.div_ceil(512) + 1]`, `u8 present[E.div_ceil(8)]`, `u64 coarse[G.div_ceil(32) + 1]`, `u16 within[G + 1]`, `u64 G`. `off(g) = coarse[g / 32] + within[g]` where `g = rank(k)` | `graph.rs` `intermediate_range` / `decode_edge_coords` — **mandatory**, see below |
 | `road_names.bin` | deduped NUL-terminated UTF-8 pool; a name offset is a byte offset | `graph.rs` |
 | `poi_index.bin` | 14-byte records: `i32 lat_e7, i32 lon_e7, u32 name_off, u16 type`, Morton-sorted | `PoiIndex.kt` |
 | `poi_names.bin` | same pool convention as `road_names.bin` | `PoiIndex.kt` |
 
-`GRAPH_VERSION` is **4**. Version 1 stored a 16-byte node record and a dense
+`GRAPH_VERSION` is **5**. Version 1 stored a 16-byte node record and a dense
 `u64` offset per edge in both blob files; version 2 fixed that, and version 3 gave
 `intermediate.bin` a presence bitmap and dropped both endpoints of every stored
 polyline. See [Getting a planet under 40 GB](#getting-a-planet-under-40-gb) and
@@ -146,12 +146,16 @@ polyline. See [Getting a planet under 40 GB](#getting-a-planet-under-40-gb) and
 it. There is no dual-path reader — an older pack is rejected — so the app and the
 pack have to be updated together, as they already did across the v0→v1 boundary.
 
-Version 4 changes **no layout at all**. It adds `edge_count` to `metadata.bin`, so
-that the reader stops deriving it from `edges.bin`'s file size, and with it
+Versions 4 and 5 are the next step down, to ~25.8 GB; see
+[Getting it under 25](#getting-it-under-25-what-the-census-says). Version 4 changes
+**no layout at all**. It adds `edge_count` to `metadata.bin`, so that the reader
+stops deriving it from `edges.bin`'s file size, and with it
 [exact length validation](#every-files-length-is-checked) of every other file.
 That has to land before any record narrows: the moment the stride changes, a
 derived `edge_count` changes silently — and it is what sizes `intermediate.bin`'s
 trailer, so the mis-parse would be of a *different file*.
+
+Version 5 is the narrowing itself.
 
 ### Every file's length is checked
 
@@ -160,9 +164,9 @@ Every mandatory file's length is now an exact function of the two counts in
 
 | File | Expected length |
 |---|---|
-| `metadata.bin` | ≥ 24 B, with the right magic and version |
+| `metadata.bin` | ≥ 32 B, with the right magic and version |
 | `nodes.bin` | exactly `(node_count + 1) × 12` |
-| `edges.bin` | exactly `edge_count × 14` |
+| `edges.bin` | exactly `align_up(edge_count × 11, 8) + (E.div_ceil(1024) + 1) × 4 + escape_count × 12`, with the block index's last entry equal to `escape_count` and every row's `edge_idx < edge_count` |
 | `lanes.bin` | exactly `4 + (n + 1) × 8 + blob`, from its own header, plus every `edge_idx < edge_count` |
 | `intermediate.bin` | trailer sized from `edge_count` and `G`, with `coarse[G/32] + within[G] == ` the blob length |
 
@@ -641,9 +645,47 @@ P(|target − source| > n) ≈ c · n^(−1/2)
 because a level-*k* quadrant boundary produces a delta of order `N / 4^k` and is
 crossed with probability proportional to `2^k`; substituting `n = N / 4^k` gives
 `P = (L·√N / W) / √n`, and `L·√N / W` is the ratio of edge length to node spacing —
-a local, physical quantity that does not depend on `N`. California gives
-**c ≈ 0.546** at the `i16` boundary. `--stats` prints `c` at every power of two so
-the shape of the curve is visible, not just one point on it.
+a local, physical quantity that does not depend on `N`. `--stats` prints `c` at every
+power of two so the shape of the curve is visible, not just one point on it.
+
+**Measured on both California and Europe, and it holds.** Europe is 20.9× the edge
+count and 21.6× the node count:
+
+| | California | Europe | ratio |
+|---|---|---|---|
+| directed edges | 16,785,702 | 350,290,432 | 20.9× |
+| nodes | 6,418,361 | 138,635,441 | 21.6× |
+| `i16` escape rate | 0.3014% | 0.3132% | **1.04×** |
+| `c` at n = 32,767 | 0.5456 | 0.5670 | **1.04×** |
+| `u24 dist_mm` escape rate | 0.000989% | 0.000892% | 0.90× |
+| named edges | 37.72% | 31.15% | 0.83× |
+| max out-degree | 24 | **77** | 3.2× |
+| degree-0 nodes | 0.0231% | 0.0270% | 1.17× |
+| max `dist_mm` | 61.5 km | **2,979 km** | 48× |
+
+`c` moves by 4% across a 21× change in scale, well inside the 1.5× the design needed,
+so the planet escape rate is predictable and the escape table is ~40 MB rather than
+anything that matters. Two other columns are worth more than they look:
+
+* **The named fraction *falls* with scale** (37.7% → 31.1%), so making `name_offset`
+  sparse saves more on a planet than California suggests, not less.
+* **Max out-degree triples** (24 → 77). Any future per-node `u8 degree` field would
+  still fit, but not by the margin California implied — which is why one is not
+  worth adding without a writer pre-pass that widens the field if it overflows.
+
+### The single most useful thing the census found
+
+Europe has an edge **2,979 km long**. California's longest is 61.5 km.
+
+That number kills the option v3 considered and this work rejected: `dist_mm` as a
+`u24` counting **centimetres**, which needs no escape table because 2^24 cm is
+167.77 km. It would have been silently, catastrophically wrong on Europe — the value
+wraps — and it quantises all 1.07 G edges to buy that. Millimetres plus a shared
+escape table keeps every distance *exact* and costs 3,126 rows on Europe: 37 KB.
+
+It also vindicates merging the two escape tables. The `dist_mm` escape rate is the
+least transferable number in the whole census, and merging makes it irrelevant to
+the design: a hundredfold miss rides along in the table `target` already needed.
 
 ### Hilbert was tried, and loses
 
@@ -684,6 +726,151 @@ verified against instead of the ~35 K vertices 999 sampled routes happen to touc
 
 `route_diff` also gained a `bench` mode, so the phases that are gated on latency
 rather than correctness have a baseline to be gated against.
+
+Version 4's own gate: every data file byte-identical to the v3 pack on both collapse
+paths, `metadata.bin` 16 B → 24 B, and `route_diff report` byte-identical to what
+the *v3 binary* produced from the *v3 pack* — a direct reader-equivalence check
+across the change rather than a comparison against itself.
+
+### Version 5: the 11-byte record
+
+```text
+[ EdgeRec[E] ]                     11 B: i16 target_delta, u24 dist_mm,
+                                         u8 type_, u8 speed_limit, u32 name_offset
+[ pad to an 8-byte boundary ]
+[ u32 escape_first[E.div_ceil(1024) + 1] ]
+[ { u32 edge_idx, u32 target, u32 dist_mm } × escape_count ]   ascending by edge_idx
+```
+
+`target` becomes a signed delta from the edge's own source and `dist_mm` a `u24`,
+so 14 bytes become 11 — **3.22 GB** of a planet, less the escape table. Every value
+stays exact.
+
+**One escape table, not two.** `target_delta == i16::MIN` *or* `dist_mm == 0xFFFFFF`
+means both fields come from the escape row. Two sentinels with two tables would cost
+two branches in the A* relaxation, two metadata fields and two sets of off-by-one
+risk, to keep a 39 MB table apart from an 85 KB one. Merging costs ~13 MB and
+removes half the code — and it makes the `dist_mm` escape rate, the least
+transferable number in the census, irrelevant to the design: collapsed chains in
+Siberia will be far longer than California's, and a hundredfold miss just rides
+along in the same table.
+
+**A block index, not a binary search.** The inline sentinel already *is* the
+presence bit — it is in a register that was just loaded — so a v3-style presence
+bitmap would spend 134 MB duplicating it. All that is missing is edge index → row,
+and `u32 escape_first[E/1024 + 1]` is 4.2 MB: one load from a largely
+cache-resident array, then a scan of the ~3 rows a block holds, usually one cache
+line. A binary search over 3.24 M rows would be 12–15 misses. `lanes.bin` does
+binary-search its sparse index and its doc comment justifies that by being "called
+once per maneuver rather than per edge"; `target` is read on every relaxation, so
+that precedent does not transfer.
+
+**Field order is load-bearing.** The four fields the A* relaxation reads sit in
+bytes 0..7, so one 8-byte load covers all of them, and `name_offset` is last. The
+`u24` is assembled from three bytes rather than loaded as a masked `u32`, so no read
+can run past the array — and the array is padded to 8 bytes anyway, which keeps the
+block index naturally aligned whatever `E` is.
+
+Shrinking the record is a locality *win*, not a cost: adjacency records per 64-byte
+line goes 4.6 → 5.8, so the relaxation should get slightly faster rather than
+slower.
+
+**Measured on California:** `edges.bin` 234,999,828 → 185,316,836 bytes on the
+reference path (−21.1%), with 50,711 escape rows (0.302% of 16,785,702 edges); the
+whole pack 458,981,307 → 409,298,323 (−10.8%). The per-element dump is identical —
+**0 of 16,785,702 edges and 0 of 6,418,362 node records differ**, and the same on the
+within-way path's 18,033,545 edges — `report` is still byte-identical to the v3
+binary's, and `compare` and `geometry` do not move a digit.
+
+| file | v3/v4 | v5 | basis |
+|---|---|---|---|
+| `metadata.bin` | 24 B | 32 B | `escape_count` |
+| `edges.bin` | 15.04 GB | **11.86 GB** | 11 B × E + 4.2 MB index + 40 MB rows |
+| everything else | | unchanged | |
+| **planet total** | **~29.0 GB** | **~25.8 GB** | |
+
+**Seven synthetic tests cover what California cannot contain**: deltas at 0, ±1,
+±32766, ±32767, ±32768, −32769 and +40000; `dist_mm` at 0, 1, `0xFFFFFE`,
+`0xFFFFFF`, `0x1000000` and `u32::MAX`; an edge that fails both tests at once
+(one row, not two); escapes at edge 0 and edge E−1; a pack with no escapes at all,
+where the padding is the only thing keeping a wide load in bounds; and escape rows
+on both sides of every block boundary at 1023/1024/1025/2047/2048/2049. The
+encoder and the decoder are exercised as a pair, directly, because putting two nodes
+exactly 32,768 apart in Morton order would mean choosing coordinates for the 32,767
+nodes in between.
+
+**`--rounds 1` vs `3` vs `17` stays byte-identical on all six files, on both collapse
+paths.** That is the strongest check the escape table gets: round boundaries move
+which edges each pass collects, which of them escape, and where the block index's
+prefix counts land — and none of it reaches the file.
+
+### Version 6: `name_offset` becomes sparse
+
+```text
+[ EdgeRec[E] ]                     7 B: i16 target_delta, u24 dist_mm,
+                                        u8 type_, u8 speed_limit
+[ pad ][ u32 escape_first[..] ][ EscapeRow[escape_count] ][ pad ]
+[ u64 name rank[E.div_ceil(512) + 1] ][ u8 name present[E.div_ceil(8)] ]
+[ u32 name_off[named_edges] ]
+```
+
+Two thirds of edges have no name — **62.28%** of California's, **68.85%** of
+Europe's — so a dense `u32` per edge spent four bytes on a sentinel more often than
+on an offset. A presence bitmap plus a rank index makes absence free and costs the
+named third four bytes each: **−2.53 GB** of a planet.
+
+**It is a presence bitmap over the existing byte offset, not a dense name id.**
+Adding an id space would get a further 0.41 GB, but it means changing
+`NamePool::intern`'s return type, and `poi_build.rs` is a second consumer that has to
+keep byte offsets for `PoiIndex.kt`. Recoverable later without touching
+`poi_build.rs` if that 0.41 GB is ever wanted.
+
+**The rank/select pair is now one type, used twice.** `intermediate.bin` has had a
+presence bitmap and rank index since v3, and this is the same question asked of a
+different field, so `EdgeBitmap` in the reader and `PresenceBitmap` in the writer
+replace what would have been two transcriptions of the same eight lines. The block
+size stays 64 bytes — 512 edges, one cache line — so a rank is one `u64` load plus at
+most eight `popcount`s.
+
+**Why this and not sparse `speed_limit`.** `speed_limit` is zero on 91.76% of edges
+and making it sparse would save 0.84 GB, but it is read in the A* relaxation, up to
+25 M expansions × degree per route, from a record already in L1. A rank probe there
+is not worth 0.84 GB. Names are read when an *instruction* is emitted — once per
+maneuver, not once per edge — which is what makes three loads instead of one
+affordable.
+
+**The prerequisite was deleting a dead store.** The A* relaxation used to copy
+`name_offset` into the scratchpad on every improving edge, into an `Entry` field
+nothing ever read; the same was true of `last_type`. Until those went, `name_offset`
+was on the hot path and no sparse form was affordable. Removing them also took
+`Entry` from 24 bytes to 20, in the structure the router touches most.
+
+**Measured on California:** `edges.bin` 185,316,836 → 145,857,713 bytes on the
+reference path, so the whole pack is 458,981,307 → 369,839,208 — **−19.4% against
+v3**. 6,330,795 of 16,785,702 edges are named (37.72%). The per-element dump is
+identical again — **0 of 16,785,702 edges and 0 of 6,418,362 node records differ,
+including `name_offset` for every edge**, which is the phase where that dump earns
+its keep.
+
+The 145,857,713 breaks down exactly as the reader computes it: 117,499,920 of padded
+records, 65,576 of escape block index, 608,532 of escape rows, 4 of padding,
+2,360,501 of name bitmap and rank, and 25,323,180 of name offsets.
+
+| file | v3 | v5 | v6 | basis |
+|---|---|---|---|---|
+| `metadata.bin` | 16 B | 32 B | 40 B | `named_edges` |
+| `edges.bin` | 15.04 GB | 11.86 GB | **9.33 GB** | 7 B × E + 0.15 GB bitmap + 1.62 GB offsets |
+| everything else | | | unchanged | |
+| **planet total** | **~29.0 GB** | **~25.8 GB** | **~23.3 GB** | |
+
+That planet column uses California's 37.72% named fraction. At Europe's 31.15% the
+offsets are 1.34 GB rather than 1.62 GB, so the real figure should come in nearer
+**23.0 GB**.
+
+**Four synthetic tests cover the sparse table's boundaries**: a name at edge 0 and at
+edge E−1; names either side of the 512-edge rank-block boundary and either side of
+1024, with a distinct offset per named edge so a rank off by one reads a visibly
+wrong value; a pack where no edge is named; and one where every edge is.
 
 ## Build-time memory
 

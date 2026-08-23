@@ -129,6 +129,15 @@ fn main() -> ExitCode {
                  {} defer to a twin",
                 stats.intermediate_bytes, stats.geometry_edges, stats.reversed_edges
             );
+            println!(
+                "edges.bin: {} byte(s), {} edge(s) needed the escape table ({:.4}%), \
+                 {} named ({:.2}%)",
+                stats.edges_bytes,
+                stats.escape_count,
+                stats.escape_count as f64 / stats.edge_count.max(1) as f64 * 100.0,
+                stats.named_edges,
+                stats.named_edges as f64 / stats.edge_count.max(1) as f64 * 100.0
+            );
             println!("Peak RSS: {}", osm_ingest::mem::peak_rss_report());
             println!("Wrote {}", out_dir.display());
             if want_stats {

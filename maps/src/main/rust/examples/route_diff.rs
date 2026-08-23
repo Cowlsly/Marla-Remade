@@ -399,10 +399,18 @@ fn dump(args: &[String]) -> Result<bool, String> {
         w(&n.edge_ptr.to_le_bytes())?;
     }
     f.flush().map_err(|e| format!("{out}: {e}"))?;
+    // The escape and named counts are reported but deliberately *not* written into
+    // the dump. The dump has to stay byte-identical across every phase, and which
+    // fields a record could not hold is a property of the encoding rather than of the
+    // graph.
     println!(
-        "{out}: {} edge(s) and {} node record(s)",
+        "{out}: {} edge(s) and {} node record(s), {} escaped ({:.4}%), {} named ({:.2}%)",
         g.edge_count,
-        u64::from(g.node_count) + 1
+        u64::from(g.node_count) + 1,
+        g.escape_count,
+        g.escape_count as f64 / g.edge_count.max(1) as f64 * 100.0,
+        g.named_edges,
+        g.named_edges as f64 / g.edge_count.max(1) as f64 * 100.0
     );
     Ok(true)
 }
@@ -1059,7 +1067,12 @@ fn geometry(args: &[String]) -> Result<bool, String> {
     }
     println!();
 
-    let missing: Vec<&(i32, i32)> = b.vertices.difference(&c.vertices).collect();
+    // Sorted, because the sample below is the only thing a human has to go on and a
+    // `HashSet`'s iteration order is randomised per process — so an unsorted sample
+    // changes on every run of the same pack, which makes it useless for both
+    // diagnosis and for diffing two runs against each other.
+    let mut missing: Vec<&(i32, i32)> = b.vertices.difference(&c.vertices).collect();
+    missing.sort_unstable();
     let mut ok = true;
     if missing.is_empty() {
         println!("PASS  every baseline vertex survives in the candidate");
