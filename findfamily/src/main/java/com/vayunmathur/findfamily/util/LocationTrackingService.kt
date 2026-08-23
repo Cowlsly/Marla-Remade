@@ -59,6 +59,8 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
 import java.util.Locale
@@ -100,6 +102,9 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var lastKnownLocation: Location? = null
     private var heartbeatJob: Job? = null
     private var trackingInitialized = false
+
+    /** Serializes the off-reader enrichment batches (see [processIncomingLocations]). */
+    private val enrichmentMutex = Mutex()
 
     // Custom UWB tracker feature (DEV_BUILD only). Owner-side store of tracker
     // secrets/private keys, and the finder-side beacon scan job.
@@ -223,15 +228,14 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 
     /**
-     * Processes a batch of freshly-decrypted peer locations: inserts unknown
-     * senders, recomputes waypoint entry/exit + low-battery notifications, and
-     * upserts the values. Self-contained (re-reads users/waypoints) so it can be
-     * driven by both the 30s heartbeat poll and the live WebSocket push.
+     * Persists a batch of freshly-decrypted peer locations and inserts unknown senders.
+     * Runs on the live WebSocket reader coroutine, so it only does fast, durable work;
+     * the slow best-effort part is handed to [enrichIncomingLocations]. Self-contained
+     * (re-reads users) so it can be driven by any inbound path.
      */
     private suspend fun processIncomingLocations(locList: List<LocationValue>) {
         if (locList.isEmpty()) return
         val currentUsers = repository.getAllUsers()
-        val currentWaypoints = repository.getAllWaypoints()
         val userIDs = currentUsers.map { it.id }
 
         val usersRecieved = locList.map { it.userid }.distinct()
@@ -257,6 +261,28 @@ class LocationTrackingService : Service(), SensorEventListener {
         // follows.
         repository.upsertLocations(locList)
         Log.d("FF-Heartbeat", "upsertAll ${locList.size} locations done")
+
+        // Enrichment runs off the reader coroutine. Reverse-geocoding is a slow network
+        // call, so doing it inline stalled every subsequent inbound frame until the
+        // liveness timeout force-reconnected the socket. The mutex keeps batches
+        // serialized, so entry/exit and low-battery alerts still fire once each.
+        serviceScope.launch {
+            enrichmentMutex.withLock { enrichIncomingLocations(locList, latestMap) }
+        }
+    }
+
+    /**
+     * Best-effort follow-up to [processIncomingLocations]: recomputes waypoint
+     * entry/exit, reverse-geocodes the display name, and raises the entry/exit and
+     * low-battery notifications. [latestMap] is the latest-per-user snapshot taken
+     * *before* the new fixes were stored, so the comparisons below see the prior state.
+     */
+    private suspend fun enrichIncomingLocations(
+        locList: List<LocationValue>,
+        latestMap: Map<Long, LocationValue>,
+    ) {
+        val currentUsers = repository.getAllUsers()
+        val currentWaypoints = repository.getAllWaypoints()
 
         currentUsers.forEach { user ->
             // Self never receives its own published location, so fall back to the latest
@@ -753,37 +779,45 @@ class LocationTrackingService : Service(), SensorEventListener {
     }
 }
 
-suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? =
-    suspendCancellableCoroutine { continuation ->
-        val geocoder = Geocoder(this, Locale.getDefault())
+/**
+ * Reverse-geocodes a coordinate, or null if it can't be resolved.
+ *
+ * Devices without Play Services / microG (e.g. GrapheneOS) have no geocode backend at
+ * all, so [Geocoder.isPresent] is checked first. The async API also reports failures via
+ * `onError`, which must be implemented: a bare lambda only supplies `onGeocode`, leaving
+ * the continuation unresumed forever on any error. The timeout is the final backstop —
+ * this is a network call, and hanging here blocks whoever is awaiting it.
+ */
+suspend fun Context.fetchAddress(lat: Double, lng: Double): Address? {
+    if (!Geocoder.isPresent()) return null
+    return withTimeoutOrNull(15.seconds) {
+        suspendCancellableCoroutine { continuation ->
+            val geocoder = Geocoder(this@fetchAddress, Locale.getDefault())
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Modern Async API (Android 13+)
-            geocoder.getFromLocation(lat, lng, 1) { addresses ->
-                val result = addresses.firstOrNull()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                // Modern Async API (Android 13+)
+                geocoder.getFromLocation(lat, lng, 1, object : Geocoder.GeocodeListener {
+                    override fun onGeocode(addresses: MutableList<Address>) {
+                        if (continuation.isActive) continuation.resume(addresses.firstOrNull())
+                    }
 
-                // Use the stable 3-parameter lambda
-                continuation.resume(result) { _, _, _ ->
-                    /* No specific cleanup needed for Address objects */
+                    override fun onError(errorMessage: String?) {
+                        if (continuation.isActive) continuation.resume(null)
+                    }
+                })
+            } else {
+                // Legacy Synchronous (Must be on background thread)
+                try {
+                    @Suppress("DEPRECATION")
+                    val address = geocoder.getFromLocation(lat, lng, 1)?.firstOrNull()
+                    continuation.resume(address)
+                } catch (_: Exception) {
+                    continuation.resume(null)
                 }
             }
-        } else {
-            // Legacy Synchronous (Must be on background thread)
-            try {
-                @Suppress("DEPRECATION")
-                val address = geocoder.getFromLocation(lat, lng, 1)?.firstOrNull()
-                continuation.resume(address)
-            } catch (_: Exception) {
-                continuation.resume(null)
-            }
-        }
-
-        // Safety: If the calling scope is canceled, stop the continuation
-        continuation.invokeOnCancellation {
-            // Geocoder doesn't support manual cancellation,
-            // but this prevents memory leaks in the listener.
         }
     }
+}
 
 class ServiceRestartWorker(
     appContext: Context,
