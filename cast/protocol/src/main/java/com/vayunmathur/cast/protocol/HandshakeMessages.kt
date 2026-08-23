@@ -14,8 +14,13 @@ import kotlinx.serialization.json.Json
  * 3 is where H.264 stopped being the only codec. [DecoderLimits] became a per-codec list and
  * [StreamConfig] gained a required codec, both reshaped rather than extended with compatibility
  * defaults - a mismatch is refused outright anyway, so the bump is the honest signal.
+ *
+ * 4 adds [PlaybackState] and [PlaybackCommand], which turn the TV from a display into a remote. A
+ * phone on 3 would never send state, so the TV's overlay would be permanently empty, and a TV on 3
+ * would drop every command it was sent - both are silent failures, which is exactly what a refused
+ * version check is for.
  */
-const val PROTOCOL_VERSION = 3
+const val PROTOCOL_VERSION = 4
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -36,6 +41,8 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *                          ◄───────────── STREAM_READY  (udp port + receiver SSRCs)
  *        VIDEO_CODEC_CONFIG ─────────────────►          (AV1 only, and repeated on every PLI)
  *        … RTP over UDP …
+ *        PLAYBACK_STATE ─────────────────────►          (app content only, ~2/s while it plays)
+ *                          ◄───────────── PLAYBACK_COMMAND (the TV remote, whenever it is pressed)
  *        BYE ─────────────────────────────────►
  * ```
  *
@@ -282,6 +289,136 @@ data class StreamReady(
 @Serializable
 @SerialName("VIDEO_CODEC_CONFIG")
 data class VideoCodecConfig(val csd: String) : ControlMessage
+
+/**
+ * Where playback is, phone to TV, so a television can draw a seek bar for something it is only
+ * decoding.
+ *
+ * **A snapshot, never a delta.** Sent on any material change and otherwise at a slow heartbeat, and
+ * every field is absolute - so a lost message costs at most one heartbeat of staleness and repairs
+ * itself, with no sequence numbers, no acknowledgements and no resynchronisation path to get wrong.
+ *
+ * **The phone owns the truth.** The TV cannot compute [positionMs] for itself: what it holds is a
+ * 150 ms RTP jitter buffer, which is a smoothing device and not a content clock. Between snapshots it
+ * interpolates from the last one it received, and every fresh snapshot re-anchors that estimate.
+ *
+ * [hasNext] and [hasPrevious] are carried because the TV must not offer a button that does nothing -
+ * and it has no way to know whether there is anything to skip to, since the queue is a list of
+ * related videos that only the phone can see.
+ */
+@Serializable
+@SerialName("PLAYBACK_STATE")
+data class PlaybackState(
+    val positionMs: Long,
+    /** Zero or negative for a stream with no known end, which the TV renders without a bar. */
+    val durationMs: Long,
+    val playing: Boolean,
+    val buffering: Boolean,
+    /** The tempo multiplier, 1.0 being normal. */
+    val speed: Float = 1f,
+    /** Media volume as 0..1, the same level on both ends - see `PLAYBACK_COMMAND`'s `SET_VOLUME`. */
+    val volume: Float = 1f,
+    val hasNext: Boolean = false,
+    val hasPrevious: Boolean = false,
+) : ControlMessage {
+
+    /**
+     * Where playback will be [elapsedMs] after this snapshot arrived.
+     *
+     * The TV redraws at its display's rate from snapshots that land twice a second, so a bar plotted
+     * at [positionMs] would visibly step. It records the wall-clock time each snapshot arrived and
+     * asks this for the position now; every fresh snapshot re-anchors, so the estimate can drift for
+     * at most one heartbeat and never accumulates.
+     *
+     * A pure function of two numbers on purpose - it is the one piece of this feature that can be
+     * pinned down without a television in the room.
+     *
+     * Paused holds still, [speed] scales the advance, and the result never runs past [durationMs].
+     * Buffering needs no case of its own: the phone reports [playing] from the player's own
+     * `isPlaying`, which is already false while it stalls.
+     */
+    fun interpolated(elapsedMs: Long): Long {
+        if (!playing || elapsedMs <= 0) return positionMs.coerceAtLeast(0)
+        val advanced = positionMs + (elapsedMs * speed.toDouble()).toLong()
+        return if (durationMs > 0) advanced.coerceIn(0, durationMs) else advanced.coerceAtLeast(0)
+    }
+}
+
+/**
+ * A press on the television's remote, TV to phone.
+ *
+ * **One message with an action enum rather than ten message types.** The set of things a remote can
+ * ask for is going to grow, and a TV that needed a protocol bump to gain a button would mean shipping
+ * both apps again for a change that is entirely on one side. The phone ignores an action it does not
+ * recognise, which is the only forward compatibility this needs.
+ *
+ * The phone is free to refuse any of these. A [PlaybackAction.Next] with nothing to play next is
+ * dropped rather than answered, and the TV finds out the ordinary way - the next [PlaybackState]
+ * simply does not change.
+ */
+@Serializable
+@SerialName("PLAYBACK_COMMAND")
+data class PlaybackCommand(
+    val action: PlaybackAction,
+    /**
+     * The action's argument, or null for the ones that take none.
+     *
+     * One nullable `Double` rather than a field per type: milliseconds for [PlaybackAction.SeekTo], a
+     * multiplier for [PlaybackAction.SetSpeed], 0..1 for [PlaybackAction.SetVolume]. A `Double`
+     * represents every millisecond of a plausible video exactly, so nothing is lost by not having a
+     * `Long` here, and the alternative is three mostly-null fields that can disagree.
+     */
+    val value: Double? = null,
+) : ControlMessage
+
+/**
+ * What the remote asked for.
+ *
+ * Serial names are pinned because these cross the wire; the Kotlin identifiers are free to change.
+ */
+@Serializable
+enum class PlaybackAction {
+    @SerialName("PLAY")
+    Play,
+
+    @SerialName("PAUSE")
+    Pause,
+
+    /**
+     * Whichever of the two the phone is not currently doing.
+     *
+     * Distinct from [Play] and [Pause] on purpose: a D-pad centre press means "the other one", and
+     * asking the TV to decide from its own possibly-stale snapshot is how a double press ends up
+     * doing nothing.
+     */
+    @SerialName("TOGGLE")
+    Toggle,
+
+    /** [PlaybackCommand.value] is an absolute position in milliseconds. */
+    @SerialName("SEEK_TO")
+    SeekTo,
+
+    /** The phone's own skip interval, so the two ends cannot disagree about how far ten seconds is. */
+    @SerialName("SKIP_FORWARD")
+    SkipForward,
+
+    @SerialName("SKIP_BACK")
+    SkipBack,
+
+    @SerialName("NEXT")
+    Next,
+
+    @SerialName("PREVIOUS")
+    Previous,
+
+    /** [PlaybackCommand.value] is a tempo multiplier. */
+    @SerialName("SET_SPEED")
+    SetSpeed,
+
+    /** [PlaybackCommand.value] is 0..1, and moves the phone's media volume as well as the TV's. */
+    @SerialName("SET_VOLUME")
+    SetVolume,
+}
 
 /**
  * Either end, at any point after the secret is established.
