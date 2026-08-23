@@ -41,6 +41,10 @@ set -euo pipefail
 #                         world.transit and the transit_stops tile layer
 #     --gtfs-region GLOB  build that manifest from Transitous' published gtfs
 #                         directory instead, e.g. 'us-ca' (see build_world_transit.sh)
+#     --gtfs-mirror DIR   where that mirror lives (default <work>/transit/transitous).
+#                         ~10 GB for the whole world, so on WSL put it on the LINUX
+#                         filesystem even when --out-dir is under /mnt/c.
+#     --gtfs-rate LIMIT   wget --limit-rate for the mirror (default 30m)
 #     --bbox BOX          "minlon,minlat,maxlon,maxlat". Clipped ONCE up front and
 #                         reused by every stage, so the graph honours it too.
 #                         Needs osmium.
@@ -132,6 +136,8 @@ WITH_BASE=0
 WITHIN_WAY_CHAINS=0
 ROUNDS=""
 SPILL_DIR=""
+GTFS_MIRROR=""
+GTFS_RATE=""
 SKIP_GRAPH=0
 SKIP_POIS=0
 SKIP_TRANSIT=0
@@ -164,6 +170,8 @@ while [[ $# -gt 0 ]]; do
         --within-way-chains) WITHIN_WAY_CHAINS=1; shift ;;
         --rounds) ROUNDS="$2"; shift 2 ;;
         --spill-dir) SPILL_DIR="$2"; shift 2 ;;
+        --gtfs-mirror) GTFS_MIRROR="$2"; shift 2 ;;
+        --gtfs-rate) GTFS_RATE="$2"; shift 2 ;;
         --admin-reuse) ADMIN_REUSE="$2"; shift 2 ;;
         --base-mode) BASE_MODE="$2"; shift 2 ;;
         --base-jar) BASE_JAR="$2"; shift 2 ;;
@@ -184,7 +192,7 @@ while [[ $# -gt 0 ]]; do
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,114p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,119p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -354,6 +362,8 @@ if want_stage transit; then
             echo "ERROR: pass --gtfs-manifest or --gtfs-region, not both" >&2; exit 1; }
         echo "=== transit -> $OUT_DIR/world.transit ==="
         WT_ARGS=(--work "$TRANSIT_WORK" --out "$OUT_DIR")
+        [[ -n "$GTFS_MIRROR" ]] && WT_ARGS+=(--mirror-dir "$GTFS_MIRROR")
+        [[ -n "$GTFS_RATE" ]] && WT_ARGS+=(--rate "$GTFS_RATE")
         if [[ -n "$GTFS_MANIFEST" ]]; then
             WT_ARGS+=(--manifest "$GTFS_MANIFEST")
         else
