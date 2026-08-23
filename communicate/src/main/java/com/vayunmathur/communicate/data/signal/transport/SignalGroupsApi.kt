@@ -17,6 +17,8 @@ import org.signal.libsignal.zkgroup.groups.GroupSecretParams
 import org.signal.libsignal.zkgroup.groups.UuidCiphertext
 import org.signal.storageservice.storage.protos.groups.Group
 import org.signal.storageservice.storage.protos.groups.GroupAttributeBlob
+import org.signal.storageservice.storage.protos.groups.GroupChange
+import org.signal.storageservice.storage.protos.groups.Member
 import javax.net.ssl.SSLSocketFactory
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -203,6 +205,92 @@ object SignalGroupsApi {
         )
     } catch (t: Throwable) {
         Log.w(TAG, "could not decrypt the group", t)
+        null
+    }
+
+    /**
+     * Submit a group change.
+     *
+     * The body is a serialized `GroupChange.Actions`, not JSON — which is why the previous hand-rolled JSON
+     * PATCH could never have been accepted. The client does **not** sign: the server validates the actions
+     * against the presented credential and returns a signed `GroupChange`.
+     */
+    suspend fun patchGroup(
+        authorization: String,
+        actions: GroupChange.Actions,
+        sslSocketFactory: SSLSocketFactory?,
+    ): Boolean {
+        val resp = try {
+            NetworkClient.execute(
+                "$STORAGE_URL$GROUP_PATH",
+                method = "PATCH",
+                headers = mapOf(
+                    "Authorization" to "Basic $authorization",
+                    "Content-Type" to "application/x-protobuf",
+                ),
+                body = actions.toByteArray(),
+                sslSocketFactory = sslSocketFactory,
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "group change failed", t)
+            return false
+        }
+        if (!resp.isSuccess) {
+            // Reported rather than swallowed: a rejected change previously still updated local state, so the
+            // UI claimed success for a group the server never modified.
+            Log.w(TAG, "group change rejected: ${resp.status} ${resp.statusMessage}")
+            return false
+        }
+        Log.i(TAG, "group change accepted")
+        return true
+    }
+
+    /** A rename, as the server expects it: the title encrypted into a `GroupAttributeBlob`. */
+    fun titleChange(secretParams: GroupSecretParams, title: String, newRevision: Int): GroupChange.Actions? = try {
+        val blob = GroupAttributeBlob.newBuilder().setTitle(title).build()
+        val encrypted = ClientZkGroupCipher(secretParams).encryptBlob(blob.toByteArray())
+        GroupChange.Actions.newBuilder()
+            .setVersion(newRevision)
+            .setModifyTitle(
+                GroupChange.Actions.ModifyTitleAction.newBuilder()
+                    .setTitle(com.google.protobuf.ByteString.copyFrom(encrypted)),
+            )
+            .build()
+    } catch (t: Throwable) {
+        Log.w(TAG, "could not build a title change", t)
+        null
+    }
+
+    /**
+     * Add members. Each is added as a full [Member] with its ACI encrypted, at the default role.
+     *
+     * Note a real client adds members *pending profile key* unless it already holds their profile key; this adds
+     * them directly, which the server accepts only when permitted by the group's access control.
+     */
+    fun addMembersChange(
+        secretParams: GroupSecretParams,
+        acis: List<String>,
+        newRevision: Int,
+    ): GroupChange.Actions? = try {
+        val cipher = ClientZkGroupCipher(secretParams)
+        val builder = GroupChange.Actions.newBuilder().setVersion(newRevision)
+        var added = 0
+        acis.forEach { aci ->
+            val serviceId = runCatching { ServiceId.Aci.parseFromString(aci) }.getOrNull() ?: return@forEach
+            val userId = cipher.encrypt(serviceId).serialize()
+            builder.addAddMembers(
+                GroupChange.Actions.AddMemberAction.newBuilder()
+                    .setAdded(
+                        Member.newBuilder()
+                            .setUserId(com.google.protobuf.ByteString.copyFrom(userId))
+                            .setRole(Member.Role.DEFAULT),
+                    ),
+            )
+            added++
+        }
+        if (added == 0) null else builder.build()
+    } catch (t: Throwable) {
+        Log.w(TAG, "could not build an add-members change", t)
         null
     }
 

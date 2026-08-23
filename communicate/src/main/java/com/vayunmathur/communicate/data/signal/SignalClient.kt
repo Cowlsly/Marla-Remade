@@ -18,6 +18,7 @@ import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
 import com.vayunmathur.communicate.data.signal.transport.SignalCallingApi
 import com.vayunmathur.communicate.data.signal.transport.SignalGroupsApi
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
+import org.signal.storageservice.storage.protos.groups.GroupChange
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
@@ -1164,29 +1165,48 @@ object SignalClient {
             Log.w(TAG, "no stored master key for $conversationId, cannot rename the group")
             return false
         }
-        val auth = authData
-        if (auth != null) {
-            try {
-                val secretParams = SignalGroups.secretParamsFor(masterKey)
-                val titleBlob = SignalGroups.encryptGroupBlob(secretParams, name.toByteArray(Charsets.UTF_8))
-                val revision = existing.groupRevision + 1
-                val body = org.json.JSONObject().apply {
-                    put("masterKey", AndroidBase64.encodeToString(masterKey, AndroidBase64.NO_WRAP))
-                    put("titleBlob", AndroidBase64.encodeToString(titleBlob, AndroidBase64.NO_WRAP))
-                    put("revision", revision)
-                }.toString().toByteArray(Charsets.UTF_8)
-                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, sslSocketFactory = signalTls())
-                // Live-only: a real GroupChange.Actions needs the server's signature over signed actions.
-                Log.i(TAG, "setGroupName PATCH /v2/groups/ ${resp.status}")
-            } catch (e: Exception) { Log.w(TAG, "setGroupName failed", e) }
+        val revision = existing.groupRevision + 1
+        val accepted = groupChange(masterKey) { secretParams ->
+            SignalGroupsApi.titleChange(secretParams, name, revision)
+        }
+        if (!accepted) {
+            // The local name is not updated on rejection: claiming success for a change the server refused is
+            // how the group drifts out of step with everyone else's view of it.
+            Log.w(TAG, "the server rejected renaming $conversationId")
+            return false
         }
         _events.emit(SignalEvent.ConversationNameChanged(conversationId = conversationId, newName = name))
-        // Persist the bumped revision too: every outgoing message quotes it, and dropping it meant every
-        // group send claimed revision 0 forever.
         try {
-            db?.conversationDao()?.upsert(existing.copy(name = name, groupRevision = existing.groupRevision + 1))
+            db?.conversationDao()?.upsert(existing.copy(name = name, groupRevision = revision))
         } catch (_: Exception) {}
         return true
+    }
+
+    /**
+     * Submit a group change built by [build], handling the credential dance.
+     *
+     * Returns whether the server accepted it, so callers can avoid recording a change that did not happen.
+     */
+    private suspend fun groupChange(
+        masterKey: ByteArray,
+        build: (org.signal.libsignal.zkgroup.groups.GroupSecretParams) -> GroupChange.Actions?,
+    ): Boolean {
+        val auth = authData ?: return false
+        return try {
+            val secretParams = org.signal.libsignal.zkgroup.groups.GroupSecretParams.deriveFromMasterKey(
+                org.signal.libsignal.zkgroup.groups.GroupMasterKey(masterKey),
+            )
+            val actions = build(secretParams) ?: return false
+            val credential = SignalGroupsApi
+                .fetchCredentials(basicAuthHeader(), signalTls())
+                .minByOrNull { kotlin.math.abs(it.redemptionTimeSeconds - System.currentTimeMillis() / 1000) }
+                ?: return false
+            val authorization = SignalGroupsApi.authorizationFor(auth, secretParams, credential) ?: return false
+            SignalGroupsApi.patchGroup(authorization, actions, signalTls())
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not submit a group change", t)
+            false
+        }
     }
 
     suspend fun updateGroupParticipants(conversationId: String, participantIds: List<String>, action: String): Boolean {
@@ -1196,29 +1216,20 @@ object SignalClient {
             Log.w(TAG, "no stored master key for $conversationId, cannot change membership")
             return false
         }
-        val auth = authData
-        if (auth != null) {
-            try {
-                // Members go as UuidCiphertext, not plaintext ACIs — hiding the membership list is the
-                // point of GroupsV2, and posting it in the clear defeats it.
-                val secretParams = SignalGroups.secretParamsFor(masterKey)
-                val encryptedMembers = participantIds.mapNotNull { SignalGroups.encryptServiceId(secretParams, it) }
-                if (encryptedMembers.size != participantIds.size) {
-                    Log.w(TAG, "could not encrypt every member id for $conversationId, refusing to send them")
-                    return false
-                }
-                val body = org.json.JSONObject().apply {
-                    put("masterKey", AndroidBase64.encodeToString(masterKey, AndroidBase64.NO_WRAP))
-                    put(
-                        "members",
-                        org.json.JSONArray(encryptedMembers.map { AndroidBase64.encodeToString(it, AndroidBase64.NO_WRAP) }),
-                    )
-                    put("action", action)
-                    put("revision", existing.groupRevision + 1)
-                }.toString().toByteArray(Charsets.UTF_8)
-                val resp = NetworkClient.execute("https://chat.signal.org/v2/groups/", method = "PATCH", headers = mapOf("Authorization" to "Basic ${SignalGroups.basicAuth(auth)}", "Content-Type" to "application/json"), body = body, sslSocketFactory = signalTls())
-                Log.i(TAG, "updateGroupParticipants PATCH /v2/groups/ $action ${resp.status}")
-            } catch (e: Exception) { Log.w(TAG, "updateGroupParticipants failed", e) }
+        val revision = existing.groupRevision + 1
+        val accepted = when (action) {
+            "add" -> groupChange(masterKey) { secretParams ->
+                SignalGroupsApi.addMembersChange(secretParams, participantIds, revision)
+            }
+            else -> {
+                // Removal needs DeleteMemberAction, which is not built yet; refuse rather than pretend.
+                Log.w(TAG, "removing members from a Signal group is not implemented")
+                false
+            }
+        }
+        if (!accepted) {
+            Log.w(TAG, "the server rejected the membership change for $conversationId")
+            return false
         }
         for (pid in participantIds) {
             if (action == "add") _events.emit(SignalEvent.ParticipantAdded(conversationId = conversationId, participantId = pid))
