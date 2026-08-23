@@ -16,6 +16,7 @@ import com.vayunmathur.communicate.data.signal.call.toContent
 import com.vayunmathur.communicate.data.signal.call.toRingRtc
 import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
 import com.vayunmathur.communicate.data.signal.transport.SignalCallingApi
+import com.vayunmathur.communicate.data.signal.transport.SignalGroupsApi
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
@@ -2066,6 +2067,50 @@ object SignalClient {
         contactFor(serviceId)?.phoneE164?.takeIf { it.isNotBlank() } ?: serviceId
 
     /**
+     * Refresh a group's membership and title from the server.
+     *
+     * This is what makes a reply reach the whole group: membership learned from inbound messages only covers
+     * whoever has spoken, whereas the server knows everyone. Returns false when the group could not be fetched,
+     * leaving the locally-known membership in place rather than emptying it.
+     */
+    suspend fun refreshGroup(conversationId: String): Boolean {
+        val auth = authData ?: return false
+        val dao = db?.conversationDao() ?: return false
+        val existing = try { dao.getConversation(conversationId) } catch (_: Exception) { null } ?: return false
+        val masterKey = existing.groupMasterKey ?: return false
+        return try {
+            val secretParams = org.signal.libsignal.zkgroup.groups.GroupSecretParams.deriveFromMasterKey(
+                org.signal.libsignal.zkgroup.groups.GroupMasterKey(masterKey),
+            )
+            val credential = SignalGroupsApi
+                .fetchCredentials(basicAuthHeader(), signalTls())
+                // Credentials come a week at a time; the one for today is the only one the server accepts now.
+                .minByOrNull { kotlin.math.abs(it.redemptionTimeSeconds - System.currentTimeMillis() / 1000) }
+                ?: return false
+            val authorization = SignalGroupsApi.authorizationFor(auth, secretParams, credential) ?: return false
+            val group = SignalGroupsApi.fetchGroup(authorization, signalTls()) ?: return false
+            val state = SignalGroupsApi.decryptGroup(secretParams, group) ?: return false
+            dao.upsert(
+                existing.copy(
+                    isGroup = true,
+                    name = state.title.ifBlank { existing.name },
+                    participants = state.memberAcis.joinToString(","),
+                    groupRevision = state.revision,
+                ),
+            )
+            Log.i(
+                TAG,
+                "refreshed $conversationId: \"${state.title}\" revision=${state.revision} " +
+                    "members=${state.memberAcis.size} pending=${state.pendingCount}",
+            )
+            true
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not refresh the group $conversationId", t)
+            false
+        }
+    }
+
+    /**
      * Record a group we received a message from, so we can reply to it.
      *
      * Membership is learned incrementally from whoever has spoken: the envelope names only its sender, and the
@@ -2092,6 +2137,9 @@ object SignalClient {
                     participants = members.joinToString(","),
                 ),
             )
+            // Now that the master key is known, ask the server for the real membership. Best-effort: the
+            // message is already usable with what we learned from the envelope.
+            scope.launch { refreshGroup(conversationId) }
         } catch (t: Throwable) {
             Log.w(TAG, "could not record the group behind $conversationId", t)
         }

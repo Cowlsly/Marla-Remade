@@ -12,8 +12,11 @@ import org.signal.libsignal.protocol.ServiceId
 import org.signal.libsignal.zkgroup.ServerPublicParams
 import org.signal.libsignal.zkgroup.auth.AuthCredentialWithPniResponse
 import org.signal.libsignal.zkgroup.auth.ClientZkAuthOperations
+import org.signal.libsignal.zkgroup.groups.ClientZkGroupCipher
 import org.signal.libsignal.zkgroup.groups.GroupSecretParams
+import org.signal.libsignal.zkgroup.groups.UuidCiphertext
 import org.signal.storageservice.storage.protos.groups.Group
+import org.signal.storageservice.storage.protos.groups.GroupAttributeBlob
 import javax.net.ssl.SSLSocketFactory
 import kotlin.io.encoding.Base64
 import kotlin.io.encoding.ExperimentalEncodingApi
@@ -152,6 +155,55 @@ object SignalGroupsApi {
             Log.w(TAG, "could not parse the group response", t)
             null
         }
+    }
+
+    /** A group's server state, decrypted. */
+    data class GroupState(
+        val title: String,
+        val revision: Int,
+        /** Full membership as ACI strings — what a fan-out send needs. */
+        val memberAcis: List<String>,
+        /** Invited but not yet joined; they cannot receive group messages yet. */
+        val pendingCount: Int,
+    )
+
+    /**
+     * Decrypt a fetched group.
+     *
+     * Every identifying field on the wire is encrypted under the group's secret params: members are
+     * `UuidCiphertext` and the title is a `GroupAttributeBlob` inside an encrypted blob. That is the whole point
+     * of GroupsV2 — the server routes the group without knowing who is in it.
+     */
+    fun decryptGroup(secretParams: GroupSecretParams, group: Group): GroupState? = try {
+        val cipher = ClientZkGroupCipher(secretParams)
+        val members = group.membersList.mapNotNull { member ->
+            try {
+                // A member carrying a presentation has not been reduced to a plain userId yet; skip rather than
+                // guess, since its ACI is inside the presentation.
+                if (member.presentation != null && member.presentation.size() > 0) return@mapNotNull null
+                val serviceId = cipher.decrypt(UuidCiphertext(member.userId.toByteArray()))
+                (serviceId as? ServiceId.Aci)?.toString()
+            } catch (t: Throwable) {
+                Log.i(TAG, "skipping an undecryptable group member: ${t.message}")
+                null
+            }
+        }
+        val title = try {
+            val blobBytes = cipher.decryptBlob(group.title.toByteArray())
+            GroupAttributeBlob.parseFrom(blobBytes).title.trim()
+        } catch (t: Throwable) {
+            Log.i(TAG, "could not decrypt the group title: ${t.message}")
+            ""
+        }
+        GroupState(
+            title = title,
+            revision = group.version,
+            memberAcis = members,
+            pendingCount = group.membersPendingProfileKeyCount,
+        )
+    } catch (t: Throwable) {
+        Log.w(TAG, "could not decrypt the group", t)
+        null
     }
 
     /** Signal's zkgroup server public params, needed to verify credentials it issues. */
