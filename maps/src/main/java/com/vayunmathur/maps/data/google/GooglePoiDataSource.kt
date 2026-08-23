@@ -66,9 +66,26 @@ object GooglePoiDataSource {
     // Bounded LRU cache (access-ordered). Stores the resolved info OR null (a
     // negative cache entry) so a place with no Google match isn't retried on
     // every reselect. Guarded by `synchronized(cache)`.
+    //
+    // Only a request that COMPLETED is ever written here — see [Outcome].
     private data class Key(val name: String, val lat: Double, val lon: Double)
     private val cache = object : LinkedHashMap<Key, GooglePoiInfo?>(16, 0.75f, true) {
         override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Key, GooglePoiInfo?>) = size > 64
+    }
+
+    /**
+     * Why a fetch came back empty.
+     *
+     * The two reasons must not be remembered alike. "Google has nothing for this
+     * place" is a stable fact and worth caching; "the request did not complete" is a
+     * property of the moment, and caching it strands the place for the rest of the
+     * process — a POI tapped offline would stay bare even after connectivity
+     * returned, with no way for the user to ask again.
+     */
+    private sealed interface Outcome {
+        data class Found(val info: GooglePoiInfo) : Outcome
+        data object NoMatch : Outcome
+        data object Failed : Outcome
     }
 
     /**
@@ -80,24 +97,32 @@ object GooglePoiDataSource {
         if (name.isBlank()) return null
         val key = Key(name, lat, lon)
         synchronized(cache) { if (cache.containsKey(key)) return cache[key] }
-        val info = runCatching { fetchUncached(name, lat, lon) }.getOrNull()
-        synchronized(cache) { cache[key] = info }
-        return info
+        val outcome = runCatching { fetchUncached(name, lat, lon) }.getOrElse { Outcome.Failed }
+        return when (outcome) {
+            is Outcome.Found -> outcome.info.also { synchronized(cache) { cache[key] = it } }
+            Outcome.NoMatch -> null.also { synchronized(cache) { cache[key] = null } }
+            // Deliberately not cached, so the next tap retries.
+            Outcome.Failed -> null
+        }
     }
 
-    private suspend fun fetchUncached(name: String, lat: Double, lon: Double): GooglePoiInfo? =
+    private suspend fun fetchUncached(name: String, lat: Double, lon: Double): Outcome =
         withContext(Dispatchers.IO) {
             warmSession()
             val pb = buildSearchPb(name, lat, lon)
             val url = "$SEARCH_ENDPOINT&q=${name.enc()}&pb=${pb.enc()}"
-            val body = get(url) ?: return@withContext null
-            val root = GoogleResponse.parseOrNull(body) ?: return@withContext null
-            val entry = pickEntry(root, lat, lon) ?: return@withContext null
+            // A transport error or a non-2xx never became an answer.
+            val body = get(url) ?: return@withContext Outcome.Failed
+            // Nor did a body we cannot parse: a 200 that does not decode is far more
+            // likely an interstitial (consent, captcha, rate limit) than a genuine
+            // "no such place".
+            val root = GoogleResponse.parseOrNull(body) ?: return@withContext Outcome.Failed
+            val entry = pickEntry(root, lat, lon) ?: return@withContext Outcome.NoMatch
             // Reviews are no longer fetched here: the dead `listentitiesreviews` RPC 404s, and the
             // WebView scrape ([WebReviewsFetcher]) is async/slow, so it must NOT block base
             // enrichment. The base info carries reviews = emptyList(); the caller fills them in
             // progressively once it has [GooglePoiInfo.featureId].
-            parsePlace(entry)
+            parsePlace(entry)?.let { Outcome.Found(it) } ?: Outcome.NoMatch
         }
 
     // --- HTTP plumbing ------------------------------------------------------
