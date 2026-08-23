@@ -154,16 +154,31 @@ class FindFamilyViewModel(
      * on an outdated (classic-only) app, invokes [onNeedsUpdate] and does NOT add them.
      * Unknown (not-yet-registered) peers are allowed through — they may register with PQC
      * once they install the app.
+     *
+     * [inviteFingerprint] is the `k=` value of the invite link this started from, if any. The
+     * relay's key must hash to it, otherwise [onKeyMismatch] fires and the peer is not added.
      */
-    fun connectUser(user: User, onNeedsUpdate: () -> Unit, onDone: () -> Unit) {
+    fun connectUser(
+        user: User,
+        inviteFingerprint: String? = null,
+        onNeedsUpdate: () -> Unit,
+        onKeyMismatch: () -> Unit = {},
+        onDone: () -> Unit,
+    ) {
         viewModelScope.launch(Dispatchers.IO) {
-            val status = Networking.peerCryptoStatus(user.id)
-            if (status == Networking.PeerCrypto.NEEDS_UPDATE) {
-                withContext(Dispatchers.Main) { onNeedsUpdate() }
-            } else {
-                repository.upsertUser(user)
-                LocationServiceController.syncServiceState(ctx)
-                withContext(Dispatchers.Main) { onDone() }
+            val check = Networking.peerCryptoStatus(user.id, inviteFingerprint)
+            when (check.status) {
+                Networking.PeerCrypto.NEEDS_UPDATE -> withContext(Dispatchers.Main) { onNeedsUpdate() }
+                Networking.PeerCrypto.KEY_MISMATCH -> withContext(Dispatchers.Main) { onKeyMismatch() }
+                else -> {
+                    // Store the fingerprint-checked key with the row itself, so the key that was
+                    // verified is the one used from here on rather than a fresh relay lookup.
+                    repository.upsertUser(
+                        check.verifiedBundleB64?.let { user.copy(pqcEncryptionKey = it) } ?: user
+                    )
+                    LocationServiceController.syncServiceState(ctx)
+                    withContext(Dispatchers.Main) { onDone() }
+                }
             }
         }
     }

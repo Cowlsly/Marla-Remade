@@ -278,6 +278,11 @@
     <!-- OutdatedPeerDialog: Body telling the user the other person must update their app before sharing can work. Sentence -->
     <string name="outdated_peer_body">This person is using an older version of FindFamily that doesn\'t support quantum-safe encryption. Ask them to update their app, then try connecting again.</string>
 
+    <!-- KeyMismatchDialog: Title shown when a peer's encryption key doesn't match the one their invite link vouched for. Noun phrase -->
+    <string name="key_mismatch_title">Couldn\'t verify this person</string>
+    <!-- KeyMismatchDialog: Body explaining the key check failed and the connection was refused. Sentence -->
+    <string name="key_mismatch_body">The encryption key for this person doesn\'t match the one their invite link listed, so they weren\'t added. Check that you opened the whole link, and ask them to send a new one.</string>
+
     <!-- TrackingTileService: Quick Settings tile label. Short noun phrase -->
     <string name="tile_label">FindFamily tracking</string>
     <!-- TrackingTileService: tile subtitle when tracking is on. Short status -->

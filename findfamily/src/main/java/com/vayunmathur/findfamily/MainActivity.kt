@@ -75,15 +75,15 @@ class MainActivity : ComponentActivity() {
     }
 
     /**
-     * Pending `findfamily://add/<base26>` invite id (already decoded), set on cold
+     * Pending `findfamily://add/<base26>` invite (already decoded), set on cold
      * start and via [onNewIntent] for warm starts. Read from Compose so a tap routes
      * to the prefilled Add Person dialog; cleared once consumed.
      */
-    private val deepLinkAddId = mutableStateOf<Long?>(null)
+    private val deepLinkAddInvite = mutableStateOf<AddInvite?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        deepLinkAddId.value = parseAddDeepLink(intent)
+        deepLinkAddInvite.value = parseAddDeepLink(intent)
         // FIRST_PARTY: api.vayunmathur.com + data.vayunmathur.com + findfamily.cc (Cloudflare ISRG+GTS)
         NetworkClient.init(this, TrustBundle.FIRST_PARTY)
         enableEdgeToEdge()
@@ -124,8 +124,8 @@ class MainActivity : ComponentActivity() {
                         ffViewModel,
                         ffViewModel.missingFeatures,
                         deepLinkPeerId,
-                        deepLinkAddId.value,
-                        onDeepLinkAddConsumed = { deepLinkAddId.value = null },
+                        deepLinkAddInvite.value,
+                        onDeepLinkAddConsumed = { deepLinkAddInvite.value = null },
                     )
                 }
             }
@@ -137,21 +137,28 @@ class MainActivity : ComponentActivity() {
         // singleTop: warm-start links arrive here. Keep getIntent() in sync and
         // surface the invite so Compose routes to the prefilled dialog.
         setIntent(intent)
-        parseAddDeepLink(intent)?.let { deepLinkAddId.value = it }
+        parseAddDeepLink(intent)?.let { deepLinkAddInvite.value = it }
     }
 
     /**
-     * Decodes a `findfamily://add/<base26Userid>` invite to a numeric user id, or
-     * null for any other intent. The link carries only the sender's public id.
+     * Decodes a `findfamily://add/<base26Userid>[?k=<fingerprint>]` invite, or null for any
+     * other intent. `k` is a truncated hash of the sender's public bundle, which the connect
+     * flow checks the relay's key against; links from builds before it existed have no `k`.
      */
-    private fun parseAddDeepLink(intent: Intent?): Long? {
+    private fun parseAddDeepLink(intent: Intent?): AddInvite? {
         val data = intent?.data ?: return null
         if (data.scheme != "findfamily" || data.host != "add") return null
         val segment = data.lastPathSegment?.trim()?.uppercase() ?: return null
         if (segment.isEmpty() || segment.any { it !in 'A'..'Z' }) return null
-        return runCatching { segment.decodeBase26() }.getOrNull()
+        val id = runCatching { segment.decodeBase26() }.getOrNull() ?: return null
+        val fingerprint = runCatching { data.getQueryParameter("k")?.trim() }.getOrNull()
+            ?.takeIf { it.isNotEmpty() && it.all { c -> c.isLetterOrDigit() || c == '-' || c == '_' } }
+        return AddInvite(id, fingerprint)
     }
 }
+
+/** A tapped invite link: the sender's id, plus the bundle fingerprint it vouched for. */
+data class AddInvite(val id: Long, val fingerprint: String?)
 
 @Composable
 fun NoPermissionsScreen(
@@ -291,7 +298,7 @@ sealed interface Route: NavKey {
     data class UserPageHistoryDatePicker(val initialDate: LocalDate): Route
 
     @Serializable
-    data class AddPersonDialog(val id: Long? = null): Route
+    data class AddPersonDialog(val id: Long? = null, val fingerprint: String? = null): Route
 
     @Serializable
     data object AddLinkDialog: Route
@@ -314,7 +321,7 @@ fun Navigation(
     ffViewModel: FindFamilyViewModel,
     showMissingFeatures: Boolean,
     deepLinkUwbPeerId: Long? = null,
-    deepLinkAddId: Long? = null,
+    deepLinkAddInvite: AddInvite? = null,
     onDeepLinkAddConsumed: () -> Unit = {},
 ) {
     val backStack = rememberNavBackStack<Route>(Route.MainPage())
@@ -333,9 +340,9 @@ fun Navigation(
 
     // A tapped invite prefills the Add Person dialog; the user still explicitly
     // accepts, so the connection/crypto flow is unchanged.
-    LaunchedEffect(deepLinkAddId) {
-        if (deepLinkAddId != null) {
-            backStack.add(Route.AddPersonDialog(deepLinkAddId))
+    LaunchedEffect(deepLinkAddInvite) {
+        if (deepLinkAddInvite != null) {
+            backStack.add(Route.AddPersonDialog(deepLinkAddInvite.id, deepLinkAddInvite.fingerprint))
             onDeepLinkAddConsumed()
         }
     }
@@ -349,7 +356,7 @@ fun Navigation(
                 TimeZone.currentSystemDefault()).date)
         }
         entry<Route.AddPersonDialog>(metadata = DialogPage()) {
-            AddPersonDialog(backStack, ffViewModel, platform, it.id)
+            AddPersonDialog(backStack, ffViewModel, platform, it.id, it.fingerprint)
         }
         entry<Route.AddLinkDialog>(metadata = DialogPage()) {
             AddLinkDialog(backStack, ffViewModel)

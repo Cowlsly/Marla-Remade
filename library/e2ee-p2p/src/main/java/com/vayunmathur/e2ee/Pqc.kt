@@ -82,6 +82,10 @@ object Pqc {
     fun securityCode(myBundle: ByteArray, peerBundle: ByteArray): String =
         SecurityCode.compute(myBundle, peerBundle)
 
+    /** Short fingerprint of a bundle for invite links (see [InviteFingerprint]). */
+    fun inviteFingerprint(userId: Long, publicBundle: ByteArray): ByteArray =
+        InviteFingerprint.compute(userId, publicBundle)
+
     // --- helpers ---
 
     private fun lenPrefix(a: ByteArray, b: ByteArray): ByteArray {

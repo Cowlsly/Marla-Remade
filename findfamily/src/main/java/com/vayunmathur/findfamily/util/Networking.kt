@@ -606,6 +606,18 @@ object Networking {
     data class PqcLinkKey(val seedB64Url: String, val publicBundleB64: String)
 
     /**
+     * This device's invite fingerprint, as the unpadded base64url `k=` value of a share link.
+     * Null when PQC is unavailable — the link then goes out without it and the recipient simply
+     * has nothing to pre-verify against, exactly as before this parameter existed.
+     */
+    fun myInviteFingerprint(): String? {
+        if (!pqcReady) return null
+        return runCatching {
+            Base64.UrlSafe.encode(Pqc.inviteFingerprint(userid, pqcIdentity.publicBundle)).trimEnd('=')
+        }.onFailure { Log.w(TAG, "invite fingerprint failed", it) }.getOrNull()
+    }
+
+    /**
      * Generates a full PQC identity (ML-KEM + ML-DSA) for a device we own but that cannot
      * run keygen itself — currently only UWB trackers, whose private bundle we hold on
      * their behalf. Returns (publicBundleBase64, privateBundleBase64) where the private
@@ -680,19 +692,54 @@ object Networking {
 
         /** Peer is not registered, or the lookup couldn't complete (socket down/timeout). */
         UNKNOWN,
+
+        /** The relay's bundle doesn't match the fingerprint the invite link vouched for. */
+        KEY_MISMATCH,
     }
+
+    /**
+     * Outcome of the connect-time key check. [verifiedBundleB64] is set only when an invite
+     * fingerprint was supplied and matched, and is meant to go straight onto the [User] row being
+     * created — pinning the key that was checked, so [peerPqcBundle] prefers it and a later lookup
+     * can't swap in one the fingerprint never covered.
+     */
+    data class PeerKeyCheck(val status: PeerCrypto, val verifiedBundleB64: String? = null)
 
     /**
      * Checks a peer's post-quantum capability "when connecting", over the socket. PQC bundle →
      * [PeerCrypto.PQC]; only a classic key → [PeerCrypto.NEEDS_UPDATE] (show the update dialog);
      * neither, or the socket is down/times out → [PeerCrypto.UNKNOWN].
+     *
+     * [expectedFingerprint] is the `k=` value of the invite link this connection came from, when
+     * there was one. The relay's bundle has to hash to it, or the result is
+     * [PeerCrypto.KEY_MISMATCH] — this is what stops the relay handing out a key it controls
+     * instead of the sender's.
      */
-    suspend fun peerCryptoStatus(userId: Long): PeerCrypto {
-        val res = wsGetKey(userId) ?: return PeerCrypto.UNKNOWN
+    suspend fun peerCryptoStatus(userId: Long, expectedFingerprint: String? = null): PeerKeyCheck {
+        val res = wsGetKey(userId) ?: return PeerKeyCheck(PeerCrypto.UNKNOWN)
         return when (res.status) {
-            WS_KEY_PQC -> PeerCrypto.PQC
-            WS_KEY_CLASSIC -> PeerCrypto.NEEDS_UPDATE
-            else -> PeerCrypto.UNKNOWN
+            WS_KEY_PQC -> {
+                if (expectedFingerprint == null) return PeerKeyCheck(PeerCrypto.PQC)
+                val bundle = res.bundle ?: return PeerKeyCheck(PeerCrypto.UNKNOWN)
+                if (!fingerprintMatches(userId, bundle, expectedFingerprint)) {
+                    Log.w(TAG, "invite fingerprint mismatch for ${userId.toULong()}")
+                    return PeerKeyCheck(PeerCrypto.KEY_MISMATCH)
+                }
+                PeerKeyCheck(PeerCrypto.PQC, Base64.encode(bundle))
+            }
+            WS_KEY_CLASSIC -> PeerKeyCheck(PeerCrypto.NEEDS_UPDATE)
+            else -> PeerKeyCheck(PeerCrypto.UNKNOWN)
         }
+    }
+
+    /**
+     * Whether [bundle] is the one [expected] (unpadded base64url) names. A malformed or truncated
+     * value fails rather than being skipped, so a mangled link is treated as unverified instead of
+     * silently trusting whatever the relay returned.
+     */
+    private fun fingerprintMatches(userId: Long, bundle: ByteArray, expected: String): Boolean {
+        val padded = if (expected.length % 4 == 0) expected else expected + "=".repeat(4 - expected.length % 4)
+        val want = runCatching { Base64.UrlSafe.decode(padded) }.getOrNull() ?: return false
+        return want.contentEquals(Pqc.inviteFingerprint(userId, bundle))
     }
 }

@@ -44,6 +44,7 @@ fun AddPersonDialog(
     ffViewModel: FindFamilyViewModel,
     platform: Platform,
     id: Long?,
+    fingerprint: String? = null,
 ) {
     val usersByID by ffViewModel.usersById.collectAsState()
 
@@ -58,6 +59,11 @@ fun AddPersonDialog(
     val userStatus = usersByID[userid.decodeBase26()]?.requestStatus
     val context = LocalContext.current
     var showOutdatedPeer by remember { mutableStateOf(false) }
+    var showKeyMismatch by remember { mutableStateOf(false) }
+
+    // The fingerprint only vouches for the id that arrived in the link, so it stops applying
+    // if the field gets edited to a different one.
+    val inviteFingerprint = fingerprint?.takeIf { id != null && userid.decodeBase26() == id }
 
     Dialog({backStack.pop()}) {
         Card {
@@ -78,13 +84,16 @@ fun AddPersonDialog(
                 )
 
                 // Share sheet instead of copy/paste: sends an https link that bounces to
-                // findfamily://add/<myId>, which prefills the recipient's Add Person dialog.
-                // The web hop exists because many messengers won't linkify a bare custom
-                // scheme. The id rides in the fragment, which browsers never send, so the
-                // server sees only that some share page was opened.
+                // findfamily://add/<myId>?k=<fingerprint>, which prefills the recipient's Add
+                // Person dialog. The web hop exists because many messengers won't linkify a bare
+                // custom scheme. Both values ride in the fragment, which browsers never send, so
+                // the server sees only that some share page was opened. `k` is a 22-character
+                // hash of our public bundle, not the bundle itself (~4 kB base64) — the recipient
+                // fetches the key from the relay and checks it against this.
                 OutlinedButton(
                     {
-                        val link = "https://ma.vayunmathur.com/ff/share#id=${Networking.userid.encodeBase26()}"
+                        val base = "https://ma.vayunmathur.com/ff/share#id=${Networking.userid.encodeBase26()}"
+                        val link = Networking.myInviteFingerprint()?.let { "$base&k=$it" } ?: base
                         ExternalIntents.shareText(
                             context,
                             link,
@@ -135,7 +144,9 @@ fun AddPersonDialog(
                         )
                         ffViewModel.connectUser(
                             userToAdd,
+                            inviteFingerprint = inviteFingerprint,
                             onNeedsUpdate = { showOutdatedPeer = true },
+                            onKeyMismatch = { showKeyMismatch = true },
                             onDone = { backStack.pop() },
                         )
                     },
@@ -153,6 +164,10 @@ fun AddPersonDialog(
 
     if (showOutdatedPeer) {
         OutdatedPeerDialog(onDismiss = { showOutdatedPeer = false })
+    }
+
+    if (showKeyMismatch) {
+        KeyMismatchDialog(onDismiss = { showKeyMismatch = false })
     }
 }
 
