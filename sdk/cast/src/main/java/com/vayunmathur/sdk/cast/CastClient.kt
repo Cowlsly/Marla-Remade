@@ -328,6 +328,32 @@ class CastClient(context: Context) {
     }
 
     /**
+     * Tell the TV to play a resource, in a content session.
+     *
+     * [resourceId] is this app's own name for it: whatever [CastResourceProvider] will be asked for.
+     * Call it again for the next item - there is no playlist, because the queue stays here where the
+     * ordering, the artwork and the metadata are.
+     *
+     * Silent and non-throwing, like [reportPlaybackState]: a session that has just ended is the
+     * common reason for this to go nowhere, and the client already learns that through [onEnded].
+     */
+    fun play(resourceId: String, mimeType: String, durationMs: Long = 0) {
+        if (!open) return
+        val remote = service ?: return
+        val message = Message.obtain(null, CastContract.MSG_PLAY_MEDIA).apply {
+            data = Bundle().apply {
+                putString(CastContract.KEY_RESOURCE_ID, resourceId)
+                putString(CastContract.KEY_RESOURCE_TYPE, mimeType)
+                putLong(CastContract.KEY_MEDIA_DURATION_MS, durationMs)
+            }
+        }
+        try {
+            remote.send(message)
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /**
      * End the session and unbind. Idempotent, and safe if [openSession] never succeeded.
      *
      * [onEnded] is not called: the caller asked for this and already knows.

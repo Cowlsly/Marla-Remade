@@ -60,6 +60,13 @@ data class NowPlayingUiState(
     val sourceName: String? = null,
     /** Raw embedded lyrics (LRC or plain), empty when the file carries none. */
     val lyrics: String = "",
+    /**
+     * The library row for the loaded track, or null when it is not in the library.
+     *
+     * Carried because casting needs the file itself - its URI to read and its id to name it by -
+     * where the rest of this state only needs what to draw.
+     */
+    val song: Music? = null,
 )
 
 /**
@@ -77,6 +84,14 @@ interface MusicActions {
     fun skipPrevious() {}
     fun toggleShuffle() {}
     fun toggleRepeat() {}
+
+    /**
+     * Stop local playback, because a television has taken over.
+     *
+     * Its own action rather than reusing [togglePlayPause]: the phone must end up stopped whatever
+     * it was doing, and a toggle would start it playing if it happened to be paused.
+     */
+    fun pausePlayback() {}
 
     companion object {
         val Noop: MusicActions = object : MusicActions {}

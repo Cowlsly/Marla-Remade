@@ -79,6 +79,7 @@ class MusicViewModel(
         playbackManager.playShuffled(songs, sourceId, sourceName)
 
     override fun togglePlayPause() { playbackManager.togglePlayPause() }
+    override fun pausePlayback() { playbackManager.pause() }
     override fun seekTo(pos: Long) = playbackManager.seekTo(pos)
     override fun skipNext() { playbackManager.skipNext() }
     override fun skipPrevious() { playbackManager.skipPrevious() }
@@ -122,6 +123,7 @@ class MusicViewModel(
             sourceId = sourceId,
             sourceName = sourceName,
             lyrics = lyrics,
+            song = song,
         )
     }
 

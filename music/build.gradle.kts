@@ -27,4 +27,10 @@ dependencies {
     implementation(libs.androidx.media3.ui.compose.material3)
 
     implementation(project(":library:image"))
+
+    // Casting. `:sdk:cast` owns no sockets and needs no network permission - which is the point,
+    // because this app deliberately has no INTERNET permission. `:library:media` is here for the
+    // Opus transcoder: every cast audio track is 48 kHz Opus, and most of the library is not.
+    implementation(project(":sdk:cast"))
+    implementation(project(":library:media"))
 }

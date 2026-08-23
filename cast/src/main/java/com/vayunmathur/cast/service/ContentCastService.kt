@@ -13,6 +13,7 @@ import android.os.RemoteException
 import android.util.Log
 import com.vayunmathur.cast.platform.CastController
 import com.vayunmathur.cast.platform.ContentSessionResult
+import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackAction
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.protocol.PlaybackState
@@ -84,6 +85,14 @@ class ContentCastService : Service() {
                 }
                 CastContract.MSG_RESOURCE_RESPONSE -> {
                     resources.onResponse(msg.data)
+                    true
+                }
+                CastContract.MSG_PLAY_MEDIA -> {
+                    // Dropped with no session, for the same reason a state snapshot is: there is no
+                    // TV to play it on, and a client may send one a tick after the session ended.
+                    if (sessionOpen) {
+                        msg.data?.let { CastController.playMedia(it.toPlayMedia()) }
+                    }
                     true
                 }
                 else -> false
@@ -264,6 +273,15 @@ private fun Bundle.toPlaybackState(): PlaybackState = PlaybackState(
     volume = getFloat(CastContract.KEY_VOLUME, 1f),
     hasNext = getBoolean(CastContract.KEY_HAS_NEXT),
     hasPrevious = getBoolean(CastContract.KEY_HAS_PREVIOUS),
+)
+
+/** The item a client asked for, as the message the TV understands. See [Bundle.toPlaybackState]. */
+private fun Bundle.toPlayMedia(): PlayMedia = PlayMedia(
+    resourceId = getString(CastContract.KEY_RESOURCE_ID).orEmpty(),
+    // A default rather than a refusal: ExoPlayer sniffs when it is not told, which costs a round
+    // trip but plays, where a refused item would simply be silence.
+    mimeType = getString(CastContract.KEY_RESOURCE_TYPE).orEmpty(),
+    durationMs = getLong(CastContract.KEY_MEDIA_DURATION_MS),
 )
 
 /** The command the TV sent, as the `Message` the SDK reads. See [Bundle.toPlaybackState]. */

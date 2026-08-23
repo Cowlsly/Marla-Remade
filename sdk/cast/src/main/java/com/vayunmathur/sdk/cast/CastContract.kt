@@ -116,6 +116,17 @@ object CastContract {
      */
     const val MSG_RESOURCE_RESPONSE = 8
 
+    /**
+     * Play a resource, in a content session.
+     *
+     * Carries [KEY_RESOURCE_ID], [KEY_RESOURCE_TYPE] and optionally [KEY_MEDIA_DURATION_MS]. Sent
+     * once per item rather than as a playlist, because the queue stays with the app: it owns the
+     * ordering, the artwork and the metadata, so advancing is a decision the app makes and reports.
+     *
+     * Ignored without a session, so a client need not track readiness itself.
+     */
+    const val MSG_PLAY_MEDIA = 9
+
     // ---- service → client ----
 
     /**
@@ -251,6 +262,14 @@ object CastContract {
 
     /** The resource's MIME type, which decides which extractor the TV's player reaches for. */
     const val KEY_RESOURCE_TYPE = "resourceType"
+
+    /**
+     * How long the item runs, in milliseconds, or absent when the app does not know.
+     *
+     * Sent even though the container states it, so the TV can draw a seek bar before the first byte
+     * arrives rather than having it appear a moment into playback.
+     */
+    const val KEY_MEDIA_DURATION_MS = "mediaDurationMs"
 
     // ---- MSG_SESSION_ENDED payload ----
 

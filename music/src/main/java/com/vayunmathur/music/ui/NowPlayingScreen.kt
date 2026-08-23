@@ -1,6 +1,17 @@
 package com.vayunmathur.music.ui
 
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.runtime.collectAsState
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.rememberCoroutineScope
+import com.vayunmathur.library.ui.IconCast
+import com.vayunmathur.library.ui.IconCastConnected
+import com.vayunmathur.music.platform.CastPlayback
+import com.vayunmathur.sdk.cast.CastClient
+import com.vayunmathur.sdk.cast.CastPickerContract
+import kotlinx.coroutines.launch
 import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -85,6 +96,7 @@ fun NowPlayingScreen(
                 title = { },
                 navigationIcon = { IconNavigation(backStack) },
                 actions = {
+                    CastButton(state = state, actions = actions)
                     val sourceName = state.sourceName
                     if (state.sourceId != null && sourceName != null) {
                         TextButton(onClick = {
@@ -244,6 +256,60 @@ fun NowPlayingScreen(
                     IconShuffle(tint = if (state.shuffle) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant)
                 }
             }
+        }
+    }
+}
+
+/**
+ * Puts this track on a television, or stops doing so.
+ *
+ * Talks to [CastPlayback] directly rather than through [MusicActions], the way YouPipe's player
+ * does: the picker is an `ActivityResultContract`, so the launcher has to live in a composable, and
+ * routing the session through the ViewModel would buy nothing but a second copy of its state.
+ *
+ * Absent entirely when Cast is not installed. An icon that only ever opened a store listing would be
+ * an advertisement in the middle of a transport bar.
+ */
+@Composable
+private fun CastButton(state: NowPlayingUiState, actions: MusicActions) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val castState by CastPlayback.state.collectAsState()
+
+    val supported = remember { CastPlayback.support(context) == CastClient.Support.READY }
+    if (!supported) return
+
+    val song = state.song
+
+    val picker = rememberLauncherForActivityResult(CastPickerContract()) { connected ->
+        if (!connected || song == null) return@rememberLauncherForActivityResult
+        scope.launch {
+            if (CastPlayback.open(context)) {
+                // The phone stops before the TV starts, so the track is never coming out of both.
+                actions.pausePlayback()
+                CastPlayback.play(context, song)
+            }
+        }
+    }
+
+    when (val current = castState) {
+        is CastPlayback.State.Casting -> IconButton(onClick = { CastPlayback.close() }) {
+            if (current.preparing) {
+                CircularProgressIndicator(modifier = Modifier.size(20.dp))
+            } else {
+                IconCastConnected(tint = MaterialTheme.colorScheme.primary)
+            }
+        }
+        CastPlayback.State.Connecting -> IconButton(onClick = {}) {
+            CircularProgressIndicator(modifier = Modifier.size(20.dp))
+        }
+        CastPlayback.State.Idle -> IconButton(
+            onClick = { picker.launch(Unit) },
+            // Nothing loaded means nothing to send, and a button that silently did nothing would be
+            // worse than one that is plainly unavailable.
+            enabled = song != null,
+        ) {
+            IconCast()
         }
     }
 }
