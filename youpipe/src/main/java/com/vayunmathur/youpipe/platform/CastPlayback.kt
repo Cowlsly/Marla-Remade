@@ -127,6 +127,9 @@ object CastPlayback {
 
     private var reportJob: Job? = null
 
+    /** Counting down to closing a session nothing is drawing into. See [attachPlayer]. */
+    private var orphanJob: Job? = null
+
     /**
      * The player a remote command is applied to.
      *
@@ -139,7 +142,38 @@ object CastPlayback {
     /** Called by the player screen once its `MediaController` has connected, and with null as it goes. */
     fun attachPlayer(newPlayer: Player?) {
         player = newPlayer
+        if (newPlayer != null) {
+            orphanJob?.cancel()
+            orphanJob = null
+            return
+        }
+        if (_state.value !is State.Casting) return
+        // **The grace period is what lets a cast survive navigation.** Leaving a video used to end the
+        // session outright, on the reasoning that there is one video output and it cannot follow the
+        // user to another screen. True as far as it went - but it also meant a "next" from the
+        // television dropped the cast, which is the one thing next is for. What is actually wanted is
+        // to distinguish "the user has gone somewhere else" from "one player is being replaced by
+        // another", and the only honest difference between them is whether something draws into the
+        // surface again shortly. So the session is held briefly rather than closed, and a replacement
+        // player cancels the timer.
+        orphanJob?.cancel()
+        orphanJob = scope.launch {
+            delay(ORPHAN_GRACE_MS)
+            Log.i(TAG, "nothing drew into the cast for ${ORPHAN_GRACE_MS}ms; ending it")
+            close()
+        }
     }
+
+    /**
+     * How the player screen answers a `Next` or `Previous` from the television.
+     *
+     * A callback into navigation rather than something this object can do itself, because there is no
+     * player queue to advance and there cannot easily be one: SABR needs per-video extractor state that
+     * only `loadVideo` establishes, so "next" is the same act as tapping a related video. Whether there
+     * is anything to go to is reported separately, in [Transport.hasNext] and [Transport.hasPrevious] -
+     * a remote must not offer a button that does nothing.
+     */
+    var onNavigate: ((next: Boolean) -> Unit)? = null
 
     private var client: CastClient? = null
 
@@ -199,11 +233,14 @@ object CastPlayback {
 
     /** Back to playing locally. Idempotent. */
     fun close() {
+        orphanJob?.cancel()
+        orphanJob = null
         reportJob?.cancel()
         reportJob = null
         CastAudioTap.detach()
         client?.close()
         client = null
+        _transport.update { it.copy(hasNext = false, hasPrevious = false) }
         _state.value = State.Idle
     }
 
@@ -273,8 +310,14 @@ object CastPlayback {
                 // `playbackParameters` here would drop whatever pitch the user had chosen.
                 update { it.copy(speed = speed.toFloat().coerceIn(MIN_SPEED, MAX_SPEED)) }
             }
-            // Volume and the queue are somebody else's to answer; ignored rather than guessed at.
-            PlaybackAction.SetVolume, PlaybackAction.Next, PlaybackAction.Previous -> Unit
+            // Volume is somebody else's to answer; ignored rather than guessed at.
+            PlaybackAction.SetVolume -> Unit
+            // Only offered when the phone said there was something to go to, but checked again here:
+            // the TV's copy of that is up to half a second old.
+            PlaybackAction.Next ->
+                if (_transport.value.hasNext) onNavigate?.invoke(true)
+            PlaybackAction.Previous ->
+                if (_transport.value.hasPrevious) onNavigate?.invoke(false)
         }
     }
 
@@ -306,6 +349,15 @@ object CastPlayback {
      * re-anchors before its interpolation has drifted anywhere visible.
      */
     private const val HEARTBEAT_MS = 500L
+
+    /**
+     * How long a session is kept with nothing rendering into it.
+     *
+     * Long enough for a `MediaController` to reconnect on the next screen - it is built asynchronously
+     * - and short enough that walking away from the video leaves a frozen frame on the television for a
+     * moment rather than for the evening.
+     */
+    private const val ORPHAN_GRACE_MS = 5_000L
 }
 
 /**

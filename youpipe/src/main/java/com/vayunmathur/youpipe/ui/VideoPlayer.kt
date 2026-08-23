@@ -454,11 +454,11 @@ fun VideoPlayer(
             player.volume = 1f
         }
     }
-    DisposableEffect(Unit) {
-        // Leaving the video ends the cast: there is one video output and it cannot follow the user to
-        // another screen.
-        onDispose { CastPlayback.close() }
-    }
+    // No DisposableEffect closing the cast here any more. Leaving a video used to end the session, on
+    // the reasoning that there is one video output and it cannot follow the user to another screen -
+    // which also meant a "next" from the television dropped the cast. CastPlayback now holds the
+    // session briefly when nothing is drawing into it, so a replacement player takes it over and only
+    // genuinely walking away ends it.
 
     // When paused, keep controls visible (no auto-hide). When playing resumes, re-show and start timer.
     LaunchedEffect(isPlaying) {

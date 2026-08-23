@@ -80,6 +80,7 @@ import com.vayunmathur.youpipe.util.DownloadManager
 import com.vayunmathur.youpipe.R
 import com.vayunmathur.youpipe.Route
 import com.vayunmathur.youpipe.findActivity
+import com.vayunmathur.youpipe.platform.CastPlayback
 import com.vayunmathur.youpipe.rememberIsInPipMode
 import com.vayunmathur.youpipe.util.VideoDetailActions
 import com.vayunmathur.youpipe.util.VideoDetailUiState
@@ -249,6 +250,30 @@ fun VideoPage(
     val activeDownloads by DownloadManager.activeDownloads.collectAsState()
     val history by ypvm.historyVideos.collectAsState()
     val progressById = remember(history) { history.associate { it.id to it.progress } }
+
+    // ---- next and previous, for the television's remote ----
+    // There is no player queue to advance and there cannot easily be one: SABR needs per-video
+    // extractor state that only `loadVideo` establishes. So "next" is exactly what tapping a related
+    // video does, and "previous" is the way back the user came - both of which need the back stack, so
+    // both live here rather than in the player.
+    val canGoNext = relatedVideos.isNotEmpty()
+    val canGoPrevious = backStack.backStack.count { it is Route.VideoPage } > 1
+    LaunchedEffect(canGoNext, canGoPrevious) {
+        CastPlayback.update { it.copy(hasNext = canGoNext, hasPrevious = canGoPrevious) }
+    }
+    DisposableEffect(relatedVideos, canGoPrevious) {
+        val handler: (Boolean) -> Unit = { next ->
+            if (next) {
+                relatedVideos.firstOrNull()?.let { backStack.add(Route.VideoPage(it.videoID)) }
+            } else if (canGoPrevious) {
+                backStack.pop()
+            }
+        }
+        CastPlayback.onNavigate = handler
+        // Cleared only if it is still ours. A navigation composes the incoming screen before disposing
+        // the outgoing one, so an unconditional null here would undo the handler that just replaced it.
+        onDispose { if (CastPlayback.onNavigate === handler) CastPlayback.onNavigate = null }
+    }
 
     VideoDetailScreen(
         state = VideoDetailUiState(
