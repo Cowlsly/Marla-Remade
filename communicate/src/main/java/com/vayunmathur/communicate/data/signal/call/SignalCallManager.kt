@@ -136,6 +136,12 @@ class SignalCallManager(
 
     fun hangup(): Boolean = withManager("hangup") { it.hangup() }
 
+    /** The EGL context group calls must share, so both call types use one GL thread. */
+    fun eglBaseForGroupCalls(): EglBase? = eglBase
+
+    /** RingRTC keeps one factory per CallManager, so group calls must reuse this instance. */
+    fun ringRtcCallManager(): CallManager? = callManager
+
     /** The EGL context renderers must share with the decoder, so frames can be drawn. */
     fun eglContext(): EglBase.Context? = eglBase?.eglBaseContext
 

@@ -11,6 +11,7 @@ import com.vayunmathur.communicate.data.call.InAppCallPhase
 import com.vayunmathur.communicate.data.call.InAppCallRegistry
 import com.vayunmathur.communicate.data.call.InAppCallVideoController
 import com.vayunmathur.communicate.data.signal.call.SignalCallManager
+import com.vayunmathur.communicate.data.signal.call.SignalGroupCallManager
 import com.vayunmathur.communicate.data.signal.call.SignalCallMessage
 import com.vayunmathur.communicate.data.signal.call.toContent
 import com.vayunmathur.communicate.data.signal.call.toRingRtc
@@ -18,7 +19,6 @@ import com.vayunmathur.communicate.data.signal.transport.SignalAttachmentUpload
 import com.vayunmathur.communicate.data.signal.transport.SignalCallingApi
 import com.vayunmathur.communicate.data.signal.transport.SignalGroupsApi
 import com.vayunmathur.communicate.data.signal.transport.SignalKeysApi
-import org.signal.storageservice.storage.protos.groups.GroupChange
 import com.vayunmathur.communicate.data.signal.transport.SignalPayload
 import com.vayunmathur.communicate.data.signal.transport.SignalSocket
 import com.vayunmathur.communicate.data.signal.transport.SignalTrust
@@ -28,6 +28,8 @@ import org.signal.libsignal.protocol.IdentityKey
 import org.signal.libsignal.protocol.UntrustedIdentityException
 import org.signal.libsignal.protocol.message.DecryptionErrorMessage
 import org.signal.libsignal.protocol.message.PlaintextContent
+import org.signal.ringrtc.CallManager
+import org.signal.storageservice.storage.protos.groups.GroupChange
 import org.webrtc.PeerConnection
 import com.vayunmathur.library.network.NetworkClient
 import kotlinx.coroutines.CoroutineScope
@@ -2119,6 +2121,111 @@ object SignalClient {
             Log.w(TAG, "could not refresh the group $conversationId", t)
             false
         }
+    }
+
+    /**
+     * Group calling, created on demand. Shares the 1:1 manager's RingRTC instance and EGL context — RingRTC
+     * keeps one factory for all group calls, so a second instance would fight it for the audio device.
+     */
+    private val groupCallManager: SignalGroupCallManager? by lazy {
+        val manager = callManager ?: return@lazy null
+        val egl = manager.eglBaseForGroupCalls() ?: return@lazy null
+        val ctx = appContext ?: return@lazy null
+        SignalGroupCallManager(
+            appContext = ctx,
+            callManager = manager.ringRtcCallManager() ?: return@lazy null,
+            eglBase = egl,
+            signaling = object : SignalGroupCallManager.Signaling {
+                override suspend fun membershipProof(groupId: ByteArray): ByteArray? =
+                    groupAuthorization(groupId)?.let { SignalGroupsApi.fetchMembershipProof(it, signalTls()) }
+
+                override suspend fun groupMembers(groupId: ByteArray): List<Pair<java.util.UUID, ByteArray>> {
+                    val conversation = conversationForGroupId(groupId) ?: return emptyList()
+                    val masterKey = conversation.groupMasterKey ?: return emptyList()
+                    val secretParams = org.signal.libsignal.zkgroup.groups.GroupSecretParams.deriveFromMasterKey(
+                        org.signal.libsignal.zkgroup.groups.GroupMasterKey(masterKey),
+                    )
+                    val acis = conversation.participants.split(",")
+                        .map { it.trim() }
+                        .filter { it.isNotEmpty() }
+                    return SignalGroupsApi.groupMemberInfo(secretParams, acis)
+                }
+
+                override fun onGroupCallStateChanged(groupId: ByteArray, joined: Boolean, participants: Int) {
+                    scope.launch {
+                        val conversationId = SignalProtocol.groupConversationId(groupId)
+                        InAppCallRegistry.onPhase(
+                            if (joined) InAppCallPhase.Active else InAppCallPhase.Connecting,
+                        )
+                        Log.i(TAG, "group call $conversationId joined=$joined participants=$participants")
+                    }
+                }
+
+                override fun onGroupCallEnded(groupId: ByteArray, reason: CallManager.CallEndReason?) {
+                    scope.launch { InAppCallRegistry.onEnded(reason?.toString()) }
+                }
+            },
+        )
+    }
+
+    /**
+     * Start or join the group call for [conversationId].
+     *
+     * Needs the group's membership, which is why it refreshes first: RingRTC cannot identify participants
+     * without every member's ACI ciphertext.
+     */
+    suspend fun placeGroupCall(conversationId: String): Boolean {
+        if (!SignalProtocol.isGroupConversation(conversationId)) return false
+        val manager = groupCallManager ?: run {
+            Log.w(TAG, "RingRTC unavailable, cannot place a group call")
+            return false
+        }
+        val conversation = try { db?.conversationDao()?.getConversation(conversationId) } catch (_: Exception) { null }
+        val masterKey = conversation?.groupMasterKey ?: run {
+            Log.w(TAG, "no master key for $conversationId, cannot place a group call")
+            return false
+        }
+        // Membership must be current or participants cannot be matched to people.
+        refreshGroup(conversationId)
+        val groupIdentifier = SignalGroups.groupIdentifierBytes(masterKey) ?: return false
+
+        InAppCallRegistry.bind(CommunicateLine.Signal, signalCallController, CallCapabilities.AudioAndVideo)
+        InAppCallRegistry.onCallStarting(
+            line = CommunicateLine.Signal,
+            peerId = conversationId,
+            peerName = conversation.name ?: conversationId,
+            isVideo = false,
+            incoming = false,
+            capabilities = CallCapabilities.AudioAndVideo,
+        )
+        if (!manager.connect(groupIdentifier)) {
+            InAppCallRegistry.onEnded("could not start the group call")
+            return false
+        }
+        manager.join()
+        appContext?.let { ctx -> InAppCallTelecom.addOutgoing(ctx, conversationId) }
+        return true
+    }
+
+    /** The group authorization a calling request needs, derived from the group behind [groupId]. */
+    private suspend fun groupAuthorization(groupId: ByteArray): String? {
+        val auth = authData ?: return null
+        val conversation = conversationForGroupId(groupId) ?: return null
+        val masterKey = conversation.groupMasterKey ?: return null
+        val secretParams = org.signal.libsignal.zkgroup.groups.GroupSecretParams.deriveFromMasterKey(
+            org.signal.libsignal.zkgroup.groups.GroupMasterKey(masterKey),
+        )
+        val credential = SignalGroupsApi
+            .fetchCredentials(basicAuthHeader(), signalTls())
+            .minByOrNull { kotlin.math.abs(it.redemptionTimeSeconds - System.currentTimeMillis() / 1000) }
+            ?: return null
+        return SignalGroupsApi.authorizationFor(auth, secretParams, credential)
+    }
+
+    private suspend fun conversationForGroupId(groupId: ByteArray) = try {
+        db?.conversationDao()?.getConversation(SignalProtocol.groupConversationId(groupId))
+    } catch (_: Exception) {
+        null
     }
 
     /**

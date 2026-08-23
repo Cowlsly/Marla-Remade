@@ -15,6 +15,7 @@ import org.signal.libsignal.zkgroup.auth.ClientZkAuthOperations
 import org.signal.libsignal.zkgroup.groups.ClientZkGroupCipher
 import org.signal.libsignal.zkgroup.groups.GroupSecretParams
 import org.signal.libsignal.zkgroup.groups.UuidCiphertext
+import org.signal.storageservice.storage.protos.groups.ExternalGroupCredential
 import org.signal.storageservice.storage.protos.groups.Group
 import org.signal.storageservice.storage.protos.groups.GroupAttributeBlob
 import org.signal.storageservice.storage.protos.groups.GroupChange
@@ -46,6 +47,12 @@ object SignalGroupsApi {
 
     private const val CREDENTIAL_PATH = "/v1/certificate/auth/group"
     private const val GROUP_PATH = "/v2/groups/"
+
+    /** From the official client's `PushServiceSocket.GROUPSV2_TOKEN`. */
+    private const val GROUP_TOKEN_PATH = "/v2/groups/token"
+
+    /** Signal's calling server, from the official client's `SIGNAL_SFU_URL`. */
+    const val SFU_URL = "https://sfu.voip.signal.org"
 
     private val json = Json { ignoreUnknownKeys = true }
 
@@ -292,6 +299,57 @@ object SignalGroupsApi {
     } catch (t: Throwable) {
         Log.w(TAG, "could not build an add-members change", t)
         null
+    }
+
+    /**
+     * The membership proof RingRTC presents to the SFU (`GET /v2/groups/token`).
+     *
+     * This is what proves to the calling server that we belong to the group, without the SFU learning the
+     * group's membership. It expires, which is why RingRTC asks for it again via `requestMembershipProof`.
+     */
+    suspend fun fetchMembershipProof(
+        authorization: String,
+        sslSocketFactory: SSLSocketFactory?,
+    ): ByteArray? {
+        val resp = try {
+            NetworkClient.execute(
+                "$STORAGE_URL$GROUP_TOKEN_PATH",
+                method = "GET",
+                headers = mapOf("Authorization" to "Basic $authorization"),
+                sslSocketFactory = sslSocketFactory,
+            )
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not fetch a group membership proof", t)
+            return null
+        }
+        if (!resp.isSuccess) {
+            Log.w(TAG, "membership proof request failed: ${resp.status} ${resp.statusMessage}")
+            return null
+        }
+        return try {
+            val bytes = resp.bytes ?: return null
+            // The token is a string in the proto but goes to RingRTC as raw bytes.
+            ExternalGroupCredential.parseFrom(bytes).token.toByteArray(Charsets.UTF_8)
+        } catch (t: Throwable) {
+            Log.w(TAG, "could not parse the membership proof", t)
+            null
+        }
+    }
+
+    /**
+     * Encrypt each member's ACI for the SFU. RingRTC pairs the plain UUID with its ciphertext so it can match
+     * SFU-reported participants back to people without the SFU knowing who they are.
+     */
+    fun groupMemberInfo(secretParams: GroupSecretParams, acis: List<String>): List<Pair<java.util.UUID, ByteArray>> {
+        val cipher = ClientZkGroupCipher(secretParams)
+        return acis.mapNotNull { aci ->
+            try {
+                val serviceId = ServiceId.Aci.parseFromString(aci)
+                java.util.UUID.fromString(aci) to cipher.encrypt(serviceId).serialize()
+            } catch (_: Throwable) {
+                null
+            }
+        }
     }
 
     /** Signal's zkgroup server public params, needed to verify credentials it issues. */

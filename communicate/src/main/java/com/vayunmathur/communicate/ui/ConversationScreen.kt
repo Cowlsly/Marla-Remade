@@ -290,8 +290,10 @@ fun ConversationScreen(
                 )
             }
             // Calling is per line: SIM and Google Voice hand off to Telecom, WhatsApp and Signal place an
-            // in-app WebRTC call. Groups are excluded — group calling is not implemented on either line.
-            if (!isGroup && address.isNotBlank() && CommunicateRepository.canPlaceCall(line)) {
+            // in-app WebRTC call. Signal groups call the SFU; other lines have no group calling.
+            val canCall = address.isNotBlank() && CommunicateRepository.canPlaceCall(line) &&
+                (!isGroup || CommunicateRepository.canPlaceGroupCall(line))
+            if (canCall) {
                 IconButton(onClick = {
                     scope.launch {
                         val placed = CommunicateRepository.placeCallForLine(

@@ -339,6 +339,10 @@ object SignalProtocol {
 
     fun isGroupConversation(conversationId: String): Boolean = conversationId.startsWith(GROUP_PREFIX)
 
+    /** The conversation id for a raw 32-byte group identifier, the inverse of what calling hands back. */
+    fun groupConversationId(groupIdentifier: ByteArray): String =
+        GROUP_PREFIX + groupIdentifier.joinToString("") { "%02x".format(it) }
+
     /** The raw 32-byte group identifier for a `group:<hex>` conversation id, or null. */
     fun groupIdentifierOf(conversationId: String): ByteArray? {
         if (!isGroupConversation(conversationId)) return null

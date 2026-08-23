@@ -1394,6 +1394,10 @@ object CommunicateRepository {
             if (target.isBlank()) false else { whatsAppPlaceCall(target, video); true }
         }
         CommunicateLine.Signal -> withContext(Dispatchers.IO) {
+            // A group call goes to the SFU rather than to a single peer.
+            if (remoteId != null && com.vayunmathur.communicate.data.signal.SignalProtocol.isGroupConversation(remoteId)) {
+                return@withContext SignalClient.get(context).placeGroupCall(remoteId)
+            }
             val target = remoteId?.takeIf { it.isNotBlank() } ?: toSignalRecipient(context, address)
             if (target.isBlank()) {
                 false
@@ -1421,6 +1425,10 @@ object CommunicateRepository {
         CommunicateLine.Signal -> com.vayunmathur.communicate.data.signal.SignalFeature.enabled
         else -> false
     }
+
+    /** Only Signal has group calling; it routes through the SFU rather than to individual peers. */
+    fun canPlaceGroupCall(line: CommunicateLine): Boolean =
+        line == CommunicateLine.Signal && com.vayunmathur.communicate.data.signal.SignalFeature.enabled
 
     suspend fun createSignalGroup(
         context: Context,
