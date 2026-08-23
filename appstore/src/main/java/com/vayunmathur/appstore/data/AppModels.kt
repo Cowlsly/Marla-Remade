@@ -22,8 +22,33 @@ enum class AppSource {
      * verify-then-commit path with those values, plus the new min-version gate. See
      * [com.vayunmathur.appstore.data.accrescent.AccrescentRepository].
      */
-    ACCRESCENT
+    ACCRESCENT;
+
+    companion object {
+        /**
+         * Precedence when more than one source offers the same package, most preferred first.
+         *
+         * GrapheneOS outranks Play deliberately: Play lists the Sandboxed Google Play
+         * components too, but only the build GrapheneOS re-hosts is the one the OS's gmscompat
+         * layer expects, so a Play-delivered Vending or GMS is the wrong artifact for the
+         * device even though it would install. Below that the order is a provenance
+         * preference rather than a security ranking (see
+         * [com.vayunmathur.appstore.data.security.TrustProfile]): catalogue rows carry a
+         * publisher key and a hash a download can be checked against, and Modern Apps rows are
+         * signed with this store's own key.
+         */
+        val PRIORITY: List<AppSource> =
+            listOf(GRAPHENEOS, MODERN_APPS, FDROID, ACCRESCENT, PLAYSTORE)
+    }
 }
+
+/**
+ * Rank of this source in [AppSource.PRIORITY]; lower wins. A source missing from the list
+ * sorts last rather than first, so forgetting to place a new one cannot silently promote it
+ * above every other source.
+ */
+val AppSource.priority: Int
+    get() = AppSource.PRIORITY.indexOf(this).takeIf { it >= 0 } ?: AppSource.PRIORITY.size
 
 data class UnifiedApp(
     val packageName: String,

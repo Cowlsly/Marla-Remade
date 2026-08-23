@@ -28,6 +28,22 @@ object ApkCertificates {
         fingerprints(signaturesOf(archiveInfo(context, apk), contentsOnly = true))
 
     /**
+     * Fingerprints an APK may sign *for*: the certificates that signed its bytes plus any
+     * rotated ancestors it carries proof of lineage to.
+     *
+     * A source publishes an app's *identity* certificate, which under v3 key rotation stays
+     * the original while the bytes carry the current one. An expected signer must therefore be
+     * matched against this set, not [apkSigners] — otherwise a legitimately rotated build
+     * looks like a substituted one. This is the same lineage Android itself accepts when it
+     * applies the update.
+     *
+     * Takes an already-parsed [archiveInfo] rather than the file, since parsing re-verifies the
+     * whole archive and the install path has done that already.
+     */
+    fun signerLineage(info: PackageInfo?): Set<String> =
+        fingerprints(signaturesOf(info, contentsOnly = false))
+
+    /**
      * Fingerprints currently trusted for an installed [packageName]. Includes rotated
      * ancestors (`signingCertificateHistory`) so an app that has legitimately rotated its
      * key still matches an APK signed by either the old or the new certificate.

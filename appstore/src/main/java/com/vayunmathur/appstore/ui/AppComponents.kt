@@ -212,6 +212,7 @@ fun AppTile(
     app: UnifiedApp,
     modifier: Modifier = Modifier,
     isInstalled: Boolean = false,
+    stage: InstallStage? = null,
     installedIcon: Drawable? = null,
     onClick: () -> Unit = {},
 ) {
@@ -234,14 +235,16 @@ fun AppTile(
             // Two lines' worth whatever the name's length, so tiles stay aligned.
             modifier = Modifier.heightIn(min = 32.dp),
         )
-        if (isInstalled) {
-            Text(
+        // An in-flight install replaces the rating line rather than adding a third one, so a
+        // tile mid-install stays roughly the height of its neighbours.
+        when {
+            stage != null -> StageProgress(stage)
+            isInstalled -> Text(
                 stringResource(R.string.installed),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.primary,
             )
-        } else {
-            RatingLabel(app)
+            else -> RatingLabel(app)
         }
     }
 }
@@ -269,6 +272,7 @@ fun AppCarousel(
     installedIcons: Map<String, Drawable>,
     onAppClick: (UnifiedApp) -> Unit,
     modifier: Modifier = Modifier,
+    stages: Map<String, InstallStage> = emptyMap(),
 ) {
     LazyRow(
         modifier = modifier.fillMaxWidth(),
@@ -279,6 +283,7 @@ fun AppCarousel(
             AppTile(
                 app = app,
                 isInstalled = app.packageName in installedPackages,
+                stage = stages[app.packageName],
                 installedIcon = installedIcons[app.packageName],
                 onClick = { onAppClick(app) },
             )

@@ -72,9 +72,16 @@ class UpdateCheckWorker(
         val installed = installedRepo.apps.value
         val fromCatalog = catalog.updatesFor(installed)
 
-        // Only Play can answer for packages the offline catalogues have never heard of.
+        // Only Play can answer for packages the offline catalogues have never heard of — except
+        // the Sandboxed Google Play components, which Play also hosts but must never update
+        // here: only the builds GrapheneOS re-hosts are the ones this device can use.
         val index = catalog.packageIndex.value
-        val unknown = installed.filter { it.packageName !in index }.map { it.packageName }
+        val unknown = installed
+            .filter {
+                it.packageName !in index &&
+                    it.packageName !in SandboxedGooglePlay.PACKAGES
+            }
+            .map { it.packageName }
         val remote = play.details(unknown).associateBy { it.packageName }
         val fromPlay = installed.mapNotNull { inst ->
             remote[inst.packageName]?.takeIf { it.versionCode > inst.versionCode }
@@ -99,7 +106,11 @@ class UpdateCheckWorker(
                 details.copy(versionCode = update.versionCode, versionName = update.versionName)
             }
 
-        val updates = (fromCatalog + fromPlay + fromAccrescent).distinctBy { it.packageName }
+        // The surviving row's source decides which download-and-verify path the update takes,
+        // so it has to be the same precedence the rest of the store uses.
+        val updates = (fromCatalog + fromPlay + fromAccrescent)
+            .sortedBy { it.source.priority }
+            .distinctBy { it.packageName }
 
         val settings = SettingsRepository(context, scope)
         val autoInstall = settings.readAutoInstallUpdates()
@@ -112,9 +123,17 @@ class UpdateCheckWorker(
             }
             // Only nag about the updates we could not apply on our own.
             val remaining = updates.filterNot { canSilentlyUpdate(it.packageName) }
-            notifyIfChanged(remaining.map { it.packageName }.toSortedSet(), remaining.size)
+            notifyIfChanged(
+                remaining.map { it.packageName }.toSortedSet(),
+                remaining.size,
+                needsConfirmation = true,
+            )
         } else {
-            notifyIfChanged(updates.map { it.packageName }.toSortedSet(), updates.size)
+            notifyIfChanged(
+                updates.map { it.packageName }.toSortedSet(),
+                updates.size,
+                needsConfirmation = false,
+            )
         }
 
         accrescent.shutdown()
@@ -130,10 +149,14 @@ class UpdateCheckWorker(
      *
      * Without this, a daily check on a phone with one perpetually-stale app would post the
      * same notification every day until the user turned notifications off.
+     *
+     * [needsConfirmation] distinguishes updates left over from an auto-install run, which the OS
+     * will not let us apply unattended, from an ordinary "updates are waiting" nudge. It is part
+     * of the de-dupe signature so toggling the setting re-posts with the matching wording.
      */
-    private fun notifyIfChanged(packages: Set<String>, count: Int) {
+    private fun notifyIfChanged(packages: Set<String>, count: Int, needsConfirmation: Boolean) {
         val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val signature = packages.joinToString(",")
+        val signature = packages.joinToString(",") + "|$needsConfirmation"
         if (prefs.getString(KEY_LAST_NOTIFIED, "") == signature) return
         prefs.edit { putString(KEY_LAST_NOTIFIED, signature) }
 
@@ -149,6 +172,10 @@ class UpdateCheckWorker(
         }
 
         createChannel()
+        val body = context.getString(
+            if (needsConfirmation) R.string.updates_confirm_notification_body
+            else R.string.updates_notification_body
+        )
         val open = PendingIntent.getActivity(
             context,
             0,
@@ -159,9 +186,15 @@ class UpdateCheckWorker(
         val notification = NotificationCompat.Builder(context, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.stat_sys_download_done)
             .setContentTitle(
-                context.resources.getQuantityString(R.plurals.updates_count, count, count)
+                context.resources.getQuantityString(
+                    if (needsConfirmation) R.plurals.updates_confirm_count
+                    else R.plurals.updates_count,
+                    count,
+                    count,
+                )
             )
-            .setContentText(context.getString(R.string.updates_notification_body))
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
             .setContentIntent(open)
             .setAutoCancel(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)

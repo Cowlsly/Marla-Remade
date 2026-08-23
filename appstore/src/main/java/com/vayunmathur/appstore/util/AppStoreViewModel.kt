@@ -24,6 +24,7 @@ import com.vayunmathur.appstore.data.installer.InstallCoordinator
 import com.vayunmathur.appstore.data.installer.InstallStage
 import com.vayunmathur.appstore.data.play.PlayAuthState
 import com.vayunmathur.appstore.data.play.PlayRepository
+import com.vayunmathur.appstore.data.priority
 import com.vayunmathur.appstore.data.security.ApkCertificates
 import com.vayunmathur.appstore.data.security.VerificationResult
 import com.vayunmathur.library.util.AppMessages
@@ -147,6 +148,9 @@ class AppStoreViewModel(
     ) { catalogUpdates, playUpdates, accrescentUpdates, installed ->
         val installedVersions = installed.associate { it.packageName to it.versionCode }
         (catalogUpdates + playUpdates + accrescentUpdates)
+            // The surviving row's source decides which download-and-verify path the update
+            // takes, so it has to be the same precedence search and the library use.
+            .sortedBy { it.source.priority }
             .distinctBy { it.packageName }
             // Re-check against what is on the device rather than trusting the lists.
             // _playUpdates is a snapshot from the last network check, so without this a
@@ -470,7 +474,6 @@ class AppStoreViewModel(
                     id = SandboxedGooglePlay.SECTION_ID,
                     title = context.getString(R.string.section_sandboxed_google_play),
                     apps = sandboxed,
-                    layout = SectionLayout.LIST,
                     subtitle = context.getString(R.string.section_sandboxed_google_play_subtitle),
                 )
             )
@@ -578,16 +581,19 @@ class AppStoreViewModel(
     }
 
     /**
-     * Combine catalogue and Play hits, one row per package.
+     * Combine catalogue, Play and Accrescent hits, one row per package.
      *
-     * Where both offer a package the catalogue entry wins. That is a provenance
-     * preference, not a security ranking (see
-     * [com.vayunmathur.appstore.data.security.TrustProfile]): the F-Droid and Modern Apps
-     * rows carry a publisher key and a hash this app can check the download against,
-     * which is simply more to show on the detail page than a Play listing has.
+     * Where several sources offer a package, [AppSource.PRIORITY] decides which row survives —
+     * notably keeping the GrapheneOS row for the Sandboxed Google Play components rather than
+     * Play's listing of the same three packages. Sorting is stable, so each source's own
+     * relevance ordering is preserved within its rank, and [rank] re-sorts the result anyway.
      */
     private fun merge(vararg lists: List<UnifiedApp>): List<UnifiedApp> =
-        lists.asSequence().flatten().distinctBy { it.packageName }.toList()
+        lists.asSequence()
+            .flatten()
+            .sortedBy { it.source.priority }
+            .distinctBy { it.packageName }
+            .toList()
 
     /** Exact hits first, then name prefixes, then everything else alphabetically. */
     private fun rank(apps: List<UnifiedApp>, query: String): List<UnifiedApp> {
@@ -611,6 +617,16 @@ class AppStoreViewModel(
         detailJob?.cancel()
         _selectedApp.value = app
         detailJob = viewModelScope.launch {
+            // Play lists the Sandboxed Google Play components too, so a search hit for one can
+            // arrive carrying AppSource.PLAYSTORE. Describe it from GrapheneOS regardless: that
+            // is the row an install would actually use, and the Play build is the wrong
+            // artifact for the device even though Play would happily deliver it. Prefer the
+            // cached row — the stand-in carries no version, size, signer or hash, and on a cold
+            // start nothing has enriched it yet.
+            sandboxedGooglePlayRow(app.packageName)?.let { sandboxed ->
+                _selectedApp.value = catalog.byPackage(app.packageName) ?: sandboxed
+                return@launch
+            }
             // The catalogue row wins whenever there is one, even if the user tapped a Play
             // tile for the same package. It is the row an install would actually use — it
             // carries the signer and hash an authenticated index published — so showing
@@ -645,6 +661,10 @@ class AppStoreViewModel(
     /** Open a package the store only knows by name, e.g. from a `market://` link. */
     fun selectPackage(packageName: String) {
         viewModelScope.launch {
+            sandboxedGooglePlayRow(packageName)?.let {
+                selectApp(it)
+                return@launch
+            }
             val known = catalog.byPackage(packageName)
             if (known != null) {
                 selectApp(known)
@@ -666,6 +686,15 @@ class AppStoreViewModel(
         detailJob?.cancel()
         _selectedApp.value = null
     }
+
+    /**
+     * The GrapheneOS row for a Sandboxed Google Play component, or null for any other package.
+     *
+     * Carries whatever [loadHome] enriched the stand-in with, so this is the best row the store
+     * holds for GSF, GMS or Vending.
+     */
+    private fun sandboxedGooglePlayRow(packageName: String): UnifiedApp? =
+        _sandboxedGooglePlay.value.firstOrNull { it.packageName == packageName }
 
     // --- Actions ----------------------------------------------------------------------
 
@@ -764,10 +793,16 @@ class AppStoreViewModel(
 
             // Only ask Play about packages neither offline source lists — for the rest the
             // catalogue already answered, and Play would just re-answer it over the network.
+            // The Sandboxed Google Play components are held back too: Play hosts newer builds
+            // of all three, but only GrapheneOS's are the ones this device can use, so no
+            // update is better than the wrong one until its release metadata is synced.
             val index = catalog.packageIndex.value
             val installed = installedRepo.apps.value
             val playCandidates = installed
-                .filter { it.packageName !in index }
+                .filter {
+                    it.packageName !in index &&
+                        it.packageName !in SandboxedGooglePlay.PACKAGES
+                }
                 .map { it.packageName }
 
             val remote = play.details(playCandidates).associateBy { it.packageName }

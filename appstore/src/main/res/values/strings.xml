@@ -71,6 +71,7 @@
     <string name="updates_checking">Checking for updates…</string>
     <string name="updates_last_checked">Last checked %1$s</string>
     <string name="updates_notification_body">Open the App Store to review and install them.</string>
+    <string name="updates_confirm_notification_body">Android only lets the App Store update apps it installed itself, so these need a tap from you. Open the App Store to install them.</string>
     <string name="updates_channel_name">App updates</string>
     <string name="updates_channel_description">Tells you when apps you installed here have a newer version.</string>
     <string name="setting_auto_install_updates_title">Automatically install updates</string>
@@ -78,6 +79,10 @@
     <plurals name="updates_count">
         <item quantity="one">%1$d update available</item>
         <item quantity="other">%1$d updates available</item>
+    </plurals>
+    <plurals name="updates_confirm_count">
+        <item quantity="one">%1$d update needs your confirmation</item>
+        <item quantity="other">%1$d updates need your confirmation</item>
     </plurals>
     <plurals name="updates_installing">
         <item quantity="one">Installing %1$d update…</item>

@@ -36,15 +36,21 @@ import com.vayunmathur.library.ui.Text
 
 /** Binds [AppStoreViewModel] to the stateless [SearchScreen]. */
 @Composable
-fun SearchPage(viewModel: AppStoreViewModel, onAppClick: (UnifiedApp) -> Unit) {
+fun SearchPage(
+    viewModel: AppStoreViewModel,
+    onAppClick: (UnifiedApp) -> Unit,
+    isActive: Boolean = true,
+) {
     val state by viewModel.search.collectAsState()
     // Opening the search tab is a request to type. Only on a fresh one, though — coming
-    // back from an app's page should not throw the keyboard over the results.
+    // back from an app's page should not throw the keyboard over the results. And only when
+    // this page is the one the user is actually on: a pager composes its neighbours, so
+    // focusing while merely adjacent would drag the pager onto search mid-swipe.
     SearchScreen(
         state = state,
         actions = viewModel,
         onAppClick = onAppClick,
-        autoFocus = state.query.isBlank(),
+        autoFocus = isActive && state.query.isBlank(),
     )
 }
 

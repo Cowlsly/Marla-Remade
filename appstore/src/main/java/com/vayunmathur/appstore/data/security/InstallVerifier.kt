@@ -12,8 +12,9 @@ import java.io.File
 data class InstallRequirement(
     val expectedPackage: String,
     /**
-     * Certificate fingerprints the APK must be signed by. Non-empty means authoritative:
-     * a mismatch is a hard failure. Empty means the source could not tell us.
+     * Certificate fingerprints the APK must be signed by, or prove rotation lineage to.
+     * Non-empty means authoritative: a mismatch is a hard failure. Empty means the source
+     * could not tell us.
      */
     val requiredSigners: Set<String> = emptySet(),
     /**
@@ -76,7 +77,7 @@ sealed class VerificationResult {
  *   turns a cryptic `INSTALL_FAILED_UPDATE_INCOMPATIBLE` into a stated key mismatch, and
  *   catches it before the bytes reach the system installer;
  * - a published SHA-256 must match;
- * - a published signer set must intersect the APK's actual signers;
+ * - a published signer set must intersect the APK's signing lineage;
  * - with none of the above available, the result is [VerificationResult.Unverified] and
  *   the caller may proceed with a visible warning.
  */
@@ -137,6 +138,10 @@ object InstallVerifier {
         }
         val actualSigners = signerSets.first()
 
+        // The stamp check and the required-signer check below both read the base APK, since a
+        // config split carries neither a stamp nor a rotation lineage of its own.
+        val base = baseApk(parsed, requirement.expectedPackage) ?: parsed.first()
+
         val checks = mutableListOf<String>()
 
         // Rollback guard (Accrescent): the base APK's version code must be at least the
@@ -190,7 +195,13 @@ object InstallVerifier {
 
         if (requirement.requiredSigners.isNotEmpty()) {
             val required = requirement.requiredSigners.map { it.lowercase() }.toSet()
-            if (actualSigners.none { it in required }) {
+            // Match the app's identity, not just the bytes: a source publishes the original
+            // certificate, so an app that has rotated its signing key presents a current
+            // certificate the source never listed. Accepting the proven rotation lineage keeps
+            // a substituted APK out while letting a rotated one through, which is the same
+            // call Android makes when it applies the update.
+            val lineage = actualSigners + ApkCertificates.signerLineage(base.second)
+            if (lineage.none { it in required }) {
                 val origin = requirement.signerOrigin.ifBlank { "the source" }
                 return VerificationResult.Rejected("it is not signed by the key $origin expects")
             }
@@ -201,8 +212,7 @@ object InstallVerifier {
         // Checked on the base APK — splits do not carry their own stamp.
         var stampToPin: String? = null
         if (requirement.requireStamp || requirement.pinnedStamp != null) {
-            val base = baseApk(parsed, requirement.expectedPackage) ?: files.first()
-            val stamp = SourceStamp.of(base)
+            val stamp = SourceStamp.of(base.first)
             if (stamp == null) {
                 if (requirement.requireStamp) {
                     return VerificationResult.Rejected("it carries no publisher stamp to check")
@@ -233,11 +243,11 @@ object InstallVerifier {
         return VerificationResult.Verified(checks.joinToString("; "), stampToPin)
     }
 
-    /** The file whose manifest declares [packageName] without a split name. */
+    /** The file, and its parsed manifest, declaring [packageName] without a split name. */
     private fun baseApk(
         parsed: List<Pair<File, android.content.pm.PackageInfo?>>,
         packageName: String,
-    ): File? = parsed.firstOrNull { (_, info) ->
+    ): Pair<File, android.content.pm.PackageInfo?>? = parsed.firstOrNull { (_, info) ->
         info?.packageName == packageName && info.splitNames.isNullOrEmpty()
-    }?.first
+    }
 }

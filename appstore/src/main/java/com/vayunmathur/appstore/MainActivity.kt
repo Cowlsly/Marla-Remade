@@ -197,12 +197,20 @@ private fun AppTabs(
             HomePage(
                 viewModel = viewModel,
                 onAppClick = onAppClick,
-                onOpenUpdates = { scope.launch { pagerState.animateScrollToPage(2) } },
+                onOpenUpdates = { scope.launch { pagerState.animateScrollToPage(PAGE_UPDATES) } },
                 onOpenSources = onOpenSources,
             )
         },
         PagerTab(stringResource(R.string.nav_search), { IconSearch() }) {
-            SearchPage(viewModel = viewModel, onAppClick = onAppClick)
+            // settledPage, not currentPage: currentPage flips to the nearest page part-way
+            // through a swipe or an animated jump, and search grabbing focus at that moment
+            // pulls the pager onto itself — so going home -> updates would land on search
+            // with the keyboard up.
+            SearchPage(
+                viewModel = viewModel,
+                onAppClick = onAppClick,
+                isActive = pagerState.settledPage == PAGE_SEARCH,
+            )
         },
         PagerTab(stringResource(R.string.nav_updates), { IconDownload() }) {
             UpdatesPage(viewModel = viewModel, onAppClick = onAppClick)
@@ -213,3 +221,6 @@ private fun AppTabs(
     )
     TabbedPagerScaffold(tabs = tabs, pagerState = pagerState, tabStyle = TabStyle.BottomNav)
 }
+
+private const val PAGE_SEARCH = 1
+private const val PAGE_UPDATES = 2

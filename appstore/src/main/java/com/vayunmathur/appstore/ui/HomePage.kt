@@ -153,6 +153,7 @@ fun HomeScreen(
                             installedPackages = state.installedPackages,
                             installedIcons = state.installedIcons,
                             onAppClick = onAppClick,
+                            stages = state.stages,
                         )
                     }
                     SectionLayout.LIST -> items(
