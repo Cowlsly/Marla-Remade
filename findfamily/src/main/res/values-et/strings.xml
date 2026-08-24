@@ -131,4 +131,6 @@
     <string name="add_tracker_scanning">Otsin nutimärgiseid…</string>
     <string name="add_tracker_binding">Seon nutimärgist…</string>
     <string name="add_tracker_failed">Nutimärgise sidumine ei õnnestunud. Proovi uuesti.</string>
+    <string name="key_mismatch_title">Antud isiku verifitseerimine ei õnnestunud</string>
+    <string name="key_mismatch_body">Selle isiku krüptovõti ei vasta tema kutselingis märgitud võtmele, seetõttu teda ei lisatud. Kontrolli, kas avasid lingi tervikuna või palu tal saata uus link.</string>
 </resources>
