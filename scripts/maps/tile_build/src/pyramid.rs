@@ -41,6 +41,8 @@
 //!   gap or a hairline overlap. Reproducing it needs a shared topology pass across
 //!   features, which is a project of its own.
 
+use std::io::Write;
+
 use crate::clip::clip_geometry;
 use crate::geom::{self, Geometry, IntGeometry};
 use crate::mvt::{self, Feature as MvtFeature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
@@ -67,8 +69,12 @@ pub struct Options {
     /// Simplification tolerance multiplier; 1.0 is the default policy.
     pub simplification: f64,
     pub max_tile_bytes: usize,
+    /// Print a per-zoom progress bar to stdout while tiling.
+    ///
+    /// Off by default so the library stays silent: the binaries turn it on, and the
+    /// tests would otherwise interleave bars with their output.
+    pub progress: bool,
 }
-
 impl Options {
     pub fn new(layer: impl Into<String>, min_zoom: u8, max_zoom: u8) -> Options {
         Options {
@@ -78,6 +84,70 @@ impl Options {
             extent: DEFAULT_EXTENT,
             simplification: 1.0,
             max_tile_bytes: DEFAULT_MAX_TILE_BYTES,
+            progress: false,
+        }
+    }
+
+    /// Show the tiling progress bar. What the `tile_*` binaries call.
+    pub fn with_progress(mut self) -> Options {
+        self.progress = true;
+        self
+    }
+}
+
+/// A one-line progress bar for one zoom's tile loop.
+///
+/// Deliberately the same shape `osm_ingest`'s passes print (`label [42%]`, carriage
+/// return, no newline until the end) so a build log reads consistently across the two
+/// crates. Single-threaded, so no atomics are needed.
+///
+/// The count is CANDIDATE tiles, which is the loop's length -- larger than the `tiles`
+/// column in the report below, because a candidate whose geometry clips away to
+/// nothing is never written. Saying "candidate" keeps the two numbers from looking
+/// like a contradiction.
+///
+/// Throttled to whole percent: a planet zoom has millions of tiles and a write per
+/// tile would cost more than the tiling.
+struct Progress {
+    label: String,
+    total: usize,
+    done: usize,
+    last_pct: usize,
+    on: bool,
+}
+
+impl Progress {
+    fn new(layer: &str, z: u8, total: usize, on: bool) -> Progress {
+        let p = Progress {
+            label: format!("{layer} z{z}"),
+            total,
+            done: 0,
+            last_pct: usize::MAX,
+            on,
+        };
+        if p.on {
+            print!("\r{:<28} [  0%] {} candidate tile(s)", p.label, total);
+            let _ = std::io::stdout().flush();
+        }
+        p
+    }
+
+    fn tick(&mut self) {
+        self.done += 1;
+        if !self.on || self.total == 0 {
+            return;
+        }
+        let pct = self.done * 100 / self.total;
+        if pct != self.last_pct {
+            self.last_pct = pct;
+            print!("\r{:<28} [{pct:>3}%] {} candidate tile(s)", self.label, self.total);
+            let _ = std::io::stdout().flush();
+        }
+    }
+
+    fn finish(&self) {
+        if self.on {
+            println!("\r{:<28} [100%] {} candidate tile(s)", self.label, self.total);
         }
     }
 }
@@ -153,7 +223,9 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
 
         let mut tiles: Vec<(u64, u64)> = by_tile.keys().copied().collect();
         tiles.sort_unstable();
+        let mut bar = Progress::new(&opts.layer, z, tiles.len(), opts.progress);
         for (tx, ty) in tiles {
+            bar.tick();
             let indices = &by_tile[&(tx, ty)];
             let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
 
@@ -192,6 +264,7 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
             stats.tiles += 1;
             builder.add_tile_raw(pmtiles::tile_id(z, tx, ty), body);
         }
+        bar.finish();
         report.push(stats);
     }
 
@@ -507,6 +580,8 @@ pub fn cli_main(name: &str, accept: Accept, argv: &[String]) -> std::process::Ex
         extent,
         simplification,
         max_tile_bytes,
+        // A planet layer spends minutes to hours per zoom, so the operator gets a bar.
+        progress: true,
     };
     let (bytes, report) = match build_archive(&features, &opts) {
         Ok(v) => v,

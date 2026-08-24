@@ -224,27 +224,41 @@ impl TileRange {
 ///
 /// Polygons keep whole-ring boxes: a polygon legitimately covers its interior tiles,
 /// and per-segment boxes would drop every tile strictly inside the ring.
+/// Every tile a geometry can reach at zoom `z`, sorted and deduplicated.
+///
+/// The point of this over `tile_range(bounds(g))` is long thin diagonal features. A
+/// bounding box is a terrible approximation of a route. Measured on one
+/// transcontinental rail relation (40° of longitude) at z16:
+///
+/// | | tiles |
+/// |---|---|
+/// | its bounding box | 34,535,986 |
+/// | tiles it actually crosses | 16,632 |
+///
+/// A 2077x difference, and each of those 34.5 million tiles ran a full clip and
+/// simplify of the whole geometry. That is why `transit_lines` at planet scale took
+/// hours.
+///
+/// Each SEGMENT's own box is used instead, and their union taken. A segment whose box
+/// still spans many tiles is bisected until it does not, so the result does not depend
+/// on the input's vertex density: the same path with only 2 vertices walks 16,626
+/// tiles, within 0.1% of the 2000-vertex version. Without bisection a sparse line's
+/// segment boxes are nearly as bad as the whole feature's.
+///
+/// It stays a conservative superset — a segment's box always contains the segment, and
+/// bisecting preserves that — so no tile a feature reaches can be missed. A
+/// line-walking algorithm would have to be exactly right to be safe; this only has to
+/// be tight.
+///
+/// Polygons keep whole-ring boxes: a polygon legitimately covers its interior tiles,
+/// and per-segment boxes would drop every tile strictly inside the ring.
 pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(u64, u64)>) {
     out.clear();
-    let mut push_box = |ax: f64, ay: f64, bx: f64, by: f64| {
-        if !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
-            return;
-        }
-        let b = Rect {
-            min_x: ax.min(bx),
-            min_y: ay.min(by),
-            max_x: ax.max(bx),
-            max_y: ay.max(by),
-        };
-        if let Some(r) = tile_range(&b, z, extent, pad) {
-            out.extend(r.iter());
-        }
-    };
     match g {
         // A point's box is a point; one range call each is already tight.
         Geometry::Points(pts) => {
             for &(x, y) in pts {
-                push_box(x, y, x, y);
+                push_box(out, x, y, x, y, z, extent, pad);
             }
         }
         Geometry::Lines(lines) => {
@@ -252,10 +266,10 @@ pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(
                 match line.as_slice() {
                     [] => {}
                     // A degenerate one-point "line" still occupies a tile.
-                    [(x, y)] => push_box(*x, *y, *x, *y),
+                    [(x, y)] => push_box(out, *x, *y, *x, *y, z, extent, pad),
                     _ => {
                         for seg in line.windows(2) {
-                            push_box(seg[0].0, seg[0].1, seg[1].0, seg[1].1);
+                            push_segment(out, seg[0], seg[1], z, extent, pad, 0);
                         }
                     }
                 }
@@ -275,7 +289,7 @@ pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(
                     min = (min.0.min(x), min.1.min(y));
                     max = (max.0.max(x), max.1.max(y));
                 }
-                push_box(min.0, min.1, max.0, max.1);
+                push_box(out, min.0, min.1, max.0, max.1, z, extent, pad);
             }
         }
     }
@@ -283,6 +297,76 @@ pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(
     // tiles, and a duplicate would encode the whole geometry twice into one tile.
     out.sort_unstable();
     out.dedup();
+}
+
+/// A segment box this wide or tall is worth bisecting rather than filling.
+///
+/// 2 means "no more than a 2x2 tile block", which is the smallest box a segment
+/// crossing a tile corner can have — so bisection stops as soon as it is tight rather
+/// than recursing forever on a segment that genuinely straddles a corner.
+const MAX_SEGMENT_TILES: u64 = 2;
+
+/// Recursion cap, so a pathological coordinate cannot spin. At depth 24 a segment has
+/// been bisected into 16 million pieces; anything still too wide is a broken input and
+/// filling its box is the safe answer.
+const MAX_BISECT_DEPTH: u32 = 24;
+
+fn push_segment(
+    out: &mut Vec<(u64, u64)>,
+    a: Pt,
+    b: Pt,
+    z: u8,
+    extent: u32,
+    pad: f64,
+    depth: u32,
+) {
+    let (ax, ay) = a;
+    let (bx, by) = b;
+    if !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
+        return;
+    }
+    let rect = Rect {
+        min_x: ax.min(bx),
+        min_y: ay.min(by),
+        max_x: ax.max(bx),
+        max_y: ay.max(by),
+    };
+    let Some(r) = tile_range(&rect, z, extent, pad) else { return };
+    let spans_many = (r.x1 - r.x0) >= MAX_SEGMENT_TILES || (r.y1 - r.y0) >= MAX_SEGMENT_TILES;
+    if spans_many && depth < MAX_BISECT_DEPTH {
+        // Bisecting at the midpoint keeps the superset property: the two halves
+        // together cover exactly the same line.
+        let mid = ((ax + bx) / 2.0, (ay + by) / 2.0);
+        push_segment(out, a, mid, z, extent, pad, depth + 1);
+        push_segment(out, mid, b, z, extent, pad, depth + 1);
+        return;
+    }
+    out.extend(r.iter());
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_box(
+    out: &mut Vec<(u64, u64)>,
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    z: u8,
+    extent: u32,
+    pad: f64,
+) {
+    if !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
+        return;
+    }
+    let b = Rect {
+        min_x: ax.min(bx),
+        min_y: ay.min(by),
+        max_x: ax.max(bx),
+        max_y: ay.max(by),
+    };
+    if let Some(r) = tile_range(&b, z, extent, pad) {
+        out.extend(r.iter());
+    }
 }
 
 /// The tiles a world-space bounding box touches at zoom `z`, grown by `pad`
@@ -555,43 +639,85 @@ mod tests {
         assert!(!touched.contains(&(40, 0)), "top-right corner is empty");
     }
 
-    /// Safety property: it may over-include, never under-include. Anything it lists
-    /// is inside the feature's bounding box, and every segment's own box is covered.
+    /// Safety property: it may over-include, never under-include. Everything it lists
+    /// is inside the feature's bounding box, and every point ON the line lands in a
+    /// tile it listed.
+    ///
+    /// Sampling the line rather than asserting each segment's whole box, because
+    /// bisection deliberately produces a tighter set than those boxes — that is the
+    /// optimisation. What must not change is that no part of the line is unreachable.
     #[test]
-    fn tiles_touched_is_a_subset_of_the_bounding_box_and_covers_every_segment() {
+    fn tiles_touched_covers_every_point_on_the_line_and_nothing_outside_the_box() {
         let extent = 4096u32;
         let e = extent as f64;
-        let g = Geometry::Lines(vec![vec![
+        let pts = vec![
             (0.5 * e, 0.5 * e),
             (3.5 * e, 1.5 * e),
             (2.0 * e, 6.0 * e),
-        ]]);
+        ];
+        let g = Geometry::Lines(vec![pts.clone()]);
 
         let mut touched = Vec::new();
         tiles_touched(&g, 8, extent, 0.0, &mut touched);
+
         let bbox = tile_range(&bounds(&g).unwrap(), 8, extent, 0.0).unwrap();
         let inside: Vec<(u64, u64)> = bbox.iter().collect();
         for t in &touched {
             assert!(inside.contains(t), "{t:?} is outside the bounding box");
         }
 
-        // Each segment's own tile range must be fully present, which is what makes
-        // this a conservative superset of the tiles the line actually enters.
-        let pts = match &g {
-            Geometry::Lines(l) => l[0].clone(),
-            _ => unreachable!(),
-        };
+        // Walk each segment finely; every sample's tile must have been listed.
         for seg in pts.windows(2) {
-            let b = Rect {
-                min_x: seg[0].0.min(seg[1].0),
-                min_y: seg[0].1.min(seg[1].1),
-                max_x: seg[0].0.max(seg[1].0),
-                max_y: seg[0].1.max(seg[1].1),
-            };
-            for t in tile_range(&b, 8, extent, 0.0).unwrap().iter() {
-                assert!(touched.contains(&t), "segment tile {t:?} was dropped");
+            let steps = 2000;
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                let x = seg[0].0 + (seg[1].0 - seg[0].0) * t;
+                let y = seg[0].1 + (seg[1].1 - seg[0].1) * t;
+                let tile = ((x / e).floor() as u64, (y / e).floor() as u64);
+                assert!(
+                    touched.contains(&tile),
+                    "point ({x}, {y}) is in tile {tile:?}, which was not listed"
+                );
             }
         }
+    }
+
+    /// Bisection is what makes the result independent of vertex density: a 4-vertex
+    /// line across a continent must walk about as many tiles as a 400-vertex one along
+    /// the same path, rather than filling its segment boxes.
+    #[test]
+    fn a_sparse_line_walks_as_tightly_as_a_dense_one() {
+        let extent = 4096u32;
+        let e = extent as f64;
+        let end = 40.0;
+
+        let sparse = Geometry::Lines(vec![vec![(0.0, 0.0), (end * e, end * e)]]);
+        let dense: Vec<Pt> = (0..=400)
+            .map(|i| {
+                let t = i as f64 / 400.0;
+                (end * e * t, end * e * t)
+            })
+            .collect();
+        let dense = Geometry::Lines(vec![dense]);
+
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        tiles_touched(&sparse, 8, extent, 0.0, &mut a);
+        tiles_touched(&dense, 8, extent, 0.0, &mut b);
+
+        let bbox = tile_range(&bounds(&sparse).unwrap(), 8, extent, 0.0).unwrap();
+        assert!(
+            (a.len() as u64) * 10 < bbox.len(),
+            "sparse walked {} of the box's {}",
+            a.len(),
+            bbox.len()
+        );
+        // Within a small factor of each other, not orders apart.
+        assert!(
+            a.len() < b.len() * 3 && b.len() < a.len() * 3,
+            "sparse {} vs dense {} should be comparable",
+            a.len(),
+            b.len()
+        );
     }
 
     /// A polygon covers its interior, so its footprint stays the whole ring box --
