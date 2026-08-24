@@ -19,7 +19,7 @@
 use std::process::ExitCode;
 use tile_build::geojson;
 use tile_build::geom::Geometry;
-use tile_build::tiling::{build_point_archive, Point};
+use tile_build::tiling::{build_point_archive_with, Point};
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -108,7 +108,7 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let bytes = match build_point_archive(&layer, &points, minzoom, maxzoom) {
+    let bytes = match build_point_archive_with(&layer, &points, minzoom, maxzoom, true) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("tile_points: {e}");

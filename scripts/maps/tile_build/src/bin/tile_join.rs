@@ -15,7 +15,7 @@
 
 use std::process::ExitCode;
 use tile_build::pmtiles::Archive;
-use tile_build::tiling::merge_archives;
+use tile_build::tiling::merge_archives_with;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -83,7 +83,7 @@ fn main() -> ExitCode {
     }
 
     let refs: Vec<&Archive> = archives.iter().collect();
-    let merged = match merge_archives(&refs) {
+    let merged = match merge_archives_with(&refs, true) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("tile_join: {e}");

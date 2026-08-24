@@ -54,6 +54,7 @@ pub mod geom;
 pub mod gz;
 pub mod mvt;
 pub mod pmtiles;
+pub mod progress;
 pub mod proto;
 pub mod pyramid;
 pub mod simplify;

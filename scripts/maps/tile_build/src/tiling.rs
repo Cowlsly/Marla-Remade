@@ -10,6 +10,7 @@
 use crate::geom::project;
 use crate::mvt::{self, Feature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
 use crate::pmtiles::{self, Archive, Builder};
+use crate::progress::Progress;
 use crate::proto::Result;
 use std::collections::HashMap;
 
@@ -75,12 +76,27 @@ pub fn tile_points(
     out
 }
 
-/// Build a single-layer point archive across `min_zoom..=max_zoom`.
+/// Build a single-layer point archive across `min_zoom..=max_zoom`, silently.
 pub fn build_point_archive(
     layer_name: &str,
     points: &[Point],
     min_zoom: u8,
     max_zoom: u8,
+) -> Result<Vec<u8>> {
+    build_point_archive_with(layer_name, points, min_zoom, max_zoom, false)
+}
+
+/// As [`build_point_archive`], with a per-zoom progress bar when `progress`.
+///
+/// The binaries pass true and the library defaults to false, so tests stay quiet.
+/// Worth having for points and not only for lines: `ma_pois` is 22.6 M features at
+/// planet scale and used to print nothing at all between its start and its report.
+pub fn build_point_archive_with(
+    layer_name: &str,
+    points: &[Point],
+    min_zoom: u8,
+    max_zoom: u8,
+    progress: bool,
 ) -> Result<Vec<u8>> {
     let mut b = Builder::new();
     b.min_zoom = min_zoom;
@@ -88,12 +104,23 @@ pub fn build_point_archive(
     b.center_zoom = min_zoom;
     b.metadata = point_metadata(layer_name, min_zoom, max_zoom).into_bytes();
     for z in min_zoom..=max_zoom {
-        for (id, body) in tile_points(layer_name, points, z, DEFAULT_EXTENT) {
+        // `tile_points` buckets and MVT-encodes the whole zoom before returning, so
+        // the bar covers the gzip loop -- which is where the time goes -- and the
+        // bucketing shows as a pause before the bar appears.
+        let tiles = tile_points(layer_name, points, z, DEFAULT_EXTENT);
+        let mut bar = Progress::new(format!("{layer_name} z{z}"), tiles.len(), TILES, progress);
+        for (id, body) in tiles {
+            bar.tick(TILES);
             b.add_tile_raw(id, crate::gz::compress(&body));
         }
+        bar.finish(TILES);
     }
     b.build()
 }
+
+/// Points are bucketed before they are counted, so unlike the pyramid's candidates
+/// every one of these really is written.
+const TILES: &str = "tile(s)";
 
 /// The `json` metadata blob a PMTiles archive carries. MapLibre does not need it
 /// to render a styled layer, but `pmtiles show` and friends read it, so emitting a
@@ -127,6 +154,11 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 /// far the most expensive thing this function can do. It also keeps peak memory down,
 /// since those tiles stay compressed while they wait.
 pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
+    merge_archives_with(inputs, false)
+}
+
+/// As [`merge_archives`], with a progress bar over the write loop when `progress`.
+pub fn merge_archives_with(inputs: &[&Archive], progress: bool) -> Result<Vec<u8>> {
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0u8;
     // (west, south, east, north), in e7 degrees.
@@ -176,7 +208,9 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
 
     let mut ids: Vec<u64> = collected.keys().copied().collect();
     ids.sort_unstable();
+    let mut bar = Progress::new("merging".to_string(), ids.len(), TILES, progress);
     for id in ids {
+        bar.tick(TILES);
         let bodies = &collected[&id];
         // Sole owner, already in the compression the builder writes: hand the
         // producer's bytes straight through. No inflate, no deflate, and the tile is
@@ -200,6 +234,7 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
         };
         b.add_tile_raw(id, crate::gz::compress(&merged));
     }
+    bar.finish(TILES);
     b.build()
 }
 
