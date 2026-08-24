@@ -6,6 +6,7 @@ import com.vayunmathur.cast.domain.ClientFailure
 import com.vayunmathur.cast.network.ControlSocket
 import com.vayunmathur.cast.protocol.Bye
 import com.vayunmathur.cast.protocol.ByeReason
+import com.vayunmathur.cast.protocol.ContentEnded
 import com.vayunmathur.cast.protocol.ContentReady
 import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecoderLimits
@@ -354,6 +355,37 @@ class MirrorClient(
     }
 
     /**
+     * Ask the TV to do something, in a served session.
+     *
+     * The reverse of the direction this message runs for screen mirroring, and the honest one for a
+     * file: the television has the player, so this is what a pause pressed anywhere on the phone turns
+     * into. Non-throwing for [sendPlaybackState]'s reasons - a dead socket is [awaitEnd]'s to report -
+     * but logged, because unlike a snapshot each of these is a user action rather than a tick.
+     */
+    fun sendPlaybackCommand(command: PlaybackCommand) {
+        Log.i(TAG, "asking the TV for ${command.action}${command.value?.let { " $it" }.orEmpty()}")
+        runCatching { socket.send(command) }
+            .onFailure { Log.w(TAG, "could not send ${command.action}", it) }
+    }
+
+    /**
+     * Tell the TV the content session is over, and that the connection is not.
+     *
+     * **Nothing else tells it.** The TV owns its own clock and buffer, so a session that simply stops
+     * being served carries on playing whatever it had already fetched and then fails its next request
+     * against a proxy that has gone - an error card where the idle screen belongs. Which is also why
+     * this must be sent *before* the proxy stops.
+     *
+     * Deliberately not [sayGoodbye]: that ends the connection, and with it the paired-and-connected
+     * state the user just used. Closing one cast should leave the TV ready for the next.
+     */
+    fun sendContentEnded() {
+        Log.i(TAG, "telling '$receiverName' the content session is over")
+        runCatching { socket.send(ContentEnded) }
+            .onFailure { Log.w(TAG, "could not end the content session", it) }
+    }
+
+    /**
      * Put a keep-alive on the control channel, so the TV's read deadline does not expire.
      *
      * Non-throwing and unlogged for exactly [sendPlaybackState]'s reasons - it is a timer loop, and
@@ -378,14 +410,18 @@ class MirrorClient(
      * the caller has to act on, not a note for a human.
      *
      * **A dispatch loop rather than a drain.** This used to discard everything that was not a `Bye`,
-     * which was right while the TV had nothing else to say. It has a remote now, and its
-     * [PlaybackCommand]s arrive on this same socket - and cannot arrive anywhere else, because there
-     * is one socket with one read position and this is already the only reader.
+     * which was right while the TV had nothing else to say. It has a transport now, and both halves of
+     * it arrive on this same socket - and cannot arrive anywhere else, because there is one socket with
+     * one read position and this is already the only reader.
      *
-     * [onCommand] is null for screen mirroring, which has no transport to control. A command that
-     * turns up anyway is logged and dropped rather than acted on.
+     * [onCommand] is null for screen mirroring, which has no transport to control. [onState] is null
+     * for anything that is not a served session, where the TV has no player to describe. Either
+     * message turning up anyway is logged and dropped rather than acted on.
      */
-    fun awaitEnd(onCommand: ((PlaybackCommand) -> Unit)? = null): String? {
+    fun awaitEnd(
+        onCommand: ((PlaybackCommand) -> Unit)? = null,
+        onState: ((PlaybackState) -> Unit)? = null,
+    ): String? {
         while (true) {
             val next = socket.receive() ?: return null
             when (val message = next.message) {
@@ -403,6 +439,9 @@ class MirrorClient(
                         onCommand(message)
                     }
                 }
+                // The television's own player, in a served session. Not logged: this arrives twice a
+                // second, and a line per snapshot would bury everything else about the session.
+                is PlaybackState -> onState?.invoke(message)
                 // The echo of our own keep-alive. Nothing to do with it: having read it is the
                 // whole effect, because that is what pushed this socket's read deadline out.
                 is Ping -> {}

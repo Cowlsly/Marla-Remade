@@ -81,8 +81,10 @@ class CastClient(context: Context) {
      * A live content session: Cast is serving this app's own media to the TV.
      *
      * Nothing to draw into and nothing to write, because nothing is being encoded. The TV fetches
-     * byte ranges of whatever the app named and decodes them itself, so the app's only remaining
-     * job is to answer [CastResourceProvider] and to keep sending [reportPlaybackState].
+     * byte ranges of whatever the app named and decodes them itself - so it also owns the clock, the
+     * buffer and the position, which is why the app's remaining jobs are to answer
+     * [CastResourceProvider], to *listen* on [onPlaybackState], and to send what the user presses
+     * through [sendCommand]. [reportPlaybackState] has nothing to say here: there is no local player.
      *
      * There is no granted geometry either: the TV plays the media at its own size, which is the
      * point - the frame is no longer being squeezed through an encoder this phone had to choose.
@@ -111,6 +113,20 @@ class CastClient(context: Context) {
      */
     var onCommand: ((PlaybackCommand) -> Unit)? = null
 
+    /**
+     * Called with the *television's* playback, in a content session, twice a second and on any change.
+     *
+     * The inverse of [reportPlaybackState], and the one that matters when the TV is serving this app's
+     * media: there is no player running here, so this is the only account of where playback is. A
+     * client that leaves it null casts perfectly and then shows a player frozen at 0:00 whose buttons
+     * drive nothing anybody can hear.
+     *
+     * `hasNext` and `hasPrevious` should be ignored - the queue is this app's, and the TV never saw it.
+     *
+     * Runs on the main thread, like [onCommand].
+     */
+    var onPlaybackState: ((PlaybackState) -> Unit)? = null
+
     private var service: Messenger? = null
     private var bound = false
 
@@ -137,6 +153,12 @@ class CastClient(context: Context) {
                     // Dropped rather than queued when the session is not live: a command that arrived
                     // during teardown would drive a player the TV is no longer showing.
                     if (open) PlaybackCommand.from(msg.data)?.let { onCommand?.invoke(it) }
+                    true
+                }
+                CastContract.MSG_TV_PLAYBACK_STATE -> {
+                    // Dropped after the session, for [onCommand]'s reason turned around: a snapshot
+                    // applied during teardown would leave a local player describing a dead TV.
+                    if (open) msg.data?.let { onPlaybackState?.invoke(PlaybackState.from(it)) }
                     true
                 }
                 CastContract.MSG_RESOURCE_REQUEST -> {
@@ -334,10 +356,14 @@ class CastClient(context: Context) {
      * Call it again for the next item - there is no playlist, because the queue stays here where the
      * ordering, the artwork and the metadata are.
      *
+     * [startPositionMs] is what makes handing playback over keep its place instead of restarting the
+     * track. A resource still being written cannot honour it, because there is no length to seek
+     * against, and the TV then starts at the beginning.
+     *
      * Silent and non-throwing, like [reportPlaybackState]: a session that has just ended is the
      * common reason for this to go nowhere, and the client already learns that through [onEnded].
      */
-    fun play(resourceId: String, mimeType: String, durationMs: Long = 0) {
+    fun play(resourceId: String, mimeType: String, durationMs: Long = 0, startPositionMs: Long = 0) {
         if (!open) return
         val remote = service ?: return
         val message = Message.obtain(null, CastContract.MSG_PLAY_MEDIA).apply {
@@ -345,7 +371,30 @@ class CastClient(context: Context) {
                 putString(CastContract.KEY_RESOURCE_ID, resourceId)
                 putString(CastContract.KEY_RESOURCE_TYPE, mimeType)
                 putLong(CastContract.KEY_MEDIA_DURATION_MS, durationMs)
+                putLong(CastContract.KEY_START_POSITION_MS, startPositionMs)
             }
+        }
+        try {
+            remote.send(message)
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /**
+     * Ask the television to do something, in a content session.
+     *
+     * The inverse of [onCommand]: the TV holds the player, so play, pause, seek and speed have to
+     * travel to it however the user asked - the app's own screen, a notification, a headset button, a
+     * car. [PlaybackAction.Next] and [PlaybackAction.Previous] are **not** for this: the queue is
+     * here, so advancing means calling [play] with the next item.
+     *
+     * Silent and non-throwing, like [play] and [reportPlaybackState], and for the same reasons.
+     */
+    fun sendCommand(command: PlaybackCommand) {
+        if (!open) return
+        val remote = service ?: return
+        val message = Message.obtain(null, CastContract.MSG_SEND_PLAYBACK_COMMAND).apply {
+            data = command.toBundle()
         }
         try {
             remote.send(message)
@@ -388,6 +437,7 @@ class CastClient(context: Context) {
     fun close() {
         onEnded = null
         onCommand = null
+        onPlaybackState = null
         pending = null
         resources = null
         // Shut down after clearing the provider so a request already in flight finds nothing to

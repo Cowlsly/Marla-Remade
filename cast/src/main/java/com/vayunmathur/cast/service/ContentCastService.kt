@@ -49,7 +49,7 @@ class ContentCastService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
-    /** Where `MSG_SESSION_READY`, `MSG_SESSION_ENDED` and `MSG_PLAYBACK_COMMAND` go. */
+    /** Where `MSG_SESSION_READY`, `MSG_SESSION_ENDED`, `MSG_PLAYBACK_COMMAND` and `MSG_TV_PLAYBACK_STATE` go. */
     private var client: Messenger? = null
 
     /** True between a successful open and the session ending, so nothing is reported twice. */
@@ -99,6 +99,15 @@ class ContentCastService : Service() {
                     // TV to play it on, and a client may send one a tick after the session ended.
                     if (sessionOpen) {
                         msg.data?.let { CastController.playMedia(it.toPlayMedia()) }
+                    }
+                    true
+                }
+                CastContract.MSG_SEND_PLAYBACK_COMMAND -> {
+                    // Dropped with no session, like the two above: the television it would drive is no
+                    // longer this client's.
+                    if (sessionOpen) {
+                        msg.data?.toPlaybackCommand()
+                            ?.let { CastController.sendPlaybackCommand(it) }
                     }
                     true
                 }
@@ -177,6 +186,11 @@ class ContentCastService : Service() {
                     CastController.onPlaybackCommand = { command ->
                         scope.launch { send(playbackCommand(command)) }
                     }
+                    // The half that only a served session has: the TV holds the player, so its state
+                    // has to reach the client rather than the other way round.
+                    CastController.onTvPlaybackState = { state ->
+                        scope.launch { send(tvPlaybackState(state)) }
+                    }
                     sendServing(result)
                 }
             }
@@ -230,6 +244,7 @@ class ContentCastService : Service() {
         sessionOpen = false
         CastController.onContentSessionEnded = null
         CastController.onPlaybackCommand = null
+        CastController.onTvPlaybackState = null
         // The app's descriptors are ours until the session ends, and nothing else will close them.
         resources.close()
         // Back to a paired-but-idle TV rather than a dropped session: the pairing is per device and
@@ -289,7 +304,28 @@ private fun Bundle.toPlayMedia(): PlayMedia = PlayMedia(
     // trip but plays, where a refused item would simply be silence.
     mimeType = getString(CastContract.KEY_RESOURCE_TYPE).orEmpty(),
     durationMs = getLong(CastContract.KEY_MEDIA_DURATION_MS),
+    startPositionMs = getLong(CastContract.KEY_START_POSITION_MS),
 )
+
+/**
+ * The press a client sent, as the message the TV understands, or null for an action this build does
+ * not know.
+ *
+ * Matched through [sdkAction] rather than a second hand-written table, which is what keeps this
+ * exhaustive for free: adding an action to the protocol enum fails to compile *there*, and this
+ * follows without being able to disagree with it. Null rather than a fallback for an unrecognised int,
+ * because a command invented by a newer SDK is one this build has nothing to do with.
+ */
+private fun Bundle.toPlaybackCommand(): PlaybackCommand? {
+    val action = getInt(CastContract.KEY_ACTION, -1)
+    val matched = PlaybackAction.entries.firstOrNull { it.sdkAction == action } ?: return null
+    val value = if (containsKey(CastContract.KEY_ACTION_VALUE)) {
+        getDouble(CastContract.KEY_ACTION_VALUE)
+    } else {
+        null
+    }
+    return PlaybackCommand(matched, value)
+}
 
 /** The command the TV sent, as the `Message` the SDK reads. See [Bundle.toPlaybackState]. */
 private fun playbackCommand(command: PlaybackCommand): Message =
@@ -297,6 +333,28 @@ private fun playbackCommand(command: PlaybackCommand): Message =
         data = Bundle().apply {
             putInt(CastContract.KEY_ACTION, command.action.sdkAction)
             command.value?.let { putDouble(CastContract.KEY_ACTION_VALUE, it) }
+        }
+    }
+
+/**
+ * The television's own playback, as the `Message` the SDK reads.
+ *
+ * The inverse of [Bundle.toPlaybackState], and `hasNext`/`hasPrevious` are carried through unchanged
+ * even though the TV cannot know them: the keys exist, the client ignores them, and dropping them here
+ * would be a second place that has to agree about which fields are meaningful in which direction.
+ */
+private fun tvPlaybackState(state: PlaybackState): Message =
+    Message.obtain(null, CastContract.MSG_TV_PLAYBACK_STATE).apply {
+        data = Bundle().apply {
+            putLong(CastContract.KEY_POSITION_MS, state.positionMs)
+            putLong(CastContract.KEY_DURATION_MS, state.durationMs)
+            putBoolean(CastContract.KEY_PLAYING, state.playing)
+            putBoolean(CastContract.KEY_BUFFERING, state.buffering)
+            putFloat(CastContract.KEY_SPEED, state.speed)
+            putFloat(CastContract.KEY_VOLUME, state.volume)
+            putBoolean(CastContract.KEY_HAS_NEXT, state.hasNext)
+            putBoolean(CastContract.KEY_HAS_PREVIOUS, state.hasPrevious)
+            putBoolean(CastContract.KEY_ENDED, state.ended)
         }
     }
 

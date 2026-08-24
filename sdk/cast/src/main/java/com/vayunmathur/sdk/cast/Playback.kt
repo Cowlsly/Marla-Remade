@@ -3,7 +3,7 @@ package com.vayunmathur.sdk.cast
 import android.os.Bundle
 
 /**
- * Where playback is, for the television to draw a seek bar from.
+ * Where playback is, for the end that cannot see the player to draw a seek bar from.
  *
  * **A deliberate second definition of `:cast:protocol`'s message of the same name, not a reuse of
  * it.** This module is the public client contract: every app that casts compiles against it, and
@@ -11,6 +11,11 @@ import android.os.Bundle
  * the RTP packetiser - which is the entire thing brokering exists to avoid. `:cast` depends on both
  * sides and owns the translation, so the duplication is one file wide and two functions deep, and it
  * buys a public API that cannot leak the protocol.
+ *
+ * Used in both directions: an app that draws into a `Surface` reports its own player with
+ * [CastClient.reportPlaybackState], and an app whose media the TV is *serving* is told about the
+ * television's player through [CastClient.onPlaybackState]. Which end owns the truth is whichever end
+ * owns the player.
  *
  * A snapshot rather than a delta: absolute in every field, so a lost one repairs itself on the next
  * heartbeat and there is no sequence number to get wrong.
@@ -22,9 +27,9 @@ data class PlaybackState(
     /**
      * Whether media is actually advancing.
      *
-     * Report the player's own "is playing" rather than its play-when-ready flag: the TV extrapolates
-     * position between snapshots, and a stall reported as playing runs its seek bar ahead of the
-     * picture and then snaps it back.
+     * Report the player's own "is playing" rather than its play-when-ready flag: the receiver
+     * extrapolates position between snapshots, and a stall reported as playing runs its seek bar ahead
+     * of the picture and then snaps it back.
      */
     val playing: Boolean,
     /** For a spinner. Distinct from [playing], because a stall is not a pause. */
@@ -37,10 +42,19 @@ data class PlaybackState(
      * Whether there is anything to skip to.
      *
      * Carried because the TV cannot know - what comes next is this app's own idea of a queue - and a
-     * remote offering a button that does nothing is worse than one offering none.
+     * remote offering a button that does nothing is worse than one offering none. Always the app's,
+     * and meaningless coming *from* the television.
      */
     val hasNext: Boolean = false,
     val hasPrevious: Boolean = false,
+    /**
+     * The item finished on its own, so a queue can advance.
+     *
+     * Only meaningful coming from the television. Its own field rather than a position-against-duration
+     * reading, which cannot be told apart from a pause at the end of a track - and has no duration to
+     * compare against at all while a resource is still being written.
+     */
+    val ended: Boolean = false,
 ) {
     internal fun toBundle(): Bundle = Bundle().apply {
         putLong(CastContract.KEY_POSITION_MS, positionMs)
@@ -51,11 +65,37 @@ data class PlaybackState(
         putFloat(CastContract.KEY_VOLUME, volume)
         putBoolean(CastContract.KEY_HAS_NEXT, hasNext)
         putBoolean(CastContract.KEY_HAS_PREVIOUS, hasPrevious)
+        putBoolean(CastContract.KEY_ENDED, ended)
+    }
+
+    internal companion object {
+        /**
+         * Read one back, for the television's own playback.
+         *
+         * Defaults rather than refusals for the optional fields, exactly as `:cast` does going the
+         * other way: an absent speed means 1x, and a snapshot rejected for lacking one would leave
+         * every surface on the phone frozen.
+         */
+        internal fun from(data: Bundle): PlaybackState = PlaybackState(
+            positionMs = data.getLong(CastContract.KEY_POSITION_MS),
+            durationMs = data.getLong(CastContract.KEY_DURATION_MS),
+            playing = data.getBoolean(CastContract.KEY_PLAYING),
+            buffering = data.getBoolean(CastContract.KEY_BUFFERING),
+            speed = data.getFloat(CastContract.KEY_SPEED, 1f),
+            volume = data.getFloat(CastContract.KEY_VOLUME, 1f),
+            hasNext = data.getBoolean(CastContract.KEY_HAS_NEXT),
+            hasPrevious = data.getBoolean(CastContract.KEY_HAS_PREVIOUS),
+            ended = data.getBoolean(CastContract.KEY_ENDED),
+        )
     }
 }
 
 /**
- * A press on the television's remote.
+ * A press on whichever transport the user reached for.
+ *
+ * Arrives from the television's remote through [CastClient.onCommand] when the app is drawing into a
+ * `Surface`, and goes *to* the television through [CastClient.sendCommand] when the television is the
+ * one with the player.
  *
  * [value] is the action's argument for the actions that take one - milliseconds for
  * [PlaybackAction.SeekTo], a multiplier for [PlaybackAction.SetSpeed], 0..1 for
@@ -66,6 +106,11 @@ data class PlaybackCommand(
     val action: PlaybackAction,
     val value: Double? = null,
 ) {
+    internal fun toBundle(): Bundle = Bundle().apply {
+        putInt(CastContract.KEY_ACTION, action.wire)
+        value?.let { putDouble(CastContract.KEY_ACTION_VALUE, it) }
+    }
+
     companion object {
         /**
          * Read one back, or null for an action this build does not know.
@@ -87,7 +132,7 @@ data class PlaybackCommand(
 }
 
 /**
- * What the remote asked for.
+ * What the transport asked for.
  *
  * The [wire] value is what crosses the `Bundle`; the Kotlin names are free to change. An enum is not
  * put in the `Bundle` directly because a `Serializable` enum there is a class-loading problem waiting
@@ -98,20 +143,21 @@ enum class PlaybackAction(internal val wire: Int) {
     Pause(CastContract.ACTION_PAUSE),
 
     /**
-     * Whichever of the two the player is not currently doing.
+     * Whichever of the two the end holding the player is not currently doing.
      *
-     * Its own action rather than the TV resolving it from the last snapshot: that snapshot can be half
-     * a second old, and two quick presses resolved against it would both send the same thing.
+     * Its own action rather than the sender resolving it from the last snapshot: that snapshot can be
+     * half a second old, and two quick presses resolved against it would both send the same thing.
      */
     Toggle(CastContract.ACTION_TOGGLE),
 
     /** Absolute position, in milliseconds. */
     SeekTo(CastContract.ACTION_SEEK_TO),
 
-    /** The app's own skip interval, so the two ends cannot disagree about how far it is. */
+    /** A discrete skip, by whatever interval the end holding the player uses for one. */
     SkipForward(CastContract.ACTION_SKIP_FORWARD),
     SkipBack(CastContract.ACTION_SKIP_BACK),
 
+    /** Always the app's to answer, whichever way it arrived: the queue is the app's. */
     Next(CastContract.ACTION_NEXT),
     Previous(CastContract.ACTION_PREVIOUS),
 

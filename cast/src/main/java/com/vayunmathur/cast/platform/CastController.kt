@@ -207,12 +207,21 @@ object CastController {
      *
      * Set and cleared by `ContentCastService` alongside [onContentSessionEnded], and for the same
      * reasons: one session, one callback, and a command has to reach the app once rather than be a
-     * current value worth observing.
+     * current value.
      *
      * Null during screen mirroring, which has no transport to control - and [startWatch] does not even
      * offer the dispatch in that case, so a stray command never reaches this far.
      */
     var onPlaybackCommand: ((PlaybackCommand) -> Unit)? = null
+
+    /**
+     * Notified with the *television's* playback, during a served session.
+     *
+     * The inverse of [reportPlaybackState] and set on the same terms as [onPlaybackCommand]. Only a
+     * served session produces these: it is the one case where the TV holds the player, so it is the one
+     * case where the phone has to be told rather than telling.
+     */
+    var onTvPlaybackState: ((PlaybackState) -> Unit)? = null
 
     /**
      * The name of the app that last completed `CastPickerActivity`, resolved from its
@@ -692,6 +701,18 @@ object CastController {
         scope.launch { mutex.withLock { activeClient.playMedia(media) } }
     }
 
+    /**
+     * Ask the TV to do something, in a served session.
+     *
+     * Under [mutex] like [playMedia] and for the same reason: one socket, several writers. Silently
+     * does nothing with no session, because the caller is an app's transport and a session that has
+     * just ended is the ordinary reason for a press to go nowhere.
+     */
+    fun sendPlaybackCommand(command: PlaybackCommand) {
+        val activeClient = client ?: return
+        scope.launch { mutex.withLock { activeClient.sendPlaybackCommand(command) } }
+    }
+
     private fun startWatch(
         appContext: Context,
         activeClient: MirrorClient,
@@ -717,7 +738,12 @@ object CastController {
             } else {
                 null
             }
-            val reason = activeClient.awaitEnd(dispatch)
+            val states: ((PlaybackState) -> Unit)? = if (transportControls) {
+                { state -> onTvPlaybackState?.invoke(state) }
+            } else {
+                null
+            }
+            val reason = activeClient.awaitEnd(dispatch, states)
             // **Another path may already own this teardown.** Closing the socket is what unblocks the
             // read above, and [endCodecConfigFailure] closes it deliberately - so a return from
             // `awaitEnd` is not proof that the TV ended the session. Whoever cancelled this job is
@@ -754,9 +780,15 @@ object CastController {
      *
      * A content session is the case where the control channel can go completely silent while
      * everything is working: the TV fetches the media over HTTPS and owns its own clock, so unless
-     * the app volunteers playback snapshots there is nothing for the phone to say. Both ends give a
-     * read 60 seconds, so silence used to end the session on whichever side read first - which is
-     * what tore a session down a minute in while a track was still being encoded.
+     * one end volunteers playback snapshots there is nothing to say. Both ends give a read 60 seconds,
+     * so silence used to end the session on whichever side read first - which is what tore a session
+     * down a minute in while a track was still being encoded.
+     *
+     * **Stopped when the session is, even though `ContentEnded` hands the channel back rather than
+     * closing it.** Keeping it running would hold that channel open indefinitely - and a second
+     * content session on a channel whose [watchJob] is still parked in a blocking read has two readers
+     * of one socket, so the reply to its `CONTENT_SESSION` goes to the wrong one. Letting the idle
+     * channel lapse at the read timeout is what bounds that window to a minute rather than for ever.
      *
      * Under [mutex] like every other writer, because this is one more thread writing one socket.
      */
@@ -775,6 +807,11 @@ object CastController {
         val appContext = context.applicationContext
         scope.launch {
             endContentSession(CastContract.REASON_CLIENT_CLOSED)
+            // **Before [stopEngine], which closes the proxy.** The TV owns its own clock and buffer, so
+            // told afterwards it would keep playing what it had already fetched and then fail its next
+            // fetch against a port that has gone - an error card instead of the idle screen. `proxy`
+            // being set is exactly "this was a served session"; nothing else needs telling.
+            if (proxy != null) client?.let { mutex.withLock { it.sendContentEnded() } }
             stopEngine()
             _mirrorPhase.value = MirrorPhase.Idle
             _sessionState.update {
@@ -953,7 +990,8 @@ object CastController {
         proxy = null
         // Cancelled here rather than only in `teardown`: `stopMirroring` deliberately leaves the
         // control channel and `watchJob` alive, so a ping loop left running would keep pinging on
-        // behalf of a session that has ended.
+        // behalf of a session that has ended - and hold that channel open for ever, which is more
+        // than `ContentEnded`'s handback can safely be given. See [startKeepAlive].
         pingJob?.cancel()
         pingJob = null
     }
@@ -968,6 +1006,7 @@ object CastController {
         val notify = onContentSessionEnded ?: return
         onContentSessionEnded = null
         onPlaybackCommand = null
+        onTvPlaybackState = null
         notify(reason)
     }
 
