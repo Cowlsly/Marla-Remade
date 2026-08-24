@@ -120,7 +120,7 @@ object PwaHelper {
             data = Uri.parse(url)
             putExtra(com.vayunmathur.web.platform.PwaActivity.EXTRA_URL, url)
             putExtra(com.vayunmathur.web.platform.PwaActivity.EXTRA_TITLE, title)
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
         }
     }
 

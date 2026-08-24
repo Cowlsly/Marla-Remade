@@ -50,11 +50,20 @@
             </intent-filter>
         </activity>
 
+        <!--
+          Empty taskAffinity keeps installed sites out of the browser's task, and
+          documentLaunchMode gives each one a task of its own keyed off the intent's data URI -
+          the site's start URL - so relaunching a site returns to its existing task instead of
+          stacking a duplicate. Both have to be declared here rather than as intent flags,
+          because shortcuts already pinned to the home screen carry the old flags forever.
+          documentLaunchMode is ignored unless launchMode is the default "standard".
+        -->
         <activity
             android:name=".platform.PwaActivity"
             android:exported="true"
             android:theme="@style/Theme.Web"
-            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:documentLaunchMode="intoExisting"
             android:configChanges="mcc|mnc|colorMode|density|fontScale|fontWeightAdjustment|keyboard|keyboardHidden|layoutDirection|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode">
         </activity>
 

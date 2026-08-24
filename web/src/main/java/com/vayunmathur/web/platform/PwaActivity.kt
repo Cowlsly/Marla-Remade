@@ -2,9 +2,11 @@ package com.vayunmathur.web.platform
 
 import android.Manifest
 import android.annotation.SuppressLint
+import android.app.ActivityManager
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.view.ViewGroup
 import android.webkit.CookieManager
@@ -103,6 +105,25 @@ class PwaActivity : ComponentActivity() {
         val url = urlFromExtra ?: extractHttpUrl(urlFromData ?: "") ?: return
         initialUrlState.value = url
         titleState.value = intent.getStringExtra(EXTRA_TITLE)
+        labelRecentsEntry(url, titleState.value)
+    }
+
+    /**
+     * Name this task after the site it is showing. Every installed site is the same activity,
+     * so without this Recents lists them all as "Web" and they can't be told apart.
+     */
+    private fun labelRecentsEntry(url: String, title: String?) {
+        val label = title?.takeIf { it.isNotBlank() }
+            ?: runCatching { BrowserUtils.hostFromUrl(url) }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: return
+        setTaskDescription(
+            if (Build.VERSION.SDK_INT >= 33) {
+                ActivityManager.TaskDescription.Builder().setLabel(label).build()
+            } else {
+                @Suppress("DEPRECATION")
+                ActivityManager.TaskDescription(label)
+            }
+        )
     }
 
     private fun extractHttpUrl(text: String): String? {
