@@ -111,4 +111,10 @@
     <string name="delete_account">Usuń konto</string>
     <string name="delete_local_account_confirm">Usunąć to konto i wszystkie kontakty? Tego nie da się cofnąć.</string>
     <string name="account_name_exists">Konto o takiej nazwie już istnieje</string>
+    <string name="ringtone">Dzwonek</string>
+    <string name="select_ringtone">Wybierz dzwonek</string>
+    <string name="no_contacts_yet">Nie masz jeszcze żadnych kontaktów</string>
+    <string name="no_contacts_yet_message">Dotknij przycisk Dodaj, aby utworzyć pierwszy kontakt.</string>
+    <string name="no_groups_yet">Nie ma jeszcze żadnych grup</string>
+    <string name="no_groups_yet_message">Dotknij przycisk Dodaj, aby tworzyć grupy kontaktów.</string>
 </resources>
