@@ -306,7 +306,9 @@ if [[ "$SKIP_POIS" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for ma_pois layer (or --skip-pois)" >&2; exit 1; }
     POIS_ARGS=(--pbf "$PBF" --out "$WORK/ma_pois.pmtiles" \
         --names-out "$OUTDIR/poi_names.bin" --index-out "$OUTDIR/poi_index.bin" \
-        --attrs-out "$OUTDIR/poi_attrs.bin")
+        --attrs-out "$OUTDIR/poi_attrs.bin" \
+        --spatial-out "$OUTDIR/poi_spatial.bin" \
+        --name-index-out "$OUTDIR/poi_name_index.bin")
     [[ -n "$BBOX" ]] && POIS_ARGS+=(--bbox "$BBOX")
     run "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
     INPUTS+=("$WORK/ma_pois.pmtiles")
@@ -408,6 +410,8 @@ if [[ "$SKIP_POIS" == "0" ]]; then
     echo "  $OUTDIR/poi_names.bin   (deduped NUL-terminated UTF-8 name table)"
     echo "  $OUTDIR/poi_index.bin   (flat 14-byte records: lat_e7,lon_e7,name_off,type)"
     echo "  $OUTDIR/poi_attrs.bin   (attribute sidecar, keyed by poi_index record ordinal)"
+    echo "  $OUTDIR/poi_spatial.bin (sparse CSR lat/lon grid over record ordinals)"
+    echo "  $OUTDIR/poi_name_index.bin (one (record, word) entry per word, word-sorted)"
     echo ""
 fi
 

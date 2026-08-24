@@ -98,8 +98,8 @@ tap). It deliberately does **not** reuse the base Protomaps `pois` layer (which
 the app suppresses). It is built by [`build_pois_layer.sh`](build_pois_layer.sh)
 (→ [`osm_ingest`](osm_ingest/)'s `poi_extract`) at zooms **z12–z16**. The same
 pass also
-emits three compact side files (`poi_names.bin` + `poi_index.bin` +
-`poi_attrs.bin`, formats below)
+emits five compact side files (`poi_names.bin` + `poi_index.bin` +
+`poi_attrs.bin`, `poi_spatial.bin`, `poi_name_index.bin`, formats below)
 so the app can mmap + binary-scan POIs; the layer and the side files are
 mutually consistent (same POI set, same coordinates). See
 [POI layer & side files (P27)](#poi-layer--side-files-p27) below.
@@ -543,7 +543,7 @@ Individual layers can also be built standalone — see each script's `--help`.
 | `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
 | `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
 | `ma_pois.pmtiles` | planet | ~0.5–2 GB (named POI points) |
-| `poi_names.bin` + `poi_index.bin` + `poi_attrs.bin` | planet | ~0.5–2 GB combined (side files) |
+| `poi_names.bin` + `poi_index.bin` + `poi_attrs.bin` + `poi_spatial.bin` + `poi_name_index.bin` | planet | ~1–3 GB combined (side files) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
 | **`v5-overlay.pmtiles`** | planet | ~**2–7 GB** (every overlay, no base) |
 | `v5.pmtiles` | planet | ≈ **137 GB** (base + overlays; the base is > 97% of it) |
@@ -553,9 +553,19 @@ The base dominates so completely that publishing it together with the overlays
 means re-uploading 127 GB of unchanged bytes to ship a POI fix. Hence the split.
 
 The side-file budget grew with `poi_attrs.bin`. Its offset array alone is
-`4 × record_count` — about 90 MB against 22.6 M planet POIs — before the
+`4 x record_count` - about 90 MB against 22.6 M planet POIs - before the
 deduplicated attribute blob. Recheck it against a real planet run rather than
 trusting this estimate.
+
+The two lookup indexes added more, and `poi_name_index.bin` is now the largest of
+the side files. It carries one 5-byte entry per `(record, word)`, so at ~2.2 words
+per name it is roughly `11 x record_count` - order 250 MB against 22.6 M POIs.
+It cannot be per-*name* instead: `poi_names.bin` is deduplicated, so a word only
+identifies a name and a name still has to be resolved to the records using it.
+`poi_spatial.bin` adds `4 x record_count` (~90 MB) for its ordinal array plus
+8 bytes per populated cell. Both are optional to the app - it falls back to a
+Morton-span walk and a name-pool scan - so a size problem is a performance
+regression, not an outage. Measure them on a real planet run.
 
 ---
 
@@ -646,9 +656,11 @@ binary-scan POIs without opening the tileset:
 poi_names.bin
 poi_index.bin
 poi_attrs.bin
+poi_spatial.bin
+poi_name_index.bin
 ```
 
-All three are published by `build_all.sh --publish` (they are in its artifact list,
+All five are published by `build_all.sh --publish` (they are in its artifact list,
 so `publish_r2.sh` keys each by basename) and ship from the same
 `data.vayunmathur.com` host as the routing graph.
 
@@ -839,6 +851,61 @@ so the tap's coordinate is close to the record's `lat_e7`/`lon_e7` but never equ
 to it — an exact match does not work. `PoiIndex.attributesNear` takes the nearest
 record within a few metres **whose name also matches**, because a mall and a cafe
 inside it can share a coordinate to within a metre.
+
+### `poi_spatial.bin` + `poi_name_index.bin` - the two lookup indexes
+
+Both are optional, both join to `poi_index.bin` **by record ordinal**, and both carry
+its record count so the reader refuses a stale one rather than returning someone
+else's place. `osm_ingest/src/poi_side.rs` is the authoritative layout;
+`maps/.../util/PoiIndex.kt` is the reader.
+
+They exist because `poi_index.bin`'s Morton order bounds a bbox query by the box's
+*Morton span*, and a box straddling the equator or the prime meridian flips a
+top-level Z-curve bit and covers most of the key space - geographically tiny, but
+nearly a full walk. A plain row/column grid has no such pathology.
+
+```
+poi_spatial.bin
+0..4     magic "PSP1"
+4..8     uint32 version (1)
+8..12    uint32 record_count      (must equal poi_index.bin's, else refused)
+12..16   uint32 cell_count        (populated cells only)
+16..20   int32  lat0_e7           grid origin: the records' own minimum corner
+20..24   int32  lon0_e7
+24..28   uint32 cell_e7           200000, i.e. 0.02 deg, same as the transit pack
+28..32   uint32 cols
+then     uint32 cell_ids[cell_count]        ascending
+         uint32 cell_off[cell_count + 1]    CSR prefix into ordinals
+         uint32 ordinals[record_count]      grouped by cell, ascending within one
+```
+
+```
+poi_name_index.bin
+0..4     magic "PNI1"
+4..8     uint32 version (1)
+8..12    uint32 record_count      (must equal poi_index.bin's, else refused)
+12..16   uint32 entry_count
+then     uint32 ordinals[entry_count]   the record the word belongs to
+         uint8  word_idx[entry_count]   which word of that record's name
+```
+
+Parallel arrays, so an entry is 5 bytes rather than the 8 alignment would round a
+packed struct up to. One entry per `(record, word)`, sorted by the word, so a name
+search is a binary search plus a walk of the matching range - and because *every*
+word is indexed, "pizza" finds "Joe's Pizza".
+
+**The sort order is a cross-language contract.** A word is a maximal run of bytes
+that are not ASCII whitespace, and the sort key is those bytes with ASCII `A-Z`
+folded to lowercase and every other byte, including all non-ASCII, left alone.
+Deliberately not Unicode case folding: Rust's `to_lowercase` and Kotlin's
+`lowercase` do not agree byte-for-byte on every input, and a disagreement here is a
+POI that can never be found. Both sides pin it with tests.
+
+One consequence worth stating: a sorted index can only answer prefix questions, so
+name search matches a prefix **of any word** where the old scan matched a substring
+anywhere. "izza" no longer finds "Pizza"; "pizza" still finds "Joe's Pizza". The
+fallback scan keeps the old behaviour when the file is absent, so the two paths
+differ - `PoiIndex.searchByName` documents that, and a test asserts it.
 
 ---
 

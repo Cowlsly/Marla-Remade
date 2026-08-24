@@ -12,7 +12,7 @@ set -euo pipefail
 # THE 11 ARTIFACTS, all landing in --out-dir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
 #            intermediate.bin
-#   pois     poi_names.bin poi_index.bin poi_attrs.bin
+#   pois     poi_names.bin poi_index.bin poi_attrs.bin poi_spatial.bin poi_name_index.bin
 #   transit  world.transit
 #   tiles    v5-overlay.pmtiles               (name from --out)
 # plus manifest.txt listing every one with its size and SHA-256. The first ten
@@ -344,6 +344,8 @@ if want_stage pois; then
             --names-out "$OUT_DIR/poi_names.bin" \
             --index-out "$OUT_DIR/poi_index.bin" \
             --attrs-out "$OUT_DIR/poi_attrs.bin" \
+            --spatial-out "$OUT_DIR/poi_spatial.bin" \
+            --name-index-out "$OUT_DIR/poi_name_index.bin" \
             --engine "$ENGINE_POIS"
         mark_done pois
     fi
@@ -417,9 +419,10 @@ if want_stage tiles; then
     fi
 fi
 
-# --- manifest.txt: name, size, SHA-256 for all 9 ---
+# --- manifest.txt: name, size, SHA-256 for all 12 ---
 ARTIFACTS=(metadata.bin road_names.bin nodes.bin edges.bin lanes.bin intermediate.bin
-           poi_names.bin poi_index.bin poi_attrs.bin world.transit)
+           poi_names.bin poi_index.bin poi_attrs.bin poi_spatial.bin poi_name_index.bin
+           world.transit)
 
 sha256_of() {
     if command -v sha256sum >/dev/null; then

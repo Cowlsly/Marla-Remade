@@ -20,30 +20,39 @@ import java.nio.channels.FileChannel
  *    `{ int32 lat_e7; int32 lon_e7; uint32 name_off; uint16 type }`,
  *    `count = filesize / 14`, sorted ascending by the 64-bit Morton(lat,lon)
  *    key (the key itself is not stored — [spatialFromE7] recomputes it).
- *  * `poi_attrs.bin` — OPTIONAL attribute sidecar (opening hours, phone,
+ *  * `poi_attrs.bin` - OPTIONAL attribute sidecar (opening hours, phone,
  *    website, address, cuisine, wheelchair), indexed by the ORDINAL of the
  *    matching `poi_index.bin` record. See `scripts/maps/osm_ingest/src/poi_attrs.rs`
  *    for the layout.
+ *  * `poi_spatial.bin` - OPTIONAL sparse CSR lat/lon grid over record ordinals, so
+ *    a bbox query visits only the cells it overlaps.
+ *  * `poi_name_index.bin` - OPTIONAL word index: one `(record, word)` entry for
+ *    every word of every name, sorted by word, so name search is a binary search.
+ *    Both are laid out in `scripts/maps/osm_ingest/src/poi_side.rs`.
  *
- * It exposes a name search (prefix/substring over the deduped name pool) and a
- * spatial nearest lookup, so a POI query can resolve locally without a Google
- * call. Everything is a harmless no-op until both files are present (they ship
- * from the same host as the graph); queries then return empty lists. The sidecar
- * is separately optional: an install that has the index but not the attributes
- * keeps working, and every attribute reads as null.
+ * It exposes a name search and a spatial nearest lookup, so a POI query can resolve
+ * locally without a Google call. Everything is a harmless no-op until the index and
+ * the name pool are present (they ship from the same host as the graph); queries then
+ * return empty lists. The three side files are each separately optional, and each is
+ * refused rather than trusted when its record count disagrees with the index — they
+ * all join by ordinal, so a stale one would return the wrong place rather than none.
  *
- * **The spatial queries binary-search; they do not scan.** They used to walk all
- * `count` records, which was imperceptible over a California extract and ANR'd the
- * app on a planet-wide one — 22.6 M records on the main thread inside a tap
- * handler. `poi_index.bin` was already sorted by Morton key; this reader simply
- * never used it. See [Mapped.forEachInBbox] for the bound that replaced the scan,
- * and its caveat.
+ * **Nothing here scans the dataset.** Every lookup used to walk all `count` records,
+ * which was imperceptible over a California extract and ANR'd the app on a planet-wide
+ * one - 22.6 M records on the main thread inside a tap handler. Now:
+ *
+ *  * bbox queries go through the grid, or fall back to a Morton-span walk of the
+ *    already-sorted `poi_index.bin` — see [Mapped.forEachInBbox] and its caveat;
+ *  * name search goes through the word index, or falls back to the two-pass scan.
+ *    The two differ deliberately; [searchByName] says how.
  */
 object PoiIndex {
     private const val TAG = "PoiIndex"
     const val INDEX_FILE = "poi_index.bin"
     const val NAMES_FILE = "poi_names.bin"
     const val ATTRS_FILE = "poi_attrs.bin"
+    const val SPATIAL_FILE = "poi_spatial.bin"
+    const val NAME_INDEX_FILE = "poi_name_index.bin"
 
     /** Bytes per record: int32 lat_e7 + int32 lon_e7 + uint32 name_off + uint16 type. */
     private const val RECORD_BYTES = 14
@@ -59,6 +68,42 @@ object PoiIndex {
     private const val ATTRS_HEADER_BYTES = 12
     /** `attr_off` for a POI that carries no attributes. */
     private const val NO_ATTRS = -1
+
+    // --- poi_spatial.bin / poi_name_index.bin (see osm_ingest/src/poi_side.rs) -----
+    private val SPATIAL_MAGIC =
+        byteArrayOf('P'.code.toByte(), 'S'.code.toByte(), 'P'.code.toByte(), '1'.code.toByte())
+    private const val SPATIAL_VERSION = 1
+    private const val SPATIAL_HEADER_BYTES = 32
+
+    private val NAME_INDEX_MAGIC =
+        byteArrayOf('P'.code.toByte(), 'N'.code.toByte(), 'I'.code.toByte(), '1'.code.toByte())
+    private const val NAME_INDEX_VERSION = 1
+    private const val NAME_INDEX_HEADER_BYTES = 16
+
+    /**
+     * ASCII-only lowercase, and deliberately not [Char.lowercase].
+     *
+     * `poi_name_index.bin` is sorted by the writer, so the reader has to reproduce that
+     * order byte for byte. Rust's `to_lowercase` and Kotlin's `lowercase` do not agree on
+     * every input, and here a disagreement is a POI that can never be found. See the
+     * cross-language contract in `osm_ingest/src/poi_side.rs`.
+     */
+    private fun asciiLower(b: Byte): Int {
+        val v = b.toInt() and 0xFF
+        return if (v >= 'A'.code && v <= 'Z'.code) v + 32 else v
+    }
+
+    private fun isAsciiSpace(b: Byte): Boolean {
+        val v = b.toInt() and 0xFF
+        return v == ' '.code || v == '\t'.code || v == '\n'.code || v == '\r'.code ||
+            v == 0x0B || v == 0x0C
+    }
+
+    /** A query as the index's sort key: UTF-8 bytes, ASCII-lowercased. */
+    private fun queryKey(query: String): ByteArray {
+        val raw = query.toByteArray(Charsets.UTF_8)
+        return ByteArray(raw.size) { asciiLower(raw[it]).toByte() }
+    }
 
     private const val KEY_OPENING_HOURS = 1
     private const val KEY_PHONE = 2
@@ -142,6 +187,16 @@ object PoiIndex {
         val attrs: MappedByteBuffer?,
         /** Byte offset of the attribute blob, i.e. just past the offset array. */
         val attrsBlobStart: Int,
+        /** The CSR spatial grid, or null when absent or mismatched. */
+        val spatial: MappedByteBuffer? = null,
+        val cellCount: Int = 0,
+        val lat0E7: Int = 0,
+        val lon0E7: Int = 0,
+        val cellE7: Int = 0,
+        val cols: Int = 0,
+        /** The word index, or null when absent or mismatched. */
+        val nameIdx: MappedByteBuffer? = null,
+        val entryCount: Int = 0,
     ) {
         fun latE7(i: Int): Int = index.getInt(i * RECORD_BYTES)
         fun lonE7(i: Int): Int = index.getInt(i * RECORD_BYTES + 4)
@@ -183,15 +238,23 @@ object PoiIndex {
         }
 
         /**
-         * Visit every record inside the bbox in file order, stopping early when [onHit]
-         * returns false.
+         * Visit every record inside the bbox in **ordinal order**, stopping early when
+         * [onHit] returns false.
          *
-         * Cost is the box's Morton span — a binary search to its lower bound, then a walk to
-         * its upper bound — rather than [count]. That span is not the box: a box straddling the
-         * equator or the prime meridian flips a top-level Z-curve bit and covers most of the
-         * key space, so those degenerate back toward a full walk. `poi_spatial.bin` makes the
-         * lookup exactly cell-local; this is the bound available without a format change, and
-         * it is what takes a POI tap from 22.6 M records to a local handful.
+         * Two implementations, picked by whether `poi_spatial.bin` was mapped:
+         *
+         *  * **Grid** — only the cells the box actually overlaps are visited, so the cost
+         *    is the box's own area. Exact, and with no pathological cases.
+         *  * **Morton walk** — a binary search to the box's lower key bound, then a walk to
+         *    its upper bound. The bound is the box's *Morton span*, which is not the box: a
+         *    box straddling the equator or the prime meridian flips a top-level Z-curve bit
+         *    and covers most of the key space, degenerating back toward a full walk. Kept
+         *    because the side file is optional, and it still beats scanning [count].
+         *
+         * Ordinal order either way. The grid visits cells row by row, so its hits come out
+         * shuffled relative to the file and are sorted before being yielded — callers that
+         * truncate at a cap, or that break distance ties by file order, must not see a
+         * different answer depending on which side files happen to be present.
          */
         fun forEachInBbox(
             minLatE7: Int,
@@ -201,6 +264,20 @@ object PoiIndex {
             onHit: (ordinal: Int, latE7: Int, lonE7: Int) -> Boolean,
         ) {
             if (minLatE7 > maxLatE7 || minLonE7 > maxLonE7) return
+            if (spatial != null && cellCount > 0 && cols > 0 && cellE7 > 0) {
+                forEachInCells(minLatE7, maxLatE7, minLonE7, maxLonE7, onHit)
+            } else {
+                forEachInMortonSpan(minLatE7, maxLatE7, minLonE7, maxLonE7, onHit)
+            }
+        }
+
+        private fun forEachInMortonSpan(
+            minLatE7: Int,
+            maxLatE7: Int,
+            minLonE7: Int,
+            maxLonE7: Int,
+            onHit: (ordinal: Int, latE7: Int, lonE7: Int) -> Boolean,
+        ) {
             val (first, last) = spatialRangeForBbox(minLatE7, maxLatE7, minLonE7, maxLonE7)
             var i = lowerBound(first)
             while (i < count) {
@@ -214,6 +291,151 @@ object PoiIndex {
                 }
                 i++
             }
+        }
+
+        /** Cell offset along one axis. Must match `cell_axis` in `poi_side.rs`. */
+        private fun axis(value: Int, origin: Int): Int {
+            val d = value.toLong() - origin.toLong()
+            return if (d <= 0) 0 else (d / cellE7).toInt()
+        }
+
+        private fun row(latE7: Int): Int = axis(latE7, lat0E7)
+        private fun col(lonE7: Int): Int = axis(lonE7, lon0E7).coerceAtMost(cols - 1)
+
+        /** Index of [cellId] in the ascending cell-id array, or -1 when unpopulated. */
+        private fun cellIndexOf(cellId: Int): Int {
+            val buf = spatial ?: return -1
+            var lo = 0
+            var hi = cellCount
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                val v = buf.getInt(SPATIAL_HEADER_BYTES + 4 * mid)
+                if (v == cellId) return mid
+                if (v < cellId) lo = mid + 1 else hi = mid
+            }
+            return -1
+        }
+
+        /** CSR prefix entry [i], i.e. where cell `i`'s ordinals begin. */
+        private fun cellOff(i: Int): Int =
+            spatial!!.getInt(SPATIAL_HEADER_BYTES + 4 * cellCount + 4 * i)
+
+        private fun gridOrdinal(k: Int): Int =
+            spatial!!.getInt(SPATIAL_HEADER_BYTES + 4 * cellCount + 4 * (cellCount + 1) + 4 * k)
+
+        private fun forEachInCells(
+            minLatE7: Int,
+            maxLatE7: Int,
+            minLonE7: Int,
+            maxLonE7: Int,
+            onHit: (ordinal: Int, latE7: Int, lonE7: Int) -> Boolean,
+        ) {
+            val hits = ArrayList<Int>()
+            for (r in row(minLatE7)..row(maxLatE7)) {
+                for (c in col(minLonE7)..col(maxLonE7)) {
+                    val ci = cellIndexOf(r * cols + c)
+                    if (ci < 0) continue
+                    for (k in cellOff(ci) until cellOff(ci + 1)) {
+                        val ordinal = gridOrdinal(k)
+                        if (ordinal < 0 || ordinal >= count) continue
+                        if (latE7(ordinal) in minLatE7..maxLatE7 &&
+                            lonE7(ordinal) in minLonE7..maxLonE7
+                        ) {
+                            hits.add(ordinal)
+                        }
+                    }
+                }
+            }
+            hits.sort()
+            for (ordinal in hits) {
+                if (!onHit(ordinal, latE7(ordinal), lonE7(ordinal))) return
+            }
+        }
+
+        // --- Word index --------------------------------------------------------
+
+        private fun entryOrdinal(i: Int): Int =
+            nameIdx!!.getInt(NAME_INDEX_HEADER_BYTES + 4 * i)
+
+        private fun entryWordIdx(i: Int): Int =
+            nameIdx!!.get(NAME_INDEX_HEADER_BYTES + 4 * entryCount + i).toInt() and 0xFF
+
+        /**
+         * Byte range of the [wordIdx]th whitespace-separated word of the name at [off], or
+         * null when the name has fewer words. Must match `word_at` in `poi_side.rs`.
+         */
+        private fun wordRange(off: Int, wordIdx: Int): IntRange? {
+            if (off < 0 || off >= namesLen) return null
+            var i = off
+            var idx = 0
+            while (i < namesLen && names.get(i).toInt() != 0) {
+                while (i < namesLen && names.get(i).toInt() != 0 && isAsciiSpace(names.get(i))) i++
+                if (i >= namesLen || names.get(i).toInt() == 0) break
+                val start = i
+                while (i < namesLen && names.get(i).toInt() != 0 && !isAsciiSpace(names.get(i))) i++
+                if (idx == wordIdx) return start until i
+                idx++
+            }
+            return null
+        }
+
+        private fun entryWord(i: Int): IntRange? =
+            wordRange(nameOff(entryOrdinal(i)), entryWordIdx(i))
+
+        /** ASCII-lowercased byte compare of the word at [range] against [key]. */
+        private fun compareWord(range: IntRange, key: ByteArray): Int {
+            val len = range.last - range.first + 1
+            for (k in 0 until minOf(len, key.size)) {
+                val d = asciiLower(names.get(range.first + k)) - (key[k].toInt() and 0xFF)
+                if (d != 0) return d
+            }
+            return len - key.size
+        }
+
+        private fun wordStartsWith(range: IntRange, key: ByteArray): Boolean {
+            if (range.last - range.first + 1 < key.size) return false
+            for (k in key.indices) {
+                if (asciiLower(names.get(range.first + k)) != (key[k].toInt() and 0xFF)) return false
+            }
+            return true
+        }
+
+        /** First entry whose word is >= [key], or [entryCount]. */
+        private fun lowerBoundWord(key: ByteArray): Int {
+            var lo = 0
+            var hi = entryCount
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                val w = entryWord(mid)
+                // A word we cannot resolve sorts first, so the search steps past it rather
+                // than stalling on a name the index disagrees with.
+                if (w == null || compareWord(w, key) < 0) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+
+        /**
+         * Ordinals whose name has a word starting with [key], each paired with whether the
+         * match was on the name's *first* word.
+         *
+         * Binary search plus a walk of the matching range, so the cost is the number of
+         * matches rather than the size of the name pool.
+         */
+        fun wordPrefixMatches(key: ByteArray, cap: Int): List<IntArray> {
+            if (nameIdx == null || entryCount == 0) return emptyList()
+            val out = ArrayList<IntArray>()
+            val seen = HashSet<Int>()
+            var i = lowerBoundWord(key)
+            while (i < entryCount && out.size < cap) {
+                val w = entryWord(i) ?: break
+                if (!wordStartsWith(w, key)) break
+                val ordinal = entryOrdinal(i)
+                // A name can match on more than one word ("Pizza Pizza"); the better rank
+                // wins, and the index lists word 0 first within one name.
+                if (seen.add(ordinal)) out.add(intArrayOf(ordinal, entryWordIdx(i)))
+                i++
+            }
+            return out
         }
     }
 
@@ -280,6 +502,8 @@ object PoiIndex {
             // Separate and optional: a failure here leaves the index perfectly
             // usable, just without attributes.
             val attrs = openAttrs(File(dir, ATTRS_FILE), count)
+            val grid = openSpatial(File(dir, SPATIAL_FILE), count)
+            val words = openNameIndex(File(dir, NAME_INDEX_FILE), count)
             mapped = Mapped(
                 index = indexBuf,
                 names = namesBuf,
@@ -287,8 +511,20 @@ object PoiIndex {
                 count = count,
                 attrs = attrs?.first,
                 attrsBlobStart = attrs?.second ?: 0,
+                spatial = grid?.buf,
+                cellCount = grid?.cellCount ?: 0,
+                lat0E7 = grid?.lat0E7 ?: 0,
+                lon0E7 = grid?.lon0E7 ?: 0,
+                cellE7 = grid?.cellE7 ?: 0,
+                cols = grid?.cols ?: 0,
+                nameIdx = words?.first,
+                entryCount = words?.second ?: 0,
             )
-            Log.d(TAG, "Loaded $count POI records, names=${namesBuf.capacity()}B")
+            Log.d(
+                TAG,
+                "Loaded $count POI records, names=${namesBuf.capacity()}B, " +
+                    "grid=${grid?.cellCount ?: 0} cells, words=${words?.second ?: 0}",
+            )
             true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to map POI side files", e)
@@ -349,6 +585,96 @@ object PoiIndex {
         }
     }
 
+    /** The mapped spatial grid plus the parameters read out of its header. */
+    private class Grid(
+        val buf: MappedByteBuffer,
+        val cellCount: Int,
+        val lat0E7: Int,
+        val lon0E7: Int,
+        val cellE7: Int,
+        val cols: Int,
+    )
+
+    /**
+     * Map `poi_spatial.bin`, or null when it is absent, stale or malformed.
+     *
+     * The record-count check matters for the same reason it does for the sidecar: the grid
+     * stores *ordinals*, so a grid built against a different `poi_index.bin` would return
+     * the wrong places rather than none. Refusing it costs only the Morton fallback.
+     */
+    private fun openSpatial(file: File, count: Int): Grid? {
+        if (!file.isFile) return null
+        return try {
+            val buf = mapReadOnly(file).also { it.order(ByteOrder.LITTLE_ENDIAN) }
+            if (buf.capacity() < SPATIAL_HEADER_BYTES) return null
+            for (i in SPATIAL_MAGIC.indices) {
+                if (buf.get(i) != SPATIAL_MAGIC[i]) {
+                    Log.w(TAG, "$SPATIAL_FILE has the wrong magic; ignoring it")
+                    return null
+                }
+            }
+            if (buf.getInt(4) != SPATIAL_VERSION) {
+                Log.w(TAG, "$SPATIAL_FILE version ${buf.getInt(4)} unsupported; ignoring it")
+                return null
+            }
+            val records = buf.getInt(8)
+            if (records != count) {
+                Log.w(TAG, "$SPATIAL_FILE covers $records record(s), index has $count; ignoring it")
+                return null
+            }
+            val cellCount = buf.getInt(12)
+            val cols = buf.getInt(28)
+            // cell_ids + cell_off + ordinals must all be present before any of them is read.
+            val need = SPATIAL_HEADER_BYTES + 4L * cellCount + 4L * (cellCount + 1) + 4L * count
+            if (cellCount < 0 || cols < 0 || need > buf.capacity()) {
+                Log.w(TAG, "$SPATIAL_FILE is truncated; ignoring it")
+                return null
+            }
+            Grid(buf, cellCount, buf.getInt(16), buf.getInt(20), buf.getInt(24), cols)
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to map $SPATIAL_FILE", e)
+            null
+        }
+    }
+
+    /** Map `poi_name_index.bin` and its entry count, or null when unusable. */
+    private fun openNameIndex(file: File, count: Int): Pair<MappedByteBuffer, Int>? {
+        if (!file.isFile) return null
+        return try {
+            val buf = mapReadOnly(file).also { it.order(ByteOrder.LITTLE_ENDIAN) }
+            if (buf.capacity() < NAME_INDEX_HEADER_BYTES) return null
+            for (i in NAME_INDEX_MAGIC.indices) {
+                if (buf.get(i) != NAME_INDEX_MAGIC[i]) {
+                    Log.w(TAG, "$NAME_INDEX_FILE has the wrong magic; ignoring it")
+                    return null
+                }
+            }
+            if (buf.getInt(4) != NAME_INDEX_VERSION) {
+                Log.w(TAG, "$NAME_INDEX_FILE version ${buf.getInt(4)} unsupported; ignoring it")
+                return null
+            }
+            val records = buf.getInt(8)
+            if (records != count) {
+                Log.w(
+                    TAG,
+                    "$NAME_INDEX_FILE covers $records record(s), index has $count; ignoring it",
+                )
+                return null
+            }
+            val entries = buf.getInt(12)
+            if (entries < 0 ||
+                NAME_INDEX_HEADER_BYTES + 5L * entries > buf.capacity()
+            ) {
+                Log.w(TAG, "$NAME_INDEX_FILE is truncated; ignoring it")
+                return null
+            }
+            buf to entries
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to map $NAME_INDEX_FILE", e)
+            null
+        }
+    }
+
     private fun mapReadOnly(file: File): MappedByteBuffer =
         RandomAccessFile(file, "r").use { raf ->
             raf.channel.use { ch ->
@@ -359,10 +685,20 @@ object PoiIndex {
         }
 
     /**
-     * Case-insensitive prefix/substring search over the deduped name pool,
-     * returning matching POIs ranked prefix-first then by distance to
-     * ([nearLat],[nearLon]). Returns an empty list when nothing matches or the
-     * index isn't loaded.
+     * Name search, ranked first-word-first then by distance to ([nearLat],[nearLon]).
+     *
+     * Two implementations, picked by whether `poi_name_index.bin` was mapped:
+     *
+     *  * **Indexed** — binary search to the query's place in a word-sorted index, then a
+     *    walk of the matching range, so the cost is the number of matches. Because every
+     *    word of a name is indexed, "pizza" still finds "Joe's Pizza".
+     *  * **Scan** — the name pool, then every record. Two passes whose cost is the whole
+     *    dataset, kept only because the side file is optional.
+     *
+     * **The two do not match exactly, by design.** The scan matches a substring anywhere,
+     * so "izza" finds "Pizza"; a sorted index can only answer prefix questions, so the
+     * indexed path matches a prefix *of any word*. That is a deliberate narrowing —
+     * mid-word matches are lost, whole-word ones are not.
      */
     fun searchByName(
         query: String,
@@ -371,6 +707,45 @@ object PoiIndex {
         limit: Int = 20,
     ): List<PoiRecord> {
         val m = mapped ?: return emptyList()
+        if (query.isBlank()) return emptyList()
+        if (m.nameIdx != null) return searchByWordIndex(m, query, nearLat, nearLon, limit)
+        return searchByScan(m, query, nearLat, nearLon, limit)
+    }
+
+    private fun searchByWordIndex(
+        m: Mapped,
+        query: String,
+        nearLat: Double,
+        nearLon: Double,
+        limit: Int,
+    ): List<PoiRecord> {
+        val key = queryKey(query.trim())
+        if (key.isEmpty()) return emptyList()
+        val out = ArrayList<Ranked>()
+        for (hit in m.wordPrefixMatches(key, CANDIDATE_CAP)) {
+            val (ordinal, wordIdx) = hit
+            // Matching the name's first word is the indexed equivalent of the scan's
+            // "starts with", and ranks the same way.
+            val rank = if (wordIdx == 0) 0 else 1
+            out.add(
+                Ranked(
+                    m.record(ordinal),
+                    rank,
+                    distanceSq(nearLat, nearLon, m.latE7(ordinal) / 1e7, m.lonE7(ordinal) / 1e7),
+                )
+            )
+        }
+        out.sortWith(compareBy({ it.rank }, { it.distSq }))
+        return out.take(limit).map { it.record }
+    }
+
+    private fun searchByScan(
+        m: Mapped,
+        query: String,
+        nearLat: Double,
+        nearLon: Double,
+        limit: Int,
+    ): List<PoiRecord> {
         val q = query.trim().lowercase()
         if (q.isEmpty()) return emptyList()
 

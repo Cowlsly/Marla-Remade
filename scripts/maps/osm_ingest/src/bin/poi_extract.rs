@@ -25,6 +25,8 @@ fn main() -> ExitCode {
         &args.names,
         &args.index,
         &args.attrs,
+        &args.spatial,
+        &args.name_index,
     ) {
         Ok(stats) => {
             println!(
@@ -43,11 +45,17 @@ fn main() -> ExitCode {
                 stats.with_attrs, stats.unique_attrs, stats.attr_bytes
             );
             println!(
-                "Wrote {}, {}, {}, {}",
+                "{} populated grid cell(s), {} name index entr(ies)",
+                stats.spatial_cells, stats.name_entries
+            );
+            println!(
+                "Wrote {}, {}, {}, {}, {}, {}",
                 args.geojson.display(),
                 args.names.display(),
                 args.index.display(),
-                args.attrs.display()
+                args.attrs.display(),
+                args.spatial.display(),
+                args.name_index.display()
             );
             ExitCode::SUCCESS
         }

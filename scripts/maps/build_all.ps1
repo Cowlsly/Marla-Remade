@@ -18,7 +18,7 @@
 # THE 11 ARTIFACTS, all landing in -OutDir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
 #            intermediate.bin
-#   pois     poi_names.bin poi_index.bin poi_attrs.bin
+#   pois     poi_names.bin poi_index.bin poi_attrs.bin poi_spatial.bin poi_name_index.bin
 #   transit  world.transit
 #   tiles    v5-overlay.pmtiles               (name from -Out)
 # plus manifest.txt with each one's size and SHA-256, byte-comparable with the
@@ -215,13 +215,15 @@ if (Test-Stage "pois") {
     } else {
         Assert-Pbf "Pois"
         $poiGeo = Join-Path $Work "ma_pois.geojsonseq"
-        Write-Host "=== pois -> $OutDir\poi_names.bin + poi_index.bin + poi_attrs.bin ==="
+        Write-Host "=== pois -> $OutDir\poi_names.bin + poi_index.bin + poi_attrs.bin + poi_spatial.bin + poi_name_index.bin ==="
         Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
             "--bin", "poi_extract", "--", $Pbf,
             "--geojson", $poiGeo,
             "--names", (Join-Path $OutDir "poi_names.bin"),
             "--index", (Join-Path $OutDir "poi_index.bin"),
-            "--attrs", (Join-Path $OutDir "poi_attrs.bin"))
+            "--attrs", (Join-Path $OutDir "poi_attrs.bin"),
+            "--spatial", (Join-Path $OutDir "poi_spatial.bin"),
+            "--name-index", (Join-Path $OutDir "poi_name_index.bin"))
         Write-Host "=== pois -> $PoisTile (z12-16, tile_points) ==="
         Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
             "--bin", "tile_points", "--",
@@ -336,7 +338,8 @@ if (Test-Stage "tiles") {
 # so the digests compare directly.
 $artifacts = @("metadata.bin", "road_names.bin", "nodes.bin", "edges.bin", "lanes.bin",
                "intermediate.bin",
-               "poi_names.bin", "poi_index.bin", "poi_attrs.bin", "world.transit",
+               "poi_names.bin", "poi_index.bin", "poi_attrs.bin", "poi_spatial.bin",
+               "poi_name_index.bin", "world.transit",
                (Split-Path $Out -Leaf))
 
 function Get-ArtifactPath {

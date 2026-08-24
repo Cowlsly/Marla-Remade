@@ -46,6 +46,7 @@ use crate::names::NamePool;
 use crate::osm::{self, visit_block, Element, MEMBER_WAY};
 use crate::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
 use crate::poi_attrs::AttrPool;
+use crate::poi_side;
 use crate::proto::{Error, Result};
 use crate::spatial::spatial_from_e7;
 use crate::tags::{self, PoiTags};
@@ -67,6 +68,10 @@ pub struct Stats {
     pub with_attrs: usize,
     pub unique_attrs: usize,
     pub attr_bytes: usize,
+    /// Populated cells in `poi_spatial.bin`.
+    pub spatial_cells: usize,
+    /// `(record, word)` entries in `poi_name_index.bin`.
+    pub name_entries: usize,
 }
 
 struct Poi {
@@ -125,10 +130,12 @@ pub fn build(
     names: &Path,
     index: &Path,
     attrs: &Path,
+    spatial: &Path,
+    name_index: &Path,
 ) -> Result<Stats> {
     // Fail before the three passes rather than after them if an output path is
     // unwritable.
-    for path in [geojson, names, index, attrs] {
+    for path in [geojson, names, index, attrs, spatial, name_index] {
         if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent)
                 .map_err(|e| Error(format!("cannot create {}: {e}", parent.display())))?;
@@ -255,7 +262,7 @@ pub fn build(
     // are stable across runs.
     pois.sort_by_key(|p| (p.morton, p.osm_id));
 
-    let written = write_outputs(&pois, geojson, names, index, attrs)?;
+    let written = write_outputs(&pois, geojson, names, index, attrs, spatial, name_index)?;
     Ok(Stats {
         records: written.records,
         unique_names: written.unique_names,
@@ -266,6 +273,8 @@ pub fn build(
         with_attrs: written.with_attrs,
         unique_attrs: written.unique_attrs,
         attr_bytes: written.attr_bytes,
+        spatial_cells: written.spatial_cells,
+        name_entries: written.name_entries,
     })
 }
 
@@ -453,6 +462,8 @@ struct Written {
     with_attrs: usize,
     unique_attrs: usize,
     attr_bytes: usize,
+    spatial_cells: usize,
+    name_entries: usize,
 }
 
 fn write_outputs(
@@ -461,6 +472,8 @@ fn write_outputs(
     names: &Path,
     index: &Path,
     attrs: &Path,
+    spatial: &Path,
+    name_index: &Path,
 ) -> Result<Written> {
     let mut pool = NamePool::new(BufWriter::new(create(names)?));
     let mut index_out = BufWriter::new(create(index)?);
@@ -495,6 +508,20 @@ fn write_outputs(
     attr_pool.write(&mut attrs_out).map_err(io_err)?;
     attrs_out.flush().map_err(io_err)?;
 
+    // Both side files are derived from the same Morton-sorted vector as the index, in
+    // the same function, for the same reason the sidecar is: they join by record
+    // ordinal, and any second pass over `pois` is an opportunity to disagree.
+    let coords: Vec<(i32, i32)> = pois.iter().map(|p| (p.lat_e7, p.lon_e7)).collect();
+    let mut spatial_out = BufWriter::new(create(spatial)?);
+    let spatial_cells = poi_side::write_spatial(&mut spatial_out, &coords).map_err(io_err)?;
+    spatial_out.flush().map_err(io_err)?;
+
+    let name_slices: Vec<&[u8]> = pois.iter().map(|p| p.name.as_slice()).collect();
+    let mut name_index_out = BufWriter::new(create(name_index)?);
+    let name_entries =
+        poi_side::write_name_index(&mut name_index_out, &name_slices).map_err(io_err)?;
+    name_index_out.flush().map_err(io_err)?;
+
     index_out.flush().map_err(io_err)?;
     geojson_out.flush().map_err(io_err)?;
     let unique = pool.unique_count();
@@ -510,6 +537,9 @@ fn write_outputs(
         attr_pool.unique_count(),
         attr_pool.total_len()
     );
+    println!(
+        "Wrote {spatial_cells} populated grid cell(s), {name_entries} name index entr(ies)"
+    );
     Ok(Written {
         records: pois.len(),
         unique_names: unique,
@@ -517,6 +547,8 @@ fn write_outputs(
         with_attrs: attr_pool.with_attrs(),
         unique_attrs: attr_pool.unique_count(),
         attr_bytes: attr_pool.total_len(),
+        spatial_cells,
+        name_entries,
     })
 }
 
@@ -534,23 +566,29 @@ pub struct Args {
     pub names: PathBuf,
     pub index: PathBuf,
     pub attrs: PathBuf,
+    pub spatial: PathBuf,
+    pub name_index: PathBuf,
 }
 
 /// `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE [--attrs FILE]`
+/// `[--spatial FILE] [--name-index FILE]`
 ///
-/// `--attrs` defaults to `poi_attrs.bin` beside `--index`, so a caller that predates
-/// the sidecar keeps working and still emits it. Making it required would break
-/// build_pois_layer.sh and build_all.* on the same commit.
+/// The optional outputs default to their conventional names beside `--index`, so a
+/// caller that predates any of them keeps working and still emits them. Making them
+/// required would break build_pois_layer.sh and build_all.* on the same commit.
 pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
     let mut input: Option<PathBuf> = None;
     let mut geojson: Option<PathBuf> = None;
     let mut names: Option<PathBuf> = None;
     let mut index: Option<PathBuf> = None;
     let mut attrs: Option<PathBuf> = None;
+    let mut spatial: Option<PathBuf> = None;
+    let mut name_index: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            flag @ ("--geojson" | "--names" | "--index" | "--attrs") => {
+            flag @ ("--geojson" | "--names" | "--index" | "--attrs" | "--spatial"
+            | "--name-index") => {
                 let flag = flag.to_string();
                 i += 1;
                 let value = args
@@ -561,6 +599,8 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
                     "--geojson" => geojson = Some(value),
                     "--names" => names = Some(value),
                     "--attrs" => attrs = Some(value),
+                    "--spatial" => spatial = Some(value),
+                    "--name-index" => name_index = Some(value),
                     _ => index = Some(value),
                 }
             }
@@ -581,12 +621,16 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
     let names = names.ok_or_else(|| "--names is required".to_string())?;
     let index = index.ok_or_else(|| "--index is required".to_string())?;
     let attrs = attrs.unwrap_or_else(|| index.with_file_name("poi_attrs.bin"));
+    let spatial = spatial.unwrap_or_else(|| index.with_file_name("poi_spatial.bin"));
+    let name_index = name_index.unwrap_or_else(|| index.with_file_name("poi_name_index.bin"));
     Ok(Args {
         input,
         geojson,
         names,
         index,
         attrs,
+        spatial,
+        name_index,
     })
 }
 
@@ -666,6 +710,8 @@ mod tests {
             &dir.join("poi_names.bin"),
             &dir.join("poi_index.bin"),
             &dir.join("poi_attrs.bin"),
+            &dir.join("poi_spatial.bin"),
+            &dir.join("poi_name_index.bin"),
         )
         .unwrap();
         (stats, dir)
@@ -779,6 +825,8 @@ mod tests {
                 &dir.join(format!("names{suffix}.bin")),
                 &dir.join(format!("index{suffix}.bin")),
                 &dir.join(format!("attrs{suffix}.bin")),
+                &dir.join(format!("spatial{suffix}.bin")),
+                &dir.join(format!("nameidx{suffix}.bin")),
             )
             .unwrap();
         };
@@ -789,6 +837,8 @@ mod tests {
             ("namesa.bin", "namesb.bin"),
             ("indexa.bin", "indexb.bin"),
             ("attrsa.bin", "attrsb.bin"),
+            ("spatiala.bin", "spatialb.bin"),
+            ("nameidxa.bin", "nameidxb.bin"),
         ] {
             assert_eq!(
                 std::fs::read(dir.join(a)).unwrap(),

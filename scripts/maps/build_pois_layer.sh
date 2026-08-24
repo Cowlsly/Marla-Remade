@@ -8,10 +8,10 @@ set -euo pipefail
 # when the user taps a POI. This deliberately does NOT reuse the Protomaps base
 # `pois` layer (the app suppresses that one).
 #
-# Produces four mutually-consistent outputs from a single `poi_extract` pass
+# Produces six mutually-consistent outputs from a single `poi_extract` pass
 # (same POI set, same order, same coordinates):
 #
-#   * <out>.pmtiles   source-layer `ma_pois` (Point) — attrs: name, type, osm_id
+#   * <out>.pmtiles   source-layer `ma_pois` (Point) - attrs: name, type, osm_id
 #   * poi_names.bin   deduped NUL-terminated UTF-8 name table (each unique name
 #                     once); a "name start index" is the byte offset of a name
 #   * poi_index.bin   flat 14-byte records (little-endian):
@@ -19,6 +19,13 @@ set -euo pipefail
 #                     sorted by Morton (Z-order) key of (lat,lon)
 #   * poi_attrs.bin   attribute sidecar keyed by poi_index.bin RECORD ORDINAL:
 #                     opening_hours, phone, website, addr:*, cuisine, wheelchair
+#   * poi_spatial.bin sparse CSR lat/lon grid over record ordinals, so a bbox
+#                     query is cell-local instead of a Morton-span walk
+#   * poi_name_index.bin  one (record, word) entry per word of every name,
+#                     sorted by word, so name search is a binary search
+#
+# The last two are OPTIONAL for the app - it falls back to the Morton walk and
+# the name-pool scan - but they are what keeps a planet-sized index usable.
 #
 # See scripts/maps/osm_ingest (src/poi_build.rs, src/poi_attrs.rs) for the full
 # TYPE MAP + the exact on-disk layouts, and the README (`ma_pois` schema + file
@@ -35,6 +42,10 @@ set -euo pipefail
 #   --names-out FILE  Output name table (default: poi_names.bin)
 #   --index-out FILE  Output record index (default: poi_index.bin)
 #   --attrs-out FILE  Output attribute sidecar (default: poi_attrs.bin beside
+#                     --index-out)
+#   --spatial-out FILE     Output spatial grid (default: poi_spatial.bin beside
+#                     --index-out)
+#   --name-index-out FILE  Output word index (default: poi_name_index.bin beside
 #                     --index-out)
 #   --bbox BOX        Optional "minlon,minlat,maxlon,maxlat" metro extract (dry runs)
 #   --minzoom N       tiler minzoom (default 12)
@@ -56,6 +67,8 @@ OUT="ma_pois.pmtiles"
 NAMES_OUT="poi_names.bin"
 INDEX_OUT="poi_index.bin"
 ATTRS_OUT=""
+SPATIAL_OUT=""
+NAME_INDEX_OUT=""
 BBOX=""
 MINZOOM=12
 MAXZOOM=16
@@ -69,6 +82,8 @@ while [[ $# -gt 0 ]]; do
         --names-out) NAMES_OUT="$2"; shift 2 ;;
         --index-out) INDEX_OUT="$2"; shift 2 ;;
         --attrs-out) ATTRS_OUT="$2"; shift 2 ;;
+        --spatial-out) SPATIAL_OUT="$2"; shift 2 ;;
+        --name-index-out) NAME_INDEX_OUT="$2"; shift 2 ;;
         --bbox) BBOX="$2"; shift 2 ;;
         --minzoom) MINZOOM="$2"; shift 2 ;;
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
@@ -82,6 +97,8 @@ done
 # Beside the index by default, because that is where the app looks for it and
 # because the two are only meaningful as a pair.
 [[ -n "$ATTRS_OUT" ]] || ATTRS_OUT="$(dirname "$INDEX_OUT")/poi_attrs.bin"
+[[ -n "$SPATIAL_OUT" ]] || SPATIAL_OUT="$(dirname "$INDEX_OUT")/poi_spatial.bin"
+[[ -n "$NAME_INDEX_OUT" ]] || NAME_INDEX_OUT="$(dirname "$INDEX_OUT")/poi_name_index.bin"
 
 [[ -n "$PBF" ]] || { echo "ERROR: --pbf required" >&2; exit 1; }
 [[ -f "$PBF" ]] || { echo "ERROR: pbf not found: $PBF" >&2; exit 1; }
@@ -110,13 +127,15 @@ if [[ -n "$BBOX" ]]; then
     SRC="$TMP/metro.osm.pbf"
 fi
 
-echo "[ma_pois] extracting POIs -> geojsonseq + $NAMES_OUT + $INDEX_OUT + $ATTRS_OUT"
+echo "[ma_pois] extracting POIs -> geojsonseq + $NAMES_OUT + $INDEX_OUT + $ATTRS_OUT + $SPATIAL_OUT + $NAME_INDEX_OUT"
 cargo run --release --manifest-path "$HERE/osm_ingest/Cargo.toml" --bin poi_extract -- \
     "$SRC" \
     --geojson "$TMP/ma_pois.geojsonseq" \
     --names "$NAMES_OUT" \
     --index "$INDEX_OUT" \
-    --attrs "$ATTRS_OUT"
+    --attrs "$ATTRS_OUT" \
+    --spatial "$SPATIAL_OUT" \
+    --name-index "$NAME_INDEX_OUT"
 
 FEATURES="$(wc -l < "$TMP/ma_pois.geojsonseq" | tr -d ' ')"
 echo "[ma_pois] $FEATURES POI feature(s)"

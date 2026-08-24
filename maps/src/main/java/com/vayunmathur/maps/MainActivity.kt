@@ -102,6 +102,14 @@ class MainActivity : ComponentActivity() {
                     // itself treats the file as optional, so a device that somehow
                     // lacks it degrades to no attributes rather than breaking.
                     Triple("https://data.vayunmathur.com/poi_attrs.bin", "poi_attrs.bin", getString(R.string.downloading_poi_data)),
+                    // The two POI lookup indexes: a spatial grid so a tap or a viewport
+                    // refresh is cell-local, and a word index so name search is a binary
+                    // search. Same hosting order hazard as the sidecar above — both must
+                    // be published before this version ships. Both are optional to
+                    // PoiIndex, which falls back to the Morton walk and the name scan, so
+                    // a device that ends up without them is slow rather than broken.
+                    Triple("https://data.vayunmathur.com/poi_spatial.bin", "poi_spatial.bin", getString(R.string.downloading_poi_data)),
+                    Triple("https://data.vayunmathur.com/poi_name_index.bin", "poi_name_index.bin", getString(R.string.downloading_poi_data)),
                     Triple("https://data.vayunmathur.com/world.transit", "world.transit", getString(R.string.downloading_transit_data))
                 )) {
                     val perms = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
