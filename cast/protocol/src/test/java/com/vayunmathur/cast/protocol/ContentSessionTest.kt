@@ -81,6 +81,29 @@ class ContentSessionTest {
     }
 
     @Test
+    fun `handing playback over carries the position it was at`() {
+        // Without this the track restarts every time a cast begins, which is the one thing a handover
+        // is supposed not to do.
+        val play = PlayMedia("track-1", "audio/ogg", durationMs = 214_000, startPositionMs = 91_500)
+        val back = assertIs<PlayMedia>(roundTrip(play))
+        assertEquals(91_500L, back.startPositionMs)
+    }
+
+    @Test
+    fun `a fresh item starts at the beginning without saying so`() {
+        val back = assertIs<PlayMedia>(roundTrip(PlayMedia("track-1", "audio/ogg")))
+        assertEquals(0L, back.startPositionMs)
+    }
+
+    @Test
+    fun `ending a content session is not the same message as ending the connection`() {
+        // A TV that took one for the other would drop the pairing the user had just established, and
+        // the next cast would ask them to pick the television again.
+        assertIs<ContentEnded>(roundTrip(ContentEnded))
+        assertIs<Bye>(roundTrip(Bye(reason = "user disconnected")))
+    }
+
+    @Test
     fun `an unknown duration is zero rather than absent`() {
         val back = assertIs<PlayMedia>(roundTrip(PlayMedia("track-1", "audio/ogg")))
         assertEquals(0L, back.durationMs, "the TV draws no seek bar for a length it does not know")
@@ -99,6 +122,7 @@ class ContentSessionTest {
             ControlJson.encodeToString(PlayMedia("a", "audio/ogg") as ControlMessage)
                 .contains("\"PLAY_MEDIA\""),
         )
+        assertTrue(ControlJson.encodeToString(ContentEnded as ControlMessage).contains("\"CONTENT_ENDED\""))
         assertTrue(ControlJson.encodeToString(Ping as ControlMessage).contains("\"PING\""))
     }
 

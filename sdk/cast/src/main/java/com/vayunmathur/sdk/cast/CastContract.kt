@@ -37,6 +37,15 @@ package com.vayunmathur.sdk.cast
  *       … Cast serves byte ranges of that fd to the TV, which decodes them itself …
  * ```
  *
+ * **And it reverses the transport, because the television owns the player.** There is nothing playing
+ * on the phone in a content session - the app paused its own player before the cast began - so the TV
+ * is the only end that knows where playback is, and the only end a command can be applied to:
+ *
+ * ```
+ *                                    ◄──  MSG_TV_PLAYBACK_STATE (the TV's player, ~2/s)
+ *       MSG_SEND_PLAYBACK_COMMAND         ─►     (whatever the user pressed, wherever)
+ * ```
+ *
  * A resource may also be offered while it is still being written, with a negative length - which
  * is what lets an app start playback before it has finished encoding:
  *
@@ -86,8 +95,13 @@ object CastContract {
      * the user has no way to tell it apart from a broken TV. So the old app blocks the cast and says
      * to update, in the same breath as the protocol version bump that already forces both halves to
      * ship together.
+     *
+     * **Bumped again for a served session's reversed transport**, on the same argument in the other
+     * direction: a Cast that cannot carry the television's own playback state back to the app reports
+     * nothing while the TV plays, so every surface on the phone shows a paused player and every button
+     * on it drives a player nobody can hear.
      */
-    const val MIN_CAST_VERSION_CODE = 20260823L
+    const val MIN_CAST_VERSION_CODE = 20260824L
 
     // ---- client → service ----
 
@@ -151,6 +165,21 @@ object CastContract {
      */
     const val MSG_RESOURCE_COMPLETE = 10
 
+    /**
+     * Ask the television to do something, in a content session.
+     *
+     * Carries [KEY_ACTION] and maybe [KEY_ACTION_VALUE] - the same payload as
+     * [MSG_PLAYBACK_COMMAND], travelling the other way.
+     *
+     * **A new id rather than [MSG_PLAYBACK_COMMAND] reused in reverse.** The *types* are deliberately
+     * shared, because the set of things a transport can ask for does not depend on which end is asked;
+     * a constant that meant opposite things depending on which `Messenger` delivered it would make the
+     * sequence above a lie, and there is no reader of this file who could tell which was meant.
+     *
+     * Ignored without a session, so a client need not track readiness itself.
+     */
+    const val MSG_SEND_PLAYBACK_COMMAND = 12
+
     // ---- service → client ----
 
     /**
@@ -183,6 +212,22 @@ object CastContract {
      * as a failed load rather than as a hang.
      */
     const val MSG_RESOURCE_REQUEST = 7
+
+    /**
+     * Where the *television's* playback is, in a content session.
+     *
+     * The inverse of [MSG_PLAYBACK_STATE], and its own id for the reason
+     * [MSG_SEND_PLAYBACK_COMMAND] gives. Carries the same keys, plus [KEY_ENDED].
+     *
+     * An absolute snapshot on the same terms: sent on any material change and otherwise at a slow
+     * heartbeat, so a dropped one costs at most one heartbeat of staleness. [KEY_HAS_NEXT] and
+     * [KEY_HAS_PREVIOUS] are meaningless here and should be ignored - the queue is the client's, and
+     * the TV has never been able to see it.
+     *
+     * A client that leaves [CastClient.onPlaybackState] null still casts; it simply shows a player
+     * that does not move, which is what this exists to fix.
+     */
+    const val MSG_TV_PLAYBACK_STATE = 11
 
     // ---- MSG_OPEN_SESSION payload ----
 
@@ -306,12 +351,21 @@ object CastContract {
      */
     const val KEY_MEDIA_DURATION_MS = "mediaDurationMs"
 
+    /**
+     * Where the TV should start the item, in milliseconds. Absent means the beginning.
+     *
+     * What makes handing playback over keep its place instead of restarting the track. A request
+     * rather than a guarantee: a resource offered with a negative [KEY_RESOURCE_LENGTH] has nothing
+     * to seek against, so the TV begins at the start whatever this says.
+     */
+    const val KEY_START_POSITION_MS = "startPositionMs"
+
     // ---- MSG_SESSION_ENDED payload ----
 
     /** One of the `REASON_` constants. */
     const val KEY_END_REASON = "endReason"
 
-    // ---- MSG_PLAYBACK_STATE payload ----
+    // ---- MSG_PLAYBACK_STATE / MSG_TV_PLAYBACK_STATE payload ----
 
     /**
      * Where playback is and where it ends, in milliseconds.
@@ -344,12 +398,22 @@ object CastContract {
      * Whether there is anything to skip to.
      *
      * Carried because the TV cannot know: what is next is the client's own idea of a queue, and a
-     * remote that offers a button doing nothing is worse than one that offers none.
+     * remote that offers a button doing nothing is worse than one that offers none. Meaningless in a
+     * [MSG_TV_PLAYBACK_STATE], where the client is the one who knows.
      */
     const val KEY_HAS_NEXT = "hasNext"
     const val KEY_HAS_PREVIOUS = "hasPrevious"
 
-    // ---- MSG_PLAYBACK_COMMAND payload ----
+    /**
+     * The item finished on its own, in a [MSG_TV_PLAYBACK_STATE]. Absent means it did not.
+     *
+     * What lets a client advance its queue. Its own key rather than a position-against-duration
+     * reading, which is indistinguishable from a pause at the end of a track - and has no duration to
+     * compare against at all while a resource is still being written.
+     */
+    const val KEY_ENDED = "ended"
+
+    // ---- MSG_PLAYBACK_COMMAND / MSG_SEND_PLAYBACK_COMMAND payload ----
 
     /** One of the `ACTION_` constants. Unknown values must be ignored, not treated as an error. */
     const val KEY_ACTION = "action"
@@ -361,7 +425,7 @@ object CastContract {
     const val KEY_ACTION_VALUE = "actionValue"
 
     /**
-     * What the remote asked for.
+     * What the transport asked for.
      *
      * **Deliberately a second definition of `:cast:protocol`'s `PlaybackAction`, not a reuse of it.**
      * This module is the public client contract and every consumer compiles against it; giving it a
@@ -378,10 +442,10 @@ object CastContract {
     const val ACTION_PAUSE = 1
 
     /**
-     * Whichever of play and pause the client is not currently doing.
+     * Whichever of play and pause the end holding the player is not currently doing.
      *
-     * Its own action rather than the TV choosing from its last snapshot: that snapshot can be half a
-     * second old, and two quick presses resolved against it would both send the same thing.
+     * Its own action rather than the sender choosing from its last snapshot: that snapshot can be half
+     * a second old, and two quick presses resolved against it would both send the same thing.
      */
     const val ACTION_TOGGLE = 2
 
@@ -392,6 +456,7 @@ object CastContract {
     const val ACTION_SKIP_FORWARD = 4
     const val ACTION_SKIP_BACK = 5
 
+    /** Always answered by the *client*, whichever way it arrived: the queue is the client's. */
     const val ACTION_NEXT = 6
     const val ACTION_PREVIOUS = 7
 

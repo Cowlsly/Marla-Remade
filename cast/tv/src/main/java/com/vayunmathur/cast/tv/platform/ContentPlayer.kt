@@ -16,6 +16,9 @@ import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.EphemeralTls
 import com.vayunmathur.cast.protocol.MediaProxy
 import com.vayunmathur.cast.protocol.PlayMedia
+import com.vayunmathur.cast.protocol.PlaybackAction
+import com.vayunmathur.cast.protocol.PlaybackCommand
+import com.vayunmathur.cast.protocol.PlaybackState
 import com.vayunmathur.cast.protocol.ProtocolBase64
 import javax.net.ssl.HttpsURLConnection
 
@@ -34,6 +37,11 @@ private const val TAG = "ContentPlayer"
  * channel, which the pairing already authenticated, so the player's data source trusts exactly that
  * one certificate. Nothing here is told to skip verification - the point of pinning is that it
  * verifies something stronger than a name.
+ *
+ * **This player is the truth about a served session**, which is what [snapshot] and [apply] are for.
+ * The phone has no player running - it deliberately paused its own before the cast started - so it
+ * neither knows where playback is nor could usefully be asked to move it. Everything the phone shows
+ * and everything it commands passes through here.
  */
 @OptIn(UnstableApi::class)
 class ContentPlayer(
@@ -43,11 +51,82 @@ class ContentPlayer(
 
     private var player: ExoPlayer? = null
 
+    /**
+     * Called whenever something about playback changed, so a snapshot can go out at once.
+     *
+     * A pause that took half a second to reach the phone's notification reads as a dropped button
+     * press. The heartbeat behind this exists for position, which changes constantly and would make
+     * "changed" mean "always".
+     *
+     * Runs on the player's own thread, which is the main thread.
+     */
+    var onChanged: (() -> Unit)? = null
+
+    /**
+     * What the phone said the item runs for, used until the player works it out for itself.
+     *
+     * This is the whole reason `PLAY_MEDIA` carries a duration. A resource still being encoded has no
+     * length in its container either, so ExoPlayer reports none - and a seek bar that appears only once
+     * a track has finished encoding is a seek bar that never appears on a first play.
+     */
+    private var statedDurationMs: Long = 0
+
     /** Where playback is, for the phone. Null until the player has produced anything. */
     val position: Long get() = player?.currentPosition ?: 0L
-    val duration: Long get() = player?.duration?.takeIf { it > 0 } ?: 0L
+    val duration: Long get() = player?.duration?.takeIf { it > 0 } ?: statedDurationMs
     val isPlaying: Boolean get() = player?.isPlaying == true
     val isBuffering: Boolean get() = player?.playbackState == Player.STATE_BUFFERING
+
+    /**
+     * The item played to its end on its own, which is what lets the phone advance its queue.
+     *
+     * A flag rather than something inferred from position against duration: those are
+     * indistinguishable from a pause at the end of a track, and a growing transcode has no duration to
+     * compare against at all.
+     */
+    val isEnded: Boolean get() = player?.playbackState == Player.STATE_ENDED
+
+    val speed: Float get() = player?.playbackParameters?.speed ?: 1f
+
+    val volume: Float get() = player?.volume ?: 1f
+
+    /**
+     * Everything the phone needs to draw this player, as an absolute snapshot.
+     *
+     * `hasNext` and `hasPrevious` are left at their defaults deliberately: the queue is a list only
+     * the phone can see, so it owns them in both directions and ignores whatever arrives from here.
+     */
+    fun snapshot(): PlaybackState = PlaybackState(
+        positionMs = position,
+        durationMs = duration,
+        playing = isPlaying,
+        buffering = isBuffering,
+        speed = speed,
+        volume = volume,
+        ended = isEnded,
+    )
+
+    /**
+     * Do what a transport asked, wherever it was pressed.
+     *
+     * [PlaybackAction.Next] and [PlaybackAction.Previous] are refused rather than handled, and must
+     * be: there is no queue here to advance, and the phone answers them by sending a fresh
+     * `PLAY_MEDIA`. Returns whether this player owned the command, so a caller can pass the rest on.
+     */
+    fun apply(command: PlaybackCommand): Boolean {
+        when (command.action) {
+            PlaybackAction.Play -> play()
+            PlaybackAction.Pause -> pause()
+            PlaybackAction.Toggle -> if (isPlaying) pause() else play()
+            PlaybackAction.SeekTo -> command.value?.let { seekTo(it.toLong()) }
+            PlaybackAction.SkipForward -> seekTo(position + SKIP_MS)
+            PlaybackAction.SkipBack -> seekTo((position - SKIP_MS).coerceAtLeast(0))
+            PlaybackAction.SetSpeed -> command.value?.let { setSpeed(it.toFloat()) }
+            PlaybackAction.SetVolume -> command.value?.let { setVolume(it.toFloat()) }
+            PlaybackAction.Next, PlaybackAction.Previous -> return false
+        }
+        return true
+    }
 
     /**
      * Builds the player, or returns false if the fingerprint was unusable.
@@ -85,6 +164,12 @@ class ContentPlayer(
                 Log.w(TAG, "playback failed: ${error.errorCodeName}", error)
                 onError(error.errorCodeName)
             }
+
+            // Everything at once rather than a callback per field: the reporter's job is to notice
+            // that *something* changed, and it compares snapshots itself to decide whether to send.
+            override fun onEvents(player: Player, events: Player.Events) {
+                onChanged?.invoke()
+            }
         })
         built.playWhenReady = true
         player = built
@@ -106,8 +191,12 @@ class ContentPlayer(
             // round trip before anything can start.
             .setMimeType(media.mimeType.ifBlank { MimeTypes.BASE_TYPE_AUDIO })
             .build()
-        Log.i(TAG, "playing ${media.resourceId} (${media.mimeType})")
-        active.setMediaItem(item)
+        Log.i(TAG, "playing ${media.resourceId} (${media.mimeType}) from ${media.startPositionMs}ms")
+        statedDurationMs = media.durationMs
+        // A position rather than the start, so handing playback over from the phone keeps it. A
+        // resource still being written cannot honour it - there is no length to seek against - and
+        // ExoPlayer then begins at the beginning, which is the honest outcome rather than a failure.
+        active.setMediaItem(item, media.startPositionMs)
         active.prepare()
         active.play()
     }
@@ -145,12 +234,21 @@ class ContentPlayer(
     }
 
     fun release() {
+        onChanged = null
         runCatching { player?.release() }
         player = null
     }
 
     private companion object {
         const val FINGERPRINT_BYTES = 32
+
+        /**
+         * How far a discrete skip moves, now that this end applies one.
+         *
+         * Its own constant rather than a number the phone supplies: the press is applied here so that
+         * it acts at once, and a round trip to ask how far ten seconds is would defeat that.
+         */
+        const val SKIP_MS = 10_000L
 
         /** The phone is on the same LAN, so a slow connect means something is wrong rather than far. */
         const val CONNECT_TIMEOUT_MS = 8_000

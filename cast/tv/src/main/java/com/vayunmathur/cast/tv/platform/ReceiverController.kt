@@ -6,6 +6,7 @@ import android.util.Log
 import android.view.Surface
 import com.vayunmathur.cast.protocol.Bye
 import com.vayunmathur.cast.protocol.ByeReason
+import com.vayunmathur.cast.protocol.ContentEnded
 import com.vayunmathur.cast.protocol.ContentReady
 import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecodableFrame
@@ -41,14 +42,19 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import java.net.DatagramSocket
@@ -94,6 +100,15 @@ private const val RECEIVE_BUFFER_BYTES = 2 * 1024 * 1024
 
 /** One press of the remote's volume key. Sixteen steps end to end, which is what a TV usually offers. */
 private const val VOLUME_STEP = 1f / 16f
+
+/**
+ * How often a served session's playback goes to the phone even when nothing changed.
+ *
+ * Matches the cadence the phone used to report at, and for the same reason: every message is an
+ * absolute snapshot, so this is the longest anything can be stale for, and the receiving end
+ * interpolates position between them precisely so it does not need them faster.
+ */
+private const val REPORT_HEARTBEAT_MS = 500L
 
 /**
  * The single owner of the live receiving session.
@@ -185,10 +200,28 @@ object ReceiverController {
     private var channel: ControlChannel? = null
 
     /**
-     * Ask the phone to do something. Dropped silently with no session, which is the honest answer:
-     * the remote was pressed at a screen with nothing playing on it.
+     * Do what the remote asked, wherever the player for it happens to be.
+     *
+     * **A served session applies the press here**, because that is where the player is: the phone
+     * paused its own before the cast started, so a round trip to it would move nothing and take a
+     * LAN's latency doing it. The phone finds out from the next snapshot, half a second later at
+     * worst. Screen mirroring is the other way round - the phone's player is the one making the
+     * sound - so the command goes to it, unchanged.
+     *
+     * [PlaybackAction.Next] and [PlaybackAction.Previous] always go to the phone, whichever kind of
+     * session it is: the queue is a list only the phone can see. Dropped silently with no session,
+     * which is the honest answer - the remote was pressed at a screen with nothing playing on it.
      */
     fun send(command: PlaybackCommand) {
+        val served = contentPlayer
+        // On the main thread already, which is where ExoPlayer must be touched: every caller is
+        // `MirrorActivity`'s key handling.
+        if (served != null && served.apply(command)) {
+            // A press has to be visible before the reporter's next tick, or the overlay lags the
+            // sound coming out of this very box.
+            onPlaybackState(served.snapshot())
+            return
+        }
         val live = channel ?: return
         scope.launch {
             runCatching { live.send(command) }
@@ -196,7 +229,7 @@ object ReceiverController {
         }
     }
 
-    /** Skip forward or back by the phone's own interval, which is the phone's to decide. */
+    /** Skip forward or back by whichever interval the end holding the player uses. */
     fun skip(forward: Boolean) {
         send(PlaybackCommand(if (forward) PlaybackAction.SkipForward else PlaybackAction.SkipBack))
     }
@@ -204,10 +237,10 @@ object ReceiverController {
     /**
      * Nudge the shared volume level up or down by one step.
      *
-     * Sent to the phone rather than applied here, even though the sound comes out of this end. The
-     * phone owns the level - it stores it, it reports it, and it keeps it for local playback once the
-     * cast is over - so the round trip is what makes the two ends agree. The gain follows about half a
-     * second later when the next snapshot arrives, which is faster than a hand leaves a button.
+     * The level is read from the last snapshot rather than held separately, so there is one answer to
+     * "how loud is it" however the session is arranged. [send] then puts the new level wherever the
+     * player is: on this box's own player for a served session, or on the phone for screen mirroring,
+     * where the phone owns the level, stores it, and keeps it for local playback afterwards.
      *
      * Returns false with no session, so the key falls through to the box's own volume control.
      */
@@ -418,30 +451,60 @@ object ReceiverController {
         if (!authenticate(channel, store, keys, transcriptValue, greeting)) return
         _state.update { it.copy(phase = ReceiverPhase.Connected(greeting.senderName)) }
 
-        val configured = channel.receive() ?: return
-        // The fork between the two kinds of session. Screen mirroring has no file behind it and keeps
-        // the RTP path; anything with a file is served over HTTPS and decoded here, which is why
-        // seeking becomes an offset and a pause is nobody's business but this end's.
-        val config = when (val first = configured.message) {
-            is StreamConfig -> first
-            is ContentSession -> {
-                serveContent(context, channel, first, greeting.senderName)
-                return
+        // **A loop rather than one configuration, because a content session gives the channel back.**
+        // Ending a cast is far more common than disconnecting a television, and the pairing is exactly
+        // what the user just spent time on - so `CONTENT_ENDED` returns here and the next cast starts
+        // without re-picking the TV. Screen mirroring never comes back: its session lives in the UDP
+        // loop until the socket dies.
+        while (true) {
+            val configured = channel.receive() ?: return
+            // The fork between the two kinds of session. Screen mirroring has no file behind it and
+            // keeps the RTP path; anything with a file is served over HTTPS and decoded here, which is
+            // why seeking becomes an offset and a pause is nobody's business but this end's.
+            when (val first = configured.message) {
+                is StreamConfig -> {
+                    startStreaming(channel, keys, first, greeting.senderName)
+                    mirrorSession(channel, first, greeting.senderName)
+                    return
+                }
+                is ContentSession -> {
+                    if (!serveContent(context, channel, first, greeting.senderName)) return
+                    _state.update { it.copy(phase = ReceiverPhase.Connected(greeting.senderName)) }
+                    forgetPlayback()
+                }
+                is Bye -> {
+                    Log.i(TAG, "'${greeting.senderName}' said goodbye")
+                    return
+                }
+                // Echoed rather than treated as a surprise, so a keep-alive cannot end the very channel
+                // it exists to preserve. A snapshot or a command still in flight from the session that
+                // just ended is dropped for the same reason: there is no longer a player for either.
+                is Ping -> runCatching { channel.send(Ping) }
+                is PlaybackState, is PlaybackCommand -> Unit
+                else -> return
             }
-            else -> return
         }
-        startStreaming(channel, keys, config, greeting.senderName)
+    }
 
-        // The session now lives in the UDP loop; this coroutine stays here so a BYE or a dropped
-        // socket tears everything down through the same path. It is also where the codec configuration
-        // arrives, which for AV1 is what the media loop is waiting on before it can start a decoder at
-        // all - it is repeated on every key-frame request, so this handles it more than once. And it is
-        // where playback snapshots arrive, twice a second, for as long as an app is casting content.
+    /**
+     * The rest of a screen-mirroring session: everything that arrives while the UDP loop runs.
+     *
+     * The session now lives in that loop; this coroutine stays here so a BYE or a dropped socket tears
+     * everything down through the same path. It is also where the codec configuration arrives, which
+     * for AV1 is what the media loop is waiting on before it can start a decoder at all - it is
+     * repeated on every key-frame request, so this handles it more than once. And it is where playback
+     * snapshots arrive, twice a second, for as long as an app is casting encoded content.
+     */
+    private suspend fun mirrorSession(
+        channel: ControlChannel,
+        config: StreamConfig,
+        senderName: String,
+    ) {
         while (true) {
             val next = channel.receive() ?: break
             when (val message = next.message) {
                 is Bye -> {
-                    Log.i(TAG, "'${greeting.senderName}' said goodbye")
+                    Log.i(TAG, "'$senderName' said goodbye")
                     return
                 }
                 is VideoCodecConfig -> onVideoCodecConfig(message, config)
@@ -461,23 +524,31 @@ object ReceiverController {
      * key frame, and there is no picture-loss indicator to send because there are no lost pictures.
      * What is left is a URL, a pinned certificate and a player that owns its own clock.
      *
+     * **And because it owns the clock, it owns the truth.** A reporting coroutine puts this player's
+     * state on the channel - immediately when something changes, and otherwise at
+     * [REPORT_HEARTBEAT_MS] - which is what lets every surface on the phone show what is actually
+     * playing. `PLAYBACK_COMMAND` arrives here rather than leaving, for the same reason.
+     *
      * ExoPlayer must be built and driven from the thread whose looper it took, so every call into it
      * hops to the main thread. The control channel stays on this coroutine, because it is the same
      * blocking read it always was.
+     *
+     * Returns true when the phone ended the *session* and wants to keep the connection, so the caller
+     * can go back to waiting for the next configuration.
      */
     private suspend fun serveContent(
         context: Context,
         channel: ControlChannel,
         session: ContentSession,
         senderName: String,
-    ) {
+    ): Boolean {
         if (!session.video && AudioPlayer.limits().isEmpty()) {
             // The failure that used to be silence. A TV with no Opus decoder and no picture to fall
             // back on has to say so, and the phone has to be told rather than left streaming into it.
             Log.w(TAG, "refusing an audio-only session: this TV has no Opus decoder")
             channel.send(ContentReady(accepted = false, detail = "this TV has no Opus decoder"))
             _state.update { it.copy(phase = ReceiverPhase.Failed(ReceiverFailure.NoAudioDecoder)) }
-            return
+            return false
         }
 
         val player = withContext(Dispatchers.Main) { ContentPlayer(context, session) }
@@ -488,7 +559,7 @@ object ReceiverController {
             channel.send(ContentReady(accepted = false, detail = "the player could not be built"))
             _state.update { it.copy(phase = ReceiverPhase.Failed(ReceiverFailure.Handshake)) }
             withContext(NonCancellable + Dispatchers.Main) { player.release() }
-            return
+            return false
         }
 
         contentPlayer = player
@@ -511,16 +582,33 @@ object ReceiverController {
         }
         Log.i(TAG, "serving content from ${session.host}:${session.port} for '${session.appLabel}'")
 
+        // A third writer on this channel, alongside the ping echo and this coroutine's own sends.
+        // Nothing guards it here because nothing needs to: `ControlChannel.send` encodes and writes
+        // under one lock, so a frame cannot interleave with another and the cipher's nonce cannot
+        // advance twice for one message. What a mutex would add is ordering between *sequences*, and
+        // there are none here - every send is a single message.
+        val reporting = scope.launch { report(player, channel) }
         try {
             while (true) {
-                val next = channel.receive() ?: break
+                val next = channel.receive() ?: return false
                 when (val message = next.message) {
                     is Bye -> {
                         Log.i(TAG, "'$senderName' said goodbye")
-                        return
+                        return false
+                    }
+                    // The phone is done casting but not done with us. Distinct from a `Bye`, and the
+                    // difference is the pairing: this leaves the TV connected and ready for the next
+                    // cast rather than back at its idle screen waiting to be picked again.
+                    is ContentEnded -> {
+                        Log.i(TAG, "'$senderName' ended the content session")
+                        return true
                     }
                     is PlayMedia -> withContext(Dispatchers.Main) { player.play(message) }
-                    is PlaybackState -> onPlaybackState(message)
+                    // The phone's transport, wherever it was pressed - its own screen, a notification,
+                    // a headset button, a car. Applied to the player that is actually making the
+                    // sound. `Next` and `Previous` are refused by the player and arrive as a fresh
+                    // `PLAY_MEDIA` instead, because only the phone can see the queue.
+                    is PlaybackCommand -> withContext(Dispatchers.Main) { player.apply(message) }
                     // Echoed straight back, which is the whole of the keep-alive. Reading it has
                     // already pushed this end's deadline out; replying is what pushes the phone's,
                     // since a read timeout is not reset by anything that end sends.
@@ -529,6 +617,11 @@ object ReceiverController {
                 }
             }
         } finally {
+            // Cancelled **and joined**, under NonCancellable because this runs on the teardown path a
+            // cancelled session takes. A publish already past its last suspension point would
+            // otherwise land after the caller has cleared the overlay, putting a stale 0:00 snapshot
+            // back on the idle screen and making `nudgeVolume` answer for a session that has gone.
+            withContext(NonCancellable) { reporting.cancelAndJoin() }
             contentPlayer = null
             // NonCancellable because this is the teardown path a cancelled session takes, and an
             // ExoPlayer left unreleased holds a codec the next session will ask for.
@@ -537,11 +630,64 @@ object ReceiverController {
     }
 
     /**
-     * Take a playback snapshot, and stamp it with the moment it arrived.
+     * Keep the phone's copy of this player current, for as long as the session lasts.
      *
-     * The timestamp is taken here rather than in the UI because this is the closest thing to "when the
-     * phone said so" that exists on this side - anything later would fold recomposition delay into the
-     * seek bar's anchor.
+     * Two cadences, because they answer different needs. Anything the phone *renders* differently goes
+     * out the instant it changes - a pause that took half a second to reach a notification reads as a
+     * dropped button press. Position is deliberately excluded from that test: it moves constantly, so
+     * "changed" would mean "always", and the phone interpolates between snapshots precisely so it does
+     * not need them faster.
+     *
+     * The heartbeat underneath is what makes the whole thing self-repairing: every message is an
+     * absolute snapshot, so a lost one costs at most one interval of staleness and needs no
+     * acknowledgement, no sequence number and no retry.
+     *
+     * Each snapshot is also published locally, because this box draws its own overlay from the same
+     * numbers - it is the source of them now, so there is nothing else to draw from.
+     */
+    private suspend fun report(player: ContentPlayer, channel: ControlChannel) {
+        // Built on the main thread, because every getter behind `snapshot` asserts the player's own
+        // looper - reading them from this coroutine would throw rather than report a stale number.
+        val latest = withContext(Dispatchers.Main) {
+            MutableStateFlow(player.snapshot()).also { flow ->
+                player.onChanged = { flow.value = player.snapshot() }
+            }
+        }
+        try {
+            coroutineScope {
+                launch {
+                    latest
+                        .map { it.copy(positionMs = 0) }
+                        .distinctUntilChanged()
+                        .collect { publish(latest.value, channel) }
+                }
+                while (isActive) {
+                    delay(REPORT_HEARTBEAT_MS)
+                    latest.value = withContext(Dispatchers.Main) { player.snapshot() }
+                    publish(latest.value, channel)
+                }
+            }
+        } finally {
+            withContext(NonCancellable + Dispatchers.Main) { player.onChanged = null }
+        }
+    }
+
+    /** One snapshot, to this box's own overlay and to the phone. */
+    private fun publish(snapshot: PlaybackState, channel: ControlChannel) {
+        onPlaybackState(snapshot)
+        runCatching { channel.send(snapshot) }
+            .onFailure { Log.w(TAG, "could not report playback", it) }
+    }
+
+    /**
+     * Take a playback snapshot, and stamp it with the moment it became true.
+     *
+     * The timestamp is taken here rather than in the UI because this is the closest thing to "when it
+     * was so" that exists - anything later would fold recomposition delay into the seek bar's anchor.
+     *
+     * Fed from the phone for screen mirroring and from this box's own player for a served session,
+     * which is the whole of the direction change: the overlay is drawn from whichever end owns the
+     * clock, through one field either way.
      *
      * Not logged. Two of these a second would drown the once-a-second throughput line that everything
      * else about a session is diagnosed from.

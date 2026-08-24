@@ -5,8 +5,8 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 /**
- * The two messages that turn the television into a remote, and the one piece of arithmetic behind
- * its seek bar.
+ * The two messages that carry a transport in either direction, and the one piece of arithmetic behind
+ * a seek bar.
  *
  * The interpolation is here rather than in `:cast:tv` deliberately: it is a pure function of a
  * snapshot and an elapsed time, so it is provable on the JVM, and a seek bar that drifts or overshoots
@@ -31,6 +31,8 @@ class PlaybackTest {
             ),
             // Every default at once, which is the case `encodeDefaults` could quietly eat.
             PlaybackState(positionMs = 0, durationMs = 0, playing = false, buffering = true),
+            // A track that finished on its own, which is what makes the other end advance its queue.
+            PlaybackState(positionMs = 214_000, durationMs = 214_000, playing = false, buffering = false, ended = true),
             PlaybackCommand(PlaybackAction.Toggle),
             PlaybackCommand(PlaybackAction.SeekTo, value = 125_000.0),
             PlaybackCommand(PlaybackAction.SetSpeed, value = 2.0),
@@ -42,9 +44,18 @@ class PlaybackTest {
     }
 
     @Test
+    fun `an item still playing is not reported as ended`() {
+        // Defaulted, so a sender written against the older contract still means what it meant - and a
+        // spurious `ended` would skip the track it was describing.
+        val playing = PlaybackState(1_000, 214_000, playing = true, buffering = false)
+        val back = codec.decode(codec.encode(playing)) as PlaybackState
+        assertTrue(!back.ended)
+    }
+
+    @Test
     fun `action names on the wire are the stable ones, not the Kotlin identifiers`() {
         // Renaming `Toggle` or `SkipBack` must not change the wire format: the failure would be a
-        // remote whose buttons stop working while both ends agree they are on version 4.
+        // transport whose buttons stop working while both ends agree they are on version 6.
         for ((action, wire) in mapOf(
             PlaybackAction.Play to "PLAY",
             PlaybackAction.Pause to "PAUSE",

@@ -27,8 +27,16 @@ import kotlinx.serialization.json.Json
  * [StreamConfig.videoCodec] became optional in the same bump, and [DecoderLimits] grew an audio half.
  * [Ping] arrived in the same version, once a served session turned out to be able to go quiet for
  * longer than either end's read timeout allows.
+ *
+ * 6 turns a served session's transport the right way round. [PlaybackState] and [PlaybackCommand]
+ * are unchanged and reused in the reverse direction - see [ControlMessage] - because for a file the
+ * TV holds the media, the clock and the buffer, so the phone was reporting a player that makes no
+ * sound and commanding one that cannot be heard. [ContentEnded], [PlaybackState.ended] and
+ * [PlayMedia.startPositionMs] arrive with it. A version-5 TV would drop every command and report no
+ * state: a session that streams perfectly with a dead remote, which is worse than a refusal for
+ * exactly the reason `MIN_CAST_VERSION_CODE`'s own KDoc gives.
  */
-const val PROTOCOL_VERSION = 5
+const val PROTOCOL_VERSION = 6
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -60,12 +68,24 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  * ```
  *        CONTENT_SESSION ─────────────────────►         (proxy host, port, cert fingerprint, token)
  *                          ◄───────────── CONTENT_READY (accepted, or refused with a reason)
- *        PLAY_MEDIA ──────────────────────────►         (which resource, and what is in it)
+ *        PLAY_MEDIA ──────────────────────────►         (which resource, and from what position)
  *        … the TV fetches byte ranges over HTTPS and decodes them itself …
+ *        PLAYBACK_COMMAND ───────────────────►          (the phone's transport, wherever it was pressed)
+ *                          ◄───────────── PLAYBACK_STATE (the TV's own player, ~2/s while it plays)
  *        PING ────────────────────────────────►         (every 20 s, so neither read deadline expires)
  *                          ◄───────────── PING          (echoed straight back)
+ *        CONTENT_ENDED ───────────────────────►         (release the player, keep the channel)
  *        BYE ─────────────────────────────────►
  * ```
+ *
+ * **The two transport messages run the other way here, and that is the point.** [PlaybackState] is
+ * phone→TV and [PlaybackCommand] is TV→phone for mirroring, which is right when the phone's player is
+ * what makes the sound. For a served session the television holds the media, the clock and the
+ * buffer, so it is the only end that can report the truth - and the only end a command can usefully
+ * be applied to. The messages already carry exactly the right fields and [ControlCodec] is
+ * symmetric, so they are reused rather than duplicated. [PlaybackState.hasNext] and
+ * [PlaybackState.hasPrevious] stay phone-owned and are ignored when the TV sends them: the queue is
+ * only visible on the phone.
  *
  * Everything from `PAIR_REQUIRED` onward is AES-256-GCM under the derived control key; the first
  * three messages cannot be, because they are what establishes it. Both ends install the cipher at
@@ -403,7 +423,32 @@ data class PlayMedia(
      * before the first byte arrives rather than appearing a moment into playback.
      */
     val durationMs: Long = 0,
+    /**
+     * Where to start, so handing playback over keeps the position instead of restarting the track.
+     *
+     * Defaulted because every other use of this message is a fresh item, which starts at zero. It is
+     * a request rather than a guarantee: a resource still being written has no length and cannot be
+     * seeked, so the TV will begin at the start whatever this says - which is a limit of a growing
+     * stream, not of this field.
+     */
+    val startPositionMs: Long = 0,
 ) : ControlMessage
+
+/**
+ * Stop playing and let go of the player - but keep this connection, phone to TV.
+ *
+ * **Distinct from [Bye], which ends the *connection*.** The phone stops a content session far more
+ * often than it disconnects from a television: closing one app's cast should leave the TV paired,
+ * connected and ready for the next, because that pairing is exactly what the user just spent time
+ * on. Sending [Bye] instead would throw it away.
+ *
+ * Sent rather than inferred, and sent **before the proxy stops**. Nothing else tells the TV: it owns
+ * its own clock and buffer, so it would carry on playing what it had already fetched and then fail
+ * its next request against a port that has gone - an error card where the idle screen belongs.
+ */
+@Serializable
+@SerialName("CONTENT_ENDED")
+data object ContentEnded : ControlMessage
 
 /**
  * The video decoder's configuration bytes, phone to TV, for a codec that cannot carry them in-band.
@@ -422,20 +467,22 @@ data class PlayMedia(
 data class VideoCodecConfig(val csd: String) : ControlMessage
 
 /**
- * Where playback is, phone to TV, so a television can draw a seek bar for something it is only
- * decoding.
+ * Where playback is, so the end that cannot see the player can draw a seek bar for it.
  *
  * **A snapshot, never a delta.** Sent on any material change and otherwise at a slow heartbeat, and
  * every field is absolute - so a lost message costs at most one heartbeat of staleness and repairs
  * itself, with no sequence numbers, no acknowledgements and no resynchronisation path to get wrong.
  *
- * **The phone owns the truth.** The TV cannot compute [positionMs] for itself: what it holds is a
- * 150 ms RTP jitter buffer, which is a smoothing device and not a content clock. Between snapshots it
- * interpolates from the last one it received, and every fresh snapshot re-anchors that estimate.
+ * **Which end owns the truth depends on which end owns the player.** For screen mirroring this is
+ * phone→TV: the phone encodes pixels, so its player *is* the content clock, and what the TV holds is
+ * a 150 ms RTP jitter buffer - a smoothing device, not a clock. For a served session it runs the
+ * other way, because there the television fetched the file and owns the decoder, the buffer and the
+ * position. Either way the receiver of this message interpolates from the last one it was sent, and
+ * every fresh snapshot re-anchors that estimate.
  *
- * [hasNext] and [hasPrevious] are carried because the TV must not offer a button that does nothing -
- * and it has no way to know whether there is anything to skip to, since the queue is a list of
- * related videos that only the phone can see.
+ * [hasNext] and [hasPrevious] are **always the phone's**, in both directions, and ignored when the TV
+ * sends them: the queue is a list only the phone can see, and a remote must not offer a button that
+ * does nothing.
  */
 @Serializable
 @SerialName("PLAYBACK_STATE")
@@ -451,22 +498,32 @@ data class PlaybackState(
     val volume: Float = 1f,
     val hasNext: Boolean = false,
     val hasPrevious: Boolean = false,
+    /**
+     * The item finished on its own, so the other end can advance the queue.
+     *
+     * Its own field rather than a `positionMs ≈ durationMs && !playing` reading, which is
+     * indistinguishable from a pause at the end of a track - and has nothing to compare against at
+     * all while a transcode is still growing, because such a stream states no duration.
+     *
+     * Defaulted, so it means what it always meant coming from a sender that never sets it.
+     */
+    val ended: Boolean = false,
 ) : ControlMessage {
 
     /**
      * Where playback will be [elapsedMs] after this snapshot arrived.
      *
-     * The TV redraws at its display's rate from snapshots that land twice a second, so a bar plotted
-     * at [positionMs] would visibly step. It records the wall-clock time each snapshot arrived and
-     * asks this for the position now; every fresh snapshot re-anchors, so the estimate can drift for
-     * at most one heartbeat and never accumulates.
+     * The receiver redraws at its display's rate from snapshots that land twice a second, so a bar
+     * plotted at [positionMs] would visibly step. It records the wall-clock time each snapshot
+     * arrived and asks this for the position now; every fresh snapshot re-anchors, so the estimate
+     * can drift for at most one heartbeat and never accumulates.
      *
      * A pure function of two numbers on purpose - it is the one piece of this feature that can be
      * pinned down without a television in the room.
      *
      * Paused holds still, [speed] scales the advance, and the result never runs past [durationMs].
-     * Buffering needs no case of its own: the phone reports [playing] from the player's own
-     * `isPlaying`, which is already false while it stalls.
+     * Buffering needs no case of its own: [playing] is the player's own `isPlaying`, which is already
+     * false while it stalls.
      */
     fun interpolated(elapsedMs: Long): Long {
         if (!playing || elapsedMs <= 0) return positionMs.coerceAtLeast(0)
@@ -476,16 +533,20 @@ data class PlaybackState(
 }
 
 /**
- * A press on the television's remote, TV to phone.
+ * A press on whichever transport the user reached for, sent to whichever end owns the player.
+ *
+ * TV→phone for screen mirroring, where the phone's player is what makes the sound; phone→TV for a
+ * served session, where the television's is. See [ControlMessage].
  *
  * **One message with an action enum rather than ten message types.** The set of things a remote can
  * ask for is going to grow, and a TV that needed a protocol bump to gain a button would mean shipping
- * both apps again for a change that is entirely on one side. The phone ignores an action it does not
- * recognise, which is the only forward compatibility this needs.
+ * both apps again for a change that is entirely on one side. The receiver ignores an action it does
+ * not recognise, which is the only forward compatibility this needs.
  *
- * The phone is free to refuse any of these. A [PlaybackAction.Next] with nothing to play next is
- * dropped rather than answered, and the TV finds out the ordinary way - the next [PlaybackState]
- * simply does not change.
+ * The receiver is free to refuse any of these. A [PlaybackAction.Next] with nothing to play next is
+ * dropped rather than answered, and the sender finds out the ordinary way - the next [PlaybackState]
+ * simply does not change. [PlaybackAction.Next] and [PlaybackAction.Previous] arriving at a *TV* are
+ * always dropped, because only the phone can see the queue.
  */
 @Serializable
 @SerialName("PLAYBACK_COMMAND")
@@ -516,10 +577,10 @@ enum class PlaybackAction {
     Pause,
 
     /**
-     * Whichever of the two the phone is not currently doing.
+     * Whichever of the two the player is not currently doing.
      *
      * Distinct from [Play] and [Pause] on purpose: a D-pad centre press means "the other one", and
-     * asking the TV to decide from its own possibly-stale snapshot is how a double press ends up
+     * asking the sender to decide from its own possibly-stale snapshot is how a double press ends up
      * doing nothing.
      */
     @SerialName("TOGGLE")
@@ -529,13 +590,14 @@ enum class PlaybackAction {
     @SerialName("SEEK_TO")
     SeekTo,
 
-    /** The phone's own skip interval, so the two ends cannot disagree about how far ten seconds is. */
+    /** A discrete skip, by whatever interval the end holding the player uses for one. */
     @SerialName("SKIP_FORWARD")
     SkipForward,
 
     @SerialName("SKIP_BACK")
     SkipBack,
 
+    /** Always answered by the phone, whichever direction it arrived from: the queue is the phone's. */
     @SerialName("NEXT")
     Next,
 
@@ -587,6 +649,9 @@ const val PING_INTERVAL_MS = 20_000L
  *
  * Sent rather than just closing the socket, so the TV can return to its idle screen instead of
  * holding the last frame while it waits for a read to time out.
+ *
+ * Ends the *connection*, and the pairing state that goes with being connected. [ContentEnded] is what
+ * ends a content session while keeping it.
  */
 @Serializable
 @SerialName("BYE")
