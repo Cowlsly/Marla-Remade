@@ -62,9 +62,26 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "3-small", device = PHONE, showSystemUi = true)
+    @Preview(name = "3-twelve", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview3Small() {
+    fun Preview3Twelve() {
+        // The largest board, where digits past nine are lettered and the pad becomes a 3x4 grid.
+        Board(
+            game(
+                size = BoardSize.TWELVE,
+                difficulty = Difficulty.MEDIUM,
+                seed = 1212,
+                filled = 18,
+                selected = 40,
+                elapsed = 604,
+            )
+        )
+    }
+
+    @PreviewTest
+    @Preview(name = "4-six", device = PHONE, showSystemUi = true)
+    @Composable
+    fun Preview4Six() {
         Board(
             game(
                 size = BoardSize.SIX,
@@ -78,9 +95,9 @@ class MetadataPreviews {
     }
 
     @PreviewTest
-    @Preview(name = "4-solved", device = PHONE, showSystemUi = true)
+    @Preview(name = "5-solved", device = PHONE, showSystemUi = true)
     @Composable
-    fun Preview4Solved() {
+    fun Preview5Solved() {
         val base = game(BoardSize.NINE, Difficulty.EXPERT, seed = 2024, filled = 0, elapsed = 511)
         Board(base.copy(entries = base.blanksFilled(), isWon = true))
     }

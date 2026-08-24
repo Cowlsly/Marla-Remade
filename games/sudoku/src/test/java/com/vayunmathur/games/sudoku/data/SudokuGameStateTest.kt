@@ -9,7 +9,7 @@ import kotlin.test.assertTrue
 
 class SudokuGameStateTest {
 
-    private val puzzle = SudokuGenerator.generate(BoardSize.FOUR, Difficulty.EASY, Random(1))
+    private val puzzle = SudokuGenerator.generate(BoardSize.SIX, Difficulty.EASY, Random(1))
     private val fresh = SudokuGameState.from(puzzle)
 
     /** A cell the player is allowed to fill in. */

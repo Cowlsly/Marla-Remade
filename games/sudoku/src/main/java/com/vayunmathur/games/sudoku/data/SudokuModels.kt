@@ -5,16 +5,16 @@ import kotlinx.serialization.Serializable
 /**
  * The three board shapes on offer, each with the box geometry that goes with it.
  *
- * [boxRows] x [boxCols] must equal [side], because a Sudoku box has to hold exactly as many cells
- * as a row does — that is what makes "every digit once per box" the same strength of constraint as
- * "every digit once per row". 6x6 is the only asymmetric one (2 rows of 3), which is why the box
+ * [boxRows] x [boxCols] must equal [side], because a Sudoku box has to hold exactly as many cells as a
+ * row does — that is what makes "every digit once per box" the same strength of constraint as "every
+ * digit once per row". Only 9x9 has square boxes; 6x6 uses 2x3 and 12x12 uses 3x4, which is why the box
  * dimensions are stored rather than derived from a square root.
  */
 @Serializable
 enum class BoardSize(val side: Int, val boxRows: Int, val boxCols: Int) {
-    FOUR(4, 2, 2),
     SIX(6, 2, 3),
-    NINE(9, 3, 3);
+    NINE(9, 3, 3),
+    TWELVE(12, 3, 4);
 
     val cellCount: Int get() = side * side
 
@@ -27,13 +27,23 @@ enum class BoardSize(val side: Int, val boxRows: Int, val boxCols: Int) {
 }
 
 /**
+ * The character shown for [digit], which is 1-based.
+ *
+ * Past nine the symbols become letters. A 12x12 cell has to fit a pencil-mark grid of twelve
+ * candidates, and "10", "11", "12" at that size are illegible; one character each keeps both the
+ * entered digit and the marks readable. The solver and generator only ever deal in the numbers.
+ */
+fun sudokuSymbol(digit: Int): String =
+    if (digit <= 9) digit.toString() else ('A' + digit - 10).toString()
+
+/**
  * How many cells the generator leaves filled in.
  *
  * The clue counts are fractions of the board rather than absolute numbers so one difficulty means
- * roughly the same amount of deduction on a 4x4 as on a 9x9. [clueFraction] is a target, not a
- * guarantee: digging stops early if removing any remaining clue would leave the puzzle with more
- * than one solution, so an EXPERT 4x4 often lands well above its target simply because tiny grids
- * run out of removable cells.
+ * roughly the same amount of deduction on a 6x6 as on a 12x12. [clueFraction] is a target, not a
+ * guarantee: digging stops early if removing any remaining clue would leave the puzzle with more than
+ * one solution, so a small board often lands well above its target simply because it runs out of
+ * removable cells.
  */
 @Serializable
 enum class Difficulty(val clueFraction: Double) {

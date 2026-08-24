@@ -13,9 +13,9 @@ import com.vayunmathur.games.sudoku.data.Difficulty
 @Composable
 fun BoardSize.displayName(): String = stringResource(
     when (this) {
-        BoardSize.FOUR -> R.string.size_four
         BoardSize.SIX -> R.string.size_six
         BoardSize.NINE -> R.string.size_nine
+        BoardSize.TWELVE -> R.string.size_twelve
     }
 )
 

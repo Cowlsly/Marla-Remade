@@ -27,6 +27,7 @@ import androidx.compose.ui.unit.sp
 import com.vayunmathur.games.sudoku.R
 import com.vayunmathur.games.sudoku.data.BoardSize
 import com.vayunmathur.games.sudoku.data.SudokuGameState
+import com.vayunmathur.games.sudoku.data.sudokuSymbol
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import androidx.compose.ui.res.stringResource
@@ -113,7 +114,7 @@ private fun SudokuCell(
     // wrong-cell colour because a wrong digit is refused rather than written.
     val digitColor = if (given) scheme.onSurface else scheme.primary
 
-    val spoken = if (value == 0) stringResource(R.string.cd_empty) else value.toString()
+    val spoken = if (value == 0) stringResource(R.string.cd_empty) else sudokuSymbol(value)
     val side = game.size.side
     val description =
         stringResource(R.string.cd_cell, index / side + 1, index % side + 1, spoken)
@@ -125,7 +126,7 @@ private fun SudokuCell(
     ) {
         when {
             value != 0 -> Text(
-                text = value.toString(),
+                text = sudokuSymbol(value),
                 color = digitColor,
                 // Sized from the cell so a 4x4 does not render tiny digits in large squares.
                 fontSize = (game.size.digitScale * 22).sp,
@@ -166,7 +167,7 @@ private fun NoteMarks(size: BoardSize, mask: Int) {
                     ) {
                         if (mask and (1 shl (digit - 1)) != 0) {
                             Text(
-                                text = digit.toString(),
+                                text = sudokuSymbol(digit),
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 fontSize = (size.digitScale * 8).sp,
                                 lineHeight = (size.digitScale * 9).sp,
@@ -215,10 +216,10 @@ private fun Modifier.drawGridLines(
     }
 }
 
-/** Scales type with the board: a 4x4 cell is more than twice the width of a 9x9 cell. */
+/** Scales type with the board: a 6x6 cell is twice the width of a 12x12 cell. */
 private val BoardSize.digitScale: Float
     get() = when (this) {
-        BoardSize.FOUR -> 1.6f
         BoardSize.SIX -> 1.25f
         BoardSize.NINE -> 1f
+        BoardSize.TWELVE -> 0.78f
     }

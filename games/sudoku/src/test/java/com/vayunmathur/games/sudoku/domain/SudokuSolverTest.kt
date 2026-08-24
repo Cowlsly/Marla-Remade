@@ -39,7 +39,7 @@ class SudokuSolverTest {
 
     @Test
     fun contradictoryGridHasNoSolution() {
-        val size = BoardSize.FOUR
+        val size = BoardSize.SIX
         // Two 1s in the same row cannot both be right.
         val grid = blank(size).toMutableList().also {
             it[0] = 1
@@ -51,7 +51,7 @@ class SudokuSolverTest {
 
     @Test
     fun emptyGridHasManySolutions() {
-        val size = BoardSize.FOUR
+        val size = BoardSize.SIX
         // Capped at 2: the point is only that it is not unique.
         assertEquals(2, SudokuSolver(size).countSolutions(blank(size)))
     }
@@ -65,13 +65,14 @@ class SudokuSolverTest {
 
     @Test
     fun countStopsAtTheGivenLimit() {
-        val size = BoardSize.FOUR
+        val size = BoardSize.SIX
         assertEquals(1, SudokuSolver(size).countSolutions(blank(size), limit = 1))
         // Subtree totals are added whole, so the result can overshoot the limit - it is a
         // "found at least this many" answer, which is all the uniqueness check needs.
         val capped = SudokuSolver(size).countSolutions(blank(size), limit = 5)
         assertTrue(capped >= 5, "expected at least 5, got $capped")
-        assertTrue(capped < 288, "should have stopped well short of all 288 solutions, got $capped")
+        // A 6x6 has 28,800 completions, so stopping early has to bite well short of that.
+        assertTrue(capped < 1_000, "should have stopped early, got $capped")
     }
 
     @Test

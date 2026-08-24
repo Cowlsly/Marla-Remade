@@ -16,12 +16,12 @@
     <!-- GameConfigDialog / WinOverlay: Dismiss button. Verb -->
     <string name="back">Back</string>
 
-    <!-- GameConfigDialog: Board size option, a 4 by 4 grid of 2x2 boxes. Noun, dimensions -->
-    <string name="size_four" translatable="false">4x4</string>
     <!-- GameConfigDialog: Board size option, a 6 by 6 grid of 2x3 boxes. Noun, dimensions -->
     <string name="size_six" translatable="false">6x6</string>
     <!-- GameConfigDialog: Board size option, a 9 by 9 grid of 3x3 boxes. Noun, dimensions -->
     <string name="size_nine" translatable="false">9x9</string>
+    <!-- GameConfigDialog: Board size option, a 12 by 12 grid of 3x4 boxes. Noun, dimensions -->
+    <string name="size_twelve" translatable="false">12x12</string>
 
     <!-- GameConfigDialog: Easiest difficulty, most clues given. Adjective -->
     <string name="difficulty_easy">Easy</string>
