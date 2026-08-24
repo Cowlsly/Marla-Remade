@@ -17,6 +17,15 @@ import com.vayunmathur.games.arrows.data.TapOutcome
 object ArrowsRules {
 
     /**
+     * What happens when an arrow is tapped, in enough detail to animate it.
+     *
+     * @param route the piece's own cells followed by its head's escape path, tail first.
+     * @param advance how many cells the head moves before it leaves or is stopped.
+     * @param clears whether it gets off the board.
+     */
+    data class Travel(val route: List<Int>, val advance: Int, val clears: Boolean)
+
+    /**
      * The cells an arrow's head visits after leaving [from], heading [direction], until it is off the
      * board.
      *
@@ -43,18 +52,39 @@ object ArrowsRules {
     }
 
     /**
+     * How far [piece] gets if tapped, and what stops it.
+     *
+     * [Travel.route] runs from the piece's tail through its body and on along the head's escape path, so
+     * a caller animating the move can read cell `i + advance` for the piece's `i`th cell and get snake
+     * motion round corners for free.
+     *
+     * [Travel.advance] is how many cells the head can move: the full path length for a clean exit, or the
+     * number of free cells before the obstruction. Zero means it is wedged against something already.
+     */
+    fun travel(state: ArrowsGameState, piece: ArrowPiece): Travel {
+        val path = exitPath(state.puzzle, piece.head, piece.direction)
+        // A route that never leaves is impassable; nothing moves.
+        if (path == null) return Travel(piece.cells, advance = 0, clears = false)
+
+        val occupied = state.occupancy
+        val blockedAt = path.indexOfFirst { occupied.containsKey(it) }
+        val route = piece.cells + path
+        return if (blockedAt < 0) {
+            Travel(route, advance = path.size, clears = true)
+        } else {
+            Travel(route, advance = blockedAt, clears = false)
+        }
+    }
+
+    /**
      * Whether [piece] can leave [state] right now.
      *
      * The body follows the head, so the only thing that can stop it is an occupied cell on the head's
-     * route. The piece's own cells count as occupied too: normally the route leads away from its body
-     * so this never comes up, but a mirror can turn an arrow back into itself, and letting it pass
-     * through its own tail would be indefensible to a player watching it happen.
+     * route. The piece's own cells count as occupied too: normally the route leads away from its body so
+     * this never comes up, but a mirror can turn an arrow back into itself, and letting it pass through
+     * its own tail would be indefensible to a player watching it happen.
      */
-    fun isBlocked(state: ArrowsGameState, piece: ArrowPiece): Boolean {
-        val path = exitPath(state.puzzle, piece.head, piece.direction) ?: return true
-        val occupied = state.occupancy
-        return path.any { occupied.containsKey(it) }
-    }
+    fun isBlocked(state: ArrowsGameState, piece: ArrowPiece): Boolean = !travel(state, piece).clears
 
     /**
      * Applies a tap on the arrow with [pieceId].

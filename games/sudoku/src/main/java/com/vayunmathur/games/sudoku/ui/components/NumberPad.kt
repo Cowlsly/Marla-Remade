@@ -102,7 +102,7 @@ private fun DigitKey(
             Text(
                 text = label,
                 color = scheme.onSurface,
-                fontSize = 19.sp,
+                fontSize = FullFontSize,
                 textAlign = TextAlign.Center,
             )
         }
@@ -114,11 +114,13 @@ private fun DigitKey(
  *
  * Lays out the full mini-grid and fills only this digit's slot, so every key positions its digit on the
  * same lattice — the pad reads as one cell's worth of marks spread across the keys.
+ *
+ * Sized well above a real pencil mark — see [NoteFontSize] — so the key stays readable, while its position
+ * still tells the player exactly which mark the tap will place.
  */
 @Composable
 private fun NoteSlot(digit: Int, label: String, size: BoardSize) {
     val slotHeight = KeySize / size.boxRows
-    val fontSize = (KeySize.value / size.boxCols * 0.62f).coerceIn(7f, 12f).sp
     val target = digit - 1
     Column(Modifier.fillMaxSize()) {
         for (row in 0 until size.boxRows) {
@@ -138,9 +140,9 @@ private fun NoteSlot(digit: Int, label: String, size: BoardSize) {
                             Text(
                                 text = label,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = fontSize,
-                                // Matched to the slot, or the glyph's own line box overflows it and
-                                // the bottom row of a 3x4 pad is clipped.
+                                fontSize = NoteFontSize,
+                                // Matched to the slot, or the glyph's own line box overflows it and the
+                                // bottom row of a 3x4 pad is clipped.
                                 lineHeight = slotHeight.value.sp,
                                 fontWeight = FontWeight.Medium,
                                 textAlign = TextAlign.Center,
@@ -157,3 +159,16 @@ private fun NoteSlot(digit: Int, label: String, size: BoardSize) {
 private val KeySize = 50.dp
 
 private val OutlineWidth = 1.dp
+
+/** Size of a digit that a tap will write into the grid. */
+private val FullFontSize = 19.sp
+
+/**
+ * Size of a digit a tap will pencil in.
+ *
+ * Deliberately much larger than a real pencil mark: the marks on the board are sized to fit twelve of
+ * them in one cell, which is far smaller than a key needs, and a lone digit that small is hard to read.
+ * Expressed as a fraction of [FullFontSize] so the two stay in step, and still fits the narrowest slot a
+ * board asks for — a 12x12's 3x4 pad.
+ */
+private val NoteFontSize = FullFontSize * 0.7f

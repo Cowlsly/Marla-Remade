@@ -224,4 +224,65 @@ class ArrowsRulesTest {
         val free = ArrowsRules.clearableNow(state(puzzle(listOf(mover, blocker))))
         assertEquals(listOf(1), free.map { it.id })
     }
+
+    @Test
+    fun travelOfAClearArrowRunsTheWholePath() {
+        val piece = arrow(0, 2, 2, Direction.RIGHT)
+        val travel = ArrowsRules.travel(state(puzzle(listOf(piece))), piece)
+        assertTrue(travel.clears)
+        // (2,3) and (2,4), then off the board.
+        assertEquals(2, travel.advance)
+        // The route is the body followed by the escape path, so an animation can index straight into it.
+        assertEquals(piece.cells + listOf(at(2, 3), at(2, 4)), travel.route)
+    }
+
+    @Test
+    fun travelStopsShortOfWhateverIsInTheWay() {
+        val mover = arrow(0, 2, 1, Direction.RIGHT)
+        val blocker = arrow(1, 2, 4, Direction.UP)
+        val travel = ArrowsRules.travel(state(puzzle(listOf(mover, blocker))), mover)
+        assertFalse(travel.clears)
+        // Head at (2,1) can reach (2,2) and (2,3); (2,4) is the blocker's head.
+        assertEquals(2, travel.advance)
+    }
+
+    @Test
+    fun travelIsZeroWhenWedgedAgainstTheNextCell() {
+        // The blocker's body sits immediately ahead, so there is nowhere to go at all.
+        val mover = ArrowPiece(0, listOf(at(2, 0), at(2, 1)), Direction.RIGHT)
+        val blocker = ArrowPiece(1, listOf(at(1, 2), at(2, 2)), Direction.DOWN)
+        val travel = ArrowsRules.travel(state(puzzle(listOf(mover, blocker))), mover)
+        assertFalse(travel.clears)
+        assertEquals(0, travel.advance, "a wedged arrow cannot advance")
+    }
+
+    @Test
+    fun travelOnAnImpassableRouteReportsNoMovement() {
+        // A ring of mirrors traps the head, so the arrow can never leave and must not appear to try.
+        val ring = mapOf(
+            at(1, 1) to Mirror.FORWARD,
+            at(1, 3) to Mirror.BACK,
+            at(3, 3) to Mirror.FORWARD,
+            at(3, 1) to Mirror.BACK,
+        )
+        val piece = ArrowPiece(0, listOf(at(3, 1), at(2, 1)), Direction.UP)
+        val travel = ArrowsRules.travel(state(puzzle(listOf(piece), ring)), piece)
+        assertFalse(travel.clears)
+        assertEquals(0, travel.advance)
+    }
+
+    @Test
+    fun travelAndIsBlockedAlwaysAgree() {
+        // isBlocked is defined in terms of travel, so the two can never drift apart - this pins that down.
+        val a = arrow(0, 2, 2, Direction.RIGHT)
+        val b = arrow(1, 2, 4, Direction.UP)
+        val s = state(puzzle(listOf(a, b)))
+        for (piece in listOf(a, b)) {
+            assertEquals(
+                ArrowsRules.isBlocked(s, piece),
+                !ArrowsRules.travel(s, piece).clears,
+                "arrow ${piece.id}",
+            )
+        }
+    }
 }

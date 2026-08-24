@@ -1,12 +1,24 @@
 package com.vayunmathur.games.arrows.ui.components
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.LinearOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.geometry.Offset
@@ -26,7 +38,9 @@ import com.vayunmathur.games.arrows.data.ArrowsGameState
 import com.vayunmathur.games.arrows.data.Direction
 import com.vayunmathur.games.arrows.data.Mirror
 import com.vayunmathur.games.arrows.domain.ArrowsRules
+import com.vayunmathur.games.arrows.platform.ArrowMove
 import com.vayunmathur.library.ui.MaterialTheme
+import kotlinx.coroutines.delay
 
 /**
  * The board.
@@ -43,7 +57,9 @@ import com.vayunmathur.library.ui.MaterialTheme
 fun ArrowsBoard(
     game: ArrowsGameState,
     showRoutes: Boolean,
+    move: ArrowMove?,
     onTapArrow: (Int) -> Unit,
+    onMoveFinished: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -53,17 +69,37 @@ fun ArrowsBoard(
     val dotColor = scheme.outlineVariant
     val cols = game.puzzle.cols
 
-    // The route the last blocked arrow tried to take, up to and including what stopped it. Computed
-    // here rather than stored, because it is derivable from the board and would only go stale.
+    // How far along its route the moving arrow currently is, in cells. Driven by one animation per tap;
+    // `0` whenever nothing is moving, so a settled board draws from `game` alone.
+    val advance = remember(move) { Animatable(0f) }
+    // Turns red only once it has actually run into something, not from the first frame.
+    var showBlocked by remember(move) { mutableStateOf(false) }
+
+    LaunchedEffect(move) {
+        if (move == null) return@LaunchedEffect
+        if (move.clears) {
+            // Past the end of the route, so the tail clears the edge too rather than winking out on it.
+            val target = (move.advance + move.route.size).toFloat()
+            advance.animateTo(target, tween(cellMillis(move.advance + move.route.size), easing = LinearEasing))
+        } else {
+            // Wedged arrows still get a nudge, or a tap on one reads as the game ignoring the input.
+            val target = if (move.advance == 0) NudgeCells else move.advance.toFloat()
+            advance.animateTo(target, tween(cellMillis(move.advance), easing = LinearOutSlowInEasing))
+            showBlocked = true
+            delay(BlockedHoldMillis)
+            advance.animateTo(0f, tween(cellMillis(move.advance), easing = FastOutSlowInEasing))
+        }
+        onMoveFinished()
+    }
+
+    // The route the last blocked arrow tried to take, up to and including what stopped it. Derived rather
+    // than stored, so it cannot go stale against the board.
     val blockedRoute = if (!showRoutes || game.blockedId < 0) emptyList() else {
         game.puzzle.pieces.firstOrNull { it.id == game.blockedId }?.let { piece ->
-            val occupied = game.occupancy
-            ArrowsRules.exitPath(game.puzzle, piece.head, piece.direction)
-                .orEmpty()
-                .let { route ->
-                    val stop = route.indexOfFirst { it in occupied }
-                    if (stop < 0) route else route.take(stop + 1)
-                }
+            val travel = ArrowsRules.travel(game, piece)
+            // route is body + path, so drop the body and keep one past where it stopped: the cell that
+            // stopped it is the one the player needs to look at.
+            travel.route.drop(piece.length).take(travel.advance + 1)
         }.orEmpty()
     }
 
@@ -92,36 +128,59 @@ fun ArrowsBoard(
                         drawRoute(blockedRoute, cols, cellPx, blockedColor)
                     }
                     for (piece in game.remaining) {
-                        val color = if (piece.id == game.blockedId) blockedColor else arrowColor
-                        drawArrow(piece, cols, cellPx, color)
+                        val moving = piece.id == move?.pieceId
+                        val color = when {
+                            moving && showBlocked -> blockedColor
+                            piece.id == game.blockedId -> blockedColor
+                            else -> arrowColor
+                        }
+                        if (moving && move != null) {
+                            drawTravellingArrow(piece, move, advance.value, cols, cellPx, color)
+                        } else {
+                            drawArrow(piece, cols, cellPx, color)
+                        }
                     }
                 }
         ) {
-            // Semantics only: invisible, one per arrow, sitting on its head cell.
+            // Semantics only: invisible, one per arrow, sitting on its head cell. Taps anywhere along an
+            // arrow are handled by the board's own pointerInput; these exist so a screen reader has
+            // something to find and activate.
+            //
+            // `key` matters: without it, clearing an arrow shifts every later Box's identity onto a
+            // different arrow, and any interaction state they hold - a half-finished ripple - replays on
+            // an unrelated head. `indication = null` then makes sure there is no ripple to leak, since
+            // the board draws its own feedback and a stray square flashing over a cell reads as a bug.
             for (piece in game.remaining) {
-                val description = stringResource(
-                    R.string.cd_arrow,
-                    stringResource(piece.direction.spokenNameRes),
-                    piece.head / cols + 1,
-                    piece.head % cols + 1,
-                )
-                Box(
-                    Modifier
-                        .offset(x = cell * (piece.head % cols), y = cell * (piece.head / cols))
-                        .size(cell)
-                        .clickable { onTapArrow(piece.id) }
-                        .clearAndSetSemantics { contentDescription = description }
-                )
+                key(piece.id) {
+                    val description = stringResource(
+                        R.string.cd_arrow,
+                        stringResource(piece.direction.spokenNameRes),
+                        piece.head / cols + 1,
+                        piece.head % cols + 1,
+                    )
+                    Box(
+                        Modifier
+                            .offset(x = cell * (piece.head % cols), y = cell * (piece.head / cols))
+                            .size(cell)
+                            .clickable(
+                                interactionSource = remember { MutableInteractionSource() },
+                                indication = null,
+                            ) { onTapArrow(piece.id) }
+                            .clearAndSetSemantics { contentDescription = description }
+                    )
+                }
             }
             // Redirectors are not interactive, but a screen reader still has to know they are there.
             val redirector = stringResource(R.string.cd_redirector)
             for (index in game.puzzle.mirrors.keys) {
-                Box(
-                    Modifier
-                        .offset(x = cell * (index % cols), y = cell * (index / cols))
-                        .size(cell)
-                        .clearAndSetSemantics { contentDescription = redirector }
-                )
+                key(index) {
+                    Box(
+                        Modifier
+                            .offset(x = cell * (index % cols), y = cell * (index / cols))
+                            .size(cell)
+                            .clearAndSetSemantics { contentDescription = redirector }
+                    )
+                }
             }
         }
     }
@@ -167,29 +226,100 @@ private fun DrawScope.drawMirror(cell: Int, mirror: Mirror, cols: Int, size: Flo
 }
 
 /**
+ * One arrow part-way along its route.
+ *
+ * Cell `i` of the piece sits at route position `i + advance`, so the body follows wherever the head went
+ * and turns corners with it. Fractional advance interpolates between the two positions either side, which
+ * is what makes the motion continuous rather than a hop per cell.
+ *
+ * Once the route runs out the piece is leaving the board, so positions past the end are extrapolated from
+ * the final step's direction — it slides off the edge instead of stopping dead on it.
+ */
+private fun DrawScope.drawTravellingArrow(
+    piece: ArrowPiece,
+    move: ArrowMove,
+    advance: Float,
+    cols: Int,
+    cell: Float,
+    color: Color,
+) {
+    val centres = piece.cells.indices.map { routePoint(move.route, it + advance, cols, cell) }
+    // Sampled half a cell further along the route rather than taken from the last two body cells: a
+    // one-cell arrow has no "last two", and sampling also keeps the head turning smoothly through a
+    // mirror instead of snapping once the body reaches it.
+    val headAt = piece.cells.lastIndex + advance
+    val ahead = routePoint(move.route, headAt + 0.5f, cols, cell)
+    val head = centres.last()
+    val sampled = Offset(ahead.x - head.x, ahead.y - head.y)
+    // A mirror ring leaves an arrow with no escape path at all, so there is nothing ahead to sample and
+    // the arrowhead would collapse to a dot. Fall back to the direction it is painted pointing.
+    val heading = if (kotlin.math.hypot(sampled.x, sampled.y) > 0.01f) sampled
+    else Offset(piece.direction.dCol.toFloat(), piece.direction.dRow.toFloat())
+    drawArrowShape(centres, heading, cell, color)
+}
+
+/**
+ * Where route position [at] falls in pixels, interpolating between whole cells.
+ *
+ * Beyond the last cell it keeps going in the direction of the final step, so an exiting arrow carries on
+ * off the board rather than piling up on the edge.
+ */
+private fun routePoint(route: List<Int>, at: Float, cols: Int, cell: Float): Offset {
+    fun centre(index: Int) = Offset((index % cols + 0.5f) * cell, (index / cols + 0.5f) * cell)
+
+    val last = route.size - 1
+    if (at <= 0f) return centre(route[0])
+    if (at >= last) {
+        val end = centre(route[last])
+        val previous = centre(route[(last - 1).coerceAtLeast(0)])
+        val overshoot = at - last
+        return Offset(
+            end.x + (end.x - previous.x) * overshoot,
+            end.y + (end.y - previous.y) * overshoot,
+        )
+    }
+    val low = at.toInt()
+    val t = at - low
+    val from = centre(route[low])
+    val to = centre(route[low + 1])
+    return Offset(from.x + (to.x - from.x) * t, from.y + (to.y - from.y) * t)
+}
+
+/**
  * One arrow: its body as a single joined stroke, and an arrowhead at the head.
  *
  * The stroke runs through cell centres, so a turn in the polyline becomes a rounded corner. The tip
- * reaches past the head's centre by [HEAD_REACH] to leave room for the barbs while staying inside its
- * own cell rather than poking into the next one.
+ * reaches past the head's centre by [HEAD_REACH] to leave room for the barbs while staying inside its own
+ * cell rather than poking into the next one.
  */
 private fun DrawScope.drawArrow(piece: ArrowPiece, cols: Int, cell: Float, color: Color) {
-    val stroke = cell * 0.11f
-    fun centre(index: Int) = Offset((index % cols + 0.5f) * cell, (index / cols + 0.5f) * cell)
+    val centres = piece.cells.map { Offset((it % cols + 0.5f) * cell, (it / cols + 0.5f) * cell) }
+    val heading = Offset(piece.direction.dCol.toFloat(), piece.direction.dRow.toFloat())
+    drawArrowShape(centres, heading, cell, color)
+}
 
-    val head = centre(piece.head)
-    val tip = Offset(
-        head.x + piece.direction.dCol * cell * HEAD_REACH,
-        head.y + piece.direction.dRow * cell * HEAD_REACH,
-    )
+/**
+ * Draws the body through [centres] and an arrowhead pointing along [heading].
+ *
+ * [heading] need not be normalised - it is only used for its direction - which lets the animated path
+ * supply the difference between its last two points and get a head that turns with the route.
+ */
+private fun DrawScope.drawArrowShape(
+    centres: List<Offset>,
+    heading: Offset,
+    cell: Float,
+    color: Color,
+) {
+    val stroke = cell * 0.11f
+    val length = kotlin.math.hypot(heading.x, heading.y).takeIf { it > 0.0001f } ?: 1f
+    val unit = Offset(heading.x / length, heading.y / length)
+
+    val head = centres.last()
+    val tip = Offset(head.x + unit.x * cell * HEAD_REACH, head.y + unit.y * cell * HEAD_REACH)
 
     val path = Path().apply {
-        val first = centre(piece.cells.first())
-        moveTo(first.x, first.y)
-        for (index in piece.cells.drop(1)) {
-            val point = centre(index)
-            lineTo(point.x, point.y)
-        }
+        moveTo(centres.first().x, centres.first().y)
+        for (point in centres.drop(1)) lineTo(point.x, point.y)
         lineTo(tip.x, tip.y)
     }
     drawPath(
@@ -198,20 +328,16 @@ private fun DrawScope.drawArrow(piece: ArrowPiece, cols: Int, cell: Float, color
         style = Stroke(width = stroke, cap = StrokeCap.Round, join = StrokeJoin.Round),
     )
 
-    // Two barbs angled back from the tip. For an axis-aligned heading the perpendicular is just the
-    // row and column components swapped, so no trigonometry is needed.
+    // Two barbs angled back from the tip. The perpendicular of a 2D vector is its components swapped
+    // with one negated, so no trigonometry is needed even once the heading is diagonal mid-turn.
     val barb = cell * 0.26f
-    val backRow = -piece.direction.dRow
-    val backCol = -piece.direction.dCol
-    val perpRow = piece.direction.dCol
-    val perpCol = piece.direction.dRow
     for (side in intArrayOf(1, -1)) {
         drawLine(
             color = color,
             start = tip,
             end = Offset(
-                tip.x + (backCol + perpCol * side) * barb,
-                tip.y + (backRow + perpRow * side) * barb,
+                tip.x + (-unit.x + -unit.y * side) * barb,
+                tip.y + (-unit.y + unit.x * side) * barb,
             ),
             strokeWidth = stroke,
             cap = StrokeCap.Round,
@@ -221,6 +347,21 @@ private fun DrawScope.drawArrow(piece: ArrowPiece, cols: Int, cell: Float, color
 
 /** How far past the head cell's centre the tip reaches, as a fraction of a cell. */
 private const val HEAD_REACH = 0.34f
+
+/** How long the arrow takes per cell of travel. Fast enough not to be a wait, slow enough to follow. */
+private const val MILLIS_PER_CELL = 45
+
+/** Floor on the animation, so a one-cell move is still long enough to register. */
+private const val MIN_MOVE_MILLIS = 120
+
+private fun cellMillis(cells: Int): Int =
+    (cells * MILLIS_PER_CELL).coerceAtLeast(MIN_MOVE_MILLIS)
+
+/** How far a wedged arrow lurches before coming back, in cells. */
+private const val NudgeCells = 0.3f
+
+/** How long the arrow stays red at the far end before returning. */
+private const val BlockedHoldMillis = 180L
 
 /**
  * The route a blocked arrow tried to take, drawn as a trail of dots behind the arrows.

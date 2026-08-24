@@ -197,18 +197,50 @@ class ArrowsViewModel(application: Application) : AndroidViewModel(application),
      */
     private var lastBlockedId: Int = -1
 
+    /**
+     * Starts a tap: works out what will happen and hands it to the board to animate.
+     *
+     * Nothing is committed here. The outcome is decided now, from the board as it stands, but applying it
+     * waits for [commitMove] so the arrow can be seen travelling — and, if it is blocked, seen coming
+     * back. Taps are ignored while an animation is in flight, which also stops two arrows moving at once.
+     */
     override fun tapArrow(pieceId: Int) {
         val state = _uiState.value
         val game = state.game ?: return
-        if (game.isOver) return
+        if (game.isOver || state.move != null) return
+        val piece = game.remaining.firstOrNull { it.id == pieceId } ?: return
 
-        val (next, outcome) = ArrowsRules.tap(game, pieceId)
-        if (outcome == TapOutcome.IGNORED) return
+        val travel = ArrowsRules.travel(game, piece)
+        _uiState.value = state.copy(
+            move = ArrowMove(
+                pieceId = pieceId,
+                route = travel.route,
+                advance = travel.advance,
+                clears = travel.clears,
+            )
+        )
+    }
+
+    /**
+     * Applies the animated tap.
+     *
+     * Re-runs the rules rather than trusting the outcome worked out when the tap started: the board cannot
+     * have changed in between - taps are locked out while animating - but deriving the result in one place
+     * keeps [ArrowsRules.tap] the only thing that decides what a tap does.
+     */
+    override fun commitMove() {
+        val state = _uiState.value
+        val move = state.move ?: return
+        val game = state.game ?: return
+
+        val (next, outcome) = ArrowsRules.tap(game, move.pieceId)
+        if (outcome == TapOutcome.IGNORED) {
+            _uiState.value = state.copy(move = null)
+            return
+        }
 
         lastBlockedId = next.blockedId
-        // Published immediately so the flash and the heart update land on this frame rather than
-        // waiting for the DataStore write to come back round through the flow.
-        _uiState.value = state.copy(game = next)
+        _uiState.value = state.copy(game = next, move = null)
 
         val daily = state.mode == GameMode.DAILY
         viewModelScope.launch {
@@ -223,17 +255,20 @@ class ArrowsViewModel(application: Application) : AndroidViewModel(application),
         val state = _uiState.value
         if (state.mode == GameMode.DAILY) return
         lastBlockedId = -1
+        _uiState.value = state.copy(move = null)
         viewModelScope.launch { dataStore.saveLevel(state.level + 1) }
     }
 
     override fun restartLevel() {
         val daily = _uiState.value.mode == GameMode.DAILY
         lastBlockedId = -1
+        _uiState.value = _uiState.value.copy(move = null)
         viewModelScope.launch { dataStore.resetBoard(daily) }
     }
 
     override fun setGameMode(mode: GameMode) {
         lastBlockedId = -1
+        _uiState.value = _uiState.value.copy(move = null)
         viewModelScope.launch { dataStore.setGameMode(mode) }
     }
 
