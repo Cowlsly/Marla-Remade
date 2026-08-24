@@ -49,6 +49,10 @@ private const val TAG = "MirrorActivity"
  * than moving a focus ring between buttons, because a media overlay's D-pad presses are gestures -
  * left seeks, up is volume - and there is nothing to focus. Keys are only claimed while a phone is
  * actually reporting playback, so screen mirroring keeps the ordinary behaviour of every key.
+ *
+ * **A press while the controls are hidden wakes them rather than toggling playback.** See
+ * [dispatchKeyEvent]; an audio-only session never has hidden controls at all, because there is no
+ * picture for them to get out of the way of.
  */
 class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
 
@@ -233,9 +237,16 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         }
         if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
 
-        // Any press at all brings the controls up, and re-arms the timer that takes them away. The
-        // press still does its own job: a user who reaches for pause should not have to press twice.
+        // Any press at all brings the controls up, and re-arms the timer that takes them away.
+        val waking = !overlayVisible
         revealOverlay()
+        // **A press that wakes the controls does not also toggle playback.** With the overlay hidden
+        // there is nothing on screen to say what a centre press is aimed at, so it reads as "show me
+        // the controls" - and pausing the film instead is the kind of surprise that costs the user the
+        // place they were watching. Only the toggle is held back: a dedicated skip or volume key is
+        // unambiguous whether anything is on screen or not, and a scrub reveals the very bar it moves.
+        // An audio-only session never reaches this, because its controls are pinned and never hidden.
+        if (waking && isToggleKey(event.keyCode)) return true
 
         when (event.keyCode) {
             KeyEvent.KEYCODE_DPAD_CENTER,
@@ -277,6 +288,12 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
 
     private fun isScrubKey(keyCode: Int): Boolean =
         keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT
+
+    /** The presses that mean "the other one" - and so mean nothing until the controls are visible. */
+    private fun isToggleKey(keyCode: Int): Boolean =
+        keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
+            keyCode == KeyEvent.KEYCODE_ENTER ||
+            keyCode == KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE
 
     /**
      * Move the preview position, starting it from where playback actually is on the first press.
