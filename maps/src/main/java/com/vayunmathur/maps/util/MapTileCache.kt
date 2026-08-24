@@ -74,11 +74,11 @@ object MapTileCache {
      * safety overlay ([com.vayunmathur.maps.ui.SafetyLayersSource]), the ambient POI
      * layer, the transit line/stop overlays and the admin search-highlight.
      *
-     * Currently the California test build (`v5-ca-overlay.pmtiles`). Shipping
-     * globally is a one-line change here once the planet overlay build is hosted.
+     * Planet-wide: 36.8 M tiles over z0-16, built by
+     * `build_v5_pmtiles.sh --no-base` and streamed by range request like the base.
      */
     const val OVERLAY_PMTILES_URL =
-        "pmtiles://https://data.vayunmathur.com/v5-ca-overlay.pmtiles"
+        "pmtiles://https://data.vayunmathur.com/v5-overlay.pmtiles"
 
     internal const val TILE_HOST = "data.vayunmathur.com"
     private val REFRESH_INTERVAL_MS = 24.hours.inWholeMilliseconds
