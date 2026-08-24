@@ -9,14 +9,14 @@ set -euo pipefail
 # and closes the gap where poi_names.bin/poi_index.bin had to be hand-copied
 # into the graph directory before the upload would pick them up.
 #
-# THE 11 ARTIFACTS, all landing in --out-dir:
+# THE 13 ARTIFACTS, all landing in --out-dir:
 #   graph    metadata.bin road_names.bin nodes.bin edges.bin lanes.bin
 #            intermediate.bin
 #   pois     poi_names.bin poi_index.bin poi_attrs.bin poi_spatial.bin poi_name_index.bin
 #   transit  world.transit
 #   tiles    v5-overlay.pmtiles               (name from --out)
-# plus manifest.txt listing every one with its size and SHA-256. The first ten
-# are what MainActivity's InitialDownloadChecker fetches; the eleventh is streamed.
+# plus manifest.txt listing every one with its size and SHA-256. The first twelve
+# are what MainActivity's InitialDownloadChecker fetches; the thirteenth is streamed.
 #
 # Stages run in order graph -> pois -> transit -> tiles. Each writes a stamp file
 # under <work>/stamps on success, so a re-run skips what already finished;
@@ -49,7 +49,7 @@ set -euo pipefail
 #                         reused by every stage, so the graph honours it too.
 #                         Needs osmium.
 #   Outputs
-#     --out-dir DIR       where the 11 artifacts land (default ./build_all_out)
+#     --out-dir DIR       where the 13 artifacts land (default ./build_all_out)
 #     --out FILE          the tile archive (default <out-dir>/v5-overlay.pmtiles,
 #                         or <out-dir>/v5.pmtiles with --with-base). Its basename
 #                         becomes the published key, so match whatever the app
@@ -328,8 +328,8 @@ if want_stage graph; then
     fi
 fi
 
-# --- stage: pois (3 side files + the ma_pois tile layer) ---
-# One poi_extract pass produces the geojson the tiler reads AND the three side
+# --- stage: pois (5 side files + the ma_pois tile layer) ---
+# One poi_extract pass produces the geojson the tiler reads AND all five side
 # files, so they cannot disagree. The side files go straight to --out-dir; that
 # is the manual copy step run_generator.sh used to ask for.
 if want_stage pois; then
@@ -337,7 +337,7 @@ if want_stage pois; then
         echo "=== pois: stamp present, skipping (--force to redo) ==="
     else
         require_pbf pois
-        echo "=== pois -> $OUT_DIR/poi_{names,index,attrs}.bin + $POIS_TILE ==="
+        echo "=== pois -> $OUT_DIR/poi_{names,index,attrs,spatial,name_index}.bin + $POIS_TILE ==="
         run "$HERE/build_pois_layer.sh" \
             --pbf "$PBF" \
             --out "$POIS_TILE" \
