@@ -27,4 +27,8 @@
     <string name="currency_unavailable">Valuutakursid pole saadaval</string>
     <string name="currency_retry">Proovi uuesti</string>
     <string name="calculator_widget_label">Kalkulaator</string>
+    <string name="calculator_widget_description">Toimiv numbriklahvistik sinu avalehel - Kalkulaatori avamiseks klõpsa seda</string>
+    <string name="units_widget_label">Ühikute teisendaja</string>
+    <string name="units_widget_description">Teisenda ühikuid lennult - teisendaja avamiseks klõpsa seda</string>
+    <string name="units_widget_choose_category">Vali ühikute kategooria</string>
 </resources>
