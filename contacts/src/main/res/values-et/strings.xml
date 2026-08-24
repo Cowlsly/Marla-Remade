@@ -105,4 +105,10 @@
     <string name="delete_account">Kustuta kasutajakonto</string>
     <string name="delete_local_account_confirm">Kas kustutad selle kasutajakonto ning kõike tema kontaktid? Seda tegevust ei saa tagasi pöörata.</string>
     <string name="account_name_exists">Sellise nimega kasutajakonto on juba olemas</string>
+    <string name="ringtone">Helin</string>
+    <string name="select_ringtone">Vali telefonihelin</string>
+    <string name="no_contacts_yet">Kontakte veel ei leidu</string>
+    <string name="no_contacts_yet_message">Oma esimese kontakti lisamiseks klõpsa lisamisnuppu.</string>
+    <string name="no_groups_yet">Gruppe veel pole</string>
+    <string name="no_groups_yet_message">Kontaktide grupeerimiseks klõpsa lisamisnuppu.</string>
 </resources>
