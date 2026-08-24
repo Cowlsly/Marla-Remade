@@ -119,12 +119,15 @@ fun TransportOverlay(
                     style = MaterialTheme.typography.bodyLarge,
                     color = Color.White,
                 )
-                // The one place the paused/buffering distinction is drawn: a stall and a pause look
-                // identical on a frozen picture, and only one of them is the user's own doing.
+                // **The action the centre key will take, not a description of the state.** Read as a
+                // status it would be the other way round, and both readings are defensible - which is
+                // exactly why it has to match the button it sits next to. Buffering is its own case:
+                // a stall and a pause look identical on a frozen picture, and only one of them is the
+                // user's own doing.
                 Text(
                     text = when {
                         state.buffering -> "…"
-                        !state.playing -> "❚❚"
+                        state.playing -> "❚❚"
                         else -> "▶"
                     },
                     style = MaterialTheme.typography.bodyLarge,

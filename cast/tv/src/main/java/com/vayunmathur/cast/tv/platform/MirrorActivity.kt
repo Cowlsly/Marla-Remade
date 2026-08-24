@@ -72,6 +72,16 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     private var overlayVisible by mutableStateOf(false)
 
     /**
+     * Whether the controls stay up rather than timing out.
+     *
+     * **True for an audio-only session, because there is nothing behind them to get out of the way
+     * of.** The auto-hide exists so a seek bar does not sit on top of a film; with no picture it only
+     * takes the one thing on screen away and leaves the user pressing a key to find out where playback
+     * is. Read from the session rather than fixed, so screen mirroring and video are unchanged.
+     */
+    private var overlayPinned = false
+
+    /**
      * A scrub the user is still composing, in milliseconds, or -1 when none is in progress.
      *
      * **Accumulate here and commit on release.** Sending a seek per keypress would put a storm of them
@@ -104,6 +114,8 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         // the receiver is never handed somewhere to draw. A full-screen black rectangle over silence
         // would read as a fault rather than as music.
         val hasVideo = (ReceiverController.state.value.phase as? ReceiverPhase.Mirroring)?.hasVideo != false
+        overlayPinned = !hasVideo
+        overlayVisible = overlayPinned
         container = FrameLayout(this).apply {
             setBackgroundColor(android.graphics.Color.BLACK)
             if (hasVideo) {
@@ -140,6 +152,10 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
         lifecycleScope.launch {
             ReceiverController.state.collectLatest { state ->
                 if (state.phase is ReceiverPhase.Mirroring) {
+                    // Settled here as well as in onCreate: the phase may not have arrived yet when the
+                    // Activity is built, and this is the first moment the session is known for certain.
+                    overlayPinned = !state.phase.hasVideo
+                    if (overlayPinned) overlayVisible = true
                     fitToFrame(state.phase.width, state.phase.height)
                 } else {
                     finish()
@@ -200,7 +216,9 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
             ?: return super.dispatchKeyEvent(event)
 
         if (event.keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event.action == KeyEvent.ACTION_UP && overlayVisible) {
+            // Pinned controls cannot be dismissed, so back means what it always means rather than
+            // needing two presses to leave a screen that never changes.
+            if (event.action == KeyEvent.ACTION_UP && overlayVisible && !overlayPinned) {
                 hideOverlay()
                 return true
             }
@@ -290,6 +308,8 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     private fun revealOverlay() {
         overlayVisible = true
         hideJob?.cancel()
+        hideJob = null
+        if (overlayPinned) return
         hideJob = lifecycleScope.launch {
             delay(OVERLAY_AUTO_HIDE_MS)
             // A scrub in progress is an interaction, however long the user has been holding the key.
