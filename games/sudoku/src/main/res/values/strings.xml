@@ -45,10 +45,7 @@
 
     <!-- WinOverlay: Celebratory title shown when the grid is completed. Declarative -->
     <string name="congratulations">Congratulations!</string>
-    <!-- WinOverlay: Label for the finishing time, e.g. Time: 04:12. Noun -->
-    <string name="time">Time</string>
-    <!-- WinOverlay: Restarts the same puzzle from empty. Verb phrase -->
-    <string name="play_again">Play Again</string>
+    <!-- WinOverlay: Celebratory title shown when the grid is completed. Declarative -->
     <!-- HomeScreen stat card: Label under the won-of-played ratio. Verb past participle -->
     <string name="won">won</string>
 

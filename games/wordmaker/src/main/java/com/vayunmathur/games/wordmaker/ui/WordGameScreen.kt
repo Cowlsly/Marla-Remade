@@ -65,12 +65,13 @@ import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.GameTopBarActions
 import com.vayunmathur.library.util.AchievementsManager
 import com.vayunmathur.games.wordmaker.ui.components.CompetitiveStatusBar
 import com.vayunmathur.games.wordmaker.ui.components.CrosswordBoard
 import com.vayunmathur.games.wordmaker.ui.components.DailyStatusBar
-import com.vayunmathur.games.wordmaker.ui.components.GameModeDropdown
 import com.vayunmathur.games.wordmaker.ui.components.LetterChooser
+import com.vayunmathur.games.wordmaker.ui.components.WordMakerModeChooser
 import com.vayunmathur.games.wordmaker.ui.dialogs.BonusWordsDialog
 import com.vayunmathur.games.wordmaker.ui.dialogs.DefinitionDialog
 import kotlinx.coroutines.delay
@@ -205,18 +206,17 @@ fun WordGameScreen(
     AppScaffold(
         modifier = Modifier.fillMaxSize(),
         title = {
-            if (gameMode == GameMode.CASUAL) {
-                Text(text = stringResource(R.string.level_number, currentLevel), fontWeight = FontWeight.Bold)
-            }
+            WordMakerModeChooser(
+                selected = gameMode,
+                onSelected = { actions.setGameMode(it) },
+                levelNumber = currentLevel,
+            )
         },
-        navigationIcon = { GameModeDropdown(selected = gameMode, onSelected = { actions.setGameMode(it) }) },
         actions = {
-            IconButton(onClick = onOpenGameCenter) {
-                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
-            }
-            IconButton(onClick = onOpenSettings) {
-                IconSettings()
-            }
+            GameTopBarActions(
+                onOpenGameCenter = onOpenGameCenter,
+                onOpenSettings = onOpenSettings,
+            )
         },
         alignment = AppBarAlignment.Center,
         scrollBehavior = appBarScrollBehavior(),

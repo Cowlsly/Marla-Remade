@@ -9,9 +9,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.AppScaffold
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
@@ -24,6 +24,7 @@ import com.vayunmathur.games.solitaire.data.SolitaireUiState
 import com.vayunmathur.games.solitaire.platform.SolitaireActions
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.formatDuration
 
 private val SolitaireBoardMaxWidth = 640.dp
 
@@ -40,7 +41,7 @@ fun GameBoardScreen(state: SolitaireUiState, mode: GameMode, actions: SolitaireA
     val moveCount = activeGame?.second ?: 0
     val elapsed = activeGame?.third ?: 0
     val modeName = mode.displayName()
-    val timeText = "%02d:%02d".format(elapsed / 60, elapsed % 60)
+    val timeText = formatDuration(elapsed)
     AppScaffold(
         title = modeName,
         actions = {

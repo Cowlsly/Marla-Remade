@@ -36,12 +36,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
 import androidx.compose.ui.zIndex
 import com.vayunmathur.games.unblockjam.data.DailyLevelGenerator
 import com.vayunmathur.games.unblockjam.data.LevelData
@@ -64,10 +61,7 @@ import com.vayunmathur.library.ui.DailyReminderSettingsSection
 import com.vayunmathur.library.ui.DetailScaffold
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.GameCenterScreen
-import com.vayunmathur.library.ui.Icon
-import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconCheck
-import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.IconStar
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.AppScaffold
@@ -75,6 +69,10 @@ import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
 import com.vayunmathur.library.ui.rememberPermissionRequest
+import com.vayunmathur.library.ui.game.DailyChallengeCard
+import com.vayunmathur.library.ui.game.GameTopBarActions
+import com.vayunmathur.library.ui.game.LevelPickerBox
+import com.vayunmathur.library.ui.game.MovesBox
 import com.vayunmathur.library.util.GameHubComposeHook
 import com.vayunmathur.library.util.LevelStats
 import com.vayunmathur.library.util.MainNavigation
@@ -82,9 +80,6 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.library.util.openSettingsIfRequested
 import com.vayunmathur.library.util.rememberNavBackStack
 import com.vayunmathur.library.ui.R as UiR
-import java.time.LocalDate
-import java.time.format.DateTimeFormatter
-import java.time.format.FormatStyle
 
 @Composable
 fun Navigation(viewModel: UnblockJamViewModel) {
@@ -230,12 +225,10 @@ fun PackScreen(
     AppScaffold(
         title = stringResource(R.string.pack_selector),
         actions = {
-            IconButton(onClick = onOpenSettings) {
-                IconSettings()
-            }
-            IconButton(onClick = onOpenGameCenter) {
-                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
-            }
+            GameTopBarActions(
+                onOpenGameCenter = onOpenGameCenter,
+                onOpenSettings = onOpenSettings,
+            )
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
@@ -244,7 +237,17 @@ fun PackScreen(
             contentPadding = paddingValues + PaddingValues(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 0.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            daily?.let { item { DailyCard(it, onOpenDaily) } }
+            daily?.let {
+                item {
+                    DailyChallengeCard(
+                        day = it.day,
+                        completed = it.completed,
+                        total = it.total,
+                        streak = it.streak,
+                        onOpen = onOpenDaily,
+                    )
+                }
+            }
             itemsIndexed(packNames) { index, name ->
                 Card(Modifier.clickable{
                     onOpenPack(index)
@@ -253,39 +256,6 @@ fun PackScreen(
                         Text(name, Modifier.align(Alignment.Center), style = MaterialTheme.typography.displayMedium)
                     }
                 }
-            }
-        }
-    }
-}
-
-@Composable
-private fun DailyCard(daily: DailyProgress, onOpen: () -> Unit) {
-    Card(
-        Modifier.clickable { onOpen() },
-        colors = CardDefaults.cardColors(MaterialTheme.colorScheme.primaryContainer)
-    ) {
-        Row(
-            Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Column {
-                Text(
-                    stringResource(R.string.daily_challenge),
-                    style = MaterialTheme.typography.headlineMedium
-                )
-                Text(
-                    LocalDate.ofEpochDay(daily.day)
-                        .format(DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM)),
-                    style = MaterialTheme.typography.bodyMedium
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
-                Text("${daily.completed}/${daily.total}", style = MaterialTheme.typography.titleMedium)
-                Text(
-                    stringResource(R.string.daily_streak, daily.streak.toInt()),
-                    style = MaterialTheme.typography.bodyMedium
-                )
             }
         }
     }
@@ -449,13 +419,15 @@ fun GameScreen(state: GameUiState, actions: GameActions, onBack: () -> Unit) {
             color = MaterialTheme.colorScheme.background
         ) {
             val infoBoxes = @Composable {
-                PuzzleInfoBox(
+                LevelPickerBox(
                     levelIndex = state.levelIndex,
-                    onLevelChange = actions::onLevelChange,
+                    maxLevelIndex = state.maxLevelIndex,
                     isCompleted = state.isCompleted,
-                    maxLevelIndex = state.maxLevelIndex
+                    onLevelChange = actions::onLevelChange,
+                    // unblockjam calls its levels puzzles.
+                    title = stringResource(R.string.level),
                 )
-                MovesInfoBox(
+                MovesBox(
                     moves = state.moves,
                     bestScore = state.bestScore,
                     optimalMoves = currentLevelData.optimalMoves
@@ -549,84 +521,6 @@ fun GameScreen(state: GameUiState, actions: GameActions, onBack: () -> Unit) {
                     }
                 }
             }
-        }
-    }
-}
-
-@Composable
-fun PuzzleInfoBox(levelIndex: Int, onLevelChange: (Int) -> Unit, isCompleted: Boolean, maxLevelIndex: Int) {
-    InfoBox(title = stringResource(R.string.level)) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween,
-            modifier = Modifier.fillMaxWidth()
-        ) {
-            IconButton(
-                onClick = { onLevelChange(levelIndex - 1) },
-                enabled = levelIndex > 0
-            ) {
-                Icon(
-                    painterResource(R.drawable.arrow_back_24px),
-                    contentDescription = stringResource(R.string.previous_level),
-                )
-            }
-            Text(
-                text = "${levelIndex + 1}",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
-            IconButton(
-                onClick = { onLevelChange(levelIndex + 1) },
-                enabled = levelIndex < maxLevelIndex
-            ) {
-                Icon(
-                    painterResource(R.drawable.arrow_forward_24px),
-                    contentDescription = stringResource(R.string.next_level),
-                )
-            }
-        }
-        if (isCompleted) {
-            Text(
-                text = stringResource(R.string.completed),
-                color = MaterialTheme.colorScheme.error,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-@Composable
-fun MovesInfoBox(moves: Int, bestScore: Int?, optimalMoves: Int) {
-    InfoBox(title = stringResource(R.string.moves)) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Text(
-                text = "$moves",
-                fontSize = 24.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                text = "${bestScore ?: "-"} / $optimalMoves",
-                fontSize = 18.sp,
-                fontWeight = FontWeight.Bold
-            )
-        }
-    }
-}
-
-@Composable
-fun InfoBox(title: String, content: @Composable () -> Unit) {
-    Surface(
-        modifier = Modifier.size(width = 150.dp, height = 120.dp),
-        shape = RoundedCornerShape(12.dp),
-    ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceAround
-        ) {
-            Text(text = title, fontSize = 16.sp)
-            content()
         }
     }
 }

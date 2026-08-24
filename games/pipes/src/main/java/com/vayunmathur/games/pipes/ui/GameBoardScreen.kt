@@ -17,8 +17,8 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.pipes.R
 import com.vayunmathur.games.pipes.platform.GameBoardUiState
 import com.vayunmathur.games.pipes.platform.PipesActions
-import com.vayunmathur.games.pipes.ui.components.MovesInfoBox
-import com.vayunmathur.games.pipes.ui.components.PuzzleInfoBox
+import com.vayunmathur.library.ui.game.LevelPickerBox
+import com.vayunmathur.library.ui.game.MovesBox
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
@@ -33,7 +33,7 @@ import com.vayunmathur.library.ui.R as UiR
 fun GameBoardScreen(state: GameBoardUiState, actions: PipesActions, onBack: () -> Unit, onLevelChange: (Int) -> Unit) {
     AppScaffold(title = "", onNavigateBack = onBack, scrollBehavior = appBarScrollBehavior()) { innerPadding ->
         Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            val infoBoxes = @Composable { PuzzleInfoBox(levelIndex = state.levelIndex, onLevelChange = onLevelChange, isCompleted = state.isCompleted, maxLevelIndex = state.maxLevelIndex); MovesInfoBox(moves = state.moves, bestScore = state.bestScore, optimalMoves = state.levelData.optimalMoves) }
+            val infoBoxes = @Composable { LevelPickerBox(levelIndex = state.levelIndex, onLevelChange = onLevelChange, isCompleted = state.isCompleted, maxLevelIndex = state.maxLevelIndex); MovesBox(moves = state.moves, bestScore = state.bestScore, optimalMoves = state.levelData.optimalMoves) }
             val actionButtons = @Composable { if (!state.isLevelWon) { Button(onClick = { actions.onUndo() }, enabled = state.canUndo) { Text(stringResource(UiR.string.undo)) }; Button(onClick = { actions.onRestart() }, enabled = state.canUndo) { Text(stringResource(R.string.restart)) } } else if (state.levelIndex < state.maxLevelIndex) { Button(onClick = { onLevelChange(state.levelIndex + 1) }) { Text(stringResource(R.string.next_level)) } } }
             val board = @Composable { boardModifier: Modifier -> GameBoard(levelData = state.levelData, gameState = state.gameState, activeColor = state.activeColor, activePath = state.activePath, onStartDraw = actions::startDraw, onExtendPath = actions::extendPath, onCommitDraw = actions::commitDraw, isLevelWon = state.isLevelWon, colorblind = state.colorblind, modifier = boardModifier) }
             BoxWithConstraints(modifier = Modifier.fillMaxSize().padding(innerPadding).padding(16.dp)) {

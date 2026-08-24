@@ -5,24 +5,14 @@
     <string name="pack_selector">Pack Select</string>
     <!-- LevelScreen: TopAppBar title for level grid inside a pack. Noun phrase -->
     <string name="level_selector">Level Select</string>
-    <!-- GameScreen PuzzleInfoBox: Title of info box showing current level number with prev/next navigation. Noun -->
-    <string name="level">Level</string>
-    <!-- GameScreen MovesInfoBox: Title of info box showing move counter and best/optimal. Noun -->
-    <string name="moves">Moves</string>
     <!-- GameScreen: Button to reset current level to initial state. Verb -->
     <string name="restart">Restart</string>
-    <!-- GameScreen PuzzleInfoBox: Accessibility content description for back arrow to previous level. Noun phrase -->
-    <string name="previous_level">Previous Level</string>
-    <!-- GameScreen PuzzleInfoBox: Accessibility content description for forward arrow to next level. Noun phrase -->
+    <!-- GameScreen: Button advancing to the next level once the current one is solved. Noun phrase -->
     <string name="next_level">Next Level</string>
-    <!-- GameScreen PuzzleInfoBox: Red badge below level number when level already completed (stats present). Adjective/status -->
-    <string name="completed">Completed</string>
     <!-- SettingsScreen: Toggle label for colorblind accessibility mode. Noun phrase -->
     <string name="colorblind_mode">Colorblind mode</string>
     <!-- SettingsScreen: Subtitle explaining colorblind mode labels each flow with letter A-Z. Sentence -->
     <string name="colorblind_mode_desc">Label each flow with a letter (A–Z)</string>
     <!-- PackScreen / DailyLevelScreen: Pinned card and screen title for the date-generated daily pack. Noun phrase -->
     <string name="daily_challenge">Daily Challenge</string>
-    <!-- PackScreen daily card: Consecutive days the player has cleared the daily pack. %1$d = streak length e.g. 5. Noun phrase with number -->
-    <string name="daily_streak"><xliff:g id="days" example="5">%1$d</xliff:g> day streak</string>
 </resources>

@@ -1,6 +1,5 @@
 package com.vayunmathur.games.minesweeper.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,14 +29,16 @@ import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconFlag
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.SegmentedButton
 import com.vayunmathur.library.ui.SegmentedButtonDefaults
 import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Spacing
-import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.GameResultOverlay
+import com.vayunmathur.library.ui.game.formatDuration
 
 /** Caps the field on tablets, where a full-width board would give absurdly large cells. */
 private val FieldMaxWidth = 480.dp
@@ -64,7 +65,7 @@ fun GameBoardScreen(
         actions = {
             if (game != null) {
                 Text(
-                    formatTime(game.elapsedSeconds),
+                    formatDuration(game.elapsedSeconds),
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(end = Spacing.lg),
                 )
@@ -142,12 +143,21 @@ fun GameBoardScreen(
             }
 
             if (game.isOver) {
-                ResultOverlay(
-                    won = game.outcome == GameOutcome.WON,
-                    elapsedSeconds = game.elapsedSeconds,
+                val won = game.outcome == GameOutcome.WON
+                GameResultOverlay(
+                    title = stringResource(if (won) R.string.cleared else R.string.boom),
+                    won = won,
                     onPlayAgain = { actions.restart() },
                     onBack = onExit,
-                )
+                ) {
+                    // A losing time is not an achievement, so it is only shown on a win.
+                    if (won) {
+                        Text(
+                            "${stringResource(UiR.string.game_time)}: " +
+                                formatDuration(game.elapsedSeconds)
+                        )
+                    }
+                }
             }
         }
     }
@@ -171,49 +181,6 @@ private fun TapModeToggle(mode: TapMode, onSelect: (TapMode) -> Unit) {
                 onClick = { onSelect(value) },
                 selected = mode == value,
             ) { Text(stringResource(label)) }
-        }
-    }
-}
-
-@Composable
-private fun ResultOverlay(
-    won: Boolean,
-    elapsedSeconds: Int,
-    onPlayAgain: () -> Unit,
-    onBack: () -> Unit,
-) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            // Scrim, so the card reads as modal instead of letting the field show around it.
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.7f))
-            .padding(Spacing.lg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Surface(
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            Column(
-                Modifier.padding(Spacing.xl),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(Spacing.md),
-            ) {
-                Text(
-                    stringResource(if (won) R.string.cleared else R.string.boom),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = if (won) MaterialTheme.colorScheme.primary
-                    else MaterialTheme.colorScheme.error,
-                )
-                // A losing time is not an achievement, so it is only shown on a win.
-                if (won) Text("${stringResource(R.string.time)}: ${formatTime(elapsedSeconds)}")
-                Button(onClick = onPlayAgain, Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.play_again))
-                }
-                TextButton(onClick = onBack, Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.back))
-                }
-            }
         }
     }
 }

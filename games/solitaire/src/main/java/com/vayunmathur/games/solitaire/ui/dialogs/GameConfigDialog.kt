@@ -3,11 +3,11 @@ package com.vayunmathur.games.solitaire.ui.dialogs
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
-import androidx.compose.material3.Text
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.SegmentedButton
+import com.vayunmathur.library.ui.SegmentedButtonDefaults
+import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
+import com.vayunmathur.library.ui.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf

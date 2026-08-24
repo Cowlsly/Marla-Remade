@@ -18,8 +18,7 @@
     <string name="daily_come_back_tomorrow">Solved! Come back tomorrow for a new puzzle.</string>
     <!-- NonogramGameScreen: Celebratory line shown when a level is completed. Declarative -->
     <string name="solved">Solved!</string>
-    <!-- DailyStatusBar: Current daily streak length. %1$d = consecutive days, e.g. 5 -->
-    <string name="daily_streak">Streak: <xliff:g id="days" example="5">%1$d</xliff:g></string>
+    <!-- NonogramGameScreen: Shown after clearing the daily, since there is only one per day. Sentence -->
     <!-- NonogramGameScreen: Hint under a fresh board explaining the two gestures. Imperative sentence -->
     <string name="how_to_play">Tap to fill, long press to cross out</string>
     <!-- MarkModeToggle: Tap places part of the picture. Verb, imperative -->
@@ -28,12 +27,6 @@
     <string name="mode_cross">Cross</string>
     <!-- NonogramGameScreen: Shown when the last heart is spent. Declarative, sympathetic -->
     <string name="out_of_hearts">Out of hearts!</string>
-
-    <!-- NonogramGameScreen: Content description of the hearts remaining. %1$d = hearts left, 0 to 3, e.g. 2 -->
-    <plurals name="cd_hearts">
-        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> heart left</item>
-        <item quantity="other"><xliff:g id="count" example="2">%1$d</xliff:g> hearts left</item>
-    </plurals>
 
     <!-- NonogramGameScreen: Shown when no fair puzzle could be generated for this level. Sentence -->
     <string name="generation_failed">Could not build a puzzle for this level.</string>

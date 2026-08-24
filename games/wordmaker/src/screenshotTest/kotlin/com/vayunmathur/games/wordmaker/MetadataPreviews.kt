@@ -11,6 +11,8 @@ import com.vayunmathur.games.wordmaker.platform.CompetitiveLobbyUiState
 import com.vayunmathur.games.wordmaker.platform.CompetitiveResult
 import com.vayunmathur.games.wordmaker.platform.WordGameActions
 import com.vayunmathur.games.wordmaker.platform.WordGameUiState
+import com.vayunmathur.games.wordmaker.ui.CompetitiveLobbyScreen
+import com.vayunmathur.games.wordmaker.ui.WordGameScreen
 import com.vayunmathur.library.ui.DynamicTheme
 
 /** Phone-shaped, roughly 1080x2340 at xxhdpi — comfortably above the F-Droid minimum. */

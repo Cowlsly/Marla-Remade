@@ -53,10 +53,6 @@
     <string name="cleared">Field Cleared!</string>
     <!-- LossOverlay: Title shown when a mine is opened. Declarative, sympathetic -->
     <string name="boom">Boom!</string>
-    <!-- WinOverlay: Label for the finishing time, e.g. Time: 01:24. Noun -->
-    <string name="time">Time</string>
-    <!-- WinOverlay / LossOverlay: Plays another field with the same settings. Verb phrase -->
-    <string name="play_again">Play Again</string>
     <!-- HomeScreen stat card: Label under the cleared-of-played ratio. Verb past participle -->
     <string name="cleared_count">cleared</string>
 

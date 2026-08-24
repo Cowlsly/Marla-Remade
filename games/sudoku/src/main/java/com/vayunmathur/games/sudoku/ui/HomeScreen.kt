@@ -25,12 +25,12 @@ import com.vayunmathur.games.sudoku.ui.dialogs.GameConfigDialog
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.Card
-import com.vayunmathur.library.ui.IconButton
-import com.vayunmathur.library.ui.IconEmojiEvents
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.GameTopBarActions
+import com.vayunmathur.library.ui.game.formatDuration
 import com.vayunmathur.library.util.NavBackStack
 
 @Composable
@@ -46,9 +46,7 @@ fun HomeScreen(
     AppScaffold(
         title = stringResource(R.string.app_name),
         actions = {
-            IconButton(onClick = { backStack.add(Route.GameCenter) }) {
-                IconEmojiEvents()
-            }
+            GameTopBarActions(onOpenGameCenter = { backStack.add(Route.GameCenter) })
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { padding ->
@@ -134,7 +132,7 @@ private fun SizeStatsCard(
             )
             if (stats.bestTimeSeconds < Int.MAX_VALUE) {
                 Text(
-                    formatTime(stats.bestTimeSeconds),
+                    formatDuration(stats.bestTimeSeconds),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     textAlign = TextAlign.Center,
@@ -142,13 +140,4 @@ private fun SizeStatsCard(
             }
         }
     }
-}
-
-/** `mm:ss`, and `h:mm:ss` once a puzzle has run past the hour. */
-fun formatTime(seconds: Int): String {
-    val hours = seconds / 3600
-    val minutes = (seconds % 3600) / 60
-    val secs = seconds % 60
-    return if (hours > 0) "%d:%02d:%02d".format(hours, minutes, secs)
-    else "%02d:%02d".format(minutes, secs)
 }

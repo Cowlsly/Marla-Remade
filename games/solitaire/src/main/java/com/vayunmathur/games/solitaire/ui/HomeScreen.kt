@@ -6,15 +6,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import com.vayunmathur.library.ui.AppScaffold
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -22,7 +14,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -33,9 +24,17 @@ import com.vayunmathur.games.solitaire.data.GameMode
 import com.vayunmathur.games.solitaire.platform.SolitaireViewModel
 import com.vayunmathur.games.solitaire.ui.dialogs.GameConfigDialog
 import com.vayunmathur.library.ui.AlertDialog
+import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
+import com.vayunmathur.library.ui.Card
+import com.vayunmathur.library.ui.CardDefaults
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
+import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.GameTopBarActions
+import com.vayunmathur.library.ui.game.formatDuration
 import com.vayunmathur.library.util.NavBackStack
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,9 +52,7 @@ fun HomeScreen(backStack: NavBackStack<Route>, viewModel: SolitaireViewModel) {
     AppScaffold(
         title = stringResource(R.string.app_name),
         actions = {
-            IconButton(onClick = { backStack.add(Route.GameCenter) }) {
-                Icon(painterResource(id = android.R.drawable.btn_star_big_on), "Achievements")
-            }
+            GameTopBarActions(onOpenGameCenter = { backStack.add(Route.GameCenter) })
         },
         scrollBehavior = appBarScrollBehavior(),
     ) { paddingValues ->
@@ -80,7 +77,7 @@ fun HomeScreen(backStack: NavBackStack<Route>, viewModel: SolitaireViewModel) {
                             Text("${stats.gamesWon}/${stats.gamesPlayed}", style = MaterialTheme.typography.bodyLarge, textAlign = TextAlign.Center)
                             Text(stringResource(R.string.won), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), textAlign = TextAlign.Center)
                             if (stats.bestTimeSeconds < Int.MAX_VALUE) {
-                                Text("%02d:%02d".format(stats.bestTimeSeconds / 60, stats.bestTimeSeconds % 60), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), textAlign = TextAlign.Center)
+                                Text(formatDuration(stats.bestTimeSeconds), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), textAlign = TextAlign.Center)
                             }
                         }
                     }

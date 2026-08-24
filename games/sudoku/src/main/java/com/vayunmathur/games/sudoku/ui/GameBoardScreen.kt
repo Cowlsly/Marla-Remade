@@ -1,6 +1,5 @@
 package com.vayunmathur.games.sudoku.ui
 
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,16 +20,17 @@ import com.vayunmathur.games.sudoku.ui.components.NumberPad
 import com.vayunmathur.games.sudoku.ui.components.SudokuGrid
 import com.vayunmathur.library.ui.AppBarAlignment
 import com.vayunmathur.library.ui.AppScaffold
-import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
+import com.vayunmathur.library.ui.R as UiR
 import com.vayunmathur.library.ui.Spacing
-import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
 import com.vayunmathur.library.ui.appBarScrollBehavior
+import com.vayunmathur.library.ui.game.GameResultOverlay
+import com.vayunmathur.library.ui.game.formatDuration
 
 /** Caps the grid on tablets, where a full-width board would put the digits absurdly far apart. */
 private val BoardMaxWidth = 520.dp
@@ -54,7 +54,7 @@ fun GameBoardScreen(
         actions = {
             if (game != null) {
                 Text(
-                    formatTime(game.elapsedSeconds),
+                    formatDuration(game.elapsedSeconds),
                     style = MaterialTheme.typography.titleMedium,
                     modifier = Modifier.padding(end = Spacing.lg),
                 )
@@ -106,12 +106,21 @@ fun GameBoardScreen(
             }
 
             if (game.isWon) {
-                WinOverlay(
-                    elapsedSeconds = game.elapsedSeconds,
-                    hintsUsed = game.hintsUsed,
+                GameResultOverlay(
+                    title = stringResource(R.string.congratulations),
+                    won = true,
                     onPlayAgain = { actions.restart() },
                     onBack = onExit,
-                )
+                ) {
+                    Text("${stringResource(UiR.string.game_time)}: ${formatDuration(game.elapsedSeconds)}")
+                    if (game.hintsUsed > 0) {
+                        Text(
+                            "${stringResource(R.string.hints_used)}: ${game.hintsUsed}",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
             }
         }
     }
@@ -164,53 +173,5 @@ private fun ActionBar(
             },
             modifier = Modifier.fillMaxWidth(),
         ) { Text(stringResource(R.string.give_up)) }
-    }
-}
-
-@Composable
-private fun WinOverlay(
-    elapsedSeconds: Int,
-    hintsUsed: Int,
-    onPlayAgain: () -> Unit,
-    onBack: () -> Unit,
-) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            // Scrim, so the card reads as modal instead of letting the number pad show around it.
-            .background(MaterialTheme.colorScheme.scrim.copy(alpha = 0.7f))
-            .padding(Spacing.lg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Surface(
-            shape = MaterialTheme.shapes.extraLarge,
-            color = MaterialTheme.colorScheme.surfaceContainerHigh,
-        ) {
-            Column(
-                Modifier.padding(Spacing.xl),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(Spacing.md),
-            ) {
-                Text(
-                    stringResource(R.string.congratulations),
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-                Text("${stringResource(R.string.time)}: ${formatTime(elapsedSeconds)}")
-                if (hintsUsed > 0) {
-                    Text(
-                        "${stringResource(R.string.hints_used)}: $hintsUsed",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Button(onClick = onPlayAgain, Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.play_again))
-                }
-                TextButton(onClick = onBack, Modifier.fillMaxWidth()) {
-                    Text(stringResource(R.string.back))
-                }
-            }
-        }
     }
 }
