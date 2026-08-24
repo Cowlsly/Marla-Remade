@@ -1,0 +1,57 @@
+package com.vayunmathur.games.nonogram.platform
+
+import com.vayunmathur.games.nonogram.data.GameMode
+import com.vayunmathur.games.nonogram.data.NonogramGameState
+
+/**
+ * The UI contract between [NonogramViewModel] and the board.
+ *
+ * The board takes this interface rather than the ViewModel itself so it can be rendered by a
+ * `@Preview` — which is what the store listing images are generated from. It lives in `platform`
+ * rather than next to the board so the dependency runs one way: `ui` depends on `platform`, and the
+ * ViewModel implements this.
+ *
+ * Every member has a no-op default, so `Noop` is the whole implementation a preview needs.
+ */
+interface NonogramGameActions {
+    /** Tap: cycles blank to filled to crossed and back. */
+    fun tapCell(index: Int) {}
+
+    /** Long press: crosses a cell directly, skipping the fill step. */
+    fun crossCell(index: Int) {}
+
+    fun nextLevel() {}
+    fun restartLevel() {}
+    fun setGameMode(mode: GameMode) {}
+
+    companion object { val Noop: NonogramGameActions = object : NonogramGameActions {} }
+}
+
+/** What the board needs to draw itself. [game] is null only while a puzzle is being generated. */
+data class NonogramUiState(
+    val game: NonogramGameState? = null,
+    val mode: GameMode = GameMode.CASUAL,
+    val level: Int = 1,
+    val showMistakes: Boolean = true,
+    val dailyStreak: Long = 0,
+    /** True once today's daily has been completed, which swaps the next-level button for a note. */
+    val dailyDone: Boolean = false,
+    val generating: Boolean = false,
+    /** Set when even a widened seed search found no fair puzzle, so the board can offer a retry. */
+    val generationFailed: Boolean = false,
+)
+
+interface SettingsActions {
+    fun setShowMistakes(enabled: Boolean) {}
+    fun setReminderEnabled(enabled: Boolean) {}
+    fun setReminderTime(hour: Int, minute: Int) {}
+
+    companion object { val Noop: SettingsActions = object : SettingsActions {} }
+}
+
+data class SettingsUiState(
+    val showMistakes: Boolean = true,
+    val reminderEnabled: Boolean = false,
+    val reminderHour: Int = 20,
+    val reminderMinute: Int = 0,
+)

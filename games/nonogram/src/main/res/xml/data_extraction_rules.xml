@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Nonogram. Audited state: filesDir/datastore/settings.preferences_pb, holding the
+  current level, the filled and crossed cells on it, the daily board with the day
+  it belongs to, and the show-mistakes preference; plus
+  filesDir/datastore_default.preferences_pb, the shared DataStoreUtils file
+  holding the DailyChallengeStore("nonogram_daily") streak, the daily reminder
+  settings and the AchievementsManager unlocks. No SharedPreferences, no Room
+  database, nothing written to external storage - achievements.json is a
+  read-only APK asset and every puzzle is generated on device from its level
+  number or the date. Back everything up; it is a few KB of pure user progress.
+  SCOPE: nonogram declares android:backupAgent=".platform.AppBackupAgent" and
+  does NOT set android:fullBackupOnly, so Android uses key/value backup and the
+  <cloud-backup> section below is NOT consulted. Cloud content is exactly
+  AppBackupAgent's datastoreNames = ["settings", "datastore_default"], which is
+  the same data this file would have sent. <device-transfer> IS governed here,
+  and these rules become the cloud control too if the backupAgent is ever
+  removed.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>

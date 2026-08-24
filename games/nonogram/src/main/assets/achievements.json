@@ -1,0 +1,46 @@
+[
+  {
+    "id": "first_puzzle",
+    "name": "Picture Perfect",
+    "description": "Complete your first puzzle!"
+  },
+  {
+    "id": "big_picture",
+    "name": "The Big Picture",
+    "description": "Complete a 15x15 puzzle."
+  },
+  {
+    "id": "no_mistakes",
+    "name": "Careful Reader",
+    "description": "Complete a puzzle without ever filling a wrong cell."
+  },
+  {
+    "id": "first_daily",
+    "name": "Daily Habit",
+    "description": "Complete a daily puzzle."
+  },
+  {
+    "id": "puzzles_10",
+    "name": "Getting The Hang Of It",
+    "description": "Complete 10 puzzles.",
+    "targetProgress": 10
+  },
+  {
+    "id": "puzzles_50",
+    "name": "Gallery Owner",
+    "description": "Complete 50 puzzles.",
+    "targetProgress": 50
+  },
+  {
+    "id": "daily_streak_7",
+    "name": "Week Streak",
+    "description": "Complete the daily puzzle 7 days in a row.",
+    "targetProgress": 7
+  },
+  {
+    "id": "daily_streak_30",
+    "name": "Month Streak",
+    "description": "Complete the daily puzzle 30 days in a row.",
+    "targetProgress": 30
+  }
+]
