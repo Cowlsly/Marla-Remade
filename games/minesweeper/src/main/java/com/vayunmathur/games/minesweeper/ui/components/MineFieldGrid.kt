@@ -1,0 +1,163 @@
+package com.vayunmathur.games.minesweeper.ui.components
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.res.pluralStringResource
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.vayunmathur.games.minesweeper.R
+import com.vayunmathur.games.minesweeper.data.GameOutcome
+import com.vayunmathur.games.minesweeper.data.MinesweeperGameState
+import com.vayunmathur.library.ui.ColorScheme
+import com.vayunmathur.library.ui.IconFlag
+import com.vayunmathur.library.ui.IconMine
+import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.Text
+
+/**
+ * The mine field.
+ *
+ * Cells are square and sized from the available width, so a taller field simply gets taller rather
+ * than squeezing the cells. Tap and long press are handled per cell by [detectTapGestures] rather
+ * than by `clickable` + `combinedClickable`, because the flag gesture needs to fire on press-and-hold
+ * without also delivering the tap that would open the cell.
+ */
+@Composable
+fun MineFieldGrid(
+    game: MinesweeperGameState,
+    onTap: (Int) -> Unit,
+    onLongPress: (Int) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        for (row in 0 until game.rows) {
+            Row(Modifier.fillMaxWidth()) {
+                for (col in 0 until game.cols) {
+                    val index = row * game.cols + col
+                    MineCell(
+                        game = game,
+                        index = index,
+                        onTap = { onTap(index) },
+                        onLongPress = { onLongPress(index) },
+                        // weight + aspectRatio keeps the cells square whatever the column count.
+                        modifier = Modifier
+                            .weight(1f)
+                            .aspectRatio(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MineCell(
+    game: MinesweeperGameState,
+    index: Int,
+    onTap: () -> Unit,
+    onLongPress: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val haptics = LocalHapticFeedback.current
+
+    val revealed = game.revealed[index]
+    val flagged = game.flagged[index]
+    val isMine = game.mines[index]
+    val count = game.neighbourCounts[index]
+    val lost = game.outcome == GameOutcome.LOST
+
+    // Mines are hidden during play - they are the thing being deduced. On a loss the field is opened
+    // up; on a win the mines are shown as the flags the player earned rather than as bare mines.
+    val showMine = isMine && (revealed || lost)
+    val showFlag = flagged && !showMine
+
+    val background = when {
+        index == game.explodedAt -> scheme.error
+        revealed || showMine -> scheme.surfaceContainerLowest
+        else -> scheme.surfaceContainerHighest
+    }
+
+    val position = stringResource(
+        R.string.cd_position,
+        index / game.cols + 1,
+        index % game.cols + 1,
+    )
+    val stateWord = when {
+        showMine -> stringResource(R.string.cd_mine)
+        showFlag -> stringResource(R.string.cd_flagged)
+        !revealed -> stringResource(R.string.cd_covered)
+        count == 0 -> stringResource(R.string.cd_empty)
+        else -> pluralStringResource(R.plurals.cd_count, count, count)
+    }
+
+    Box(
+        modifier
+            .padding(CellGap)
+            .clip(MaterialTheme.shapes.extraSmall)
+            .background(background)
+            .pointerInput(index, game.isOver, game.started) {
+                detectTapGestures(
+                    onTap = { onTap() },
+                    onLongPress = {
+                        // Confirms the flag without the player having to look away from the field.
+                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                        onLongPress()
+                    },
+                )
+            }
+            .clearAndSetSemantics { contentDescription = "$position, $stateWord" },
+        contentAlignment = Alignment.Center,
+    ) {
+        when {
+            showMine -> IconMine(
+                Modifier.fillMaxSize(0.7f),
+                tint = if (index == game.explodedAt) scheme.onError else scheme.onSurfaceVariant,
+            )
+
+            showFlag -> IconFlag(Modifier.fillMaxSize(0.65f), tint = scheme.error)
+
+            revealed && count > 0 -> Text(
+                text = count.toString(),
+                color = countColor(count, scheme),
+                fontWeight = FontWeight.Bold,
+                fontSize = 15.sp,
+            )
+        }
+    }
+}
+
+/** Gap between cells, so the field reads as a grid without needing drawn lines. */
+private val CellGap = 1.dp
+
+/**
+ * The traditional per-number colours, mapped onto theme roles so they still work in both light and
+ * dark and against a dynamic palette. Beyond four the numbers are rare enough that one shared colour
+ * is fine, and the count is bold enough to read regardless.
+ */
+private fun countColor(count: Int, scheme: ColorScheme): Color = when (count) {
+    1 -> scheme.primary
+    2 -> scheme.tertiary
+    3 -> scheme.error
+    4 -> scheme.secondary
+    else -> scheme.onSurface
+}

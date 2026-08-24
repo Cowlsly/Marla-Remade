@@ -38,6 +38,7 @@ private fun resolveGameMetadata(
             "wordmaker" -> "Wordmaker"
             "logicgate" -> "Logic Gates"
             "sudoku" -> "Sudoku"
+            "minesweeper" -> "Minesweeper"
             else -> gameId.replaceFirstChar { it.uppercase() }
         },
         description = null,

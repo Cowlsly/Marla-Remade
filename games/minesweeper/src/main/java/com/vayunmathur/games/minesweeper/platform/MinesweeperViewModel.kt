@@ -1,0 +1,173 @@
+package com.vayunmathur.games.minesweeper.platform
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import com.vayunmathur.games.minesweeper.data.BoardSize
+import com.vayunmathur.games.minesweeper.data.Difficulty
+import com.vayunmathur.games.minesweeper.data.GameConfig
+import com.vayunmathur.games.minesweeper.data.GameOutcome
+import com.vayunmathur.games.minesweeper.data.MinesweeperGameState
+import com.vayunmathur.games.minesweeper.data.MinesweeperStatsRepository
+import com.vayunmathur.games.minesweeper.domain.FieldGenerator
+import com.vayunmathur.games.minesweeper.domain.MinesweeperRules
+import com.vayunmathur.library.util.AchievementsManager
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlin.random.Random
+
+/**
+ * Owns the field in progress.
+ *
+ * The field is held in memory only. The Activity declares every `configChanges` it can, so this
+ * survives rotation and theme changes without a saved-state handle; a game is lost on process death,
+ * which matches the other games in this family and is why the home screen offers "Continue" rather
+ * than a saved-game list.
+ *
+ * Unlike sudoku there is no generation cost worth dispatching off the main thread: laying mines is a
+ * shuffle and one pass for the neighbour counts, so it runs inline on the first tap.
+ */
+class MinesweeperViewModel(application: Application) :
+    AndroidViewModel(application), MinesweeperActions {
+
+    private val _uiState = MutableStateFlow(MinesweeperUiState())
+    val uiState: StateFlow<MinesweeperUiState> = _uiState.asStateFlow()
+
+    private val statsRepository = MinesweeperStatsRepository(application)
+
+    /**
+     * Whether the player has placed a flag this game.
+     *
+     * Cannot be read off the finished state: winning marks every remaining mine, so a cleared board
+     * always looks fully flagged regardless of what the player actually did.
+     */
+    private var placedAnyFlag = false
+
+    val achievementsManager: AchievementsManager = run {
+        val json = application.assets.open("achievements.json").bufferedReader().readText()
+        MinesweeperAchievementsManager(application, json, statsRepository)
+    }
+
+    init {
+        achievementsManager.checkExistingAchievements()
+    }
+
+    fun hasActiveGame(): Boolean = _uiState.value.game?.isOver == false
+
+    fun getSizeStats(size: BoardSize) = statsRepository.getSizeStats(size)
+
+    /** Deals a blank field for [config]. Mines are not laid until the first tap. */
+    fun newGame(config: GameConfig) {
+        placedAnyFlag = false
+        _uiState.value = MinesweeperUiState(
+            config = config,
+            game = MinesweeperGameState.empty(config),
+        )
+    }
+
+    /**
+     * Opens a covered cell, or chords an open number.
+     *
+     * The first tap also lays the mines, keeping itself and its neighbours clear, so the opening move
+     * can never lose. That is also where the game counts as played — backing out of a field you never
+     * touched should not show up in the stats.
+     */
+    override fun tapCell(index: Int) {
+        val state = _uiState.value
+        val game = state.game ?: return
+        if (game.isOver) return
+
+        val laid = if (game.started) game else {
+            statsRepository.recordGamePlayed(state.config.size, state.config.difficulty)
+            FieldGenerator.lay(game, index, Random.Default)
+        }
+
+        val next =
+            if (laid.revealed[index]) {
+                MinesweeperRules.chord(laid, index).also { chorded ->
+                    // Only counts when the chord was legal and actually opened something.
+                    if (chorded !== laid) achievementsManager.onAchievementUnlocked("first_chord")
+                }
+            } else {
+                MinesweeperRules.reveal(laid, index)
+            }
+
+        publish(next)
+    }
+
+    override fun flagCell(index: Int) {
+        val game = _uiState.value.game ?: return
+        // Flagging before the first reveal would have nothing to flag: the mines are not laid yet.
+        if (!game.started || game.isOver) return
+        val next = MinesweeperRules.toggleFlag(game, index)
+        if (next.flagsPlaced > game.flagsPlaced) placedAnyFlag = true
+        publish(next)
+    }
+
+    /** A fresh field with the same settings. */
+    override fun restart() {
+        newGame(_uiState.value.config)
+    }
+
+    /** Abandons an unfinished field, which breaks the win streak for that variant. */
+    override fun giveUp() {
+        val state = _uiState.value
+        val game = state.game ?: return
+        if (game.started && !game.isOver) {
+            statsRepository.recordGameLost(state.config.size, state.config.difficulty)
+        }
+        _uiState.value = MinesweeperUiState(config = state.config)
+    }
+
+    fun incrementTimer() {
+        val game = _uiState.value.game ?: return
+        if (!game.started || game.isOver) return
+        _uiState.update { it.copy(game = game.copy(elapsedSeconds = game.elapsedSeconds + 1)) }
+    }
+
+    fun dismissAchievementNotification() = achievementsManager.dismissNotification()
+
+    /**
+     * Stores [next] and, when it has just ended, records the result.
+     *
+     * Every path that can finish a game goes through here, so stats and achievements can never
+     * disagree about what happened.
+     */
+    private fun publish(next: MinesweeperGameState) {
+        val previous = _uiState.value.game
+        _uiState.update { it.copy(game = next) }
+
+        val justEnded = previous != null && !previous.isOver && next.isOver
+        if (!justEnded) return
+
+        val config = _uiState.value.config
+        when (next.outcome) {
+            GameOutcome.WON -> onWin(next)
+            GameOutcome.LOST -> statsRepository.recordGameLost(config.size, config.difficulty)
+            GameOutcome.PLAYING -> Unit
+        }
+    }
+
+    private fun onWin(game: MinesweeperGameState) {
+        val config = _uiState.value.config
+        statsRepository.recordGameWon(config.size, config.difficulty, game.elapsedSeconds)
+
+        val manager = achievementsManager
+        manager.onAchievementUnlocked("first_win")
+        if (config.size == BoardSize.LARGE) manager.onAchievementUnlocked("win_large")
+        if (config.difficulty == Difficulty.EXPERT) manager.onAchievementUnlocked("win_expert")
+        if (!placedAnyFlag) manager.onAchievementUnlocked("no_flags_needed")
+        if (game.elapsedSeconds < FAST_WIN_SECONDS) manager.onAchievementUnlocked("speed_win")
+
+        val totalWins = statsRepository.getTotalGamesWon()
+        manager.onProgressUpdated("wins_10", totalWins)
+        manager.onProgressUpdated("wins_50", totalWins)
+        manager.onProgressUpdated("win_streak_5", statsRepository.getBestWinStreak())
+    }
+
+    private companion object {
+        /** Matches the "under a minute" wording of the `speed_win` description. */
+        const val FAST_WIN_SECONDS = 60
+    }
+}

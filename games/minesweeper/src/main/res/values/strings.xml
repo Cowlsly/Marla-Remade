@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Manifest / HomeScreen TopAppBar: App name. Noun, proper -->
+    <string name="app_name" translatable="false">Minesweeper</string>
+
+    <!-- HomeScreen: Primary CTA opening the size and density picker. Verb phrase -->
+    <string name="new_game">New Game</string>
+    <!-- HomeScreen: Button shown when an unfinished field is still in memory. Verb -->
+    <string name="continue_game">Continue</string>
+    <!-- GameConfigDialog: Title of the size and density picker dialog. Noun phrase -->
+    <string name="new_field">New Field</string>
+    <!-- GameConfigDialog: Label above the field size segmented buttons. Noun -->
+    <string name="field_size">Field size</string>
+    <!-- GameConfigDialog: Label above the mine density segmented buttons. Noun -->
+    <string name="difficulty">Mines</string>
+    <!-- GameConfigDialog / WinOverlay: Dismiss button. Verb -->
+    <string name="back">Back</string>
+
+    <!-- GameConfigDialog: Smallest field, 8 columns by 10 rows. Adjective -->
+    <string name="size_small">Small</string>
+    <!-- GameConfigDialog: Middle field, 10 columns by 14 rows. Adjective -->
+    <string name="size_medium">Medium</string>
+    <!-- GameConfigDialog: Largest field, 12 columns by 18 rows. Adjective -->
+    <string name="size_large">Large</string>
+
+    <!-- GameConfigDialog: Lowest mine density, about one cell in ten. Adjective -->
+    <string name="difficulty_easy">Easy</string>
+    <!-- GameConfigDialog: Middle mine density. Adjective -->
+    <string name="difficulty_medium">Medium</string>
+    <!-- GameConfigDialog: Second highest mine density. Adjective -->
+    <string name="difficulty_hard">Hard</string>
+    <!-- GameConfigDialog: Highest mine density, close to a quarter of the field. Adjective -->
+    <string name="difficulty_expert">Expert</string>
+
+    <!-- GameBoardScreen: Hint under the field explaining the two gestures. Imperative sentence -->
+    <string name="how_to_play">Tap to open, long press to flag</string>
+    <!-- GameBoardScreen TopAppBar: Subtitle giving the total mine count, after the size name. Quantified noun -->
+    <plurals name="mine_count">
+        <!-- Singular, only reachable on the very smallest field at the lowest density -->
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> mine</item>
+        <item quantity="other"><xliff:g id="count" example="21">%1$d</xliff:g> mines</item>
+    </plurals>
+    <!-- GameBoardScreen action bar: Abandons the field, recorded as a loss. Verb phrase -->
+    <string name="give_up">Give Up</string>
+    <!-- GameBoardScreen: Starts a fresh field with the same settings. Verb phrase -->
+    <string name="new_field_button">New Field</string>
+
+    <!-- WinOverlay: Celebratory title shown when the field is cleared. Declarative -->
+    <string name="cleared">Field Cleared!</string>
+    <!-- LossOverlay: Title shown when a mine is opened. Declarative, sympathetic -->
+    <string name="boom">Boom!</string>
+    <!-- WinOverlay: Label for the finishing time, e.g. Time: 01:24. Noun -->
+    <string name="time">Time</string>
+    <!-- WinOverlay / LossOverlay: Plays another field with the same settings. Verb phrase -->
+    <string name="play_again">Play Again</string>
+    <!-- HomeScreen stat card: Label under the cleared-of-played ratio. Verb past participle -->
+    <string name="cleared_count">cleared</string>
+
+    <!-- GameBoardScreen: Content description of a covered cell. Adjective -->
+    <string name="cd_covered">Covered</string>
+    <!-- GameBoardScreen: Content description of a flagged cell. Verb past participle -->
+    <string name="cd_flagged">Flagged</string>
+    <!-- GameBoardScreen: Content description of a revealed mine. Noun -->
+    <string name="cd_mine">Mine</string>
+    <!-- GameBoardScreen: Content description of an open cell touching no mines. Adjective -->
+    <string name="cd_empty">Empty</string>
+    <!-- GameBoardScreen: Content description of an open cell, giving its mine count. %1$d = number of adjacent mines, 1 to 8, e.g. 3 -->
+    <plurals name="cd_count">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> mine nearby</item>
+        <item quantity="other"><xliff:g id="count" example="3">%1$d</xliff:g> mines nearby</item>
+    </plurals>
+    <!-- GameBoardScreen: Content description prefix locating a cell. %1$d = row number starting at 1, e.g. 4. %2$d = column number starting at 1, e.g. 6 -->
+    <string name="cd_position">Row <xliff:g id="row" example="4">%1$d</xliff:g>, column <xliff:g id="column" example="6">%2$d</xliff:g></string>
+</resources>

@@ -1,0 +1,50 @@
+[
+  {
+    "id": "first_win",
+    "name": "Swept",
+    "description": "Clear your first field!"
+  },
+  {
+    "id": "win_large",
+    "name": "Wide Open",
+    "description": "Clear a large field."
+  },
+  {
+    "id": "win_expert",
+    "name": "Dense Work",
+    "description": "Clear a field on Expert density."
+  },
+  {
+    "id": "no_flags_needed",
+    "name": "From Memory",
+    "description": "Clear a field without placing a single flag."
+  },
+  {
+    "id": "speed_win",
+    "name": "Light Touch",
+    "description": "Clear a field in under a minute."
+  },
+  {
+    "id": "first_chord",
+    "name": "Two At Once",
+    "description": "Open a group of cells by tapping a satisfied number."
+  },
+  {
+    "id": "wins_10",
+    "name": "Steady Hand",
+    "description": "Clear 10 fields.",
+    "targetProgress": 10
+  },
+  {
+    "id": "wins_50",
+    "name": "Bomb Disposal",
+    "description": "Clear 50 fields.",
+    "targetProgress": 50
+  },
+  {
+    "id": "win_streak_5",
+    "name": "Unshaken",
+    "description": "Clear five fields in a row.",
+    "targetProgress": 5
+  }
+]

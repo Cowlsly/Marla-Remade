@@ -9,6 +9,8 @@ import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.HealthAndSafety
 import androidx.compose.material.icons.filled.Medication
 import androidx.compose.material.icons.filled.MonitorHeart
+import androidx.compose.material.icons.filled.Flag
+import androidx.compose.material.icons.filled.Brightness7
 import androidx.compose.material.icons.filled.DeliveryDining
 import androidx.compose.material.icons.filled.Explore
 import androidx.compose.material.icons.filled.Restaurant
@@ -1357,3 +1359,19 @@ fun IconMedication(modifier: Modifier = Modifier, tint: Color = LocalContentColo
 @Composable
 fun IconMonitorHeart(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
     AppIcon(Icons.Filled.MonitorHeart, "Medical records", modifier, tint)
+
+/** Flag planted on a cell — marking a suspected mine in Minesweeper. */
+@Composable
+fun IconFlag(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Flag, "Flag", modifier, tint)
+
+/**
+ * A mine — the spiked disc the classic Minesweeper glyph uses.
+ *
+ * Material has no bomb, and `Brightness7` is a filled circle with eight rays, which is exactly that
+ * shape. Named for what it means here rather than what it is called upstream, as `IconFire`
+ * (Whatshot) and `IconEraser` (Backspace) already are.
+ */
+@Composable
+fun IconMine(modifier: Modifier = Modifier, tint: Color = LocalContentColor.current) =
+    AppIcon(Icons.Filled.Brightness7, "Mine", modifier, tint)

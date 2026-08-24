@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Minesweeper. Audited state: the "minesweeper_stats" SharedPreferences file
+  (AppBackupAgent.prefNames) holding per size-and-difficulty played/won counts,
+  win streaks and best times, plus filesDir/datastore_default.preferences_pb,
+  the shared DataStoreUtils file holding the AchievementsManager unlocks. No
+  Room database, no in-progress board (the field lives only in the ViewModel),
+  nothing written to external storage - achievements.json is a read-only APK
+  asset and every field is generated on device. Back everything up; it is a few
+  KB of pure user progress.
+  SCOPE: minesweeper declares android:backupAgent=".platform.AppBackupAgent" and
+  does NOT set android:fullBackupOnly, so Android uses key/value backup and the
+  <cloud-backup> section below is NOT consulted. Cloud content is exactly
+  AppBackupAgent's prefNames = ["minesweeper_stats"] plus datastoreNames =
+  ["datastore_default"], which is the same data this file would have sent.
+  <device-transfer> IS governed here, and these rules become the cloud control
+  too if the backupAgent is ever removed.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <include domain="root" path="." />
+        <include domain="file" path="." />
+        <include domain="database" path="." />
+        <include domain="sharedpref" path="." />
+        <include domain="external" path="." />
+    </device-transfer>
+</data-extraction-rules>
