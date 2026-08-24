@@ -30,10 +30,8 @@ import com.vayunmathur.library.ui.Text
  * hairline in the background colour separates them, so the block reads as distinct keys without
  * needing gaps.
  *
- * A digit that has been placed as many times as the board is wide is disabled rather than hidden, so
- * the keys never reflow under the player's thumb mid-game. Notes mode keeps every digit enabled,
- * because a pencil mark for a finished digit is still a legitimate thing to jot down while ruling it
- * out.
+ * No key is ever disabled. A wrong digit is accepted silently, so there is nothing to gate on, and a
+ * digit that already appears the maximum number of times may still be one the player wants to move.
  */
 @Composable
 fun NumberPad(
@@ -49,8 +47,6 @@ fun NumberPad(
                     val digit = row * size.boxCols + col + 1
                     DigitKey(
                         digit = digit,
-                        enabled = !game.isWon &&
-                            (game.notesMode || game.placedCount(digit) < size.side),
                         highlighted = game.notesMode,
                         onClick = { onDigit(digit) },
                     )
@@ -63,7 +59,6 @@ fun NumberPad(
 @Composable
 private fun DigitKey(
     digit: Int,
-    enabled: Boolean,
     highlighted: Boolean,
     onClick: () -> Unit,
 ) {
@@ -78,7 +73,6 @@ private fun DigitKey(
         FilledTonalButton(
             onClick = onClick,
             modifier = shared,
-            enabled = enabled,
             shape = RectangleShape,
             contentPadding = PaddingValues(0.dp),
         ) { label() }
@@ -86,7 +80,6 @@ private fun DigitKey(
         Button(
             onClick = onClick,
             modifier = shared,
-            enabled = enabled,
             shape = RectangleShape,
             contentPadding = PaddingValues(0.dp),
         ) { label() }

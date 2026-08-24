@@ -89,17 +89,17 @@ class SudokuViewModel(application: Application) : AndroidViewModel(application),
      * Re-entering the digit already showing clears the cell instead, so the number pad doubles as a
      * toggle and the player rarely needs the separate erase button.
      *
-     * A confirmed digit that disagrees with the solution is refused: nothing is written, no move is
-     * counted, and the board does not change. The attempt is still remembered for the `no_mistakes`
-     * achievement, which is the only trace a wrong guess leaves.
+     * A digit that disagrees with the solution goes in exactly like any other, with no highlight and no
+     * complaint. The player finds out only because [checkWin] never fires, which keeps the deduction
+     * theirs to do; the attempt is remembered for the `no_mistakes` achievement.
      */
     override fun enterDigit(digit: Int) {
         val game = _uiState.value.game ?: return
         val index = game.selected
         if (index !in 0 until game.size.cellCount || game.isGiven(index) || game.isWon) return
 
+        pushHistory(game)
         if (game.notesMode) {
-            pushHistory(game)
             val bit = 1 shl (digit - 1)
             mutate { state ->
                 state.copy(
@@ -111,21 +111,13 @@ class SudokuViewModel(application: Application) : AndroidViewModel(application),
             return
         }
 
-        // Tapping the digit already there means "take it back", which is always allowed.
-        if (game.entries[index] == digit) {
-            clearCell()
-            return
-        }
-        if (!game.accepts(index, digit)) {
-            madeMistake = true
-            return
-        }
-
-        pushHistory(game)
+        // Tapping the digit already there means "take it back".
+        val next = if (game.entries[index] == digit) 0 else digit
+        if (next != 0 && next != game.solution[index]) madeMistake = true
         mutate { state ->
             state.copy(
-                entries = state.entries.replacing(index, digit),
-                // A confirmed digit makes its own pencil marks meaningless.
+                entries = state.entries.replacing(index, next),
+                // A written digit makes its own pencil marks meaningless.
                 notes = state.notes.replacing(index, 0),
                 moveCount = state.moveCount + 1,
             )
@@ -148,16 +140,18 @@ class SudokuViewModel(application: Application) : AndroidViewModel(application),
     }
 
     /**
-     * Fills one cell with its correct digit.
+     * Fixes one cell, correcting a mistake before filling anything new.
      *
-     * Prefers the selected cell so a stuck player gets help where they are looking; otherwise it takes
-     * the first blank. Entries are always correct, so a blank cell is the only thing a hint can help
-     * with.
+     * Errors come first wherever they are on the board: a hint spent on a fresh cell while a wrong
+     * digit sits elsewhere would leave the player deducing from something false. Only once the grid is
+     * consistent does it fill a blank, preferring the selected one so help lands where they are
+     * looking.
      */
     override fun hint() {
         val game = _uiState.value.game ?: return
         if (game.isWon) return
-        val index = game.selected.takeIf { it >= 0 && !game.isGiven(it) && game.valueAt(it) == 0 }
+        val index = game.wrongIndices().firstOrNull()
+            ?: game.selected.takeIf { it >= 0 && !game.isGiven(it) && game.valueAt(it) == 0 }
             ?: game.blankIndices().firstOrNull()
             ?: return
 

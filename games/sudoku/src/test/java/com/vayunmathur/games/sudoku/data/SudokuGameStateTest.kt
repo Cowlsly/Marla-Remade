@@ -16,42 +16,60 @@ class SudokuGameStateTest {
     private val blank = puzzle.givens.indices.first { puzzle.givens[it] == 0 }
 
     /** A digit that does not belong in [blank]. */
-    private val wrongDigit =
-        (1..puzzle.size.side).first { it != puzzle.solution[blank] }
+    private val wrongDigit = (1..puzzle.size.side).first { it != puzzle.solution[blank] }
+
+    private fun SudokuGameState.withEntry(index: Int, digit: Int) =
+        copy(entries = entries.toMutableList().also { it[index] = digit })
 
     @Test
-    fun theCorrectDigitIsAccepted() {
-        assertTrue(fresh.accepts(blank, puzzle.solution[blank]))
+    fun aWrongDigitIsRecognisedButNotBlocked() {
+        // Wrong digits go in silently; nothing stops them, and nothing draws attention to them.
+        val s = fresh.withEntry(blank, wrongDigit)
+        assertTrue(s.isWrong(blank))
+        assertEquals(wrongDigit, s.valueAt(blank), "the wrong digit should still be on the board")
     }
 
     @Test
-    fun aWrongDigitIsRefused() {
-        // The whole point: the grid never holds a digit that disagrees with the solution.
-        assertFalse(fresh.accepts(blank, wrongDigit))
+    fun aCorrectDigitIsNotWrong() {
+        assertFalse(fresh.withEntry(blank, puzzle.solution[blank]).isWrong(blank))
     }
 
     @Test
-    fun givenCellsRefuseEverything() {
+    fun anEmptyCellIsNotWrong() {
+        assertFalse(fresh.isWrong(blank))
+    }
+
+    @Test
+    fun givensAreNeverWrong() {
         val given = puzzle.givens.indices.first { puzzle.givens[it] != 0 }
-        for (digit in 1..puzzle.size.side) {
-            assertFalse(fresh.accepts(given, digit), "digit $digit into a given")
+        assertFalse(fresh.isWrong(given))
+    }
+
+    @Test
+    fun aFullBoardWithAMistakeDoesNotComplete() {
+        // This is the only signal the player gets that something is off.
+        val entries = List(puzzle.size.cellCount) {
+            if (fresh.isGiven(it)) 0 else puzzle.solution[it]
         }
-    }
-
-    @Test
-    fun outOfRangeCellsAreRefused() {
-        assertFalse(fresh.accepts(-1, 1))
-        assertFalse(fresh.accepts(puzzle.size.cellCount, 1))
-    }
-
-    @Test
-    fun aFinishedGridRefusesFurtherWrites() {
-        val solved = fresh.copy(
-            entries = List(puzzle.size.cellCount) { if (fresh.isGiven(it)) 0 else puzzle.solution[it] },
-            isWon = true,
-        )
+        val solved = fresh.copy(entries = entries)
         assertTrue(solved.isComplete)
-        assertFalse(solved.accepts(blank, puzzle.solution[blank]))
+
+        val spoiled = solved.withEntry(blank, wrongDigit)
+        assertFalse(spoiled.isComplete, "a full grid with a wrong digit must not count as complete")
+        assertTrue(spoiled.blankIndices().isEmpty(), "and it really is full")
+    }
+
+    @Test
+    fun wrongIndicesFindEveryMistake() {
+        val second = puzzle.givens.indices.last { puzzle.givens[it] == 0 }
+        val s = fresh.withEntry(blank, wrongDigit).withEntry(second, wrongDigitFor(second))
+        assertEquals(listOf(blank, second).sorted(), s.wrongIndices())
+    }
+
+    @Test
+    fun wrongIndicesIsEmptyOnACleanBoard() {
+        assertTrue(fresh.wrongIndices().isEmpty())
+        assertTrue(fresh.withEntry(blank, puzzle.solution[blank]).wrongIndices().isEmpty())
     }
 
     @Test
@@ -60,30 +78,15 @@ class SudokuGameStateTest {
             puzzle.givens.indices.filter { puzzle.givens[it] == 0 },
             fresh.blankIndices(),
         )
-        // Filling one removes it from the list, which is what stops a hint reusing that cell.
-        val filled = fresh.copy(entries = fresh.entries.toMutableList().also {
-            it[blank] = puzzle.solution[blank]
-        })
-        assertFalse(blank in filled.blankIndices())
+        assertFalse(blank in fresh.withEntry(blank, puzzle.solution[blank]).blankIndices())
     }
 
     @Test
-    fun placedCountOnlyCountsWhatIsOnTheBoard() {
-        val digit = puzzle.solution[blank]
-        val before = fresh.placedCount(digit)
-        val after = fresh.copy(entries = fresh.entries.toMutableList().also {
-            it[blank] = digit
-        }).placedCount(digit)
-        assertEquals(before + 1, after)
-    }
-
-    @Test
-    fun aGridIsCompleteOnlyWhenEveryCellMatchesTheSolution() {
-        assertFalse(fresh.isComplete)
-        val solved = fresh.copy(
-            entries = List(puzzle.size.cellCount) { if (fresh.isGiven(it)) 0 else puzzle.solution[it] }
-        )
-        assertTrue(solved.isComplete)
+    fun aWrongEntryCountsAsFilledNotBlank() {
+        // A hint has to treat it as an error to fix, not as an empty cell to fill.
+        val s = fresh.withEntry(blank, wrongDigit)
+        assertFalse(blank in s.blankIndices())
+        assertTrue(blank in s.wrongIndices())
     }
 
     @Test
@@ -97,12 +100,28 @@ class SudokuGameStateTest {
         for (size in BoardSize.entries) {
             val counts = IntArray(size.side)
             for (index in 0 until size.cellCount) counts[size.boxOf(index)]++
-            // Every box must hold exactly as many cells as a row does, or the box constraint would
-            // be weaker or stronger than the row constraint.
+            // Every box must hold exactly as many cells as a row does, or the box constraint would be
+            // weaker or stronger than the row constraint.
             assertTrue(
                 counts.all { it == size.side },
                 "${size.name} box sizes were ${counts.toList()}",
             )
         }
     }
+
+    @Test
+    fun symbolsAreOneCharacterOnEveryBoard() {
+        // A 12x12 pencil-mark grid has twelve candidates in one cell; two-character labels are unusable.
+        for (size in BoardSize.entries) {
+            for (digit in 1..size.side) {
+                assertEquals(1, sudokuSymbol(digit).length, "${size.name} digit $digit")
+            }
+        }
+        assertEquals("9", sudokuSymbol(9))
+        assertEquals("A", sudokuSymbol(10))
+        assertEquals("C", sudokuSymbol(12))
+    }
+
+    private fun wrongDigitFor(index: Int) =
+        (1..puzzle.size.side).first { it != puzzle.solution[index] }
 }

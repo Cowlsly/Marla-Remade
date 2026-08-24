@@ -71,8 +71,8 @@ data class GameConfig(
  * A generated puzzle: the clues the player starts with and the unique grid they lead to.
  *
  * Both lists are [BoardSize.cellCount] long and use 0 for "blank"; digits are 1-based. Keeping the
- * solution alongside the clues is what lets a hint fill one correct cell without re-running the
- * solver, and lets a digit that does not belong be refused as it is entered.
+ * solution alongside the clues is what lets a hint fill or correct one cell without re-running the
+ * solver, and what the completion check compares against.
  */
 data class Puzzle(
     val size: BoardSize,
@@ -112,26 +112,29 @@ data class SudokuGameState(
     fun isGiven(index: Int): Boolean = givens[index] != 0
 
     /**
-     * Whether [digit] may be written into [index].
+     * True when [index] holds a digit that disagrees with the solution.
      *
-     * A digit that disagrees with the solution is refused outright rather than written and flagged, so
-     * the grid only ever holds correct entries. That is why there is no "wrong cell" state to render:
-     * it cannot occur.
-     *
-     * Clearing a cell is not a write and does not go through here.
+     * Nothing in the UI draws this. A wrong digit goes in silently and stays there; the player finds
+     * out because the puzzle refuses to complete, and a hint will fix it. It exists so [wrongIndices]
+     * can find those cells.
      */
-    fun accepts(index: Int, digit: Int): Boolean =
-        !isWon &&
-            index in 0 until size.cellCount &&
-            !isGiven(index) &&
-            digit == solution[index]
+    fun isWrong(index: Int): Boolean {
+        val value = valueAt(index)
+        return value != 0 && value != solution[index]
+    }
 
-    /** How many of [digit] are already placed, so the number pad can retire finished digits. */
-    fun placedCount(digit: Int): Int = (0 until size.cellCount).count { valueAt(it) == digit }
+    /** Filled cells that disagree with the solution, which a hint fixes before filling anything new. */
+    fun wrongIndices(): List<Int> = (0 until size.cellCount).filter { isWrong(it) }
 
-    /** Cells with nothing in them yet, which is what a hint picks from. */
+    /** Cells with nothing in them yet. */
     fun blankIndices(): List<Int> = (0 until size.cellCount).filter { valueAt(it) == 0 }
 
+    /**
+     * Complete only when every cell matches the solution.
+     *
+     * A full grid is not enough: since wrong digits are accepted without comment, this is the only
+     * thing that tells the player they have something wrong somewhere.
+     */
     val isComplete: Boolean get() = (0 until size.cellCount).all { valueAt(it) == solution[it] }
 
     companion object {
