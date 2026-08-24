@@ -338,6 +338,15 @@
     </plurals>
     <!-- Transit directions: joins the headsign and the stop count, e.g. "Towards Ocean Beach · 4 stops" -->
     <string name="transit_detail_separator">%1$s \u00b7 %2$s</string>
+    <!-- Transit directions: a walk leg of an itinerary, phrased from its duration. %1$d = whole minutes -->
+    <plurals name="maneuver_walk_minutes">
+        <item quantity="one">Walk %1$d min</item>
+        <item quantity="other">Walk %1$d min</item>
+    </plurals>
+    <!-- Transit directions: when to set off, so the first ride is caught. %1$s = time e.g. "08:42" -->
+    <string name="leave_at">Leave at <xliff:g id="time" example="08:42">%1$s</xliff:g></string>
+    <!-- Transit directions: when the itinerary reaches the destination. %1$s = time e.g. "09:15" -->
+    <string name="arrive_at">Arrive at <xliff:g id="time" example="09:15">%1$s</xliff:g></string>
 
     <!-- Settings: screen title. Noun. -->
     <string name="settings_title">Settings</string>

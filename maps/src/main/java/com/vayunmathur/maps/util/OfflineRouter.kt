@@ -949,6 +949,15 @@ object OfflineRouter {
                                         else ->
                                             if (raw.isTransit && raw.stopCode != null && raw.endStopCode != null)
                                                 context.getString(R.string.maneuver_ride_transit, raw.roadName, raw.stopCode, raw.endStopCode, raw.stopCount)
+                                            else if (mode == RouteService.TravelMode.TRANSIT)
+                                                // A walk leg of an itinerary. The planner names
+                                                // every one of them "Walk", which the road-name
+                                                // templates below turn into "Continue onto Walk".
+                                                // Phrased for real after coalescing, from the
+                                                // merged duration; this placeholder only has to
+                                                // compare equal between adjacent walk legs so
+                                                // they still merge.
+                                                WALK_LEG_PLACEHOLDER
                                             else if (hasName)
                                                 context.getString(
                                                         R.string.maneuver_unspecified,
@@ -1039,7 +1048,15 @@ object OfflineRouter {
                                 coalescedSteps.sumOf { it.staticDuration.inWholeSeconds }.seconds,
                         distanceMeters = coalescedSteps.sumOf { it.distanceMeters },
                         polyline = fullPolyline,
-                        step = coalescedSteps
+                        step = phraseWalkLegs(coalescedSteps, mode) { minutes ->
+                            context.resources.getQuantityString(
+                                    R.plurals.maneuver_walk_minutes,
+                                    minutes,
+                                    minutes,
+                            )
+                        },
+                        departureTime = leaveAt(rawSteps),
+                        arrivalTime = arriveAt(rawSteps),
                 )
     }
 

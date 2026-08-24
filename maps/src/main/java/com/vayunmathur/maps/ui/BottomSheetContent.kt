@@ -283,8 +283,19 @@ fun RouteSheet(
             LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 when (routeForMode) {
                     is RouteService.Route -> {
+                        // "Leave at" and "Arrive at" bracket the leg list as ordinary rows, so
+                        // the card rounding has to be indexed across all three groups rather
+                        // than over the legs alone.
+                        val leave = listOfNotNull(routeForMode.departureTime)
+                        val arrive = listOfNotNull(routeForMode.arrivalTime)
+                        val total = leave.size + routeForMode.step.size + arrive.size
+                        itemsIndexed(leave) { idx, time ->
+                            Card(shape = verticalShape(idx, total)) {
+                                ListItem({ Text(stringResource(R.string.leave_at, time)) })
+                            }
+                        }
                         itemsIndexed(routeForMode.step) { idx, it ->
-                            Card(shape = verticalShape(idx, routeForMode.step.size)) {
+                            Card(shape = verticalShape(leave.size + idx, total)) {
                                 val transit = it.transitDetails
                                 ListItem({
                                     Text(it.navInstruction.instructions)
@@ -330,6 +341,16 @@ fun RouteSheet(
                                             }
                                         }
                                     })
+                            }
+                        }
+                        itemsIndexed(arrive) { idx, time ->
+                            Card(
+                                shape = verticalShape(
+                                    leave.size + routeForMode.step.size + idx,
+                                    total,
+                                )
+                            ) {
+                                ListItem({ Text(stringResource(R.string.arrive_at, time)) })
                             }
                         }
                     }

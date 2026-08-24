@@ -24,7 +24,21 @@ object RouteService {
          */
         @Serializable data class Lane(val directions: List<Maneuver>, val active: Boolean)
     }
-    data class Route(override val duration: Duration, override val distanceMeters: Double, val polyline: List<Position>, val step: List<Step>): RouteType
+    /**
+     * [departureTime] and [arrivalTime] are wall-clock `HH:mm` in the **feed's**
+     * timezone, matching the per-leg times in [API.StopDetails] — a transit
+     * itinerary's legs are timetabled in that zone, so a device-local rendering
+     * would disagree with the rows beneath. Null on any route without a ride leg,
+     * which includes every non-transit mode and a walk-only itinerary.
+     */
+    data class Route(
+        override val duration: Duration,
+        override val distanceMeters: Double,
+        val polyline: List<Position>,
+        val step: List<Step>,
+        val departureTime: String? = null,
+        val arrivalTime: String? = null,
+    ): RouteType
     data class Step(val distanceMeters: Double, val staticDuration: Duration, val polyline: List<Position>, val navInstruction: API.NavInstruction, val travelMode: TravelMode, val transitDetails: API.TransitDetails? = null, val speedRatio: Double = 1.0, val lanes: List<API.Lane> = emptyList())
     interface RouteType { val duration: Duration; val distanceMeters: Double }
     class EmptyRoute: RouteType { override val duration: Duration = 0.seconds; override val distanceMeters: Double = 0.0 }
