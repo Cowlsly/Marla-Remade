@@ -190,4 +190,16 @@
     <string name="trust_accrescent_limits">Accrescent nie publikuje żadnych skrótów dla poszczególnych plików ani powtarzalnych kompilacji, więc gwarancją jest podpis i minimalna wersja, a nie zgodność ze źródłem. Listy i linki do pobrania pochodzą ze zwykłego serwera za pośrednictwem gRPC; błędna odpowiedź może skutkować jedynie plikiem, który nie przejdzie kontroli podpisu i wersji. Nikt nie skanuje aplikacji i nie ma możliwości wycofania wadliwej wersji z telefonów.</string>
     <string name="source_accrescent">Accrescent</string>
     <string name="source_accrescent_pin">Przypięto do klucza podpisu repodata Accrescent (ed25519)</string>
+    <string name="updates_confirm_notification_body">Android pozwala App Store na aktualizowanie tylko tych aplikacji, które zostały przez niego zainstalowane, dlatego te wymagają Twojego kliknięcia. Otwórz App Store, aby je zainstalować.</string>
+    <plurals name="updates_confirm_count">
+        <item quantity="one">%1$d aktualizacja wymaga Twojego potwierdzenia</item>
+        <item quantity="few">%1$d aktualizacje wymagają Twojego potwierdzenia</item>
+        <item quantity="many">%1$d aktualizacji wymaga Twojego potwierdzenia</item>
+        <item quantity="other">%1$d aktualizacji wymaga Twojego potwierdzenia</item>
+    </plurals>
+    <string name="install_failed_reason">Nie można zainstalować %1$s: %2$s</string>
+    <string name="install_failure_incompatible">Aplikavja nie jest przeznaczona na to urządzenie</string>
+    <string name="install_failure_storage">niewystarczająca ilość pamięci</string>
+    <string name="install_failure_conflict">koliduje z wersją już zainstalowaną</string>
+    <string name="install_failure_unknown">odrzucone przez system</string>
 </resources>
