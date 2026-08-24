@@ -119,13 +119,21 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 /// has no base to inherit a world-sized envelope from, so whichever overlay happened
 /// to be listed first would otherwise clip every other layer to its own extent — and
 /// point a viewer at its own centre.
+///
+/// A tile only ONE input holds is copied through as the producer's own compressed
+/// bytes: no inflate, no deflate, no MVT round trip. That is the overwhelming
+/// majority of tiles in an overlay-only merge, because the layers are disjoint and so
+/// are most of their tile sets — and deflate at [`crate::gz`]'s archive level is by
+/// far the most expensive thing this function can do. It also keeps peak memory down,
+/// since those tiles stay compressed while they wait.
 pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0u8;
     // (west, south, east, north), in e7 degrees.
     let mut bounds: Option<(i32, i32, i32, i32)> = None;
-    // tile_id -> the tile's MVT from each input, in input order.
-    let mut collected: HashMap<u64, Vec<Vec<u8>>> = HashMap::new();
+    // tile_id -> each input's STILL-COMPRESSED tile, in input order, paired with
+    // that input's `tile_compression` so the decode below stays faithful to it.
+    let mut collected: HashMap<u64, Vec<(Vec<u8>, u8)>> = HashMap::new();
     for a in inputs {
         let h = &a.header;
         min_zoom = min_zoom.min(h.min_zoom);
@@ -139,12 +147,11 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
                 n.max(h.max_lat_e7),
             ),
         });
+        // Only gzip is pass-through-able, because gzip is what the builder writes.
+        // Anything else still has to be decoded, and labelling e.g. zstd bytes as
+        // gzip would produce an archive no reader could open.
         for (id, raw) in a.iter_tiles()? {
-            let body = match h.tile_compression {
-                pmtiles::COMPRESSION_NONE => raw.to_vec(),
-                _ => crate::gz::decompress(raw)?,
-            };
-            collected.entry(id).or_default().push(body);
+            collected.entry(id).or_default().push((raw.to_vec(), h.tile_compression));
         }
     }
 
@@ -163,7 +170,7 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
         b.center_lon_e7 = midpoint_e7(w, e);
         b.center_lat_e7 = midpoint_e7(s, n);
     }
-    if inputs.first().is_some() {
+    if !inputs.is_empty() {
         b.metadata = merge_metadata(inputs);
     }
 
@@ -171,12 +178,25 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
     ids.sort_unstable();
     for id in ids {
         let bodies = &collected[&id];
-        let merged = if bodies.len() == 1 {
-            // Single source: re-encode is unnecessary, so skip it entirely and keep
-            // the original bytes.
-            bodies[0].clone()
+        // Sole owner, already in the compression the builder writes: hand the
+        // producer's bytes straight through. No inflate, no deflate, and the tile is
+        // preserved byte for byte.
+        if let [(raw, pmtiles::COMPRESSION_GZIP)] = bodies.as_slice() {
+            b.add_tile_raw(id, raw.clone());
+            continue;
+        }
+        let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(bodies.len());
+        for (raw, compression) in bodies {
+            decoded.push(match *compression {
+                pmtiles::COMPRESSION_NONE => raw.clone(),
+                _ => crate::gz::decompress(raw)?,
+            });
+        }
+        let merged = if decoded.len() == 1 {
+            // One input, but not gzip: re-encoding the MVT is still unnecessary.
+            decoded.pop().unwrap_or_default()
         } else {
-            merge_tiles(bodies)?
+            merge_tiles(&decoded)?
         };
         b.add_tile_raw(id, crate::gz::compress(&merged));
     }
@@ -847,5 +867,70 @@ mod tests {
             "{\"vector_layers\":[{\"id\":\"ma_pois\",\"minzoom\":12,\"maxzoom\":16}]}",
             "listed once, at the rebuilt layer's zoom range"
         );
+    }
+
+    /// A tile only one input holds must come out as that producer's exact bytes.
+    ///
+    /// Worth pinning because the win is invisible from the output alone: a re-deflate
+    /// would still produce a valid archive, just slowly. Comparing the raw stored
+    /// bytes is the only way to tell the passthrough is actually happening.
+    #[test]
+    fn a_sole_owner_tile_is_copied_through_without_recompressing() {
+        let mut a = Builder::new();
+        a.min_zoom = 11;
+        a.max_zoom = 11;
+        a.add_tile(11, 1, 1, &one_point_tile("safety"));
+        let a_bytes = a.build().unwrap();
+
+        let mut b = Builder::new();
+        b.min_zoom = 11;
+        b.max_zoom = 11;
+        // A different tile, so neither input shares one with the other.
+        b.add_tile(11, 9, 9, &one_point_tile("ma_pois"));
+        let b_bytes = b.build().unwrap();
+
+        let (aa, ba) = (
+            Archive::parse(&a_bytes).unwrap(),
+            Archive::parse(&b_bytes).unwrap(),
+        );
+        let m = Archive::parse(&merge_archives(&[&aa, &ba]).unwrap()).unwrap();
+
+        assert_eq!(
+            m.tile_raw(11, 1, 1).unwrap().map(<[u8]>::to_vec),
+            aa.tile_raw(11, 1, 1).unwrap().map(<[u8]>::to_vec),
+            "the first input's tile is byte-identical to its stored bytes",
+        );
+        assert_eq!(
+            m.tile_raw(11, 9, 9).unwrap().map(<[u8]>::to_vec),
+            ba.tile_raw(11, 9, 9).unwrap().map(<[u8]>::to_vec),
+            "and so is the second's",
+        );
+    }
+
+    /// The passthrough must not apply where the tile actually needs merging.
+    #[test]
+    fn a_shared_tile_is_still_merged_rather_than_passed_through() {
+        let mut base = Builder::new();
+        base.min_zoom = 11;
+        base.max_zoom = 11;
+        base.add_tile(11, 5, 5, &one_point_tile("water"));
+        let base_bytes = base.build().unwrap();
+
+        let mut ov = Builder::new();
+        ov.min_zoom = 11;
+        ov.max_zoom = 11;
+        ov.add_tile(11, 5, 5, &one_point_tile("transit_stops"));
+        let ov_bytes = ov.build().unwrap();
+
+        let (ba, oa) = (
+            Archive::parse(&base_bytes).unwrap(),
+            Archive::parse(&ov_bytes).unwrap(),
+        );
+        let m = Archive::parse(&merge_archives(&[&ba, &oa]).unwrap()).unwrap();
+
+        let t = Tile::decode(&m.tile(11, 5, 5).unwrap().unwrap()).unwrap();
+        let mut names = t.layer_names();
+        names.sort_unstable();
+        assert_eq!(names, vec!["transit_stops", "water"], "both layers present");
     }
 }
