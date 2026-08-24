@@ -1,0 +1,51 @@
+[
+  {
+    "id": "first_board",
+    "name": "All Clear",
+    "description": "Clear your first board!"
+  },
+  {
+    "id": "flawless",
+    "name": "Not A Scratch",
+    "description": "Clear a board without losing a single heart."
+  },
+  {
+    "id": "first_block",
+    "name": "Boxed In",
+    "description": "Tap an arrow that has nowhere to go."
+  },
+  {
+    "id": "through_the_looking_glass",
+    "name": "Through The Looking Glass",
+    "description": "Clear a board that has redirectors on it."
+  },
+  {
+    "id": "first_daily",
+    "name": "Daily Habit",
+    "description": "Clear a daily board."
+  },
+  {
+    "id": "boards_10",
+    "name": "Traffic Control",
+    "description": "Clear 10 boards.",
+    "targetProgress": 10
+  },
+  {
+    "id": "boards_50",
+    "name": "Gridlock Breaker",
+    "description": "Clear 50 boards.",
+    "targetProgress": 50
+  },
+  {
+    "id": "daily_streak_7",
+    "name": "Week Streak",
+    "description": "Clear the daily board 7 days in a row.",
+    "targetProgress": 7
+  },
+  {
+    "id": "daily_streak_30",
+    "name": "Month Streak",
+    "description": "Clear the daily board 30 days in a row.",
+    "targetProgress": 30
+  }
+]

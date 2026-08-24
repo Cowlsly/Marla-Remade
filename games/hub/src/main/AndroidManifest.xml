@@ -20,6 +20,7 @@
         <package android:name="com.vayunmathur.games.sudoku" />
         <package android:name="com.vayunmathur.games.minesweeper" />
         <package android:name="com.vayunmathur.games.nonogram" />
+        <package android:name="com.vayunmathur.games.arrows" />
         <package android:name="com.vayunmathur.games" />
         <intent>
             <action android:name="android.intent.action.MAIN" />

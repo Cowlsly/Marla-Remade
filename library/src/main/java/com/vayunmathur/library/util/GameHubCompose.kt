@@ -40,6 +40,7 @@ private fun resolveGameMetadata(
             "sudoku" -> "Sudoku"
             "minesweeper" -> "Minesweeper"
             "nonogram" -> "Nonogram"
+            "arrows" -> "Arrows"
             else -> gameId.replaceFirstChar { it.uppercase() }
         },
         description = null,

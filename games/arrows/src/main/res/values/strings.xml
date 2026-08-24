@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Manifest / TopAppBar: App name. Noun, plural -->
+    <string name="app_name" translatable="false">Arrows</string>
+
+    <!-- GameModeDropdown: Mode playing the numbered level progression. Noun plural -->
+    <string name="mode_casual">Levels</string>
+    <!-- GameModeDropdown: Mode playing today's shared board. Adjective -->
+    <string name="mode_daily">Daily</string>
+
+    <!-- ArrowsGameScreen TopAppBar: Current level in the progression. %1$d = level number, e.g. 6 -->
+    <string name="level_title">Level <xliff:g id="level" example="6">%1$d</xliff:g></string>
+    <!-- ArrowsGameScreen: Button advancing to the next level after clearing the board. Verb phrase -->
+    <string name="next_level">Next Level</string>
+    <!-- ArrowsGameScreen: Puts every arrow back and restores the hearts. Verb -->
+    <string name="restart">Restart</string>
+    <!-- ArrowsGameScreen: Shown after clearing the daily, since there is only one per day. Sentence -->
+    <string name="daily_come_back_tomorrow">Cleared! Come back tomorrow for a new board.</string>
+    <!-- ArrowsGameScreen: Celebratory line shown when every arrow has flown. Declarative -->
+    <string name="board_cleared">Board Cleared!</string>
+    <!-- ArrowsGameScreen: Shown when the last heart is spent. Declarative, sympathetic -->
+    <string name="out_of_hearts">Out of hearts!</string>
+    <!-- ArrowsGameScreen: Retries the level after running out of hearts. Verb phrase -->
+    <string name="try_again">Try Again</string>
+    <!-- DailyStatusBar: Current daily streak length. %1$d = consecutive days, e.g. 5 -->
+    <string name="daily_streak">Streak: <xliff:g id="days" example="5">%1$d</xliff:g></string>
+    <!-- ArrowsGameScreen: Hint under a fresh board explaining the one gesture. Imperative sentence -->
+    <string name="how_to_play">Tap an arrow to send it off the board</string>
+
+    <!-- ArrowsGameScreen: Shown when no clearable board could be generated for this level. Sentence -->
+    <string name="generation_failed">Could not build a board for this level.</string>
+
+    <!-- SettingsScreen: Toggle for flashing the route a blocked arrow tried to take. Noun phrase -->
+    <string name="show_routes">Show blocked routes</string>
+    <!-- SettingsScreen: Explains what the show-routes toggle does. Sentence -->
+    <string name="show_routes_description">Trace the path a blocked arrow tried to take.</string>
+
+    <!-- ArrowsBoard: Content description of the hearts remaining. %1$d = hearts left, 0 to 3, e.g. 2 -->
+    <plurals name="cd_hearts">
+        <item quantity="one"><xliff:g id="count" example="1">%1$d</xliff:g> heart left</item>
+        <item quantity="other"><xliff:g id="count" example="2">%1$d</xliff:g> hearts left</item>
+    </plurals>
+    <!-- ArrowsBoard: Content description of one arrow. %1$s = the direction it points, e.g. right. %2$d = row number starting at 1, e.g. 3. %3$d = column number starting at 1, e.g. 5 -->
+    <string name="cd_arrow">Arrow pointing <xliff:g id="direction" example="right">%1$s</xliff:g> at row <xliff:g id="row" example="3">%2$d</xliff:g>, column <xliff:g id="column" example="5">%3$d</xliff:g></string>
+    <!-- ArrowsBoard: Direction name, spoken in cd_arrow. Adverb -->
+    <string name="cd_up">up</string>
+    <!-- ArrowsBoard: Direction name, spoken in cd_arrow. Adverb -->
+    <string name="cd_down">down</string>
+    <!-- ArrowsBoard: Direction name, spoken in cd_arrow. Adverb -->
+    <string name="cd_left">left</string>
+    <!-- ArrowsBoard: Direction name, spoken in cd_arrow. Adverb -->
+    <string name="cd_right">right</string>
+    <!-- ArrowsBoard: Content description of a redirector tile that turns passing arrows. Noun -->
+    <string name="cd_redirector">Redirector</string>
+</resources>
