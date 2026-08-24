@@ -77,7 +77,7 @@
     <string name="cancel_ride">Tühista sõit</string>
     <string name="cancel_ride_title">Kas tühistad selle sõidu?</string>
     <string name="cancel_ride_message">Tühistamine võib olla tasuline. Näed ka Lyfti vastust.</string>
-    <string name="keep_ride">Jäta sõidutellimuse alles</string>
+    <string name="keep_ride">Jäta sõidutellimus alles</string>
     <string name="driver_min_away">Auto on %1$d minuti kaugusel</string>
     <string name="driver_arriving_now">Auto on just saabumas</string>
     <string name="status_en_route">Auto on teel</string>
@@ -98,4 +98,17 @@
     <string name="sign_out">Logi välja</string>
     <string name="sign_out_title">Kas logid Lyfti teenusest välja?</string>
     <string name="sign_out_message">Järgnevaga tühistatakse sellest seadmest Lyfti sessioon. Sa saad alati uuesti sisse logida.</string>
+    <string name="nav_ride">Sõit</string>
+    <string name="ride_status">Sõidu olek</string>
+    <string name="ride_created">Sõit on loodud %1$s</string>
+    <string name="booking_dry_run_title">Test: koosta sõit</string>
+    <string name="track_ride">Jälgimine</string>
+    <string name="connect_prompt">Nägemaks hindu reaalajas ühenda oma kasutajakonto teenuses %1$s</string>
+    <string name="booking_charge_to">Sõidu tasu on %1$s.</string>
+    <string name="booking_dry_run_notice">See on test - järgnev päring on kuvatud kontrollimise mõttes, pole veel edastatud ja kulusid veel ei teki.</string>
+    <string name="booking_dry_run_done">Test on tehtud - päring on koostatud ja edastamata.</string>
+    <string name="ride_tracking_channel_desc">Järjepidev andmeuuendus sõidu ajal</string>
+    <string name="status_finding_driver">Leian sinu autojuhti</string>
+    <string name="pickup_label">Sisseistumine</string>
+    <string name="pickup_placeholder">Pealevõtmise asukoht</string>
 </resources>
