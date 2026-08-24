@@ -34,6 +34,10 @@
 
     <!-- GameBoardScreen: Hint under the field explaining the two gestures. Imperative sentence -->
     <string name="how_to_play">Tap to open, long press to flag</string>
+    <!-- TapModeToggle: Tap uncovers a cell. Verb, imperative -->
+    <string name="mode_dig">Dig</string>
+    <!-- TapModeToggle: Tap plants a flag on a suspected mine. Noun used as a verb, imperative -->
+    <string name="mode_flag">Flag</string>
     <!-- GameBoardScreen TopAppBar: Subtitle giving the total mine count, after the size name. Quantified noun -->
     <plurals name="mine_count">
         <!-- Singular, only reachable on the very smallest field at the lowest density -->

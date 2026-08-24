@@ -61,6 +61,14 @@ data class GameConfig(
 enum class GameOutcome { PLAYING, WON, LOST }
 
 /**
+ * Which action a plain tap performs.
+ *
+ * Long press always does the opposite, whatever the mode is, so the mode is a convenience for placing a
+ * run of flags rather than the only way to reach either action.
+ */
+enum class TapMode { DIG, FLAG }
+
+/**
  * Everything about a field in progress.
  *
  * Geometry is held as plain [cols] and [rows] rather than a [BoardSize], so the rules work on any

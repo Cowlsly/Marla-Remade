@@ -19,6 +19,14 @@ enum class GameMode { CASUAL, DAILY }
  */
 enum class CellMark { BLANK, FILLED, CROSSED }
 
+/**
+ * Which mark a plain tap places.
+ *
+ * Long press always does the opposite, whatever the mode is, so the mode is a convenience for placing
+ * a run of the same mark rather than the only way to reach either one.
+ */
+enum class MarkMode { FILL, CROSS }
+
 /** Hearts a level starts with. Three wrong guesses and the board has to be retried. */
 const val STARTING_HEARTS = 3
 

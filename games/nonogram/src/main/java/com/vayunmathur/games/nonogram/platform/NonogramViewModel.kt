@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.vayunmathur.games.nonogram.data.DAILY_SIZE
 import com.vayunmathur.games.nonogram.data.GameMode
+import com.vayunmathur.games.nonogram.data.MarkMode
 import com.vayunmathur.games.nonogram.data.NonogramDataStore
 import com.vayunmathur.games.nonogram.data.NonogramGameState
 import com.vayunmathur.games.nonogram.data.NonogramPuzzle
@@ -75,8 +76,9 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
             combine(
                 dataStore.gameMode,
                 dataStore.currentLevel,
+                dataStore.markMode,
                 dailyStore.currentStreak,
-            ) { mode, level, streak -> Session(mode, level, streak) }
+            ) { mode, level, markMode, streak -> Session(mode, level, markMode, streak) }
                 .collectLatest { session -> load(session) }
         }
     }
@@ -85,6 +87,7 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
     private data class Session(
         val mode: GameMode,
         val level: Int,
+        val markMode: MarkMode,
         val streak: Long,
     )
 
@@ -96,6 +99,7 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(
             mode = session.mode,
             level = session.level,
+            markMode = session.markMode,
             dailyStreak = session.streak,
             generating = true,
             generationFailed = false,
@@ -176,17 +180,19 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
     )
 
     /**
-     * Tap: fills a cell that belongs to the picture, or spends a heart on one that does not.
+     * Tap: places whichever mark [MarkMode] selects.
      *
-     * A wrong guess is recorded as a *revealed* blank, not as an ordinary note, so it cannot be cleared
-     * and then tapped again — one wrong cell costs exactly one heart however many times it is prodded.
-     * Correct fills are locked for the same reason.
-     *
-     * The player's own notes stay freely reversible; only a cell the game has settled is locked.
+     * In fill mode a cell that belongs to the picture is filled and one that does not costs a heart. In
+     * cross mode a tap only ever writes the player's own note, so it is always free — which is the
+     * point of the mode: crossing off a long run of cells should not be a gamble.
      */
     override fun tapCell(index: Int) {
         val game = _uiState.value.game ?: return
         if (game.isOver || game.isLocked(index)) return
+        if (_uiState.value.markMode == MarkMode.CROSS) {
+            toggleNote(game, index)
+            return
+        }
 
         val daily = game.mode == GameMode.DAILY
         viewModelScope.launch {
@@ -199,17 +205,37 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * Long press: crosses a cell out as a note, or takes the note back.
+     * Long press: the other mark from whatever the mode is.
      *
-     * Free either way, even on a cell that does turn out to belong to the picture: a cross is the
-     * player's own working, and being wrong in a note is not a guess the game should punish.
+     * So a cross-mode player can still fill without switching back, and a fill-mode player can still
+     * jot a cross. Crossing is free either way, even on a cell that does belong to the picture: a cross
+     * is the player's own working, and being wrong in a note is not a guess the game should punish.
      */
     override fun crossCell(index: Int) {
         val game = _uiState.value.game ?: return
         if (game.isOver || game.isLocked(index)) return
+        if (_uiState.value.markMode == MarkMode.CROSS) {
+            val daily = game.mode == GameMode.DAILY
+            viewModelScope.launch {
+                if (game.belongsToPicture(index)) {
+                    dataStore.fillCell(index, daily)
+                } else {
+                    dataStore.revealBlank(index, daily)
+                }
+            }
+        } else {
+            toggleNote(game, index)
+        }
+    }
+
+    private fun toggleNote(game: NonogramGameState, index: Int) {
         val daily = game.mode == GameMode.DAILY
         val alreadyNoted = index in game.crossed
         viewModelScope.launch { dataStore.setNote(index, !alreadyNoted, daily) }
+    }
+
+    override fun setMarkMode(mode: MarkMode) {
+        viewModelScope.launch { dataStore.setMarkMode(mode) }
     }
 
     override fun nextLevel() {

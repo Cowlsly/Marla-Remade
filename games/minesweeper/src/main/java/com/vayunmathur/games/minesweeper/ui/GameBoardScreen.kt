@@ -19,6 +19,7 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.minesweeper.R
 import com.vayunmathur.games.minesweeper.data.GameOutcome
+import com.vayunmathur.games.minesweeper.data.TapMode
 import com.vayunmathur.games.minesweeper.platform.MinesweeperActions
 import com.vayunmathur.games.minesweeper.platform.MinesweeperUiState
 import com.vayunmathur.games.minesweeper.ui.components.MineFieldGrid
@@ -26,8 +27,12 @@ import com.vayunmathur.library.ui.AppBarAlignment
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconFlag
 import com.vayunmathur.library.ui.MaterialTheme
+import com.vayunmathur.library.ui.SegmentedButton
+import com.vayunmathur.library.ui.SegmentedButtonDefaults
+import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Surface
 import com.vayunmathur.library.ui.Text
@@ -86,6 +91,7 @@ fun GameBoardScreen(
                     .fillMaxWidth()
                     .verticalScroll(rememberScrollState())
                     .padding(horizontal = Spacing.md, vertical = Spacing.sm),
+                horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(Spacing.md),
             ) {
                 Row(
@@ -112,9 +118,10 @@ fun GameBoardScreen(
                         stringResource(R.string.how_to_play),
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.fillMaxWidth(),
                     )
                 }
+
+                TapModeToggle(state.tapMode, actions::setTapMode)
 
                 Row(
                     Modifier.fillMaxWidth(),
@@ -142,6 +149,28 @@ fun GameBoardScreen(
                     onBack = onExit,
                 )
             }
+        }
+    }
+}
+
+/**
+ * Chooses what a plain tap does.
+ *
+ * Two segments rather than a switch, because digging and flagging are peers: neither is the off state of
+ * the other. Flag mode matters most on a dense field, where placing a run of flags by long press is
+ * slow and one slip on a mine ends the game outright.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun TapModeToggle(mode: TapMode, onSelect: (TapMode) -> Unit) {
+    SingleChoiceSegmentedButtonRow {
+        val options = listOf(TapMode.DIG to R.string.mode_dig, TapMode.FLAG to R.string.mode_flag)
+        options.forEachIndexed { index, (value, label) ->
+            SegmentedButton(
+                shape = SegmentedButtonDefaults.itemShape(index, options.size),
+                onClick = { onSelect(value) },
+                selected = mode == value,
+            ) { Text(stringResource(label)) }
         }
     }
 }

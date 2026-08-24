@@ -1,6 +1,7 @@
 package com.vayunmathur.games.nonogram.platform
 
 import com.vayunmathur.games.nonogram.data.GameMode
+import com.vayunmathur.games.nonogram.data.MarkMode
 import com.vayunmathur.games.nonogram.data.NonogramGameState
 
 /**
@@ -14,12 +15,13 @@ import com.vayunmathur.games.nonogram.data.NonogramGameState
  * Every member has a no-op default, so `Noop` is the whole implementation a preview needs.
  */
 interface NonogramGameActions {
-    /** Tap: fills a cell of the picture, or spends a heart on one that is not. */
+    /** Tap: places whichever mark the current [MarkMode] selects. */
     fun tapCell(index: Int) {}
 
-    /** Long press: crosses a cell out as a note, or takes the cross back. Never costs a heart. */
+    /** Long press: places the other mark, whatever the mode is. */
     fun crossCell(index: Int) {}
 
+    fun setMarkMode(mode: MarkMode) {}
     fun nextLevel() {}
     fun restartLevel() {}
     fun setGameMode(mode: GameMode) {}
@@ -31,6 +33,7 @@ interface NonogramGameActions {
 data class NonogramUiState(
     val game: NonogramGameState? = null,
     val mode: GameMode = GameMode.CASUAL,
+    val markMode: MarkMode = MarkMode.FILL,
     val level: Int = 1,
     val dailyStreak: Long = 0,
     /** True once today's daily has been completed, which swaps the next-level button for a note. */

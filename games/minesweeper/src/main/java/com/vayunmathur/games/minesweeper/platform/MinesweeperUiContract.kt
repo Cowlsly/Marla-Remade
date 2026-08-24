@@ -2,6 +2,7 @@ package com.vayunmathur.games.minesweeper.platform
 
 import com.vayunmathur.games.minesweeper.data.GameConfig
 import com.vayunmathur.games.minesweeper.data.MinesweeperGameState
+import com.vayunmathur.games.minesweeper.data.TapMode
 
 /**
  * The UI contract between [MinesweeperViewModel] and the board.
@@ -14,12 +15,13 @@ import com.vayunmathur.games.minesweeper.data.MinesweeperGameState
  * Every member has a no-op default, so [Noop] is the whole implementation a preview needs.
  */
 interface MinesweeperActions {
-    /** Tap: opens a covered cell, or chords an already-open number. */
+    /** Tap: digs or flags depending on the current [TapMode]; chords an already-open number. */
     fun tapCell(index: Int) {}
 
-    /** Long press: cycles the flag. */
+    /** Long press: the other action from whatever the mode is. */
     fun flagCell(index: Int) {}
 
+    fun setTapMode(mode: TapMode) {}
     fun restart() {}
     fun giveUp() {}
 
@@ -29,10 +31,11 @@ interface MinesweeperActions {
 /**
  * What the board needs to draw itself.
  *
- * [config] lives here rather than on the game state because the chosen size and density belong to
- * the session, not the field — the rules work on any rectangle.
+ * [config] lives here rather than on the game state because the chosen size and density belong to the
+ * session, not the field — the rules work on any rectangle.
  */
 data class MinesweeperUiState(
     val config: GameConfig = GameConfig(),
     val game: MinesweeperGameState? = null,
+    val tapMode: TapMode = TapMode.DIG,
 )

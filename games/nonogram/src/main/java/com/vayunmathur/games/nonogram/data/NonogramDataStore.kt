@@ -34,6 +34,12 @@ class NonogramDataStore(private val context: Context) {
             ?: GameMode.CASUAL
     }
 
+    /** Which mark a tap places. Kept so the choice survives leaving and returning to the board. */
+    val markMode: Flow<MarkMode> = context.dataStore.data.map { prefs ->
+        prefs[MARK_MODE_KEY]?.let { runCatching { MarkMode.valueOf(it) }.getOrNull() }
+            ?: MarkMode.FILL
+    }
+
     /** Lifetime count of completed puzzles, which survives [saveLevel] clearing the board. */
     val puzzlesCompleted: Flow<Int> = context.dataStore.data.map { it[COMPLETED_KEY] ?: 0 }
 
@@ -51,6 +57,10 @@ class NonogramDataStore(private val context: Context) {
 
     suspend fun setGameMode(mode: GameMode) {
         context.dataStore.edit { it[GAME_MODE_KEY] = mode.name }
+    }
+
+    suspend fun setMarkMode(mode: MarkMode) {
+        context.dataStore.edit { it[MARK_MODE_KEY] = mode.name }
     }
 
     /**
@@ -155,6 +165,7 @@ class NonogramDataStore(private val context: Context) {
         val REVEALED_KEY = stringSetPreferencesKey("revealed_blanks")
         val HEARTS_KEY = intPreferencesKey("hearts")
         val GAME_MODE_KEY = stringPreferencesKey("game_mode")
+        val MARK_MODE_KEY = stringPreferencesKey("mark_mode")
         val COMPLETED_KEY = intPreferencesKey("puzzles_completed")
 
         val DAILY_DAY_KEY = longPreferencesKey("daily_day")

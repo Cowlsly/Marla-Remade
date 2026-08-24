@@ -8,6 +8,7 @@ import com.vayunmathur.games.minesweeper.data.GameConfig
 import com.vayunmathur.games.minesweeper.data.GameOutcome
 import com.vayunmathur.games.minesweeper.data.MinesweeperGameState
 import com.vayunmathur.games.minesweeper.data.MinesweeperStatsRepository
+import com.vayunmathur.games.minesweeper.data.TapMode
 import com.vayunmathur.games.minesweeper.domain.FieldGenerator
 import com.vayunmathur.games.minesweeper.domain.MinesweeperRules
 import com.vayunmathur.library.util.AchievementsManager
@@ -57,49 +58,80 @@ class MinesweeperViewModel(application: Application) :
 
     fun getSizeStats(size: BoardSize) = statsRepository.getSizeStats(size)
 
-    /** Deals a blank field for [config]. Mines are not laid until the first tap. */
+    /** Deals a blank field for [config]. Mines are not laid until the first dig. */
     fun newGame(config: GameConfig) {
         placedAnyFlag = false
         _uiState.value = MinesweeperUiState(
             config = config,
             game = MinesweeperGameState.empty(config),
+            // Carried over: a player who prefers flag mode should not have to re-pick it every field.
+            tapMode = _uiState.value.tapMode,
         )
     }
 
     /**
-     * Opens a covered cell, or chords an open number.
+     * Tap: digs, flags, or chords, depending on the mode and what is under the finger.
      *
-     * The first tap also lays the mines, keeping itself and its neighbours clear, so the opening move
-     * can never lose. That is also where the game counts as played — backing out of a field you never
-     * touched should not show up in the stats.
+     * In flag mode a tap can never uncover anything, which is the whole point — clearing a run of
+     * suspected mines should not risk ending the game on a mis-tap. Chording still works in flag mode,
+     * because tapping an already-open number is unambiguous whichever mode is active.
      */
     override fun tapCell(index: Int) {
         val state = _uiState.value
         val game = state.game ?: return
         if (game.isOver) return
 
+        if (game.started && game.revealed[index]) {
+            chord(game, index)
+            return
+        }
+        if (state.tapMode == TapMode.FLAG) {
+            toggleFlag(game, index)
+            return
+        }
+        dig(state, game, index)
+    }
+
+    /** Long press: the other action from whatever the mode is. */
+    override fun flagCell(index: Int) {
+        val state = _uiState.value
+        val game = state.game ?: return
+        if (game.isOver) return
+        if (state.tapMode == TapMode.FLAG) dig(state, game, index) else toggleFlag(game, index)
+    }
+
+    override fun setTapMode(mode: TapMode) {
+        _uiState.update { it.copy(tapMode = mode) }
+    }
+
+    /**
+     * Uncovers [index], laying the mines first if this is the opening move.
+     *
+     * The first dig is also where the game counts as played — backing out of a field you never touched
+     * should not show up in the stats.
+     */
+    private fun dig(
+        state: MinesweeperUiState,
+        game: MinesweeperGameState,
+        index: Int,
+    ) {
         val laid = if (game.started) game else {
             statsRepository.recordGamePlayed(state.config.size, state.config.difficulty)
             FieldGenerator.lay(game, index, Random.Default)
         }
-
-        val next =
-            if (laid.revealed[index]) {
-                MinesweeperRules.chord(laid, index).also { chorded ->
-                    // Only counts when the chord was legal and actually opened something.
-                    if (chorded !== laid) achievementsManager.onAchievementUnlocked("first_chord")
-                }
-            } else {
-                MinesweeperRules.reveal(laid, index)
-            }
-
-        publish(next)
+        publish(MinesweeperRules.reveal(laid, index))
     }
 
-    override fun flagCell(index: Int) {
-        val game = _uiState.value.game ?: return
-        // Flagging before the first reveal would have nothing to flag: the mines are not laid yet.
-        if (!game.started || game.isOver) return
+    private fun chord(game: MinesweeperGameState, index: Int) {
+        val chorded = MinesweeperRules.chord(game, index)
+        // Only counts when the chord was legal and actually opened something.
+        if (chorded !== game) achievementsManager.onAchievementUnlocked("first_chord")
+        publish(chorded)
+    }
+
+    private fun toggleFlag(game: MinesweeperGameState, index: Int) {
+        // Flagging before the first dig would have nothing to flag: the mines are not laid yet.
+        if (!game.started) return
         val next = MinesweeperRules.toggleFlag(game, index)
         if (next.flagsPlaced > game.flagsPlaced) placedAnyFlag = true
         publish(next)
@@ -117,7 +149,7 @@ class MinesweeperViewModel(application: Application) :
         if (game.started && !game.isOver) {
             statsRepository.recordGameLost(state.config.size, state.config.difficulty)
         }
-        _uiState.value = MinesweeperUiState(config = state.config)
+        _uiState.value = MinesweeperUiState(config = state.config, tapMode = state.tapMode)
     }
 
     fun incrementTimer() {

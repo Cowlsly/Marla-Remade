@@ -24,6 +24,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.games.nonogram.R
 import com.vayunmathur.games.nonogram.data.GameMode
+import com.vayunmathur.games.nonogram.data.MarkMode
 import com.vayunmathur.games.nonogram.data.STARTING_HEARTS
 import com.vayunmathur.games.nonogram.platform.NonogramGameActions
 import com.vayunmathur.games.nonogram.platform.NonogramUiState
@@ -34,6 +35,7 @@ import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.CircularProgressIndicator
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
+import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.IconArrowDropDown
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.IconEmojiEvents
@@ -41,6 +43,9 @@ import com.vayunmathur.library.ui.IconFavorite
 import com.vayunmathur.library.ui.IconSettings
 import com.vayunmathur.library.ui.MaterialTheme
 import com.vayunmathur.library.ui.OutlinedButton
+import com.vayunmathur.library.ui.SegmentedButton
+import com.vayunmathur.library.ui.SegmentedButtonDefaults
+import com.vayunmathur.library.ui.SingleChoiceSegmentedButtonRow
 import com.vayunmathur.library.ui.Spacing
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.TextButton
@@ -48,6 +53,31 @@ import com.vayunmathur.library.ui.appBarScrollBehavior
 
 /** Caps the board on tablets, where a full-width grid would give absurdly large cells. */
 private val BoardMaxWidth = 460.dp
+
+/**
+ * Chooses what a plain tap does.
+ *
+ * Two segments rather than a single switch, because filling and crossing are peers: neither is the off
+ * state of the other. The active one is filled in so the current mode is obvious at a glance, since
+ * getting it wrong in fill mode costs a heart.
+ */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MarkModeToggle(mode: MarkMode, onSelect: (MarkMode) -> Unit) {
+    SingleChoiceSegmentedButtonRow {
+        val options = listOf(
+            MarkMode.FILL to R.string.mode_fill,
+            MarkMode.CROSS to R.string.mode_cross,
+        )
+        options.forEachIndexed { index, (value, label) ->
+            SegmentedButton(
+                shape = SegmentedButtonDefaults.itemShape(index, options.size),
+                onClick = { onSelect(value) },
+                selected = mode == value,
+            ) { Text(stringResource(label)) }
+        }
+    }
+}
 
 /**
  * The hearts left.
@@ -184,6 +214,7 @@ fun NonogramGameScreen(
                         }
 
                         else -> {
+                            MarkModeToggle(state.markMode, actions::setMarkMode)
                             if (game.filled.isEmpty() && game.crossed.isEmpty() &&
                                 game.revealedBlanks.isEmpty()
                             ) {
