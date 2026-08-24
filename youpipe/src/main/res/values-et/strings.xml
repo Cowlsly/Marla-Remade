@@ -136,4 +136,10 @@
     <string name="label_player">Pleier</string>
     <string name="label_keep_controls_visible">Hoia pleieri juhtnupud nähtaval</string>
     <string name="label_keep_controls_visible_description">Selle asemel, et 2 sekundi möödumisel peita, jäävad juhtnupud nähtavaks. Sobib kasutuseks näiteks hõlbustuse mõttes.</string>
+    <string name="cast_to_tv">Edasta telerisse</string>
+    <string name="cast_playing_on">Esitamisel teleris %1$s</string>
+    <string name="cast_stop">Lõpeta edastus</string>
+    <string name="cast_install_prompt">Ma Meediumilevi (MA Cast) rakendus pole paigaldatud. Ava tema vaade rakenduste poes ja paigalda ta.</string>
+    <string name="cast_update_prompt">Ma Meediumilevi (MA Cast) rakendus on sisu edastamiseks sinu telerisse liiga vana. Ava tema vaade rakenduste poes ja uuenda ta.</string>
+    <string name="cast_failed">Edastamist sinu telerisse ei õnnestunud käivitada</string>
 </resources>
