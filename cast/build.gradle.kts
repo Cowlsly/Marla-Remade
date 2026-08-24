@@ -11,6 +11,11 @@ android {
     defaultConfig {
         applicationId = "com.vayunmathur.cast"
     }
+    // MediaProxyServer is sockets and lifecycle, and every branch of it logs. Its teardown is worth
+    // proving on the JVM, so android.util.Log has to answer rather than throw.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

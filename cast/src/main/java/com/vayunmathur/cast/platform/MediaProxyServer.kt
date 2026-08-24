@@ -13,12 +13,15 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.net.InetAddress
 import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.net.Socket
 import java.security.SecureRandom
 import java.util.Base64
+import java.util.Collections
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
-import javax.net.ssl.SSLServerSocket
 import javax.net.ssl.SSLSocket
+import javax.net.ssl.SSLSocketFactory
 
 private const val TAG = "MediaProxyServer"
 
@@ -54,6 +57,10 @@ private const val MAX_CONNECTIONS = 16
  * Everything that decides *what* to answer lives in `:cast:protocol`
  * ([MediaProxyExchange], [EphemeralTls]), where it can be tested without a TV. What is left here
  * is sockets, threads and lifecycle.
+ *
+ * **Single-use: an instance that has been [stop]ped cannot be started again**, because [stop]
+ * cancels [scope] and a later [start] would bind a port and then accept nothing. Every session
+ * builds a fresh one, so this is a property worth stating rather than a bug worth guarding.
  */
 class MediaProxyServer(
     private val token: String,
@@ -64,7 +71,40 @@ class MediaProxyServer(
     private val exchange = MediaProxyExchange(token, resolver)
     private val connections = AtomicInteger(0)
 
-    private var server: SSLServerSocket? = null
+    /**
+     * A plain listening socket, with TLS layered on each connection after it is accepted.
+     *
+     * **Not an `SSLServerSocket`, and that is what makes [stop] work.** Closing an `SSLSocket` is not
+     * a close, it is a *write*: the JDK sends a `close_notify` first, which takes the socket's write
+     * lock - the very lock held by the thread parked in the body transfer this needs to interrupt. So
+     * `stop()` deadlocked against the connection it was trying to end. Owning the underlying TCP
+     * socket means the teardown can close *that*, which needs no lock and unblocks the writer at once.
+     */
+    private var server: ServerSocket? = null
+
+    private var tls: SSLSocketFactory? = null
+
+    /**
+     * The connections currently being served, as their underlying TCP sockets, so [stop] can end them.
+     *
+     * **Closing the socket is the only thing that can end a serving thread**, and an unknown-length
+     * body makes that thread's whole life one `write` call: once the TV's buffer is full it parks in
+     * TCP backpressure for as long as the track lasts. Coroutine cancellation cannot interrupt a
+     * thread blocked in socket I/O, and `soTimeout` is a *read* timeout that never applies to it -
+     * so before this existed a session left a thread and a descriptor behind, [connections] never
+     * came back down, and enough reconnects turned [MAX_CONNECTIONS] into a ratchet that refused to
+     * serve at all.
+     */
+    private val live: MutableSet<Socket> = Collections.newSetFromMap(ConcurrentHashMap())
+
+    /**
+     * How many connections are currently being served.
+     *
+     * Exposed for the test that proves [stop] unwinds them. The ratchet this fixes is invisible from
+     * outside - a leaked thread and descriptor look like nothing at all until the seventeenth
+     * session is refused - so the count is what the test can actually assert on.
+     */
+    internal val openConnections: Int get() = connections.get()
 
     /** What the TV has to be told to be able to fetch anything. */
     data class Endpoint(val port: Int, val certificateFingerprint: ByteArray) {
@@ -85,9 +125,8 @@ class MediaProxyServer(
         if (server != null) return null
         return try {
             val credentials = EphemeralTls.server(addresses)
-            val socket = credentials.sslContext.serverSocketFactory
-                .createServerSocket(0, MAX_CONNECTIONS, InetAddress.getByName("0.0.0.0")) as SSLServerSocket
-            restrictProtocols(socket.supportedProtocols) { socket.enabledProtocols = it }
+            tls = credentials.sslContext.socketFactory
+            val socket = ServerSocket(0, MAX_CONNECTIONS, InetAddress.getByName("0.0.0.0"))
             server = socket
             Log.i(TAG, "media proxy listening on ${socket.localPort} for ${addresses.joinToString { it.hostAddress ?: "?" }}")
             accept(socket)
@@ -104,37 +143,66 @@ class MediaProxyServer(
         // leave it parked in a blocking accept until a connection happened to arrive.
         runCatching { server?.close() }
         server = null
+        tls = null
+        // And closing each connection's TCP socket is what unblocks the thread serving it - see
+        // [live] and [server] for why it is the TCP socket and not the TLS one. Before the scope is
+        // cancelled, because a cancelled scope cannot reach them at all.
+        for (client in live) runCatching { client.close() }
+        live.clear()
         scope.cancel()
     }
 
-    private fun accept(socket: SSLServerSocket) {
+    private fun accept(socket: ServerSocket) {
         scope.launch {
             while (isActive) {
                 val client = try {
-                    socket.accept() as SSLSocket
+                    socket.accept()
                 } catch (e: Exception) {
                     if (isActive) Log.w(TAG, "accept failed", e)
                     break
                 }
-                if (connections.get() >= MAX_CONNECTIONS) {
-                    Log.w(TAG, "refusing a connection: already serving ${connections.get()}")
+                // Claimed before the comparison, so admission is atomic: two accepts that each
+                // read the count before either raised it would both have been let in.
+                if (connections.incrementAndGet() > MAX_CONNECTIONS) {
+                    Log.w(TAG, "refusing a connection: already serving $MAX_CONNECTIONS")
+                    connections.decrementAndGet()
                     runCatching { client.close() }
                     continue
                 }
-                connections.incrementAndGet()
+                // Registered here rather than inside `serve`, so a socket accepted moments before a
+                // [stop] is still closed by it even if its coroutine never runs.
+                live += client
                 scope.launch { serve(client) }
             }
         }
     }
 
-    private fun serve(client: SSLSocket) {
+    /**
+     * One connection: the TLS handshake, then requests until the client is done or the socket dies.
+     *
+     * The handshake happens here rather than in the accept loop because it is a round trip on the
+     * network, and a loop that waited for one would refuse to accept the next connection while it did.
+     */
+    private fun serve(client: Socket) {
+        var secure: SSLSocket? = null
         try {
             client.soTimeout = IDLE_TIMEOUT_MS
             // Nagle would hold back the tail of a response waiting for more to send, which on a
             // small range request is pure added latency.
             client.tcpNoDelay = true
-            val input = client.inputStream.buffered()
-            val output = client.outputStream.buffered()
+            val factory = tls ?: return
+            // autoClose, so closing either one closes the other and no descriptor outlives this.
+            val layered = factory.createSocket(
+                client,
+                client.inetAddress?.hostAddress,
+                client.port,
+                true,
+            ) as SSLSocket
+            layered.useClientMode = false
+            restrictProtocols(layered.supportedProtocols) { layered.enabledProtocols = it }
+            secure = layered
+            val input = layered.inputStream.buffered()
+            val output = layered.outputStream.buffered()
             while (true) {
                 val result = exchange.serve(input, output)
                 report(result.outcome, client)
@@ -145,12 +213,18 @@ class MediaProxyServer(
             // of a connection as often as it is a fault.
             Log.d(TAG, "connection from ${client.inetAddress?.hostAddress} ended: ${e.javaClass.simpleName}")
         } finally {
+            live -= client
+            // The TLS close first, which writes a `close_notify`: an unknown-length body is delimited
+            // by the connection closing, so without it the TV sees a truncation rather than a clean
+            // end of track. Safe from here and only from here - this is the thread that was writing,
+            // so the write lock it needs is this thread's own.
+            runCatching { secure?.close() }
             runCatching { client.close() }
             connections.decrementAndGet()
         }
     }
 
-    private fun report(outcome: ExchangeOutcome, client: SSLSocket) {
+    private fun report(outcome: ExchangeOutcome, client: Socket) {
         val peer = client.inetAddress?.hostAddress
         when (outcome) {
             is ExchangeOutcome.Served ->
