@@ -1,0 +1,260 @@
+package com.vayunmathur.games.sudoku.platform
+
+import android.app.Application
+import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.viewModelScope
+import com.vayunmathur.games.sudoku.data.BoardSize
+import com.vayunmathur.games.sudoku.data.Difficulty
+import com.vayunmathur.games.sudoku.data.GameConfig
+import com.vayunmathur.games.sudoku.data.SudokuGameState
+import com.vayunmathur.games.sudoku.data.SudokuSnapshot
+import com.vayunmathur.games.sudoku.data.SudokuStatsRepository
+import com.vayunmathur.games.sudoku.domain.SudokuGenerator
+import com.vayunmathur.library.util.AchievementsManager
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlin.random.Random
+
+/**
+ * Owns the puzzle in progress.
+ *
+ * The board is held in memory only. The Activity declares every `configChanges` it can, so this
+ * survives rotation and theme changes without a saved-state handle; a puzzle is lost on process
+ * death, which matches the other games in this family and is why the home screen offers "Continue"
+ * rather than a saved-game list.
+ */
+class SudokuViewModel(application: Application) : AndroidViewModel(application), SudokuActions {
+
+    private val _uiState = MutableStateFlow(SudokuUiState())
+    val uiState: StateFlow<SudokuUiState> = _uiState.asStateFlow()
+
+    private val statsRepository = SudokuStatsRepository(application)
+
+    /** Undo snapshots, oldest first. Cleared whenever a new puzzle is dealt. */
+    private val history = ArrayDeque<SudokuSnapshot>()
+
+    /** Set when the player ever types a digit that disagrees with the solution. */
+    private var madeMistake = false
+
+    val achievementsManager: AchievementsManager = run {
+        val json = application.assets.open("achievements.json").bufferedReader().readText()
+        SudokuAchievementsManager(application, json, statsRepository)
+    }
+
+    init {
+        achievementsManager.checkExistingAchievements()
+    }
+
+    fun hasActiveGame(): Boolean = _uiState.value.game?.isWon == false
+
+    fun getStats(config: GameConfig) = statsRepository.getStats(config.size, config.difficulty)
+
+    fun getSizeStats(size: BoardSize) = statsRepository.getSizeStats(size)
+
+    /**
+     * Deals a new puzzle for [config], replacing anything in progress.
+     *
+     * Generation is dispatched to [Dispatchers.Default] and the board is blanked first, so the
+     * screen shows a spinner instead of freezing while a 9x9 Expert is dug.
+     */
+    fun newGame(config: GameConfig) {
+        history.clear()
+        madeMistake = false
+        _uiState.value = SudokuUiState(generating = true)
+        viewModelScope.launch {
+            val puzzle = withContext(Dispatchers.Default) {
+                SudokuGenerator.generate(config.size, config.difficulty, Random.Default)
+            }
+            statsRepository.recordGamePlayed(config.size, config.difficulty)
+            _uiState.value = SudokuUiState(game = SudokuGameState.from(puzzle))
+        }
+    }
+
+    override fun selectCell(index: Int) {
+        mutate { it.copy(selected = if (it.selected == index) -1 else index) }
+    }
+
+    override fun toggleNotesMode() {
+        mutate { it.copy(notesMode = !it.notesMode) }
+    }
+
+    /**
+     * Writes [digit] into the selected cell, as a pencil mark when notes mode is on.
+     *
+     * Re-entering the digit already showing clears the cell instead, so the number pad doubles as a
+     * toggle and the player rarely needs the separate erase button.
+     */
+    override fun enterDigit(digit: Int) {
+        val game = _uiState.value.game ?: return
+        val index = game.selected
+        if (index !in 0 until game.size.cellCount || game.isGiven(index) || game.isWon) return
+
+        pushHistory(game)
+        if (game.notesMode) {
+            val bit = 1 shl (digit - 1)
+            mutate { state ->
+                state.copy(
+                    notes = state.notes.replacing(index, state.notes[index] xor bit),
+                    entries = state.entries.replacing(index, 0),
+                    moveCount = state.moveCount + 1,
+                )
+            }
+            return
+        }
+
+        val next = if (game.entries[index] == digit) 0 else digit
+        if (next != 0 && next != game.solution[index]) madeMistake = true
+        mutate { state ->
+            state.copy(
+                entries = state.entries.replacing(index, next),
+                // A confirmed digit makes its own pencil marks meaningless.
+                notes = state.notes.replacing(index, 0),
+                moveCount = state.moveCount + 1,
+            )
+        }
+        checkWin()
+    }
+
+    override fun clearCell() {
+        val game = _uiState.value.game ?: return
+        val index = game.selected
+        if (index !in 0 until game.size.cellCount || game.isGiven(index) || game.isWon) return
+        pushHistory(game)
+        mutate { state ->
+            state.copy(
+                entries = state.entries.replacing(index, 0),
+                notes = state.notes.replacing(index, 0),
+                moveCount = state.moveCount + 1,
+            )
+        }
+    }
+
+    /**
+     * Fills one cell with its correct digit.
+     *
+     * Prefers the selected cell so a stuck player gets help where they are looking; otherwise it
+     * takes the first blank or wrong cell, so a hint is never wasted on a cell that is already right.
+     */
+    override fun hint() {
+        val game = _uiState.value.game ?: return
+        if (game.isWon) return
+        val index = game.selected.takeIf { it >= 0 && !game.isGiven(it) && game.valueAt(it) != game.solution[it] }
+            ?: (0 until game.size.cellCount).firstOrNull { !game.isGiven(it) && game.valueAt(it) != game.solution[it] }
+            ?: return
+
+        pushHistory(game)
+        mutate { state ->
+            state.copy(
+                entries = state.entries.replacing(index, state.solution[index]),
+                notes = state.notes.replacing(index, 0),
+                selected = index,
+                hintsUsed = state.hintsUsed + 1,
+                moveCount = state.moveCount + 1,
+            )
+        }
+        checkWin()
+    }
+
+    override fun undo() {
+        val snapshot = history.removeLastOrNull() ?: return
+        mutate { it.copy(entries = snapshot.entries, notes = snapshot.notes, usedUndo = true) }
+        _uiState.update { it.copy(canUndo = history.isNotEmpty()) }
+    }
+
+    /** Clears the player's work but keeps the same puzzle. */
+    override fun restart() {
+        val game = _uiState.value.game ?: return
+        history.clear()
+        madeMistake = false
+        _uiState.value = SudokuUiState(
+            game = game.copy(
+                entries = List(game.size.cellCount) { 0 },
+                notes = List(game.size.cellCount) { 0 },
+                selected = -1,
+                moveCount = 0,
+                elapsedSeconds = 0,
+                hintsUsed = 0,
+                isWon = false,
+                usedUndo = false,
+            )
+        )
+    }
+
+    /** Abandons an unfinished puzzle, which breaks the win streak for that variant. */
+    override fun giveUp() {
+        val game = _uiState.value.game ?: return
+        if (!game.isWon) statsRepository.recordGameLost(game.size, game.difficulty)
+        history.clear()
+        _uiState.value = SudokuUiState()
+    }
+
+    fun incrementTimer() {
+        val game = _uiState.value.game ?: return
+        if (game.isWon) return
+        mutate { it.copy(elapsedSeconds = it.elapsedSeconds + 1) }
+    }
+
+    fun dismissAchievementNotification() = achievementsManager.dismissNotification()
+
+    /**
+     * The one place a win is recorded, so stats and achievements can never disagree about what
+     * happened. Every path that can complete the grid ends up here.
+     */
+    private fun checkWin() {
+        val game = _uiState.value.game ?: return
+        if (game.isWon || !game.isComplete) return
+        mutate { it.copy(isWon = true, selected = -1) }
+
+        statsRepository.recordGameWon(game.size, game.difficulty, game.elapsedSeconds)
+        val manager = achievementsManager
+        manager.onAchievementUnlocked("first_win")
+        if (game.size == BoardSize.NINE) {
+            manager.onAchievementUnlocked("win_nine")
+            if (game.hintsUsed == 0) manager.onAchievementUnlocked("no_hints")
+            if (game.elapsedSeconds < SudokuAchievementsManager.SPEED_SECONDS) {
+                manager.onAchievementUnlocked("speed_nine")
+            }
+        }
+        if (game.difficulty == Difficulty.EXPERT) {
+            manager.onAchievementUnlocked("win_expert")
+        }
+        if (!madeMistake) manager.onAchievementUnlocked("no_mistakes")
+        if (BoardSize.entries.all { statsRepository.getSizeStats(it).gamesWon > 0 }) {
+            manager.onAchievementUnlocked("every_size")
+        }
+        val totalWins = statsRepository.getTotalGamesWon()
+        manager.onProgressUpdated("wins_10", totalWins)
+        manager.onProgressUpdated("wins_50", totalWins)
+        manager.onProgressUpdated("win_streak_5", statsRepository.getBestWinStreak())
+    }
+
+    private fun pushHistory(game: SudokuGameState) {
+        history.addLast(SudokuSnapshot(game.entries, game.notes))
+        if (history.size > MAX_HISTORY) history.removeFirst()
+        _uiState.update { it.copy(canUndo = true) }
+    }
+
+    private inline fun mutate(transform: (SudokuGameState) -> SudokuGameState) {
+        _uiState.update { state ->
+            val game = state.game ?: return@update state
+            state.copy(game = transform(game))
+        }
+    }
+
+    private companion object {
+        /**
+         * Undo depth. A snapshot is two lists of at most 81 ints, so this is a few hundred KB at
+         * worst — bounded mainly so a long session cannot grow without limit.
+         */
+        const val MAX_HISTORY = 200
+    }
+}
+
+/** [this] with [index] replaced by [value]. */
+private fun List<Int>.replacing(index: Int, value: Int): List<Int> =
+    toMutableList().also { it[index] = value }

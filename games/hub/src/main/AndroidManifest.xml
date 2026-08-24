@@ -17,6 +17,7 @@
         <package android:name="com.vayunmathur.games.wordmaker" />
         <package android:name="com.vayunmathur.games.logicgate" />
         <package android:name="com.vayunmathur.games.voxels" />
+        <package android:name="com.vayunmathur.games.sudoku" />
         <package android:name="com.vayunmathur.games" />
         <intent>
             <action android:name="android.intent.action.MAIN" />

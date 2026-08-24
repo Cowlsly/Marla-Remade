@@ -1,0 +1,55 @@
+[
+  {
+    "id": "first_win",
+    "name": "Solved",
+    "description": "Complete your first puzzle!"
+  },
+  {
+    "id": "win_nine",
+    "name": "Full House",
+    "description": "Complete a 9x9 puzzle."
+  },
+  {
+    "id": "win_expert",
+    "name": "Expert Hand",
+    "description": "Complete an Expert puzzle."
+  },
+  {
+    "id": "no_hints",
+    "name": "Unaided",
+    "description": "Complete a 9x9 puzzle without using a hint."
+  },
+  {
+    "id": "no_mistakes",
+    "name": "Flawless",
+    "description": "Complete a puzzle without ever entering a wrong digit."
+  },
+  {
+    "id": "speed_nine",
+    "name": "Quick Thinker",
+    "description": "Complete a 9x9 puzzle in under five minutes."
+  },
+  {
+    "id": "every_size",
+    "name": "Shape Shifter",
+    "description": "Complete a puzzle on every board size."
+  },
+  {
+    "id": "wins_10",
+    "name": "Regular",
+    "description": "Complete 10 puzzles.",
+    "targetProgress": 10
+  },
+  {
+    "id": "wins_50",
+    "name": "Devoted",
+    "description": "Complete 50 puzzles.",
+    "targetProgress": 50
+  },
+  {
+    "id": "win_streak_5",
+    "name": "On A Roll",
+    "description": "Win five puzzles in a row.",
+    "targetProgress": 5
+  }
+]

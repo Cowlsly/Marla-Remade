@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
+    <!-- Manifest / HomeScreen TopAppBar: App name. Noun, proper -->
+    <string name="app_name" translatable="false">Sudoku</string>
+
+    <!-- HomeScreen: Primary CTA opening the size and difficulty picker. Verb phrase -->
+    <string name="new_game">New Game</string>
+    <!-- HomeScreen: Button shown when an unfinished puzzle is still in memory. Verb -->
+    <string name="continue_game">Continue</string>
+    <!-- GameConfigDialog: Title of the size and difficulty picker dialog. Verb phrase -->
+    <string name="new_puzzle">New Puzzle</string>
+    <!-- GameConfigDialog: Label above the board size segmented buttons. Noun -->
+    <string name="board_size">Board size</string>
+    <!-- GameConfigDialog: Label above the difficulty segmented buttons. Noun -->
+    <string name="difficulty">Difficulty</string>
+    <!-- GameConfigDialog / WinOverlay: Dismiss button. Verb -->
+    <string name="back">Back</string>
+
+    <!-- GameConfigDialog: Board size option, a 4 by 4 grid of 2x2 boxes. Noun, dimensions -->
+    <string name="size_four" translatable="false">4x4</string>
+    <!-- GameConfigDialog: Board size option, a 6 by 6 grid of 2x3 boxes. Noun, dimensions -->
+    <string name="size_six" translatable="false">6x6</string>
+    <!-- GameConfigDialog: Board size option, a 9 by 9 grid of 3x3 boxes. Noun, dimensions -->
+    <string name="size_nine" translatable="false">9x9</string>
+
+    <!-- GameConfigDialog: Easiest difficulty, most clues given. Adjective -->
+    <string name="difficulty_easy">Easy</string>
+    <!-- GameConfigDialog: Middle difficulty. Adjective -->
+    <string name="difficulty_medium">Medium</string>
+    <!-- GameConfigDialog: Second hardest difficulty. Adjective -->
+    <string name="difficulty_hard">Hard</string>
+    <!-- GameConfigDialog: Hardest difficulty, fewest clues given. Adjective -->
+    <string name="difficulty_expert">Expert</string>
+
+    <!-- GameBoardScreen action bar: Toggles whether taps write pencil marks. Noun used as a label -->
+    <string name="notes">Notes</string>
+    <!-- GameBoardScreen action bar: Fills one cell with its correct digit. Noun -->
+    <string name="hint">Hint</string>
+    <!-- GameBoardScreen action bar: Clears the selected cell. Verb -->
+    <string name="erase">Erase</string>
+    <!-- GameBoardScreen action bar: Abandons the puzzle, recorded as a loss. Verb phrase -->
+    <string name="give_up">Give Up</string>
+    <!-- GameBoardScreen TopAppBar: Label preceding the hint counter, e.g. Hints: 2. Noun plural -->
+    <string name="hints_used">Hints</string>
+
+    <!-- WinOverlay: Celebratory title shown when the grid is completed. Declarative -->
+    <string name="congratulations">Congratulations!</string>
+    <!-- WinOverlay: Label for the finishing time, e.g. Time: 04:12. Noun -->
+    <string name="time">Time</string>
+    <!-- WinOverlay: Restarts the same puzzle from empty. Verb phrase -->
+    <string name="play_again">Play Again</string>
+    <!-- HomeScreen stat card: Label under the won-of-played ratio. Verb past participle -->
+    <string name="won">won</string>
+
+    <!-- GameBoardScreen: Content description of a single grid cell. %1$d = row number starting at 1, e.g. 3. %2$d = column number starting at 1, e.g. 7. %3$s = the digit showing or the word for empty, e.g. 5 -->
+    <string name="cd_cell">Row <xliff:g id="row" example="3">%1$d</xliff:g>, column <xliff:g id="column" example="7">%2$d</xliff:g>, <xliff:g id="value" example="5">%3$s</xliff:g></string>
+    <!-- GameBoardScreen: Spoken in place of a digit for a cell with nothing in it. Adjective -->
+    <string name="cd_empty">empty</string>
+</resources>

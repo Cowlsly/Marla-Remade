@@ -37,6 +37,7 @@ private fun resolveGameMetadata(
             "unblockjam" -> "Unblock Jam"
             "wordmaker" -> "Wordmaker"
             "logicgate" -> "Logic Gates"
+            "sudoku" -> "Sudoku"
             else -> gameId.replaceFirstChar { it.uppercase() }
         },
         description = null,
