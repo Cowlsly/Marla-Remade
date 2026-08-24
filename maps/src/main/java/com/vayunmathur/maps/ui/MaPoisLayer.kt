@@ -131,9 +131,10 @@ fun MaPoisLayer(source: VectorSource, filterTypes: Set<Int>? = null) {
  * and `GooglePoiEnrichment` renders in the sheet — no new detail path needed.
  *
  * [osmPlace] folds in the sidecar's hours / phone / website / address, so the sheet
- * has something to show before (and without) any Google response.
+ * has something to show before (and without) any Google response. That is a mapped-file
+ * read, which is why this suspends.
  */
-fun Feature1.toSelectedMaPoi(): SpecificFeature? {
+suspend fun Feature1.toSelectedMaPoi(): SpecificFeature? {
     val props = properties ?: return null
     val name = props.string("name")?.ifBlank { null } ?: return null
     val pos = (geometry as? Point)?.coordinates ?: return null

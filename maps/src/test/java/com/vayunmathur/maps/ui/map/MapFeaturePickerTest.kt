@@ -11,6 +11,7 @@ import com.vayunmathur.maps.ui.SAVED_PLACE_LAYER_ID
 import com.vayunmathur.maps.ui.SEARCH_RESULT_LAYER_ID
 import com.vayunmathur.maps.ui.TRANSIT_STOP_LAYER_ID
 import com.vayunmathur.maps.ui.theme.MapChromeMetrics
+import kotlinx.coroutines.runBlocking
 import org.maplibre.spatialk.geojson.Point
 import org.maplibre.spatialk.geojson.Position
 import kotlin.test.Test
@@ -25,6 +26,10 @@ import kotlin.test.assertTrue
  * accident of which `?:` came first.
  *
  * [FeatureSource] is the seam — no renderer, no composition, no device.
+ *
+ * [MapFeaturePicker.pickPin] suspends because the POI probe reads a sidecar file, so the tests
+ * that call it run under [runBlocking]. Nothing here actually blocks: [FakeSource] answers from
+ * a map, and no probe reaches real I/O.
  */
 class MapFeaturePickerTest {
 
@@ -46,7 +51,7 @@ class MapFeaturePickerTest {
     private val tap = DpOffset(100.dp, 200.dp)
 
     @Test
-    fun `probes run parking, stop, search, saved, family, poi in that order`() {
+    fun `probes run parking, stop, search, saved, family, poi in that order`() = runBlocking {
         val source = FakeSource(emptyMap())
         MapFeaturePicker(source, transitEnabled = true).pickPin(tap)
 
@@ -64,7 +69,7 @@ class MapFeaturePickerTest {
     }
 
     @Test
-    fun `probeOrder matches what actually gets queried`() {
+    fun `probeOrder matches what actually gets queried`() = runBlocking {
         val source = FakeSource(emptyMap())
         val picker = MapFeaturePicker(source, transitEnabled = true)
         picker.pickPin(tap)
@@ -73,7 +78,7 @@ class MapFeaturePickerTest {
 
     /** Parking wins outright: a car spot on top of a POI is still the car spot. */
     @Test
-    fun `parking beats everything below it and stops the search`() {
+    fun `parking beats everything below it and stops the search`() = runBlocking {
         val source = FakeSource(
             mapOf(
                 PARKING_PIN_LAYER_ID to listOf(bareFeature()),
@@ -88,7 +93,7 @@ class MapFeaturePickerTest {
 
     /** The transit probe is skipped entirely when the layer is not drawn. */
     @Test
-    fun `a transit stop is not probed while the layer is off`() {
+    fun `a transit stop is not probed while the layer is off`() = runBlocking {
         val source = FakeSource(emptyMap())
         MapFeaturePicker(source, transitEnabled = false).pickPin(tap)
         assertTrue(
@@ -109,7 +114,7 @@ class MapFeaturePickerTest {
      * being hit and the hit being usable are different things.
      */
     @Test
-    fun `an unresolvable feature falls through to the next probe`() {
+    fun `an unresolvable feature falls through to the next probe`() = runBlocking {
         val source = FakeSource(mapOf(SEARCH_RESULT_LAYER_ID to listOf(bareFeature())))
         val hit = MapFeaturePicker(source, transitEnabled = false).pickPin(tap)
 
@@ -121,13 +126,13 @@ class MapFeaturePickerTest {
     }
 
     @Test
-    fun `no hits anywhere yields null`() {
+    fun `no hits anywhere yields null`() = runBlocking {
         assertNull(MapFeaturePicker(FakeSource(emptyMap()), transitEnabled = true).pickPin(tap))
     }
 
     /** The slop box is what makes tapping *near* a small glyph work. */
     @Test
-    fun `every pin probe uses the same hit slop box around the tap`() {
+    fun `every pin probe uses the same hit slop box around the tap`() = runBlocking {
         val source = FakeSource(emptyMap())
         MapFeaturePicker(source, transitEnabled = true).pickPin(tap)
 

@@ -74,8 +74,7 @@ object OrderLookupClient {
     }
 }
 
-/** Food categories worth checking for orderability (mirrors the food buckets of
- *  GooglePoiLayer's category colouring). */
+/** Food categories worth checking for orderability. */
 private val FOOD_KEYWORDS = listOf(
     "restaurant", "food", "dining", "pizza", "burger", "steak", "sushi",
     "cafe", "coffee", "bakery", "tea", "dessert",

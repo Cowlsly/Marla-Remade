@@ -47,7 +47,7 @@ private val SAVED_PLACE_COLOR = Color(0xFF1A73E8)
  * Saved-place overlay (Vela's `SavedPin`): a [GeoJsonSource] fed from the user's
  * saved places (Home, Work and the starred list) plus a [CircleLayer] "dot" and
  * a [SymbolLayer] bookmark glyph on top, ported to maplibre-compose declarative
- * layers exactly like [GooglePoiLayer] / [SearchResultLayer]. Tap → details via
+ * layers exactly like [SearchResultLayer]. Tap → details via
  * [toSelectedSavedPlace], reusing [SpecificFeature.GenericPlace] so the existing
  * enrichment + place sheet render with no new detail path.
  */

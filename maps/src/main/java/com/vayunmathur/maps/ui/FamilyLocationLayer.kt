@@ -48,7 +48,7 @@ private val FAMILY_LOCATION_COLOR = Color(0xFF5E35B1)
  * Live family-location overlay: a [GeoJsonSource] fed from the findfamily bound
  * service (pushed while the map is open) plus a [CircleLayer] avatar dot, a
  * centred initial and a name label, ported to maplibre-compose declarative
- * layers exactly like [SavedPlacesLayer] / [GooglePoiLayer]. Tap the dot →
+ * layers exactly like [SavedPlacesLayer] / [SearchResultLayer]. Tap the dot →
  * details via [toSelectedFamilyMember], reusing [SpecificFeature.GenericPlace]
  * so the existing place sheet + Directions/route path renders with no new code.
  */

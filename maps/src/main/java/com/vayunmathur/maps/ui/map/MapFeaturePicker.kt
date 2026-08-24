@@ -53,9 +53,11 @@ fun interface FeatureSource {
  * be read and asserted on rather than the shape of a hundred-line chain of `?:` and early
  * `return`s.
  *
- * Not a composable and not suspending. It does no I/O — the admin-label branch used to make a
- * Wikidata round-trip inside the gesture handler; that now belongs to the ViewModel, which is
- * why [adminLabelIds] hits are returned as raw features for the caller to resolve.
+ * Not a composable. [pickPin] suspends: resolving a POI hit reads the `poi_attrs.bin` sidecar,
+ * so that one probe does I/O and does it on [kotlinx.coroutines.Dispatchers.IO]. The admin-label
+ * branch is the opposite arrangement — it used to make a Wikidata round-trip inside the gesture
+ * handler, and now belongs to the ViewModel, which is why [ADMIN_LABEL_LAYER_IDS] hits come back
+ * as raw features for the caller to resolve.
  */
 class MapFeaturePicker(
     private val source: FeatureSource,
@@ -72,7 +74,7 @@ class MapFeaturePicker(
     private class Probe(
         val layerId: String,
         val enabled: Boolean = true,
-        val resolve: (List<Feature1>) -> MapHit?,
+        val resolve: suspend (List<Feature1>) -> MapHit?,
     )
 
     private val probes: List<Probe> = listOf(
@@ -103,7 +105,7 @@ class MapFeaturePicker(
      * Every probe uses the same tolerance box so a tap NEAR a small glyph still counts; see
      * [MapChromeMetrics.hitSlop].
      */
-    fun pickPin(offset: DpOffset): MapHit? {
+    suspend fun pickPin(offset: DpOffset): MapHit? {
         val box = hitBox(offset)
         return probes.firstNotNullOfOrNull { probe ->
             if (!probe.enabled) null else probe.resolve(source.query(box, setOf(probe.layerId)))

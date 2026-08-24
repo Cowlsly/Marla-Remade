@@ -25,6 +25,7 @@ import com.vayunmathur.library.ui.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -50,6 +51,7 @@ import com.vayunmathur.maps.util.SearchResult
 import com.vayunmathur.maps.util.SearchPhase
 import com.vayunmathur.maps.util.SearchUiState
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
+import kotlinx.coroutines.launch
 
 /**
  * Google-only search page (amenities.db removed, Decision D2): a text query
@@ -88,6 +90,8 @@ fun SearchPage(
         }
     }
 
+    val scope = rememberCoroutineScope()
+
     val actions = remember(nearLat, nearLon, idx) {
         object : SearchActions {
             override fun setQuery(query: String) {
@@ -110,23 +114,29 @@ fun SearchPage(
                 // Shared selection path: replace a route waypoint when picking a
                 // stop (idx != null), otherwise set the selected feature. Then
                 // leave the search page.
-                val feature = searchViewModel.toFeature(result)
-                if (idx != null) {
-                    // The selection could have changed (e.g. user navigated away
-                    // and back) between opening search and picking a result.
-                    // Tolerate a non-Route current selection rather than crashing.
-                    val current = viewModel.selectedFeature.value
-                    if (current is SpecificFeature.Route) {
-                        viewModel.set(current.copy(waypoints = current.waypoints.mapIndexed { idx2, it ->
-                            if (idx2 == idx) feature else it
-                        }))
+                //
+                // Launched because building the feature reads the POI attribute sidecar off the
+                // main thread; the pop stays inside so the selection is in place before this
+                // page goes away.
+                scope.launch {
+                    val feature = searchViewModel.toFeature(result)
+                    if (idx != null) {
+                        // The selection could have changed (e.g. user navigated away
+                        // and back) between opening search and picking a result.
+                        // Tolerate a non-Route current selection rather than crashing.
+                        val current = viewModel.selectedFeature.value
+                        if (current is SpecificFeature.Route) {
+                            viewModel.set(current.copy(waypoints = current.waypoints.mapIndexed { idx2, it ->
+                                if (idx2 == idx) feature else it
+                            }))
+                        } else {
+                            viewModel.set(feature)
+                        }
                     } else {
                         viewModel.set(feature)
                     }
-                } else {
-                    viewModel.set(feature)
+                    backStack.pop()
                 }
-                backStack.pop()
             }
 
             override fun pickContactAddress(address: String) {

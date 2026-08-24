@@ -44,7 +44,7 @@ private const val SEARCH_RESULT_SOURCE_ID = "search-result-geojson"
  * Search-result pin overlay (Vela's `MARKERS_LAYER` analog): a [GeoJsonSource]
  * fed from the Google search results plus a [CircleLayer] "dot" and a
  * [SymbolLayer] marker glyph on top, ported to maplibre-compose declarative
- * layers exactly like [GooglePoiLayer]. Distinct from the ambient POI overlay so
+ * layers exactly like [SavedPlacesLayer]. Distinct from the ambient POI overlay so
  * search pins read as "your results" (a single accent colour) rather than the
  * category-coloured ambient POIs. Tap → details via [toSelectedSearchResult].
  */

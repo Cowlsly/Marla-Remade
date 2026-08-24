@@ -90,8 +90,7 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
 
     /**
      * Publish ambient pins from the OFFLINE POI index (P29) for the
-     * [north]..[south] × [west]..[east] box, feeding [GooglePoiLayer] (the proven
-     * GeoJSON pin renderer). Debounced; views wider than [MAX_LAT_SPAN] and empty
+     * [north]..[south] × [west]..[east] box. Debounced; views wider than [MAX_LAT_SPAN] and empty
      * results KEEP the previous pins so a fast pan / wide zoom never blinks the
      * overlay to nothing (P23 no-clear). The index query + name decode run on
      * [Dispatchers.IO]; [PoiIndex.initialize] is idempotent so calling it here is
@@ -180,7 +179,7 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         }
     }
 
-    /** Map an offline index record to the pin model [GooglePoiLayer] renders; the
+    /** Map an offline index record to the pin model [pins] publishes; the
      *  category label drives its data-driven pin colour (P29). */
     private fun PoiIndex.PoiRecord.toPin(): GooglePoiPin = GooglePoiPin(
         id = "poi:$latE7:$lonE7",
@@ -237,7 +236,7 @@ class GooglePoiMapViewModel(application: Application) : AndroidViewModel(applica
         const val MAX_LAT_SPAN = 0.15
 
         // Cap on ambient offline pins per viewport (P29) so a dense city box
-        // stays bounded; matches GooglePoiLayer's close-zoom feel.
+        // stays bounded; matches the ambient overlay's close-zoom feel.
         const val OFFLINE_CAP = 300
 
         // Degrees of latitude → metres, for turning the viewport's lat span into

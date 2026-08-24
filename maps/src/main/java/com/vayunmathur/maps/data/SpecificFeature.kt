@@ -2,6 +2,8 @@ package com.vayunmathur.maps.data
 
 import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.Wikidata
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
@@ -50,9 +52,21 @@ sealed interface SpecificFeature {
  *
  * Returns a bare place when the sidecar is absent or the point is not one of ours,
  * which is the same thing every caller used to produce unconditionally.
+ *
+ * Suspending, and on [Dispatchers.IO], because [PoiIndex.attributesNear] reads a mapped side
+ * file. Every one of this function's call sites used to be on the main thread — including the
+ * one inside the tap gesture handler — so a cold 316 MB mmap page-faulted on the UI thread.
+ * That is true even now the lookup is a binary search rather than a scan: the scan was what
+ * made it an ANR, the mmap is what makes it I/O.
  */
-fun osmPlace(name: String, position: Position, poiType: Int? = null): SpecificFeature.GenericPlace {
-    val attrs = PoiIndex.attributesNear(position.latitude, position.longitude, name)
+suspend fun osmPlace(
+    name: String,
+    position: Position,
+    poiType: Int? = null,
+): SpecificFeature.GenericPlace {
+    val attrs = withContext(Dispatchers.IO) {
+        PoiIndex.attributesNear(position.latitude, position.longitude, name)
+    }
     return SpecificFeature.GenericPlace(
         name = name,
         phone = attrs?.phone,
@@ -73,8 +87,8 @@ fun JsonObject.string(key: String): String? = this[key]?.jsonPrimitive?.content
 /**
  * Resolve a tapped basemap feature into a [SpecificFeature].
  *
- * Amenities are now Google-only (rendered on the custom overlay layer and tapped
- * there — see GooglePoiLayer), so this no longer reads the amenities DB: it only
+ * Amenities come from the baked `ma_pois` layer and are tapped there (see
+ * [com.vayunmathur.maps.ui.toSelectedMaPoi]), so this no longer reads the amenities DB: it only
  * handles the country/region/city admin labels (Wikidata-backed). Everything else
  * returns null, since native POIs are suppressed in the style.
  */

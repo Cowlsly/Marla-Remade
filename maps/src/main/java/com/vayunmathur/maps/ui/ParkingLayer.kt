@@ -42,7 +42,7 @@ private val PARKING_COLOR = Color(0xFF1967D2)
  * Parking-pin overlay (P9): a [GeoJsonSource] holding the single active
  * [ParkingSpot] plus a [CircleLayer] body and a [SymbolLayer] "P" glyph on top,
  * ported to maplibre-compose declarative layers exactly like [SavedPlacesLayer]
- * / [GooglePoiLayer]. Renders nothing when no spot is saved.
+ * / [SearchResultLayer]. Renders nothing when no spot is saved.
  */
 @Composable
 @MaplibreComposable

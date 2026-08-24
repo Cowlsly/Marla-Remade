@@ -154,7 +154,7 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
         query: String,
         nearLat: Double,
         nearLon: Double,
-        onFirst: (SearchResult?) -> Unit,
+        onFirst: suspend (SearchResult?) -> Unit,
     ) {
         _query.value = query
         searchJob?.cancel()
@@ -230,9 +230,9 @@ class MapsSearchViewModel(application: Application) : AndroidViewModel(applicati
      *
      * The sidecar lookup matters most here: an offline result has no Google
      * enrichment coming, so without it the sheet opens with a title and nothing
-     * else.
+     * else. It is also a mapped-file read, hence [osmPlace] and this suspend.
      */
-    fun toFeature(result: SearchResult): SpecificFeature.GenericPlace =
+    suspend fun toFeature(result: SearchResult): SpecificFeature.GenericPlace =
         osmPlace(name = result.title, position = Position(result.lon, result.lat))
 
     /**

@@ -19,7 +19,7 @@ import java.nio.channels.FileChannel
  *  * `poi_index.bin` — a flat array of 14-byte little-endian records
  *    `{ int32 lat_e7; int32 lon_e7; uint32 name_off; uint16 type }`,
  *    `count = filesize / 14`, sorted ascending by the 64-bit Morton(lat,lon)
- *    key (the key itself is not stored).
+ *    key (the key itself is not stored — [spatialFromE7] recomputes it).
  *  * `poi_attrs.bin` — OPTIONAL attribute sidecar (opening hours, phone,
  *    website, address, cuisine, wheelchair), indexed by the ORDINAL of the
  *    matching `poi_index.bin` record. See `scripts/maps/osm_ingest/src/poi_attrs.rs`
@@ -31,6 +31,13 @@ import java.nio.channels.FileChannel
  * from the same host as the graph); queries then return empty lists. The sidecar
  * is separately optional: an install that has the index but not the attributes
  * keeps working, and every attribute reads as null.
+ *
+ * **The spatial queries binary-search; they do not scan.** They used to walk all
+ * `count` records, which was imperceptible over a California extract and ANR'd the
+ * app on a planet-wide one — 22.6 M records on the main thread inside a tap
+ * handler. `poi_index.bin` was already sorted by Morton key; this reader simply
+ * never used it. See [Mapped.forEachInBbox] for the bound that replaced the scan,
+ * and its caveat.
  */
 object PoiIndex {
     private const val TAG = "PoiIndex"
@@ -116,26 +123,112 @@ object PoiIndex {
                 address == null && cuisine == null && wheelchair == null
     }
 
-    private var index: MappedByteBuffer? = null
-    private var names: MappedByteBuffer? = null
-    private var namesLen: Int = 0
-    private var count: Int = 0
-    private var loaded = false
+    /**
+     * One consistent set of mappings, published as a unit.
+     *
+     * Every query used to be `@Synchronized` on this object, which meant a lookup for a tapped
+     * pin also blocked a background viewport refresh and vice versa — for the duration of a
+     * full-file scan. The mapped state is immutable once built, so the queries need no lock at
+     * all: they read [mapped] once into a local and work from that. Only [reload] mutates, and
+     * a query already in flight keeps using the snapshot it started with rather than seeing the
+     * buffers swapped underneath it.
+     */
+    private class Mapped(
+        val index: MappedByteBuffer,
+        val names: MappedByteBuffer,
+        val namesLen: Int,
+        val count: Int,
+        /** The attribute sidecar, or null when it is absent or does not match. */
+        val attrs: MappedByteBuffer?,
+        /** Byte offset of the attribute blob, i.e. just past the offset array. */
+        val attrsBlobStart: Int,
+    ) {
+        fun latE7(i: Int): Int = index.getInt(i * RECORD_BYTES)
+        fun lonE7(i: Int): Int = index.getInt(i * RECORD_BYTES + 4)
+        fun nameOff(i: Int): Int = index.getInt(i * RECORD_BYTES + 8)
+        fun type(i: Int): Int = index.getShort(i * RECORD_BYTES + 12).toInt() and 0xFFFF
+
+        /** The Morton key the file is sorted by, recomputed from the record's coordinate. */
+        fun spatialAt(i: Int): Long = spatialFromE7(latE7(i), lonE7(i))
+
+        fun record(i: Int): PoiRecord =
+            PoiRecord(latE7(i), lonE7(i), type(i), nameAt(nameOff(i)) ?: "", i)
+
+        /** Read the NUL-terminated UTF-8 name that starts at byte [off], or null. */
+        fun nameAt(off: Int): String? {
+            if (off < 0 || off >= namesLen) return null
+            var end = off
+            while (end < namesLen && names.get(end).toInt() != 0) end++
+            val n = end - off
+            if (n <= 0) return null
+            val bytes = ByteArray(n)
+            // Absolute bulk get keeps the shared buffer's position untouched.
+            val dup = names.duplicate()
+            dup.position(off)
+            dup.get(bytes, 0, n)
+            return String(bytes, Charsets.UTF_8)
+        }
+
+        /** Ordinal of the first record whose key is >= [key], or [count]. */
+        fun lowerBound(key: Long): Int {
+            var lo = 0
+            var hi = count
+            while (lo < hi) {
+                val mid = (lo + hi) ushr 1
+                // Unsigned: half the planet's keys have bit 63 set, and a signed compare here
+                // walks off the front of the northern hemisphere.
+                if (java.lang.Long.compareUnsigned(spatialAt(mid), key) < 0) lo = mid + 1 else hi = mid
+            }
+            return lo
+        }
+
+        /**
+         * Visit every record inside the bbox in file order, stopping early when [onHit]
+         * returns false.
+         *
+         * Cost is the box's Morton span — a binary search to its lower bound, then a walk to
+         * its upper bound — rather than [count]. That span is not the box: a box straddling the
+         * equator or the prime meridian flips a top-level Z-curve bit and covers most of the
+         * key space, so those degenerate back toward a full walk. `poi_spatial.bin` makes the
+         * lookup exactly cell-local; this is the bound available without a format change, and
+         * it is what takes a POI tap from 22.6 M records to a local handful.
+         */
+        fun forEachInBbox(
+            minLatE7: Int,
+            maxLatE7: Int,
+            minLonE7: Int,
+            maxLonE7: Int,
+            onHit: (ordinal: Int, latE7: Int, lonE7: Int) -> Boolean,
+        ) {
+            if (minLatE7 > maxLatE7 || minLonE7 > maxLonE7) return
+            val (first, last) = spatialRangeForBbox(minLatE7, maxLatE7, minLonE7, maxLonE7)
+            var i = lowerBound(first)
+            while (i < count) {
+                if (java.lang.Long.compareUnsigned(spatialAt(i), last) > 0) return
+                val latE7 = latE7(i)
+                val lonE7 = lonE7(i)
+                if (latE7 in minLatE7..maxLatE7 && lonE7 in minLonE7..maxLonE7 &&
+                    !onHit(i, latE7, lonE7)
+                ) {
+                    return
+                }
+                i++
+            }
+        }
+    }
+
+    @Volatile
+    private var mapped: Mapped? = null
     private var tried = false
 
-    /** The attribute sidecar, or null when it is absent or does not match. */
-    private var attrs: MappedByteBuffer? = null
-    /** Byte offset of the blob, i.e. just past the offset array. */
-    private var attrsBlobStart: Int = 0
-
     /** True once both side files were mapped successfully. */
-    val available: Boolean get() = loaded
+    val available: Boolean get() = mapped != null
 
     /** True when the optional attribute sidecar is mapped and usable. */
-    val attributesAvailable: Boolean get() = attrs != null
+    val attributesAvailable: Boolean get() = mapped?.attrs != null
 
     /** Number of POI records available offline (0 when not loaded). */
-    val recordCount: Int get() = count
+    val recordCount: Int get() = mapped?.count ?: 0
 
     /**
      * Map both side files from [Context.getExternalFilesDir]. Idempotent and
@@ -145,10 +238,35 @@ object PoiIndex {
      */
     @Synchronized
     fun initialize(context: Context): Boolean {
-        if (loaded) return true
+        if (mapped != null) return true
         if (tried) return false
         tried = true
         val dir = context.getExternalFilesDir(null) ?: return false
+        return open(dir)
+    }
+
+    /** Force a re-map after the side files finish downloading. */
+    @Synchronized
+    fun reload(context: Context): Boolean {
+        val dir = context.getExternalFilesDir(null) ?: return false
+        return reload(dir)
+    }
+
+    /**
+     * Re-map from an explicit directory.
+     *
+     * Also the seam `PoiIndexTest` maps fixtures through: the production entry point needs a
+     * `Context` only to find the directory, and a unit test has a temp dir and no Context.
+     */
+    @Synchronized
+    internal fun reload(dir: File): Boolean {
+        mapped = null
+        tried = true
+        return open(dir)
+    }
+
+    @Synchronized
+    private fun open(dir: File): Boolean {
         val indexFile = File(dir, INDEX_FILE)
         val namesFile = File(dir, NAMES_FILE)
         if (!indexFile.isFile || !namesFile.isFile) {
@@ -156,59 +274,54 @@ object PoiIndex {
             return false
         }
         return try {
-            index = mapReadOnly(indexFile).also { it.order(ByteOrder.LITTLE_ENDIAN) }
+            val indexBuf = mapReadOnly(indexFile).also { it.order(ByteOrder.LITTLE_ENDIAN) }
             val namesBuf = mapReadOnly(namesFile)
-            names = namesBuf
-            namesLen = namesBuf.capacity()
-            count = (indexFile.length() / RECORD_BYTES).toInt()
-            loaded = true
-            Log.d(TAG, "Loaded $count POI records, names=${namesLen}B")
+            val count = (indexFile.length() / RECORD_BYTES).toInt()
             // Separate and optional: a failure here leaves the index perfectly
             // usable, just without attributes.
-            openAttrs(File(dir, ATTRS_FILE))
+            val attrs = openAttrs(File(dir, ATTRS_FILE), count)
+            mapped = Mapped(
+                index = indexBuf,
+                names = namesBuf,
+                namesLen = namesBuf.capacity(),
+                count = count,
+                attrs = attrs?.first,
+                attrsBlobStart = attrs?.second ?: 0,
+            )
+            Log.d(TAG, "Loaded $count POI records, names=${namesBuf.capacity()}B")
             true
         } catch (e: Exception) {
             Log.w(TAG, "Failed to map POI side files", e)
-            index = null; names = null; loaded = false
+            mapped = null
             false
         }
     }
 
-    /** Force a re-map after the side files finish downloading. */
-    @Synchronized
-    fun reload(context: Context): Boolean {
-        loaded = false
-        tried = false
-        index = null
-        names = null
-        attrs = null
-        return initialize(context)
-    }
-
     /**
-     * Map the attribute sidecar, leaving [attrs] null if anything is off.
+     * Map the attribute sidecar, returning null (rather than throwing) if anything is off.
      *
      * The record-count check is the one that matters: the sidecar joins to the
      * index purely by position, so a sidecar from a different build would hand
      * every place someone else's phone number. Refusing the file is the only safe
      * response, and there is no way to detect the mismatch later.
+     *
+     * @return the mapped buffer and the byte offset of the blob, or null.
      */
-    private fun openAttrs(file: File) {
-        attrs = null
+    private fun openAttrs(file: File, count: Int): Pair<MappedByteBuffer, Int>? {
         if (!file.isFile) {
             Log.d(TAG, "POI attribute sidecar absent")
-            return
+            return null
         }
         try {
             val buf = mapReadOnly(file).also { it.order(ByteOrder.LITTLE_ENDIAN) }
             if (buf.capacity() < ATTRS_HEADER_BYTES) {
                 Log.w(TAG, "$ATTRS_FILE is truncated")
-                return
+                return null
             }
             for (i in ATTRS_MAGIC.indices) {
                 if (buf.get(i) != ATTRS_MAGIC[i]) {
                     Log.w(TAG, "$ATTRS_FILE has the wrong magic")
-                    return
+                    return null
                 }
             }
             // Not a gate: the length prefixes let this reader step over a key added
@@ -221,18 +334,18 @@ object PoiIndex {
             val attrCount = buf.getInt(8)
             if (attrCount != count) {
                 Log.w(TAG, "$ATTRS_FILE has $attrCount slots but the index has $count; ignoring it")
-                return
+                return null
             }
             val blobStart = ATTRS_HEADER_BYTES + 4 * attrCount
             if (blobStart > buf.capacity()) {
                 Log.w(TAG, "$ATTRS_FILE offset array runs past the file")
-                return
+                return null
             }
-            attrsBlobStart = blobStart
-            attrs = buf
             Log.d(TAG, "Loaded POI attributes for $attrCount record(s)")
+            return buf to blobStart
         } catch (e: Exception) {
             Log.w(TAG, "Failed to map $ATTRS_FILE", e)
+            return null
         }
     }
 
@@ -245,55 +358,32 @@ object PoiIndex {
             }
         }
 
-    /** Read the NUL-terminated UTF-8 name that starts at byte [off], or null. */
-    private fun nameAt(off: Int): String? {
-        val buf = names ?: return null
-        if (off < 0 || off >= namesLen) return null
-        var end = off
-        while (end < namesLen && buf.get(end).toInt() != 0) end++
-        val n = end - off
-        if (n <= 0) return null
-        val bytes = ByteArray(n)
-        // Absolute bulk get keeps the shared buffer's position untouched.
-        val dup = buf.duplicate()
-        dup.position(off)
-        dup.get(bytes, 0, n)
-        return String(bytes, Charsets.UTF_8)
-    }
-
-    private fun recLatE7(i: Int): Int = index!!.getInt(i * RECORD_BYTES)
-    private fun recLonE7(i: Int): Int = index!!.getInt(i * RECORD_BYTES + 4)
-    private fun recNameOff(i: Int): Int = index!!.getInt(i * RECORD_BYTES + 8)
-    private fun recType(i: Int): Int = index!!.getShort(i * RECORD_BYTES + 12).toInt() and 0xFFFF
-
     /**
      * Case-insensitive prefix/substring search over the deduped name pool,
      * returning matching POIs ranked prefix-first then by distance to
      * ([nearLat],[nearLon]). Returns an empty list when nothing matches or the
      * index isn't loaded.
      */
-    @Synchronized
     fun searchByName(
         query: String,
         nearLat: Double,
         nearLon: Double,
         limit: Int = 20,
     ): List<PoiRecord> {
-        if (!loaded) return emptyList()
+        val m = mapped ?: return emptyList()
         val q = query.trim().lowercase()
         if (q.isEmpty()) return emptyList()
 
         // Pass 1: walk the name pool once, recording matching offsets and their
         // rank (0 = prefix match, 1 = substring). Decoding each unique name once
         // is the dedup win the side-file layout is designed for.
-        val buf = names ?: return emptyList()
         val matchRank = HashMap<Int, Int>()
         var pos = 0
-        while (pos < namesLen) {
+        while (pos < m.namesLen) {
             var end = pos
-            while (end < namesLen && buf.get(end).toInt() != 0) end++
+            while (end < m.namesLen && m.names.get(end).toInt() != 0) end++
             if (end > pos) {
-                val name = nameAt(pos)
+                val name = m.nameAt(pos)
                 if (name != null) {
                     val lower = name.lowercase()
                     if (lower.startsWith(q)) matchRank[pos] = 0
@@ -305,18 +395,17 @@ object PoiIndex {
         if (matchRank.isEmpty()) return emptyList()
 
         // Pass 2: scan records, keeping those whose name offset matched.
-        val out = ArrayList<Ranked>(minOf(CANDIDATE_CAP, count))
+        val out = ArrayList<Ranked>(minOf(CANDIDATE_CAP, m.count))
         var i = 0
-        while (i < count && out.size < CANDIDATE_CAP) {
-            val off = recNameOff(i)
+        while (i < m.count && out.size < CANDIDATE_CAP) {
+            val off = m.nameOff(i)
             val rank = matchRank[off]
             if (rank != null) {
-                val name = nameAt(off) ?: ""
-                val latE7 = recLatE7(i)
-                val lonE7 = recLonE7(i)
+                val latE7 = m.latE7(i)
+                val lonE7 = m.lonE7(i)
                 out.add(
                     Ranked(
-                        PoiRecord(latE7, lonE7, recType(i), name, i),
+                        PoiRecord(latE7, lonE7, m.type(i), m.nameAt(off) ?: "", i),
                         rank,
                         distanceSq(latE7 / 1e7, lonE7 / 1e7, nearLat, nearLon),
                     )
@@ -333,14 +422,13 @@ object PoiIndex {
      * pre-filter + squared-distance sort). Names are decoded only for the
      * returned winners. Empty when the index isn't loaded.
      */
-    @Synchronized
     fun nearest(
         lat: Double,
         lon: Double,
         limit: Int = 20,
         maxMeters: Double = 250.0,
     ): List<PoiRecord> {
-        if (!loaded) return emptyList()
+        val m = mapped ?: return emptyList()
         val dLat = maxMeters / 111_320.0
         val cosLat = Math.cos(Math.toRadians(lat)).coerceAtLeast(1e-6)
         val dLon = maxMeters / (111_320.0 * cosLat)
@@ -350,35 +438,22 @@ object PoiIndex {
         val maxLonE7 = ((lon + dLon) * 1e7).toInt()
 
         val hits = ArrayList<Hit>()
-        var i = 0
-        while (i < count) {
-            val latE7 = recLatE7(i)
-            val lonE7 = recLonE7(i)
-            if (latE7 in minLatE7..maxLatE7 && lonE7 in minLonE7..maxLonE7) {
-                hits.add(Hit(i, distanceSq(latE7 / 1e7, lonE7 / 1e7, lat, lon)))
-            }
-            i++
+        m.forEachInBbox(minLatE7, maxLatE7, minLonE7, maxLonE7) { i, latE7, lonE7 ->
+            hits.add(Hit(i, distanceSq(latE7 / 1e7, lonE7 / 1e7, lat, lon)))
+            true
         }
+        // Stable, so records at an equal distance stay in file order — the tie-break the
+        // scan this replaced had, and what the equivalence test pins.
         hits.sortBy { it.distSq }
-        return hits.take(limit).map { h ->
-            PoiRecord(
-                recLatE7(h.idx),
-                recLonE7(h.idx),
-                recType(h.idx),
-                nameAt(recNameOff(h.idx)) ?: "",
-                h.idx,
-            )
-        }
+        return hits.take(limit).map { m.record(it.idx) }
     }
 
     /**
      * All POIs whose coordinate falls inside the [west]..[east] × [south]..[north]
-     * bounding box, capped at [cap] (a linear scan over the flat record array —
-     * cheap even at ~283k records for a per-idle viewport refresh). Names are
-     * decoded for each returned record. Empty when the index isn't loaded; used
-     * to drive the ambient offline pin overlay (P29).
+     * bounding box, capped at [cap]. Names are decoded for each returned record.
+     * Empty when the index isn't loaded; used to drive the ambient offline pin
+     * overlay (P29).
      */
-    @Synchronized
     fun inViewport(
         west: Double,
         south: Double,
@@ -386,20 +461,16 @@ object PoiIndex {
         north: Double,
         cap: Int = 300,
     ): List<PoiRecord> {
-        if (!loaded || cap <= 0) return emptyList()
+        val m = mapped ?: return emptyList()
+        if (cap <= 0) return emptyList()
         val minLatE7 = (south * 1e7).toInt()
         val maxLatE7 = (north * 1e7).toInt()
         val minLonE7 = (west * 1e7).toInt()
         val maxLonE7 = (east * 1e7).toInt()
-        val out = ArrayList<PoiRecord>(minOf(cap, count))
-        var i = 0
-        while (i < count && out.size < cap) {
-            val latE7 = recLatE7(i)
-            val lonE7 = recLonE7(i)
-            if (latE7 in minLatE7..maxLatE7 && lonE7 in minLonE7..maxLonE7) {
-                out.add(PoiRecord(latE7, lonE7, recType(i), nameAt(recNameOff(i)) ?: "", i))
-            }
-            i++
+        val out = ArrayList<PoiRecord>(minOf(cap, m.count))
+        m.forEachInBbox(minLatE7, maxLatE7, minLonE7, maxLonE7) { i, _, _ ->
+            out.add(m.record(i))
+            out.size < cap
         }
         return out
     }
@@ -417,18 +488,18 @@ object PoiIndex {
      * Every offset is treated as untrusted. The file arrives over the network and a
      * truncated download must read as "no attributes", not throw out of a tap.
      */
-    @Synchronized
     fun attributesAt(ordinal: Int): PoiAttributes? {
-        val buf = attrs ?: return null
-        if (ordinal < 0 || ordinal >= count) return null
+        val m = mapped ?: return null
+        val buf = m.attrs ?: return null
+        if (ordinal < 0 || ordinal >= m.count) return null
         val off = buf.getInt(ATTRS_HEADER_BYTES + 4 * ordinal)
         if (off == NO_ATTRS || off < 0) return null
         // Bounded before the add, not after: `attrsBlobStart + off` can wrap negative
         // for a large positive off, and a negative index passes an `at + 2 > capacity`
         // test on its way to an IndexOutOfBoundsException.
-        val blobLen = buf.capacity() - attrsBlobStart
+        val blobLen = buf.capacity() - m.attrsBlobStart
         if (off > blobLen - 2) return null
-        val at = attrsBlobStart + off
+        val at = m.attrsBlobStart + off
         val bodyLen = buf.getShort(at).toInt() and 0xFFFF
         val body = at + 2
         if (bodyLen > buf.capacity() - body) return null
@@ -447,18 +518,16 @@ object PoiIndex {
      * can share a coordinate to within a metre, and attaching one's phone number to
      * the other is the kind of wrong that looks right.
      *
-     * Costs one [nearest] call, which is a linear scan of the whole record array —
-     * the same cost model [inViewport] documents and runs per viewport idle. If that
-     * ever stops being affordable it is a limitation of all three, not of this one.
+     * Costs one [nearest] call, which is a binary search plus a walk of a 25 m box.
+     * Still a file read against a cold mmap, so callers keep it off the main thread.
      */
-    @Synchronized
     fun attributesNear(
         lat: Double,
         lon: Double,
         name: String,
         maxMeters: Double = 25.0,
     ): PoiAttributes? {
-        if (attrs == null || name.isBlank()) return null
+        if (mapped?.attrs == null || name.isBlank()) return null
         val match = nearest(lat, lon, limit = 8, maxMeters = maxMeters)
             .firstOrNull { it.name == name }
             ?: return null

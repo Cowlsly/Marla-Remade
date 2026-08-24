@@ -13,6 +13,9 @@ android {
     defaultConfig {
         applicationId = "com.vayunmathur.maps"
     }
+    // PoiIndexTest exercises the real side-file reader, which logs. Without this every
+    // android.util.Log call throws "not mocked" and the test can only cover code that never logs.
+    testOptions.unitTests.isReturnDefaultValues = true
 }
 
 androidComponents {
