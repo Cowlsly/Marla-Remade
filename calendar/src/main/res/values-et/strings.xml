@@ -157,4 +157,8 @@
         <item quantity="one">Kordub <xliff:g id="count" example="1">%1$d</xliff:g>-l päeval</item>
         <item quantity="other">Kordub <xliff:g id="count" example="1">%1$d</xliff:g>-l päeval</item>
     </plurals>
+    <string name="export_ics_file">Ekspordi .ics failina</string>
+    <string name="export_events_to_ics_file">Ekspordi sündmused .ics faili</string>
+    <string name="export_ics_success">Kalender on eksporditud</string>
+    <string name="export_ics_failed_format">Kalendri eksportimine ei õnnestunud: <xliff:g id="error" example="Õigused on puudu">%1$s</xliff:g></string>
 </resources>
