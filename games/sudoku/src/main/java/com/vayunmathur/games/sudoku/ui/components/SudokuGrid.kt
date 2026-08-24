@@ -100,7 +100,6 @@ private fun SudokuCell(
 ) {
     val scheme = MaterialTheme.colorScheme
     val value = game.valueAt(index)
-    val wrong = game.isWrong(index)
     val given = game.isGiven(index)
 
     val background = when {
@@ -110,11 +109,9 @@ private fun SudokuCell(
         else -> Color.Transparent
     }
 
-    val digitColor = when {
-        wrong -> scheme.error
-        given -> scheme.onSurface
-        else -> scheme.primary
-    }
+    // Givens are the puzzle, entries are the player's work, so they read differently. There is no
+    // wrong-cell colour because a wrong digit is refused rather than written.
+    val digitColor = if (given) scheme.onSurface else scheme.primary
 
     val spoken = if (value == 0) stringResource(R.string.cd_empty) else value.toString()
     val side = game.size.side

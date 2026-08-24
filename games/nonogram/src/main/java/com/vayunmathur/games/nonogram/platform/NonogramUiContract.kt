@@ -14,10 +14,10 @@ import com.vayunmathur.games.nonogram.data.NonogramGameState
  * Every member has a no-op default, so `Noop` is the whole implementation a preview needs.
  */
 interface NonogramGameActions {
-    /** Tap: cycles blank to filled to crossed and back. */
+    /** Tap: fills a cell of the picture, or spends a heart on one that is not. */
     fun tapCell(index: Int) {}
 
-    /** Long press: crosses a cell directly, skipping the fill step. */
+    /** Long press: crosses a cell out as a note, or takes the cross back. Never costs a heart. */
     fun crossCell(index: Int) {}
 
     fun nextLevel() {}
@@ -32,7 +32,6 @@ data class NonogramUiState(
     val game: NonogramGameState? = null,
     val mode: GameMode = GameMode.CASUAL,
     val level: Int = 1,
-    val showMistakes: Boolean = true,
     val dailyStreak: Long = 0,
     /** True once today's daily has been completed, which swaps the next-level button for a note. */
     val dailyDone: Boolean = false,
@@ -42,7 +41,6 @@ data class NonogramUiState(
 )
 
 interface SettingsActions {
-    fun setShowMistakes(enabled: Boolean) {}
     fun setReminderEnabled(enabled: Boolean) {}
     fun setReminderTime(hour: Int, minute: Int) {}
 
@@ -50,7 +48,6 @@ interface SettingsActions {
 }
 
 data class SettingsUiState(
-    val showMistakes: Boolean = true,
     val reminderEnabled: Boolean = false,
     val reminderHour: Int = 20,
     val reminderMinute: Int = 0,

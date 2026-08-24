@@ -7,6 +7,7 @@ import com.vayunmathur.games.nonogram.data.DAILY_SIZE
 import com.vayunmathur.games.nonogram.data.GameMode
 import com.vayunmathur.games.nonogram.data.NonogramGameState
 import com.vayunmathur.games.nonogram.data.NonogramPuzzle
+import com.vayunmathur.games.nonogram.data.STARTING_HEARTS
 import com.vayunmathur.games.nonogram.data.sizeForLevel
 import com.vayunmathur.games.nonogram.domain.NonogramGenerator
 import com.vayunmathur.games.nonogram.platform.NonogramGameActions
@@ -34,7 +35,7 @@ class MetadataPreviews {
     @Preview(name = "1-level", device = PHONE, showSystemUi = true)
     @Composable
     fun Preview1Level() {
-        // Part-way through a 10x10, with some cells crossed out as a player would leave them.
+        // Part-way through a 10x10, with some cells crossed out and one heart already spent.
         val puzzle = level(12)
         val correct = puzzle.solution.indices.filter { puzzle.solution[it] }
         val blanks = puzzle.solution.indices.filter { !puzzle.solution[it] }
@@ -43,7 +44,10 @@ class MetadataPreviews {
                 puzzle = puzzle,
                 level = 12,
                 filled = correct.take(correct.size / 2).toSet(),
-                crossed = blanks.take(blanks.size / 3).toSet(),
+                crossed = blanks.drop(1).take(blanks.size / 3).toSet(),
+                // One cell the player got wrong, which is what the missing heart paid for.
+                revealedBlanks = setOf(blanks.first()),
+                hearts = STARTING_HEARTS - 1,
             )
         )
     }
@@ -119,11 +123,15 @@ class MetadataPreviews {
         level: Int,
         filled: Set<Int>,
         crossed: Set<Int>,
+        revealedBlanks: Set<Int> = emptySet(),
         mode: GameMode = GameMode.CASUAL,
+        hearts: Int = STARTING_HEARTS,
     ) = NonogramGameState(
         puzzle = puzzle,
         filled = filled,
         crossed = crossed,
+        revealedBlanks = revealedBlanks,
+        hearts = hearts,
         mode = mode,
         level = level,
     )

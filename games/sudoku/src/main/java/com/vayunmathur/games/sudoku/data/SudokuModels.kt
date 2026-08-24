@@ -62,7 +62,7 @@ data class GameConfig(
  *
  * Both lists are [BoardSize.cellCount] long and use 0 for "blank"; digits are 1-based. Keeping the
  * solution alongside the clues is what lets a hint fill one correct cell without re-running the
- * solver, and lets a wrong entry be flagged immediately rather than only at the end.
+ * solver, and lets a digit that does not belong be refused as it is entered.
  */
 data class Puzzle(
     val size: BoardSize,
@@ -101,14 +101,26 @@ data class SudokuGameState(
 
     fun isGiven(index: Int): Boolean = givens[index] != 0
 
-    /** True when [index] holds a digit that disagrees with the solution. */
-    fun isWrong(index: Int): Boolean {
-        val value = valueAt(index)
-        return value != 0 && value != solution[index]
-    }
+    /**
+     * Whether [digit] may be written into [index].
+     *
+     * A digit that disagrees with the solution is refused outright rather than written and flagged, so
+     * the grid only ever holds correct entries. That is why there is no "wrong cell" state to render:
+     * it cannot occur.
+     *
+     * Clearing a cell is not a write and does not go through here.
+     */
+    fun accepts(index: Int, digit: Int): Boolean =
+        !isWon &&
+            index in 0 until size.cellCount &&
+            !isGiven(index) &&
+            digit == solution[index]
 
     /** How many of [digit] are already placed, so the number pad can retire finished digits. */
     fun placedCount(digit: Int): Int = (0 until size.cellCount).count { valueAt(it) == digit }
+
+    /** Cells with nothing in them yet, which is what a hint picks from. */
+    fun blankIndices(): List<Int> = (0 until size.cellCount).filter { valueAt(it) == 0 }
 
     val isComplete: Boolean get() = (0 until size.cellCount).all { valueAt(it) == solution[it] }
 

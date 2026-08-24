@@ -46,7 +46,6 @@ import com.vayunmathur.library.ui.Text
 @Composable
 fun NonogramBoard(
     game: NonogramGameState,
-    showMistakes: Boolean,
     onTap: (Int) -> Unit,
     onLongPress: (Int) -> Unit,
     modifier: Modifier = Modifier,
@@ -74,7 +73,7 @@ fun NonogramBoard(
             }
             Row {
                 RowClues(game, rowGutterCells, cell, clueCell, fontSize, lineHeight)
-                Grid(game, showMistakes, cell, onTap, onLongPress)
+                Grid(game, cell, onTap, onLongPress)
             }
         }
     }
@@ -157,7 +156,6 @@ private fun ClueText(
 @Composable
 private fun Grid(
     game: NonogramGameState,
-    showMistakes: Boolean,
     cell: Dp,
     onTap: (Int) -> Unit,
     onLongPress: (Int) -> Unit,
@@ -172,7 +170,6 @@ private fun Grid(
                         NonogramCell(
                             game = game,
                             index = index,
-                            showMistakes = showMistakes,
                             onTap = { onTap(index) },
                             onLongPress = { onLongPress(index) },
                             modifier = Modifier.size(cell),
@@ -193,7 +190,6 @@ private fun Grid(
 private fun NonogramCell(
     game: NonogramGameState,
     index: Int,
-    showMistakes: Boolean,
     onTap: () -> Unit,
     onLongPress: () -> Unit,
     modifier: Modifier = Modifier,
@@ -201,19 +197,15 @@ private fun NonogramCell(
     val scheme = MaterialTheme.colorScheme
     val haptics = LocalHapticFeedback.current
     val mark = game.markAt(index)
-    val mistake = showMistakes && game.isMistake(index)
 
-    val background = when {
-        mistake -> scheme.error
-        mark == CellMark.FILLED -> scheme.onSurface
-        else -> Color.Transparent
-    }
+    // No mistake colour: a fill only ever lands on a cell that belongs to the picture, because a wrong
+    // guess is turned into a cross instead.
+    val background = if (mark == CellMark.FILLED) scheme.onSurface else Color.Transparent
 
-    val stateWord = when {
-        mistake -> stringResource(R.string.cd_mistake)
-        mark == CellMark.FILLED -> stringResource(R.string.cd_filled)
-        mark == CellMark.CROSSED -> stringResource(R.string.cd_crossed)
-        else -> stringResource(R.string.cd_blank)
+    val stateWord = when (mark) {
+        CellMark.FILLED -> stringResource(R.string.cd_filled)
+        CellMark.CROSSED -> stringResource(R.string.cd_crossed)
+        CellMark.BLANK -> stringResource(R.string.cd_blank)
     }
     val description = stringResource(
         R.string.cd_cell,
@@ -225,7 +217,7 @@ private fun NonogramCell(
     Box(
         modifier
             .background(background)
-            .pointerInput(index, game.isWon) {
+            .pointerInput(index, game.isOver, game.isLocked(index)) {
                 detectTapGestures(
                     onTap = { onTap() },
                     onLongPress = {

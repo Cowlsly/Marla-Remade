@@ -16,25 +16,37 @@ class NonogramGameStateTest {
         """
     )
 
-    private fun state(filled: Set<Int> = emptySet(), crossed: Set<Int> = emptySet()) =
-        NonogramGameState(
-            puzzle = cross,
-            filled = filled,
-            crossed = crossed,
-            mode = GameMode.CASUAL,
-            level = 1,
-        )
+    private fun state(
+        filled: Set<Int> = emptySet(),
+        crossed: Set<Int> = emptySet(),
+        revealedBlanks: Set<Int> = emptySet(),
+        hearts: Int = STARTING_HEARTS,
+    ) = NonogramGameState(
+        puzzle = cross,
+        filled = filled,
+        crossed = crossed,
+        revealedBlanks = revealedBlanks,
+        hearts = hearts,
+        mode = GameMode.CASUAL,
+        level = 1,
+    )
 
-    /** Indices of the cells that should be filled in [cross]. */
+    /** Indices of the cells that make up the picture. */
     private val answer = cross.solution.indices.filter { cross.solution[it] }.toSet()
 
+    /** A cell that is not part of the picture. */
+    private val blankCell = cross.solution.indices.first { !cross.solution[it] }
+
     @Test
-    fun aFreshBoardIsNotWon() {
-        assertFalse(state().isWon)
+    fun aFreshBoardIsNotWonAndHasEveryHeart() {
+        val s = state()
+        assertFalse(s.isWon)
+        assertFalse(s.isFailed)
+        assertEquals(STARTING_HEARTS, s.hearts)
     }
 
     @Test
-    fun fillingExactlyTheSolutionWins() {
+    fun fillingTheWholePictureWins() {
         assertTrue(state(filled = answer).isWon)
     }
 
@@ -42,7 +54,7 @@ class NonogramGameStateTest {
     fun crossesDoNotAffectTheWinCheck() {
         val blanks = cross.solution.indices.filterNot { cross.solution[it] }.toSet()
         assertTrue(state(filled = answer, crossed = blanks).isWon)
-        assertTrue(state(filled = answer, crossed = emptySet()).isWon)
+        assertTrue(state(filled = answer).isWon)
     }
 
     @Test
@@ -51,33 +63,55 @@ class NonogramGameStateTest {
     }
 
     @Test
+    fun runningOutOfHeartsFailsTheBoard() {
+        val s = state(hearts = 0)
+        assertTrue(s.isFailed)
+        assertTrue(s.isOver)
+        assertFalse(s.isWon)
+    }
+
+    @Test
+    fun finishingOnTheLastHeartIsAWinNotAFailure() {
+        // An invariant guard rather than a reachable position: winning must always beat failing when
+        // both conditions hold at once.
+        val s = state(filled = answer, hearts = 0)
+        assertTrue(s.isWon)
+        assertFalse(s.isFailed)
+    }
+
+    @Test
     fun anExtraFilledCellIsNotAWin() {
-        // Over-filling must not pass: the sets have to match, not merely cover the solution.
-        val extra = cross.solution.indices.first { !cross.solution[it] }
-        assertFalse(state(filled = answer + extra).isWon)
+        // Fills should never land outside the picture, but a board restored from older progress could
+        // carry one, and the size comparison alone would wrongly call that finished.
+        assertFalse(state(filled = answer + blankCell).isWon)
     }
 
     @Test
-    fun aWrongFillIsReportedAsAMistake() {
-        val wrong = cross.solution.indices.first { !cross.solution[it] }
-        val s = state(filled = setOf(wrong))
-        assertTrue(s.isMistake(wrong))
-        assertTrue(s.hasMistake)
+    fun aRevealedBlankDrawsAsACrossButIsLocked() {
+        val s = state(revealedBlanks = setOf(blankCell))
+        assertEquals(CellMark.CROSSED, s.markAt(blankCell))
+        assertTrue(s.isLocked(blankCell), "a cell the game revealed cannot be charged for twice")
     }
 
     @Test
-    fun aCorrectFillIsNotAMistake() {
-        val right = answer.first()
-        val s = state(filled = setOf(right))
-        assertFalse(s.isMistake(right))
-        assertFalse(s.hasMistake)
+    fun aPlayerNoteIsNotLocked() {
+        // Notes stay reversible; only what the game has settled is locked.
+        val s = state(crossed = setOf(blankCell))
+        assertEquals(CellMark.CROSSED, s.markAt(blankCell))
+        assertFalse(s.isLocked(blankCell))
     }
 
     @Test
-    fun aCrossedBlankIsNeverAMistake() {
-        // Crosses are bookkeeping; being wrong about one is not the same as painting a wrong cell.
-        val s = state(crossed = answer)
-        assertFalse(s.hasMistake)
+    fun aCorrectFillIsLocked() {
+        val filledCell = answer.first()
+        assertTrue(state(filled = setOf(filledCell)).isLocked(filledCell))
+    }
+
+    @Test
+    fun belongsToPictureIdentifiesWhichTapsAreFree() {
+        // This is what the ViewModel judges a tap against, so it decides where hearts are spent.
+        for (index in answer) assertTrue(state().belongsToPicture(index), "cell $index")
+        assertFalse(state().belongsToPicture(blankCell))
     }
 
     @Test

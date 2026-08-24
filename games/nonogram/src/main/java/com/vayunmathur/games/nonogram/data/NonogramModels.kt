@@ -19,43 +19,67 @@ enum class GameMode { CASUAL, DAILY }
  */
 enum class CellMark { BLANK, FILLED, CROSSED }
 
+/** Hearts a level starts with. Three wrong guesses and the board has to be retried. */
+const val STARTING_HEARTS = 3
+
 /**
  * A puzzle plus the player's work on it.
  *
- * [filled] and [crossed] are disjoint sets of cell indices: marking a cell one way clears the other,
- * because a cell cannot be both. Storing them as sets rather than a per-cell list keeps the DataStore
- * write small — only the cells actually touched are persisted.
+ * The three cell sets are disjoint and mean different things:
+ *  - [filled] is part of the picture. A fill only ever lands on a cell that belongs, so this is always
+ *    a subset of the solution and there is no "wrong cell" state to draw.
+ *  - [crossed] is the player's own note that a cell looks empty. Free to place and to take back, and
+ *    never checked against the solution — being wrong in a note is not a guess worth punishing.
+ *  - [revealedBlanks] is a cell the game has *told* the player is empty, after a wrong guess cost a
+ *    heart. It draws the same as a cross but cannot be cleared, which is what stops the same cell
+ *    being charged for twice.
+ *
+ * Storing them as sets rather than per-cell lists keeps the DataStore write small — only the cells
+ * actually touched are persisted.
  */
 data class NonogramGameState(
     val puzzle: NonogramPuzzle,
     val filled: Set<Int>,
     val crossed: Set<Int>,
+    val revealedBlanks: Set<Int>,
+    val hearts: Int,
     val mode: GameMode,
     val level: Int,
     val elapsedSeconds: Int = 0,
 ) {
     val size: Int get() = puzzle.size
 
-    fun markAt(index: Int): CellMark = when (index) {
-        in filled -> CellMark.FILLED
-        in crossed -> CellMark.CROSSED
+    fun markAt(index: Int): CellMark = when {
+        index in filled -> CellMark.FILLED
+        index in crossed || index in revealedBlanks -> CellMark.CROSSED
         else -> CellMark.BLANK
     }
 
     /**
-     * Won when the filled cells are exactly the solution's.
+     * Whether [index] is settled and no longer takes input.
      *
-     * Crosses are ignored, and an over-filled grid does not count — the sets must match, not merely
-     * cover.
+     * A correct fill and a revealed blank are both facts the game has confirmed, so re-tapping either
+     * does nothing rather than undoing them.
+     */
+    fun isLocked(index: Int): Boolean = index in filled || index in revealedBlanks
+
+    /**
+     * Won when every cell of the picture has been filled in.
+     *
+     * The subset check is belt-and-braces: [filled] should never hold a cell outside the picture, but
+     * a size comparison alone would silently accept a board restored from progress that predates that
+     * guarantee.
      */
     val isWon: Boolean
-        get() = filled.size == puzzle.filledCount &&
-            filled.all { puzzle.solution[it] }
+        get() = filled.size == puzzle.filledCount && filled.all { puzzle.solution[it] }
 
-    /** Cells the player filled that should be blank, so the board can point out a wrong guess. */
-    fun isMistake(index: Int): Boolean = index in filled && !puzzle.solution[index]
+    /** Failed once the hearts run out, unless the last guess also finished the picture. */
+    val isFailed: Boolean get() = hearts <= 0 && !isWon
 
-    val hasMistake: Boolean get() = filled.any { !puzzle.solution[it] }
+    val isOver: Boolean get() = isWon || isFailed
+
+    /** Whether [index] belongs to the picture, which is what a tap on it is judged against. */
+    fun belongsToPicture(index: Int): Boolean = puzzle.solution[index]
 }
 
 /**

@@ -3,12 +3,12 @@ package com.vayunmathur.games.nonogram.platform
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.games.nonogram.data.CellMark
 import com.vayunmathur.games.nonogram.data.DAILY_SIZE
 import com.vayunmathur.games.nonogram.data.GameMode
 import com.vayunmathur.games.nonogram.data.NonogramDataStore
 import com.vayunmathur.games.nonogram.data.NonogramGameState
 import com.vayunmathur.games.nonogram.data.NonogramPuzzle
+import com.vayunmathur.games.nonogram.data.STARTING_HEARTS
 import com.vayunmathur.games.nonogram.data.sizeForLevel
 import com.vayunmathur.games.nonogram.domain.NonogramGenerator
 import com.vayunmathur.library.util.AchievementsManager
@@ -75,9 +75,8 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
             combine(
                 dataStore.gameMode,
                 dataStore.currentLevel,
-                dataStore.showMistakes,
                 dailyStore.currentStreak,
-            ) { mode, level, showMistakes, streak -> Session(mode, level, showMistakes, streak) }
+            ) { mode, level, streak -> Session(mode, level, streak) }
                 .collectLatest { session -> load(session) }
         }
     }
@@ -86,7 +85,6 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
     private data class Session(
         val mode: GameMode,
         val level: Int,
-        val showMistakes: Boolean,
         val streak: Long,
     )
 
@@ -98,7 +96,6 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
         _uiState.value = _uiState.value.copy(
             mode = session.mode,
             level = session.level,
-            showMistakes = session.showMistakes,
             dailyStreak = session.streak,
             generating = true,
             generationFailed = false,
@@ -133,55 +130,86 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
         val daily = session.mode == GameMode.DAILY
         val filledFlow = if (daily) dataStore.dailyFilledCells else dataStore.filledCells
         val crossedFlow = if (daily) dataStore.dailyCrossedCells else dataStore.crossedCells
+        val revealedFlow = if (daily) dataStore.dailyRevealedBlanks else dataStore.revealedBlanks
+        val heartsFlow = if (daily) dataStore.dailyHearts else dataStore.hearts
 
-        combine(filledFlow, crossedFlow, dataStore.dailyDay, dailyStore.lastCompletedDayFlow) {
-            filled, crossed, storedDay, lastCompleted ->
+        // Two stages because the typed `combine` overloads stop at five flows.
+        val boardFlow = combine(filledFlow, crossedFlow, revealedFlow, heartsFlow) {
+            filled, crossed, revealed, hearts ->
+            Marks(filled, crossed, revealed, hearts, dailyDone = false)
+        }
+
+        combine(boardFlow, dataStore.dailyDay, dailyStore.lastCompletedDayFlow) {
+            marks, storedDay, lastCompleted ->
+            // Anything stored against a different day is yesterday's work and must not be shown.
             val stale = daily && storedDay != day
-            Triple(
-                if (stale) emptySet() else filled,
-                if (stale) emptySet() else crossed,
-                lastCompleted == day,
-            )
-        }.collectLatest { (filled, crossed, dailyDone) ->
+            if (stale) {
+                Marks(emptySet(), emptySet(), emptySet(), STARTING_HEARTS, lastCompleted == day)
+            } else {
+                marks.copy(dailyDone = lastCompleted == day)
+            }
+        }.collectLatest { marks ->
             val game = NonogramGameState(
                 puzzle = puzzle,
-                filled = filled,
-                crossed = crossed,
+                filled = marks.filled,
+                crossed = marks.crossed,
+                revealedBlanks = marks.revealed,
+                hearts = marks.hearts,
                 mode = session.mode,
                 level = session.level,
             )
             _uiState.value = _uiState.value.copy(
                 game = game,
                 generating = false,
-                dailyDone = dailyDone,
+                dailyDone = marks.dailyDone,
             )
             if (game.isWon) onWin(game, daily, day)
         }
     }
 
+    private data class Marks(
+        val filled: Set<Int>,
+        val crossed: Set<Int>,
+        val revealed: Set<Int>,
+        val hearts: Int,
+        val dailyDone: Boolean,
+    )
+
+    /**
+     * Tap: fills a cell that belongs to the picture, or spends a heart on one that does not.
+     *
+     * A wrong guess is recorded as a *revealed* blank, not as an ordinary note, so it cannot be cleared
+     * and then tapped again — one wrong cell costs exactly one heart however many times it is prodded.
+     * Correct fills are locked for the same reason.
+     *
+     * The player's own notes stay freely reversible; only a cell the game has settled is locked.
+     */
     override fun tapCell(index: Int) {
         val game = _uiState.value.game ?: return
-        if (game.isWon) return
-        // Blank -> filled -> crossed -> blank, so one finger can reach every state.
-        val next = when (game.markAt(index)) {
-            CellMark.BLANK -> CellMark.FILLED
-            CellMark.FILLED -> CellMark.CROSSED
-            CellMark.CROSSED -> CellMark.BLANK
+        if (game.isOver || game.isLocked(index)) return
+
+        val daily = game.mode == GameMode.DAILY
+        viewModelScope.launch {
+            if (game.belongsToPicture(index)) {
+                dataStore.fillCell(index, daily)
+            } else {
+                dataStore.revealBlank(index, daily)
+            }
         }
-        setMark(index, next)
     }
 
+    /**
+     * Long press: crosses a cell out as a note, or takes the note back.
+     *
+     * Free either way, even on a cell that does turn out to belong to the picture: a cross is the
+     * player's own working, and being wrong in a note is not a guess the game should punish.
+     */
     override fun crossCell(index: Int) {
         val game = _uiState.value.game ?: return
-        if (game.isWon) return
-        val next =
-            if (game.markAt(index) == CellMark.CROSSED) CellMark.BLANK else CellMark.CROSSED
-        setMark(index, next)
-    }
-
-    private fun setMark(index: Int, mark: CellMark) {
-        val daily = _uiState.value.mode == GameMode.DAILY
-        viewModelScope.launch { dataStore.setMark(index, mark, daily) }
+        if (game.isOver || game.isLocked(index)) return
+        val daily = game.mode == GameMode.DAILY
+        val alreadyNoted = index in game.crossed
+        viewModelScope.launch { dataStore.setNote(index, !alreadyNoted, daily) }
     }
 
     override fun nextLevel() {
@@ -197,10 +225,6 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
 
     override fun setGameMode(mode: GameMode) {
         viewModelScope.launch { dataStore.setGameMode(mode) }
-    }
-
-    override fun setShowMistakes(enabled: Boolean) {
-        viewModelScope.launch { dataStore.setShowMistakes(enabled) }
     }
 
     override fun setReminderEnabled(enabled: Boolean) {
@@ -250,7 +274,7 @@ class NonogramViewModel(application: Application) : AndroidViewModel(application
             val manager = achievementsManager
             manager.onAchievementUnlocked("first_puzzle")
             if (game.size >= BIG_PICTURE_SIZE) manager.onAchievementUnlocked("big_picture")
-            if (!game.hasMistake) manager.onAchievementUnlocked("no_mistakes")
+            if (game.hearts == STARTING_HEARTS) manager.onAchievementUnlocked("no_mistakes")
             manager.onProgressUpdated("puzzles_10", total)
             manager.onProgressUpdated("puzzles_50", total)
 
