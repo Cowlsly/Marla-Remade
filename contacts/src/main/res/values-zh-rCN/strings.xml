@@ -102,4 +102,10 @@
     <string name="sim_limited_fields_hint">SIM 卡联系人仅存储名称、电话号码和电子邮件地址。</string>
     <string name="save_failed">保存失败</string>
     <string name="importing">正在导入…</string>
+    <string name="ringtone">铃声</string>
+    <string name="select_ringtone">选择铃声</string>
+    <string name="no_contacts_yet">尚无联系人</string>
+    <string name="no_contacts_yet_message">点按添加按钮创建您的第一个联系人。</string>
+    <string name="no_groups_yet">尚无群组</string>
+    <string name="no_groups_yet_message">点按添加按钮将联系人分组。</string>
 </resources>
