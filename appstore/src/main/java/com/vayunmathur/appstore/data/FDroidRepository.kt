@@ -1,6 +1,7 @@
 package com.vayunmathur.appstore.data
 
 import android.content.Context
+import android.os.Build
 import android.util.JsonReader
 import android.util.JsonToken
 import com.vayunmathur.appstore.data.security.ApkCertificates
@@ -178,15 +179,7 @@ object FDroidRepository {
         var featureGraphic: String? = null
         var screenshots: List<String> = emptyList()
         var antiFeatures: List<String> = emptyList()
-        var latestAdded: Long = -1L
-        var latestFileName: String? = null
-        var latestSize: Long = 0L
-        var latestSha256: String? = null
-        var latestSigners: List<String> = emptyList()
-        var latestVersionName: String? = null
-        var latestVersionCode: Long = 0L
-        var latestTargetSdk: Int? = null
-        var latestWhatsNew: String? = null
+        val versions = mutableListOf<VersionCandidate>()
 
         reader.beginObject()
         while (reader.hasNext()) {
@@ -238,6 +231,7 @@ object FDroidRepository {
                             var vVersionName: String? = null
                             var vVersionCode: Long = 0L
                             var vTargetSdk: Int? = null
+                            var vNativeCode: List<String> = emptyList()
                             var vWhatsNew: String? = null
                             while (reader.hasNext()) {
                                 when (reader.nextName()) {
@@ -270,6 +264,9 @@ object FDroidRepository {
                                                     }
                                                     reader.endObject()
                                                 }
+                                                // The ABIs this APK carries native libraries for.
+                                                // Absent means it has none and runs anywhere.
+                                                "nativecode" -> vNativeCode = readStringArray(reader)
                                                 // signer.sha256 is the list of signing-certificate
                                                 // fingerprints this APK is expected to carry.
                                                 "signer" -> {
@@ -292,18 +289,20 @@ object FDroidRepository {
                                 }
                             }
                             reader.endObject()
-                            // Newest version always wins; reproducibility is recorded as a
-                            // badge below, not used to drop older-but-reproduced builds.
-                            if (vAdded >= latestAdded) {
-                                latestAdded = vAdded
-                                latestFileName = vFileName
-                                latestSize = vFileSize
-                                latestSha256 = vFileSha256
-                                latestSigners = vSigners
-                                latestVersionName = vVersionName
-                                latestVersionCode = vVersionCode
-                                latestTargetSdk = vTargetSdk
-                                latestWhatsNew = vWhatsNew
+                            val fileName = vFileName
+                            if (fileName != null) {
+                                versions += VersionCandidate(
+                                    added = vAdded,
+                                    fileName = fileName,
+                                    size = vFileSize,
+                                    sha256 = vFileSha256,
+                                    signers = vSigners,
+                                    versionName = vVersionName,
+                                    versionCode = vVersionCode,
+                                    targetSdk = vTargetSdk,
+                                    nativeCode = vNativeCode,
+                                    whatsNew = vWhatsNew,
+                                )
                             }
                         } catch (_: Exception) {
                             try { reader.endObject() } catch (_: Exception) {}
@@ -316,18 +315,18 @@ object FDroidRepository {
         }
         reader.endObject()
 
-        // No usable version at all — drop the package rather than advertising an entry
+        // Nothing this device can run — drop the package rather than advertising an entry
         // that has no installable APK behind it.
-        if (latestAdded < 0L || latestFileName == null) return null
+        val latest = selectVersion(versions, deviceAbis) ?: return null
 
         // index-v2 file names are repo-absolute ("/com.example_12.apk").
-        val apkUrl = latestFileName.let { repoBase + "/" + it.trimStart('/') }
+        val apkUrl = repoBase + "/" + latest.fileName.trimStart('/')
         return UnifiedApp(
             packageName = packageName,
             source = source,
-            expectedSigners = latestSigners,
-            apkSha256 = latestSha256,
-            reproducible = isReproducible(packageName, latestVersionCode),
+            expectedSigners = latest.signers,
+            apkSha256 = latest.sha256,
+            reproducible = isReproducible(packageName, latest.versionCode),
             name = metaName ?: packageName.substringAfterLast('.'),
             summary = metaSummary ?: "",
             description = metaDesc ?: "",
@@ -337,19 +336,81 @@ object FDroidRepository {
             antiFeatures = antiFeatures,
             author = author,
             categories = categories,
-            versionName = latestVersionName,
-            versionCode = latestVersionCode,
-            sizeBytes = latestSize,
+            versionName = latest.versionName,
+            versionCode = latest.versionCode,
+            sizeBytes = latest.size,
             apkUrl = apkUrl,
-            targetSdk = latestTargetSdk,
+            targetSdk = latest.targetSdk,
             license = license,
             website = website,
             sourceCode = sourceCode,
-            whatsNew = latestWhatsNew,
+            whatsNew = latest.whatsNew,
             addedTimestamp = added,
             lastUpdated = if (lastUpdated != 0L) lastUpdated else added,
             repoUrl = repoBase
         )
+    }
+
+    // ---- Version selection ----
+
+    /**
+     * One entry of a package's `versions` map.
+     *
+     * Held as a list rather than folded into a running maximum as it is read, because
+     * F-Droid publishes some apps as one APK per architecture under a single release, and
+     * those all share the same [added] timestamp: which of them is installable here can
+     * only be decided once every variant has been seen.
+     */
+    internal data class VersionCandidate(
+        val added: Long,
+        val fileName: String,
+        val size: Long = 0L,
+        val sha256: String? = null,
+        val signers: List<String> = emptyList(),
+        val versionName: String? = null,
+        val versionCode: Long = 0L,
+        val targetSdk: Int? = null,
+        val nativeCode: List<String> = emptyList(),
+        val whatsNew: String? = null,
+    )
+
+    private val deviceAbis: List<String> by lazy { Build.SUPPORTED_ABIS?.toList().orEmpty() }
+
+    /**
+     * Pick the one APK to advertise for a package, newest release first.
+     *
+     * A release split per architecture used to resolve to whichever variant happened to be
+     * enumerated last, so an arm64 phone could be handed the x86_64 build. Everything before
+     * the install then passed — the hash and signer come from the same chosen entry — and
+     * Android rejected it only at the very end, after the download and the system prompt,
+     * which read as the install doing nothing at all.
+     *
+     * Variants this device cannot run are dropped outright, so a package whose newest release
+     * has no build for this architecture falls back to an older one that does rather than
+     * disappearing.
+     */
+    internal fun selectVersion(
+        candidates: List<VersionCandidate>,
+        deviceAbis: List<String>,
+    ): VersionCandidate? =
+        candidates
+            .mapNotNull { candidate -> abiRank(candidate.nativeCode, deviceAbis)?.let { candidate to it } }
+            .minWithOrNull(
+                compareByDescending<Pair<VersionCandidate, Int>> { it.first.added }
+                    .thenBy { it.second }
+                    .thenByDescending { it.first.versionCode }
+            )
+            ?.first
+
+    /**
+     * How well an APK's `nativecode` fits this device — lower is better, null means it cannot
+     * run here at all. An APK with no native code is architecture-independent so it always
+     * fits, but it ranks behind any variant built for one of the device's own ABIs, matching
+     * how Android itself prefers the most specific available.
+     */
+    private fun abiRank(nativeCode: List<String>, deviceAbis: List<String>): Int? {
+        if (nativeCode.isEmpty()) return deviceAbis.size
+        return nativeCode.mapNotNull { abi -> deviceAbis.indexOf(abi).takeIf { it >= 0 } }.minOrNull()
     }
 
     // ---- Helpers ----
