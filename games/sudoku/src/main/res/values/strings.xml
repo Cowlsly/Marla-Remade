@@ -51,6 +51,10 @@
 
     <!-- GameBoardScreen: Content description of a single grid cell. %1$d = row number starting at 1, e.g. 3. %2$d = column number starting at 1, e.g. 7. %3$s = the digit showing or the word for empty, e.g. 5 -->
     <string name="cd_cell">Row <xliff:g id="row" example="3">%1$d</xliff:g>, column <xliff:g id="column" example="7">%2$d</xliff:g>, <xliff:g id="value" example="5">%3$s</xliff:g></string>
+    <!-- NumberPad: Content description of a key that writes a digit. %1$s = the digit's symbol, e.g. 7 or B -->
+    <string name="cd_digit_key">Enter <xliff:g id="digit" example="7">%1$s</xliff:g></string>
+    <!-- NumberPad: Content description of a key that pencils a digit in, while notes mode is on. %1$s = the digit's symbol, e.g. 7 or B -->
+    <string name="cd_note_key">Note <xliff:g id="digit" example="7">%1$s</xliff:g></string>
     <!-- GameBoardScreen: Spoken in place of a digit for a cell with nothing in it. Adjective -->
     <string name="cd_empty">empty</string>
 </resources>
