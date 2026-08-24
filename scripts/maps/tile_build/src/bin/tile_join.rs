@@ -15,7 +15,7 @@
 
 use std::process::ExitCode;
 use tile_build::pmtiles::Archive;
-use tile_build::tiling::merge_archives_with;
+use tile_build::tiling::merge_archives_to;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
@@ -83,21 +83,27 @@ fn main() -> ExitCode {
     }
 
     let refs: Vec<&Archive> = archives.iter().collect();
-    let merged = match merge_archives_with(&refs, true) {
-        Ok(m) => m,
+    // Scratch beside the output, because the last step copies the data section across
+    // and a cross-filesystem copy would be needlessly slow.
+    let scratch = format!("{out}.tiledata");
+    if let Err(e) = merge_archives_to(&refs, &out, &scratch, true) {
+        eprintln!("tile_join: {e}");
+        let _ = std::fs::remove_file(&scratch);
+        return ExitCode::FAILURE;
+    }
+    // Re-opened rather than kept in memory: the whole point is never to hold the
+    // finished archive, and reading the header back is the check that matters.
+    let written = match std::fs::read(&out) {
+        Ok(b) => b,
         Err(e) => {
-            eprintln!("tile_join: {e}");
+            eprintln!("tile_join: cannot re-read {out}: {e}");
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = std::fs::write(&out, &merged) {
-        eprintln!("tile_join: cannot write {out}: {e}");
-        return ExitCode::FAILURE;
-    }
-    match Archive::parse(&merged) {
+    match Archive::parse(&written) {
         Ok(a) => eprintln!(
             "tile_join: wrote {out} ({:.1} MiB): z{}-{}, {} addressed tile(s), {} distinct body(ies)",
-            merged.len() as f64 / 1_048_576.0,
+            written.len() as f64 / 1_048_576.0,
             a.header.min_zoom,
             a.header.max_zoom,
             a.header.addressed_tiles,

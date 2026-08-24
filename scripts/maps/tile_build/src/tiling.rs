@@ -11,6 +11,7 @@ use crate::geom::project;
 use crate::mvt::{self, Feature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
 use crate::pmtiles::{self, Archive, Builder};
 use crate::progress::Progress;
+use std::path::{Path, PathBuf};
 use crate::proto::Result;
 use std::collections::HashMap;
 
@@ -132,6 +133,113 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
     )
 }
 
+/// Merge several archives straight to `out`, holding no archive in memory.
+///
+/// The in-memory [`merge_archives`] is fine for a metro extract and cannot do a planet
+/// overlay join: it copies every input tile into a `HashMap`, then [`Builder`] keeps
+/// three more copies of every body. Measured on the real 7-layer overlay merge — 36.8 M
+/// tiles, 17 GB of inputs — that is roughly 76 GB and gets killed.
+///
+/// This keeps only a `(tile_id, offset, length)` row per input tile (12 bytes) and one
+/// tile body at a time, so peak memory is set by the tile COUNT: about 1.5 GB for that
+/// same merge, versus 76 GB.
+///
+/// Inputs are still read into memory by the CALLER, because a PMTiles body can only be
+/// found through its directory and the directories live in the same file. That is the
+/// remaining ceiling and it is the size of the inputs, not a multiple of it.
+pub fn merge_archives_to(
+    inputs: &[&Archive],
+    out: impl AsRef<Path>,
+    scratch: impl Into<PathBuf>,
+    progress: bool,
+) -> Result<()> {
+    let mut min_zoom = u8::MAX;
+    let mut max_zoom = 0u8;
+    let mut bounds: Option<(i32, i32, i32, i32)> = None;
+    for a in inputs {
+        let h = &a.header;
+        min_zoom = min_zoom.min(h.min_zoom);
+        max_zoom = max_zoom.max(h.max_zoom);
+        bounds = Some(match bounds {
+            None => (h.min_lon_e7, h.min_lat_e7, h.max_lon_e7, h.max_lat_e7),
+            Some((w, s, e, n)) => (
+                w.min(h.min_lon_e7),
+                s.min(h.min_lat_e7),
+                e.max(h.max_lon_e7),
+                n.max(h.max_lat_e7),
+            ),
+        });
+    }
+
+    // One row per input tile, sorted by (tile_id, input index) so a tile's sources come
+    // out in input order -- which is what makes a later input win a layer collision.
+    let mut rows: Vec<(u64, u32, u32, u32)> = Vec::new();
+    for (i, a) in inputs.iter().enumerate() {
+        for (id, off, len) in a.tile_offsets()? {
+            rows.push((id, i as u32, off, len));
+        }
+    }
+    rows.sort_unstable_by_key(|(id, i, _, _)| (*id, *i));
+
+    let mut b = pmtiles::StreamBuilder::new(scratch)?;
+    b.min_zoom = if min_zoom == u8::MAX { 0 } else { min_zoom };
+    b.max_zoom = max_zoom;
+    b.center_zoom = b.min_zoom;
+    if let Some((w, s, e, n)) = bounds {
+        b.min_lon_e7 = w;
+        b.min_lat_e7 = s;
+        b.max_lon_e7 = e;
+        b.max_lat_e7 = n;
+        b.center_lon_e7 = midpoint_e7(w, e);
+        b.center_lat_e7 = midpoint_e7(s, n);
+    }
+    if !inputs.is_empty() {
+        b.metadata = merge_metadata(inputs);
+    }
+
+    let mut bar = Progress::new("merging".to_string(), rows.len(), TILES, progress);
+    let mut k = 0usize;
+    while k < rows.len() {
+        let id = rows[k].0;
+        let mut j = k;
+        while j < rows.len() && rows[j].0 == id {
+            j += 1;
+        }
+        let group = &rows[k..j];
+        for _ in group {
+            bar.tick(TILES);
+        }
+
+        if let [(_, i, off, len)] = group {
+            let src = inputs[*i as usize];
+            if src.header.tile_compression == pmtiles::COMPRESSION_GZIP {
+                // Sole owner, already gzip: the producer's bytes go straight out.
+                b.add_tile_raw(id, src.body_at(*off, *len)?)?;
+                k = j;
+                continue;
+            }
+        }
+        let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(group.len());
+        for (_, i, off, len) in group {
+            let src = inputs[*i as usize];
+            let raw = src.body_at(*off, *len)?;
+            decoded.push(match src.header.tile_compression {
+                pmtiles::COMPRESSION_NONE => raw.to_vec(),
+                _ => crate::gz::decompress(raw)?,
+            });
+        }
+        let merged = if decoded.len() == 1 {
+            decoded.pop().unwrap_or_default()
+        } else {
+            merge_tiles(&decoded)?
+        };
+        b.add_tile_raw(id, &crate::gz::compress(&merged))?;
+        k = j;
+    }
+    bar.finish(TILES);
+    b.finish(out)
+}
+
 /// Merge several tilesets into one, unioning each tile's layers.
 ///
 /// This is the `tile-join` replacement. Later inputs win a name collision, so a
@@ -153,12 +261,12 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 /// are most of their tile sets — and deflate at [`crate::gz`]'s archive level is by
 /// far the most expensive thing this function can do. It also keeps peak memory down,
 /// since those tiles stay compressed while they wait.
+/// Merge several tilesets into one IN MEMORY, returning the archive bytes.
+///
+/// Kept as the reference implementation and the oracle the streaming
+/// [`merge_archives_to`] is pinned against byte for byte. Use that one for anything
+/// large: this holds several copies of every tile body and cannot do a planet join.
 pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
-    merge_archives_with(inputs, false)
-}
-
-/// As [`merge_archives`], with a progress bar over the write loop when `progress`.
-pub fn merge_archives_with(inputs: &[&Archive], progress: bool) -> Result<Vec<u8>> {
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0u8;
     // (west, south, east, north), in e7 degrees.
@@ -208,9 +316,7 @@ pub fn merge_archives_with(inputs: &[&Archive], progress: bool) -> Result<Vec<u8
 
     let mut ids: Vec<u64> = collected.keys().copied().collect();
     ids.sort_unstable();
-    let mut bar = Progress::new("merging".to_string(), ids.len(), TILES, progress);
     for id in ids {
-        bar.tick(TILES);
         let bodies = &collected[&id];
         // Sole owner, already in the compression the builder writes: hand the
         // producer's bytes straight through. No inflate, no deflate, and the tile is
@@ -234,7 +340,6 @@ pub fn merge_archives_with(inputs: &[&Archive], progress: bool) -> Result<Vec<u8
         };
         b.add_tile_raw(id, crate::gz::compress(&merged));
     }
-    bar.finish(TILES);
     b.build()
 }
 
@@ -967,5 +1072,70 @@ mod tests {
         let mut names = t.layer_names();
         names.sort_unstable();
         assert_eq!(names, vec!["transit_stops", "water"], "both layers present");
+    }
+
+    /// The streaming join must produce EXACTLY what the in-memory one does.
+    ///
+    /// This is the test the rewrite lives or dies by. `merge_archives` is covered by
+    /// every test above, so pinning the two byte for byte inherits all of it — the
+    /// header, the deduplication, the run coalescing, the directory split and the tile
+    /// bodies — without restating any of it.
+    #[test]
+    fn the_streaming_join_is_byte_identical_to_the_in_memory_one() {
+        let dir = std::env::temp_dir().join(format!("tb_stream_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Overlapping and disjoint tiles, several zooms, and a repeated body so the
+        // deduplication and run coalescing paths are both exercised.
+        let a = build_point_archive(
+            "safety",
+            &[pt(-122.42, 37.77, "a"), pt(-74.0, 40.7, "b")],
+            10,
+            12,
+        )
+        .unwrap();
+        let b = build_point_archive(
+            "ma_pois",
+            &[pt(-122.42, 37.77, "c"), pt(2.35, 48.85, "d")],
+            11,
+            13,
+        )
+        .unwrap();
+        let (aa, ba) = (Archive::parse(&a).unwrap(), Archive::parse(&b).unwrap());
+
+        let in_memory = merge_archives(&[&aa, &ba]).unwrap();
+
+        let out = dir.join("streamed.pmtiles");
+        merge_archives_to(&[&aa, &ba], &out, dir.join("scratch.bin"), false).unwrap();
+        let streamed = std::fs::read(&out).unwrap();
+
+        assert_eq!(
+            streamed.len(),
+            in_memory.len(),
+            "streamed {} bytes, in-memory {}",
+            streamed.len(),
+            in_memory.len()
+        );
+        assert!(streamed == in_memory, "the two archives differ byte for byte");
+
+        // The scratch file must not survive a successful run.
+        assert!(
+            !dir.join("scratch.bin").exists(),
+            "the scratch file was left behind"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Ids must ascend for run coalescing and for `clustered` to be honest, so the
+    /// writer refuses rather than quietly emitting an archive readers will mis-seek.
+    #[test]
+    fn the_streaming_writer_rejects_out_of_order_ids() {
+        let dir = std::env::temp_dir().join(format!("tb_order_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut b = pmtiles::StreamBuilder::new(dir.join("s.bin")).unwrap();
+        b.add_tile_raw(10, b"x").unwrap();
+        assert!(b.add_tile_raw(9, b"y").is_err(), "9 after 10 must fail");
+        assert!(b.add_tile_raw(10, b"y").is_err(), "a repeat must fail too");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
