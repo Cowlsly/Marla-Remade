@@ -89,6 +89,22 @@ class FreeHeightSheetState(private val initialValue: SheetValue) {
     internal val offsetPx: Float
         get() = offset.value
 
+    /**
+     * How far above its resting place map chrome must sit to clear the sheet, in
+     * pixels. `0` while the sheet is hidden.
+     *
+     * **This is a height, not a distance from the top of the window** — the opposite
+     * of Material's `SheetState.requireOffset`, so a caller offsets by the *negation*
+     * of it (`IntOffset(0, -lift)`) and needs no baseline to difference against.
+     *
+     * There is also nothing to sample a baseline from: this sheet has no anchors, so
+     * a fling rests wherever the decay stops and there is no settled "peek" position.
+     * The value is read inside a layout lambda rather than observed, so chrome tracks
+     * the sheet every frame without recomposing.
+     */
+    val liftPx: Float
+        get() = offset.value
+
     internal val expandedHeightPx: Float
         get() = expandedPx
 

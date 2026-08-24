@@ -49,6 +49,7 @@ import com.vayunmathur.maps.util.PoiIndex
 import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.visibleBoundsOrWorld
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -299,50 +300,50 @@ fun MapPage(
                     )
                 }
 
-                // Browse controls only: navigation owns its own, and a selected place hands the
-                // bottom half of the screen to the sheet.
-                if (browsing) {
-                    MapFabStack(
-                        zoom = camera.position.zoom,
-                        latitude = camera.position.target.latitude,
-                        bearing = camera.position.bearing,
-                        onResetNorth = {
-                            coroutineScope.launch {
-                                camera.animateTo(camera.position.copy(bearing = 0.0, tilt = 0.0))
+                // Browse controls, plus the layers button, which stays out while a place is
+                // selected and rides above the sheet — see [MapFabStack].
+                MapFabStack(
+                    zoom = camera.position.zoom,
+                    latitude = camera.position.target.latitude,
+                    bearing = camera.position.bearing,
+                    browsing = browsing,
+                    lift = { sheetState.liftPx.roundToInt() },
+                    onResetNorth = {
+                        coroutineScope.launch {
+                            camera.animateTo(camera.position.copy(bearing = 0.0, tilt = 0.0))
+                        }
+                    },
+                    onLayers = { chrome.show(MapOverlay.Layers) },
+                    onParking = {
+                        val spot = parkingSpot
+                        if (spot == null) {
+                            val position = userPosition
+                            if (position.latitude != 0.0 || position.longitude != 0.0) {
+                                parkingViewModel.saveParking(position.latitude, position.longitude)
                             }
-                        },
-                        onLayers = { chrome.show(MapOverlay.Layers) },
-                        onParking = {
-                            val spot = parkingSpot
-                            if (spot == null) {
-                                val position = userPosition
-                                if (position.latitude != 0.0 || position.longitude != 0.0) {
-                                    parkingViewModel.saveParking(position.latitude, position.longitude)
-                                }
-                            } else {
-                                coroutineScope.launch {
-                                    camera.animateTo(
-                                        camera.position.copy(
-                                            target = Position(spot.lon, spot.lat),
-                                            zoom = maxOf(camera.position.zoom, 15.0),
-                                        )
-                                    )
-                                }
-                                chrome.show(MapOverlay.Parking)
-                            }
-                        },
-                        onMyLocation = {
+                        } else {
                             coroutineScope.launch {
                                 camera.animateTo(
                                     camera.position.copy(
-                                        target = userPosition,
+                                        target = Position(spot.lon, spot.lat),
                                         zoom = maxOf(camera.position.zoom, 15.0),
                                     )
                                 )
                             }
-                        },
-                    )
-                }
+                            chrome.show(MapOverlay.Parking)
+                        }
+                    },
+                    onMyLocation = {
+                        coroutineScope.launch {
+                            camera.animateTo(
+                                camera.position.copy(
+                                    target = userPosition,
+                                    zoom = maxOf(camera.position.zoom, 15.0),
+                                )
+                            )
+                        }
+                    },
+                )
 
                 NavigationOverlay(
                     navState = navState,
