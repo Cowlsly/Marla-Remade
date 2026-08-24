@@ -59,6 +59,9 @@
     <string name="cast_mirror_no_common_codec">This phone can send %1$s and this TV can decode %2$s, but nothing they share works at this screen size.</string>
     <string name="cast_mirror_codec_demoted">%1$s did not work with this TV before, and there is no other codec you both support. Pair with this TV again to retry it.</string>
     <string name="cast_mirror_codec_config_failed">The TV could not be given the video settings it needed. The next attempt will use a different codec.</string>
+    <!-- The encoder started and then emitted nothing. Deliberately does not blame the codec: an
+         encoder that produces nothing and a source that draws nothing are indistinguishable. -->
+    <string name="cast_mirror_no_video_output">No video reached the TV. Try casting again.</string>
 
     <!-- Quick Settings tile -->
     <string name="cast_tile_label">Mirror screen</string>

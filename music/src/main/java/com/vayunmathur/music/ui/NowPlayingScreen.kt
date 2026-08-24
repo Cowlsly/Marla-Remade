@@ -10,7 +10,6 @@ import com.vayunmathur.music.platform.CastPlayback
 import com.vayunmathur.sdk.cast.CastClient
 import com.vayunmathur.sdk.cast.CastPickerContract
 import kotlinx.coroutines.launch
-import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.animation.Crossfade
 import androidx.compose.foundation.background
@@ -66,9 +65,12 @@ import com.vayunmathur.library.util.NavBackStack
 import com.vayunmathur.music.R
 import com.vayunmathur.music.Route
 import com.vayunmathur.music.platform.AlbumArt
+import com.vayunmathur.music.platform.Lyrics
 import com.vayunmathur.music.platform.MusicActions
 import com.vayunmathur.music.platform.NowPlayingUiState
 import com.vayunmathur.music.platform.PlaybackSource
+import com.vayunmathur.music.platform.classifyLyrics
+import com.vayunmathur.music.platform.currentLyricIndex
 import com.vayunmathur.music.platform.formatDuration
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -81,12 +83,10 @@ fun NowPlayingScreen(
     // UI States
     var showLyrics by remember { mutableStateOf(false) }
     // Lyrics are read from the playing file's embedded tags (see EmbeddedLyrics); when a
-    // track carries none this is empty and the overlay shows "no lyrics" gracefully.
-    val rawLyrics = state.lyrics
-
-    val parsedLyrics = remember(rawLyrics) { parseLyrics(rawLyrics) }
-    val currentLyricIndex = remember(parsedLyrics, state.positionMs) {
-        parsedLyrics.indexOfLast { it.timestamp <= state.positionMs }
+    // track carries none this is Lyrics.None and the overlay says so gracefully.
+    val lyrics = remember(state.lyrics) { classifyLyrics(state.lyrics) }
+    val currentIndex = remember(lyrics, state.positionMs) {
+        (lyrics as? Lyrics.Timed)?.let { currentLyricIndex(it.lines, state.positionMs) } ?: -1
     }
 
     // RAW SCAFFOLD EXCEPTION: nested now-playing scaffold
@@ -140,7 +140,7 @@ fun NowPlayingScreen(
             ) {
                 Crossfade(targetState = showLyrics, label = "LyricsToggle") { isShowingLyrics ->
                     if (isShowingLyrics) {
-                        LyricsView(parsedLyrics, currentLyricIndex)
+                        LyricsView(lyrics, currentIndex)
                     } else {
                         Card(
                             modifier = Modifier.fillMaxSize(),
@@ -314,32 +314,4 @@ private fun CastButton(state: NowPlayingUiState) {
             IconCast()
         }
     }
-}
-
-/** Parses LRC lyric content. Public so [LyricsView] tests can reuse it if needed. */
-fun parseLyrics(lrcContent: String): List<LyricLine> {
-    val lines = mutableListOf<LyricLine>()
-    // Regex to match [mm:ss.xx] text
-    val lyricPattern = Regex("\\[(\\d{2}):(\\d{2})\\.(\\d{2,3})](.*)")
-
-    lrcContent.lines().forEach { line ->
-        try {
-            val match = lyricPattern.find(line)
-            if (match != null) {
-                val min = match.groupValues[1].toLong()
-                val sec = match.groupValues[2].toLong()
-                val ms = match.groupValues[3].toLong()
-                val text = match.groupValues[4].trim()
-
-                // Convert to total milliseconds
-                val timestamp = (min * 60 * 1000) + (sec * 1000) + (if (match.groupValues[3].length == 2) ms * 10 else ms)
-                if (text.isNotEmpty()) {
-                    lines.add(LyricLine(timestamp, text))
-                }
-            }
-        } catch (e: Exception) {
-            Log.e("SongScreen", "Error parsing lyric line: $line", e)
-        }
-    }
-    return lines.sortedBy { it.timestamp }
 }

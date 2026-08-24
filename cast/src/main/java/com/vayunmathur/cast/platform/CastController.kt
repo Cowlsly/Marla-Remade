@@ -25,6 +25,7 @@ import com.vayunmathur.cast.protocol.CodecNegotiation
 import com.vayunmathur.cast.protocol.CodecSelection
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.MediaResourceResolver
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.protocol.PING_INTERVAL_MS
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
 import com.vayunmathur.cast.protocol.PlayMedia
@@ -702,6 +703,17 @@ object CastController {
     }
 
     /**
+     * Tell the TV what the item it is playing actually is.
+     *
+     * Under [mutex] like [playMedia] and for the same reason. Silent with no session: this is
+     * enrichment, and a snapshot that arrives a moment after a cast ended has nothing to enrich.
+     */
+    fun setNowPlaying(nowPlaying: NowPlaying) {
+        val activeClient = client ?: return
+        scope.launch { mutex.withLock { activeClient.sendNowPlaying(nowPlaying) } }
+    }
+
+    /**
      * Ask the TV to do something, in a served session.
      *
      * Under [mutex] like [playMedia] and for the same reason: one socket, several writers. Silently
@@ -848,6 +860,8 @@ object CastController {
             MirrorStopReason.ReceiverGone -> context.getString(R.string.cast_mirror_receiver_gone)
             MirrorStopReason.CodecConfig ->
                 context.getString(R.string.cast_mirror_codec_config_failed)
+            MirrorStopReason.NoVideoOutput ->
+                context.getString(R.string.cast_mirror_no_video_output)
         }
         _mirrorPhase.value = MirrorPhase.Failed
         endContentSession(CastContract.REASON_FAILED)

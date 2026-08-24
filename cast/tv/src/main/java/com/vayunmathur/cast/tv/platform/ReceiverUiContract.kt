@@ -1,5 +1,6 @@
 package com.vayunmathur.cast.tv.platform
 
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.protocol.PlaybackState
 
 /** Where the receiver is, from the point of view of a screen. */
@@ -122,7 +123,57 @@ data class ReceiverUiState(
      * overlay that only exists when this is non-null cannot appear over a mirrored phone screen.
      */
     val playback: PlaybackSnapshot? = null,
-)
+    /**
+     * The last thing the phone said about what is playing, whichever track it describes.
+     *
+     * Beside [phase] for [playback]'s reason, and stored unconditionally rather than filtered on
+     * arrival - see [nowPlayingForCurrentItem], which is where it is actually decided whether this
+     * describes the audio coming out of the speakers.
+     */
+    val nowPlaying: NowPlaying? = null,
+    /**
+     * The resource the player was last told to play, or empty before anything.
+     *
+     * **Here rather than only on the player, because it is half of a comparison the UI makes.** The
+     * player's own copy is a plain field that nothing recomposes on; keeping it beside the snapshot
+     * means the two are read from one immutable object and can never be compared across a moment in
+     * which one of them changed.
+     */
+    val playingResourceId: String = "",
+    /**
+     * Where cover art for [nowPlaying] can be fetched from, while a served session is live.
+     *
+     * **In the state rather than a field of `ReceiverController`, because the screen reads it during
+     * composition** - and composition does not observe a plain field, so a null read at the moment the
+     * screen first mounts would be corrected only incidentally, the next time something else changed.
+     * Null is the whole of "there is nothing to fetch from": screen mirroring, or a session that has
+     * ended.
+     */
+    val artwork: ArtworkFetcher? = null,
+) {
+    /**
+     * The metadata for what is actually playing, or null.
+     *
+     * **The correlation gate for a served session, and it is load-bearing there.** The control channel
+     * is ordered but the phone's *producers* are not: a metadata job for one track can finish after
+     * the next track's `PLAY_MEDIA` has gone out. A receiver that drew whatever arrived last would
+     * paint the previous cover over this audio and never correct itself, because nothing further is
+     * coming.
+     *
+     * Compared at read time rather than filtered on arrival, which also makes the two messages' order
+     * irrelevant: a snapshot that lands before the play it describes is simply not shown yet, and
+     * starts being shown the moment the play arrives.
+     *
+     * **A snapshot naming no resource is shown unconditionally**, which is the mirrored case rather
+     * than a hole in the gate. Nothing is served, so there is no id to compare - and nothing to
+     * compare: the phone holds the player there, so the last thing it said is what it is playing.
+     * [playingResourceId] is empty for such a session too, so the comparison would in fact hold; it is
+     * spelled out because relying on two unrelated blanks matching is the kind of coincidence that
+     * stops being true the first time either side gains a default.
+     */
+    val nowPlayingForCurrentItem: NowPlaying?
+        get() = nowPlaying?.takeIf { it.resourceId.isEmpty() || it.resourceId == playingResourceId }
+}
 
 /**
  * One playback snapshot, with the moment it landed.

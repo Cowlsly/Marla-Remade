@@ -59,6 +59,23 @@ private const val KEY_FRAME_REQUEST_INTERVAL_MS = 500L
  */
 private const val CODEC_CONFIG_TIMEOUT_MS = 2_000L
 
+/**
+ * How long the video encoder has to produce **anything at all**, measured from `start()`.
+ *
+ * [CODEC_CONFIG_TIMEOUT_MS] deliberately cannot catch this: its clock begins at the first output, so
+ * an encoder that emits nothing ever leaves it disarmed for the life of the session. What that looked
+ * like was a cast with audio playing, a black picture, and no failure at either end - the receiver's
+ * own 5 s bound only exists for a codec whose configuration travels out of band, so for H.265 there
+ * was nothing anywhere to notice.
+ *
+ * **Deliberately longer than the receiver's bound**, so this never pre-empts it. For AV1 the TV still
+ * says `BYE missing codec config` first and the codec is still demoted for that TV, which is the
+ * correct attribution and the thing that makes the next session work. This is the net underneath, for
+ * the cases the receiver structurally cannot see - and it is generous because a
+ * [MirrorSource.Content] client hands its surface out over Binder and may legitimately be slow to draw.
+ */
+private const val NO_VIDEO_OUTPUT_TIMEOUT_MS = 12_000L
+
 /** What could not be started, so the UI can say so rather than looking broken. */
 data class MirrorDegradation(
     val videoUnavailable: Boolean = false,
@@ -78,6 +95,18 @@ enum class MirrorStopReason {
      * the thing at fault, and the recovery is to remember that and start the next session at H.265.
      */
     CodecConfig,
+
+    /**
+     * The encoder started and then produced no output whatever.
+     *
+     * **Distinct from [CodecConfig], and the distinction is an attribution.** That one means frames are
+     * flowing and the configuration did not come with them, which is the codec's fault and is
+     * remembered against the TV. This one cannot say whose fault it is: an encoder that emits nothing
+     * and a source that draws nothing look identical from here, and demoting a codec on that evidence
+     * would eventually demote every codec and leave the device unable to cast at all. So it fails the
+     * session, says so, and remembers nothing.
+     */
+    NoVideoOutput,
 }
 
 /**
@@ -250,9 +279,24 @@ class MirrorEngine(
             // timed from. Zero until then, so a session whose content has not started drawing yet is
             // simply waiting rather than failing.
             var firstOutputAt = 0L
+            val startedAt = SystemClock.elapsedRealtime()
             while (isActive) {
                 val chunks = encoder.drain()
                 if (chunks.isEmpty()) {
+                    // The one condition the codec-config watchdog below cannot reach, because its
+                    // clock never starts. See [NO_VIDEO_OUTPUT_TIMEOUT_MS].
+                    if (firstOutputAt == 0L &&
+                        SystemClock.elapsedRealtime() - startedAt >= NO_VIDEO_OUTPUT_TIMEOUT_MS
+                    ) {
+                        Log.w(
+                            TAG,
+                            "${videoCodec.label} produced no output at all in " +
+                                "${NO_VIDEO_OUTPUT_TIMEOUT_MS}ms; either the encoder is wedged or " +
+                                "nothing is being drawn into its surface",
+                        )
+                        onStopped(MirrorStopReason.NoVideoOutput)
+                        return@launch
+                    }
                     delay(FRAME_POLL_MS)
                     continue
                 }

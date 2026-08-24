@@ -1,8 +1,10 @@
 package com.vayunmathur.music.platform
 
+import android.content.ContentUris
 import android.content.Context
 import android.net.Uri
 import android.os.ParcelFileDescriptor
+import android.provider.MediaStore
 import android.util.Log
 import androidx.core.net.toUri
 import com.vayunmathur.library.media.OpusTranscoder
@@ -121,6 +123,18 @@ object CastPlayback {
     private var transcodeJob: Job? = null
 
     /**
+     * The running metadata job, so a track change can cancel it.
+     *
+     * **Cancelled rather than left to lose a race.** Reading a cover out of a file and re-compressing
+     * it takes long enough that a job for track A can finish after track B has started playing, and
+     * its snapshot would then describe the wrong audio. The television refuses a snapshot that does
+     * not name what it is playing as well - see `NowPlaying.resourceId` - because either measure alone
+     * leaves a window: cancellation is not instantaneous, and a gate cannot stop wasted work.
+     */
+    @Volatile
+    private var metadataJob: Job? = null
+
+    /**
      * What the TV has been told about, by resource id.
      *
      * Also the authorisation list: a request for anything this app did not offer is answered with
@@ -210,6 +224,11 @@ object CastPlayback {
         // A transcode for a track the TV has moved on from is a minute of CPU nobody is waiting
         // for. Skipped when the id matches, so replaying the current track does not kill its own.
         cancelTranscodeExcept(id)
+
+        // Above the three branches below, because the first of them returns early: a track replayed
+        // within one session takes the `offered` fast path, and metadata launched inside it would
+        // never run at all.
+        startMetadata(context, active, song, id)
 
         val known = offered[id]
         if (known != null) {
@@ -303,6 +322,117 @@ object CastPlayback {
         transcodeJob?.cancel()
     }
 
+    // ------------------------------------------------------------------
+    // What the television shows while it plays
+    // ------------------------------------------------------------------
+
+    /**
+     * Tell the TV what this track is, and then what it looks like.
+     *
+     * **Two sends, because the two halves are ready at different times.** The text is already in the
+     * `Music` row the caller handed over, so it goes out at once and the television has a real
+     * now-playing screen from the first moment. The cover has to be read out of the file and
+     * re-compressed, and the lyrics out of its tag region, so those follow in a second snapshot -
+     * which is exactly why this is not fields on `PLAY_MEDIA`, where changing them would mean
+     * restarting the track.
+     *
+     * The artwork resource is registered in [offered] and its bytes are on disk **before** its id is
+     * named, and that ordering is not stylistic: the TV fetches the id the moment it arrives, and an
+     * unoffered one is a `404` it does not retry.
+     */
+    private fun startMetadata(context: Context, active: CastClient, song: Music, id: String) {
+        metadataJob?.cancel()
+        active.setNowPlaying(
+            resourceId = id,
+            title = song.title,
+            author = song.artist,
+            album = song.album,
+        )
+        metadataJob = scope.launch {
+            val lyrics = classifyLyrics(EmbeddedLyrics.read(context, song.uri.toUri()))
+            val timed = (lyrics as? Lyrics.Timed)?.lines.orEmpty()
+            val artworkId = prepareArtwork(context, song)
+            active.setNowPlaying(
+                resourceId = id,
+                title = song.title,
+                author = song.artist,
+                album = song.album,
+                artworkResourceId = artworkId.orEmpty(),
+                lyricTimesMs = LongArray(timed.size) { timed[it].timestamp },
+                lyricTexts = Array(timed.size) { timed[it].text },
+                plainLyrics = (lyrics as? Lyrics.Plain)?.text.orEmpty(),
+            )
+        }
+    }
+
+    /**
+     * The resource id the cover can be fetched from, or null when the track has none.
+     *
+     * Cached on disk beside the converted audio, so a track cast twice - in this session or a later
+     * one - is read, scaled and re-compressed only once. An ordinary [Source.Cached]: a real file with
+     * a real length, so it needs no `resourceComplete` handshake and no new kind of source.
+     *
+     * **The file's extension carries the content type**, which is what makes the disk hit usable at
+     * all: `offered` is emptied when a session ends, so a later cast finds only the file - and the
+     * proxy has to state a type for it. Sniffing the bytes back would cost about as much as producing
+     * them again.
+     */
+    private suspend fun prepareArtwork(context: Context, song: Music): String? =
+        withContext(Dispatchers.IO) {
+            val id = artworkResourceId(song.id)
+            if (offered[id]?.let { hasBytes(it) } == true) return@withContext id
+
+            // A file left by an earlier session, which `offered` knows nothing about.
+            for ((extension, contentType) in ARTWORK_TYPES) {
+                val existing = artworkFile(context, song.id, extension)
+                if (existing.length() > 0) {
+                    offered[id] = Prepared(Source.Cached(existing), contentType)
+                    return@withContext id
+                }
+            }
+
+            val artwork = runCatching {
+                artworkBytes(context, song.uri.toUri(), albumArtUri(song.albumId))
+            }.getOrNull() ?: return@withContext null
+            val extension = ARTWORK_TYPES.entries.firstOrNull { it.value == artwork.contentType }?.key
+                ?: return@withContext null
+            val file = artworkFile(context, song.id, extension)
+            val written = runCatching {
+                file.parentFile?.mkdirs()
+                file.writeBytes(artwork.bytes)
+                true
+            }.getOrDefault(false)
+            if (!written) return@withContext null
+            offered[id] = Prepared(Source.Cached(file), artwork.contentType)
+            id
+        }
+
+    /** Whether an offered resource still has a file with something in it behind it. */
+    private fun hasBytes(prepared: Prepared): Boolean =
+        (prepared.source as? Source.Cached)?.file?.length()?.let { it > 0 } == true
+
+    /**
+     * The album's `MediaStore` entry, which is where the fallback thumbnail comes from.
+     *
+     * Built rather than looked up: this is the same URI `getAlbums` composes for `Album.uri`, so
+     * reaching into the repository for it would be a database read to reconstruct an id we already
+     * have.
+     */
+    private fun albumArtUri(albumId: Long): Uri? = runCatching {
+        ContentUris.withAppendedId(MediaStore.Audio.Albums.EXTERNAL_CONTENT_URI, albumId)
+    }.getOrNull()
+
+    /**
+     * Prefixed, so an artwork id can never collide with a track id.
+     *
+     * Both live in one [offered] map and both are addressed on one proxy, and a track whose numeric id
+     * happened to match another's would otherwise serve a JPEG as audio.
+     */
+    private fun artworkResourceId(songId: Long): String = "$ARTWORK_PREFIX$songId"
+
+    private fun artworkFile(context: Context, songId: Long, extension: String): File =
+        File(File(context.cacheDir, ARTWORK_CACHE_DIR), "$songId.$extension")
+
     fun close() {
         client?.close()
         clear()
@@ -313,6 +443,8 @@ object CastPlayback {
         // `growing`, and letting it run on would leave it writing into a session that has gone.
         transcodeJob?.cancel()
         transcodeJob = null
+        metadataJob?.cancel()
+        metadataJob = null
         _growing.value = null
         client = null
         offered.clear()
@@ -380,11 +512,21 @@ object CastPlayback {
                         ?: return null
                     CastResource(descriptor, descriptor.statSize, prepared.contentType)
                 }
-                is Source.Cached -> CastResource(
-                    ParcelFileDescriptor.open(source.file, ParcelFileDescriptor.MODE_READ_ONLY),
-                    source.file.length(),
-                    prepared.contentType,
-                )
+                is Source.Cached -> {
+                    // Checked rather than assumed: these files outlive the session that wrote them,
+                    // and one the system has reclaimed under storage pressure should be a clean 404
+                    // rather than an exception on Cast's own thread.
+                    if (!source.file.isFile) {
+                        Log.w(TAG, "'$resourceId' was cached and is no longer on disk")
+                        offered.remove(resourceId)
+                        return null
+                    }
+                    CastResource(
+                        ParcelFileDescriptor.open(source.file, ParcelFileDescriptor.MODE_READ_ONLY),
+                        source.file.length(),
+                        prepared.contentType,
+                    )
+                }
                 is Source.Growing -> CastResource(
                     ParcelFileDescriptor.open(source.file, ParcelFileDescriptor.MODE_READ_ONLY),
                     // Not `file.length()`: the length now is a snapshot of a file still growing,
@@ -418,19 +560,41 @@ object CastPlayback {
         File(File(context.cacheDir, CACHE_DIR), "$songId.opus")
 
     /**
-     * Clears converted tracks.
+     * Clears converted tracks and cached cover art.
      *
      * The cache is what makes a second cast of the same track free, so it is kept across sessions -
      * but it is a cache, and 256 kbps Opus of a whole library would not be small.
+     *
+     * **Both directories, or the one it forgot leaks for ever**: nothing else ever deletes them, and
+     * a user who clears the cache means all of it.
      */
     fun clearCache(context: Context) {
         runCatching { File(context.cacheDir, CACHE_DIR).deleteRecursively() }
+        runCatching { File(context.cacheDir, ARTWORK_CACHE_DIR).deleteRecursively() }
     }
 
     /** Enough to cover an Ogg page header and the `OpusHead` packet that follows it. */
     private const val SNIFF_BYTES = 64
 
     private const val CACHE_DIR = "cast-opus"
+
+    /** Its own directory rather than a suffix in [CACHE_DIR], so either can be cleared alone. */
+    private const val ARTWORK_CACHE_DIR = "cast-art"
+
+    private const val ARTWORK_PREFIX = "art-"
+
+    /**
+     * The image types a cover is stored and served as, by the extension it is stored under.
+     *
+     * The extension is how the type survives a session ending, and the map is also what decides
+     * whether a picture can be passed through untouched: a type not named here is re-compressed to
+     * JPEG by `artworkBytes`, so there is never a file on disk this cannot state a type for.
+     */
+    private val ARTWORK_TYPES = mapOf(
+        "jpg" to "image/jpeg",
+        "png" to "image/png",
+        "webp" to "image/webp",
+    )
 
     /**
      * The length reported for a track still being encoded: negative means "still being written,

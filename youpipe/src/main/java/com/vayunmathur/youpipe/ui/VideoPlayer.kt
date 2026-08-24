@@ -470,10 +470,66 @@ fun VideoPlayer(
         val player = controller ?: return@LaunchedEffect
         val casting = castState as? CastPlayback.State.Casting
         if (casting != null) {
+            android.util.Log.i(
+                "YpCastDiag",
+                "handing the cast surface to the player: valid=${casting.surface.isValid} " +
+                    "${casting.width}x${casting.height}",
+            )
             player.setVideoSurface(casting.surface)
             player.volume = 0f
         } else {
             player.volume = 1f
+        }
+    }
+    // TEMPORARY DIAGNOSTICS. Answers the one thing the logs cannot: whether the player ever draws a
+    // frame into the encoder's input surface. Remove once the no-video-on-cast fault is understood.
+    DisposableEffect(controller, isCasting) {
+        val player = controller
+        if (player == null || !isCasting) return@DisposableEffect onDispose { }
+        android.util.Log.i(
+            "YpCastDiag",
+            "attached; videoSize=${player.videoSize.width}x${player.videoSize.height} " +
+                "playing=${player.isPlaying} state=${player.playbackState}",
+        )
+        val listener = object : androidx.media3.common.Player.Listener {
+            override fun onRenderedFirstFrame() {
+                android.util.Log.i("YpCastDiag", "onRenderedFirstFrame")
+            }
+
+            override fun onVideoSizeChanged(videoSize: androidx.media3.common.VideoSize) {
+                android.util.Log.i(
+                    "YpCastDiag",
+                    "onVideoSizeChanged ${videoSize.width}x${videoSize.height}",
+                )
+            }
+
+            override fun onSurfaceSizeChanged(width: Int, height: Int) {
+                android.util.Log.i("YpCastDiag", "onSurfaceSizeChanged ${width}x$height")
+            }
+
+            override fun onTracksChanged(tracks: androidx.media3.common.Tracks) {
+                val video = tracks.groups.count {
+                    it.type == androidx.media3.common.C.TRACK_TYPE_VIDEO
+                }
+                val selected = tracks.groups.count {
+                    it.type == androidx.media3.common.C.TRACK_TYPE_VIDEO && it.isSelected
+                }
+                android.util.Log.i(
+                    "YpCastDiag",
+                    "onTracksChanged videoGroups=$video selectedVideoGroups=$selected",
+                )
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+    // What the television puts where "Receiving from YouPipe" used to be. Keyed on the video as well
+    // as the session, because a `Next` from the remote reloads this player in place rather than
+    // advancing a queue - so the title would otherwise describe the previous video for the rest of the
+    // cast. Sending it again is free: it is an absolute snapshot that replaces wholesale.
+    LaunchedEffect(castState, videoInfo.name, videoInfo.author) {
+        if (castState is CastPlayback.State.Casting) {
+            CastPlayback.setNowPlaying(videoInfo.name, videoInfo.author)
         }
     }
     // No DisposableEffect closing the cast here any more. Leaving a video used to end the session, on

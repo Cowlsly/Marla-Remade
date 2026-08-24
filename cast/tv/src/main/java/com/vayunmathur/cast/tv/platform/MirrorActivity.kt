@@ -8,20 +8,30 @@ import android.view.SurfaceView
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.ComposeView
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.lifecycleScope
+import androidx.tv.material3.MaterialTheme
 import com.vayunmathur.cast.protocol.PlaybackAction
 import com.vayunmathur.cast.protocol.PlaybackCommand
 import com.vayunmathur.cast.tv.ui.CastTvTheme
+import com.vayunmathur.cast.tv.ui.NowPlayingScreen
+import com.vayunmathur.cast.tv.ui.PlaybackClock
 import com.vayunmathur.cast.tv.ui.TransportOverlay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -174,10 +184,17 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
     }
 
     /**
-     * The controls, as a transparent layer above the picture.
+     * The now-playing screen and the controls, as layers above the picture.
      *
-     * Composes to nothing at all until the phone reports playback, which is what keeps it off a
+     * Composes to nothing at all until the phone reports playback, which is what keeps both off a
      * mirrored phone screen: screen mirroring has no transport, so it never sends a snapshot.
+     *
+     * **The now-playing screen is behind the controls and only for an audio session**, where there is
+     * no `SurfaceView` in the window at all and this `ComposeView` is the whole of it. Over video it
+     * would be an opaque rectangle across the film. It renders only the metadata that names what the
+     * player is actually playing - see `ReceiverUiState.nowPlayingForCurrentItem` - so nothing appears
+     * until the phone has described the track, and the existing headline in the overlay stays the
+     * fallback for an old phone, a non-music app, and the moment before the first snapshot lands.
      */
     private fun overlayView(): ComposeView = ComposeView(this).apply {
         setContent {
@@ -193,12 +210,60 @@ class MirrorActivity : ComponentActivity(), SurfaceHolder.Callback {
                         scrubPreviewMs = NO_SCRUB
                     }
                 }
-                if (playback != null && overlayVisible) {
-                    TransportOverlay(
-                        snapshot = playback,
-                        sourceName = (state.phase as? ReceiverPhase.Mirroring)?.sourceName.orEmpty(),
-                        scrubPreviewMs = scrubPreviewMs.takeIf { it != NO_SCRUB },
-                    )
+                if (playback == null) return@CastTvTheme
+                val mirroring = state.phase as? ReceiverPhase.Mirroring
+                val nowPlaying = state.nowPlayingForCurrentItem
+                // Read from the state rather than from `overlayPinned`, which is a plain field that
+                // composition does not observe: the same condition, but one that recomposes when the
+                // session's own answer to it changes.
+                val audioOnly = mirroring?.hasVideo == false
+                // One clock for both layers, passed down as a lambda so neither the artwork nor the
+                // lyrics column ends up in a scope that invalidates per frame. See `PlaybackClock`.
+                PlaybackClock(
+                    snapshot = playback,
+                    scrubPreviewMs = scrubPreviewMs.takeIf { it != NO_SCRUB },
+                ) { positionMs ->
+                    val transport: @Composable (Modifier, Boolean) -> Unit = { m, scrim ->
+                        TransportOverlay(
+                            snapshot = playback,
+                            sourceName = mirroring?.sourceName.orEmpty(),
+                            nowPlaying = nowPlaying,
+                            positionMs = positionMs,
+                            scrubbing = scrubPreviewMs != NO_SCRUB,
+                            scrim = scrim,
+                            modifier = m,
+                        )
+                    }
+                    if (nowPlaying != null && audioOnly) {
+                        // **Stacked, not overlaid.** There is no picture for the bar to get out of the
+                        // way of, so it takes the height it needs and the lyrics take the rest -
+                        // which is the only way they can fill the panel without a reserved constant
+                        // that is wrong on every screen size but the one it was measured on.
+                        //
+                        // **And the background is painted here, once, for the whole window** - so the
+                        // transport sits on the same sheet of colour as the cover and the lyrics rather
+                        // than on a black band under them. Which is also why the bar is asked for no
+                        // scrim: with nothing behind it to see through, a gradient would draw exactly
+                        // the seam this is avoiding.
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .background(MaterialTheme.colorScheme.surface),
+                        ) {
+                            NowPlayingScreen(
+                                nowPlaying = nowPlaying,
+                                positionMs = positionMs,
+                                artwork = state.artwork,
+                                modifier = Modifier.weight(1f),
+                            )
+                            if (overlayVisible) transport(Modifier, false)
+                        }
+                    } else if (overlayVisible) {
+                        // Over the picture, where a scrim is the whole point.
+                        Box(modifier = Modifier.fillMaxSize()) {
+                            transport(Modifier.align(Alignment.BottomCenter), true)
+                        }
+                    }
                 }
             }
         }

@@ -32,6 +32,10 @@
     <string name="tv_transport_speed">%1$s×</string>
     <string name="tv_transport_hint">OK to play or pause · ◀ ▶ to seek · ▲ ▼ for volume</string>
 
+    <!-- Now playing, for an audio-only session where there is no picture -->
+    <string name="tv_now_playing_no_artwork">No cover art</string>
+    <string name="tv_now_playing_artwork">Cover art</string>
+
     <!-- Foreground service -->
     <string name="tv_notification_channel_name">Receiving</string>
     <string name="tv_notification_channel_desc">Shown while this TV is available to cast to</string>

@@ -269,6 +269,24 @@ object CastPlayback {
         }
     }
 
+    /**
+     * Tell the television what video this is.
+     *
+     * **Sent even though this is a `Surface` session**, where the receiver already has the picture: a
+     * picture is not a name, and until this existed the television could say nothing about an encoded
+     * video beyond which app had sent it. It names no resource - nothing is being served here - which
+     * is what tells the receiver to render it at once rather than correlate it against a play request
+     * that this kind of session never issues.
+     *
+     * Called again whenever the video changes, which for this app includes a `Next` from the remote:
+     * that reloads the player in place rather than advancing a queue, so nothing else would say so.
+     *
+     * Silent with no session, like everything else here.
+     */
+    fun setNowPlaying(name: String, author: String) {
+        client?.setNowPlaying(title = name, author = author)
+    }
+
     /** Back to playing locally. Idempotent. */
     fun close() {
         orphanJob?.cancel()

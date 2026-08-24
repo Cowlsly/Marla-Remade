@@ -346,8 +346,46 @@ class MediaProxyTest {
     }
 
     // ------------------------------------------------------------------
+    // Cover art, which travels the same path as the media
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `serves cover art whole with its own content type`() {
+        // Artwork is an ordinary resource rather than a second mechanism, which is the whole argument
+        // for sending it over the proxy - but only if the type it states is the resource's own and not
+        // the audio type every other resource here happens to have.
+        val response = artwork().get("/$token/art-1234")
+        assertEquals(200, response.status)
+        assertEquals("image/jpeg", response.headers["content-type"])
+        assertEquals("5000", response.headers["content-length"])
+        assertContentEquals(media, response.body)
+    }
+
+    @Test
+    fun `serves a byte range of cover art`() {
+        // Nothing asks for one today - the fetcher reads the whole body - but a cached resource states
+        // a length and advertises ranges, so answering one wrongly would be a latent fault.
+        val response = artwork().get("/$token/art-1234", "Range: bytes=100-199")
+        assertEquals(206, response.status)
+        assertEquals("image/jpeg", response.headers["content-type"])
+        assertEquals("bytes 100-199/5000", response.headers["content-range"])
+        assertContentEquals(media.copyOfRange(100, 200), response.body)
+    }
+
+    @Test
+    fun `an artwork id that was never offered is a 404`() {
+        // The failure mode the phone's ordering exists to prevent: an id named in a snapshot before its
+        // bytes are on disk is fetched at once, and this is what it gets.
+        assertEquals(404, exchange().get("/$token/art-1234").status)
+    }
+
+    // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------
+
+    private fun artwork() = MediaProxyExchange(token) { id ->
+        if (id == "art-1234") FakeResource(media, contentType = "image/jpeg") else null
+    }
 
     private fun exchange() = MediaProxyExchange(token) { id ->
         if (id == "track" || id.startsWith("251/")) FakeResource(media) else null

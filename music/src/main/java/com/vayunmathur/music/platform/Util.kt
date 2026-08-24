@@ -3,6 +3,7 @@ import com.vayunmathur.music.R
 import android.content.ContentUris
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Rect
 import android.media.MediaMetadataRetriever
@@ -27,6 +28,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalInspectionMode
 import androidx.core.graphics.createBitmap
+import androidx.core.graphics.scale
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.image.ImageRequest
 import com.vayunmathur.library.image.Size as CoilSize
@@ -35,6 +37,7 @@ import com.vayunmathur.music.data.Artist
 import com.vayunmathur.music.data.Music
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
 import java.util.Locale
 import androidx.compose.ui.res.stringResource
 
@@ -294,3 +297,94 @@ fun getAudioYear(context: Context, uri: Uri): Int =
             ?: it.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DATE)
         raw?.let { value -> Regex("\\d{4}").find(value)?.value?.toIntOrNull() } ?: 0
     }
+
+/** Cover art bytes, with the type a server would have to state for them. */
+class ArtworkBytes(val bytes: ByteArray, val contentType: String)
+
+/**
+ * The largest edge a cover is sent at.
+ *
+ * Bounding this on the phone is what keeps the receiver simple - it decodes whatever arrives with no
+ * pre-pass - and stops a 6 MB scan of an LP sleeve competing with the initial audio buffer over
+ * Wi-Fi. Generous for a television: 1280px fills the cover half of a 4K panel.
+ */
+private const val ARTWORK_MAX_EDGE = 1280
+
+private const val ARTWORK_JPEG_QUALITY = 88
+
+/**
+ * A track's cover art as bytes, bounded in size, or null when it has none.
+ *
+ * The embedded picture first, because it is the original at full resolution and is common even on
+ * MP3s, where nothing else about the file's tags is readable. [fallbackArtUri] is the album's
+ * `MediaStore` entry, whose 300x300 thumbnail is small for a television panel but beats a
+ * placeholder.
+ *
+ * **Re-compressed only when it has to be.** Bounds are decoded first, and a picture already inside
+ * [ARTWORK_MAX_EDGE] is passed through untouched - so the common case costs one decode of a header
+ * rather than a decode, a scale and a JPEG encode. The type is sniffed from the magic bytes rather
+ * than assumed, because whoever serves these has to state it.
+ */
+fun artworkBytes(context: Context, uri: Uri, fallbackArtUri: Uri?): ArtworkBytes? {
+    val embedded = withAudioMetadata(context, uri, null) { it.embeddedPicture }
+    if (embedded != null) return boundedArtwork(embedded)
+    val thumbnail = fallbackArtUri?.let { getThumbnail(context, it) } ?: return null
+    return ArtworkBytes(compressToJpeg(thumbnail), "image/jpeg")
+}
+
+private fun boundedArtwork(source: ByteArray): ArtworkBytes? {
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(source, 0, source.size, bounds)
+    val longest = maxOf(bounds.outWidth, bounds.outHeight)
+    if (longest <= 0) return null
+    val sniffed = sniffImageType(source)
+    if (longest <= ARTWORK_MAX_EDGE && sniffed != null) return ArtworkBytes(source, sniffed)
+
+    // `inSampleSize` only halves, so this lands at or below the bound and the scale below finishes
+    // the job exactly - decoding at full size first is what a large cover must not be allowed to do.
+    var sample = 1
+    while (longest / (sample * 2) >= ARTWORK_MAX_EDGE) sample *= 2
+    val decoded = BitmapFactory.decodeByteArray(
+        source,
+        0,
+        source.size,
+        BitmapFactory.Options().apply { inSampleSize = sample },
+    ) ?: return null
+    val scaled = scaleWithin(decoded, ARTWORK_MAX_EDGE)
+    val bytes = compressToJpeg(scaled)
+    if (scaled !== decoded) scaled.recycle()
+    decoded.recycle()
+    return ArtworkBytes(bytes, "image/jpeg")
+}
+
+private fun scaleWithin(bitmap: Bitmap, maxEdge: Int): Bitmap {
+    val longest = maxOf(bitmap.width, bitmap.height)
+    if (longest <= maxEdge) return bitmap
+    val scale = maxEdge.toDouble() / longest
+    return bitmap.scale(
+        (bitmap.width * scale).toInt().coerceAtLeast(1),
+        (bitmap.height * scale).toInt().coerceAtLeast(1),
+    )
+}
+
+private fun compressToJpeg(bitmap: Bitmap): ByteArray {
+    val out = ByteArrayOutputStream()
+    bitmap.compress(Bitmap.CompressFormat.JPEG, ARTWORK_JPEG_QUALITY, out)
+    return out.toByteArray()
+}
+
+/**
+ * The image type from its first bytes, or null for one nothing here can name.
+ *
+ * Null is what sends the picture through the re-compression path even when its size did not need it:
+ * a type that cannot be stated honestly is worse than a JPEG, because a receiver is told what to
+ * decode before it looks.
+ */
+private fun sniffImageType(bytes: ByteArray): String? = when {
+    bytes.size < 12 -> null
+    bytes[0] == 0xFF.toByte() && bytes[1] == 0xD8.toByte() -> "image/jpeg"
+    bytes[0] == 0x89.toByte() && bytes[1] == 'P'.code.toByte() -> "image/png"
+    String(bytes, 0, 4, Charsets.ISO_8859_1) == "RIFF" &&
+        String(bytes, 8, 4, Charsets.ISO_8859_1) == "WEBP" -> "image/webp"
+    else -> null
+}

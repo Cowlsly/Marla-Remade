@@ -12,6 +12,7 @@ import com.vayunmathur.cast.protocol.ContentSession
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.Hello
 import com.vayunmathur.cast.protocol.Negotiation
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
 import com.vayunmathur.cast.protocol.PairCode
 import com.vayunmathur.cast.protocol.PairFailed
@@ -127,15 +128,14 @@ class MirrorClient(
      * [HandshakeOutcome.Paired] when a remembered device key was enough.
      */
     fun begin(): HandshakeOutcome {
-        transcript.add(
-            socket.send(
-                Hello(
-                    senderName = senderName,
-                    senderId = senderId,
-                    paired = storedDeviceKey != null,
-                ),
+        val hello = socket.send(
+            Hello(
+                senderName = senderName,
+                senderId = senderId,
+                paired = storedDeviceKey != null,
             ),
-        )
+        ) ?: return HandshakeOutcome.Failed(ClientFailure.Unreachable)
+        transcript.add(hello)
 
         val identityFrame = socket.receive()
             ?: return HandshakeOutcome.Failed(ClientFailure.Unreachable)
@@ -168,7 +168,9 @@ class MirrorClient(
         val secret = SessionKeys.newSecret()
         val sealed = runCatching { SecretSealing.seal(bundle, secret) }.getOrNull()
             ?: return HandshakeOutcome.Failed(ClientFailure.Protocol)
-        transcript.add(socket.send(SealedSecret(sealed = ProtocolBase64.encode(sealed))))
+        val sealedFrame = socket.send(SealedSecret(sealed = ProtocolBase64.encode(sealed)))
+            ?: return HandshakeOutcome.Failed(ClientFailure.Unreachable)
+        transcript.add(sealedFrame)
 
         val sessionKeys = SessionKeys.of(secret)
         keys = sessionKeys
@@ -208,6 +210,7 @@ class MirrorClient(
 
     private fun proof(bytes: ByteArray): HandshakeOutcome {
         socket.send(PairProof(proof = ProtocolBase64.encode(bytes)))
+            ?: return HandshakeOutcome.Failed(ClientFailure.Unreachable)
         val reply = socket.receive() ?: return HandshakeOutcome.Failed(ClientFailure.Unreachable)
         return when (val message = reply.message) {
             is PairOk -> {
@@ -262,7 +265,10 @@ class MirrorClient(
             videoCodec = videoCodec,
             appLabel = appLabel,
         )
-        socket.send(config)
+        // Null means the channel went away between choosing a codec and configuring it, which is
+        // exactly what a teardown racing a fresh session does. Refused rather than thrown: the caller
+        // has a failure branch for this and had nothing to catch an exception with.
+        socket.send(config) ?: return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
         val ready = socket.receive()?.message as? StreamReady
             ?: return HandshakeOutcome.Failed(ClientFailure.StreamRefused)
         if (ready.udpPort !in 1..65535) {
@@ -293,7 +299,7 @@ class MirrorClient(
         video: Boolean,
         appLabel: String,
     ): ContentOutcome {
-        socket.send(
+        val offered = socket.send(
             ContentSession(
                 host = host,
                 port = port,
@@ -303,6 +309,7 @@ class MirrorClient(
                 appLabel = appLabel,
             ),
         )
+        if (offered == null) return ContentOutcome.Refused("the control channel had already closed")
         val ready = socket.receive()?.message as? ContentReady
             ?: return ContentOutcome.Refused("the TV did not answer")
         if (!ready.accepted) {
@@ -323,6 +330,24 @@ class MirrorClient(
         Log.i(TAG, "asking the TV to play ${media.resourceId}")
         runCatching { socket.send(media) }
             .onFailure { Log.w(TAG, "could not send the play request", it) }
+    }
+
+    /**
+     * Tell the TV what the item it was asked to play actually is.
+     *
+     * Separate from [playMedia] because it is state rather than a command: the cover and the lyrics can
+     * arrive after the audio has already started, and folding them into the play request would mean
+     * restarting the track to change them. Non-throwing for [sendPlaybackState]'s reasons, and logged
+     * without its payload - a lyric sheet in the log would bury everything else.
+     */
+    fun sendNowPlaying(nowPlaying: NowPlaying) {
+        Log.i(
+            TAG,
+            "describing ${nowPlaying.resourceId} to the TV: '${nowPlaying.title}'" +
+                if (nowPlaying.artworkResourceId.isEmpty()) ", no cover" else ", with a cover",
+        )
+        runCatching { socket.send(nowPlaying) }
+            .onFailure { Log.w(TAG, "could not send the now-playing metadata", it) }
     }
 
     /**

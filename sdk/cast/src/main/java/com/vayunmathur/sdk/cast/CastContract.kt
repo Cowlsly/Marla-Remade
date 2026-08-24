@@ -100,8 +100,13 @@ object CastContract {
      * direction: a Cast that cannot carry the television's own playback state back to the app reports
      * nothing while the TV plays, so every surface on the phone shows a paused player and every button
      * on it drives a player nobody can hear.
+     *
+     * **And bumped for [MSG_SET_NOW_PLAYING], which nothing about this app needs.** A client that
+     * never calls it casts exactly as it did, so the SDK half is genuinely additive - but the
+     * protocol version behind it went 6 → 7 and is refused on mismatch, so a Cast on 6 cannot talk to
+     * a television on 7 at all. "Update Cast" is a better answer than "casting failed".
      */
-    const val MIN_CAST_VERSION_CODE = 20260824L
+    const val MIN_CAST_VERSION_CODE = 20260825L
 
     // ---- client → service ----
 
@@ -144,7 +149,8 @@ object CastContract {
      *
      * Carries [KEY_RESOURCE_ID], [KEY_RESOURCE_TYPE] and optionally [KEY_MEDIA_DURATION_MS]. Sent
      * once per item rather than as a playlist, because the queue stays with the app: it owns the
-     * ordering, the artwork and the metadata, so advancing is a decision the app makes and reports.
+     * ordering, so advancing is a decision the app makes and reports. What the item *is* travels
+     * separately, in [MSG_SET_NOW_PLAYING].
      *
      * Ignored without a session, so a client need not track readiness itself.
      */
@@ -179,6 +185,31 @@ object CastContract {
      * Ignored without a session, so a client need not track readiness itself.
      */
     const val MSG_SEND_PLAYBACK_COMMAND = 12
+
+    /**
+     * What is playing, so the television can show it rather than one line of text.
+     *
+     * Carries [KEY_RESOURCE_ID] and any of [KEY_TITLE], [KEY_AUTHOR], [KEY_ALBUM],
+     * [KEY_ARTWORK_RESOURCE_ID], [KEY_LYRIC_TIMES] with [KEY_LYRIC_TEXTS], and [KEY_PLAIN_LYRICS].
+     *
+     * **Its own message rather than fields on [MSG_PLAY_MEDIA], because metadata is state and
+     * playing is a command.** Fields on the command could only change by re-issuing it, which
+     * restarts the track - so artwork that took a moment to read could not be delivered at all.
+     * Split, the text goes out with the play and the cover follows once its bytes exist, which is
+     * necessary rather than merely tidier: an artwork id announced before the resource is offered is
+     * a `404` the TV fetches immediately.
+     *
+     * **Accepted for either kind of session**, and not only for the served one it was added for. An
+     * app drawing into a `Surface` is as anonymous on the television as a served track was, and it
+     * has the same two strings in hand; the only difference is that it has no resource to name, so it
+     * leaves [KEY_RESOURCE_ID] absent. See [KEY_RESOURCE_ID] for what that means on arrival.
+     *
+     * A full snapshot that replaces wholesale, and may be sent more than once per item.
+     *
+     * Optional in full: a client that never sends one casts exactly as it did before, and the TV
+     * falls back to naming the app. Ignored without a session, like its neighbours.
+     */
+    const val MSG_SET_NOW_PLAYING = 13
 
     // ---- service → client ----
 
@@ -359,6 +390,81 @@ object CastContract {
      * to seek against, so the TV begins at the start whatever this says.
      */
     const val KEY_START_POSITION_MS = "startPositionMs"
+
+    // ---- MSG_SET_NOW_PLAYING payload ----
+    //
+    // [KEY_RESOURCE_ID] is reused here, and its absence is meaningful rather than lazy. Present, it
+    // names the [MSG_PLAY_MEDIA] this describes and the TV renders the snapshot only while that is
+    // what its player is playing - metadata is prepared off the main path and can finish after the
+    // next item has started, and a previous track's cover over this one's audio would never correct
+    // itself. Absent, there is no resource to name and no race to lose: the client holds the player,
+    // so whatever it last said is what it is playing, and the TV renders it at once.
+
+    /** What to show. Absent means the TV shows nothing for that line rather than a placeholder. */
+    const val KEY_TITLE = "title"
+
+    /**
+     * Who made it: a track's artist, or a video's channel.
+     *
+     * One key rather than one per kind of media, and named `author` rather than `artist` because it
+     * carries both - a key named for one of the two would be a name that lies about half of what it
+     * holds. [KEY_ALBUM] is genuinely music-only and is simply absent for a video, which is a
+     * different thing from being misnamed.
+     */
+    const val KEY_AUTHOR = "author"
+    const val KEY_ALBUM = "album"
+
+    /**
+     * A [KEY_RESOURCE_ID] for the cover art, which the TV fetches like any other resource.
+     *
+     * So it must already be answerable when this is sent: the TV requests it at once, and an id the
+     * client has not offered yet is a `404` it will not retry. Absent means no cover, which the TV
+     * draws as a deliberate placeholder.
+     *
+     * Meaningless outside a served session - there is no proxy to fetch from - so a client drawing
+     * into a `Surface` leaves it absent.
+     */
+    const val KEY_ARTWORK_RESOURCE_ID = "artworkResourceId"
+
+    /**
+     * Timed lyrics, as two parallel primitive arrays: positions in milliseconds and the lines at
+     * them, in the same order.
+     *
+     * **Two arrays rather than one list of a small class, for the reason [KEY_ACTION] gives about
+     * enums**: this crosses a `Bundle`, and a `Serializable` in one is a class-loading problem
+     * waiting for a client built against a different SDK version. Mismatched lengths are refused
+     * outright rather than truncated to the shorter - the two halves disagreeing means the sender is
+     * confused, and guessing which it meant would put the wrong words at the wrong times.
+     *
+     * Parsed by the client, because the format is the client's business. Cast clamps the line count
+     * and the total characters: a first-party app is trusted, but a bug in one must not be able to
+     * end a session by overflowing a control frame.
+     */
+    const val KEY_LYRIC_TIMES = "lyricTimes"
+    const val KEY_LYRIC_TEXTS = "lyricTexts"
+
+    /**
+     * Lyrics with no timings at all, as one block of text.
+     *
+     * Its own key rather than a [KEY_LYRIC_TIMES] full of sentinels, which reads as tidy and is
+     * wrong: a highlight picked as the last line at or before the position would select the final
+     * line for ever. Dropped when [KEY_LYRIC_TEXTS] is present, so the two can never both be shown.
+     */
+    const val KEY_PLAIN_LYRICS = "plainLyrics"
+
+    /**
+     * The most lyric lines and the most characters of them Cast will pass on.
+     *
+     * Stated here rather than hidden in Cast so a client can bound its own text to the same numbers
+     * and know what will arrive. Anything past them is dropped rather than refused: a very long song
+     * losing its last verse on the television is a better outcome than no lyrics at all, and both are
+     * better than a control frame nothing can send.
+     *
+     * Sized so that the worst case is orders of magnitude under a control frame - a real LRC file is
+     * a few kilobytes.
+     */
+    const val MAX_LYRIC_LINES = 400
+    const val MAX_LYRIC_CHARS = 16_000
 
     // ---- MSG_SESSION_ENDED payload ----
 

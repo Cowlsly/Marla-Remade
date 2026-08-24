@@ -72,9 +72,17 @@ class ControlSocket(private val host: String, private val port: Int) {
         }
     }
 
-    /** Returns the body bytes, for the transcript. */
-    fun send(message: ControlMessage): ByteArray {
-        val stream = output ?: error("send before connect")
+    /**
+     * The body bytes for the transcript, or null when this socket is not connected.
+     *
+     * **Null rather than a throw, symmetrically with [receive].** A closed socket is a race, not a
+     * caller's mistake: [close] is deliberately called from teardown without holding the mutex a
+     * handshake holds - so a send already in flight can legitimately find its stream gone. Signalling
+     * that with `IllegalStateException` made it look like a programming error and, because the
+     * handshake path has nothing to catch such a thing, took the whole process with it.
+     */
+    fun send(message: ControlMessage): ByteArray? {
+        val stream = output ?: return null
         val body = codec.encode(message)
         stream.write(ControlFraming.encode(body))
         stream.flush()

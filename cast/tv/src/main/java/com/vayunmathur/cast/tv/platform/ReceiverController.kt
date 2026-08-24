@@ -13,6 +13,7 @@ import com.vayunmathur.cast.protocol.DecodableFrame
 import com.vayunmathur.cast.protocol.DecoderLimits
 import com.vayunmathur.cast.protocol.Hello
 import com.vayunmathur.cast.protocol.Negotiation
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.protocol.PROTOCOL_VERSION
 import com.vayunmathur.cast.protocol.PairCode
 import com.vayunmathur.cast.protocol.PairFailed
@@ -279,10 +280,20 @@ object ReceiverController {
      * and resetting [castVolume] is what stops the *next* session inheriting this one's gain. Missing
      * the second is a quiet, nasty failure - a screen-mirroring session that follows a quiet cast would
      * play at that gain for ever, with no snapshot to change it and `nudgeVolume` declining to try.
+     *
+     * The metadata goes with them, and has to: it is not merely stale but wrong, and a cover left on
+     * screen over the next session's audio would look deliberate.
      */
     private fun forgetPlayback() {
         castVolume = 1f
-        _state.update { it.copy(playback = null) }
+        _state.update {
+            it.copy(
+                playback = null,
+                nowPlaying = null,
+                playingResourceId = "",
+                artwork = null,
+            )
+        }
     }
 
     /** Called by `MirrorActivity` once its `SurfaceView` has a surface to draw into. */
@@ -477,10 +488,13 @@ object ReceiverController {
                     return
                 }
                 // Echoed rather than treated as a surprise, so a keep-alive cannot end the very channel
-                // it exists to preserve. A snapshot or a command still in flight from the session that
-                // just ended is dropped for the same reason: there is no longer a player for either.
+                // it exists to preserve. A snapshot, a command or a metadata update still in flight
+                // from the session that just ended is dropped for the same reason: there is no longer
+                // a player for the first two, and nothing on screen for the third. Metadata is the
+                // likeliest of the three to land here, because the phone prepares it off the path that
+                // ends the session - a cover read and re-compressed while the user closed the cast.
                 is Ping -> runCatching { channel.send(Ping) }
-                is PlaybackState, is PlaybackCommand -> Unit
+                is PlaybackState, is PlaybackCommand, is NowPlaying -> Unit
                 else -> return
             }
         }
@@ -493,7 +507,9 @@ object ReceiverController {
      * everything down through the same path. It is also where the codec configuration arrives, which
      * for AV1 is what the media loop is waiting on before it can start a decoder at all - it is
      * repeated on every key-frame request, so this handles it more than once. And it is where playback
-     * snapshots arrive, twice a second, for as long as an app is casting encoded content.
+     * snapshots arrive, twice a second, for as long as an app is casting encoded content - as does the
+     * metadata that says what that content *is*, which an encoded video needs quite as much as a
+     * served track did.
      */
     private suspend fun mirrorSession(
         channel: ControlChannel,
@@ -509,6 +525,10 @@ object ReceiverController {
                 }
                 is VideoCodecConfig -> onVideoCodecConfig(message, config)
                 is PlaybackState -> onPlaybackState(message)
+                // What the encoded picture is of. Names no resource - nothing is being served here -
+                // so the gate in `ReceiverUiState.nowPlayingForCurrentItem` passes it straight
+                // through: this end holds no player, so the phone's latest word is the only word.
+                is NowPlaying -> _state.update { it.copy(nowPlaying = message) }
                 // As in the content-session loop below: echoed so the phone's read deadline moves
                 // too. Screen mirroring never sends one, so this only fires for app content.
                 is Ping -> runCatching { channel.send(Ping) }
@@ -567,6 +587,9 @@ object ReceiverController {
         // none, and handing it one would put a black rectangle over the now-playing screen.
         if (session.video) surface?.let { withContext(Dispatchers.Main) { player.setSurface(it) } }
         channel.send(ContentReady(accepted = true))
+        // Built outside the update, because `update` may retry its lambda under contention and
+        // allocating a fetcher per attempt would be one object per lost race.
+        val artworkFetcher = ArtworkFetcher(session)
         _state.update {
             it.copy(
                 phase = ReceiverPhase.Mirroring(
@@ -578,6 +601,10 @@ object ReceiverController {
                     appLabel = session.appLabel,
                     hasVideo = session.video,
                 ),
+                // In the state rather than a field of this object, because the now-playing screen
+                // reads it during composition and a plain field is not something composition
+                // observes - the same trap the `overlayPinned` comment in `MirrorActivity` names.
+                artwork = artworkFetcher,
             )
         }
         Log.i(TAG, "serving content from ${session.host}:${session.port} for '${session.appLabel}'")
@@ -603,7 +630,17 @@ object ReceiverController {
                         Log.i(TAG, "'$senderName' ended the content session")
                         return true
                     }
-                    is PlayMedia -> withContext(Dispatchers.Main) { player.play(message) }
+                    is PlayMedia -> {
+                        withContext(Dispatchers.Main) { player.play(message) }
+                        // Published rather than only held on the player, because it is half of the
+                        // comparison `nowPlayingForCurrentItem` makes and the UI has to recompose on it.
+                        _state.update { it.copy(playingResourceId = message.resourceId) }
+                    }
+                    // What the item *is*, as opposed to which bytes it is. Stored whatever it names:
+                    // the gate is at read time, so a snapshot arriving before or after the play it
+                    // describes both work, and one for a track already skipped past is simply never
+                    // shown. See `ReceiverUiState.nowPlayingForCurrentItem`.
+                    is NowPlaying -> _state.update { it.copy(nowPlaying = message) }
                     // The phone's transport, wherever it was pressed - its own screen, a notification,
                     // a headset button, a car. Applied to the player that is actually making the
                     // sound. `Next` and `Previous` are refused by the player and arrive as a fresh

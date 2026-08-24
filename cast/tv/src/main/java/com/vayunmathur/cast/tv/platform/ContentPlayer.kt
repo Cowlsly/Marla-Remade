@@ -143,8 +143,9 @@ class ContentPlayer(
         }
 
         // Process-wide because `DefaultHttpDataSource` is `HttpURLConnection`-backed and takes its
-        // socket factory from the default. Acceptable here and nowhere else: this app makes no other
-        // HTTPS request, so there is nothing else whose trust could be narrowed by accident.
+        // socket factory from the default. Acceptable because every HTTPS request this app makes goes
+        // to the same pinned proxy - but not relied upon: `ArtworkFetcher` sets the factory on its
+        // own connection, because a snapshot can arrive before this has run.
         HttpsURLConnection.setDefaultSSLSocketFactory(EphemeralTls.client(fingerprint).socketFactory)
 
         val http = DefaultHttpDataSource.Factory()

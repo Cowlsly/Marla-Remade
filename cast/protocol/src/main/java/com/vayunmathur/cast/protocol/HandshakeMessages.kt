@@ -35,8 +35,19 @@ import kotlinx.serialization.json.Json
  * [PlayMedia.startPositionMs] arrive with it. A version-5 TV would drop every command and report no
  * state: a session that streams perfectly with a dead remote, which is worse than a refusal for
  * exactly the reason `MIN_CAST_VERSION_CODE`'s own KDoc gives.
+ *
+ * 7 gives the television something to *show*. [NowPlaying] carries the title, the author, an artwork
+ * resource id and the lyrics that [PlayMedia] deliberately left on the phone, back when the phone was
+ * the player. It is a new message rather than fields on [PlayMedia] because metadata is state and
+ * [PlayMedia] is a command - see [NowPlaying] - and it is sent for a mirrored session as well as a
+ * served one, because an encoded video was every bit as anonymous on screen as a served track.
+ *
+ * **This one cannot be additive**, which is the whole reason for the bump. [ControlCodec.decode]
+ * collapses "a type this build does not know" into the same null as "malformed", and every caller
+ * reads null as a dead session - so a version-6 television would not ignore `NOW_PLAYING`, it would
+ * hang up mid-track. Refusing at the handshake is the honest version of that.
  */
-const val PROTOCOL_VERSION = 6
+const val PROTOCOL_VERSION = 7
 
 /** The mDNS service type the TV registers and the phone browses for. */
 const val MACAST_SERVICE_TYPE = "_macast._tcp"
@@ -58,6 +69,7 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *        VIDEO_CODEC_CONFIG ─────────────────►          (AV1 only, and repeated on every PLI)
  *        … RTP over UDP …
  *        PLAYBACK_STATE ─────────────────────►          (app content only, ~2/s while it plays)
+ *        NOW_PLAYING ────────────────────────►          (title and author; no resource id to name)
  *                          ◄───────────── PLAYBACK_COMMAND (the TV remote, whenever it is pressed)
  *        BYE ─────────────────────────────────►
  * ```
@@ -69,6 +81,7 @@ const val MACAST_SERVICE_TYPE = "_macast._tcp"
  *        CONTENT_SESSION ─────────────────────►         (proxy host, port, cert fingerprint, token)
  *                          ◄───────────── CONTENT_READY (accepted, or refused with a reason)
  *        PLAY_MEDIA ──────────────────────────►         (which resource, and from what position)
+ *        NOW_PLAYING ─────────────────────────►         (title, author, cover id, lyrics; ≥1 per track)
  *        … the TV fetches byte ranges over HTTPS and decodes them itself …
  *        PLAYBACK_COMMAND ───────────────────►          (the phone's transport, wherever it was pressed)
  *                          ◄───────────── PLAYBACK_STATE (the TV's own player, ~2/s while it plays)
@@ -408,7 +421,10 @@ data class ContentReady(
  *
  * [resourceId] is the app's own name for it, appended to the proxy's path; the phone maps it back to
  * a file descriptor when the TV asks. Sent again for each new item, which is how a queue advances -
- * the queue itself stays on the phone, because it owns the artwork, the metadata and the ordering.
+ * the queue itself stays on the phone, because it owns the ordering.
+ *
+ * The artwork and the metadata used to stay there too, and no longer do: see [NowPlaying], which
+ * carries them as a separate message correlated back to this one by [resourceId].
  */
 @Serializable
 @SerialName("PLAY_MEDIA")
@@ -433,6 +449,92 @@ data class PlayMedia(
      */
     val startPositionMs: Long = 0,
 ) : ControlMessage
+
+/**
+ * What is playing, for the screen the user is actually looking at.
+ *
+ * **A separate message rather than fields on [PlayMedia], because metadata is state and [PlayMedia]
+ * is a command.** Welded onto the command, metadata could only change by re-issuing it - which
+ * restarts the track, so late-arriving artwork or lyrics that took a moment to read could not be
+ * delivered at all. Split, the text goes out at once (the phone already has it in hand when it
+ * decides what to play) and the cover follows when its file exists. That sequencing is not a nicety:
+ * an [artworkResourceId] cannot honestly be announced before the resource is registered and its
+ * bytes are on disk, because the TV fetches it immediately and an unoffered id is a `404`.
+ *
+ * **Sent for either kind of session, which is why it is not part of [ContentSession] either.** A
+ * served session and a mirrored one differ in who holds the player, and not at all in whether the
+ * user would like to know what they are listening to: an encoded video is as anonymous on screen as
+ * a served track was. So this is the one metadata message, and the two paths differ only in what they
+ * can fill in - see [resourceId].
+ *
+ * A full snapshot that replaces wholesale, and sent more than once per item - the same discipline
+ * [PlaybackState] follows, and for the same reason: there is nothing to resynchronise.
+ */
+@Serializable
+@SerialName("NOW_PLAYING")
+data class NowPlaying(
+    /**
+     * The [PlayMedia.resourceId] this describes, or empty when there is no resource to name.
+     *
+     * **A correlation key for a served session, and it is load-bearing there.** The channel is
+     * ordered but the *producers* are not: a metadata job for track A can finish after track B's
+     * [PlayMedia] has gone out, and a television that rendered whatever arrived last would paint A's
+     * cover over B's audio and never correct itself. So the receiver renders a snapshot only while it
+     * names the resource its player is actually playing, and the phone cancels the previous job as
+     * well. Either measure alone leaves a window.
+     *
+     * **Empty for a mirrored session, where the race cannot happen.** Nothing is served, so there is
+     * no id to correlate against - and nothing to correlate: the phone holds the player, so whatever
+     * it last said is by definition what it is playing. Empty is therefore "render this" rather than
+     * a missing field, and it is a distinct state from an id that does not match, which is discarded.
+     */
+    val resourceId: String = "",
+    val title: String = "",
+    /**
+     * Who made it: a track's artist, or a video's channel.
+     *
+     * `author` rather than `artist` because this carries both, and a field named for one of the two
+     * would be a name that lies about half of what it holds. `album` below is genuinely music-only
+     * and stays empty for a video, which is a different thing from being misnamed.
+     */
+    val author: String = "",
+    val album: String = "",
+    /**
+     * A resource id on the same media proxy, or empty when there is no cover.
+     *
+     * Artwork travels over the proxy rather than inline for the reason `MediaProxyServer`'s own KDoc
+     * already names - "a worst case is video, audio, a caption track and artwork at once" - which
+     * reuses a path the TV is making thousands of requests down anyway. Inline it would be a few
+     * hundred kilobytes of Base64 through AES-GCM framing against a 1 MiB frame limit, per track, to
+     * avoid one HTTP request.
+     *
+     * Always empty for a mirrored session: there is no proxy running to fetch it from, and a video
+     * has its own picture on screen anyway.
+     */
+    val artworkResourceId: String = "",
+    /**
+     * Timed lyrics, already parsed, or empty.
+     *
+     * Parsed on the phone deliberately: a resource would put an LRC parser in the receiver as well,
+     * and two parsers of a loosely-specified text format will disagree. Sixty lines of forty
+     * characters is about four kilobytes, so the frame limit is not the argument - the argument is
+     * that sending timed lines means the television never learns what LRC is.
+     */
+    val lyrics: List<LyricLine> = emptyList(),
+    /**
+     * Untimed lyrics as one block, or empty. Mutually exclusive with [lyrics], which wins.
+     *
+     * **Two fields rather than one list with a sentinel.** An untimed line carrying `atMs = -1`
+     * looks tidy and is wrong: the highlight is `indexOfLast { it.atMs <= positionMs }`, so a list
+     * where every timestamp is -1 selects the *last* line and pins the view to the bottom of the
+     * song for ever. The case has to be branched on regardless, so it is better named than encoded.
+     */
+    val plainLyrics: String = "",
+) : ControlMessage
+
+/** One lyric line, and the position it belongs at. */
+@Serializable
+data class LyricLine(val atMs: Long, val text: String)
 
 /**
  * Stop playing and let go of the player - but keep this connection, phone to TV.

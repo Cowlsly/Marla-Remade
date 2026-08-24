@@ -403,6 +403,71 @@ class CastClient(context: Context) {
     }
 
     /**
+     * Tell the television what is playing.
+     *
+     * Optional enrichment: an app that never calls this casts exactly as it always did, and the
+     * television names the app instead. Called, a served session gets a real now-playing screen -
+     * cover, title, author and lyrics that follow the television's own clock - and a `Surface`
+     * session gets the title and author where "Receiving from <app>" used to be on its overlay.
+     *
+     * **Works for either kind of session, and [resourceId] is what differs.** In a content session it
+     * must be the id passed to [play] for the item this describes, because the television correlates
+     * against it: metadata for one item can be prepared after the *next* one has started playing, and
+     * a receiver that rendered whatever arrived last would show the wrong cover indefinitely. A
+     * snapshot naming a resource that is not playing is discarded rather than queued.
+     *
+     * In a `Surface` session there is no resource, so leave it at its default. That is not a missing
+     * field: nothing is served, this app holds the player, and whatever it last said is by definition
+     * what it is playing - so the television renders it immediately.
+     *
+     * May be called more than once per item, and replaces wholesale each time - which is the point of
+     * it being separate from [play]. Send the text as soon as the item is known and follow with
+     * [artworkResourceId] once that resource is genuinely answerable by [CastResourceProvider]: the
+     * television fetches it at once, and an id offered too early is a `404` it will not retry.
+     * [artworkResourceId] has nowhere to be fetched from in a `Surface` session, so leave it empty.
+     *
+     * [lyricTimesMs] and [lyricTexts] are parallel and must be the same length, positions in
+     * milliseconds against the lines at them; mismatched lengths are dropped whole rather than
+     * truncated to the shorter. [plainLyrics] is for lyrics with no timings and is ignored when
+     * [lyricTexts] is non-empty. Both are clamped to [CastContract.MAX_LYRIC_LINES] and
+     * [CastContract.MAX_LYRIC_CHARS].
+     *
+     * Silent and non-throwing, like [play] and [reportPlaybackState], and for the same reason.
+     */
+    fun setNowPlaying(
+        title: String = "",
+        author: String = "",
+        album: String = "",
+        resourceId: String = "",
+        artworkResourceId: String = "",
+        lyricTimesMs: LongArray = LongArray(0),
+        lyricTexts: Array<String> = emptyArray(),
+        plainLyrics: String = "",
+    ) {
+        if (!open) return
+        val remote = service ?: return
+        val message = Message.obtain(null, CastContract.MSG_SET_NOW_PLAYING).apply {
+            data = Bundle().apply {
+                putString(CastContract.KEY_RESOURCE_ID, resourceId)
+                putString(CastContract.KEY_TITLE, title)
+                putString(CastContract.KEY_AUTHOR, author)
+                putString(CastContract.KEY_ALBUM, album)
+                putString(CastContract.KEY_ARTWORK_RESOURCE_ID, artworkResourceId)
+                // Primitive arrays rather than a list of a small class, for the reason
+                // `PlaybackAction` is an int on the wire: a `Serializable` in a `Bundle` is a
+                // class-loading problem waiting for a client built against a different SDK version.
+                putLongArray(CastContract.KEY_LYRIC_TIMES, lyricTimesMs)
+                putStringArray(CastContract.KEY_LYRIC_TEXTS, lyricTexts)
+                putString(CastContract.KEY_PLAIN_LYRICS, plainLyrics)
+            }
+        }
+        try {
+            remote.send(message)
+        } catch (_: RemoteException) {
+        }
+    }
+
+    /**
      * Say that a resource offered with an unknown length has finished being written.
      *
      * Only for a [CastResource] whose `length` was negative. [length] is the real size now that it

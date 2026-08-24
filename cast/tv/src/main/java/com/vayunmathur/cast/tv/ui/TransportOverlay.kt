@@ -26,14 +26,50 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.tv.material3.MaterialTheme
 import androidx.tv.material3.Text
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.tv.R
 import com.vayunmathur.cast.tv.platform.PlaybackSnapshot
 
 /**
- * The transport controls, over the picture.
+ * Owns the one per-frame clock a served session needs, and hands it down as a lambda.
+ *
+ * [TransportOverlay] used to own its own `withFrameMillis` ticker, which was right while it was the
+ * only thing on screen that moved. The now-playing screen's lyrics need the same interpolated
+ * position and the same scrub-preview override, and two tickers would be two answers to one question.
+ *
+ * **Hoisted as a lambda, not as a value, and the distinction is the whole point.** Passing the number
+ * down would put every reader of it in the recomposition scope that invalidates sixty times a second -
+ * which on TV-class hardware means redrawing a bitmap and a full lyrics column per frame. Passing a
+ * lambda leaves the invalidation here, where the state is read, and lets each reader decide how much
+ * of itself depends on it.
+ *
+ * Keyed on the snapshot so every fresh one re-anchors, and the ticker stops while playback is paused:
+ * a frame callback per frame for a still bar would keep the panel awake for nothing.
+ */
+@Composable
+fun PlaybackClock(
+    snapshot: PlaybackSnapshot,
+    /** A scrub the user is composing, which overrides the clock entirely. Null when not scrubbing. */
+    scrubPreviewMs: Long?,
+    content: @Composable (positionMs: () -> Long) -> Unit,
+) {
+    var frameNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(snapshot) {
+        frameNowMs = System.currentTimeMillis()
+        if (!snapshot.state.playing) return@LaunchedEffect
+        while (true) {
+            withFrameMillis { frameNowMs = System.currentTimeMillis() }
+        }
+    }
+    content { scrubPreviewMs ?: snapshot.positionAt(frameNowMs) }
+}
+
+/**
+ * The transport controls: a bar at the bottom of whatever it is given.
  *
  * **Nothing here is focusable, and that is deliberate rather than an omission.** A media overlay is
  * driven by the remote's dedicated keys and its D-pad as *gestures* - left seeks, up is volume - not by
@@ -44,109 +80,163 @@ import com.vayunmathur.cast.tv.platform.PlaybackSnapshot
  *
  * Only mounted while the phone is reporting playback, so it cannot appear over a mirrored phone screen
  * - there would be no transport to control.
+ *
+ * **It sizes itself to its content and lets the caller place it, rather than filling the window.** Over
+ * video it is aligned to the bottom of a `Box` and overlays the picture, which is the whole point of a
+ * scrim. For audio there is no picture, so `MirrorActivity` stacks it under the now-playing screen in a
+ * `Column` instead - and then the lyrics get exactly the height that is left, rather than the height
+ * left over from a constant somebody guessed at. Filling the window made that impossible to express.
+ *
+ * **The clock is not its own any more.** [positionMs] is read per frame and supplied by
+ * [PlaybackClock], which owns the ticker so that this and the now-playing screen's lyrics move against
+ * one number. A lambda rather than a `Long` for the reason [PlaybackClock] gives.
  */
 @Composable
 fun TransportOverlay(
     snapshot: PlaybackSnapshot,
+    /** Who is casting, shown until the phone says what is playing. Usually the app's name. */
     sourceName: String,
-    /** A scrub in progress, which has not been committed to the phone yet. Null when not scrubbing. */
-    scrubPreviewMs: Long?,
+    /** What is playing, or null when the phone has not said - an old build, or the first moment. */
+    nowPlaying: NowPlaying?,
+    /** Where playback is right now, including any scrub preview. Read per frame. */
+    positionMs: () -> Long,
+    /** Whether a scrub is in progress, which thickens the bar. */
+    scrubbing: Boolean,
+    /**
+     * Whether to darken behind itself.
+     *
+     * True over a picture, where the gradient is what keeps the frame visible through the controls and
+     * the numbers legible against whatever happens to be behind them. **False for audio**, where there
+     * is no picture to see through and the scrim would be a black band across the bottom of an
+     * otherwise continuous surface - the caller has already painted the window, and the bar belongs to
+     * the same sheet of colour as the cover and the lyrics above it.
+     */
+    scrim: Boolean = true,
     modifier: Modifier = Modifier,
 ) {
     val state = snapshot.state
+    val position = positionMs()
 
-    // Redrawn with the panel rather than with the phone's reports. A bar plotted only when a snapshot
-    // landed would step twice a second; anchoring on the snapshot and advancing with the frame clock is
-    // what makes it move like a seek bar. Keyed on the snapshot so every fresh one re-anchors.
-    var frameNowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(snapshot) {
-        frameNowMs = System.currentTimeMillis()
-        // Nothing to advance while paused, and a frame callback per frame for a still bar would keep
-        // the panel awake for no reason.
-        if (!state.playing) return@LaunchedEffect
-        while (true) {
-            withFrameMillis { frameNowMs = System.currentTimeMillis() }
-        }
-    }
-    val positionMs = scrubPreviewMs ?: snapshot.positionAt(frameNowMs)
-
-    Box(modifier = modifier.fillMaxSize()) {
-        Column(
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .fillMaxWidth()
-                // A scrim rather than a panel: the picture stays visible behind the controls, which is
-                // what makes scrubbing usable at all.
-                .background(
-                    Brush.verticalGradient(
-                        listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)),
-                    ),
-                )
-                .padding(horizontal = 48.dp, vertical = 32.dp),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = sourceName,
-                    style = MaterialTheme.typography.titleLarge,
-                    color = Color.White,
-                )
-                if (state.speed != 1f) {
-                    Text(
-                        text = stringResource(R.string.tv_transport_speed, formatSpeed(state.speed)),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = Color.White.copy(alpha = 0.8f),
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .then(
+                if (scrim) {
+                    Modifier.background(
+                        Brush.verticalGradient(
+                            listOf(Color.Transparent, Color.Black.copy(alpha = 0.85f)),
+                        ),
                     )
-                }
-            }
-
-            SeekBar(
-                positionMs = positionMs,
-                durationMs = state.durationMs,
-                scrubbing = scrubPreviewMs != null,
+                } else {
+                    Modifier
+                },
             )
-
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-            ) {
+            .padding(horizontal = 48.dp, vertical = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Headline(
+                nowPlaying = nowPlaying,
+                sourceName = sourceName,
+                modifier = Modifier.weight(1f),
+            )
+            if (state.speed != 1f) {
                 Text(
-                    text = elapsed(positionMs),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color.White,
-                )
-                // **The action the centre key will take, not a description of the state.** Read as a
-                // status it would be the other way round, and both readings are defensible - which is
-                // exactly why it has to match the button it sits next to. Buffering is its own case:
-                // a stall and a pause look identical on a frozen picture, and only one of them is the
-                // user's own doing.
-                Text(
-                    text = when {
-                        state.buffering -> "…"
-                        state.playing -> "❚❚"
-                        else -> "▶"
-                    },
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color.White,
-                )
-                Text(
-                    text = if (state.durationMs > 0) elapsed(state.durationMs) else "",
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = Color.White,
+                    text = stringResource(R.string.tv_transport_speed, formatSpeed(state.speed)),
+                    style = MaterialTheme.typography.titleMedium,
+                    color = Color.White.copy(alpha = 0.8f),
                 )
             }
+        }
 
+        SeekBar(
+            positionMs = position,
+            durationMs = state.durationMs,
+            scrubbing = scrubbing,
+        )
+
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+        ) {
             Text(
-                text = stringResource(R.string.tv_transport_hint),
-                style = MaterialTheme.typography.bodySmall,
-                color = Color.White.copy(alpha = 0.6f),
+                text = elapsed(position),
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color.White,
+            )
+            // **The action the centre key will take, not a description of the state.** Read as a
+            // status it would be the other way round, and both readings are defensible - which is
+            // exactly why it has to match the button it sits next to. Buffering is its own case:
+            // a stall and a pause look identical on a frozen picture, and only one of them is the
+            // user's own doing.
+            Text(
+                text = when {
+                    state.buffering -> "…"
+                    state.playing -> "❚❚"
+                    else -> "▶"
+                },
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color.White,
+            )
+            Text(
+                text = if (state.durationMs > 0) elapsed(state.durationMs) else "",
+                style = MaterialTheme.typography.bodyLarge,
+                color = Color.White,
             )
         }
+
+        Text(
+            text = stringResource(R.string.tv_transport_hint),
+            style = MaterialTheme.typography.bodySmall,
+            color = Color.White.copy(alpha = 0.6f),
+        )
     }
+}
+
+/**
+ * What is playing, or who is casting when that is all the television knows.
+ *
+ * **The title replaces the app's name rather than sitting beside it.** "Receiving from YouPipe" was
+ * the most the receiver could say when nothing crossed the protocol but pixels; with a title in hand
+ * it is the less useful of the two, and a user looking at a video already knows which app they
+ * started. The fallback keeps it for an old phone, an app that sends no metadata, and the moment
+ * before the first snapshot lands.
+ *
+ * **Every field it has, and no field it does not**, which is why there is no video-shaped branch here:
+ * a track fills all three lines and a video fills two, because `album` is what a video has nothing to
+ * put in. Stacked rather than joined onto one line - a video title is long and a channel name is
+ * short, and one line holding both would truncate the title to fit something that is not the title.
+ */
+@Composable
+private fun Headline(nowPlaying: NowPlaying?, sourceName: String, modifier: Modifier) {
+    Column(modifier = modifier) {
+        Text(
+            text = nowPlaying?.title.orEmpty().ifBlank { sourceName },
+            style = MaterialTheme.typography.titleLarge,
+            color = Color.White,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+        Subtitle(nowPlaying?.author.orEmpty(), alpha = 0.7f)
+        Subtitle(nowPlaying?.album.orEmpty(), alpha = 0.5f)
+    }
+}
+
+/** One line beneath the title, or nothing at all when there is nothing to put on it. */
+@Composable
+private fun Subtitle(text: String, alpha: Float) {
+    if (text.isBlank()) return
+    Text(
+        text = text,
+        style = MaterialTheme.typography.titleMedium,
+        color = Color.White.copy(alpha = alpha),
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
+    )
 }
 
 /**

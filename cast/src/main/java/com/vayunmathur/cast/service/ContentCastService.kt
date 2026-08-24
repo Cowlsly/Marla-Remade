@@ -13,6 +13,8 @@ import android.os.RemoteException
 import android.util.Log
 import com.vayunmathur.cast.platform.CastController
 import com.vayunmathur.cast.platform.ContentSessionResult
+import com.vayunmathur.cast.protocol.LyricLine
+import com.vayunmathur.cast.protocol.NowPlaying
 import com.vayunmathur.cast.protocol.PlayMedia
 import com.vayunmathur.cast.protocol.PlaybackAction
 import com.vayunmathur.cast.protocol.PlaybackCommand
@@ -108,6 +110,14 @@ class ContentCastService : Service() {
                     if (sessionOpen) {
                         msg.data?.toPlaybackCommand()
                             ?.let { CastController.sendPlaybackCommand(it) }
+                    }
+                    true
+                }
+                CastContract.MSG_SET_NOW_PLAYING -> {
+                    // Dropped with no session, like its neighbours: there is no television to show it
+                    // on, and a client may send one a tick after the session ended.
+                    if (sessionOpen) {
+                        msg.data?.toNowPlaying()?.let { CastController.setNowPlaying(it) }
                     }
                     true
                 }
@@ -305,6 +315,83 @@ private fun Bundle.toPlayMedia(): PlayMedia = PlayMedia(
     mimeType = getString(CastContract.KEY_RESOURCE_TYPE).orEmpty(),
     durationMs = getLong(CastContract.KEY_MEDIA_DURATION_MS),
     startPositionMs = getLong(CastContract.KEY_START_POSITION_MS),
+)
+
+/**
+ * The metadata a client sent, as the message the TV understands, or null when it was unusable.
+ *
+ * **This is the trust boundary, and it has to act like one.** A first-party app is trusted, but a bug
+ * in one must not be able to end a session: these strings and lines end up in a single control frame,
+ * and one over `ControlFraming.MAX_FRAME_BYTES` is refused rather than sent, which drops the
+ * connection rather than the metadata. So the clamping is here, on the way in, and not left to a
+ * caller to remember.
+ *
+ * The `Bundle` is unwrapped by [Bundle.toNowPlaying]; everything that *decides* anything is in this
+ * function so it can be proved on a plain JVM - the same move `PlaybackAction.sdkAction` makes for
+ * the other direction.
+ */
+internal fun nowPlayingOf(
+    resourceId: String,
+    title: String,
+    author: String,
+    album: String,
+    artworkResourceId: String,
+    lyricTimesMs: LongArray?,
+    lyricTexts: Array<String>?,
+    plainLyrics: String,
+): NowPlaying? {
+    // Nothing whatever to show, so there is no snapshot here - only a message that would blank the
+    // television's headline. An empty [resourceId] on its own is fine and expected: that is what a
+    // `Surface` session sends, because it has no resource to name.
+    if (title.isEmpty() && author.isEmpty() && album.isEmpty() && artworkResourceId.isEmpty() &&
+        lyricTexts.isNullOrEmpty() && plainLyrics.isEmpty()
+    ) {
+        return null
+    }
+
+    // Refused rather than truncated to the shorter: the two halves disagreeing means the sender is
+    // confused about its own lyrics, and guessing would put the wrong words at the wrong times.
+    val times = lyricTimesMs ?: LongArray(0)
+    val texts = lyricTexts ?: emptyArray()
+    val timed = if (times.size == texts.size) clampLyrics(times, texts) else emptyList()
+
+    return NowPlaying(
+        resourceId = resourceId,
+        title = title.take(CastContract.MAX_LYRIC_CHARS),
+        author = author.take(CastContract.MAX_LYRIC_CHARS),
+        album = album.take(CastContract.MAX_LYRIC_CHARS),
+        artworkResourceId = artworkResourceId,
+        lyrics = timed,
+        // Dropped when there are timed lines, so the two can never both be on screen and the
+        // television needs no precedence rule of its own.
+        plainLyrics = if (timed.isEmpty()) plainLyrics.take(CastContract.MAX_LYRIC_CHARS) else "",
+    )
+}
+
+/** Both bounds, applied together: whichever runs out first ends the list. */
+private fun clampLyrics(timesMs: LongArray, texts: Array<String>): List<LyricLine> {
+    val lines = ArrayList<LyricLine>(minOf(texts.size, CastContract.MAX_LYRIC_LINES))
+    var chars = 0
+    for (i in texts.indices) {
+        if (lines.size >= CastContract.MAX_LYRIC_LINES) break
+        val text = texts[i]
+        if (chars + text.length > CastContract.MAX_LYRIC_CHARS) break
+        lines.add(LyricLine(atMs = timesMs[i], text = text))
+        chars += text.length
+    }
+    return lines
+}
+
+/** See [nowPlayingOf], which is where everything this reads is actually decided. */
+private fun Bundle.toNowPlaying(): NowPlaying? = nowPlayingOf(
+    resourceId = getString(CastContract.KEY_RESOURCE_ID).orEmpty(),
+    title = getString(CastContract.KEY_TITLE).orEmpty(),
+    author = getString(CastContract.KEY_AUTHOR).orEmpty(),
+    album = getString(CastContract.KEY_ALBUM).orEmpty(),
+    artworkResourceId = getString(CastContract.KEY_ARTWORK_RESOURCE_ID).orEmpty(),
+    lyricTimesMs = getLongArray(CastContract.KEY_LYRIC_TIMES),
+    lyricTexts = getStringArray(CastContract.KEY_LYRIC_TEXTS),
+    plainLyrics = getString(CastContract.KEY_PLAIN_LYRICS).orEmpty(),
 )
 
 /**
