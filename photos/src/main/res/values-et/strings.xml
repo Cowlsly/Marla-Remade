@@ -159,4 +159,9 @@
     <string name="editor_desc_invert">Pööra värvid teistpidi (tee fotonegatiiv).</string>
     <string name="live_wallpaper_unavailable">Reaalajas toimiva taustapildid pole selles seadmes toetatud</string>
     <string name="live_wallpaper_description">Animeeritud taustapilt sinu fotodest</string>
+    <string name="video_crop_rotate">Kadreerimine ja pööramine</string>
+    <string name="video_trim">Kärbi kestust</string>
+    <string name="title_edit_video">Muuda videot</string>
+    <string name="people_unnamed">Ilma nimeta</string>
+    <string name="semantic_search_unavailable">Tehisarupõhine fotode otsing pole selles paigalduses saadaval. Teksti- ja failinimepõhine otsing on toimib jätkuvalt.</string>
 </resources>
