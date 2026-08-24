@@ -177,4 +177,8 @@
         <item quantity="many">W <xliff:g id="count" example="4">%1$d</xliff:g> terminach</item>
         <item quantity="other">W <xliff:g id="count" example="4">%1$d</xliff:g> terminach</item>
     </plurals>
+    <string name="export_ics_file">Eksportuj plik .ics</string>
+    <string name="export_events_to_ics_file">Eksportuj wydarzenia do pliku .ics</string>
+    <string name="export_ics_success">Kalendarz wyeksportowany</string>
+    <string name="export_ics_failed_format">Eksport kalendarza nie powiódł się: <xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
 </resources>
