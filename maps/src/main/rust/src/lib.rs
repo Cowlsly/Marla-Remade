@@ -82,6 +82,34 @@ fn route_state() -> &'static Mutex<RouteState> {
     })
 }
 
+/// Transit packs already opened, keyed by `(base_dir, feed)`.
+///
+/// `TransitIndex::load` mmaps and revalidates the entire pack — 2.84 GB for the
+/// planetary one — and a single itinerary needs three or four of them (two RAPTOR
+/// passes plus a timezone lookup). Shared behind an `Arc` like [`GRAPH`], since a
+/// loaded index is immutable.
+type TransitCache = HashMap<(String, String), Arc<transit::TransitIndex>>;
+
+fn transit_cache() -> &'static Mutex<TransitCache> {
+    static T: OnceLock<Mutex<TransitCache>> = OnceLock::new();
+    T.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// The pack for `feed` under `base`, loading it on first use. `None` when it is
+/// absent or malformed; a failure is not cached, so a later republish is picked up.
+fn transit_index(base: &str, feed: &str) -> Option<Arc<transit::TransitIndex>> {
+    let key = (base.to_string(), feed.to_string());
+    // Held across the load so two concurrent first queries map the pack once
+    // rather than racing to build two 2.84 GB mappings.
+    let mut cache = transit_cache().lock().ok()?;
+    if let Some(idx) = cache.get(&key) {
+        return Some(Arc::clone(idx));
+    }
+    let idx = Arc::new(transit::TransitIndex::load(base, feed)?);
+    cache.insert(key, Arc::clone(&idx));
+    Some(idx)
+}
+
 // ---------------------------------------------------------------------------
 // Traffic prefetch reverse-callback
 // ---------------------------------------------------------------------------
@@ -506,7 +534,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_findTransitR
         Err(_) => return null,
     };
 
-    let index = match transit::TransitIndex::load(&base, &feed_name) {
+    let index = match transit_index(&base, &feed_name) {
         Some(i) => i,
         None => return null,
     };
@@ -701,7 +729,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getStopDepar
         Err(_) => return null,
     };
 
-    let index = match transit::TransitIndex::load(&base, &feed_name) {
+    let index = match transit_index(&base, &feed_name) {
         Some(i) => i,
         None => return null,
     };
@@ -819,7 +847,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_getFeedTimez
         Ok(s) => s.into(),
         Err(_) => return null,
     };
-    let index = match transit::TransitIndex::load(&base, &feed_name) {
+    let index = match transit_index(&base, &feed_name) {
         Some(i) => i,
         None => return null,
     };
@@ -869,7 +897,7 @@ pub extern "system" fn Java_com_vayunmathur_maps_util_OfflineRouter_nearestStopM
         Ok(s) => s.into(),
         Err(_) => return null,
     };
-    let index = match transit::TransitIndex::load(&base, &feed_name) {
+    let index = match transit_index(&base, &feed_name) {
         Some(i) => i,
         None => return null,
     };

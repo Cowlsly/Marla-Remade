@@ -376,7 +376,30 @@ object OfflineRouter {
     @Synchronized
     fun reload(context: Context) {
         isInitialized = false
+        cachedTransitFeeds = null
         initialize(context)
+    }
+
+    /**
+     * Pack names under [basePath], listed once.
+     *
+     * Every transit entry point used to `listFiles` this directory and loop over
+     * the result; in practice there is exactly one pack. Cleared by [reload], which
+     * is what runs once a download has replaced it.
+     */
+    @Volatile
+    private var cachedTransitFeeds: List<String>? = null
+
+    private fun transitFeeds(base: String): List<String> {
+        cachedTransitFeeds?.let { return it }
+        val feeds = File(base)
+                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
+                ?.map { it.name.removeSuffix(".transit") }
+                .orEmpty()
+        // An empty result is not cached: the pack may still be downloading, and
+        // remembering "none" would disable offline transit until the next restart.
+        if (feeds.isNotEmpty()) cachedTransitFeeds = feeds
+        return feeds
     }
 
     /**
@@ -461,10 +484,7 @@ object OfflineRouter {
     ): RouteService.Route? = withContext(Dispatchers.Default) {
         if (!isInitialized) initialize(context)
         val base = basePath ?: return@withContext null
-        val feeds = File(base)
-                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
-                ?.map { it.name.removeSuffix(".transit") }
-                ?: emptyList()
+        val feeds = transitFeeds(base)
         if (feeds.isEmpty()) return@withContext null
 
         for (feed in feeds) {
@@ -585,10 +605,7 @@ object OfflineRouter {
     ): TransitStop? = withContext(Dispatchers.Default) {
         if (!isInitialized) initialize(context)
         val base = basePath ?: return@withContext null
-        val feeds = File(base)
-                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
-                ?.map { it.name.removeSuffix(".transit") }
-                ?: emptyList()
+        val feeds = transitFeeds(base)
         for (feed in feeds) {
             val id = runCatching {
                 nearestStopMotisIdNative(base, feed, lat, lon)
@@ -615,10 +632,7 @@ object OfflineRouter {
     ): List<Departure> = withContext(Dispatchers.Default) {
         if (!isInitialized) initialize(context)
         val base = basePath ?: return@withContext emptyList()
-        val feeds = File(base)
-                .listFiles { f -> f.isFile && f.name.endsWith(".transit") }
-                ?.map { it.name.removeSuffix(".transit") }
-                ?: emptyList()
+        val feeds = transitFeeds(base)
         if (feeds.isEmpty()) return@withContext emptyList()
 
         val all = mutableListOf<Departure>()

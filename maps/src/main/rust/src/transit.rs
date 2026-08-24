@@ -957,6 +957,73 @@ enum Reached {
     Walk { from_stop: u32 },
 }
 
+/// Earliest known arrival per stop, plus how it was reached and the destination
+/// bound that prunes the search.
+///
+/// Sparse because the flat `vec![_; stop_count]` pair this replaced wrote ~175 MB
+/// per call at planetary stop counts, twice per query, to serve a touched set that
+/// target pruning keeps proportional to the query. Probes now pay a hash instead,
+/// which the round loop can afford.
+struct Arrivals {
+    best: HashMap<u32, u32>,
+    label: HashMap<u32, Reached>,
+    /// Walk seconds from each stop within egress range of the destination.
+    egress: HashMap<u32, u32>,
+    /// Best egress-adjusted arrival at the destination so far, or `u32::MAX`.
+    ///
+    /// Every onward move costs non-negative time, so a journey through a stop
+    /// reached at or after this can never beat it. That makes it a sound cutoff
+    /// rather than a heuristic — without one, six rounds diffuse across the whole
+    /// planetary component.
+    target: u32,
+}
+
+impl Arrivals {
+    fn new(egress: &[(u32, u32)]) -> Arrivals {
+        let mut by_stop: HashMap<u32, u32> = HashMap::new();
+        for &(s, w) in egress {
+            by_stop.entry(s).and_modify(|e| *e = (*e).min(w)).or_insert(w);
+        }
+        Arrivals {
+            best: HashMap::new(),
+            label: HashMap::new(),
+            egress: by_stop,
+            target: u32::MAX,
+        }
+    }
+
+    /// Earliest known arrival at `stop`, or `u32::MAX` if unreached.
+    fn at(&self, stop: u32) -> u32 {
+        self.best.get(&stop).copied().unwrap_or(u32::MAX)
+    }
+
+    /// Whether reaching a stop at `t` could still improve the destination.
+    fn useful(&self, t: u32) -> bool {
+        t < self.target
+    }
+
+    /// Record reaching `stop` at `t` via `how`, if that beats both the stop's own
+    /// best and [`Self::target`]. Reports whether it did, and tightens the target
+    /// when `stop` can walk to the destination.
+    fn improve(&mut self, stop: u32, t: u32, how: Reached) -> bool {
+        if !self.useful(t) || t >= self.at(stop) {
+            return false;
+        }
+        self.best.insert(stop, t);
+        self.label.insert(stop, how);
+        if let Some(&w) = self.egress.get(&stop) {
+            self.target = self.target.min(t.saturating_add(w));
+        }
+        true
+    }
+
+    /// How `stop` was reached. Unreached stops read as [`Reached::Origin`], which
+    /// terminates reconstruction rather than looping.
+    fn how(&self, stop: u32) -> Reached {
+        self.label.get(&stop).copied().unwrap_or(Reached::Origin)
+    }
+}
+
 /// Plan an earliest-arrival transit journey between two WGS84 points departing
 /// at `dep_secs` seconds since midnight. All times are in the feed's local frame
 /// (see [`QueryDay`]). When `sched` carries an overlay, cancelled trips are
@@ -977,9 +1044,20 @@ pub fn plan(
     }
 
     let inf = u32::MAX;
-    let mut best = vec![inf; n];
-    let mut label = vec![Reached::Origin; n];
     let mut prof_cache: HashMap<u32, ProfileDec> = HashMap::new();
+
+    // --- Egress: precompute walk time from nearby stops to the destination. ---
+    // Before access, so the very first access stop already prunes against a
+    // walk-only journey when the two ranges overlap.
+    let egress: Vec<(u32, u32)> = idx
+        .stops_in_radius(to_lat, to_lon, ACCESS_RADIUS_M)
+        .into_iter()
+        .map(|(s, d)| (s, (d / WALK_SPEED_M_S).ceil() as u32))
+        .collect();
+    if egress.is_empty() {
+        return None;
+    }
+    let mut reach = Arrivals::new(&egress);
 
     // --- Access: walk from origin to nearby stops (grid-restricted). ---
     let access = idx.stops_in_radius(from_lat, from_lon, ACCESS_RADIUS_M);
@@ -989,26 +1067,14 @@ pub fn plan(
     let mut seeds: Vec<u32> = Vec::new();
     for (s, d) in access {
         let t = dep_secs + (d / WALK_SPEED_M_S).ceil() as u32;
-        if t < best[s as usize] {
-            best[s as usize] = t;
-            label[s as usize] = Reached::Origin;
+        if reach.improve(s, t, Reached::Origin) {
             seeds.push(s);
         }
     }
 
-    // --- Egress: precompute walk time from nearby stops to the destination. ---
-    let egress: Vec<(u32, u32)> = idx
-        .stops_in_radius(to_lat, to_lon, ACCESS_RADIUS_M)
-        .into_iter()
-        .map(|(s, d)| (s, (d / WALK_SPEED_M_S).ceil() as u32))
-        .collect();
-    if egress.is_empty() {
-        return None;
-    }
-
     // Round 0 queue = access stops + their footpath transfers.
     let mut queue: Vec<u32> = seeds.clone();
-    relax_transfers(idx, &mut best, &mut label, &seeds, &mut queue);
+    relax_transfers(idx, &mut reach, &seeds, &mut queue);
 
     // --- RAPTOR rounds ---
     for _round in 0..MAX_ROUNDS {
@@ -1059,18 +1125,18 @@ pub fn plan(
                             abs_time_on(td.start_time, arr_rel, b.prev_day),
                             b.delay_secs,
                         );
-                        if arr < best[stop as usize] {
-                            best[stop as usize] = arr;
-                            label[stop as usize] =
-                                Reached::Transit { route: r, board_stop, boarding: b };
+                        let how = Reached::Transit { route: r, board_stop, boarding: b };
+                        if reach.improve(stop, arr, how) {
                             improved.push(stop);
                         }
                     }
                 }
 
-                // Can we (re)board an earlier trip here given our arrival?
-                let ready = best[stop as usize];
-                if ready != inf {
+                // Can we (re)board an earlier trip here given our arrival? Skipped
+                // once this stop is too late to beat the destination, which is what
+                // keeps `earliest_trip` off the routes that cannot matter.
+                let ready = reach.at(stop);
+                if ready != inf && reach.useful(ready) {
                     if let Some(cand) =
                         earliest_trip(idx, &mut prof_cache, r, &trips, pos, ready, sched)
                     {
@@ -1095,7 +1161,7 @@ pub fn plan(
 
         // Next queue = freshly improved stops + their footpath transfers.
         let mut next: Vec<u32> = improved.clone();
-        relax_transfers(idx, &mut best, &mut label, &improved, &mut next);
+        relax_transfers(idx, &mut reach, &improved, &mut next);
         queue = next;
         if improved.is_empty() {
             break;
@@ -1107,10 +1173,10 @@ pub fn plan(
     let mut best_stop = u32::MAX;
     let mut best_walk = 0u32;
     for &(s, w) in &egress {
-        if best[s as usize] == inf {
+        if reach.at(s) == inf {
             continue;
         }
-        let total = best[s as usize].saturating_add(w);
+        let total = reach.at(s).saturating_add(w);
         if total < best_final {
             best_final = total;
             best_stop = s;
@@ -1133,7 +1199,7 @@ pub fn plan(
             // journey; bail so the caller falls back to the online planner.
             return None;
         }
-        match label[cur as usize] {
+        match reach.how(cur) {
             Reached::Origin => {
                 origin_stop = cur;
                 break;
@@ -1143,8 +1209,8 @@ pub fn plan(
                     idx,
                     from_stop,
                     cur,
-                    best[from_stop as usize],
-                    best[cur as usize],
+                    reach.at(from_stop),
+                    reach.at(cur),
                 ));
                 cur = from_stop;
             }
@@ -1179,7 +1245,8 @@ pub fn plan(
                 headsign: String::new(),
                 route_color: 0,
                 dep_secs,
-                arr_secs: best[first_stop as usize]
+                arr_secs: reach
+                    .at(first_stop)
                     .min(dep_secs + (access_d / WALK_SPEED_M_S).ceil() as u32),
                 stop_count: 0,
                 dist_m: access_d,
@@ -1201,8 +1268,8 @@ pub fn plan(
             to_stop: String::new(),
             headsign: String::new(),
             route_color: 0,
-            dep_secs: best[best_stop as usize],
-            arr_secs: best[best_stop as usize].saturating_add(best_walk),
+            dep_secs: reach.at(best_stop),
+            arr_secs: reach.at(best_stop).saturating_add(best_walk),
             stop_count: 0,
             dist_m: egress_d,
             coords: vec![elon, elat, to_lon, to_lat],
@@ -1400,13 +1467,12 @@ fn trip_sched_dep(
 /// whose best arrival improves into `out`.
 fn relax_transfers(
     idx: &TransitIndex,
-    best: &mut [u32],
-    label: &mut [Reached],
+    reach: &mut Arrivals,
     seeds: &[u32],
     out: &mut Vec<u32>,
 ) {
     for &s in seeds {
-        let base_t = best[s as usize];
+        let base_t = reach.at(s);
         if base_t == u32::MAX {
             continue;
         }
@@ -1414,9 +1480,7 @@ fn relax_transfers(
         for i in ts..te {
             let tr = idx.transfer(i);
             let arr = base_t.saturating_add(tr.secs);
-            if arr < best[tr.to_stop as usize] {
-                best[tr.to_stop as usize] = arr;
-                label[tr.to_stop as usize] = Reached::Walk { from_stop: s };
+            if reach.improve(tr.to_stop, arr, Reached::Walk { from_stop: s }) {
                 out.push(tr.to_stop);
             }
         }
@@ -1445,8 +1509,16 @@ fn earliest_trip(
     let slack = sched.max_early_secs();
     // Previous-day trips first: theirs are the earliest times in this frame.
     for prev_day in [true, false] {
+        // A previous-day trip departs at `start_time + rel - SECS_PER_DAY` in this
+        // frame, so its `start_time` has to clear the bound by a whole day. The
+        // day belongs in the bound rather than disabling the break: exempting the
+        // pass made it an unconditional scan of every trip on the route, each with
+        // a `service_runs` binary search.
+        let day_shift = if prev_day { SECS_PER_DAY } else { 0 };
         for (i, td) in trips.iter().enumerate() {
-            if best.is_some() && td.start_time >= best_dep.saturating_add(slack) && !prev_day {
+            if best.is_some()
+                && td.start_time >= best_dep.saturating_add(slack).saturating_add(day_shift)
+            {
                 break;
             }
             if !sched.runs(idx, td.service_idx, prev_day) {
@@ -2389,6 +2461,154 @@ mod tests {
             ride.dep_secs, 31_200,
             "the early-running 10:00 trip departs at 08:40, beating the scheduled 09:00"
         );
+    }
+
+    #[test]
+    fn an_overnight_trip_survives_the_previous_day_scan_break() {
+        // The previous-day pass used to be exempt from the break, making it an
+        // unconditional scan of the route. It now breaks on a day-shifted bound, so
+        // the earliest overnight trip must still win with later ones present.
+        let mut pack = one_route_pack();
+        pack.routes[0].trips = vec![
+            Trip {
+                start: 88_200, // 24:30 -> 00:30 in the query day
+                stoptimes: vec![(88_200, 88_200), (88_500, 88_500), (88_800, 88_800)],
+                service: 0,
+                headsign: "Owl",
+            },
+            Trip {
+                start: 91_800, // 25:30 -> 01:30
+                stoptimes: vec![(91_800, 91_800), (92_100, 92_100), (92_400, 92_400)],
+                service: 0,
+                headsign: "Owl",
+            },
+            Trip {
+                start: 95_400, // 26:30 -> 02:30
+                stoptimes: vec![(95_400, 95_400), (95_700, 95_700), (96_000, 96_000)],
+                service: 0,
+                headsign: "Owl",
+            },
+        ];
+        let idx = pack.index();
+        let day = QueryDay {
+            weekday: 3,
+            date: 20_240_104,
+            prev_weekday: 2,
+            prev_date: 20_240_103,
+        };
+        let legs = plan(&idx, 37.700, -122.400, 37.720, -122.400, 1_200, sched(day))
+            .expect("the 24:30 trip is reachable at 00:20");
+        let ride = legs.iter().find(|l| l.kind == LegKind::Ride).expect("a ride leg");
+        assert_eq!(ride.dep_secs, 1_800, "the first overnight trip, not a later one");
+    }
+
+    #[test]
+    fn a_later_overnight_trip_is_found_once_the_first_has_gone() {
+        // The break only applies once a candidate exists, so a query that misses
+        // the earliest overnight trip must keep scanning to the next one rather
+        // than stopping at the day-shifted bound.
+        let mut pack = one_route_pack();
+        pack.routes[0].trips = vec![
+            Trip {
+                start: 88_200, // departs 00:30, already gone at 01:00
+                stoptimes: vec![(88_200, 88_200), (88_500, 88_500), (88_800, 88_800)],
+                service: 0,
+                headsign: "Owl",
+            },
+            Trip {
+                start: 91_800, // departs 01:30
+                stoptimes: vec![(91_800, 91_800), (92_100, 92_100), (92_400, 92_400)],
+                service: 0,
+                headsign: "Owl",
+            },
+        ];
+        let idx = pack.index();
+        let day = QueryDay {
+            weekday: 3,
+            date: 20_240_104,
+            prev_weekday: 2,
+            prev_date: 20_240_103,
+        };
+        let legs = plan(&idx, 37.700, -122.400, 37.720, -122.400, 3_600, sched(day))
+            .expect("the 25:30 trip is still catchable at 01:00");
+        let ride = legs.iter().find(|l| l.kind == LegKind::Ride).expect("a ride leg");
+        assert_eq!(ride.dep_secs, 5_400, "the 25:30 trip, shifted into the query day");
+    }
+
+    /// Two routes reaching the destination: a direct slow one found in round 1, and
+    /// a two-leg faster one that only completes in round 2. Target pruning cuts the
+    /// search against the best destination arrival so far, so this pins that it
+    /// still admits a genuine later improvement instead of settling for the direct
+    /// route.
+    #[test]
+    fn target_pruning_still_admits_a_faster_journey_found_in_a_later_round() {
+        let pack = Pack {
+            stops: vec![
+                Stop { lat: 37.700, lon: -122.400, name: "Alpha", code: "A1", gtfs_id: "901201" },
+                Stop { lat: 37.710, lon: -122.400, name: "Beta", code: "B2", gtfs_id: "901202" },
+                Stop { lat: 37.720, lon: -122.400, name: "Gamma", code: "C3", gtfs_id: "901203" },
+            ],
+            routes: vec![
+                Route {
+                    name: "Slow",
+                    color: 0x0000FF,
+                    route_type: 0,
+                    feed: 0,
+                    pattern: vec![0, 2],
+                    trips: vec![Trip {
+                        start: 28_800,
+                        stoptimes: vec![(28_800, 28_800), (36_000, 36_000)],
+                        service: 0,
+                        headsign: "Direct",
+                    }],
+                    shape: None,
+                },
+                Route {
+                    name: "FastA",
+                    color: 0x00FF00,
+                    route_type: 0,
+                    feed: 0,
+                    pattern: vec![0, 1],
+                    trips: vec![Trip {
+                        start: 28_800,
+                        stoptimes: vec![(28_800, 28_800), (29_400, 29_400)],
+                        service: 0,
+                        headsign: "Feeder",
+                    }],
+                    shape: None,
+                },
+                Route {
+                    name: "FastB",
+                    color: 0xFF0000,
+                    route_type: 0,
+                    feed: 0,
+                    pattern: vec![1, 2],
+                    trips: vec![Trip {
+                        start: 30_000,
+                        stoptimes: vec![(30_000, 30_000), (30_600, 30_600)],
+                        service: 0,
+                        headsign: "Onward",
+                    }],
+                    shape: None,
+                },
+            ],
+            services: vec![weekdays()],
+            exceptions: Vec::new(),
+            feeds: vec![("sfmuni", "America/Los_Angeles", "us-ca-SFMTA")],
+        };
+        let idx = pack.index();
+        // 07:46, not 08:00: the sub-metre access walk rounds up to one second, which
+        // would put `ready` a second past an 08:00 departure.
+        let legs = plan(&idx, 37.700, -122.400, 37.720, -122.400, 28_000, sched(wednesday()))
+            .expect("a journey exists");
+
+        let rides: Vec<&TransitLeg> = legs.iter().filter(|l| l.kind == LegKind::Ride).collect();
+        assert_eq!(
+            rides.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            vec!["FastA", "FastB"],
+            "took the direct route the pruning bound was first set from"
+        );
+        assert_eq!(rides.last().unwrap().arr_secs, 30_600, "08:30, not the direct 10:00");
     }
 
     #[test]
