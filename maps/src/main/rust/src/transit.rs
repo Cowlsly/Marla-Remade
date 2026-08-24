@@ -1,9 +1,14 @@
 //! On-device transit index loader + RAPTOR journey planner (P11b / world pack).
 //!
 //! Consumes the compact `.transit` index produced by the host tool
-//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout (format v5 "TRX2") is
+//! `scripts/maps/gtfs_ingest` (P11a). The on-disk layout (format v6 "TRX2") is
 //! documented at the top of that tool's `src/index.rs` and MUST stay in sync
 //! with the section constants and record accessors here.
+//!
+//! v6 adds two sections (25-26): a fixed-stride trip table and its CSR directory,
+//! so a route's trips are addressable by index instead of only decodable from the
+//! route's first trip. See [`Trips`] for what that buys and what it does not.
+//! Packs without them fall back to the varint stream, unchanged.
 //!
 //! v5 adds two sections (23-24) holding a per-feed Transitous id prefix and each
 //! stop's raw GTFS `stop_id`, which compose into a MOTIS stop id
@@ -38,7 +43,7 @@ use std::collections::HashMap;
 // --- Format constants (mirror scripts/maps/gtfs_ingest/src/index.rs) ---
 const MAGIC: u32 = 0x5452_4958; // "TRIX"
 /// Newest format this reader understands.
-const VERSION: u32 = 5;
+const VERSION: u32 = 6;
 /// Oldest format still accepted. Reading both means an app update and a pack
 /// rebuild can land in either order without offline transit silently degrading
 /// to the online planner in between.
@@ -47,7 +52,7 @@ pub const NONE: u32 = 0xFFFF_FFFF;
 const HEADER_LEN: usize = 80;
 /// Section count of the newest format. The section directory is sized to this
 /// and an older pack simply leaves the trailing entries empty.
-const SECTION_COUNT: usize = 25;
+const SECTION_COUNT: usize = 27;
 const SECTION_COUNT_V3: usize = 20;
 
 const SEC_STRINGS: usize = 0;
@@ -75,6 +80,13 @@ const SEC_ROUTE_SHAPE_IDX: usize = 21;
 const SEC_ROUTE_STOP_SHAPE: usize = 22;
 const SEC_FEED_MOTIS_PREFIX: usize = 23;
 const SEC_STOP_GTFS_ID: usize = 24;
+/// v6: fixed-stride trip records, so a trip is addressable by index.
+const SEC_ROUTE_TRIP_RECS: usize = 25;
+/// v6: `u32[route_count + 1]` CSR prefix giving each route's first trip index.
+const SEC_ROUTE_TRIP_OFF: usize = 26;
+
+/// Bytes per v6 trip record: `u32 start_time, profile_id, service_idx, headsign_off`.
+const TRIP_REC_BYTES: usize = 16;
 
 const WALK_SPEED_M_S: f64 = 1.33;
 /// Access/egress radius: how far we will walk to the first / from the last stop.
@@ -138,6 +150,51 @@ struct TripDec {
     profile_id: u32,
     service_idx: u32,
     headsign_off: u32,
+}
+
+/// A route's trips, in start-time order, however the pack stores them.
+///
+/// v6 keeps them in a fixed-stride table, so [`Trips::get`] is an indexed read of 16
+/// bytes. That is the point of the format change: the trip scan in [`earliest_trip`]
+/// breaks out as soon as a trip's `start_time` passes the bound, but until now
+/// [`TransitIndex::route_trips`] had already varint-decoded and heap-allocated *every*
+/// trip of the route before the scan began — per route per RAPTOR round, again per leg,
+/// and again per departure board. The break could not save the work it was written to
+/// save.
+///
+/// Note what the sorted order does **not** buy: a lower bound. A trip's departure from
+/// stop position `p` is `start_time + dep_rel[p]`, and `dep_rel` grows along the route,
+/// so a trip starting long before `ready` can still depart after it. Only the upper
+/// bound is sound, which is why this exposes indexed access and not a binary search.
+///
+/// [`Trips::Decoded`] is the pre-v6 path, kept because [`VERSION_MIN`] still accepts
+/// those packs; it behaves exactly as before, decode cost included.
+enum Trips<'a> {
+    Strided { idx: &'a TransitIndex, base: u32, len: u32 },
+    Decoded(Vec<TripDec>),
+}
+
+impl Trips<'_> {
+    fn len(&self) -> usize {
+        match self {
+            Trips::Strided { len, .. } => *len as usize,
+            Trips::Decoded(v) => v.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    fn get(&self, i: usize) -> Option<TripDec> {
+        if i >= self.len() {
+            return None;
+        }
+        match self {
+            Trips::Strided { idx, base, .. } => Some(idx.trip_at(*base + i as u32)),
+            Trips::Decoded(v) => Some(v[i]),
+        }
+    }
 }
 
 /// A decoded run-time profile: per-stop arrival/departure offsets relative to
@@ -495,6 +552,43 @@ impl TransitIndex {
             prev = start;
         }
         out
+    }
+
+    /// Whether this pack carries v6's fixed-stride trip table.
+    fn has_trip_table(&self) -> bool {
+        self.sec[SEC_ROUTE_TRIP_RECS].1 != 0 && self.sec[SEC_ROUTE_TRIP_OFF].1 != 0
+    }
+
+    /// Trip record `i` of the strided table, by global trip index.
+    fn trip_at(&self, i: u32) -> TripDec {
+        let p = self.sec_ptr(SEC_ROUTE_TRIP_RECS);
+        let w = i as usize * 4;
+        TripDec {
+            start_time: unsafe { read_at::<u32>(p, w) },
+            profile_id: unsafe { read_at::<u32>(p, w + 1) },
+            service_idx: unsafe { read_at::<u32>(p, w + 2) },
+            headsign_off: unsafe { read_at::<u32>(p, w + 3) },
+        }
+    }
+
+    /// A route's trips, however this pack happens to store them.
+    fn trips_for(&self, route_idx: u32, rec: &RouteRec) -> Trips<'_> {
+        if !self.has_trip_table() {
+            return Trips::Decoded(self.route_trips(rec));
+        }
+        let off = self.sec_ptr(SEC_ROUTE_TRIP_OFF);
+        let base = unsafe { read_at::<u32>(off, route_idx as usize) };
+        let end = unsafe { read_at::<u32>(off, route_idx as usize + 1) };
+        // A directory that disagrees with the route record would index past the table;
+        // fall back rather than read out of bounds.
+        let len = end.saturating_sub(base);
+        if end < base
+            || (end as usize) * TRIP_REC_BYTES > self.sec[SEC_ROUTE_TRIP_RECS].1
+            || len != rec.n_trips
+        {
+            return Trips::Decoded(self.route_trips(rec));
+        }
+        Trips::Strided { idx: self, base, len }
     }
 
     /// Decode profile `pid` into per-stop offsets relative to `start_time`.
@@ -1102,7 +1196,7 @@ pub fn plan(
         let mut improved: Vec<u32> = Vec::new();
         for (&r, &start_pos) in &route_earliest {
             let route = idx.route(r);
-            let trips = idx.route_trips(&route);
+            let trips = idx.trips_for(r, &route);
             if trips.is_empty() {
                 continue;
             }
@@ -1115,7 +1209,7 @@ pub fn plan(
                 // arrives late everywhere downstream, so the boarding shift
                 // carries through the rest of the leg.
                 if let Some(b) = cur_trip {
-                    let td = trips[b.trip];
+                    let Some(td) = trips.get(b.trip) else { continue };
                     let arr_rel = {
                         let p = get_profile(&mut prof_cache, idx, td.profile_id);
                         p.arr_rel.get(pos as usize).copied()
@@ -1143,11 +1237,18 @@ pub fn plan(
                         let board_here = match cur_trip {
                             None => true,
                             Some(cur) => {
-                                let new_dep =
-                                    trip_dep(idx, &mut prof_cache, &trips[cand.trip], pos, cand);
-                                let cur_dep =
-                                    trip_dep(idx, &mut prof_cache, &trips[cur.trip], pos, cur);
-                                new_dep < cur_dep
+                                let new = trips.get(cand.trip);
+                                let old = trips.get(cur.trip);
+                                match (new, old) {
+                                    (Some(new), Some(old)) => {
+                                        let new_dep =
+                                            trip_dep(idx, &mut prof_cache, &new, pos, cand);
+                                        let cur_dep =
+                                            trip_dep(idx, &mut prof_cache, &old, pos, cur);
+                                        new_dep < cur_dep
+                                    }
+                                    _ => false,
+                                }
                             }
                         };
                         if board_here {
@@ -1385,8 +1486,10 @@ pub fn stop_departures(
             }
             let rname = idx.read_str(route.name_off);
             let feed = idx.feed_name_of(route.feed_idx);
-            let trips = idx.route_trips(&route);
-            for td in &trips {
+            let trips = idx.trips_for(r, &route);
+            for ti in 0..trips.len() {
+                let Some(td) = trips.get(ti) else { break };
+                let td = &td;
                 // Sweep the previous service day too, so a 00:30 query still
                 // finds a trip GTFS stored as 24:30:00 the day before.
                 for prev_day in [true, false] {
@@ -1494,7 +1597,7 @@ fn earliest_trip(
     idx: &TransitIndex,
     cache: &mut HashMap<u32, ProfileDec>,
     route_idx: u32,
-    trips: &[TripDec],
+    trips: &Trips,
     pos: u32,
     ready: u32,
     sched: Schedule,
@@ -1515,7 +1618,8 @@ fn earliest_trip(
         // pass made it an unconditional scan of every trip on the route, each with
         // a `service_runs` binary search.
         let day_shift = if prev_day { SECS_PER_DAY } else { 0 };
-        for (i, td) in trips.iter().enumerate() {
+        for i in 0..trips.len() {
+            let Some(td) = trips.get(i) else { break };
             if best.is_some()
                 && td.start_time >= best_dep.saturating_add(slack).saturating_add(day_shift)
             {
@@ -1526,7 +1630,7 @@ fn earliest_trip(
             }
             // A previous-day trip only counts if it actually runs into the query
             // day (a GTFS time at or past 24:00:00).
-            let Some(scheduled) = trip_sched_dep(idx, cache, td, pos, prev_day) else {
+            let Some(scheduled) = trip_sched_dep(idx, cache, &td, pos, prev_day) else {
                 continue;
             };
             let adj = sched.adjustment(route_idx, pos, scheduled);
@@ -1553,8 +1657,8 @@ fn make_transit_leg(
     alight_stop: u32,
 ) -> TransitLeg {
     let route = idx.route(route_idx);
-    let trips = idx.route_trips(&route);
-    let td = trips.get(boarding.trip).copied().unwrap_or(TripDec {
+    let trips = idx.trips_for(route_idx, &route);
+    let td = trips.get(boarding.trip).unwrap_or(TripDec {
         start_time: 0,
         profile_id: 0,
         service_idx: 0,
@@ -1805,6 +1909,8 @@ mod tests {
             let n_stops = self.stops.len();
             let mut sec_stops = Vec::new();
             let mut sec_stop_gtfs_id = Vec::new();
+            let mut sec_route_trip_recs = Vec::new();
+            let mut sec_route_trip_off = Vec::new();
             let (mut min_lat, mut min_lon) = (i32::MAX, i32::MAX);
             let (mut max_lat, mut max_lon) = (i32::MIN, i32::MIN);
             let lat_e7: Vec<i32> = self.stops.iter().map(|s| (s.lat * 1e7) as i32).collect();
@@ -1907,6 +2013,8 @@ mod tests {
                 let trips_off = sec_route_trips.len() as u32;
                 let mut ordered: Vec<&Trip> = r.trips.iter().collect();
                 ordered.sort_by_key(|t| t.start);
+                // The v6 CSR prefix: this route's first trip in the strided table.
+                u32b(&mut sec_route_trip_off, trip_total as u32);
                 let mut prev_start = 0u32;
                 for t in &ordered {
                     let pid = intern_profile(&t.stoptimes);
@@ -1915,6 +2023,13 @@ mod tests {
                     uvarint(&mut sec_route_trips, t.service as u64);
                     let h = pool.intern(t.headsign);
                     uvarint(&mut sec_route_trips, h as u64);
+                    // Both forms are written, so a v6 blob and the v3-v5 blob it would
+                    // have been carry the same trips and the two reader paths can be
+                    // compared directly.
+                    u32b(&mut sec_route_trip_recs, t.start);
+                    u32b(&mut sec_route_trip_recs, pid);
+                    u32b(&mut sec_route_trip_recs, t.service);
+                    u32b(&mut sec_route_trip_recs, h);
                     prev_start = t.start;
                     trip_total += 1;
                 }
@@ -2074,6 +2189,13 @@ mod tests {
             if version >= 5 {
                 sections.push(&sec_feed_motis_prefix);
                 sections.push(&sec_stop_gtfs_id);
+            }
+            // v6 adds the fixed-stride trip table and its CSR directory. The prefix
+            // needs its final total, which is only known once every route is written.
+            if version >= 6 {
+                u32b(&mut sec_route_trip_off, trip_total as u32);
+                sections.push(&sec_route_trip_recs);
+                sections.push(&sec_route_trip_off);
             }
             let section_count = sections.len();
 
@@ -2694,6 +2816,69 @@ mod tests {
             TransitIndex::from_bytes(pack.build_with_version(VERSION_MIN - 1)).is_none(),
             "a v2 pack must be rejected so Kotlin falls back to MOTIS"
         );
+    }
+
+    /// The strided trip table is only a storage change, so every version of the same
+    /// pack has to plan identically. Asserted across the whole version window rather
+    /// than just v6-vs-v5, because [`Trips`] is the only thing keeping the two reader
+    /// paths in agreement and nothing else would notice them drifting.
+    #[test]
+    fn every_version_of_a_pack_plans_the_same_journey() {
+        let pack = one_route_pack();
+        let mut baseline: Option<Vec<(u32, u32, String)>> = None;
+        for version in [VERSION_MIN, 4, 5, VERSION] {
+            let idx = TransitIndex::from_bytes(pack.build_with_version(version))
+                .unwrap_or_else(|| panic!("v{version} loads"));
+            let legs = plan(&idx, 37.700, -122.400, 37.720, -122.400, 25_000, sched(wednesday()))
+                .unwrap_or_else(|| panic!("v{version} finds a journey"));
+            let shape: Vec<(u32, u32, String)> = legs
+                .iter()
+                .map(|l| (l.dep_secs, l.arr_secs, l.name.clone()))
+                .collect();
+            match &baseline {
+                None => baseline = Some(shape),
+                Some(want) => assert_eq!(*want, shape, "v{version} planned a different journey"),
+            }
+        }
+    }
+
+    #[test]
+    fn every_version_of_a_pack_lists_the_same_departures() {
+        let pack = one_route_pack();
+        let mut baseline: Option<Vec<u32>> = None;
+        for version in [VERSION_MIN, 4, 5, VERSION] {
+            let idx = TransitIndex::from_bytes(pack.build_with_version(version))
+                .unwrap_or_else(|| panic!("v{version} loads"));
+            let board = stop_departures(&idx, 37.700, -122.400, 0, sched(wednesday()), 10);
+            let times: Vec<u32> = board.iter().map(|d| d.dep_secs).collect();
+            match &baseline {
+                None => baseline = Some(times),
+                Some(want) => assert_eq!(*want, times, "v{version} listed different departures"),
+            }
+        }
+    }
+
+    /// A v6 pack still carries the varint stream, so a trip table that disagrees with
+    /// the route records is recoverable — and must be recovered from rather than read
+    /// out of bounds.
+    #[test]
+    fn a_trip_table_disagreeing_with_the_route_falls_back_to_the_varint_stream() {
+        let pack = one_route_pack();
+        let idx = TransitIndex::from_bytes(pack.build_with_version(VERSION)).expect("v6 loads");
+        let route = idx.route(0);
+        assert!(idx.has_trip_table(), "the fixture writes the table");
+        // What the strided path returns, to compare the fallback against.
+        let want: Vec<u32> = {
+            let trips = idx.trips_for(0, &route);
+            (0..trips.len()).map(|i| trips.get(i).unwrap().start_time).collect()
+        };
+        let mut wrong = route;
+        wrong.n_trips += 1;
+        let trips = idx.trips_for(0, &wrong);
+        assert!(matches!(trips, Trips::Decoded(_)), "a mismatched span must not be trusted");
+        let got: Vec<u32> =
+            (0..want.len()).map(|i| trips.get(i).unwrap().start_time).collect();
+        assert_eq!(want, got, "the fallback decodes the same trips");
     }
 
     #[test]

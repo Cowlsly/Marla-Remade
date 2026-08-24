@@ -61,7 +61,7 @@ device (used for route colours via `GTFSProvider`).
 - `<pack>.transit.json` — a small manifest with counts, bbox and a **per-section
   byte breakdown** so the compression win (profiles vs the old per-trip
   stop-times) is visible, plus how many routes got ride geometry.
-  `format_version` is 5.
+  `format_version` is 6.
 
 ## Why TRX2 (v2)
 
@@ -128,6 +128,41 @@ The Douglas–Peucker tolerance is the lever on pack size: shapes dominate a v4
 pack. `shapes.txt` and `stop_times.txt` are the two largest files in a feed, so
 both are streamed (`gtfs::read_shapes`, `gtfs::stream_stop_times`) rather than
 parsed into a `Csv` of `String`s — see *Build-time memory* below.
+
+## What v6 added
+
+v6 appends two more sections, so sections 0-24 are byte-identical to v5 and only
+`VERSION` (6) and `SECTION_COUNT` (27) change. They make a route's trips
+**randomly addressable**.
+
+| Section | Payload | Why |
+|---|---|---|
+| 25 `ROUTE_TRIP_RECS` | Fixed-stride `TripRec[trip_count]` = `{ u32 start_time, profile_id, service_idx, headsign_off }`, each route's trips contiguous and start-time ordered | A trip is an index, so a scan reads only the trips it looks at. |
+| 26 `ROUTE_TRIP_OFF` | `u32[route_count + 1]` CSR prefix | Route *i*'s trips are `ROUTE_TRIP_RECS[off[i]..off[i+1]]`. |
+
+`ROUTE_TRIPS` is still written, unchanged. Both views ship because the device
+reader's `VERSION_MIN` is still 3: a pack rebuild and an app update can land in
+either order, and a reader that finds no table falls back to the varint stream.
+The two are written in the same loop, and a test asserts they decode to the same
+trips, because a writer emitting two disagreeing views is exactly the failure the
+device would inherit silently.
+
+**What this buys, precisely.** `earliest_trip` scans a route's trips in start-time
+order and breaks as soon as `start_time` passes the bound it can still improve on.
+Reading the varint stream defeated that: `route_trips` decoded and heap-allocated
+*every* trip of the route before the scan began - per route per RAPTOR round, again
+per leg, and again per departure board, over 28.4 M trips in a planetary pack. With
+the table the break actually saves the work it was written to save.
+
+**What it does not buy: a lower bound.** A trip's departure from stop position `p`
+is `start_time + dep_rel[p]`, and `dep_rel` grows along the route, so a trip
+starting well before the passenger is ready can still depart after them. Only the
+upper bound is sound, which is why the reader exposes indexed access and not a
+binary search over start times.
+
+The cost is size: 16 bytes per trip against roughly 11.8 for the varint encoding,
+so about +120 MB on a planetary pack that already carries 335 MB of `ROUTE_TRIPS`.
+Dropping the varint stream once `VERSION_MIN` moves past 5 recovers all of it.
 
 ## Build-time memory
 

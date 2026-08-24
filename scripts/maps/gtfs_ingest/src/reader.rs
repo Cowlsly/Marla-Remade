@@ -38,6 +38,11 @@ pub const SEC_ROUTE_SHAPE_IDX: usize = 21;
 pub const SEC_ROUTE_STOP_SHAPE: usize = 22;
 pub const SEC_FEED_MOTIS_PREFIX: usize = 23;
 pub const SEC_STOP_GTFS_ID: usize = 24;
+pub const SEC_ROUTE_TRIP_RECS: usize = 25;
+pub const SEC_ROUTE_TRIP_OFF: usize = 26;
+
+/// Bytes per v6 trip record: `u32 start_time, profile_id, service_idx, headsign_off`.
+pub const TRIP_REC_BYTES: usize = 16;
 
 fn ru32(b: &[u8], off: usize) -> u32 {
     u32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]])
@@ -301,6 +306,37 @@ impl Reader {
             prev = start_time;
         }
         out
+    }
+
+    /// A route's trips read from v6's fixed-stride table instead of the varint stream.
+    ///
+    /// The point of the table is that a trip is addressable by index, so the device
+    /// reader can stop decoding trips its scan never looks at. Here it serves a second
+    /// purpose: it is an independent decoding of the same data, so
+    /// [`Self::route_trips_strided`] and [`Self::route_trips`] disagreeing means the
+    /// writer emitted two views that do not match.
+    pub fn route_trips_strided(&self, route_idx: u32) -> Vec<TripRec> {
+        let off = self.sec_bytes(SEC_ROUTE_TRIP_OFF);
+        let recs = self.sec_bytes(SEC_ROUTE_TRIP_RECS);
+        if (route_idx as usize + 2) * 4 > off.len() {
+            return Vec::new();
+        }
+        let base = ru32(off, route_idx as usize * 4) as usize;
+        let end = ru32(off, (route_idx as usize + 1) * 4) as usize;
+        if end < base || end * TRIP_REC_BYTES > recs.len() {
+            return Vec::new();
+        }
+        (base..end)
+            .map(|i| {
+                let at = i * TRIP_REC_BYTES;
+                TripRec {
+                    start_time: ru32(recs, at),
+                    profile_id: ru32(recs, at + 4),
+                    service_idx: ru32(recs, at + 8),
+                    headsign_off: ru32(recs, at + 12),
+                }
+            })
+            .collect()
     }
 
     /// Profile `pid` as per-stop `(arr, dep)` offsets relative to a trip's

@@ -42,7 +42,7 @@
 //!     one pack without id collisions (ids are namespaced per feed at build).
 //!
 //! Header (80 bytes; all u32/i32 little-endian):
-//!   u32 magic (MAGIC), u32 version (VERSION=5), u32 section_count,
+//!   u32 magic (MAGIC), u32 version (VERSION=6), u32 section_count,
 //!   u32 stop_count, u32 route_count, u32 trip_count, u32 service_count,
 //!   u32 profile_count, u32 feed_count, u32 grid_cell_count, u32 feed_name_off,
 //!   i32 min_lat_e7, i32 min_lon_e7, i32 max_lat_e7, i32 max_lon_e7,
@@ -121,6 +121,20 @@
 //!                        MOTIS stop id. Kept separate from `StopRec.code_off`,
 //!                        which falls back to `stop_id` only when `stop_code` is
 //!                        blank and so cannot be relied on.
+//!  25  ROUTE_TRIP_RECS v6. Fixed-stride TripRec[trip_count] = { u32 start_time,
+//!                        u32 profile_id, u32 service_idx, u32 headsign_off },
+//!                        each route's trips contiguous and in start-time order.
+//!                        The same trips as ROUTE_TRIPS, which is still written:
+//!                        the device reader's version window accepts packs that
+//!                        only have the varint stream, so both views ship.
+//!                        A trip is addressable by index here, which is the point -
+//!                        the varint stream has to be decoded from a route's first
+//!                        trip, so a scan that breaks early still paid to decode
+//!                        every trip of the route before it started.
+//!  26  ROUTE_TRIP_OFF  v6. u32[route_count + 1] CSR prefix: route i's trips are
+//!                        ROUTE_TRIP_RECS[off[i]..off[i+1]]. Disagreeing with
+//!                        RouteRec.n_trips makes the reader fall back to the
+//!                        varint stream rather than index past the table.
 
 use crate::gtfs;
 use crate::gtfs::{parse_gtfs_date, Csv, Shape};
@@ -130,12 +144,12 @@ use std::io::Write;
 use std::path::Path;
 
 pub const MAGIC: u32 = 0x5452_4958; // "TRIX"
-pub const VERSION: u32 = 5;
+pub const VERSION: u32 = 6;
 /// Oldest version the device reader still accepts, mirrored from
 /// `maps/src/main/rust/src/transit.rs` so the host reader agrees on the range.
 pub const VERSION_MIN: u32 = 3;
 pub const NONE: u32 = 0xFFFF_FFFF;
-pub const SECTION_COUNT: usize = 25;
+pub const SECTION_COUNT: usize = 27;
 pub const HEADER_LEN: usize = 80;
 
 const MAX_TRANSFER_M: f64 = 400.0;
@@ -595,6 +609,13 @@ pub struct IndexBuilder {
     sec_routes: Vec<u8>,
     sec_route_stops: Vec<u8>,
     sec_route_trips: Vec<u8>,
+    /// v6: fixed-stride `u32 start_time, profile_id, service_idx, headsign_off` per
+    /// trip, per route contiguous, so a trip is addressable by index. Written
+    /// alongside ROUTE_TRIPS rather than replacing it, because the device reader's
+    /// version window still accepts packs that only have the varint stream.
+    sec_route_trip_recs: Vec<u8>,
+    /// v6: `u32[route_count + 1]` CSR prefix into [`Self::sec_route_trip_recs`].
+    sec_route_trip_off: Vec<u8>,
     sec_route_shape_idx: Vec<u8>,
     sec_route_stop_shape: Vec<u8>,
     sec_stop_routes: Vec<u8>,
@@ -641,6 +662,8 @@ impl IndexBuilder {
             sec_routes: Vec::new(),
             sec_route_stops: Vec::new(),
             sec_route_trips: Vec::new(),
+            sec_route_trip_recs: Vec::new(),
+            sec_route_trip_off: Vec::new(),
             sec_route_shape_idx: Vec::new(),
             sec_route_stop_shape: Vec::new(),
             sec_stop_routes: Vec::new(),
@@ -692,6 +715,8 @@ impl IndexBuilder {
             + self.sec_routes.len()
             + self.sec_route_stops.len()
             + self.sec_route_trips.len()
+            + self.sec_route_trip_recs.len()
+            + self.sec_route_trip_off.len()
             + self.sec_route_shape_idx.len()
             + self.sec_route_stop_shape.len()
             + self.sec_stop_routes.len()
@@ -1092,6 +1117,8 @@ impl IndexBuilder {
                     .to_string()
             })?;
             let mut prev_start: u32 = 0;
+            // The CSR prefix: this route's first trip in the strided table.
+            append_u32(&mut self.sec_route_trip_off, self.trip_total as u32);
             for &ti in &trip_order {
                 let bt = &built_trips[ti];
                 let profile_id = self.profiles.intern(&bt.stoptimes)?;
@@ -1100,6 +1127,10 @@ impl IndexBuilder {
                 write_uvarint(&mut self.sec_route_trips, profile_id as u64);
                 write_uvarint(&mut self.sec_route_trips, bt.service_idx as u64);
                 write_uvarint(&mut self.sec_route_trips, bt.headsign_off as u64);
+                append_u32(&mut self.sec_route_trip_recs, bt.start_time);
+                append_u32(&mut self.sec_route_trip_recs, profile_id);
+                append_u32(&mut self.sec_route_trip_recs, bt.service_idx);
+                append_u32(&mut self.sec_route_trip_recs, bt.headsign_off);
                 prev_start = bt.start_time;
                 self.trip_total += 1;
             }
@@ -1162,6 +1193,8 @@ impl IndexBuilder {
             sec_routes,
             sec_route_stops,
             sec_route_trips,
+            sec_route_trip_recs,
+            mut sec_route_trip_off,
             mut sec_route_shape_idx,
             sec_route_stop_shape,
             sec_stop_routes,
@@ -1388,7 +1421,12 @@ impl IndexBuilder {
             "ROUTE_STOP_SHAPE",
             "FEED_MOTIS_PREFIX",
             "STOP_GTFS_ID",
+            "ROUTE_TRIP_RECS",
+            "ROUTE_TRIP_OFF",
         ];
+        // Close the CSR prefix: one past the last route's trips, i.e. the total. Done
+        // here because it is only known once every feed's routes have been written.
+        append_u32(&mut sec_route_trip_off, trip_total as u32);
         let sections: [&[u8]; SECTION_COUNT] = [
             &pool.bytes,
             &sec_stops,
@@ -1415,6 +1453,8 @@ impl IndexBuilder {
             &sec_route_stop_shape,
             &sec_feed_motis_prefix,
             &sec_stop_gtfs_id,
+            &sec_route_trip_recs,
+            &sec_route_trip_off,
         ];
 
         let dir_len = SECTION_COUNT * 16;
@@ -1729,6 +1769,26 @@ mod tests {
         assert_eq!(trips[1].start_time, 32400);
         // Both reference the same profile id (dedup).
         assert_eq!(trips[0].profile_id, trips[1].profile_id);
+
+        // v6's strided table must be the same trips as the varint stream, for every
+        // route. Two views of one thing, written in the same loop, so a disagreement is
+        // a writer bug the device reader would silently inherit.
+        for route_idx in 0..r.route_count() {
+            let rec = r.route(route_idx);
+            let varint = r.route_trips(&rec);
+            let strided = r.route_trips_strided(route_idx);
+            assert_eq!(
+                varint.len(),
+                strided.len(),
+                "route {route_idx} trip count differs between the two views"
+            );
+            for (a, b) in varint.iter().zip(strided.iter()) {
+                assert_eq!(a.start_time, b.start_time, "route {route_idx} start_time");
+                assert_eq!(a.profile_id, b.profile_id, "route {route_idx} profile_id");
+                assert_eq!(a.service_idx, b.service_idx, "route {route_idx} service_idx");
+                assert_eq!(a.headsign_off, b.headsign_off, "route {route_idx} headsign_off");
+            }
+        }
 
         // Reconstruct absolute arr/dep for trip T2 (start 09:00) and compare.
         let prof = r.profile(trips[1].profile_id);
