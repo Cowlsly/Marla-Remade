@@ -33,11 +33,19 @@ import com.vayunmathur.music.MainActivity
  * The player and the custom shuffle/repeat notification buttons are unchanged;
  * we only widened the session type (MediaLibrarySession is a MediaSession) and
  * added the library-browsing callbacks, so phone playback is unaffected.
+ *
+ * **The player handed to the session is a [CastingPlayer], and that is where casting lives.** Every
+ * transport this app has - its own UI, the mini-player, the notification, the lockscreen, a headset,
+ * Android Auto - reaches playback through this one object, so wrapping it here is what makes them all
+ * describe and drive the television while a cast is running. [CastQueue] holds the raw player for the
+ * things that must *not* go to the television: muting the phone, and putting it back where the
+ * television got to afterwards.
  */
 class PlaybackService : MediaLibraryService() {
 
     private var mediaSession: MediaLibrarySession? = null
     private lateinit var libraryTree: MusicLibraryTree
+    private var castQueue: CastQueue? = null
     private val mainHandler = Handler(Looper.getMainLooper())
 
     // Custom Command Constants
@@ -57,11 +65,13 @@ class PlaybackService : MediaLibraryService() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        val player = ExoPlayer.Builder(this)
+        val local = ExoPlayer.Builder(this)
             .setDeviceVolumeControlEnabled(true)
             .setAudioAttributes(audioAttributes, true)
             .setHandleAudioBecomingNoisy(true)
             .build()
+        val player = CastingPlayer(local)
+        castQueue = CastQueue(this, local)
 
         // Create the session with our custom callback
         val intent = Intent(this, MainActivity::class.java)
@@ -234,7 +244,10 @@ class PlaybackService : MediaLibraryService() {
 
     override fun onDestroy() {
         libraryTree.release()
+        castQueue?.release()
+        castQueue = null
         mediaSession?.run {
+            // Releasing the wrapper releases what it wraps, so the local player goes with it.
             player.release()
             release()
             mediaSession = null

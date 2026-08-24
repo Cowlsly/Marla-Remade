@@ -85,14 +85,6 @@ interface MusicActions {
     fun toggleShuffle() {}
     fun toggleRepeat() {}
 
-    /**
-     * Stop local playback, because a television has taken over.
-     *
-     * Its own action rather than reusing [togglePlayPause]: the phone must end up stopped whatever
-     * it was doing, and a toggle would start it playing if it happened to be paused.
-     */
-    fun pausePlayback() {}
-
     companion object {
         val Noop: MusicActions = object : MusicActions {}
     }

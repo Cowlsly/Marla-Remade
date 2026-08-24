@@ -10,6 +10,8 @@ import com.vayunmathur.music.data.Music
 import com.vayunmathur.sdk.cast.CastClient
 import com.vayunmathur.sdk.cast.CastException
 import com.vayunmathur.sdk.cast.CastResource
+import com.vayunmathur.sdk.cast.PlaybackCommand
+import com.vayunmathur.sdk.cast.PlaybackState
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -18,7 +20,6 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -44,7 +45,12 @@ private const val TAG = "CastPlayback"
  *
  * The price is one thing a user can notice: **a track being encoded for the first time cannot be
  * seeked**, because a stream with no known length has nothing to answer a byte range with. It is
- * cached as it goes, so every later play of it is instant and seekable both.
+ * cached as it goes, so every later play of it is instant and seekable both. [growing] is which
+ * resource that currently applies to, and `CastingPlayer` takes the seek commands away while it does.
+ *
+ * **This object does not decide anything about the queue.** It opens the session, answers for bytes,
+ * and carries the television's own playback back through [tv] - `CastQueue` and `CastingPlayer` are
+ * what turn that into one player on the phone.
  */
 object CastPlayback {
 
@@ -55,21 +61,44 @@ object CastPlayback {
         /** The picker has been dismissed and the session is being negotiated. */
         data object Connecting : State
 
-        data class Casting(
-            val receiverName: String,
-            /**
-             * A track is still being encoded in the background.
-             *
-             * No longer "you are waiting": playback has already started, and this only says the
-             * encoder is still working behind it. Worth showing anyway, because it is the window
-             * in which seeking does not work and in which a failure can still appear.
-             */
-            val preparing: Boolean = false,
-        ) : State
+        data class Casting(val receiverName: String) : State
     }
+
+    /**
+     * The television's own playback, and when it was true.
+     *
+     * **The wall clock is the missing half of the message.** Snapshots land twice a second and a seek
+     * bar redraws sixty times a second, so a position plotted where it was reported would visibly step;
+     * what makes it smooth is knowing when the number was true. The extrapolation itself is
+     * `CastingPlayer`'s, because media3 already has a `PositionSupplier` for exactly this.
+     */
+    data class TvPlayback(val state: PlaybackState, val receivedAtMs: Long)
 
     private val _state = MutableStateFlow<State>(State.Idle)
     val state: StateFlow<State> = _state.asStateFlow()
+
+    private val _tv = MutableStateFlow<TvPlayback?>(null)
+
+    /**
+     * What the television's player is doing, or null before it has said anything.
+     *
+     * The only account of playback there is while casting: the phone's own player is paused and muted,
+     * so every surface that shows a position - the now-playing screen, the notification, the
+     * lockscreen, a car - is ultimately reading this.
+     */
+    val tv: StateFlow<TvPlayback?> = _tv.asStateFlow()
+
+    private val _growing = MutableStateFlow<String?>(null)
+
+    /**
+     * The resource currently being encoded as the television reads it, or null.
+     *
+     * Its own value rather than a flag on [State.Casting], because *which* resource matters: a
+     * background transcode of a track the user has already skipped past says nothing about whether the
+     * track now playing can be seeked. A flow rather than a field so the scrubber comes back the moment
+     * the encoder finishes, without waiting for a track change.
+     */
+    val growing: StateFlow<String?> = _growing.asStateFlow()
 
     /**
      * Owns the background transcodes, and is why they are not launched in the caller's scope.
@@ -83,16 +112,13 @@ object CastPlayback {
     private var client: CastClient? = null
 
     /**
-     * The running transcode and the resource it is producing, so a track change can cancel it.
+     * The running transcode, so a track change can cancel it.
      *
-     * Volatile because they are written from the transcode's own completion on `Dispatchers.IO` and
-     * read by [play] on the main thread.
+     * Volatile because it is written from the transcode's own completion on `Dispatchers.IO` and read
+     * by [play] on the main thread. Which resource it is producing is [growing].
      */
     @Volatile
     private var transcodeJob: Job? = null
-
-    @Volatile
-    private var transcodingId: String? = null
 
     /**
      * What the TV has been told about, by resource id.
@@ -150,6 +176,11 @@ object CastPlayback {
                 Log.i(TAG, "the TV ended the session")
                 clear()
             }
+            // The television holds the player, so this is where every position, every play/pause and
+            // every end-of-track on the phone ultimately comes from.
+            newClient.onPlaybackState = { state ->
+                _tv.value = TvPlayback(state, System.currentTimeMillis())
+            }
             client = newClient
             _state.value = State.Casting(session.receiverName)
             Log.i(TAG, "casting to '${session.receiverName}'")
@@ -166,10 +197,14 @@ object CastPlayback {
      * Put [song] on the TV, encoding it in the background if it is not already Opus.
      *
      * Returns as soon as the TV has been told to play, which for a track needing conversion is
-     * before any of it has been encoded. [State.Casting.preparing] is what says the encoder is
-     * still running behind the playback.
+     * before any of it has been encoded. [growing] is what says the encoder is still running behind
+     * the playback.
+     *
+     * [startPositionMs] is what makes starting a cast keep its place rather than restart the track. A
+     * resource still being written cannot honour it - there is nothing to seek against - so a track
+     * cast for the first time begins at the beginning.
      */
-    suspend fun play(context: Context, song: Music) {
+    suspend fun play(context: Context, song: Music, startPositionMs: Long = 0) {
         val active = client ?: return
         val id = song.id.toString()
         // A transcode for a track the TV has moved on from is a minute of CPU nobody is waiting
@@ -178,7 +213,7 @@ object CastPlayback {
 
         val known = offered[id]
         if (known != null) {
-            active.play(id, known.contentType, song.duration)
+            active.play(id, known.contentType, song.duration, startPositionMs)
             return
         }
 
@@ -186,7 +221,7 @@ object CastPlayback {
         val ready = withContext(Dispatchers.IO) { alreadyPlayable(context, uri, song) }
         if (ready != null) {
             offered[id] = ready
-            active.play(id, ready.contentType, song.duration)
+            active.play(id, ready.contentType, song.duration, startPositionMs)
             return
         }
 
@@ -201,8 +236,20 @@ object CastPlayback {
             return
         }
         offered[id] = Prepared(Source.Growing(cached), CONTENT_TYPE)
+        // No start position: a growing stream has no length, so the TV would begin at the start
+        // whatever it was told, and asking for a position it cannot honour reads as a bug.
         active.play(id, CONTENT_TYPE, song.duration)
         startTranscode(active, song, id, cached, source)
+    }
+
+    /**
+     * Ask the television to play, pause, seek or change speed.
+     *
+     * The one way a press on the phone reaches the sound, wherever it was pressed. Silent with no
+     * session, like everything else here: `CastingPlayer` cannot know precisely when a session ended.
+     */
+    fun send(command: PlaybackCommand) {
+        client?.sendCommand(command)
     }
 
     /**
@@ -220,8 +267,7 @@ object CastPlayback {
         cached: File,
         source: ByteArray,
     ) {
-        _state.update { if (it is State.Casting) it.copy(preparing = true) else it }
-        transcodingId = id
+        _growing.value = id
         transcodeJob = scope.launch {
             val length = runCatching {
                 FileOutputStream(cached).use { sink ->
@@ -244,16 +290,16 @@ object CastPlayback {
                     Log.w(TAG, "could not encode '${song.title}' for casting")
                 }
                 active.resourceComplete(id, length ?: PRODUCER_FAILED)
-                if (transcodingId == id) {
-                    transcodingId = null
-                    _state.update { if (it is State.Casting) it.copy(preparing = false) else it }
-                }
+                // Compared rather than cleared outright: a later track's transcode may already have
+                // claimed this, and clearing it would say the newer one had finished.
+                _growing.compareAndSet(id, null)
             }
         }
     }
 
     private fun cancelTranscodeExcept(id: String) {
-        if (transcodingId == null || transcodingId == id) return
+        val current = _growing.value
+        if (current == null || current == id) return
         transcodeJob?.cancel()
     }
 
@@ -264,12 +310,13 @@ object CastPlayback {
 
     private fun clear() {
         // Cancelled before the state is published: the transcode's own completion clears
-        // `preparing`, and letting it run on would leave it writing into a session that has gone.
+        // `growing`, and letting it run on would leave it writing into a session that has gone.
         transcodeJob?.cancel()
         transcodeJob = null
-        transcodingId = null
+        _growing.value = null
         client = null
         offered.clear()
+        _tv.value = null
         _state.value = State.Idle
     }
 

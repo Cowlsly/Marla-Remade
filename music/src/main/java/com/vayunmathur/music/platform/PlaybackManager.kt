@@ -189,15 +189,6 @@ class PlaybackManager private constructor(context: Context) {
 
     fun togglePlayPause() = controller?.let { if (it.isPlaying) it.pause() else it.play() }
 
-    /**
-     * Stop, without regard for what it was doing.
-     *
-     * For the cast handoff: the phone has to end up silent whether or not it was playing, and a
-     * toggle would start it if it happened to be paused.
-     */
-    fun pause() {
-        controller?.pause()
-    }
     fun seekTo(pos: Long) {
         controller?.seekTo(pos)
         _currentPosition.value = pos

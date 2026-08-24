@@ -96,7 +96,7 @@ fun NowPlayingScreen(
                 title = { },
                 navigationIcon = { IconNavigation(backStack) },
                 actions = {
-                    CastButton(state = state, actions = actions)
+                    CastButton(state = state)
                     val sourceName = state.sourceName
                     if (state.sourceId != null && sourceName != null) {
                         TextButton(onClick = {
@@ -267,14 +267,20 @@ fun NowPlayingScreen(
  * does: the picker is an `ActivityResultContract`, so the launcher has to live in a composable, and
  * routing the session through the ViewModel would buy nothing but a second copy of its state.
  *
+ * **All this does is open and close the session.** What plays, and where it starts from, is
+ * `CastQueue`'s - it hands the current item over as the cast begins and follows the queue from then
+ * on. Issuing a `PLAY_MEDIA` from here as well would make two writers of it and restart the track
+ * every time this screen was composed.
+ *
  * Absent entirely when Cast is not installed. An icon that only ever opened a store listing would be
  * an advertisement in the middle of a transport bar.
  */
 @Composable
-private fun CastButton(state: NowPlayingUiState, actions: MusicActions) {
+private fun CastButton(state: NowPlayingUiState) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val castState by CastPlayback.state.collectAsState()
+    val growing by CastPlayback.growing.collectAsState()
 
     val supported = remember { CastPlayback.support(context) == CastClient.Support.READY }
     if (!supported) return
@@ -282,19 +288,15 @@ private fun CastButton(state: NowPlayingUiState, actions: MusicActions) {
     val song = state.song
 
     val picker = rememberLauncherForActivityResult(CastPickerContract()) { connected ->
-        if (!connected || song == null) return@rememberLauncherForActivityResult
-        scope.launch {
-            if (CastPlayback.open(context)) {
-                // The phone stops before the TV starts, so the track is never coming out of both.
-                actions.pausePlayback()
-                CastPlayback.play(context, song)
-            }
-        }
+        if (!connected) return@rememberLauncherForActivityResult
+        scope.launch { CastPlayback.open(context) }
     }
 
-    when (val current = castState) {
+    when (castState) {
         is CastPlayback.State.Casting -> IconButton(onClick = { CastPlayback.close() }) {
-            if (current.preparing) {
+            // A track still being encoded is the window in which seeking does not work and in which a
+            // failure can still appear, so it is worth showing even though playback has started.
+            if (growing != null) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp))
             } else {
                 IconCastConnected(tint = MaterialTheme.colorScheme.primary)
