@@ -147,4 +147,8 @@
     </plurals>
     <string name="today">今天</string>
     <string name="tomorrow">明天</string>
+    <string name="export_ics_file">导出 .ics 文件</string>
+    <string name="export_events_to_ics_file">将活动导出到 .ics 文件</string>
+    <string name="export_ics_success">日历已导出</string>
+    <string name="export_ics_failed_format">日历导出失败：<xliff:g id="error" example="permission denied">%1$s</xliff:g></string>
 </resources>
