@@ -137,13 +137,16 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
         // tile -> the features that reach it, in input order.
         let mut by_tile: std::collections::HashMap<(u64, u64), Vec<usize>> =
             std::collections::HashMap::new();
+        // Reused across features so the per-feature tile list is not reallocated
+        // 3 million times per zoom.
+        let mut touched: Vec<(u64, u64)> = Vec::new();
         for (i, p) in projected.iter().enumerate() {
             let Some(p) = p else { continue };
-            let Some(b) = geom::bounds(p) else { continue };
-            let Some(range) = geom::tile_range(&b, z, opts.extent, buffer) else {
-                continue;
-            };
-            for (tx, ty) in range.iter() {
+            // Per-segment boxes, not the whole feature's: see `geom::tiles_touched`.
+            // The whole-feature box is what made a country-spanning line get clipped
+            // into millions of z16 tiles it never enters.
+            geom::tiles_touched(p, z, opts.extent, buffer, &mut touched);
+            for &(tx, ty) in &touched {
                 by_tile.entry((tx, ty)).or_default().push(i);
             }
         }
@@ -626,6 +629,47 @@ mod tests {
             let tile = Tile::decode(&crate::gz::decompress(raw).unwrap()).unwrap();
             let l = tile.layer("l").unwrap();
             assert_eq!(l.features.len(), 1);
+            assert!(!l.features[0].geometry.is_empty());
+        }
+    }
+
+    /// The failure mode of walking segments instead of filling the bounding box is
+    /// UNDER-inclusion: a tile the line crosses but which no segment box happens to
+    /// name would leave a hole in the middle of a drawn line.
+    ///
+    /// A long diagonal at z10 is the sharpest test of that. Every column of tiles
+    /// between its two ends must hold at least one tile -- a missing column is a
+    /// visible break in the line.
+    #[test]
+    fn a_long_diagonal_leaves_no_gap_in_the_tiles_it_covers() {
+        let (west, east) = ((-124.0, 42.0), (-114.0, 33.0));
+        let features = vec![line(&[west, east], vec![])];
+        let (bytes, report) = build_archive(&features, &Options::new("l", 10, 10)).unwrap();
+        let a = Archive::parse(&bytes).unwrap();
+        assert!(report[0].tiles > 50, "a real spread of tiles: {:?}", report[0]);
+
+        let (wx, wy) = geom::project(west.0, west.1, 10);
+        let (ex, ey) = geom::project(east.0, east.1, 10);
+        let (x0, x1) = (wx.floor() as u64, ex.floor() as u64);
+        let (ylo, yhi) = (wy.floor() as u64, ey.floor() as u64);
+
+        // Probe every column the line spans; each must carry at least one tile
+        // somewhere in the y band the line occupies.
+        for x in x0..=x1 {
+            let mut found = false;
+            for y in ylo..=yhi {
+                if a.tile(10, x, y).unwrap().is_some() {
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found, "column x={x} has no tile: the line has a gap there");
+        }
+
+        // And every archived tile really carries geometry, so none is a stray.
+        for (_, raw) in a.iter_tiles().unwrap() {
+            let tile = Tile::decode(&crate::gz::decompress(raw).unwrap()).unwrap();
+            let l = tile.layer("l").unwrap();
             assert!(!l.features[0].geometry.is_empty());
         }
     }

@@ -207,6 +207,84 @@ impl TileRange {
     }
 }
 
+/// Every tile a geometry can reach at zoom `z`, sorted and deduplicated.
+///
+/// The point of this over `tile_range(bounds(g))` is long thin diagonal features. A
+/// bounding box is a terrible approximation of a route: measured on one
+/// transcontinental rail relation (40° of longitude, 2000 vertices) at z16, the box
+/// covers **34,535,986** tiles and the route passes through **29,276** — a 1180x
+/// difference, and each of those tiles ran a full clip and simplify of the whole
+/// geometry. That is why `transit_lines` at planet scale took hours.
+///
+/// Each SEGMENT's own box is used instead, and their union taken. Real OSM geometry
+/// has short segments, so those boxes are 1-4 tiles each and the total tracks the
+/// tiles actually traversed. It stays a conservative superset — a segment's box always
+/// contains the segment — so no tile a feature reaches can be missed, which a
+/// line-walking algorithm would have to get exactly right to be safe.
+///
+/// Polygons keep whole-ring boxes: a polygon legitimately covers its interior tiles,
+/// and per-segment boxes would drop every tile strictly inside the ring.
+pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(u64, u64)>) {
+    out.clear();
+    let mut push_box = |ax: f64, ay: f64, bx: f64, by: f64| {
+        if !ax.is_finite() || !ay.is_finite() || !bx.is_finite() || !by.is_finite() {
+            return;
+        }
+        let b = Rect {
+            min_x: ax.min(bx),
+            min_y: ay.min(by),
+            max_x: ax.max(bx),
+            max_y: ay.max(by),
+        };
+        if let Some(r) = tile_range(&b, z, extent, pad) {
+            out.extend(r.iter());
+        }
+    };
+    match g {
+        // A point's box is a point; one range call each is already tight.
+        Geometry::Points(pts) => {
+            for &(x, y) in pts {
+                push_box(x, y, x, y);
+            }
+        }
+        Geometry::Lines(lines) => {
+            for line in lines {
+                match line.as_slice() {
+                    [] => {}
+                    // A degenerate one-point "line" still occupies a tile.
+                    [(x, y)] => push_box(*x, *y, *x, *y),
+                    _ => {
+                        for seg in line.windows(2) {
+                            push_box(seg[0].0, seg[0].1, seg[1].0, seg[1].1);
+                        }
+                    }
+                }
+            }
+        }
+        Geometry::Polygons(polys) => {
+            for rings in polys {
+                // The exterior ring's own box, which is the polygon's footprint --
+                // interior tiles included, because the fill reaches them.
+                let Some(ext) = rings.first() else { continue };
+                let mut min = (f64::INFINITY, f64::INFINITY);
+                let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
+                for &(x, y) in ext {
+                    if !x.is_finite() || !y.is_finite() {
+                        continue;
+                    }
+                    min = (min.0.min(x), min.1.min(y));
+                    max = (max.0.max(x), max.1.max(y));
+                }
+                push_box(min.0, min.1, max.0, max.1);
+            }
+        }
+    }
+    // A feature must appear in a tile's list exactly once: adjacent segments share
+    // tiles, and a duplicate would encode the whole geometry twice into one tile.
+    out.sort_unstable();
+    out.dedup();
+}
+
 /// The tiles a world-space bounding box touches at zoom `z`, grown by `pad`
 /// world units so a feature just outside a tile still reaches into its buffer.
 ///
@@ -439,6 +517,120 @@ mod tests {
         // NaN in, None out.
         let b = Rect { min_x: f64::NAN, min_y: 0.0, max_x: 1.0, max_y: 1.0 };
         assert_eq!(tile_range(&b, 4, e, 0.0), None);
+    }
+
+    /// The whole point of `tiles_touched`: a long diagonal must not claim the empty
+    /// corners of its bounding box. This is the case that made `transit_lines` at
+    /// planet scale take hours.
+    #[test]
+    fn a_diagonal_line_skips_the_corners_of_its_bounding_box() {
+        let extent = 4096u32;
+        let e = extent as f64;
+        // A staircase across a 40 x 40 tile square, one vertex per tile step, so the
+        // line genuinely passes through ~40 tiles out of 1600.
+        let pts: Vec<Pt> = (0..=40).map(|i| (i as f64 * e, i as f64 * e)).collect();
+        let g = Geometry::Lines(vec![pts]);
+
+        let mut touched = Vec::new();
+        tiles_touched(&g, 8, extent, 0.0, &mut touched);
+
+        let bbox = tile_range(&bounds(&g).unwrap(), 8, extent, 0.0).unwrap();
+        assert_eq!(bbox.len(), 41 * 41, "the box really is that big");
+        // Every vertex sits exactly on a tile corner here, which is the worst case:
+        // each segment's box spans 2x2 tiles rather than 1. Even so the walk is an
+        // order of magnitude below the box, and that ratio is what grows with zoom.
+        assert!(
+            (touched.len() as u64) * 10 < bbox.len(),
+            "walked {} tiles, more than a tenth of the box's {}",
+            touched.len(),
+            bbox.len()
+        );
+
+        // Every tile on the diagonal is present...
+        for i in 0..=40u64 {
+            assert!(touched.contains(&(i, i)), "tile ({i},{i}) is on the line");
+        }
+        // ...and the far corners, which the line never approaches, are not.
+        assert!(!touched.contains(&(0, 40)), "bottom-left corner is empty");
+        assert!(!touched.contains(&(40, 0)), "top-right corner is empty");
+    }
+
+    /// Safety property: it may over-include, never under-include. Anything it lists
+    /// is inside the feature's bounding box, and every segment's own box is covered.
+    #[test]
+    fn tiles_touched_is_a_subset_of_the_bounding_box_and_covers_every_segment() {
+        let extent = 4096u32;
+        let e = extent as f64;
+        let g = Geometry::Lines(vec![vec![
+            (0.5 * e, 0.5 * e),
+            (3.5 * e, 1.5 * e),
+            (2.0 * e, 6.0 * e),
+        ]]);
+
+        let mut touched = Vec::new();
+        tiles_touched(&g, 8, extent, 0.0, &mut touched);
+        let bbox = tile_range(&bounds(&g).unwrap(), 8, extent, 0.0).unwrap();
+        let inside: Vec<(u64, u64)> = bbox.iter().collect();
+        for t in &touched {
+            assert!(inside.contains(t), "{t:?} is outside the bounding box");
+        }
+
+        // Each segment's own tile range must be fully present, which is what makes
+        // this a conservative superset of the tiles the line actually enters.
+        let pts = match &g {
+            Geometry::Lines(l) => l[0].clone(),
+            _ => unreachable!(),
+        };
+        for seg in pts.windows(2) {
+            let b = Rect {
+                min_x: seg[0].0.min(seg[1].0),
+                min_y: seg[0].1.min(seg[1].1),
+                max_x: seg[0].0.max(seg[1].0),
+                max_y: seg[0].1.max(seg[1].1),
+            };
+            for t in tile_range(&b, 8, extent, 0.0).unwrap().iter() {
+                assert!(touched.contains(&t), "segment tile {t:?} was dropped");
+            }
+        }
+    }
+
+    /// A polygon covers its interior, so its footprint stays the whole ring box --
+    /// per-segment boxes would drop every tile strictly inside it.
+    #[test]
+    fn a_polygon_still_claims_its_interior_tiles() {
+        let extent = 4096u32;
+        let e = extent as f64;
+        let ring = vec![
+            (0.5 * e, 0.5 * e),
+            (5.5 * e, 0.5 * e),
+            (5.5 * e, 5.5 * e),
+            (0.5 * e, 5.5 * e),
+            (0.5 * e, 0.5 * e),
+        ];
+        let g = Geometry::Polygons(vec![vec![ring]]);
+
+        let mut touched = Vec::new();
+        tiles_touched(&g, 8, extent, 0.0, &mut touched);
+
+        // (3,3) is strictly inside and touches no edge.
+        assert!(touched.contains(&(3, 3)), "interior tile must be filled");
+        assert_eq!(touched.len(), 36, "the whole 6x6 footprint");
+    }
+
+    /// Adjacent segments share tiles; a duplicate would encode the geometry twice.
+    #[test]
+    fn tiles_touched_deduplicates_and_sorts() {
+        let extent = 4096u32;
+        let e = extent as f64;
+        // Many short segments all inside one tile.
+        let pts: Vec<Pt> = (0..20).map(|i| (0.1 * e + i as f64, 0.1 * e)).collect();
+        let mut touched = Vec::new();
+        tiles_touched(&Geometry::Lines(vec![pts]), 8, extent, 0.0, &mut touched);
+        assert_eq!(touched, vec![(0, 0)]);
+
+        let mut sorted = touched.clone();
+        sorted.sort_unstable();
+        assert_eq!(touched, sorted, "output is sorted for a deterministic pass");
     }
 
     #[test]
