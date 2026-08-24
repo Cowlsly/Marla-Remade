@@ -12,7 +12,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.ButtonDefaults
-import com.vayunmathur.library.ui.ButtonGroup
 import com.vayunmathur.library.ui.Card
 import com.vayunmathur.library.ui.FilterChip
 import com.vayunmathur.library.ui.ListItem
@@ -27,7 +26,9 @@ import com.vayunmathur.library.ui.verticalShape
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -49,6 +50,8 @@ import com.vayunmathur.maps.util.SavedPlacesViewModel
 import com.vayunmathur.maps.util.SelectedFeatureViewModel
 import com.vayunmathur.maps.util.TransitStopsViewModel
 import com.vayunmathur.maps.util.formatDistance
+import com.vayunmathur.maps.util.formatDuration
+import com.vayunmathur.maps.util.formatEta
 import org.maplibre.spatialk.geojson.Position
 
 @Composable
@@ -154,10 +157,15 @@ private fun AdminLabelHeader(name: String, wikipedia: String, modifier: Modifier
 }
 
 /**
- * The directions panel: one tab per travel mode, the trip summary, and the turn-by-turn
- * step list.
+ * The directions panel: one segment per travel mode, then the turn-by-turn step list.
  *
- * Stateless (no ViewModel) so the store-listing previews can render it — the map it
+ * Each segment carries its own time and distance, so there is no separate summary row —
+ * comparing modes is the point of the control, and that only works if the numbers are on
+ * it. Rideshare appears as a fifth segment when the taxi app is installed, showing
+ * arrival and price instead, and is a UI-level pseudo-mode rather than a
+ * [RouteService.TravelMode].
+ *
+ * Stateless (no ViewModel) so the store-listing previews can render it - the map it
  * normally sits over is a native surface a preview cannot draw.
  */
 @Composable
@@ -170,82 +178,147 @@ fun RouteSheet(
     userPosition: Position? = null,
     modifier: Modifier = Modifier,
 ) {
+    val context = LocalContext.current
+
+    // Rideshare endpoints. Origin may be "from here" (a null waypoint) → the user's live
+    // position; the destination must be a real waypoint, so it never falls back to it.
+    val rideOrigin = selectedFeature.waypoints.firstOrNull()
+    val rideDest = selectedFeature.waypoints.lastOrNull()
+    val rideOriginPos = rideOrigin?.position ?: userPosition
+    val rideDestPos = rideDest?.position
+    val driveRoute = route[RouteService.TravelMode.DRIVE]
+
+    val taxiInstalled = remember { RideEstimateClient.isInstalled(context) }
+    val rideEstimate =
+        if (taxiInstalled && rideOriginPos != null && rideDestPos != null) {
+            rememberRideEstimate(
+                context,
+                rideOriginPos.latitude, rideOriginPos.longitude,
+                rideDestPos.latitude, rideDestPos.longitude,
+                rideOrigin?.name, rideDest.name,
+            ).value?.takeIf { it.available }
+        } else null
+
+    // A ride substitutes for driving, so it needs the drive route to borrow a duration
+    // and a polyline from. No taxi app, no segment — same as the card this replaced.
+    val rideshareOffered = taxiInstalled &&
+        rideOriginPos != null &&
+        rideDestPos != null &&
+        selectedFeature.waypoints.size >= 2 &&
+        driveRoute != null
+
+    // Rideshare is a segment in this selector but deliberately **not** a
+    // [RouteService.TravelMode]: it has no routing profile of its own, and a new variant
+    // would make every `when` across TravelMode's thirteen consumers non-exhaustive. So
+    // its selection lives here, and picking it leaves the mode on DRIVE — a ride follows
+    // the driving route, which is what the map is already drawing.
+    var rideshareSelected by remember { mutableStateOf(false) }
+    val showRideshare = rideshareSelected && rideshareOffered
+
     Column(modifier) {
-        // A connected ButtonGroup rather than a tab row: these are four short choices about one
-        // thing, which reads as a single segmented control. A tab row implies four pages, and it
-        // sat above content that is the same shape for every mode.
-        //
-        // Labels are resolved before the group because ButtonGroupScope's builder is a plain
-        // lambda, not a composable one — `stringResource` cannot be called inside it.
-        val modeLabels = route.keys.associateWith { mode ->
-            stringResource(
-                when (mode) {
-                    RouteService.TravelMode.WALK -> R.string.travel_mode_walk
-                    RouteService.TravelMode.BICYCLE -> R.string.travel_mode_bicycle
-                    RouteService.TravelMode.DRIVE -> R.string.travel_mode_drive
-                    RouteService.TravelMode.TRANSIT -> R.string.travel_mode_transit
+        // A tab row rather than the ButtonGroup this replaced: each segment now carries
+        // three stacked lines (mode, time, distance), and `toggleableItem` takes a label
+        // string with no content slot. Tab's content overload is the only primitive in
+        // library/ui that holds a column.
+        val modes = route.keys.toList()
+        val selectedIndex =
+            if (showRideshare) modes.size else modes.indexOf(selectedRouteType).coerceAtLeast(0)
+        PrimaryTabRow(selectedTabIndex = selectedIndex, modifier = Modifier.fillMaxWidth()) {
+            modes.forEach { mode ->
+                val modeRoute = route[mode]?.takeIf { it !is RouteService.EmptyRoute }
+                Tab(
+                    selected = !showRideshare && selectedRouteType == mode,
+                    onClick = {
+                        rideshareSelected = false
+                        setSelectedRouteType(mode)
+                    },
+                ) {
+                    ModeTab(
+                        label = stringResource(
+                            when (mode) {
+                                RouteService.TravelMode.WALK -> R.string.travel_mode_walk
+                                RouteService.TravelMode.BICYCLE -> R.string.travel_mode_bicycle
+                                RouteService.TravelMode.DRIVE -> R.string.travel_mode_drive
+                                RouteService.TravelMode.TRANSIT -> R.string.travel_mode_transit
+                            }
+                        ),
+                        primary = modeRoute?.let { formatDuration(context, it.duration) },
+                        secondary = modeRoute?.let { formatDistance(it.distanceMeters) },
+                    )
                 }
-            )
-        }
-        ButtonGroup(
-            modifier = Modifier.fillMaxWidth().padding(vertical = Spacing.sm),
-        ) {
-            route.keys.forEach { mode ->
-                toggleableItem(
-                    checked = selectedRouteType == mode,
-                    label = modeLabels.getValue(mode),
-                    onCheckedChange = { setSelectedRouteType(mode) },
-                    weight = 1f,
-                )
+            }
+            if (rideshareOffered) {
+                Tab(
+                    selected = showRideshare,
+                    onClick = {
+                        rideshareSelected = true
+                        setSelectedRouteType(RouteService.TravelMode.DRIVE)
+                    },
+                ) {
+                    ModeTab(
+                        label = stringResource(R.string.route_taxi_title),
+                        // Dropoff, which the provider does not give us: `etaMinutes` is
+                        // the pickup wait. Device-local wall clock, unlike a transit
+                        // itinerary's feed-local times, because a ride is happening now.
+                        primary = rideEstimate?.etaMinutes?.let { wait ->
+                            formatEta(
+                                System.currentTimeMillis() +
+                                    wait * 60_000L +
+                                    driveRoute.duration.inWholeMilliseconds
+                            )
+                        },
+                        secondary = rideEstimate?.fareEstimate,
+                    )
+                }
             }
         }
+
+        if (showRideshare) {
+            // No step list and no Start Navigation: the ride is driven for the user, so
+            // booking it is the only action.
+            RideshareBooking(
+                originLat = rideOriginPos.latitude,
+                originLng = rideOriginPos.longitude,
+                originLabel = rideOrigin?.name,
+                destLat = rideDestPos.latitude,
+                destLng = rideDestPos.longitude,
+                destLabel = rideDest.name,
+            )
+            return@Column
+        }
+
         val routeForMode = route[selectedRouteType]
         if(routeForMode != null) {
             if(routeForMode !is RouteService.EmptyRoute) {
-                ListItem({ Text(routeForMode.duration.toString()) }, supportingContent = {
-                    Text(formatDistance(routeForMode.distanceMeters))
-                })
-                // "Start Navigation" only when we have a concrete
-                // Route (steps + polyline) and aren't already in
-                // an active navigation session.
+                // Time and distance live in the selector now, so the summary row that
+                // used to sit here would only repeat the selected tab.
                 //
-                // We also hide the button for TRANSIT: the
-                // navigation engine snaps GPS to the route
-                // polyline and computes ETA from progress along
-                // it, which doesn't model trains/buses well, and
-                // mid-trip recalc would replace transit steps
-                // with walking steps. Users can still see the
-                // transit step list; we just don't offer to
-                // "drive" them through it.
+                // "Start Navigation" needs a concrete Route (steps + polyline), no active
+                // session, and a real destination. TRANSIT is excluded: the navigation
+                // engine snaps GPS to the polyline and computes ETA from progress along
+                // it, which doesn't model trains/buses, and a mid-trip recalc would
+                // replace transit steps with walking ones. The step list still shows.
                 val lastWaypoint = selectedFeature.waypoints.lastOrNull()
-                val canStart = routeForMode is RouteService.Route &&
-                        navState is NavigationSessionManager.NavState.Idle &&
-                        selectedRouteType != RouteService.TravelMode.TRANSIT &&
-                        lastWaypoint != null
                 if (routeForMode is RouteService.Route &&
                     navState is NavigationSessionManager.NavState.Idle &&
-                    selectedRouteType != RouteService.TravelMode.TRANSIT
+                    selectedRouteType != RouteService.TravelMode.TRANSIT &&
+                    lastWaypoint != null
                 ) {
-                    val context = LocalContext.current
                     Button(
                         onClick = {
-                            if (lastWaypoint == null) return@Button
-                            val destPos = lastWaypoint.position
-                            val destName = lastWaypoint.name
                             val intent = Intent(context, NavigationService::class.java)
                             context.startForegroundService(intent)
                             NavigationSessionManager.init(context)
                             NavigationSessionManager.start(
                                 route = routeForMode,
                                 mode = selectedRouteType,
-                                destination = destPos,
-                                destinationLabel = destName,
+                                destination = lastWaypoint.position,
+                                destinationLabel = lastWaypoint.name,
                             )
                         },
-                        enabled = canStart,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                            .padding(horizontal = Spacing.lg, vertical = Spacing.sm),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = MaterialTheme.colorScheme.primary,
                             contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -254,31 +327,7 @@ fun RouteSheet(
                         Text(stringResource(R.string.nav_action_start))
                     }
                 }
-                // Taxi/ride option (P20): offer a ride for this route's origin→destination
-                // via the MA taxi app. Origin is the first waypoint (or the user's live
-                // position when the route starts "from here"); destination is the last.
-                // Drive only: a ride substitutes for driving, not for transit/walk/bicycle.
-                val taxiOrigin = selectedFeature.waypoints.firstOrNull()
-                val taxiDest = selectedFeature.waypoints.lastOrNull()
-                // Origin may be "from here" (a null waypoint) → the user's live position; the
-                // destination must be a real waypoint, so it never falls back to userPosition.
-                val taxiOriginPos = taxiOrigin?.position ?: userPosition
-                val taxiDestPos = taxiDest?.position
-                if (selectedRouteType == RouteService.TravelMode.DRIVE &&
-                    selectedFeature.waypoints.size >= 2 &&
-                    taxiOriginPos != null &&
-                    taxiDestPos != null
-                ) {
-                    RouteTaxiOption(
-                        originLat = taxiOriginPos.latitude,
-                        originLng = taxiOriginPos.longitude,
-                        originLabel = taxiOrigin?.name,
-                        destLat = taxiDestPos.latitude,
-                        destLng = taxiDestPos.longitude,
-                        destLabel = taxiDest.name,
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
+                Spacer(Modifier.height(Spacing.sm))
             }
             LazyColumn(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 when (routeForMode) {
@@ -392,14 +441,15 @@ private fun transitSupportingText(details: RouteService.API.TransitDetails): Str
 }
 
 /**
- * The taxi/ride option shown under a route (P20): if the MA taxi app is installed, offer a ride
- * for the route's origin→destination. When the signature-guarded estimate resolves, the fare/ETA
- * is shown inline; "Book ride" opens the taxi app with the trip pre-filled. If taxi is absent the
- * option renders nothing; if the estimate is unavailable it degrades to a launch-only button — no
- * crash either way.
+ * "Book ride": hands the trip off to the MA taxi app, pre-filled (P20).
+ *
+ * The only action the rideshare segment offers — the ride is driven for the user, so
+ * there is no step list and nothing to navigate. Shown only once the caller has
+ * established the app is installed; the fare and pickup wait are on the segment itself,
+ * and a provider that will not quote either simply leaves those lines off.
  */
 @Composable
-private fun RouteTaxiOption(
+private fun RideshareBooking(
     originLat: Double,
     originLng: Double,
     originLabel: String?,
@@ -408,41 +458,51 @@ private fun RouteTaxiOption(
     destLabel: String?,
 ) {
     val context = LocalContext.current
-    val installed = remember { RideEstimateClient.isInstalled(context) }
-    if (!installed) return
-    val estimate by rememberRideEstimate(
-        context, originLat, originLng, destLat, destLng, originLabel, destLabel,
-    )
-    val available = estimate?.takeIf { it.available }
-
-    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
-        Column(Modifier.padding(vertical = 4.dp)) {
-            ListItem({ Text(stringResource(R.string.route_taxi_title)) }, supportingContent = {
-                val subtitle = listOfNotNull(
-                    available?.fareEstimate,
-                    available?.etaMinutes?.let { stringResource(R.string.route_taxi_eta_minutes, it) },
-                ).joinToString(" · ").ifBlank { stringResource(R.string.route_taxi_provider) }
-                Text(subtitle)
-            })
-            Button(
-                onClick = {
-                    goto(
-                        context,
-                        RideHandoffContract.bookingDeepLink(
-                            originLat, originLng, originLabel, destLat, destLng, destLabel,
-                        ),
-                    )
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp, vertical = 8.dp),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = MaterialTheme.colorScheme.primary,
-                    contentColor = MaterialTheme.colorScheme.onPrimary,
+    Button(
+        onClick = {
+            goto(
+                context,
+                RideHandoffContract.bookingDeepLink(
+                    originLat, originLng, originLabel, destLat, destLng, destLabel,
                 ),
-            ) {
-                Text(stringResource(R.string.route_taxi_book))
-            }
+            )
+        },
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Spacing.lg, vertical = Spacing.sm),
+        colors = ButtonDefaults.buttonColors(
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary,
+        ),
+    ) {
+        Text(stringResource(R.string.route_taxi_book))
+    }
+}
+
+/**
+ * One segment of the mode selector: name on top, then two supporting lines.
+ *
+ * For a travel mode those lines are time and distance; for rideshare they are arrival
+ * and price. Either may be missing — a route that is still being computed, or a fare
+ * the provider would not quote — and the line is dropped rather than blanked so the
+ * segments stay the same height.
+ */
+@Composable
+private fun ModeTab(label: String, primary: String?, secondary: String?) {
+    Column(
+        Modifier.padding(vertical = Spacing.sm),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Text(label, style = MaterialTheme.typography.labelLarge)
+        if (primary != null) {
+            Text(primary, style = MaterialTheme.typography.bodyMedium)
+        }
+        if (secondary != null) {
+            Text(
+                secondary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
         }
     }
 }
