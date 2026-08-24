@@ -11,6 +11,8 @@ import com.vayunmathur.games.arrows.data.DAILY_MIRRORS
 import com.vayunmathur.games.arrows.data.GameMode
 import com.vayunmathur.games.arrows.data.STARTING_HEARTS
 import com.vayunmathur.games.arrows.data.arrowCountForLevel
+import com.vayunmathur.games.arrows.data.BIGGEST_BOARD_LEVEL
+import com.vayunmathur.games.arrows.data.MAX_BOARD
 import com.vayunmathur.games.arrows.data.boardSizeForLevel
 import com.vayunmathur.games.arrows.data.mirrorCountForLevel
 import com.vayunmathur.games.arrows.domain.ArrowsGenerator
@@ -76,6 +78,20 @@ class MetadataPreviews {
     @Composable
     fun Preview4Fresh() {
         Board(game(level(2), level = 2, cleared = 0))
+    }
+
+    /**
+     * The largest board the ladder ever deals.
+     *
+     * Here to guard the layout: at [MAX_BOARD] a phone-width board is twelve rows deep, which is taller
+     * than the content area, so this is what shows whether the screen still holds together at the extreme
+     * rather than only at the tutorial sizes.
+     */
+    @PreviewTest
+    @Preview(name = "5-largest", device = PHONE, showSystemUi = true)
+    @Composable
+    fun Preview5Largest() {
+        Board(game(level(BIGGEST_BOARD_LEVEL), level = BIGGEST_BOARD_LEVEL, cleared = 2))
     }
 
     @Composable

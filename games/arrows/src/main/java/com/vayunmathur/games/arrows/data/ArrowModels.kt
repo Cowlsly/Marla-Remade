@@ -135,13 +135,51 @@ data class ArrowsGameState(
 /** Hearts a level starts with. Three wrong taps and it resets. */
 const val STARTING_HEARTS = 3
 
-/** Board width and height for [level]. Grows in steps so early levels stay readable. */
+/**
+ * Board width and height for [level].
+ *
+ * Grows in steps rather than continuously so a run of levels shares a shape and the player can build an
+ * intuition for it before the board changes under them. Each step adds a row or a column but not both:
+ * gaining one of each at once would jump the area by a third and read as a difficulty spike.
+ *
+ * Stops at [MAX_BOARD], where a phone-width board is already down to roughly 46dp cells.
+ */
 fun boardSizeForLevel(level: Int): Pair<Int, Int> = when {
-    level <= 5 -> 5 to 6
-    level <= 15 -> 6 to 8
-    level <= 30 -> 7 to 9
-    else -> 8 to 10
+    level <= 3 -> 5 to 6
+    level <= 8 -> 5 to 7
+    level <= 14 -> 6 to 8
+    level <= 21 -> 6 to 9
+    level <= 29 -> 7 to 9
+    level <= 38 -> 7 to 10
+    level <= 48 -> 8 to 10
+    level <= 60 -> 8 to 11
+    else -> MAX_BOARD
 }
+
+/** The largest board the ladder reaches, from [BIGGEST_BOARD_LEVEL] on. */
+val MAX_BOARD: Pair<Int, Int> = 9 to 12
+
+/** First level played on [MAX_BOARD]. */
+const val BIGGEST_BOARD_LEVEL = 61
+
+/**
+ * Most arrows that may be launchable at once on a fresh board.
+ *
+ * A board where everything can go straight away is not a puzzle: the player taps at random and it comes
+ * apart. Holding the opening to about a quarter of the arrows means most are pinned by something, so the
+ * first move has to be found rather than guessed.
+ *
+ * Scaled to the arrow count rather than a flat number, because two of six is as tight as five of
+ * nineteen — one flat cap would leave a small board trivial and a large one barely generatable.
+ */
+fun availabilityCapFor(arrowCount: Int): Int =
+    ((arrowCount + AVAILABILITY_DIVISOR - 1) / AVAILABILITY_DIVISOR).coerceAtLeast(MIN_AVAILABLE)
+
+/** Rounded up, so six arrows allow two and nineteen allow five. */
+private const val AVAILABILITY_DIVISOR = 4
+
+/** Below two there is only ever one legal move, which is a sequence to memorise rather than a puzzle. */
+private const val MIN_AVAILABLE = 2
 
 /** How many arrows [level] should hold, scaled to the board it sits on. */
 fun arrowCountForLevel(level: Int): Int {
