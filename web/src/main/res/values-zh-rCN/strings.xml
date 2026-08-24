@@ -114,4 +114,8 @@
     <string name="copy_link">复制链接</string>
     <string name="open_in_new_tab">在新标签页中打开</string>
     <string name="link_copied">链接已复制</string>
+    <string name="cleartext_blocked_title">不安全的连接已被阻止</string>
+    <string name="cleartext_blocked_message">%1$s 是通过普通 HTTP 请求的。未加密的连接仅允许与本地网络上的设备建立。</string>
+    <string name="local_network_title">允许本地网络访问吗？</string>
+    <string name="local_network_message">%1$s 似乎是您网络上的设备。Android 需要本地网络权限才能加载此页面。</string>
 </resources>
