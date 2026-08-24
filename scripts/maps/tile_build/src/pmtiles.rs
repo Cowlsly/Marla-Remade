@@ -407,14 +407,19 @@ impl Archive {
     /// caller can hold the whole tile list of a 26-million-tile archive without also
     /// holding its 8 GB of bodies. Runs are expanded, because a run means several ids
     /// share one body and each id still needs its own row.
-    pub fn tile_offsets(&self) -> Result<Vec<(u64, u32, u32)>> {
+    ///
+    /// The offset is `u64` and must stay that way. A single planet layer's data section
+    /// is well past `u32::MAX` -- `maxspeed` alone is 8.3 GB -- so narrowing it silently
+    /// wraps every offset beyond 4 GiB onto the wrong bytes, which surfaces as
+    /// "not a gzip stream" halfway through a merge.
+    pub fn tile_offsets(&self) -> Result<Vec<(u64, u64, u32)>> {
         let mut out = Vec::new();
         let mut push = |e: &Entry| -> Result<()> {
             if e.offset + e.length as u64 > self.tile_data.len() as u64 {
                 return err("PMTiles entry runs past the tile data section");
             }
             for k in 0..e.run_length as u64 {
-                out.push((e.tile_id + k, e.offset as u32, e.length));
+                out.push((e.tile_id + k, e.offset, e.length));
             }
             Ok(())
         };
@@ -441,11 +446,18 @@ impl Archive {
     }
 
     /// The still-compressed body at `offset..offset + length` in the data section.
-    pub fn body_at(&self, offset: u32, length: u32) -> Result<&[u8]> {
-        let (o, l) = (offset as usize, length as usize);
-        match o.checked_add(l).filter(|e| *e <= self.tile_data.len()) {
-            Some(end) => Ok(&self.tile_data[o..end]),
-            None => err("PMTiles body runs past the tile data section"),
+    ///
+    /// `offset` is `u64`: a planet layer's data section is far larger than `u32::MAX`.
+    pub fn body_at(&self, offset: u64, length: u32) -> Result<&[u8]> {
+        let end = offset
+            .checked_add(length as u64)
+            .filter(|e| *e <= self.tile_data.len() as u64);
+        match end {
+            Some(end) => Ok(&self.tile_data[offset as usize..end as usize]),
+            None => err(format!(
+                "PMTiles body at {offset}+{length} runs past the {}-byte tile data section",
+                self.tile_data.len()
+            )),
         }
     }
 
@@ -992,6 +1004,42 @@ mod tests {
     /// whole gzipped root directory.
     const REAL_HEAD: &[u8] = include_bytes!("../tests/fixtures/v5ca_header_rootdir.bin");
     const REAL_TILE_MVT: &[u8] = include_bytes!("../tests/fixtures/v5ca_z11_tile.mvt");
+
+    /// A body offset past `u32::MAX` must survive [`Archive::tile_offsets`] intact.
+    ///
+    /// This is the bug that killed the first planet join at 44%: the offset was
+    /// narrowed to `u32`, so every body beyond 4 GiB pointed at the wrong bytes and
+    /// surfaced as "not a gzip stream". No fixture is that large, so the type is
+    /// exercised directly instead.
+    #[test]
+    fn a_body_offset_beyond_four_gigabytes_is_not_truncated() {
+        let big = 5_000_000_000u64;
+        assert!(big > u32::MAX as u64, "the case only matters past u32");
+
+        // What `tile_offsets` does to an entry, in isolation.
+        let e = Entry { tile_id: 7, offset: big, length: 128, run_length: 3 };
+        let rows: Vec<(u64, u64, u32)> = (0..e.run_length as u64)
+            .map(|k| (e.tile_id + k, e.offset, e.length))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![(7, big, 128), (8, big, 128), (9, big, 128)],
+            "the run expands and the offset is carried at full width"
+        );
+
+        // And the reader's bounds check must reject it against a small section rather
+        // than wrapping into a valid-looking index.
+        let mut b = Builder::new();
+        b.min_zoom = 1;
+        b.max_zoom = 1;
+        b.add_tile(1, 0, 0, b"body");
+        let bytes = b.build().unwrap();
+        let a = Archive::parse(&bytes).unwrap();
+        assert!(
+            a.body_at(big, 128).is_err(),
+            "an out-of-range offset must error, not index"
+        );
+    }
 
     #[test]
     fn zoom_base_matches_the_closed_form() {

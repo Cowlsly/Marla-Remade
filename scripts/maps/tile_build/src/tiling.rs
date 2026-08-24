@@ -173,7 +173,10 @@ pub fn merge_archives_to(
 
     // One row per input tile, sorted by (tile_id, input index) so a tile's sources come
     // out in input order -- which is what makes a later input win a layer collision.
-    let mut rows: Vec<(u64, u32, u32, u32)> = Vec::new();
+    //
+    // The offset is u64. A planet layer's data section is well past u32::MAX, so a
+    // narrower field wraps every body beyond 4 GiB onto the wrong bytes.
+    let mut rows: Vec<(u64, u32, u64, u32)> = Vec::new();
     for (i, a) in inputs.iter().enumerate() {
         for (id, off, len) in a.tile_offsets()? {
             rows.push((id, i as u32, off, len));
