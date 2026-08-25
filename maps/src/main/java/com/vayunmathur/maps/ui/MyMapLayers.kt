@@ -133,6 +133,14 @@ fun MyMapLayers(
         // the overlays.
         SatelliteLayer(satelliteEnabled)
 
+        // Our own road rendering, from the baked `roads` source-layer. Drawn FIRST
+        // among the vector overlays so every pin, line and highlight below sits on
+        // top of the roads. Above z11 this is the only thing drawing a road: the base
+        // style's own road surfaces are capped there (see StylePatcher), because ours
+        // carries the lanes, width and speed theirs has no attributes for. It also
+        // holds the probe the posted-limit query hit-tests during navigation.
+        RoadsLayer(overlaySource, tokens)
+
         // P21: live Google traffic congestion overlay (keyless raster tiles from
         // Google's mapstiles hosts), replacing the removed OfflineRouter loopback
         // vector-traffic tile server. Drawn above the basemap but below the POI
@@ -184,10 +192,6 @@ fun MyMapLayers(
             // tap a stop → live departure board (handled in MapPage.onMapClick).
             TransitStopsLayer(overlaySource)
         }
-
-        // Posted-speed-limit probe overlay (Decision D4). Invisible; queried
-        // under the puck during navigation. No-op until the tileset is hosted.
-        MaxspeedLayer()
 
         // Search-result pins (Vela MARKERS_LAYER analog) — drawn above the
         // ambient POI overlay so a query's hits stand out; tap re-selects.

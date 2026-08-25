@@ -7,7 +7,7 @@
 # WHAT THIS TWIN CAN AND CANNOT DO. Only `admin_country` and `admin_region` cannot
 # be built here, and never will be from OSM: they come from Natural Earth
 # shapefiles. Everything else is cargo-only, so the tiles stage builds safety,
-# maxspeed, transit_lines, admin_city, ma_pois and transit_stops and merges them
+# roads, transit_lines, admin_city, ma_pois and transit_stops and merges them
 # into an OVERLAY-ONLY archive -- no base. The app mounts that alongside the
 # published base archive, which is also the only shape that fits in tile_join's
 # memory at planet scale (see build_v5_pmtiles.sh --no-base). It says so loudly
@@ -67,7 +67,6 @@ param(
     # is refused until that layer is actually ported.
     [ValidateSet("rust", "legacy")] [string] $EnginePois = "rust",
     [ValidateSet("rust", "legacy")] [string] $EngineSafety = "rust",
-    [ValidateSet("rust", "legacy")] [string] $EngineMaxspeed = "rust",
     [ValidateSet("rust", "legacy")] [string] $EngineTransitLines = "rust",
     [ValidateSet("rust", "legacy")] [string] $EngineAdminCity = "rust",
 
@@ -138,7 +137,7 @@ if ($EnginePois -eq "legacy") {
 if ($EngineSafety -eq "legacy") {
     throw "-EngineSafety legacy needs osmium, tippecanoe and python3, none of which have a Windows path; use rust (the default), or build under WSL"
 }
-foreach ($pair in @(@("EngineMaxspeed", $EngineMaxspeed), @("EngineTransitLines", $EngineTransitLines), @("EngineAdminCity", $EngineAdminCity))) {
+foreach ($pair in @(@("EngineTransitLines", $EngineTransitLines), @("EngineAdminCity", $EngineAdminCity))) {
     if ($pair[1] -eq "legacy") {
         throw "-$($pair[0]) legacy needs osmium, tippecanoe, python3 (and GDAL for transit_lines), none of which have a Windows path; use rust (the default), or build under WSL"
     }
@@ -181,7 +180,7 @@ if ($Geofabrik) {
 
 $PoisTile    = Join-Path $Work "ma_pois.pmtiles"
 $SafetyTile  = Join-Path $Work "safety.pmtiles"
-$MaxspeedTile = Join-Path $Work "maxspeed.pmtiles"
+$RoadsTile   = Join-Path $Work "roads.pmtiles"
 $TransitLinesTile = Join-Path $Work "transit_lines.pmtiles"
 $AdminCityTile = Join-Path $Work "admin_city.pmtiles"
 $StopsTile   = Join-Path $Work "transit_stops.pmtiles"
@@ -273,14 +272,16 @@ if (Test-Stage "tiles") {
     if (Test-Stamp "tiles") {
         Write-Host "=== tiles: stamp present, skipping (-Force to redo) ==="
     } else {
-        # safety, maxspeed, transit_lines and admin_city are all cargo-only:
+        # safety, roads, transit_lines and admin_city are all cargo-only:
         # osm_extract reads the PBF directly -- assembling boundary rings itself for
         # admin_city -- and the tile_build tilers tile it. No osmium, tippecanoe,
         # GDAL or python3 is involved.
         if ($Pbf) {
             foreach ($spec in @(
                 @{ Layer = "safety";        Tile = $SafetyTile;       Bin = "tile_points";   Min = 10; Max = 16; Extra = @() },
-                @{ Layer = "maxspeed";      Tile = $MaxspeedTile;     Bin = "tile_lines";    Min = 12; Max = 16; Extra = @() },
+                # z11 up: base roads keep z0-10 and this layer takes over above
+                # them, so there is a handover rather than a gap.
+                @{ Layer = "roads";         Tile = $RoadsTile;        Bin = "tile_lines";    Min = 11; Max = 16; Extra = @() },
                 @{ Layer = "transit_lines"; Tile = $TransitLinesTile; Bin = "tile_lines";    Min = 8;  Max = 16; Extra = @() },
                 # Admin polygons must stay whole enough to reassemble for the
                 # dimming mask, so the per-tile byte budget is effectively lifted --
@@ -298,7 +299,7 @@ if (Test-Stage "tiles") {
                     "--minzoom", "$($spec.Min)", "--maxzoom", "$($spec.Max)") + $spec.Extra)
             }
         } else {
-            Write-Warning "no -Pbf given; skipping the safety, maxspeed, transit_lines and admin_city layers"
+            Write-Warning "no -Pbf given; skipping the safety, roads, transit_lines and admin_city layers"
         }
 
         # transit_stops needs the same feed manifest world.transit was built from,
@@ -324,7 +325,7 @@ if (Test-Stage "tiles") {
         # stale copy. No base is joined: the overlay names are disjoint from the
         # base schema's, so the app mounts the two archives side by side instead.
         $inputs = @()
-        foreach ($t in @($SafetyTile, $MaxspeedTile, $TransitLinesTile, $AdminCityTile, $PoisTile, $StopsTile)) {
+        foreach ($t in @($SafetyTile, $RoadsTile, $TransitLinesTile, $AdminCityTile, $PoisTile, $StopsTile)) {
             if ((Test-Path $t) -or $DryRun) { $inputs += $t }
         }
         Write-Host "=== tiles: merging $($inputs.Count) source(s) -> $Out ==="

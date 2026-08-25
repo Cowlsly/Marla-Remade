@@ -1,5 +1,13 @@
 //! The `maxspeed` layer: posted speed limits, for the app's `MaxspeedSource`.
 //!
+//! **Superseded by [`crate::roads`], and no longer in any build pipeline.** That
+//! layer carries the same geometry with the same raw `maxspeed` string beside the
+//! lane, width and class attributes the app needs to draw the road, so a second
+//! copy of every road in the world is not worth one property. Kept only so the
+//! retired layer can still be built and diffed against `roads`; delete it, and
+//! `build_maxspeed_layer.sh` and `normalize_maxspeed.py` with it, once that
+//! comparison is done.
+//!
 //! A port of `normalize_maxspeed.py`, which is the contract of record.
 //!
 //! ## The value is a RAW STRING and must stay one

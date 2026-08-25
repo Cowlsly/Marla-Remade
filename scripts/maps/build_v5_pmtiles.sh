@@ -20,7 +20,8 @@ set -euo pipefail
 #
 # v5.pmtiles = Protomaps base schema (unchanged, style.json-compatible)
 #            + safety     (baked road-furniture: cameras/ALPR/stops/signals)
-#            + maxspeed   (posted speed limits for the P5b MaxspeedSource)
+#            + roads      (road geometry + class/speed/lanes/width, retiring the
+#                          separate maxspeed layer)
 #            + transit_lines (OSM rail/subway/tram/… lines for the P22 highlight)
 #            + ma_pois    (OUR baked OSM POI layer: placement/name/type from OSM)
 #            + transit_stops (GTFS stop pins + their MOTIS ids, replacing the
@@ -39,7 +40,7 @@ set -euo pipefail
 #   1. build_base_layers.sh   -> base.pmtiles           (planetiler OR reuse v4)
 #                                                      (skipped by --no-base)
 #   2. build_safety_layer.sh  -> safety.pmtiles         (osmium + tippecanoe)
-#   3. build_maxspeed_layer.sh-> maxspeed.pmtiles       (osmium + tippecanoe)
+#   3. build_roads_layer.sh   -> roads.pmtiles          (cargo-only)
 #   4. build_transit_lines_layer.sh -> transit_lines.pmtiles (osmium/ogr2ogr + tippecanoe)
 #   5. build_pois_layer.sh    -> ma_pois.pmtiles + poi_{names,index,attrs}.bin
 #   6. build_admin_layers.sh  -> admin_*.pmtiles        (Natural Earth/OSM + tippecanoe)
@@ -86,13 +87,16 @@ set -euo pipefail
 #   --extra-layer F   fold an already-built .pmtiles into the final merge
 #                     (repeatable). Lets a caller that built a layer itself skip
 #                     the matching step here instead of building it twice.
-#   --engine-base E       rust|legacy per-layer engine. `safety`, `maxspeed`,
+#   --engine-base E       rust|legacy per-layer engine. `safety`,
 #   --engine-safety E     `transit_lines` and `admin-city` default to rust
-#   --engine-maxspeed E   (cargo-only); the rest default to legacy, and asking for
-#   --engine-transit-lines E  rust before a layer is ported is an error rather than
-#   --engine-admin E          a silent no-op, so a rollback is always one flag.
-#   --engine-admin-city E     `admin-country`/`admin-region` come from Natural
-#                             Earth and will never have a rust engine.
+#   --engine-transit-lines E  (cargo-only); the rest default to legacy, and asking
+#   --engine-admin E          for rust before a layer is ported is an error rather
+#   --engine-admin-city E     than a silent no-op, so a rollback is always one flag.
+#                             `admin-country`/`admin-region` come from Natural
+#                             Earth and will never have a rust engine. `roads` has
+#                             no switch: it never had a Python normaliser to be
+#                             faithful to, so there is no legacy path to fall back
+#                             to.
 #   --admin-reuse SRC Carry admin_country and admin_region forward from an existing
 #                     archive (a local .pmtiles or a URL) with pmtiles_extract,
 #                     instead of rebuilding them from Natural Earth. Those two are
@@ -102,7 +106,7 @@ set -euo pipefail
 #   --dry-run         print each step's command instead of running it
 #   --skip-base       don't (re)build base; expects <workdir>/base.pmtiles present
 #   --skip-safety     omit safety layer
-#   --skip-maxspeed   omit maxspeed layer
+#   --skip-roads      omit roads layer
 #   --skip-transit-lines omit transit_lines layer
 #   --skip-pois       omit ma_pois layer + poi_{names,index,attrs}.bin side files
 #   --skip-admin      omit admin layers
@@ -112,10 +116,10 @@ set -euo pipefail
 #   --publish-key K   remote object key when publishing (default: basename of --out)
 #   --keep-work       keep intermediates
 #
-# Tools: osmium, ogr2ogr (GDAL), python3, tippecanoe (base/safety/maxspeed/
+# Tools: osmium, ogr2ogr (GDAL), python3, tippecanoe (base/safety/
 #        transit_lines/pois/admin layers), and either java+planetiler (base build)
-#        or curl/pmtiles (base reuse). The transit_stops layer and the final merge
-#        need only cargo. See README.md.
+#        or curl/pmtiles (base reuse). The roads and transit_stops layers and the
+#        final merge need only cargo. See README.md.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
@@ -129,7 +133,6 @@ BASE_SOURCE=""
 EXTRA_LAYERS=()
 ENGINE_BASE="legacy"
 ENGINE_SAFETY="rust"
-ENGINE_MAXSPEED="rust"
 ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 ENGINE_ADMIN_CITY="rust"
@@ -138,7 +141,7 @@ DRY_RUN=0
 NO_BASE=0
 SKIP_BASE=0
 SKIP_SAFETY=0
-SKIP_MAXSPEED=0
+SKIP_ROADS=0
 SKIP_TRANSIT_LINES=0
 SKIP_POIS=0
 SKIP_ADMIN=0
@@ -161,7 +164,6 @@ while [[ $# -gt 0 ]]; do
         --extra-layer) EXTRA_LAYERS+=("$2"); shift 2 ;;
         --engine-base) ENGINE_BASE="$2"; shift 2 ;;
         --engine-safety) ENGINE_SAFETY="$2"; shift 2 ;;
-        --engine-maxspeed) ENGINE_MAXSPEED="$2"; shift 2 ;;
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
@@ -170,7 +172,7 @@ while [[ $# -gt 0 ]]; do
         --no-base) NO_BASE=1; shift ;;
         --skip-base) SKIP_BASE=1; shift ;;
         --skip-safety) SKIP_SAFETY=1; shift ;;
-        --skip-maxspeed) SKIP_MAXSPEED=1; shift ;;
+        --skip-roads) SKIP_ROADS=1; shift ;;
         --skip-transit-lines) SKIP_TRANSIT_LINES=1; shift ;;
         --skip-pois) SKIP_POIS=1; shift ;;
         --skip-admin) SKIP_ADMIN=1; shift ;;
@@ -179,7 +181,7 @@ while [[ $# -gt 0 ]]; do
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
-        -h|--help) sed -n '4,118p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,122p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -232,7 +234,6 @@ engine_check() {
 }
 engine_check base          "$ENGINE_BASE"          0
 engine_check safety        "$ENGINE_SAFETY"        1
-engine_check maxspeed      "$ENGINE_MAXSPEED"      1
 engine_check transit-lines "$ENGINE_TRANSIT_LINES" 1
 engine_check admin         "$ENGINE_ADMIN"         0
 engine_check admin-city    "$ENGINE_ADMIN_CITY"    1
@@ -283,13 +284,13 @@ if [[ "$SKIP_SAFETY" == "0" ]]; then
     INPUTS+=("$WORK/safety.pmtiles")
 fi
 
-# --- 3. maxspeed ---
-if [[ "$SKIP_MAXSPEED" == "0" ]]; then
-    [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for maxspeed layer (or --skip-maxspeed)" >&2; exit 1; }
-    MS_ARGS=(--pbf "$PBF" --out "$WORK/maxspeed.pmtiles" --engine "$ENGINE_MAXSPEED")
-    [[ -n "$BBOX" ]] && MS_ARGS+=(--bbox "$BBOX")
-    run "$HERE/build_maxspeed_layer.sh" "${MS_ARGS[@]}"
-    INPUTS+=("$WORK/maxspeed.pmtiles")
+# --- 3. roads ---
+if [[ "$SKIP_ROADS" == "0" ]]; then
+    [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for roads layer (or --skip-roads)" >&2; exit 1; }
+    ROADS_ARGS=(--pbf "$PBF" --out "$WORK/roads.pmtiles")
+    [[ -n "$BBOX" ]] && ROADS_ARGS+=(--bbox "$BBOX")
+    run "$HERE/build_roads_layer.sh" "${ROADS_ARGS[@]}"
+    INPUTS+=("$WORK/roads.pmtiles")
 fi
 
 # --- 4. transit_lines ---
@@ -408,7 +409,7 @@ if [[ "$NO_BASE" == "1" ]]; then
 else
     echo "  base : earth landcover landuse water roads buildings boundaries pois places"
 fi
-echo "  new  : safety maxspeed transit_lines ma_pois transit_stops"
+echo "  new  : safety roads transit_lines ma_pois transit_stops"
 echo "         admin_country admin_region admin_city"
 echo ""
 if [[ "$SKIP_POIS" == "0" ]]; then

@@ -373,7 +373,8 @@ pub const LAYERS_CAFE_NODE_ID: i64 = 1008;
 /// `highway=residential` + `maxspeed=25 mph`, the raw-string case.
 pub const MAXSPEED_WAY_ID: i64 = 3001;
 /// `highway=motorway` + `maxspeed=none`, which the graph's parser would collapse
-/// to 0 and this layer must keep verbatim.
+/// to 0 and this layer must keep verbatim. Also the `roads` layer's
+/// fully-attributed way: a oneway bridge with lanes, turn lanes, width and layer.
 pub const MAXSPEED_NONE_WAY_ID: i64 = 3002;
 /// `highway=service` with no speed limit at all. The negative control.
 pub const NO_MAXSPEED_WAY_ID: i64 = 3003;
@@ -471,6 +472,13 @@ pub fn layers_block() -> Vec<u8> {
     let k_colour = st.id("colour");
     let k_boundary = st.id("boundary");
     let k_admin_level = st.id("admin_level");
+    // roads: the attributes the `roads` layer carries beyond geometry and class.
+    let k_lanes = st.id("lanes");
+    let k_turn_lanes_forward = st.id("turn:lanes:forward");
+    let k_oneway = st.id("oneway");
+    let k_width = st.id("width");
+    let k_bridge = st.id("bridge");
+    let k_layer = st.id("layer");
 
     let v_speed_camera = st.id("speed_camera");
     let v_surveillance = st.id("surveillance");
@@ -503,6 +511,11 @@ pub fn layers_block() -> Vec<u8> {
     let v_six = st.id("6");
     let v_oakland = st.id("Oakland");
     let v_alameda = st.id("Alameda County");
+    let v_three = st.id("3");
+    let v_through_through_right = st.id("through|through|right");
+    let v_yes = st.id("yes");
+    let v_12m = st.id("12 m");
+    let v_one = st.id("1");
     let role_outer = st.id("outer");
     let role_inner = st.id("inner");
     let role_platform = st.id("platform");
@@ -570,13 +583,21 @@ pub fn layers_block() -> Vec<u8> {
             ],
             &WAY_NODE_IDS[..3],
         ),
-        // maxspeed=none, plus a directional tag that must NOT win over it.
+        // maxspeed=none, plus a directional tag that must NOT win over it. Also the
+        // `roads` layer's fully-attributed way: a oneway bridge with lanes, turn
+        // lanes, a width and a layer.
         way(
             MAXSPEED_NONE_WAY_ID,
             &[
                 (k_highway, v_motorway),
                 (k_maxspeed, v_none),
                 (k_maxspeed_forward, v_30mph),
+                (k_lanes, v_three),
+                (k_turn_lanes_forward, v_through_through_right),
+                (k_oneway, v_yes),
+                (k_width, v_12m),
+                (k_bridge, v_yes),
+                (k_layer, v_one),
             ],
             &WAY_NODE_IDS[2..5],
         ),

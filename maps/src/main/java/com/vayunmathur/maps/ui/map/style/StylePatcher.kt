@@ -5,6 +5,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -20,6 +21,25 @@ import kotlinx.serialization.json.putJsonObject
  * OTA-swappable per Decision D1.
  */
 private val SUPPRESSED_LAYERS = setOf("pois")
+
+/**
+ * The zoom at which the base style stops drawing each road family and our own `roads` overlay
+ * takes over. Must match `RoadsLayer`'s per-class table.
+ *
+ * A cap rather than an outright suppression, because the two layers cover different ranges: the
+ * baked `roads` archive starts at z11 (a planet-wide all-classes roads layer below that is not
+ * something the tiler can build -- see scripts/maps/README.md), so lower down the base is the
+ * only thing that has roads at all. MapLibre renders a layer for `minzoom <= z < maxzoom`, so
+ * each handover is exact and nothing draws twice.
+ *
+ * Two zooms, not one, because `RoadsLayer` holds the minor streets back: capping the base's
+ * minor layers at the through-network zoom would leave z11-12 with nobody drawing a residential
+ * street.
+ */
+private val BASE_ROADS_HANDOVER_ZOOM = mapOf(
+    BasemapPalette.RoadFamily.Through to 11,
+    BasemapPalette.RoadFamily.Minor to 13,
+)
 
 /**
  * Marks a style as already patched.
@@ -39,6 +59,10 @@ private const val PATCHED_MARKER = "ma:patched"
  * view and a high-zoom local view come from the same archive. And in dark mode each layer's
  * colour keys are swapped for [BasemapPalette] values, so we do not carry a second copy of a
  * 3544-line style file.
+ *
+ * The base's road surfaces are additionally capped at their family's handover zoom, because
+ * above it `RoadsLayer` draws them from our own `roads` overlay instead. See
+ * [BASE_ROADS_HANDOVER_ZOOM].
  *
  * Neither source declares a `maxzoom`. It used to: the merged v5 archive unioned its inputs'
  * zoom ranges, so it advertised the overlays' z16 while its base tiles stopped at z15, and base
@@ -86,6 +110,18 @@ fun patchStyleForHybrid(
             // _base/_hybrid variants.
             if (id in SUPPRESSED_LAYERS) return@forEach
 
+            // Above its family's handover zoom the roads come from our own `roads`
+            // overlay, which carries lanes, width and speed the base layer has no
+            // attributes for. Capping the base copy is what stops every street being
+            // drawn twice.
+            val roadHandoverMaxZoom = BasemapPalette.roadSurfaceFamilies[id]
+                ?.let { family -> BASE_ROADS_HANDOVER_ZOOM.getValue(family) }
+                ?.let { handover ->
+                    // Never RAISE an existing cap: a layer the style already stops earlier
+                    // was meant to stop there.
+                    minOf(layer["maxzoom"]?.jsonPrimitive?.intOrNull ?: handover, handover)
+                }
+
             // Dark palette (P14): recolor the base Protomaps paint at runtime so
             // we don't duplicate the 3544-line style.json. Only colour keys are
             // swapped; width/opacity/dasharray expressions are preserved.
@@ -112,6 +148,7 @@ fun patchStyleForHybrid(
                     put("id", "${id}_hybrid")
                     put("source", "protomaps_hybrid")
                     put("minzoom", 7)
+                    if (roadHandoverMaxZoom != null) put("maxzoom", roadHandoverMaxZoom)
                 })
             }
         }

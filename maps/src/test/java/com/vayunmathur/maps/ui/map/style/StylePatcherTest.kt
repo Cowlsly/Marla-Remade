@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import java.io.File
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -124,6 +125,71 @@ class StylePatcherTest {
     fun `suppressed layers are dropped entirely, including their zoom variants`() {
         val ids = layerIds(patch())
         assertTrue(ids.none { it.startsWith("pois") }, "pois survived: $ids")
+    }
+
+    @Test
+    fun `base road surfaces stop where our own roads layer takes over`() {
+        val root = patch()
+        // The hybrid copy runs z7 up to its family's handover, and no further: above it
+        // RoadsLayer draws the same roads from the baked `roads` overlay, and both
+        // drawing would double every street. roads_highway is the through network.
+        val hybrid = layer(root, "roads_highway_hybrid")!!
+        assertEquals(7, hybrid["minzoom"]!!.jsonPrimitive.content.toInt())
+        assertEquals(11, hybrid["maxzoom"]!!.jsonPrimitive.content.toInt())
+        // The base copy already stops at 7, so it needs no cap of its own.
+        assertEquals(7, layer(root, "roads_highway_base")!!["maxzoom"]!!.jsonPrimitive.content.toInt())
+    }
+
+    /**
+     * The minor family is held back in `RoadsLayer` until z13, so capping it at the through
+     * network's z11 would leave z11-12 with nobody drawing a residential street.
+     */
+    @Test
+    fun `minor roads are capped later than the through network`() {
+        val minorStyle = style.replace(
+            """{ "id": "roads_highway", "type": "line",""",
+            """{ "id": "roads_minor", "type": "line",""",
+        )
+        val hybrid = layer(patch(input = minorStyle), "roads_minor_hybrid")!!
+        assertEquals(13, hybrid["maxzoom"]!!.jsonPrimitive.content.toInt())
+    }
+
+    @Test
+    fun `only road surfaces are capped, and a lower cap of their own is respected`() {
+        // Labels, arrows and everything that is not a road surface keep every zoom:
+        // the `roads` overlay carries no `name`, so capping them would leave an
+        // unlabelled city.
+        for (id in listOf("water_hybrid", "places_locality_hybrid", "roads_oneway_hybrid")) {
+            assertNull(layer(patch(), id)!!["maxzoom"], "$id must not be capped")
+        }
+
+        // A road layer the style already stops earlier than the handover must not be
+        // raised to it — that would newly show a layer the style meant to hide.
+        val capped = style.replace(
+            """{ "id": "roads_highway", "type": "line",""",
+            """{ "id": "roads_highway", "type": "line", "maxzoom": 9,""",
+        )
+        val hybrid = layer(patch(input = capped), "roads_highway_hybrid")!!
+        assertEquals(9, hybrid["maxzoom"]!!.jsonPrimitive.content.toInt())
+    }
+
+    /**
+     * `RoadsLayer` anchors its opaque road surfaces below a specific patched layer id so the
+     * base's road labels stay on top. That id is a string, so nothing but a test connects it to
+     * the style the patcher actually produces — and if it stops existing, the anchor has nothing
+     * to attach to.
+     */
+    @Test
+    fun `the roads anchor target survives the patch of the real style`() {
+        val styleFile = File("src/main/assets/style.json")
+        assertTrue(styleFile.isFile, "style.json not found at ${styleFile.absolutePath}")
+        val patched = json.parseToJsonElement(
+            patchStyleForHybrid(styleFile.readText(), "pmtiles://base", "pmtiles://hybrid", false)
+        ).jsonObject
+        assertTrue(
+            "roads_labels_minor_base" in layerIds(patched),
+            "RoadsLayer's anchor target is not in the patched style",
+        )
     }
 
     @Test

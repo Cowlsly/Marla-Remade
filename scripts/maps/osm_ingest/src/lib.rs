@@ -35,6 +35,7 @@ pub mod poi_build;
 pub mod poi_side;
 pub mod proto;
 pub mod rings;
+pub mod roads;
 pub mod safety;
 pub mod select;
 pub mod spatial;

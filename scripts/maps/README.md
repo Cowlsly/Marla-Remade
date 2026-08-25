@@ -64,7 +64,7 @@ earth  landcover  landuse  water  roads  buildings  boundaries  pois  places
 | source-layer | geometry | key attributes |
 |---|---|---|
 | `safety` | Point | `kind` ∈ {`speed_camera`,`alpr`,`surveillance`,`stop_sign`,`traffic_signals`}, `name?`, `direction?`, `operator?`, `ref?`, `osm_id` |
-| `maxspeed` | LineString/MultiLineString | **`maxspeed`** (raw OSM value, e.g. `"35 mph"`, `"50"`, `"50 km/h"`), `highway?`, `name?`, `osm_id` |
+| `roads` | LineString | **`class`** (number 1-15, `tags::get_hw_id`'s road type), **`maxspeed?`** (raw OSM value, e.g. `"35 mph"`, `"none"`, `"DE:urban"`), `maxspeed_kmh?` (the same limit parsed, ABSENT when there is no numeric one), `lanes?`, `turn_lanes_forward?`/`turn_lanes_backward?` (`\|`-separated decimal `LANE_*` masks), `oneway?`, `width?` (metres), `bridge?`, `tunnel?`, `layer?`, `osm_id` |
 | `transit_lines` | LineString/MultiLineString | **`kind`** ∈ {`rail`,`subway`,`light_rail`,`tram`,`monorail`,`train`}, `name?`, `ref?`, `colour?` (route colour, e.g. `"#DA291C"`), `osm_id` |
 | `ma_pois` | Point | **`name`** (string), **`type`** (number, see POI type map), `osm_id` (number). OUR baked OSM POI layer — NOT the base `pois` layer. |
 | `admin_country` | Polygon/MultiPolygon | `admin_level=2`, `name`, `name_en`, **`ISO_A2`**, `iso_a3` |
@@ -75,11 +75,22 @@ The admin layers deliberately preserve `ISO_A2` (countries) and `iso_3166_2`
 (regions) — the same keys `CountryMap.kt` matches on — so P13 can repoint the
 mask lookup at the PMTiles source with **no attribute changes**.
 
-The `maxspeed` layer feeds P5b's `MaxspeedSource`, which reads the posted speed
-limit via `queryRenderedFeatures` on **source-layer `maxspeed`**, property
-**`maxspeed`**. It is a dedicated layer (not an attribute on the base `roads`
-layer) so it works whether the base is freshly built or the upstream Protomaps
-base is reused verbatim. P13 points `MaxspeedSource.PMTILES_URL` at v5.pmtiles.
+The `roads` layer **replaces the `maxspeed` layer**, and above z11 it replaces the
+base's road rendering too. `maxspeed` carried one property and a copy of every
+road's geometry to attach it to; `roads` carries that geometry once and also has
+what it takes to draw and label the road in-app. `RoadsLayer.kt` draws it and
+`StylePatcher.kt` caps the base's own road surfaces at the matching zoom, so nothing
+is drawn twice and no zoom is left without roads — see
+[Caveats](#caveats--known-limitations) §11 for the two-step handover, why z0-10 stays
+with the base, and the deploy ordering it implies.
+
+P5b's posted-limit probe reads **source-layer `roads`**, property **`maxspeed`**,
+via `queryRenderedFeatures` under the puck. It reads the RAW string, not
+`maxspeed_kmh`: the number is the styling attribute and is omitted for every value
+that is not a plain speed, while the string is the only thing that still carries an
+implicit country scheme (`DE:urban` is 50 km/h) and the only record of whether a
+limit was authored in mph — which decides the unit the badge renders in.
+`OsmMaxspeed.kt::parseMaxspeed` owns both judgements and is unchanged.
 
 The `transit_lines` layer feeds the **P22** transit-line highlight: the app
 queries **source-layer `transit_lines`** and styles each feature by **`kind`**
@@ -119,11 +130,16 @@ mutually consistent (same POI set, same coordinates). See
   * `man_made=surveillance` (any other) → `surveillance`
   * `highway=stop` → `stop_sign`
   * `highway=traffic_signals` → `traffic_signals`
-* **Maxspeed** — OpenStreetMap. Ways carrying a `maxspeed` (or
-  `maxspeed:forward`/`maxspeed:backward`) tag; the raw value is kept verbatim so
-  the app parses `mph`/`km/h`/bare numbers itself. Non-numeric OSM values
-  (`none`, `signals`, `walk`, etc.) are also passed through raw — the app-side
-  parser (`MaxspeedSource`) decides how to render them.
+* **Roads** — OpenStreetMap. Every way whose `highway` value has a non-zero
+  `tags::get_hw_id` (the routing graph's own road set, 15 classes), carrying the
+  class number plus speed, lanes, turn lanes, width and the bridge/tunnel/layer
+  draw-order flags. Every tag parser is shared with the routing graph, so a road
+  cannot describe itself one way to the router and another to the renderer.
+  Speed is carried twice on purpose: `maxspeed` is the tag verbatim and
+  `maxspeed_kmh` is `tags::parse_maxspeed`'s number, **omitted** rather than zeroed
+  when the value is not a plain speed — `none`, `walk`, `signals` and every
+  implicit country scheme all parse to 0, and 0 is not a speed limit. Retires the
+  old `maxspeed` layer.
 * **Transit lines** — OpenStreetMap. Two inputs feed the `transit_lines` layer:
   * railway **ways** where `railway` ∈ {`rail`,`subway`,`light_rail`,`tram`,
     `monorail`,`narrow_gauge`} → `kind` (`narrow_gauge` folds into `rail`).
@@ -171,10 +187,11 @@ mutually consistent (same POI set, same coordinates). See
 | `build_all.sh` | **The superscript**: one command from `.osm.pbf` + GTFS to all 11 runtime artifacts, with per-stage stamps and a `manifest.txt` of sizes and SHA-256s. Chains graph → pois → transit → tiles. Overlay-only by default; `--with-base` merges a base in |
 | `build_all.ps1` | **Windows twin** of the above. Stages graph/pois/transit are complete; the tiles stage composites only the cargo-only layers onto a `-BaseArchive` (see [Caveats](#caveats--known-limitations)) |
 | `run_generator.sh` | **Deprecated** thin wrapper over `build_all.sh` (graph + pois + publish) |
-| `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + maxspeed + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
+| `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + roads + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse a published archive). A `--bbox` reuse extract now uses our own `pmtiles_extract`; `--extractor go-pmtiles` is still accepted, and is the only practical way to clip the 137 GB planet base |
 | `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
-| `build_maxspeed_layer.sh` | **`--engine rust`** (default): `osm_extract` → geojsonseq → `tile_lines`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe |
+| `build_roads_layer.sh` | `osm_extract` → geojsonseq → `tile_lines` at z11-16, cargo-only. **No legacy engine**: there was never a `normalize_roads.py` to be faithful to |
+| `build_maxspeed_layer.sh` | **Superseded** by `build_roads_layer.sh`, and no longer in any pipeline. Kept so the retired layer can still be built and diffed against `roads` — delete it once that comparison is done (same policy as [Caveats](#caveats--known-limitations) §8) |
 | `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe, and **requires** ogr2ogr (see [Caveats](#caveats--known-limitations) 9) |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
 | `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer, with its own boundary ring assembler in `src/rings.rs`). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
@@ -186,7 +203,7 @@ mutually consistent (same POI set, same coordinates). See
 | `tile_build/` | Rust MVT + PMTiles v3 crate (detached), **replacing tippecanoe, tile-join and go-pmtiles**. Bins: `tile_points` / `tile_lines` / `tile_polygons` (one per geometry kind), `tile_join` (merge archives), `pmtiles_extract` (subset by bbox, zoom and layer — the `go-pmtiles extract` replacement and the admin layer lift), `pmtiles_dump` (canonical text dump, for the differential harness). Library: `geojson` (the shared GeoJSONSeq reader), `geom` (web-mercator projection, tile ranges, quantisation), `clip` (Liang-Barsky for lines, Sutherland-Hodgman for polygons), `simplify` (Douglas-Peucker in integer tile coordinates), `pyramid` (the tile pyramid driver and the drop policy), `mvt` (line and polygon encoders beside the opaque passthrough that keeps `tile_join` lossless). Container layout documented in `src/pmtiles.rs`, the pipeline order in `src/geom.rs`, the drop policy in `src/pyramid.rs` |
 | `publish_r2.sh` | Upload built artifacts to Cloudflare R2 (creds from env vars only) |
 | `normalize_safety.py` | OSM tags → `safety` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/safety.rs`; kept as the contract of record and as `--engine legacy` for the differential harness |
-| `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/maxspeed.rs`; kept as the contract of record and as `--engine legacy` |
+| `normalize_maxspeed.py` | OSM maxspeed ways → `maxspeed` layer schema (pure stdlib, unit-tested). **Superseded** twice over: by `osm_ingest/src/maxspeed.rs`, and then by the `roads` layer that retired `maxspeed` entirely. Kept only as `--engine legacy` for the retired builder |
 | `normalize_transit_lines.py` | OSM railway ways + route relations → `transit_lines` schema (pure stdlib, unit-tested). **Superseded** by `osm_ingest/src/transit_lines.rs`; kept as the contract of record and as `--engine legacy` |
 | `normalize_admin.py` | NE/OSM attrs → admin layer schema (pure stdlib, unit-tested). Still the **only** producer for `admin_country`/`admin_region`; the city level is superseded by `osm_ingest/src/admin.rs` |
 | `test/test_normalize.py` | Dry-run unit test of the schema mapping (no external tools) |
@@ -384,6 +401,53 @@ there is no legacy output to diff, so the harness cannot be the thing that tells
 you the relation half went missing. That is why the check lives in the build script
 as a hard failure instead.
 
+### 11. `roads` starts at z11, and base roads keep z0-10
+
+Not a phasing choice — a z6-16 all-classes planet roads layer is not something the
+current tiler can build:
+
+* `pyramid::build_archive` uses the non-streaming `Builder`, which holds the whole
+  archive in memory; `tile_build/src/pmtiles.rs` records 76 GB peak for a 17 GB /
+  36.8 M-tile job. A z6-16 roads layer is several times that. `StreamBuilder`
+  exists and is proven on the overlay merge, but is wired only into `tile_join`.
+* `pyramid` reads the whole geojsonseq with `read_to_string` and keeps every
+  feature parsed, plus a second projected copy per zoom.
+* **There is no per-feature zoom gating anywhere in the tiler.** No `min_zoom` on
+  `Feature`, no filter in `Options`, nothing property-driven in the zoom loop.
+  Dropping `residential` below z12 is exactly how a low zoom is kept small and
+  correct, and it cannot be expressed.
+* The drop policy is class-blind: `extent_of` sorts by bbox span, so at z6 a long
+  suburban collector outranks a motorway stretch.
+
+So the layer covers z11-16 and the handover is done in two steps, because the base
+groups its road layers into two families and `RoadsLayer` staggers by class for the
+same reason the tiler can't:
+
+| family | base draws | `roads` draws |
+|---|---|---|
+| motorway, trunk, primary, secondary, tertiary (+ their `*_link` ramps) | z0-11 | z11-16 |
+| unclassified, residential, service, living_street, pedestrian, track, footway, cycleway, path, steps | z0-13 | z13-16 |
+
+`StylePatcher` caps each base road layer at its family's zoom and `RoadsLayer` starts
+each class at the same one, so no zoom has both drawing and none has neither. A third
+threshold would open a hole: the base cannot express one. Road **labels**, shields and
+oneway arrows are never capped — the `roads` layer carries no `name` — and
+`RoadsLayer` anchors itself below them so its opaque surfaces do not paint over them.
+
+`*_link` ramps get their parent's class (`roads::base_highway`): `tags::get_hw_id` has
+no id for one and cannot be given one, since those numbers are an on-disk contract
+with `maps/src/main/rust/src/graph.rs`.
+
+**Deploy order matters.** The base's roads are capped unconditionally, so an app build
+carrying this change needs an overlay archive that already has the `roads` layer.
+Republish `v5-overlay.pmtiles` *before* shipping it, or the map has no roads above
+z11.
+
+Extending downward means, in dependency order: wire `StreamBuilder` into
+`build_archive` (`add_tile_raw` needs ascending `tile_id`, while the tile loop sorts
+by `(x, y)` — not Hilbert order); stream the geojsonseq input; add per-feature
+`min_zoom` gating; make the drop policy class-aware.
+
 ---
 
 ## Prerequisites (tools)
@@ -403,7 +467,7 @@ here is Rust and Python):
     go through it, so they run on **Windows**.
 * **tippecanoe** ≥ 2.x — now only `admin_country`/`admin_region`, and any
   `--engine legacy` run. The merge does not use its `tile-join`, and `safety`,
-  `maxspeed`, `transit_lines`, `admin_city` and `ma_pois` do not use it at all.
+  `roads`, `transit_lines`, `admin_city` and `ma_pois` do not use it at all.
 * **osmium-tool** (`osmium`) — `--engine legacy` runs, plus any `--bbox` run of
   `build_all.sh` (which clips once for every stage).
 * **GDAL** (`ogr2ogr`) — `admin_country`/`admin_region`, and
@@ -420,7 +484,7 @@ here is Rust and Python):
 
 Everything that is cargo-only, which is now every layer except `admin_country` and
 `admin_region`: the routing graph (`build_graph.ps1`), the POI layer and its side
-files, `safety`, `maxspeed`, `transit_lines`, `admin_city`, the offline transit pack
+files, `safety`, `roads`, `transit_lines`, `admin_city`, the offline transit pack
 (`build_ca_transit.ps1`), the `transit_stops` layer
 (`build_transit_stops_layer.ps1`) and the final merge (`tile_join`).
 `build_all.ps1` chains those. The two Natural Earth levels need ogr2ogr +
@@ -489,7 +553,7 @@ unlike the per-layer scripts, the routing graph honours it too. That needs
 
 Per-layer `--engine rust|legacy` flags exist for every layer so a ported layer can
 be rolled back with one flag. Asking for an engine that has not landed is an
-error, never a silent fall-back. `safety`, `maxspeed`, `transit_lines`,
+error, never a silent fall-back. `safety`, `transit_lines`,
 `admin-city` and `ma_pois` default to `rust`; `base` and `admin` (meaning the two
 Natural Earth levels) still default to `legacy`.
 
@@ -571,12 +635,12 @@ Individual layers can also be built standalone — see each script's `--help`.
 | Artifact | Extent | Approx size |
 |---|---|---|
 | `safety.pmtiles` | planet | ~0.3–1 GB (point features only) |
-| `maxspeed.pmtiles` | planet | ~1–3 GB (line features on tagged ways) |
+| `roads.pmtiles` | planet | ~4–10 GB (every road z11–16, with its lane/width attrs) |
 | `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
 | `ma_pois.pmtiles` | planet | ~0.5–2 GB (named POI points) |
 | `poi_names.bin` + `poi_index.bin` + `poi_attrs.bin` + `poi_spatial.bin` + `poi_name_index.bin` | planet | ~1–3 GB combined (side files) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
-| **`v5-overlay.pmtiles`** | planet | ~**2–7 GB** (every overlay, no base) |
+| **`v5-overlay.pmtiles`** | planet | ~**6–17 GB** (every overlay, no base; `roads` is most of it) |
 | `v5.pmtiles` | planet | ≈ **137 GB** (base + overlays; the base is > 97% of it) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
 
@@ -637,7 +701,7 @@ It auto-detects the upload tool (`--tool auto|rclone|aws`):
 * **aws-cli** — `aws s3 cp … --endpoint-url "$R2_ENDPOINT"` (creds scoped to the
   invocation via `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` from the R2 vars).
 
-Since v5 **bakes the maxspeed layer in**, you normally publish just the single
+Since v5 **bakes every overlay layer in**, you normally publish just the single
 `v5.pmtiles`. The script also accepts multiple files
 (`publish_r2.sh v5.pmtiles aux.pmtiles`) for any siblings built separately.
 
@@ -656,8 +720,8 @@ Then **P13** (separate task, app code) points the style at the new file:
 "url": "pmtiles://https://data.vayunmathur.com/v5.pmtiles"
 ```
 
-…adds style layers for `safety`, points `MaxspeedSource.PMTILES_URL` at the same
-file (source-layer `maxspeed`), adds the P22 transit-line highlight against
+…adds style layers for `safety`, draws roads from the same file (source-layer
+`roads`, which the posted-limit probe also reads), adds the P22 transit-line highlight against
 source-layer `transit_lines` (styling by `kind` + `colour`), and switches the
 country/state mask in `CountryMap.kt` / `MyMapLayers.kt` from the `.fgb` assets
 to the `admin_country` / `admin_region` PMTiles layers (matching on `ISO_A2` /

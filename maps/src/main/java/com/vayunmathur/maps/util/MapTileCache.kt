@@ -67,12 +67,13 @@ object MapTileCache {
         "pmtiles://https://data.vayunmathur.com/v4.pmtiles"
 
     /**
-     * Our overlay archive: `safety`, `maxspeed`, `transit_lines`, `ma_pois`,
+     * Our overlay archive: `safety`, `roads`, `transit_lines`, `ma_pois`,
      * `transit_stops` and the three `admin_*` levels, with no base layers.
      *
-     * Read by the maxspeed probe ([com.vayunmathur.maps.ui.MaxspeedSource]), the
-     * safety overlay ([com.vayunmathur.maps.ui.SafetyLayersSource]), the ambient POI
-     * layer, the transit line/stop overlays and the admin search-highlight.
+     * Read by the road overlay and its posted-limit probe
+     * ([com.vayunmathur.maps.ui.RoadsSource]), the safety overlay
+     * ([com.vayunmathur.maps.ui.SafetyLayersSource]), the ambient POI layer, the
+     * transit line/stop overlays and the admin search-highlight.
      *
      * Planet-wide: 36.8 M tiles over z0-16, built by
      * `build_v5_pmtiles.sh --no-base` and streamed by range request like the base.

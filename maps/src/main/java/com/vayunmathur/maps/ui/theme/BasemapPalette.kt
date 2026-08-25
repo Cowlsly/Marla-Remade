@@ -208,6 +208,70 @@ object BasemapPalette {
     /** Layer ids the palette knows about. Used by the test that keeps it in step with the asset. */
     val knownLayerIds: Set<String> get() = fillRoles.keys
 
+    /** The [Fill] roles that are a road surface or the casing under one. */
+    private val ROAD_SURFACE_FILLS =
+        setOf(Fill.RoadCasing, Fill.RoadTunnel, Fill.RoadMajor, Fill.RoadMinor)
+
+    /**
+     * Which half of the road network a base road layer draws.
+     *
+     * `StylePatcher` stops each base road layer at the zoom our own `roads` overlay starts
+     * drawing the same roads, and `RoadsLayer` does not start every class at once — the through
+     * network comes in at the handover zoom and minor streets later, because drawing every
+     * service road and footway in a metro at z11 is what the staggering exists to avoid. Two
+     * families is exactly what the base style can express, since it groups its road layers the
+     * same way, and it is what keeps the two halves from leaving a zoom where NEITHER draws a
+     * road.
+     */
+    enum class RoadFamily {
+        /** motorway, trunk, primary, secondary, tertiary, and their `*_link` ramps. */
+        Through,
+
+        /** unclassified, residential, service, living_street, pedestrian, tracks and paths. */
+        Minor,
+    }
+
+    private val roadFamilies: Map<String, RoadFamily> = buildMap {
+        for (id in listOf(
+            "roads_highway", "roads_major", "roads_link",
+            "roads_bridges_highway", "roads_bridges_major", "roads_bridges_link",
+            "roads_tunnels_highway", "roads_tunnels_major", "roads_tunnels_link",
+            "roads_highway_casing_early", "roads_highway_casing_late",
+            "roads_major_casing_early", "roads_major_casing_late",
+            "roads_link_casing",
+            "roads_bridges_highway_casing", "roads_bridges_major_casing",
+            "roads_bridges_link_casing",
+            "roads_tunnels_highway_casing", "roads_tunnels_major_casing",
+            "roads_tunnels_link_casing",
+        )) put(id, RoadFamily.Through)
+
+        for (id in listOf(
+            "roads_minor", "roads_minor_service", "roads_other",
+            "roads_bridges_minor", "roads_bridges_other",
+            "roads_tunnels_minor", "roads_tunnels_other",
+            "roads_minor_casing", "roads_minor_service_casing",
+            "roads_bridges_minor_casing", "roads_bridges_other_casing",
+            "roads_tunnels_minor_casing", "roads_tunnels_other_casing",
+        )) put(id, RoadFamily.Minor)
+    }
+
+    /**
+     * Every base style layer that draws a road surface or its casing, and which family it draws.
+     *
+     * The membership is derived from [fillRoles] rather than listed again, because a second copy
+     * of thirty-odd ids is a second copy to forget: `StylePatcher` uses this to stop the base
+     * drawing roads above the zoom where our own `roads` overlay takes over, and a layer missing
+     * from the set would draw underneath ours forever with nothing to indicate it. A test pins
+     * that every derived id has a family.
+     *
+     * Surfaces and casings only. Road LABELS, shields, oneway arrows and address points stay
+     * with the base at every zoom — the `roads` overlay carries no `name`, so suppressing them
+     * would leave an unlabelled city. `RoadsLayer` anchors itself below them for the same reason.
+     */
+    val roadSurfaceFamilies: Map<String, RoadFamily> get() =
+        fillRoles.filterValues { it in ROAD_SURFACE_FILLS }
+            .mapValues { (id, _) -> roadFamilies[id] ?: RoadFamily.Through }
+
     /**
      * Which [Fill] a style layer id denotes.
      *

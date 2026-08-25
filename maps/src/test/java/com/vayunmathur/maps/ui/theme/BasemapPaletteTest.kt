@@ -130,6 +130,70 @@ class BasemapPaletteTest {
     }
 
     /**
+     * The set `StylePatcher` caps at the roads handover zoom.
+     *
+     * Derived from `fillRoles` rather than listed, so what needs asserting is the boundary: every
+     * road surface and casing is in, and nothing that draws a road's *label* is — the `roads`
+     * overlay carries no `name`, so capping a label layer would leave an unlabelled city.
+     */
+    @Test
+    fun `road surface ids cover every surface and casing and no label`() {
+        val families = BasemapPalette.roadSurfaceFamilies
+        for (id in listOf(
+            "roads_highway", "roads_major", "roads_minor", "roads_minor_service", "roads_other",
+            "roads_link", "roads_highway_casing_early", "roads_major_casing_late",
+            "roads_tunnels_highway", "roads_tunnels_link_casing",
+            "roads_bridges_major", "roads_bridges_minor_casing",
+        )) {
+            assertTrue(id in families, "'$id' draws a road surface but is not in the handover set")
+        }
+        // Labels, shields, arrows, rail, piers and runways are not road surfaces.
+        for (id in listOf(
+            "roads_labels_major", "roads_labels_minor", "roads_shields", "roads_oneway",
+            "address_label", "roads_rail", "roads_pier", "roads_runway", "roads_taxiway",
+            "water", "buildings",
+        )) {
+            assertTrue(id !in families, "'$id' is not a road surface but would be capped")
+        }
+        // And every member really does resolve to a road-surface role.
+        for (id in families.keys) {
+            assertTrue(
+                BasemapPalette.fillRole(id) in listOf(
+                    BasemapPalette.Fill.RoadCasing,
+                    BasemapPalette.Fill.RoadTunnel,
+                    BasemapPalette.Fill.RoadMajor,
+                    BasemapPalette.Fill.RoadMinor,
+                ),
+                "'$id' is in the handover set but is not a road surface",
+            )
+        }
+    }
+
+    /**
+     * The family decides WHEN the base stops drawing a layer, so a wrong one leaves a zoom where
+     * neither the base nor our overlay draws that road. The `_link` layers are the case worth
+     * pinning: they are ramps of the through network, not minor streets.
+     */
+    @Test
+    fun `every capped road layer is assigned the family it draws`() {
+        val families = BasemapPalette.roadSurfaceFamilies
+        for (id in listOf(
+            "roads_highway", "roads_major", "roads_link", "roads_link_casing",
+            "roads_tunnels_link", "roads_bridges_link_casing", "roads_major_casing_early",
+        )) {
+            assertEquals(BasemapPalette.RoadFamily.Through, families[id], "family of '$id'")
+        }
+        for (id in listOf(
+            "roads_minor", "roads_minor_service", "roads_other", "roads_minor_casing",
+            "roads_tunnels_other", "roads_bridges_minor_casing",
+        )) {
+            assertEquals(BasemapPalette.RoadFamily.Minor, families[id], "family of '$id'")
+        }
+        // 33 road surface and casing layers in the bundled style, all classified.
+        assertEquals(33, families.size, "unexpected road layer count: ${families.keys}")
+    }
+
+    /**
      * The palette and the bundled style have to stay in step.
      *
      * `assets/style.json` is 3544 lines of vendored Protomaps output, and it gets replaced

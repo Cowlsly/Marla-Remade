@@ -3,6 +3,16 @@ set -euo pipefail
 
 # build_maxspeed_layer.sh — bake the `maxspeed` layer (P5b) into a .pmtiles
 #
+# SUPERSEDED BY build_roads_layer.sh, and no longer called by any pipeline. The
+# `roads` layer carries this layer's geometry and its raw `maxspeed` string beside
+# the class, lane and width attributes the app needs to draw the road, so keeping a
+# second copy of every road in the world to hold one property is not worth it.
+#
+# Kept only so the retired layer can still be built and diffed against `roads`.
+# Delete this, normalize_maxspeed.py and osm_ingest/src/maxspeed.rs once that
+# comparison is done — the same policy README.md's Caveat §8 applies to the other
+# superseded normalisers.
+#
 # Extracts posted speed limits from OSM ways and tiles them into a single-layer
 # PMTiles file, so the app's MaxspeedSource reads them from the basemap instead of
 # querying anything at runtime.
@@ -61,7 +71,7 @@ while [[ $# -gt 0 ]]; do
         --engine) ENGINE="$2"; shift 2 ;;
         --geojson-out) GEOJSON_OUT="$2"; shift 2 ;;
         --keep-tmp) KEEP_TMP=1; shift ;;
-        -h|--help) sed -n '4,42p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,52p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done

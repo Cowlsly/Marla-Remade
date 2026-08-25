@@ -43,6 +43,7 @@ use crate::osm::{visit_block, Element, Member, MEMBER_WAY};
 use crate::pbf::{self, KIND_NODES, KIND_RELATIONS, KIND_WAYS};
 use crate::proto::{Error, Result};
 use crate::rings::{self, MemberWay, RingStats};
+use crate::roads::{self, RoadTags};
 use crate::safety::{self, Kind, SafetyTags};
 use crate::select::Select;
 use crate::transit_lines::{self, TransitTags};
@@ -51,6 +52,7 @@ use crate::transit_lines::{self, TransitTags};
 pub enum Layer {
     Safety,
     Maxspeed,
+    Roads,
     TransitLines,
     AdminCity,
 }
@@ -60,6 +62,7 @@ impl Layer {
         match s {
             "safety" => Ok(Layer::Safety),
             "maxspeed" => Ok(Layer::Maxspeed),
+            "roads" => Ok(Layer::Roads),
             "transit_lines" => Ok(Layer::TransitLines),
             "admin_city" => Ok(Layer::AdminCity),
             other => Err(format!(
@@ -70,13 +73,14 @@ impl Layer {
     }
 
     pub fn names() -> Vec<&'static str> {
-        vec!["safety", "maxspeed", "transit_lines", "admin_city"]
+        vec!["safety", "maxspeed", "roads", "transit_lines", "admin_city"]
     }
 
     pub fn name(self) -> &'static str {
         match self {
             Layer::Safety => "safety",
             Layer::Maxspeed => "maxspeed",
+            Layer::Roads => "roads",
             Layer::TransitLines => "transit_lines",
             Layer::AdminCity => "admin_city",
         }
@@ -134,6 +138,7 @@ pub fn build(input: &Path, out: &Path, opts: &Options) -> Result<Stats> {
     match opts.layer {
         Layer::Safety => build_safety(input, &blobs, out, opts),
         Layer::Maxspeed => build_maxspeed(input, &blobs, out, opts),
+        Layer::Roads => build_roads(input, &blobs, out, opts),
         Layer::TransitLines => build_transit_lines(input, &blobs, out, opts),
         Layer::AdminCity => build_admin_city(input, &blobs, out, opts),
     }
@@ -495,6 +500,156 @@ fn maxspeed_blob(
                     name: t.name.map(str::to_string),
                 });
             }
+        }
+        Ok(())
+    })?;
+    Ok(kinds)
+}
+
+// --- roads ----------------------------------------------------------------
+
+/// One road way, with every tag value the layer emits copied out of the block.
+///
+/// The tag strings are owned because the pass borrows them from the
+/// `PrimitiveBlock` it is reading, which is dropped with the blob. Thirteen
+/// `Option<String>` per road is the one place this layer is heavier than
+/// `maxspeed`, and since this is every road rather than only the ones with a posted
+/// limit, `build_roads` consumes the rows as it renders them rather than holding
+/// both the rows and the output at once.
+struct RoadRow {
+    id: i64,
+    refs: Vec<i64>,
+    class: u8,
+    maxspeed: Option<String>,
+    lanes: Option<String>,
+    lanes_forward: Option<String>,
+    lanes_backward: Option<String>,
+    turn_lanes: Option<String>,
+    turn_lanes_forward: Option<String>,
+    turn_lanes_backward: Option<String>,
+    oneway: Option<String>,
+    width: Option<String>,
+    bridge: Option<String>,
+    tunnel: Option<String>,
+    layer: Option<String>,
+}
+
+impl RoadRow {
+    fn tags(&self) -> RoadTags<'_> {
+        RoadTags {
+            // `highway` is not re-read: `class` already holds what it classified to.
+            highway: None,
+            maxspeed: self.maxspeed.as_deref(),
+            lanes: self.lanes.as_deref(),
+            lanes_forward: self.lanes_forward.as_deref(),
+            lanes_backward: self.lanes_backward.as_deref(),
+            turn_lanes: self.turn_lanes.as_deref(),
+            turn_lanes_forward: self.turn_lanes_forward.as_deref(),
+            turn_lanes_backward: self.turn_lanes_backward.as_deref(),
+            oneway: self.oneway.as_deref(),
+            width: self.width.as_deref(),
+            bridge: self.bridge.as_deref(),
+            tunnel: self.tunnel.as_deref(),
+            layer: self.layer.as_deref(),
+        }
+    }
+}
+
+fn build_roads(
+    input: &Path,
+    blobs: &[pbf::BlobLoc],
+    out: &Path,
+    opts: &Options,
+) -> Result<Stats> {
+    let select = Select::parse(&roads::FILTERS)?;
+
+    // Same two passes as `maxspeed`: ways, then the node coordinates they need.
+    let (chunks, blob_kinds) = pbf::run_pass(
+        input,
+        blobs,
+        None,
+        KIND_WAYS,
+        "Pass 1: ways",
+        Vec::<RoadRow>::new,
+        |state: &mut Vec<RoadRow>, block| roads_blob(state, block, &select),
+    )?;
+    let mut rows: Vec<RoadRow> = Vec::new();
+    for chunk in chunks {
+        rows.extend(chunk);
+    }
+    println!("{} road way(s)", rows.len());
+
+    let table = NodeLocations::new(rows.iter().flat_map(|r| r.refs.iter().copied()).collect());
+    println!("{} node location(s) needed", table.len());
+    let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 2: nodes", table)?;
+
+    let mut lines: Vec<LineFeature> = Vec::with_capacity(rows.len());
+    let mut outside_bbox = 0usize;
+    // `drain` rather than a borrow: at planet scale the rows and the rendered output
+    // would otherwise both be resident, and the rows are the larger half.
+    for row in rows.drain(..) {
+        let coords = table.line(&row.refs);
+        if coords.len() < 2 {
+            continue;
+        }
+        if !parts_touch_bbox(std::slice::from_ref(&coords), opts.bbox.as_ref()) {
+            outside_bbox += 1;
+            continue;
+        }
+        let f = roads::feature(row.class, &row.tags(), Geometry::LineString(coords), row.id);
+        lines.push(LineFeature { sort: ("way", row.id), rendered: render(&f) });
+    }
+
+    let written = write_lines(out, lines)?;
+    println!("Wrote {} roads feature(s) to {}", written, out.display());
+    if outside_bbox > 0 {
+        println!("{outside_bbox} feature(s) dropped by --bbox");
+    }
+    Ok(Stats {
+        features: written,
+        from_nodes: 0,
+        from_ways: written,
+        from_relations: 0,
+        outside_bbox,
+    })
+}
+
+fn roads_blob(
+    state: &mut Vec<RoadRow>,
+    block: &pbf::PrimitiveBlock,
+    select: &Select,
+) -> Result<u8> {
+    let mut kinds = 0u8;
+    visit_block(block, KIND_WAYS, &mut kinds, &mut |el: Element| {
+        if let Element::Way(w) = el {
+            if w.refs.len() < 2 || w.tags.is_empty() {
+                return Ok(());
+            }
+            if !select.matches(|k| w.tags.get_str(k)) {
+                return Ok(());
+            }
+            let t = RoadTags { highway: w.tags.get_str("highway"), ..Default::default() };
+            let Some(class) = roads::classify(&t) else {
+                return Ok(());
+            };
+            let own = |k: &str| w.tags.get_str(k).map(str::to_string);
+            state.push(RoadRow {
+                id: w.id,
+                refs: w.refs.to_vec(),
+                class,
+                maxspeed: own("maxspeed"),
+                lanes: own("lanes"),
+                lanes_forward: own("lanes:forward"),
+                lanes_backward: own("lanes:backward"),
+                turn_lanes: own("turn:lanes"),
+                turn_lanes_forward: own("turn:lanes:forward"),
+                turn_lanes_backward: own("turn:lanes:backward"),
+                oneway: own("oneway"),
+                width: own("width"),
+                bridge: own("bridge"),
+                tunnel: own("tunnel"),
+                layer: own("layer"),
+            });
         }
         Ok(())
     })?;
@@ -1226,6 +1381,78 @@ mod tests {
 
         // Geometry came from resolved node coordinates, not from nowhere.
         assert!(mph.contains("-122.43"), "{mph}");
+    }
+
+    // --- roads ------------------------------------------------------------
+
+    #[test]
+    fn extracts_the_roads_layer_with_lanes_speed_and_width() {
+        let (lines, stats) = extract_layer("extract_roads", Layer::Roads);
+        // All three of the fixture's highway ways, including the one with no
+        // speed limit: `roads` is every road, not only the ones with a limit.
+        assert_eq!((stats.features, stats.from_ways), (3, 3));
+        assert_eq!(lines.len(), 3);
+
+        // The fully-attributed motorway.
+        let m = lines.iter().find(|l| l.contains("way/3002")).unwrap();
+        assert!(m.contains("\"class\":1"), "motorway is class 1: {m}");
+        assert!(m.contains("\"lanes\":3"), "{m}");
+        // through|through|right as the graph's own LANE_* masks, left to right.
+        assert!(
+            m.contains(&format!(
+                "\"turn_lanes_forward\":\"{}|{}|{}\"",
+                crate::tags::LANE_THROUGH,
+                crate::tags::LANE_THROUGH,
+                crate::tags::LANE_RIGHT
+            )),
+            "{m}"
+        );
+        assert!(m.contains("\"oneway\":1"), "{m}");
+        assert!(m.contains("\"width\":12.00"), "{m}");
+        assert!(m.contains("\"bridge\":1"), "{m}");
+        assert!(m.contains("\"layer\":1"), "{m}");
+        // `maxspeed=none` keeps its string and gets no number: it is not 0 km/h.
+        assert!(m.contains("\"maxspeed\":\"none\""), "{m}");
+        assert!(!m.contains("maxspeed_kmh"), "{m}");
+
+        // A posted mph limit arrives as both forms.
+        let r = lines.iter().find(|l| l.contains("way/3001")).unwrap();
+        assert!(r.contains("\"class\":7"), "residential is class 7: {r}");
+        assert!(r.contains("\"maxspeed\":\"25 mph\""), "{r}");
+        assert!(r.contains("\"maxspeed_kmh\":40"), "{r}");
+        assert!(r.contains("\"type\":\"LineString\""), "{r}");
+        // Geometry came from resolved node coordinates.
+        assert!(r.contains("-122.43"), "{r}");
+
+        // And the service road with nothing on it is class + osm_id only.
+        let s = lines.iter().find(|l| l.contains("way/3003")).unwrap();
+        assert!(s.contains("\"properties\":{\"class\":8,\"osm_id\":\"way/3003\"}"), "{s}");
+
+        // The railway ways and the platform are not roads.
+        assert!(!lines.iter().any(|l| l.contains("way/5001")));
+    }
+
+    #[test]
+    fn roads_is_deterministic_and_bbox_filtered() {
+        let (pbf_path, dir) = testpbf::write_layers_sample("det_roads");
+        let run = |suffix: &str| {
+            let out = dir.join(format!("roads{suffix}.geojsonseq"));
+            build(&pbf_path, &out, &Options { layer: Layer::Roads, bbox: None }).unwrap();
+            std::fs::read(out).unwrap()
+        };
+        assert_eq!(run("a"), run("b"));
+
+        let stats = build(
+            &pbf_path,
+            &dir.join("empty.geojsonseq"),
+            &Options {
+                layer: Layer::Roads,
+                bbox: Some(BBox::parse("-30,20,-20,30").unwrap()),
+            },
+        )
+        .unwrap();
+        assert_eq!(stats.features, 0);
+        assert_eq!(stats.outside_bbox, 3);
     }
 
     // --- transit_lines ----------------------------------------------------

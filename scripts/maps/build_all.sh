@@ -98,7 +98,6 @@ set -euo pipefail
 #     --engine-base E     rust|legacy    (default legacy)
 #     --engine-safety E   rust|legacy    (default rust: osm_extract + tile_points,
 #                                         no osmium/tippecanoe/python3)
-#     --engine-maxspeed E rust|legacy    (default rust: osm_extract + tile_lines)
 #     --engine-transit-lines E           (default rust: ways AND route relations
 #                                         read straight from the PBF, no GDAL)
 #     --engine-admin E    rust|legacy    (default legacy: admin_country and
@@ -149,7 +148,6 @@ PUBLISH=0
 PUBLISH_DRY_RUN=0
 ENGINE_BASE="legacy"
 ENGINE_SAFETY="rust"
-ENGINE_MAXSPEED="rust"
 ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 ENGINE_ADMIN_CITY="rust"
@@ -187,12 +185,11 @@ while [[ $# -gt 0 ]]; do
         --publish-dry-run) PUBLISH_DRY_RUN=1; shift ;;
         --engine-base) ENGINE_BASE="$2"; shift 2 ;;
         --engine-safety) ENGINE_SAFETY="$2"; shift 2 ;;
-        --engine-maxspeed) ENGINE_MAXSPEED="$2"; shift 2 ;;
         --engine-transit-lines) ENGINE_TRANSIT_LINES="$2"; shift 2 ;;
         --engine-admin) ENGINE_ADMIN="$2"; shift 2 ;;
         --engine-admin-city) ENGINE_ADMIN_CITY="$2"; shift 2 ;;
         --engine-pois) ENGINE_POIS="$2"; shift 2 ;;
-        -h|--help) sed -n '4,119p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,118p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -217,7 +214,6 @@ engine_check() {
 }
 engine_check base           "$ENGINE_BASE"           0
 engine_check safety         "$ENGINE_SAFETY"         1
-engine_check maxspeed       "$ENGINE_MAXSPEED"       1
 engine_check transit-lines  "$ENGINE_TRANSIT_LINES"  1
 engine_check admin          "$ENGINE_ADMIN"          0
 engine_check admin-city     "$ENGINE_ADMIN_CITY"     1
@@ -409,7 +405,6 @@ if want_stage tiles; then
             V5_ARGS+=(--gtfs-manifest "$GTFS_MANIFEST")
         fi
         V5_ARGS+=(--engine-safety "$ENGINE_SAFETY"
-                  --engine-maxspeed "$ENGINE_MAXSPEED"
                   --engine-transit-lines "$ENGINE_TRANSIT_LINES"
                   --engine-admin "$ENGINE_ADMIN"
                   --engine-admin-city "$ENGINE_ADMIN_CITY")

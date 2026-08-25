@@ -24,10 +24,33 @@ data class MapTokens(
     val traffic: TrafficColors,
     val transitMode: TransitModeColors,
     val speedSign: SpeedSignColors,
+    val roads: RoadColors,
     /** Walking and cycling routes, which carry no congestion data to colour by. */
     val routeInert: Color,
     /** A transit line that reported no colour of its own. */
     val routeTransitFallback: Color,
+)
+
+/**
+ * Road surfaces, for the roads we draw ourselves from the baked `roads` layer.
+ *
+ * Unlike everything else here these are not a convention being preserved -- they are basemap
+ * cartography, and they exist because above the handover zoom the base style's own road layers
+ * are suppressed (see `StylePatcher`) and there is nothing else drawing a road. The dark values
+ * come from [BasemapPalette] rather than being chosen again, so a road looks the same whether
+ * the base drew it below the handover or we drew it above.
+ *
+ * Four buckets, not fifteen classes: motorway/trunk, the primary-to-tertiary network, the minor
+ * streets, and unpaved or foot-only ways. That is the granularity a width and a fill can
+ * actually distinguish at the zooms this layer covers.
+ */
+@Immutable
+data class RoadColors(
+    val casing: Color,
+    val motorway: Color,
+    val major: Color,
+    val minor: Color,
+    val path: Color,
 )
 
 /**
@@ -97,6 +120,15 @@ private val LightMapTokens = MapTokens(
         train = Color(0xFF455A64),
     ),
     speedSign = SpeedSign,
+    // A light basemap draws its roads as white ribbons on a grey casing, with the motorway
+    // network warmed so it reads as the through route at a glance.
+    roads = RoadColors(
+        casing = Color(0xFFD5D7DB),
+        motorway = Color(0xFFFFCE8A),
+        major = Color(0xFFFFFFFF),
+        minor = Color(0xFFFFFFFF),
+        path = Color(0xFFCFC8BE),
+    ),
     routeInert = Color(0xFF1710F1),
     routeTransitFallback = Color(0xFFFF0000),
 )
@@ -125,6 +157,16 @@ private val DarkMapTokens = MapTokens(
     ),
     // Unchanged: a road sign does not have a dark variant.
     speedSign = SpeedSign,
+    roads = RoadColors(
+        casing = BasemapPalette.fill(BasemapPalette.Fill.RoadCasing),
+        // One step lighter than RoadMajor, which is the only distinction the dark palette has
+        // room for: the motorway must separate from the primary network without becoming a
+        // label-bright line across the whole viewport.
+        motorway = Color(0xFF5A6068),
+        major = BasemapPalette.fill(BasemapPalette.Fill.RoadMajor),
+        minor = BasemapPalette.fill(BasemapPalette.Fill.RoadMinor),
+        path = Color(0xFF3E434B),
+    ),
     routeInert = Color(0xFF7C8CFF),
     routeTransitFallback = Color(0xFFFF6E6E),
 )

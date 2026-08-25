@@ -19,7 +19,7 @@ set -euo pipefail
 #   export R2_ACCESS_KEY_ID=... R2_SECRET_ACCESS_KEY=...
 #   ./publish_r2.sh v5.pmtiles                 # -> s3://$R2_BUCKET/v5.pmtiles
 #   ./publish_r2.sh v5.pmtiles --key v5.pmtiles
-#   ./publish_r2.sh v5.pmtiles maxspeed.pmtiles  # multiple files (aux/siblings)
+#   ./publish_r2.sh v5.pmtiles poi_names.bin   # multiple files (aux/siblings)
 #
 # Options:
 #   --key NAME       Remote object key for the FIRST file (default: its basename).
@@ -29,7 +29,7 @@ set -euo pipefail
 #   --dry-run        Print what would happen; upload nothing.
 #   -h|--help        Show this help.
 #
-# Note: v5.pmtiles BAKES the maxspeed layer in, so normally you only publish the
+# Note: v5.pmtiles BAKES every overlay layer in, so normally you only publish the
 # single v5.pmtiles. The multi-file form exists for aux/sibling artifacts if you
 # ever build them separately.
 

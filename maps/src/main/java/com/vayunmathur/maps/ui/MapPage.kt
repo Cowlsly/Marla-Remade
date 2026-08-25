@@ -178,7 +178,8 @@ fun MapPage(
 
     NavigationCameraFollow(camera, chrome, navProgress, isNavigating)
 
-    // Poll the posted limit under the puck. Inert until the maxspeed tileset is hosted.
+    // Poll the posted limit under the puck, off the `roads` overlay's probe layer.
+    // Null when there is no road there, or none of its tags is a speed limit.
     LaunchedEffect(navProgress) {
         val progress = navProgress
         val projection = camera.projection

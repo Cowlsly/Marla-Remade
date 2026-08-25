@@ -74,6 +74,31 @@ pub fn parse_int_tag(value: Option<&str>) -> u32 {
     digits.parse::<u32>().unwrap_or(0)
 }
 
+/// Carriageway width in metres from a `width`-style tag; 0 when absent or not a
+/// positive number.
+///
+/// Bare values and an `m` suffix are metres, which is the OSM default. Feet are
+/// the one other unit the tag is written in often enough to matter, and are the
+/// reason this cannot just be [`parse_int_tag`]: US data carries `width=10'`, and
+/// reading that as 10 metres would make a residential street wider than a
+/// motorway.
+pub fn parse_width_m(value: Option<&str>) -> f64 {
+    let s = match value {
+        Some(s) => s,
+        None => return 0.0,
+    };
+    let (val, rest) = parse_leading_f64(s);
+    if val <= 0.0 {
+        return 0.0;
+    }
+    // Trimmed and case-folded: `"10 ft "` and `"10 FT"` are the same ten feet, and
+    // reading either as ten metres is the exact mistake this exists to prevent.
+    match rest.trim().to_ascii_lowercase().as_str() {
+        "ft" | "feet" | "'" => val * 0.3048,
+        _ => val,
+    }
+}
+
 /// Leading decimal number, plus the remainder of the string. Recognises the
 /// forms OSM `maxspeed` values actually use (`50`, `50.5`, `1e2`, `+50`).
 fn parse_leading_f64(s: &str) -> (f64, &str) {
