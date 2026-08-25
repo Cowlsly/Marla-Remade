@@ -89,4 +89,5 @@
     <string name="note_type_cloze">Cloze-meetod</string>
     <string name="delete_note_type_message">Kaskustutad sähvikupaki „%1$s“ ja tema %2$d märget?</string>
     <string name="review_counts">%1$d uut · %2$d õppimisel · %3$d kordamisel</string>
+    <string name="insert_image">Lisa pilt</string>
 </resources>
