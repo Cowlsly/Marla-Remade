@@ -360,10 +360,16 @@ if [[ "$SKIP_TRANSIT_STOPS" == "0" ]]; then
         # that never asked for stops.
         echo "[v5] no --gtfs-manifest given; skipping transit_stops layer" >&2
     else
+        # --maxzoom explicitly, and equal to the archive's: the merge unions every
+        # input's maxzoom into one source-level maxzoom, and MapLibre overzooms per
+        # source rather than per layer. A stops layer tiled below the union has its
+        # stops disappear above its own maxzoom, because the client then fetches real
+        # tiles that carry no `transit_stops`.
         run "$HERE/build_transit_stops_layer.sh" \
             --manifest "$GTFS_MANIFEST" \
             --out "$WORK/transit_stops.pmtiles" \
-            --workdir "$WORK/transit_stops"
+            --workdir "$WORK/transit_stops" \
+            --maxzoom 16
         INPUTS+=("$WORK/transit_stops.pmtiles")
     fi
 fi

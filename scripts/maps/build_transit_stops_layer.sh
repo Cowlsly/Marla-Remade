@@ -22,14 +22,19 @@ set -euo pipefail
 # Usage:
 #   ./build_transit_stops_layer.sh --manifest world_transit_work/feeds.manifest
 #   ./build_transit_stops_layer.sh --manifest m.txt --out transit_stops.pmtiles \
-#       --minzoom 10 --maxzoom 14
+#       --minzoom 10 --maxzoom 16
 #
 # Options:
 #   --manifest FILE   feeds.manifest: `name=dir[=motis_prefix]` per line (required)
 #   --out FILE        output .pmtiles (default transit_stops.pmtiles)
 #   --workdir DIR     scratch dir for the geojsonseq (default ./transit_stops_work)
 #   --minzoom N       default 10 (stops are denser than ma_pois, sparser than roads)
-#   --maxzoom N       default 14
+#   --maxzoom N       default 16, and it must MATCH THE MERGED ARCHIVE. The merge
+#                     unions each input's maxzoom into one source-level maxzoom, and
+#                     MapLibre overzooms per source, not per layer: tiled below the
+#                     union, this layer's stops vanish above its own maxzoom because
+#                     the client fetches real tiles that simply have no
+#                     `transit_stops` in them.
 #   --keep-work       keep the intermediate geojsonseq
 #
 # Tools required: cargo. Nothing else.
@@ -38,7 +43,7 @@ MANIFEST=""
 OUT="transit_stops.pmtiles"
 WORK="./transit_stops_work"
 MINZOOM=10
-MAXZOOM=14
+MAXZOOM=16
 KEEP_WORK=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -48,7 +53,7 @@ while [[ $# -gt 0 ]]; do
         --minzoom) MINZOOM="$2"; shift 2 ;;
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
         --keep-work) KEEP_WORK=1; shift ;;
-        -h|--help) sed -n '3,34p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '3,39p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done

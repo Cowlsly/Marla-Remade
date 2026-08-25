@@ -309,10 +309,13 @@ if (Test-Stage "tiles") {
             Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $GtfsCargo,
                 "--bin", "transit_stops", "--",
                 "--geojson", $stopsGeo, "--manifest", $script:EffectiveGtfsManifest)
+            # z16, matching the merged archive: the merge unions each input's maxzoom
+            # and MapLibre overzooms per source, not per layer, so a stops layer tiled
+            # lower has its stops vanish above its own maxzoom.
             Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
                 "--bin", "tile_points", "--",
                 "--geojson", $stopsGeo, "--out", $StopsTile, "--layer", "transit_stops",
-                "--minzoom", "10", "--maxzoom", "14")
+                "--minzoom", "10", "--maxzoom", "16")
         } else {
             Write-Warning "no GTFS manifest available; skipping the transit_stops layer"
         }

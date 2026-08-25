@@ -12,12 +12,14 @@ import com.vayunmathur.maps.data.transit.TransitStop
 import org.maplibre.compose.expressions.dsl.case
 import org.maplibre.compose.expressions.dsl.const
 import org.maplibre.compose.expressions.dsl.feature
+import org.maplibre.compose.expressions.dsl.gte
 import org.maplibre.compose.expressions.dsl.image
 import org.maplibre.compose.expressions.dsl.interpolate
 import org.maplibre.compose.expressions.dsl.linear
 import org.maplibre.compose.expressions.dsl.switch
 import org.maplibre.compose.expressions.dsl.zoom
 import org.maplibre.compose.expressions.value.IntValue
+import org.maplibre.compose.expressions.value.NumberValue
 import org.maplibre.compose.layers.CircleLayer
 import org.maplibre.compose.layers.SymbolLayer
 import org.maplibre.compose.sources.VectorSource
@@ -34,7 +36,7 @@ private const val TRANSIT_STOP_DOT_LAYER_ID = "transit-stop-dots"
  * the `transit_stops` source-layer in the overlay PMTiles archive, written by
  * `scripts/maps/build_transit_stops_layer.sh`.
  *
- * Bus and trolleybus stops are filtered out; see [TransitStopsLayer].
+ * Every mode is drawn, but not from the same zoom: see [TRANSIT_STOP_MIN_ZOOM].
  *
  * This replaced a per-viewport `GET /api/v1/map/stops` fetch. Stops are static
  * data, so a network round-trip on every camera idle bought nothing, and the baked
@@ -47,8 +49,8 @@ object TransitStopsSource {
 
 /** Transit teal so stops read distinctly from Google POIs (category colours),
  *  saved pins (blue) and search results (red). Reached by the modes that are
- *  neither rail-like nor ferries and are not filtered out: cable tram, aerial
- *  lift, funicular, monorail. */
+ *  neither rail-like nor ferries: cable tram, aerial lift, funicular, monorail,
+ *  bus and trolleybus. */
 private val TRANSIT_STOP_COLOR = Color(0xFF00897B)
 
 /** Rail-like modes get a distinct colour from buses, so a subway entrance is
@@ -58,8 +60,38 @@ private val TRANSIT_RAIL_COLOR = Color(0xFF3949AB)
 private val TRANSIT_FERRY_COLOR = Color(0xFF0277BD)
 
 /**
+ * The zoom each GTFS mode starts drawing at, listed in the same order as
+ * `mode_rank` in `scripts/maps/gtfs_ingest/src/bin/transit_stops.rs` — that
+ * function is already the project's statement of which modes are prominent, and it
+ * is what decides a stop's `route_type` when several modes call there.
+ *
+ * Buses are the overwhelming majority of a planetary stops layer, millions of
+ * them, and drawn from the archive floor they read as a field of dots with the rail
+ * network lost inside it. So the prominent half starts at the floor and buses wait
+ * until the map is zoomed in far enough for them to be individually useful.
+ */
+private val TRANSIT_STOP_MIN_ZOOM = listOf(
+    1 to 10,  // subway / metro
+    2 to 10,  // rail
+    0 to 10,  // tram / light rail
+    12 to 10, // monorail
+    4 to 12,  // ferry
+    6 to 12,  // aerial lift
+    7 to 12,  // funicular
+    5 to 12,  // cable tram
+    3 to 15,  // bus
+    11 to 15, // trolleybus
+)
+
+/** `normalize_route_type` folds every unrecognised GTFS route type onto 3, so an
+ *  unknown value is already a bus by the time it reaches the tile and the fallback
+ *  only has to agree with that. */
+private const val TRANSIT_STOP_DEFAULT_MIN_ZOOM = 15
+
+/**
  * Draw the `transit_stops` source-layer: a [CircleLayer] dot with a [SymbolLayer]
- * glyph on top, from z10 up. Takes the shared overlay [VectorSource] the admin and
+ * glyph on top, from z10 up, each mode appearing at its own zoom
+ * ([TRANSIT_STOP_MIN_ZOOM]). Takes the shared overlay [VectorSource] the admin and
  * POI overlays also read, since they are all layers of the same archive.
  *
  * The marker is a runtime Canvas bitmap rather than a sprite asset, so it renders
@@ -73,20 +105,19 @@ private val TRANSIT_FERRY_COLOR = Color(0xFF0277BD)
 fun TransitStopsLayer(source: VectorSource) {
     val marker = remember { generateTransitMarkerBitmap() }
 
-    // Bus and trolleybus stops are not drawn. They are the overwhelming majority of
-    // a planetary stops layer - millions of them - and at that density the map reads
-    // as a field of dots with the rail network lost inside it. `transit_stops` also
-    // folds every unrecognised GTFS route type onto 3 (see `normalize_route_type` in
-    // gtfs_ingest/src/bin/transit_stops.rs), so this drops junk classifications too.
+    // Per-mode min-zoom, the same shape as MaPoisLayer's per-category one. Compare
+    // against `zoom()` (a NumberValue), so the Int threshold is cast to the same
+    // value type for `gte` to resolve to the numeric overload.
     //
-    // A `switch` rather than a negated comparison, because it is the DSL this file
-    // already uses and needs no further imports.
-    val notABus = switch(
+    // ONE filter for both layers below: a glyph without its dot still draws, and is
+    // still a tap target that would open a departure board for a stop the map is
+    // not showing.
+    val minZoomForMode = switch(
         feature["route_type"].cast<IntValue>(),
-        case(3, const(false)),
-        case(11, const(false)),
-        fallback = const(true),
+        *TRANSIT_STOP_MIN_ZOOM.map { (mode, minZoom) -> case(mode, const(minZoom)) }.toTypedArray(),
+        fallback = const(TRANSIT_STOP_DEFAULT_MIN_ZOOM),
     )
+    val stopFilter = zoom() gte minZoomForMode.cast<NumberValue<Number>>()
 
     // Colour by mode. `switch` over the numeric route_type, as MyMapLayers does
     // for its own data-driven paint.
@@ -104,7 +135,7 @@ fun TransitStopsLayer(source: VectorSource) {
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
         minZoom = 10f,
-        filter = notABus,
+        filter = stopFilter,
         color = dotColor,
         radius = interpolate(
             linear(), zoom(),
@@ -124,9 +155,7 @@ fun TransitStopsLayer(source: VectorSource) {
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
         minZoom = 10f,
-        // Same filter as the dot, or a glyph would float with nothing under it -
-        // and a tap on it would open a departure board for a hidden stop.
-        filter = notABus,
+        filter = stopFilter,
         iconImage = image(marker),
         iconSize = interpolate(
             linear(), zoom(),

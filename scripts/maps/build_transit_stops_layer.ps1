@@ -19,7 +19,7 @@
 # Usage:
 #   .\build_transit_stops_layer.ps1 -Manifest ca_transit_work\feeds.manifest
 #   .\build_transit_stops_layer.ps1 -Manifest m.txt -Out transit_stops.pmtiles `
-#       -MinZoom 10 -MaxZoom 14
+#       -MinZoom 10 -MaxZoom 16
 #
 # Requires: cargo (https://rustup.rs). Nothing else.
 [CmdletBinding()]
@@ -32,7 +32,11 @@ param(
     [string]$Work = "transit_stops_work",
     # 10 because stops are denser than ma_pois (12) but far sparser than roads.
     [int]$MinZoom = 10,
-    [int]$MaxZoom = 14,
+    # 16 to MATCH THE MERGED ARCHIVE. The merge unions each input's maxzoom into one
+    # source-level maxzoom and MapLibre overzooms per source, not per layer: tiled
+    # below the union, this layer's stops vanish above its own maxzoom because the
+    # client fetches real tiles that simply have no `transit_stops` in them.
+    [int]$MaxZoom = 16,
     # Keep the intermediate geojsonseq for inspection.
     [switch]$KeepWork
 )
