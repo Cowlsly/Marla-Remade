@@ -130,11 +130,15 @@ mutually consistent (same POI set, same coordinates). See
     Exported by `osmium export` (ways export cleanly as LineStrings).
   * route **relations** where `route` ∈ {`subway`,`tram`,`light_rail`,`train`,
     `monorail`} (bus is intentionally excluded) → `kind`, and the relation
-    `colour`/`color` is carried onto the geometry. `osmium export` does not emit
-    linear relations as geometry, so these are assembled by GDAL's OSM
-    `multilinestrings` layer (`ogr2ogr`), whose `other_tags` HSTORE is parsed by
-    the normalizer to recover `route`/`colour`/`ref`. If `ogr2ogr` is not
-    installed the layer is still built from railway ways alone (colour omitted).
+    `colour`/`color` is carried onto the geometry. Only the way members that are
+    the route's **path** contribute geometry: `platform*` and `stop*` roles are
+    excluded, because a PTv2 platform is usually a closed way and drawing it as
+    track puts a box around every station. `osmium export` does not emit
+    linear relations as geometry, so on `--engine legacy` these are assembled by
+    GDAL's OSM `multilinestrings` layer (`ogr2ogr`), whose `other_tags` HSTORE is
+    parsed by the normalizer to recover `route`/`colour`/`ref`. That engine now
+    **fails** without `ogr2ogr` rather than quietly building the way half alone —
+    see [Caveats](#caveats--known-limitations) 9.
 * **POIs (`ma_pois`)** — OpenStreetMap. Any node OR way/relation-area that has
   BOTH a `name` tag AND one of the recognised POI keys
   (`amenity`/`shop`/`tourism`/`leisure`/`office`/`healthcare`) becomes a POI. The
@@ -171,7 +175,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse a published archive). A `--bbox` reuse extract now uses our own `pmtiles_extract`; `--extractor go-pmtiles` is still accepted, and is the only practical way to clip the 137 GB planet base |
 | `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
 | `build_maxspeed_layer.sh` | **`--engine rust`** (default): `osm_extract` → geojsonseq → `tile_lines`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_maxspeed.py` → tippecanoe |
-| `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe |
+| `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe, and **requires** ogr2ogr (see [Caveats](#caveats--known-limitations) 9) |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
 | `osm_ingest/` | Rust OSM ingest crate (detached, `.osm.pbf` read natively): `poi_extract` (POI layer + side files), `road_graph` (routing graph) and `osm_extract` (one geojsonseq per baked vector layer, with its own boundary ring assembler in `src/rings.rs`). Full TYPE MAP and on-disk layouts in `src/poi_build.rs` / `src/graph_build.rs`; see [`osm_ingest/README.md`](osm_ingest/README.md) |
 | `build_graph.ps1` | Windows entry point for the routing-graph build (no WSL, no g++) |
@@ -355,6 +359,31 @@ along with their assertions in `test/test_normalize.py`, because they **are** th
 on real data. Delete each one once a full-region diff against its Rust engine is
 clean; deleting them sooner would remove the evidence that the port is right.
 
+### 9. A `transit_lines` layer without its relation half renders grey
+
+A rail corridor is covered by *two* features: a `railway=*` way and a `type=route`
+relation. Only the relation carries `colour`, `ref` and the route's `name` — a
+plain way emits `kind` + `osm_id` and nothing else. The app's line paint is
+`coalesce(feature["colour"], byKind)`, so losing the relation half leaves a layer
+with a plausible feature count in which every line falls through to the grey
+`rail` fallback.
+
+`--engine rust` cannot produce that shape: it reads relations out of the PBF
+directly. `--engine legacy` can, because the relation half is the only part that
+needs `ogr2ogr`. So the legacy engine now **exits 1** when `ogr2ogr` is absent or
+its export fails; `--allow-ways-only` is the opt-in if that is genuinely what you
+want. `osm_extract` additionally warns when it finds railway ways and zero route
+relations, which is the same shape arrived at from any other direction.
+
+### 10. The differential harness cannot detect a missing GDAL
+
+`test/diff_geojsonseq.py` diffs a legacy GeoJSONSeq against a Rust one, so running
+it needs the legacy engine — which for `transit_lines` needs `ogr2ogr`. The
+detector and the failure it would catch share a dependency: on a box without GDAL
+there is no legacy output to diff, so the harness cannot be the thing that tells
+you the relation half went missing. That is why the check lives in the build script
+as a hard failure instead.
+
 ---
 
 ## Prerequisites (tools)
@@ -486,6 +515,8 @@ Natural Earth levels) still default to `legacy`.
 > One expected difference: `transit_lines` relation features now carry
 > `osm_id: "relation/9001"` where the GDAL path emitted a bare `9001`. Pass
 > `--ignore-prop osm_id` to look past it, or read [Caveats](#caveats--known-limitations) §7.
+> And on a box without GDAL there is nothing to diff at all for `transit_lines`:
+> see [Caveats](#caveats--known-limitations) §10.
 
 ### 1. Dry run (single metro — validates safety + border layers)
 

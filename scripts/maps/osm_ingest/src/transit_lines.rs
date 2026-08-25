@@ -114,6 +114,20 @@ pub fn truthy(v: Option<&str>) -> bool {
     !matches!(v, None | Some("") | Some("no") | Some("false") | Some("0"))
 }
 
+/// Whether a route relation's way member with this `role` is part of the line.
+///
+/// A PTv2 route relation carries more than its path: `platform` and `stop` members
+/// describe where passengers board, and a platform is very often a **closed way**.
+/// Including those drew every platform's outline as if it were track, which is what
+/// put station-shaped boxes all over the transit layer.
+///
+/// Unroled members are the path, and `forward`/`backward` are as much of it — only
+/// boarding infrastructure is excluded, by prefix, because PTv2 spells it
+/// `platform_entry_only`, `stop_exit_only` and so on.
+pub fn member_is_path(role: &[u8]) -> bool {
+    !role.starts_with(b"platform") && !role.starts_with(b"stop")
+}
+
 /// British spelling first, then American.
 pub fn colour<'a>(t: &TransitTags<'a>) -> Option<&'a str> {
     [t.colour, t.color].into_iter().find(|v| truthy(*v)).flatten()
@@ -348,6 +362,27 @@ mod tests {
             };
             let f = feature("rail", &t, Geometry::LineString(vec![]), "way", 1);
             assert_eq!(f.props.len(), 2, "kind + osm_id only, but {v:?} survived");
+        }
+    }
+
+    #[test]
+    fn only_boarding_infrastructure_roles_are_excluded_from_the_path() {
+        // The PTv2 role table. `platform*` and `stop*` describe where passengers
+        // board; a platform is usually a closed way, and including it drew a box
+        // around every station.
+        for role in [
+            "platform",
+            "platform_entry_only",
+            "platform_exit_only",
+            "stop",
+            "stop_entry_only",
+            "stop_exit_only",
+        ] {
+            assert!(!member_is_path(role.as_bytes()), "{role} is not the path");
+        }
+        // Unroled members are the path, and a direction is still the path.
+        for role in ["", "forward", "backward"] {
+            assert!(member_is_path(role.as_bytes()), "{role} is the path");
         }
     }
 

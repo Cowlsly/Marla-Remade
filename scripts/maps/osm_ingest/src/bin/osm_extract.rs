@@ -48,6 +48,9 @@ fn main() -> ExitCode {
                     "WARNING: 0 features. Check --bbox and that the PBF covers the area."
                 );
             }
+            if let Some(why) = stats.missing_half(args.layer) {
+                eprintln!("WARNING: {}: {why}", args.layer.name());
+            }
             ExitCode::SUCCESS
         }
         Err(e) => {

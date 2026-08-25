@@ -48,11 +48,18 @@ set -euo pipefail
 #   --engine E     rust|legacy (default rust)
 #   --geojson-out F  also keep the intermediate geojsonseq here (for the
 #                    differential harness, which needs both engines' output)
+#   --allow-ways-only  Let `--engine legacy` proceed without ogr2ogr, producing a
+#                    layer with no route relations. See the warning below.
 #   --keep-tmp     Don't delete intermediate files
 #
 # Tools required: cargo. `--engine legacy` additionally needs osmium, tippecanoe
-# and python3, plus ogr2ogr (GDAL) for the route-relation half -- without it that
-# engine silently produces railway ways only.
+# and python3, plus ogr2ogr (GDAL) for the route-relation half.
+#
+# A LAYER WITHOUT ITS RELATION HALF IS BROKEN, NOT MERELY SMALLER. `colour`, `ref`
+# and the route `name` live on the relation and essentially never on the way, so
+# dropping relations leaves a full-looking layer of colourless track and the app
+# renders every line in its grey `rail` fallback. Missing GDAL is therefore fatal
+# here, and `--allow-ways-only` is the deliberate opt-in.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PBF=""
@@ -62,6 +69,7 @@ MINZOOM=8
 MAXZOOM=16
 ENGINE="rust"
 GEOJSON_OUT=""
+ALLOW_WAYS_ONLY=0
 KEEP_TMP=0
 
 while [[ $# -gt 0 ]]; do
@@ -73,8 +81,9 @@ while [[ $# -gt 0 ]]; do
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
         --engine) ENGINE="$2"; shift 2 ;;
         --geojson-out) GEOJSON_OUT="$2"; shift 2 ;;
+        --allow-ways-only) ALLOW_WAYS_ONLY=1; shift ;;
         --keep-tmp) KEEP_TMP=1; shift ;;
-        -h|--help) sed -n '4,55p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,62p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -90,6 +99,14 @@ if [[ "$ENGINE" == "legacy" ]]; then
     command -v osmium     >/dev/null || { echo "ERROR: --engine legacy needs osmium-tool" >&2; exit 1; }
     command -v tippecanoe >/dev/null || { echo "ERROR: --engine legacy needs tippecanoe" >&2; exit 1; }
     command -v python3    >/dev/null || { echo "ERROR: --engine legacy needs python3" >&2; exit 1; }
+    if [[ "$ALLOW_WAYS_ONLY" != "1" ]] && ! command -v ogr2ogr >/dev/null; then
+        echo "ERROR: --engine legacy needs ogr2ogr (GDAL) for the route-relation half." >&2
+        echo "       Without it the layer is railway ways only, which carry no colour," >&2
+        echo "       so every transit line renders grey. Use --engine rust (no GDAL" >&2
+        echo "       needed at all), or pass --allow-ways-only if that is really what" >&2
+        echo "       you want." >&2
+        exit 1
+    fi
 fi
 
 TMP="$(mktemp -d)"
@@ -127,11 +144,14 @@ else
     # Relations need GDAL: osmium export cannot assemble relation geometry.
     : > "$TMP/relations.geojsonseq"
     if command -v ogr2ogr >/dev/null; then
-        ogr2ogr -f GeoJSONSeq "$TMP/relations.geojsonseq" \
-            "$TMP/transit_raw.osm.pbf" multilinestrings 2>/dev/null \
-            || echo "[transit_lines] WARNING: ogr2ogr relation export failed; railway ways only"
+        if ! ogr2ogr -f GeoJSONSeq "$TMP/relations.geojsonseq" \
+            "$TMP/transit_raw.osm.pbf" multilinestrings 2>/dev/null; then
+            echo "[transit_lines] ERROR: ogr2ogr relation export failed" >&2
+            [[ "$ALLOW_WAYS_ONLY" == "1" ]] || exit 1
+            echo "[transit_lines] --allow-ways-only: continuing with railway ways only" >&2
+        fi
     else
-        echo "[transit_lines] WARNING: ogr2ogr (GDAL) not found; route-relation colour omitted (railway ways only)"
+        echo "[transit_lines] --allow-ways-only: no ogr2ogr, railway ways only (no colour)" >&2
     fi
 
     echo "[transit_lines] normalizing kinds"

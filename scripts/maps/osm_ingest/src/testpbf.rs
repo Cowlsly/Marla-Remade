@@ -383,7 +383,11 @@ pub const RAILWAY_WAY_ID: i64 = 5001;
 pub const NARROW_GAUGE_WAY_ID: i64 = 5002;
 /// `railway=platform`, which is not a line. The negative control.
 pub const PLATFORM_WAY_ID: i64 = 5003;
-/// `type=route` + `route=subway`, with a colour and a ref, over two member ways.
+/// A **closed** `railway=platform` way, carried by the route relation below as a
+/// `role=platform` member. The shape that drew a box around every station.
+pub const ROUTE_PLATFORM_WAY_ID: i64 = 5004;
+/// `type=route` + `route=subway`, with a colour and a ref, over two member ways
+/// plus a `role=platform` member that is not part of the line.
 pub const ROUTE_RELATION_ID: i64 = 9001;
 /// `type=route` + `route=bus`, which this layer drops.
 pub const BUS_RELATION_ID: i64 = 9002;
@@ -392,6 +396,15 @@ pub const BUS_RELATION_ID: i64 = 9002;
 pub const ADMIN_CITY_RELATION_ID: i64 = 9101;
 /// The same, but `admin_level=6`: a county, which the city layer drops.
 pub const ADMIN_COUNTY_RELATION_ID: i64 = 9102;
+
+/// The corners of [`ROUTE_PLATFORM_WAY_ID`], well clear of every other fixture
+/// coordinate so its absence from the route's geometry can be asserted directly.
+const ROUTE_PLATFORM_NODES: [(i64, i32, i32); 4] = [
+    (2201, 377_950_000, -1_224_050_000),
+    (2202, 377_950_000, -1_224_040_000),
+    (2203, 377_960_000, -1_224_040_000),
+    (2204, 377_960_000, -1_224_050_000),
+];
 
 /// Way ids the admin boundary is assembled from.
 pub const ADMIN_OUTER_WAY_A: i64 = 7001;
@@ -492,6 +505,7 @@ pub fn layers_block() -> Vec<u8> {
     let v_alameda = st.id("Alameda County");
     let role_outer = st.id("outer");
     let role_inner = st.id("inner");
+    let role_platform = st.id("platform");
     // An empty member role is string-table index 0, per the PBF spec.
     let role_empty = ST_EMPTY;
 
@@ -540,7 +554,7 @@ pub fn layers_block() -> Vec<u8> {
         (WAY_NODE_IDS[5], 377_930_000, -1_224_100_000, vec![]),
     ];
     let mut nodes = nodes;
-    for (id, lat, lon) in ADMIN_NODES {
+    for (id, lat, lon) in ADMIN_NODES.into_iter().chain(ROUTE_PLATFORM_NODES) {
         nodes.push((id, lat, lon, vec![]));
     }
     let dense = dense_group(&nodes);
@@ -582,6 +596,12 @@ pub fn layers_block() -> Vec<u8> {
         ),
         // A platform is not a line.
         way(PLATFORM_WAY_ID, &[(k_railway, v_platform)], &WAY_NODE_IDS[..2]),
+        // And a closed one, which the route relation below claims as `role=platform`.
+        way(
+            ROUTE_PLATFORM_WAY_ID,
+            &[(k_railway, v_platform)],
+            &[2201, 2202, 2203, 2204, 2201],
+        ),
         // admin_city: the outer ring split across two ways, so the assembler has to
         // stitch them, and one of them is reversed so it has to flip one too.
         way(ADMIN_OUTER_WAY_A, &[], &[2101, 2102, 2103]),
@@ -605,6 +625,7 @@ pub fn layers_block() -> Vec<u8> {
             &[
                 (RAILWAY_WAY_ID, role_empty, 1),
                 (NARROW_GAUGE_WAY_ID, role_empty, 1),
+                (ROUTE_PLATFORM_WAY_ID, role_platform, 1),
             ],
         ),
         // A bus route: this layer is the rail-like modes only.

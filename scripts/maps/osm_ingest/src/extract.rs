@@ -99,6 +99,28 @@ pub struct Stats {
     pub outside_bbox: usize,
 }
 
+impl Stats {
+    /// A layer assembled from two element kinds, reporting none of one of them.
+    ///
+    /// `transit_lines` is the case that matters: a rail corridor is covered by both
+    /// a `railway=*` way and a `type=route` relation, and only the relation carries
+    /// `colour`, `ref` and the route's `name`. A ways-only layer therefore looks
+    /// full, has the right feature count, and renders every line in the app's grey
+    /// `rail` fallback. It is not proof of a broken build -- a rural extract really
+    /// can hold track that no PTv2 route covers -- so this is a warning, and the
+    /// build scripts own the checks that can be certain.
+    pub fn missing_half(&self, layer: Layer) -> Option<String> {
+        if layer != Layer::TransitLines || self.from_relations > 0 || self.from_ways == 0 {
+            return None;
+        }
+        Some(format!(
+            "{} railway way(s) but 0 route relation(s). Only relations carry `colour`, \
+             `ref` and the route `name`, so every line will render grey.",
+            self.from_ways
+        ))
+    }
+}
+
 pub fn build(input: &Path, out: &Path, opts: &Options) -> Result<Stats> {
     // Fail before the passes rather than after them if the output is unwritable.
     if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
@@ -663,12 +685,14 @@ fn transit_relation_blob(
             let Some(kind) = transit_lines::classify(&t) else {
                 return Ok(());
             };
-            // Every way member, whatever its role: a route's `forward`/`backward`
-            // members are as much of the line as its unroled ones.
+            // Way members that are the route's path. `forward`/`backward` count;
+            // `platform*` and `stop*` do not - see [`transit_lines::member_is_path`].
             let member_ways: Vec<i64> = r
                 .members
                 .iter()
-                .filter(|m: &&Member| m.kind == MEMBER_WAY)
+                .filter(|m: &&Member| {
+                    m.kind == MEMBER_WAY && transit_lines::member_is_path(m.role)
+                })
                 .map(|m| m.id)
                 .collect();
             if member_ways.is_empty() {
@@ -1248,6 +1272,22 @@ mod tests {
     }
 
     #[test]
+    fn a_routes_platform_members_are_not_drawn_as_track() {
+        // The fixture's route relation carries a third member: a *closed*
+        // `railway=platform` way, `role=platform`. Assembling geometry from every
+        // member drew a box around the station.
+        let (lines, stats) = extract_layer("extract_transit_platform", Layer::TransitLines);
+        let route = lines.iter().find(|l| l.contains("relation/9001")).unwrap();
+        assert_eq!(route.matches("]],[[").count(), 1, "the two path members only: {route}");
+        // The platform's corners sit at 122.404-122.405W, nowhere near the path.
+        assert!(!route.contains("-122.4050000"), "platform outline drawn: {route}");
+        assert!(!route.contains("-122.4040000"), "platform outline drawn: {route}");
+        // And it is not a feature in its own right either, roled or not.
+        assert!(!lines.iter().any(|l| l.contains("way/5004")));
+        assert_eq!((stats.from_ways, stats.from_relations), (2, 1));
+    }
+
+    #[test]
     fn the_line_layers_are_deterministic_and_bbox_filtered() {
         for layer in [Layer::Maxspeed, Layer::TransitLines] {
             let (pbf_path, dir) = testpbf::write_layers_sample(&format!("det_{}", layer.name()));
@@ -1286,6 +1326,25 @@ mod tests {
             assert_eq!(all.outside_bbox, 0, "{}", layer.name());
             assert!(all.features > 0, "{}", layer.name());
         }
+    }
+
+    #[test]
+    fn a_transit_lines_layer_with_no_relations_is_reported() {
+        // Ways-only is the shape a GDAL-less legacy build produces: the right
+        // feature count, and no `colour` anywhere, so every line renders grey.
+        let ways_only = Stats { features: 900, from_ways: 900, ..Default::default() };
+        assert!(ways_only.missing_half(Layer::TransitLines).is_some());
+        // Both halves present, or nothing at all, are both fine.
+        let both = Stats {
+            features: 900,
+            from_ways: 800,
+            from_relations: 100,
+            ..Default::default()
+        };
+        assert_eq!(both.missing_half(Layer::TransitLines), None);
+        assert_eq!(Stats::default().missing_half(Layer::TransitLines), None);
+        // And the check is specific to the two-source layer.
+        assert_eq!(ways_only.missing_half(Layer::Maxspeed), None);
     }
 
     // --- the coordinate table ---------------------------------------------
