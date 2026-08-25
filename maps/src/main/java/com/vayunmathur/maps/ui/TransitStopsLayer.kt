@@ -34,6 +34,8 @@ private const val TRANSIT_STOP_DOT_LAYER_ID = "transit-stop-dots"
  * the `transit_stops` source-layer in the overlay PMTiles archive, written by
  * `scripts/maps/build_transit_stops_layer.sh`.
  *
+ * Bus and trolleybus stops are filtered out; see [TransitStopsLayer].
+ *
  * This replaced a per-viewport `GET /api/v1/map/stops` fetch. Stops are static
  * data, so a network round-trip on every camera idle bought nothing, and the baked
  * `motis_id` means the realtime `/stoptimes` overlay still has an id to ask about
@@ -44,7 +46,9 @@ object TransitStopsSource {
 }
 
 /** Transit teal so stops read distinctly from Google POIs (category colours),
- *  saved pins (blue) and search results (red). */
+ *  saved pins (blue) and search results (red). Reached by the modes that are
+ *  neither rail-like nor ferries and are not filtered out: cable tram, aerial
+ *  lift, funicular, monorail. */
 private val TRANSIT_STOP_COLOR = Color(0xFF00897B)
 
 /** Rail-like modes get a distinct colour from buses, so a subway entrance is
@@ -69,6 +73,21 @@ private val TRANSIT_FERRY_COLOR = Color(0xFF0277BD)
 fun TransitStopsLayer(source: VectorSource) {
     val marker = remember { generateTransitMarkerBitmap() }
 
+    // Bus and trolleybus stops are not drawn. They are the overwhelming majority of
+    // a planetary stops layer - millions of them - and at that density the map reads
+    // as a field of dots with the rail network lost inside it. `transit_stops` also
+    // folds every unrecognised GTFS route type onto 3 (see `normalize_route_type` in
+    // gtfs_ingest/src/bin/transit_stops.rs), so this drops junk classifications too.
+    //
+    // A `switch` rather than a negated comparison, because it is the DSL this file
+    // already uses and needs no further imports.
+    val notABus = switch(
+        feature["route_type"].cast<IntValue>(),
+        case(3, const(false)),
+        case(11, const(false)),
+        fallback = const(true),
+    )
+
     // Colour by mode. `switch` over the numeric route_type, as MyMapLayers does
     // for its own data-driven paint.
     val dotColor = switch(
@@ -85,6 +104,7 @@ fun TransitStopsLayer(source: VectorSource) {
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
         minZoom = 10f,
+        filter = notABus,
         color = dotColor,
         radius = interpolate(
             linear(), zoom(),
@@ -104,6 +124,9 @@ fun TransitStopsLayer(source: VectorSource) {
         source,
         sourceLayer = TransitStopsSource.SOURCE_LAYER,
         minZoom = 10f,
+        // Same filter as the dot, or a glyph would float with nothing under it -
+        // and a tap on it would open a departure board for a hidden stop.
+        filter = notABus,
         iconImage = image(marker),
         iconSize = interpolate(
             linear(), zoom(),
