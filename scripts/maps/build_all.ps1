@@ -77,10 +77,19 @@ param(
     # Graph build-time memory, forwarded to road_graph. None change the on-disk
     # contract, and -Rounds does not change the output at all. Required at planet
     # scale -- see osm_ingest/README.md 'Build-time memory'.
+    #
+    # -SpillDir also carries the roads tiler's spill, for the same reason: it is
+    # re-read once per zoom, which is the other access pattern a translation layer
+    # punishes. Keep it off a network or C: mount even when -OutDir is there.
     [switch] $WithinWayChains,
     [int] $Rounds = 0,
     [string] $SpillDir = "",
 
+    # Concurrency for the two stages that fan out: GTFS feed downloads in the transit
+    # stage, and the layer builds in the tiles stage. Each layer gets
+    # ProcessorCount / Jobs threads, so this is a memory dial as much as a speed one --
+    # peak is roughly Jobs x the largest concurrent layer, and the roads extract alone
+    # peaked at 5.00 GiB on California.
     [int] $Jobs = 6
 )
 
@@ -95,6 +104,88 @@ function Invoke-Step {
     }
     & $Exe @StepArgs
     if ($LASTEXITCODE -ne 0) { throw "$Exe failed with exit code $LASTEXITCODE" }
+}
+
+# --- the layer fan-out -----------------------------------------------------
+#
+# The mirror of build_v5_pmtiles.sh's launch/reap pair, for the tiles stage that is
+# inlined below rather than delegating to that script. The same three things have to
+# be right, for the same reasons:
+#
+#   1. A background job's failure does not stop the script by itself, and a layer
+#      that died would otherwise reach tile_join and yield a short archive that looks
+#      valid. Every job's state is checked individually in Wait-LayerJobs.
+#   2. Each job's output is buffered and replayed under its own heading, because four
+#      tilers interleaving progress on one console is unreadable.
+#   3. MAPS_THREADS is divided among the jobs, or each layer sizes its own pool from
+#      the whole box and N layers oversubscribe it N-fold.
+$script:LayerJobs = @()
+
+# Run a layer's steps -- each an @{ Exe; Args } pair, in order -- in the background.
+function Start-LayerJob {
+    param([string] $Name, [object[]] $Steps, [int] $ThreadCap)
+    if ($DryRun) {
+        foreach ($s in $Steps) { Write-Host "[dry-run] $($s.Exe) $($s.Args -join ' ')" }
+        return
+    }
+    if ($Jobs -le 1) {
+        Write-Host "=== tiles: $Name ==="
+        $prev = $env:MAPS_THREADS
+        $env:MAPS_THREADS = "$ThreadCap"
+        try { foreach ($s in $Steps) { Invoke-Step $s.Exe $s.Args } }
+        finally { $env:MAPS_THREADS = $prev }
+        return
+    }
+    Write-Host "=== tiles: $Name started (MAPS_THREADS=$ThreadCap) ==="
+    $worker = {
+        param($Steps, $ThreadCap)
+        $env:MAPS_THREADS = "$ThreadCap"
+        foreach ($s in $Steps) {
+            & $s.Exe @($s.Args)
+            if ($LASTEXITCODE -ne 0) {
+                throw "$($s.Exe) $($s.Args -join ' ') failed with exit code $LASTEXITCODE"
+            }
+        }
+    }
+    $script:LayerJobs += (Start-Job -Name $Name -ScriptBlock $worker `
+        -ArgumentList $Steps, $ThreadCap)
+    # Never more than $Jobs in flight, so -Jobs really is a memory bound.
+    if ($script:LayerJobs.Count -ge $Jobs) { Wait-LayerJobs }
+}
+
+# Wait for every outstanding layer job, replay its output, and throw if any failed.
+function Wait-LayerJobs {
+    if (-not $script:LayerJobs -or $script:LayerJobs.Count -eq 0) { return }
+    $failed = @()
+    foreach ($j in $script:LayerJobs) {
+        $null = Wait-Job -Job $j
+        # Read the child job's streams directly rather than through Receive-Job: a
+        # failed job's reason lives in its Error stream, and Receive-Job either
+        # rethrows it into this scope or -- with -ErrorAction SilentlyContinue --
+        # discards it, which loses the one line that says WHY a layer died.
+        $child = $j.ChildJobs[0]
+        $lines = @()
+        $lines += $child.Output | ForEach-Object { "$_" }
+        $lines += $child.Error | ForEach-Object { "$_" }
+        # Failure is decided by the JOB STATE alone, never by the presence of error
+        # output. These tools write their progress bars and their warnings to stderr,
+        # and a PowerShell job funnels stderr into its Error stream -- so treating a
+        # non-empty Error stream as failure marks every successful layer as failed.
+        # The worker throws on a non-zero exit code, and that is what sets the state.
+        $died = ($j.State -eq 'Failed') -or ($child.JobStateInfo.State -eq 'Failed')
+        if ($died) {
+            Write-Host "===== $($j.Name): FAILED =====" -ForegroundColor Red
+            $failed += $j.Name
+        } else {
+            Write-Host "===== $($j.Name): ok ====="
+        }
+        $lines | ForEach-Object { Write-Host $_ }
+        Remove-Job -Job $j -Force
+    }
+    $script:LayerJobs = @()
+    if ($failed.Count -gt 0) {
+        throw "layer build(s) failed: $($failed -join ', ')"
+    }
 }
 
 function Test-Stage {
@@ -279,11 +370,21 @@ if (Test-Stage "tiles") {
         # admin_city -- and the tile_build tilers tile it. No osmium, tippecanoe,
         # GDAL or python3 is involved.
         if ($Pbf) {
+            # The roads layer is every road on the planet at z11-16. The non-streaming
+            # tiler holds the whole input plus a projected copy per zoom, so it cannot
+            # build it; --stream spills to disk and peak memory tracks the tile COUNT
+            # instead. Byte-identical output either way.
+            $roadsSpill = if ($SpillDir) { Join-Path $SpillDir "roads" }
+                          else { Join-Path $Work "roads_spill" }
+            # Shared out among the concurrent layers. -Jobs is also the feed-download
+            # width above; reusing it keeps one knob rather than two.
+            $perJob = [Math]::Max(1, [int]([Environment]::ProcessorCount / [Math]::Max(1, $Jobs)))
             foreach ($spec in @(
                 @{ Layer = "safety";        Tile = $SafetyTile;       Bin = "tile_points";   Min = 10; Max = 16; Extra = @() },
                 # z11 up: base roads keep z0-10 and this layer takes over above
                 # them, so there is a handover rather than a gap.
-                @{ Layer = "roads";         Tile = $RoadsTile;        Bin = "tile_lines";    Min = 11; Max = 16; Extra = @() },
+                @{ Layer = "roads";         Tile = $RoadsTile;        Bin = "tile_lines";    Min = 11; Max = 16;
+                   Extra = @("--stream", "--spill-dir", $roadsSpill) },
                 @{ Layer = "transit_lines"; Tile = $TransitLinesTile; Bin = "tile_lines";    Min = 8;  Max = 16; Extra = @() },
                 # Admin polygons must stay whole enough to reassemble for the
                 # dimming mask, so the per-tile byte budget is effectively lifted --
@@ -292,13 +393,17 @@ if (Test-Stage "tiles") {
                    Extra = @("--simplification", "4", "--max-tile-bytes", "100000000") }
             )) {
                 $geo = Join-Path $Work "$($spec.Layer).geojsonseq"
-                Write-Host "=== tiles: $($spec.Layer) -> $($spec.Tile) ==="
-                Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
-                    "--bin", "osm_extract", "--", $Pbf, "--layer", $spec.Layer, "--out", $geo)
-                Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $TileManifest,
-                    "--bin", $spec.Bin, "--",
-                    "--geojson", $geo, "--out", $spec.Tile, "--layer", $spec.Layer,
-                    "--minzoom", "$($spec.Min)", "--maxzoom", "$($spec.Max)") + $spec.Extra)
+                # Extract then tile, in that order, within the one job: the tiler reads
+                # what the extract writes, so these two cannot be split apart. Layers
+                # are what run concurrently, not the steps inside a layer.
+                Start-LayerJob $spec.Layer @(
+                    @{ Exe = "cargo"; Args = @("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
+                        "--bin", "osm_extract", "--", $Pbf, "--layer", $spec.Layer, "--out", $geo) },
+                    @{ Exe = "cargo"; Args = (@("run", "--release", "--quiet", "--manifest-path", $TileManifest,
+                        "--bin", $spec.Bin, "--",
+                        "--geojson", $geo, "--out", $spec.Tile, "--layer", $spec.Layer,
+                        "--minzoom", "$($spec.Min)", "--maxzoom", "$($spec.Max)") + $spec.Extra) }
+                ) $perJob
             }
         } else {
             Write-Warning "no -Pbf given; skipping the safety, roads, transit_lines and admin_city layers"
@@ -308,20 +413,26 @@ if (Test-Stage "tiles") {
         # so the pins and the schedules agree on stop ids.
         if ($script:EffectiveGtfsManifest -and (Test-Path $script:EffectiveGtfsManifest)) {
             $stopsGeo = Join-Path $Work "transit_stops.geojsonseq"
-            Write-Host "=== tiles: transit_stops -> $StopsTile ==="
-            Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $GtfsCargo,
-                "--bin", "transit_stops", "--",
-                "--geojson", $stopsGeo, "--manifest", $script:EffectiveGtfsManifest)
-            # z16, matching the merged archive: the merge unions each input's maxzoom
-            # and MapLibre overzooms per source, not per layer, so a stops layer tiled
-            # lower has its stops vanish above its own maxzoom.
-            Invoke-Step "cargo" @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
-                "--bin", "tile_points", "--",
-                "--geojson", $stopsGeo, "--out", $StopsTile, "--layer", "transit_stops",
-                "--minzoom", "10", "--maxzoom", "16")
+            Start-LayerJob "transit_stops" @(
+                @{ Exe = "cargo"; Args = @("run", "--release", "--quiet", "--manifest-path", $GtfsCargo,
+                    "--bin", "transit_stops", "--",
+                    "--geojson", $stopsGeo, "--manifest", $script:EffectiveGtfsManifest) },
+                # z16, matching the merged archive: the merge unions each input's maxzoom
+                # and MapLibre overzooms per source, not per layer, so a stops layer tiled
+                # lower has its stops vanish above its own maxzoom.
+                @{ Exe = "cargo"; Args = @("run", "--release", "--quiet", "--manifest-path", $TileManifest,
+                    "--bin", "tile_points", "--",
+                    "--geojson", $stopsGeo, "--out", $StopsTile, "--layer", "transit_stops",
+                    "--minzoom", "10", "--maxzoom", "16") }
+            ) $(if ($Jobs -gt 1) { [Math]::Max(1, [int]([Environment]::ProcessorCount / $Jobs)) } else { [Environment]::ProcessorCount })
         } else {
             Write-Warning "no GTFS manifest available; skipping the transit_stops layer"
         }
+
+        # Every layer job must be finished before the merge below tests for its output
+        # and reads it. This is the barrier the fan-out hangs on: it throws if any
+        # layer failed, so a dead layer cannot reach tile_join.
+        Wait-LayerJobs
 
         # Later inputs win a layer-name collision, so a rebuilt overlay replaces a
         # stale copy. No base is joined: the overlay names are disjoint from the
