@@ -52,6 +52,10 @@
     <string name="calculator_widget_label">Calculator</string>
     <!-- Widget picker description for the keypad widget. Full sentence. -->
     <string name="calculator_widget_description">A working keypad on your home screen - tap the display to open Calculator</string>
+    <!-- Keypad widget setting: switch that removes the widget's own background so the wallpaper shows through. -->
+    <string name="calculator_widget_transparent">Transparent background</string>
+    <!-- Supporting line under the transparent background switch. -->
+    <string name="calculator_widget_transparent_summary">Show the wallpaper behind the keypad. The keys stay filled in so they remain readable.</string>
     <!-- Home-screen widget name shown in the widget picker for the unit converter widget. Noun phrase. -->
     <string name="units_widget_label">Unit Converter</string>
     <!-- Widget picker description for the unit converter widget. Full sentence. -->

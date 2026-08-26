@@ -1,6 +1,7 @@
 package com.vayunmathur.calculator.widget
 
 import android.content.Context
+import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.doublePreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.glance.GlanceId
@@ -20,6 +21,12 @@ internal val CalculatorAnswerKey = doublePreferencesKey("calculator_widget_answe
 
 /** Which key was tapped, as one of the `COMMAND_*` values below. */
 internal val CalculatorKeyParam = ActionParameters.Key<String>("calculator_widget_key")
+
+/**
+ * Whether this instance drops its own surface and lets the wallpaper through. Per-widget
+ * Glance state, so two copies of the widget can be styled differently.
+ */
+internal val CalculatorTransparentKey = booleanPreferencesKey("calculator_widget_transparent")
 
 internal const val COMMAND_CLEAR = "clear"
 internal const val COMMAND_BACKSPACE = "backspace"

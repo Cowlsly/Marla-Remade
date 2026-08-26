@@ -84,7 +84,11 @@ class CalculatorGlanceWidget : GlanceAppWidget() {
             val input = prefs[CalculatorInputKey].orEmpty()
             val result = evaluateForWidget(input, prefs[CalculatorAnswerKey] ?: 0.0)
             DynamicThemeGlance(context) {
-                CalculatorWidgetContent(input, result?.display.orEmpty())
+                CalculatorWidgetContent(
+                    input = input,
+                    result = result?.display.orEmpty(),
+                    transparent = prefs[CalculatorTransparentKey] == true,
+                )
             }
         }
     }
@@ -93,7 +97,9 @@ class CalculatorGlanceWidget : GlanceAppWidget() {
         try {
             provideContent {
                 DynamicThemeGlance(context) {
-                    CalculatorWidgetContent("12*8", "96")
+                    // Opaque: the picker draws previews on its own background, and a
+                    // transparent one there reads as a broken widget.
+                    CalculatorWidgetContent("12*8", "96", transparent = false)
                 }
             }
         } catch (t: Throwable) {
@@ -122,11 +128,14 @@ class CalculatorGlanceWidget : GlanceAppWidget() {
 }
 
 @Composable
-private fun CalculatorWidgetContent(input: String, result: String) {
+private fun CalculatorWidgetContent(input: String, result: String, transparent: Boolean) {
     Column(
         modifier = GlanceModifier
             .fillMaxSize()
-            .background(GlanceTheme.colors.surface)
+            .then(
+                if (transparent) GlanceModifier
+                else GlanceModifier.background(GlanceTheme.colors.surface)
+            )
             .cornerRadius(20.dp)
             .padding(6.dp),
     ) {

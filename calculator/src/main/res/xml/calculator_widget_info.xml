@@ -4,6 +4,8 @@
     android:minHeight="180dp"
     android:updatePeriodMillis="0"
     android:initialLayout="@layout/glance_widget_initial_layout"
+    android:configure="com.vayunmathur.calculator.widget.CalculatorWidgetSettingsActivity"
+    android:widgetFeatures="reconfigurable|configuration_optional"
     android:description="@string/calculator_widget_description"
     android:resizeMode="horizontal|vertical"
     android:widgetCategory="home_screen" />
