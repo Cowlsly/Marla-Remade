@@ -112,7 +112,7 @@ class LocationTrackingService : Service(), SensorEventListener {
     private var trackerScanJob: Job? = null
 
     private val networkListener = LocationListener { location ->
-        lastKnownLocation = location
+        recordFix(location)
         if (location.accuracy > 100f) {
             if (!isGpsRunning && isMoving) startGps()
         } else {
@@ -120,7 +120,28 @@ class LocationTrackingService : Service(), SensorEventListener {
         }
     }
     private val gpsListener = LocationListener { location ->
-        lastKnownLocation = location
+        recordFix(location)
+    }
+
+    /**
+     * Keeps the best recent fix rather than simply the newest one.
+     *
+     * The network provider delivers a fix every ten seconds and its answer wanders by tens
+     * to hundreds of metres between them, so overwriting a recent GPS fix with one of those
+     * made a phone sitting on a table appear to move around the city. A coarser fix only
+     * wins once the one being held has gone stale enough to be the worse answer.
+     */
+    private fun recordFix(location: Location) {
+        val held = lastKnownLocation
+        if (held == null) {
+            lastKnownLocation = location
+            return
+        }
+        val age = location.elapsedRealtimeNanos - held.elapsedRealtimeNanos
+        if (age <= 0) return
+        if (age > FIX_MAX_AGE_NANOS || location.accuracy <= held.accuracy) {
+            lastKnownLocation = location
+        }
     }
 
     private suspend fun syncHeartbeat() {
@@ -298,18 +319,30 @@ class LocationTrackingService : Service(), SensorEventListener {
                 }
             }
 
-            val inWaypoint = currentWaypoints.find { havershine(it.coord, lastLoc.coord) < it.range }
+            val accuracy = lastLoc.acc.toDouble()
             val prevId = user.lastWaypointId
-            val stillInsidePrev = prevId?.let { pid ->
-                currentWaypoints.find { it.id == pid }?.let {
-                    havershine(it.coord, lastLoc.coord) < it.range * 1.2
+            // A fix that cannot say which side of the boundary it is on must not move the
+            // answer. A stationary phone on network fixes wanders far enough to cross and
+            // re-cross a 100 m geofence every few seconds, and every crossing notified.
+            val currentId: Long? = if (accuracy > GEOFENCE_MAX_ACCURACY_METERS) {
+                prevId
+            } else {
+                // Entering needs the whole error circle inside; leaving needs it wholly
+                // outside the hysteresis margin, so the edge cases stay where they were.
+                val entered = currentWaypoints.find {
+                    havershine(it.coord, lastLoc.coord) + accuracy < it.range
                 }
-            } ?: false
-            val currentId: Long? = inWaypoint?.id ?: if (stillInsidePrev) prevId else null
+                val stillInsidePrev = prevId?.let { pid ->
+                    currentWaypoints.find { it.id == pid }?.let {
+                        havershine(it.coord, lastLoc.coord) - accuracy < it.range * WAYPOINT_EXIT_HYSTERESIS
+                    }
+                } ?: false
+                entered?.id ?: prevId.takeIf { stillInsidePrev }
+            }
+            val currentWaypoint = currentWaypoints.find { it.id == currentId }
 
-            // Display name: prefer waypoint name (either entered or sticky-via-hysteresis), then geocoded address.
-            val displayName = inWaypoint?.name
-                ?: currentWaypoints.find { it.id == currentId }?.name
+            // Display name: prefer the waypoint we are in, then the geocoded address.
+            val displayName = currentWaypoint?.name
                 ?: runCatching { fetchAddress(lastLoc.coord.lat, lastLoc.coord.lon) }.getOrNull()?.let {
                     it.featureName ?: it.thoroughfare
                 }
@@ -329,9 +362,7 @@ class LocationTrackingService : Service(), SensorEventListener {
 
             if (currentId != prevId && user.id != Networking.userid) {
                 if (currentId != null) {
-                    val enteredName = inWaypoint?.name
-                        ?: currentWaypoints.find { it.id == currentId }?.name
-                        ?: displayName
+                    val enteredName = currentWaypoint?.name ?: displayName
                     createNotificationWithCategory(user.name, getString(R.string.notification_entered_waypoint, user.name, enteredName), "ENTRY_EXIT", user.id)
                 } else if (prevId != null) {
                     val exitedName = currentWaypoints.find { it.id == prevId }?.name ?: user.locationName
@@ -625,6 +656,23 @@ class LocationTrackingService : Service(), SensorEventListener {
         private const val ENTRY_EXIT_CHANNEL_ID = "entry_exit_channel"
         private const val UWB_REQUEST_CHANNEL_ID = "uwb_request_channel"
         private const val NOTIFICATION_ID = 101
+
+        /**
+         * How stale the held fix has to be before a less accurate one replaces it.
+         *
+         * Long enough that a burst of coarse network fixes cannot displace a good GPS one,
+         * short enough that a device which has lost GPS still reports where it now is.
+         */
+        private val FIX_MAX_AGE_NANOS = 2.minutes.inWholeNanoseconds
+
+        /**
+         * Accuracy beyond which a fix is not used to decide geofence membership. Matches the
+         * gate the tracker sighting path already applies.
+         */
+        private const val GEOFENCE_MAX_ACCURACY_METERS = 100.0
+
+        /** How far past a geofence's radius a fix has to be before it counts as having left. */
+        private const val WAYPOINT_EXIT_HYSTERESIS = 1.2
     }
 
     private fun setupNotificationChannels() {
