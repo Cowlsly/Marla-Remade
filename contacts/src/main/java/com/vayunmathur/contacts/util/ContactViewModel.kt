@@ -19,6 +19,7 @@ import com.vayunmathur.contacts.data.CDKNickname
 import com.vayunmathur.contacts.data.CDKPhone
 import com.vayunmathur.contacts.data.CDKStructuredPostal
 import com.vayunmathur.contacts.data.Contact
+import com.vayunmathur.contacts.data.ContactDetail
 import com.vayunmathur.contacts.data.ContactDetails
 import com.vayunmathur.contacts.data.ContactGroup
 import com.vayunmathur.contacts.data.ContactPrefill
@@ -831,7 +832,10 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             birthday = contact?.birthday?.startDate,
             accountName = contact?.accountName ?: _lastSelectedAccount.value?.name ?: "",
             accountType = contact?.accountType ?: _lastSelectedAccount.value?.type ?: "",
-            phoneNumbers = mergePhones(details?.phoneNumbers ?: emptyList(), prefill?.phones ?: emptyList()),
+            // Almost every contact has a phone number, so the editor opens with a row ready
+            // rather than making the user press "add phone" first. Blank rows are dropped on save.
+            phoneNumbers = mergePhones(details?.phoneNumbers ?: emptyList(), prefill?.phones ?: emptyList())
+                .ifEmpty { listOf(ContactDetail.default<PhoneNumber>()) },
             emails = mergeEmails(details?.emails ?: emptyList(), prefill?.emails ?: emptyList()),
             dates = details?.dates ?: emptyList(),
             addresses = mergeAddresses(details?.addresses ?: emptyList(), prefill?.postals ?: emptyList()),
@@ -984,13 +988,14 @@ class ContactViewModel(application: Application) : AndroidViewModel(application)
             }
         }
         val original = editingOriginal
+        val phoneNumbers = draft.phoneNumbers.filter { it.number.isNotBlank() }
         val birthdayId = original?.birthday?.id ?: 0L
         val datesWithoutBirthday = draft.dates.filter { it.type != CDKEvent.TYPE_BIRTHDAY }.toMutableList()
         draft.birthday?.let { bday ->
             datesWithoutBirthday += Event(birthdayId, bday, CDKEvent.TYPE_BIRTHDAY)
         }
         val details = ContactDetails(
-            phoneNumbers = draft.phoneNumbers,
+            phoneNumbers = phoneNumbers,
             emails = draft.emails,
             addresses = draft.addresses,
             dates = datesWithoutBirthday,

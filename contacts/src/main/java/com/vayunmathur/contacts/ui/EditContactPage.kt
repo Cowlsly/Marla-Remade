@@ -29,13 +29,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import com.vayunmathur.library.ui.R as UiR
+import com.vayunmathur.library.ui.AssistChip
 import com.vayunmathur.library.ui.Button
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
 import com.vayunmathur.library.ui.ExperimentalMaterial3Api
 import com.vayunmathur.library.ui.FilledTonalButton
 import com.vayunmathur.library.ui.FormDetailGroup
-import com.vayunmathur.library.ui.FormSection
 import com.vayunmathur.library.ui.IconButton
 import com.vayunmathur.library.ui.InputChip
 import com.vayunmathur.library.ui.LabeledTextField
@@ -58,6 +58,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringArrayResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.TextFieldValue
@@ -89,6 +90,7 @@ import com.vayunmathur.library.ui.IconCall
 import com.vayunmathur.library.ui.IconEdit
 import com.vayunmathur.library.ui.IconEvent
 import com.vayunmathur.library.ui.IconGroup
+import com.vayunmathur.library.ui.IconLocationOn
 import com.vayunmathur.library.ui.IconMail
 import com.vayunmathur.library.ui.IconRemoveCircle
 import com.vayunmathur.library.ui.appBarScrollBehavior
@@ -203,7 +205,13 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
             Spacer(Modifier.height(24.dp))
 
 
-            FormSection {
+            // Plain Column rather than FormSection: DetailScaffold already insets its content
+            // horizontally, and the section's own padding on top of that made the name fields
+            // narrower than every field below them.
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
                 LabeledTextField(
                     value = currentDraft.firstName,
                     onValueChange = { v -> viewModel.updateEditDraft { it.copy(firstName = v) } },
@@ -343,7 +351,7 @@ fun EditContactPage(backStack: NavBackStack<Route>, viewModel: ContactViewModel,
                 onLabelChange = { idx, v -> viewModel.updateEditDraft { it.copy(addresses = it.addresses.toMutableList().also { l -> l[idx] = l[idx].withLabel(v) }) } },
                 customLabelText = stringResource(R.string.custom_label),
                 customPlaceholder = stringResource(R.string.enter_custom_label),
-                addIcon = { IconEvent() },
+                addIcon = { IconLocationOn() },
             )
 
             Spacer(Modifier.height(16.dp))
@@ -392,6 +400,7 @@ fun AccountChooser(
             onValueChange = {},
             readOnly = true,
             label = { Text(stringResource(R.string.account)) },
+            singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             trailingIcon = {
                 IconButton(onClick = { expanded = true }) {
@@ -442,42 +451,63 @@ private fun getCountryFlagEmoji(phoneNumber: String): String {
     }
 }
 
-val namePrefixes = listOf("None", "Dr", "Mr", "Mrs", "Ms")
-val nameSuffixes = listOf("None", "Jr", "Sr", "I", "II", "III", "IV", "V")
-
+/**
+ * The prefix/suffix picker that sits inside the first/last name fields.
+ *
+ * A chip rather than a bare [TextButton]: it shares the field's background otherwise, so
+ * there was nothing to show it is a separate value and not part of the name being typed.
+ * [placeholder] is shown while nothing is chosen, since an empty chip reads as a stray icon.
+ */
 @Composable
-fun NamePrefixChooser(namePrefix: String, onNamePrefixChange: (String) -> Unit) {
+private fun NameAffixChooser(
+    value: String,
+    placeholder: String,
+    options: List<String>,
+    onValueChange: (String) -> Unit,
+) {
     var expanded by remember { mutableStateOf(false) }
-    TextButton(onClick = { expanded = true }) {
-        Text(namePrefix)
-        IconArrowDropDown()
+    val none = stringResource(R.string.name_affix_none)
+    Box {
+        AssistChip(
+            onClick = { expanded = true },
+            label = { Text(value.ifEmpty { placeholder }) },
+            trailingIcon = { IconArrowDropDown() },
+        )
         DropdownMenu(expanded, { expanded = false }) {
-            namePrefixes.forEach { prefix ->
-                DropdownMenuItem(text = { Text(prefix) }, onClick = {
-                    onNamePrefixChange(if(prefix == "None") "" else prefix)
+            // The clear option is listed by its localized name but stores an empty affix, so
+            // the contact does not end up with the word "None" as its title.
+            (listOf(none) + options).forEach { option ->
+                DropdownMenuItem(text = { Text(option) }, onClick = {
+                    onValueChange(if (option == none) "" else option)
                     expanded = false
                 })
             }
         }
     }
+}
+
+@Composable
+fun NamePrefixChooser(namePrefix: String, onNamePrefixChange: (String) -> Unit) {
+    NameAffixChooser(
+        value = namePrefix,
+        placeholder = stringResource(R.string.name_prefix),
+        options = stringArrayResource(R.array.name_prefixes).toList(),
+        onValueChange = onNamePrefixChange,
+    )
 }
 
 @Composable
 fun NameSuffixChooser(nameSuffix: String, onNameSuffixChange: (String) -> Unit) {
-    var expanded by remember { mutableStateOf(false) }
-    TextButton(onClick = { expanded = true }) {
-        Text(nameSuffix)
-        IconArrowDropDown()
-        DropdownMenu(expanded, { expanded = false }) {
-            nameSuffixes.forEach { suffix ->
-                DropdownMenuItem(text = { Text(suffix) }, onClick = {
-                    onNameSuffixChange(suffix)
-                    expanded = false
-                })
-            }
-        }
-    }
+    NameAffixChooser(
+        value = nameSuffix,
+        placeholder = stringResource(R.string.name_suffix),
+        options = stringArrayResource(R.array.name_suffixes).toList(),
+        onValueChange = onNameSuffixChange,
+    )
 }
+
+/** Width of a field's trailing [IconButton], kept clear of any full-row tap overlay. */
+private val RemoveButtonWidth = 48.dp
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -495,6 +525,7 @@ private fun Birthday(
             onValueChange = { },
             readOnly = true,
             label = {Text(stringResource(R.string.birthday))},
+            singleLine = true,
             modifier = Modifier.fillMaxWidth(),
             trailingIcon = {
                 IconButton(onClick = { setBirthday(null) }) {
@@ -502,12 +533,16 @@ private fun Birthday(
                 }
             }
         )
-        Box(
-            modifier = Modifier
-                .matchParentSize()
-        ) {
-            Box(Modifier.fillMaxWidth(0.9f).fillMaxHeight()
-                .clickable { backStack.add(Route.EventDatePickerDialog("birthday",birthday)) }){}
+        // The field is read-only and opens the picker, so the whole row is the tap target -
+        // except the trailing remove button, which needs its own clicks to reach it.
+        Row(Modifier.matchParentSize()) {
+            Box(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clickable { backStack.add(Route.EventDatePickerDialog("birthday", birthday)) }
+            )
+            Spacer(Modifier.width(RemoveButtonWidth))
         }
     }
 
@@ -564,6 +599,7 @@ private fun ColumnScope.DateDetailsSection(
                         }
                     }
                 },
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
             Box(
@@ -583,6 +619,7 @@ private fun ColumnScope.DateDetailsSection(
                 },
                 label = { Text(stringResource(R.string.custom_label)) },
                 placeholder = { Text(stringResource(R.string.enter_custom_label)) },
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth()
             )
         }

@@ -40,6 +40,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.takeOrElse
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
+import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation3.runtime.NavEntry
 import androidx.navigation3.scene.DialogSceneStrategy
 import androidx.navigation3.ui.NavDisplay
@@ -237,9 +240,33 @@ fun <T: NavKey> MainNavigation(
         }
     }
 }
+/**
+ * Keeps a [NavBackStack] alive while the Activity around it is destroyed and recreated.
+ *
+ * A ViewModel rather than `rememberSaveable` because the stack holds app-defined [NavKey]s,
+ * which are not all bundleable — and a configuration change is what actually loses them.
+ */
+internal class RetainedNavBackStack : ViewModel() {
+    var stack: NavBackStack<*>? = null
+}
+
 @Composable
 fun <T: NavKey> rememberNavBackStack(vararg elements: T): NavBackStack<T> {
-    return remember { NavBackStack(elements) }
+    // Changing the font scale or rotating recreates the Activity, and a plain remember would
+    // rebuild the stack from `elements` — dropping the user back on the start screen, losing
+    // whatever they were part-way through. Keyed on the start route so an owner hosting more
+    // than one stack (previews render several) gives each its own.
+    val owner = LocalViewModelStoreOwner.current
+        ?: return remember { NavBackStack(elements) }
+    val retained = viewModel<RetainedNavBackStack>(
+        viewModelStoreOwner = owner,
+        key = "nav-back-stack-${elements.firstOrNull()?.let { it::class.qualifiedName }}",
+    )
+    return remember(retained) {
+        @Suppress("UNCHECKED_CAST")
+        (retained.stack as? NavBackStack<T>)
+            ?: NavBackStack(elements).also { retained.stack = it }
+    }
 }
 
 fun DialogPage() = DialogSceneStrategy.dialog()

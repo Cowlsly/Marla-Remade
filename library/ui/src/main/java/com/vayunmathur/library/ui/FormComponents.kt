@@ -176,6 +176,7 @@ fun <T> FormDetailGroup(
                     }
                 },
                 keyboardOptions = KeyboardOptions(keyboardType = keyboardType),
+                singleLine = true,
                 modifier = Modifier.fillMaxWidth(),
             )
             if (isCustom(item) && onLabelChange != null) {
@@ -185,6 +186,7 @@ fun <T> FormDetailGroup(
                     onValueChange = { v -> onLabelChange(index, v) },
                     label = { Text(customLabelText ?: label) },
                     placeholder = customPlaceholder?.let { { Text(it) } },
+                    singleLine = true,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
