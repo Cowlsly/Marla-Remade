@@ -170,10 +170,8 @@ dependencies {
     implementation(libs.androidx.webkit)
 
     // ---- WhatsApp primary client ----
-    // Room — E2E state + message/thread/reaction/poll cache (communicate's first Room DB).
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
+    // Room - E2E state + message/thread/reaction/poll cache (communicate's first Room DB).
+    implementRoom(libs)
     implementation(project(":library:room"))
 
     // Protobuf runtime — full Java variant. The lite runtime drops the

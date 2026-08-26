@@ -1,13 +1,13 @@
 package com.vayunmathur.library.room
 
 import android.content.Context
-import androidx.room.Room
-import androidx.room.RoomDatabase
-import androidx.room.migration.Migration
+import androidx.room3.Room
+import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.DatabaseMigrations
 import com.vayunmathur.library.util.databases
-import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
+import net.zetetic.database.sqlcipher.driver.SQLCipherDriver
 import java.io.File
 import java.io.FileInputStream
 
@@ -135,16 +135,7 @@ private fun <T : RoomDatabase> Context.openRoomDatabase(
         dbName
     ).addMigrations(*resolvedMigrations.toTypedArray())
 
-    builder.openHelperFactory(SupportOpenHelperFactory(password.toByteArray(Charsets.UTF_8)))
-
-    // Force TRUNCATE (rollback-journal) mode instead of the default WAL. With the
-    // net.zetetic SQLCipher SupportSQLiteOpenHelper, WAL breaks Room's
-    // InvalidationTracker: a write marks the table dirty but the change
-    // notification isn't dispatched until a *later* write forces a refresh, so
-    // Flow-backed queries only update on the next unrelated DB write (observed as
-    // list UIs lagging until the next background write). TRUNCATE restores prompt,
-    // per-write invalidation for every RoomDatabase built through this helper.
-    builder.setJournalMode(RoomDatabase.JournalMode.TRUNCATE)
+    builder.setDriver(SQLCipherDriver(password.toByteArray(Charsets.UTF_8), null, null))
 
     return builder.build()
 }

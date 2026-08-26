@@ -1,8 +1,8 @@
 package com.vayunmathur.library.room
 
 import android.content.Context
-import androidx.room.RoomDatabase
-import androidx.room.migration.Migration
+import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
 import kotlin.reflect.KClass
 
 /**

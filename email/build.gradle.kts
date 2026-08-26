@@ -37,9 +37,7 @@ android {
 dependencies {
     implementation(libs.androidx.browser)
     implementation(libs.kotlinx.serialization.json)
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
+    implementRoom(libs)
     implementation(project(":library:room"))
     implementation(libs.androidx.work.runtime.ktx)
     implementation(libs.androidx.glance)

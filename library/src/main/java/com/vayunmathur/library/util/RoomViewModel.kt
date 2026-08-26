@@ -1,14 +1,14 @@
 package com.vayunmathur.library.util
 
-import androidx.room.Dao
-import androidx.room.Delete
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverter
-import androidx.room.Upsert
-import androidx.room.migration.Migration
+import androidx.room3.Dao
+import androidx.room3.Delete
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.ColumnTypeConverter
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
 import kotlinx.coroutines.flow.Flow
 import kotlinx.datetime.LocalTime
 import kotlinx.serialization.json.Json
@@ -94,43 +94,43 @@ interface DatabaseMigrations {
 }
 
 class DefaultConverters {
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromInstant(value: Instant) = value.epochSeconds
-    @TypeConverter
+    @ColumnTypeConverter
     fun toInstant(value: Long) = Instant.fromEpochSeconds(value)
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromInstantNullable(value: Instant?): Long? = value?.epochSeconds
-    @TypeConverter
+    @ColumnTypeConverter
     fun toInstantNullable(value: Long?): Instant? = value?.let { Instant.fromEpochSeconds(it) }
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromList(value: List<Long>?): String? {
         return value?.let { Json.encodeToString(it) }
     }
-    @TypeConverter
+    @ColumnTypeConverter
     fun toList(value: String?): List<Long>? {
         return value?.let { Json.decodeFromString<List<Long>>(it) }
     }
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromListS(value: List<String>): String {
         return Json.encodeToString(value)
     }
-    @TypeConverter
+    @ColumnTypeConverter
     fun toListS(value: String): List<String> {
         return Json.decodeFromString<List<String>>(value)
     }
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromDuration(value: Duration) = value.inWholeMilliseconds
-    @TypeConverter
+    @ColumnTypeConverter
     fun toDuration(value: Long) = value.milliseconds
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromDurationNullable(value: Duration?): Long? = value?.inWholeMilliseconds
-    @TypeConverter
+    @ColumnTypeConverter
     fun toDurationNullable(value: Long?): Duration? = value?.milliseconds
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromLocalTime(value: LocalTime) = value.toSecondOfDay()
-    @TypeConverter
+    @ColumnTypeConverter
     fun toLocalTime(value: Int) = LocalTime.fromSecondOfDay(value)
 }

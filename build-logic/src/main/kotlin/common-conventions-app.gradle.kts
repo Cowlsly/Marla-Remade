@@ -234,9 +234,8 @@ dependencies {
 }
 
 fun DependencyHandlerScope.justSoItShowsAsUsedSomewhere() {
-    implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
-    ksp(libs.androidx.room.compiler)
+    implementation(libs.androidx.room3.runtime)
+    ksp(libs.androidx.room3.compiler)
 }
 
 // Apps consume Material only through `:library:ui` wrappers, but some re-exported
