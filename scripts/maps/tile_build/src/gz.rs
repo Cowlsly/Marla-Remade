@@ -20,8 +20,99 @@ const FCOMMENT: u8 = 1 << 4;
 const LEVEL: u8 = 9;
 
 /// Wrap `data` in a gzip stream.
+///
+/// Convenience over [`Compressor`] for one-shot callers (directories, tests). The
+/// tilers use a per-worker [`Compressor`] instead — see its docs for why.
 pub fn compress(data: &[u8]) -> Vec<u8> {
-    let body = miniz_oxide::deflate::compress_to_vec(data, LEVEL);
+    frame(data, &miniz_oxide::deflate::compress_to_vec(data, LEVEL))
+}
+
+/// A reusable DEFLATE state, so a tile's compression does not pay for building one.
+///
+/// `miniz_oxide::deflate::compress_to_vec` constructs a fresh `CompressorOxide` per
+/// call, and that state is large — a 32 KiB dictionary plus hash and Huffman tables,
+/// hundreds of kilobytes, much of it zeroed on construction. On one core that block
+/// is reused by the allocator and stays cache-hot, so it costs almost nothing. Across
+/// 32 cores each worker rebuilds its own every tile, and the encode pass becomes
+/// memory-bandwidth bound: measured on 200k synthetic roads at z14, it went 3.72s at
+/// one thread to 1.55s at four and then back UP to 3.23s at 32. Reusing one state per
+/// worker is what removes that ceiling.
+///
+/// Output is byte-for-byte what `compress` produces — `reset` keeps the parameters,
+/// and `the_reusable_compressor_matches_the_one_shot_one` holds the two to it.
+pub struct Compressor {
+    state: miniz_oxide::deflate::core::CompressorOxide,
+    /// Grown to the largest tile seen and then reused, so the output buffer is not
+    /// reallocated per tile either.
+    scratch: Vec<u8>,
+    used: bool,
+}
+
+impl Default for Compressor {
+    fn default() -> Compressor {
+        Compressor::new()
+    }
+}
+
+impl Compressor {
+    pub fn new() -> Compressor {
+        // The flags `compress_to_vec(_, LEVEL)` computes: window_bits 0 (raw DEFLATE,
+        // no zlib wrapper) and the default strategy. Matching them is what makes the
+        // two functions produce the same bytes.
+        let flags = miniz_oxide::deflate::core::create_comp_flags_from_zip_params(
+            LEVEL as i32,
+            0,
+            0,
+        );
+        Compressor {
+            state: miniz_oxide::deflate::core::CompressorOxide::new(flags),
+            scratch: Vec::new(),
+            used: false,
+        }
+    }
+
+    /// Wrap `data` in a gzip stream, reusing this compressor's state.
+    pub fn compress(&mut self, data: &[u8]) -> Vec<u8> {
+        use miniz_oxide::deflate::core::{compress, TDEFLFlush, TDEFLStatus};
+
+        if self.used {
+            self.state.reset();
+        }
+        self.used = true;
+
+        // Deflate output does not depend on how the output buffer is chunked, only on
+        // the input and the parameters, so growing rather than guessing right is safe.
+        let want = data.len().saturating_add(data.len() / 2).saturating_add(64);
+        if self.scratch.len() < want {
+            self.scratch.resize(want, 0);
+        }
+
+        let mut input = data;
+        let mut at = 0usize;
+        loop {
+            let (status, read, wrote) =
+                compress(&mut self.state, input, &mut self.scratch[at..], TDEFLFlush::Finish);
+            at += wrote;
+            match status {
+                TDEFLStatus::Done => break,
+                TDEFLStatus::Okay if read <= input.len() => {
+                    input = &input[read..];
+                    if self.scratch.len() - at < 64 {
+                        let grown = (self.scratch.len() * 2).max(at + 64);
+                        self.scratch.resize(grown, 0);
+                    }
+                }
+                // Upstream panics here too: the remaining statuses are "bad parameters"
+                // and "output buffer of length zero", neither of which can happen above.
+                other => panic!("deflate failed unexpectedly: {other:?}"),
+            }
+        }
+        frame(data, &self.scratch[..at])
+    }
+}
+
+/// The 10-byte gzip header, the deflate body, then CRC32 and ISIZE.
+fn frame(data: &[u8], body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(body.len() + 18);
     out.extend_from_slice(&[
         0x1f, 0x8b, // magic
@@ -31,7 +122,7 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
         0x00, // XFL
         0xff, // OS = unknown, again for reproducibility
     ]);
-    out.extend_from_slice(&body);
+    out.extend_from_slice(body);
     out.extend_from_slice(&crc32(data).to_le_bytes());
     out.extend_from_slice(&(data.len() as u32).to_le_bytes());
     out
@@ -133,6 +224,46 @@ mod tests {
     /// stream, not just our own writer's.
     const REAL_GZ: &[u8] = include_bytes!("../tests/fixtures/v5ca_z11_tile.mvt.gz");
     const REAL_RAW: &[u8] = include_bytes!("../tests/fixtures/v5ca_z11_tile.mvt");
+
+    /// The reusable compressor must be indistinguishable from the one-shot one, or
+    /// every archive built by a tiler differs from one built by a test helper.
+    ///
+    /// Reuse is the interesting half: a `reset` that left dictionary or Huffman state
+    /// behind would still produce a VALID gzip stream, just a different one, and only
+    /// comparing the bytes of the second and later calls catches it. So the corpus is
+    /// run through a single compressor in sequence, and each result is checked against
+    /// a fresh one-shot call.
+    #[test]
+    fn the_reusable_compressor_matches_the_one_shot_one() {
+        let mut corpus: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"a".to_vec(),
+            b"hello hello hello hello hello".to_vec(),
+            REAL_RAW.to_vec(),
+            // Highly compressible, then barely compressible: two very different paths
+            // through the Huffman tables, back to back.
+            vec![0u8; 100_000],
+            (0..70_000u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect(),
+        ];
+        // A run of small inputs after a large one, which is what a tiler actually does.
+        for i in 0..40u32 {
+            corpus.push(format!("tile body number {i} with some repetition repetition").into_bytes());
+        }
+
+        let mut reusable = Compressor::new();
+        for (i, data) in corpus.iter().enumerate() {
+            let want = compress(data);
+            let got = reusable.compress(data);
+            assert!(
+                got == want,
+                "corpus[{i}] ({} byte(s)): reused {} byte(s), one-shot {}",
+                data.len(),
+                got.len(),
+                want.len()
+            );
+            assert_eq!(&decompress(&got).unwrap(), data, "corpus[{i}] round trip");
+        }
+    }
 
     #[test]
     fn crc32_matches_the_known_check_value() {

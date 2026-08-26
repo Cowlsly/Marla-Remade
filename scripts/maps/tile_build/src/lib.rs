@@ -25,6 +25,11 @@
 //!     a tile's buffered rect.
 //!   * [`simplify`] — Douglas-Peucker in integer tile coordinates.
 //!   * [`pyramid`] — the tile pyramid driver and the drop policy.
+//!   * [`par`] — the thread budget (`--threads`, `MAPS_THREADS`) and the pool the
+//!     tilers run on. Parallelism never changes an output byte.
+//!   * [`spill`] — the on-disk record format and `tile_id`-range buckets the streaming
+//!     tiler partitions through, so peak memory tracks the tile COUNT rather than the
+//!     input bytes.
 //!   * [`tiling`] — bucket points into tiles, and merge tilesets.
 //!
 //! [`geom`], [`clip`] and [`simplify`] compose in one fixed order; [`geom`]'s module
@@ -53,9 +58,11 @@ pub mod geojson;
 pub mod geom;
 pub mod gz;
 pub mod mvt;
+pub mod par;
 pub mod pmtiles;
 pub mod progress;
 pub mod proto;
 pub mod pyramid;
 pub mod simplify;
+pub mod spill;
 pub mod tiling;

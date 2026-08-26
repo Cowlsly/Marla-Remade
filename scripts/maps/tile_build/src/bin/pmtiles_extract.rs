@@ -28,15 +28,16 @@
 //!
 //! ## Memory
 //!
-//! The input is read wholly into memory, like `tile_join`. That is fine for
-//! subsetting an overlay and **not** fine for the 1.5 GB published basemap: do that
-//! on a machine with the RAM for it. Making it streaming means a random-access
-//! reader over the directory tree, which is a different program.
+//! The input is opened, not read: only its root directory, its metadata, one tile body
+//! and a 12-byte row per tile are held, so subsetting the 1.5 GB published basemap no
+//! longer needs the RAM to hold it. The OUTPUT still goes through [`Builder`], which
+//! does hold every kept tile — so extracting most of a planet archive is still out of
+//! reach, and that is now the only ceiling.
 
 use std::collections::BTreeSet;
 use std::process::ExitCode;
 use tile_build::mvt::Tile;
-use tile_build::pmtiles::{self, Archive, Builder};
+use tile_build::pmtiles::{self, Archive, ArchiveFile, Builder};
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -129,27 +130,27 @@ fn main() -> ExitCode {
         }
     }
 
-    let bytes = match std::fs::read(&input) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("pmtiles_extract: cannot read {input}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let archive = match Archive::parse(&bytes) {
+    let mut archive = match ArchiveFile::open(&input) {
         Ok(a) => a,
         Err(e) => {
             eprintln!("pmtiles_extract: {input} is not a readable PMTiles archive: {e}");
             return ExitCode::FAILURE;
         }
     };
-    let tiles = match archive.iter_tiles() {
-        Ok(t) => t,
-        Err(e) => {
-            eprintln!("pmtiles_extract: cannot walk the tile directory: {e}");
-            return ExitCode::FAILURE;
+    let source_bytes = std::fs::metadata(&input).map(|m| m.len()).unwrap_or(0);
+    let compression = archive.header.tile_compression;
+    // Runs expanded: a run means several ids share one body and each id is its own tile
+    // in the subset.
+    let mut rows: Vec<(u64, u64, u32)> = Vec::new();
+    if let Err(e) = archive.visit_entries(&mut |e| {
+        for k in 0..e.run_length as u64 {
+            rows.push((e.tile_id + k, e.offset, e.length));
         }
-    };
+        Ok(())
+    }) {
+        eprintln!("pmtiles_extract: cannot walk the tile directory: {e}");
+        return ExitCode::FAILURE;
+    }
 
     let lo = min_zoom.unwrap_or(archive.header.min_zoom);
     let hi = max_zoom.unwrap_or(archive.header.max_zoom);
@@ -183,9 +184,10 @@ fn main() -> ExitCode {
     let mut dropped_bbox = 0usize;
     let mut dropped_layer = 0usize;
     let mut seen_layers: BTreeSet<String> = BTreeSet::new();
+    let mut body = Vec::new();
 
-    for (id, body) in tiles {
-        let (z, x, y) = pmtiles::tile_zxy(id);
+    for (id, off, len) in &rows {
+        let (z, x, y) = pmtiles::tile_zxy(*id);
         if z < lo || z > hi {
             dropped_zoom += 1;
             continue;
@@ -196,16 +198,22 @@ fn main() -> ExitCode {
                 continue;
             }
         }
+        // Read only after the cheap filters, so a bbox subset does not touch the bodies
+        // it is about to discard.
+        if let Err(e) = archive.body_into(*off, *len, &mut body) {
+            eprintln!("pmtiles_extract: z{z}/{x}/{y}: {e}");
+            return ExitCode::FAILURE;
+        }
         if layers.is_empty() {
             // Nothing to filter: copy the compressed body straight across, so the
             // subset is byte-identical to the source for every tile it keeps.
-            builder.add_tile_raw(id, body.to_vec());
+            builder.add_tile_raw(*id, body.clone());
             kept += 1;
             continue;
         }
 
-        let raw = if archive.header.tile_compression == pmtiles::COMPRESSION_GZIP {
-            match tile_build::gz::decompress(body) {
+        let raw = if compression == pmtiles::COMPRESSION_GZIP {
+            match tile_build::gz::decompress(&body) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("pmtiles_extract: z{z}/{x}/{y}: {e}");
@@ -213,7 +221,7 @@ fn main() -> ExitCode {
                 }
             }
         } else {
-            body.to_vec()
+            body.clone()
         };
         let mut tile = match Tile::decode(&raw) {
             Ok(t) => t,
@@ -279,7 +287,7 @@ fn main() -> ExitCode {
     eprintln!(
         "pmtiles_extract: wrote {out} ({:.1} MiB from {:.1} MiB): {kept} tile(s), z{lo}-{hi}",
         built.len() as f64 / (1024.0 * 1024.0),
-        bytes.len() as f64 / (1024.0 * 1024.0),
+        source_bytes as f64 / (1024.0 * 1024.0),
     );
     if !layers.is_empty() {
         eprintln!(

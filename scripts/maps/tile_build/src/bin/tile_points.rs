@@ -3,7 +3,7 @@
 //!
 //! Usage:
 //!   tile_points --geojson IN.geojsonseq --out OUT.pmtiles --layer NAME
-//!               [--minzoom N] [--maxzoom N]
+//!               [--minzoom N] [--maxzoom N] [--threads N]
 //!
 //! Input is one GeoJSON `Feature` per line with `Point` geometry, exactly what
 //! `gtfs_ingest`'s `transit_stops` binary and `osm_ingest`'s `poi_extract` and
@@ -19,6 +19,7 @@
 use std::process::ExitCode;
 use tile_build::geojson;
 use tile_build::geom::Geometry;
+use tile_build::par;
 use tile_build::tiling::{build_point_archive_with, Point};
 
 fn main() -> ExitCode {
@@ -51,6 +52,20 @@ fn main() -> ExitCode {
             }
             "--maxzoom" => {
                 maxzoom = take(i).and_then(|v| v.parse().ok()).unwrap_or(maxzoom);
+                i += 2;
+            }
+            "--threads" => {
+                let Some(raw) = take(i) else {
+                    eprintln!("tile_points: --threads needs a value");
+                    return ExitCode::from(2);
+                };
+                match par::parse_threads(&raw) {
+                    Ok(n) => par::set_threads(n),
+                    Err(e) => {
+                        eprintln!("tile_points: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
                 i += 2;
             }
             "-h" | "--help" => {
@@ -129,7 +144,7 @@ fn main() -> ExitCode {
 
 fn usage() {
     eprintln!("usage: tile_points --geojson IN.geojsonseq --out OUT.pmtiles --layer NAME");
-    eprintln!("                   [--minzoom N] [--maxzoom N]");
+    eprintln!("                   [--minzoom N] [--maxzoom N] [--threads N]");
 }
 
 /// One line's points, or `None` when the line is not point geometry.

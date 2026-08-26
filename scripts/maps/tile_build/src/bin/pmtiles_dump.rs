@@ -17,10 +17,15 @@
 //!            what `diff_pmtiles.py` reads.
 //!   tiles    one line per (z/x/y, layer). Verbose, for chasing a single tile.
 //!   header   the archive header fields, one per line.
+//!
+//! The archive is opened rather than read: `--mode header` costs a 127-byte read, and
+//! the other modes hold one tile body plus a 12-byte row per tile. Dumping a planet
+//! layer used to mean an 8 GB allocation before the first line of output.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::process::ExitCode;
 use tile_build::mvt::{GeomType, Tile};
+use tile_build::pmtiles::ArchiveFile;
 use tile_build::{gz, pmtiles};
 
 fn main() -> ExitCode {
@@ -77,23 +82,14 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    let bytes = match std::fs::read(&input) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("pmtiles_dump: cannot read {input}: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-    let archive = match pmtiles::Archive::parse(&bytes) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("pmtiles_dump: {input} is not a readable PMTiles archive: {e}");
-            return ExitCode::FAILURE;
-        }
-    };
-
     if mode == "header" {
-        let h = &archive.header;
+        let h = match ArchiveFile::read_header(&input) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("pmtiles_dump: {input} is not a readable PMTiles archive: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
         println!("min_zoom\t{}", h.min_zoom);
         println!("max_zoom\t{}", h.max_zoom);
         println!("addressed_tiles\t{}", h.addressed_tiles);
@@ -109,23 +105,41 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    let tiles = match archive.iter_tiles() {
-        Ok(t) => t,
+    let mut archive = match ArchiveFile::open(&input) {
+        Ok(a) => a,
         Err(e) => {
-            eprintln!("pmtiles_dump: cannot walk the tile directory: {e}");
+            eprintln!("pmtiles_dump: {input} is not a readable PMTiles archive: {e}");
             return ExitCode::FAILURE;
         }
     };
+    let compression = archive.header.tile_compression;
+
+    // Runs expanded, so a run of identical ocean tiles is still counted once per tile.
+    let mut rows: Vec<(u64, u64, u32)> = Vec::new();
+    if let Err(e) = archive.visit_entries(&mut |e| {
+        for k in 0..e.run_length as u64 {
+            rows.push((e.tile_id + k, e.offset, e.length));
+        }
+        Ok(())
+    }) {
+        eprintln!("pmtiles_dump: cannot walk the tile directory: {e}");
+        return ExitCode::FAILURE;
+    }
 
     // (zoom, layer) -> accumulator, ordered by BTreeMap so the output is sorted
     // without a separate sort step.
     let mut agg: BTreeMap<(u8, String), Agg> = BTreeMap::new();
     let mut undecodable = 0usize;
+    let mut body = Vec::new();
 
-    for (id, body) in tiles {
-        let (z, x, y) = pmtiles::tile_zxy(id);
-        let raw = if archive.header.tile_compression == pmtiles::COMPRESSION_GZIP {
-            match gz::decompress(body) {
+    for (id, off, len) in &rows {
+        let (z, x, y) = pmtiles::tile_zxy(*id);
+        if let Err(e) = archive.body_into(*off, *len, &mut body) {
+            eprintln!("pmtiles_dump: z{z}/{x}/{y}: {e}");
+            return ExitCode::FAILURE;
+        }
+        let raw = if compression == pmtiles::COMPRESSION_GZIP {
+            match gz::decompress(&body) {
                 Ok(v) => v,
                 Err(e) => {
                     eprintln!("pmtiles_dump: z{z}/{x}/{y}: {e}");
@@ -134,7 +148,7 @@ fn main() -> ExitCode {
                 }
             }
         } else {
-            body.to_vec()
+            body.clone()
         };
         let tile = match Tile::decode(&raw) {
             Ok(t) => t,

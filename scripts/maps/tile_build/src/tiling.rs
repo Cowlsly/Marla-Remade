@@ -9,8 +9,10 @@
 
 use crate::geom::project;
 use crate::mvt::{self, Feature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
-use crate::pmtiles::{self, Archive, Builder};
+use crate::par;
+use crate::pmtiles::{self, Archive, ArchiveFile, Builder};
 use crate::progress::Progress;
+use rayon::prelude::*;
 use std::path::{Path, PathBuf};
 use crate::proto::Result;
 use std::collections::HashMap;
@@ -22,6 +24,10 @@ pub struct Point {
     pub lat: f64,
     pub props: Vec<(String, Value)>,
 }
+
+/// One tile's points as `(x, y, source index)`. The index is carried so the feature
+/// order can be made total, which is what makes a rebuild byte-identical.
+type PointBucket = Vec<(i32, i32, usize)>;
 
 /// Bucket points into tiles for one zoom and encode each as an MVT.
 ///
@@ -35,7 +41,7 @@ pub fn tile_points(
     extent: u32,
 ) -> Vec<(u64, Vec<u8>)> {
     let n = 1u64 << z;
-    let mut by_tile: HashMap<(u64, u64), Vec<(i32, i32, usize)>> = HashMap::new();
+    let mut by_tile: HashMap<(u64, u64), PointBucket> = HashMap::new();
     for (i, p) in points.iter().enumerate() {
         let (fx, fy) = project(p.lon, p.lat, z);
         if !fx.is_finite() || !fy.is_finite() {
@@ -56,23 +62,31 @@ pub fn tile_points(
         ));
     }
 
-    let mut out = Vec::with_capacity(by_tile.len());
-    for ((tx, ty), mut pts) in by_tile {
-        // Deterministic feature order, so a rebuild is byte-identical.
-        pts.sort_by_key(|&(x, y, i)| (x, y, i));
-        let mut layer = Layer::new(layer_name);
-        layer.extent = extent;
-        for (x, y, i) in pts {
-            layer.features.push(Feature {
-                id: None,
-                geom_type: GeomType::Point,
-                geometry: mvt::encode_points(&[(x, y)]),
-                props: points[i].props.clone(),
-            });
-        }
-        let tile = Tile { layers: vec![layer] };
-        out.push((pmtiles::tile_id(z, tx, ty), tile.encode()));
-    }
+    // Out of the map before encoding, so the encode is an indexed map the pool can
+    // split. The map's own iteration order is arbitrary; the sort at the end is what
+    // makes the result deterministic, exactly as before.
+    let mut buckets: Vec<((u64, u64), PointBucket)> = by_tile.into_iter().collect();
+    let mut out: Vec<(u64, Vec<u8>)> = par::install(|| {
+        buckets
+            .par_iter_mut()
+            .map(|((tx, ty), pts)| {
+                // Deterministic feature order, so a rebuild is byte-identical.
+                pts.sort_by_key(|&(x, y, i)| (x, y, i));
+                let mut layer = Layer::new(layer_name);
+                layer.extent = extent;
+                for &(x, y, i) in pts.iter() {
+                    layer.features.push(Feature {
+                        id: None,
+                        geom_type: GeomType::Point,
+                        geometry: mvt::encode_points(&[(x, y)]),
+                        props: points[i].props.clone(),
+                    });
+                }
+                let tile = Tile { layers: vec![layer] };
+                (pmtiles::tile_id(z, *tx, *ty), tile.encode())
+            })
+            .collect()
+    });
     out.sort_by_key(|(id, _)| *id);
     out
 }
@@ -110,9 +124,21 @@ pub fn build_point_archive_with(
         // bucketing shows as a pause before the bar appears.
         let tiles = tile_points(layer_name, points, z, DEFAULT_EXTENT);
         let mut bar = Progress::new(format!("{layer_name} z{z}"), tiles.len(), TILES, progress);
-        for (id, body) in tiles {
-            bar.tick(TILES);
-            b.add_tile_raw(id, crate::gz::compress(&body));
+        // Level-9 DEFLATE is the cost here, and it is per-tile independent. A batch at
+        // a time so live memory is a few compressed bodies per thread rather than a
+        // second copy of the whole zoom, and the drain below stays in `tile_id` order.
+        for chunk in tiles.chunks(par::batch_len()) {
+            let packed: Vec<Vec<u8>> = par::install(|| {
+                chunk
+                    .par_iter()
+                    .with_min_len(par::MIN_TASK_LEN)
+                    .map_init(crate::gz::Compressor::new, |gz, (_, body)| gz.compress(body))
+                    .collect()
+            });
+            for ((id, _), gz) in chunk.iter().zip(packed) {
+                bar.tick(TILES);
+                b.add_tile_raw(*id, gz);
+            }
         }
         bar.finish(TILES);
     }
@@ -133,6 +159,68 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
     )
 }
 
+/// A merge input: its header, its metadata, its tile entries and its bodies.
+///
+/// Implemented for both `&`[`Archive`] and [`ArchiveFile`], so one merge works whether
+/// the inputs are resident or on disk. The methods take `&mut self` because a file
+/// reader has to seek; `&Archive` implements it too and mutates nothing.
+pub trait TileSource {
+    fn header(&self) -> &pmtiles::Header;
+    fn metadata(&self) -> &[u8];
+    /// Every tile entry, ascending by `tile_id`, runs unexpanded.
+    fn visit_entries(
+        &mut self,
+        visit: &mut dyn FnMut(&pmtiles::Entry) -> Result<()>,
+    ) -> Result<()>;
+    /// The still-compressed body at `offset..offset + length`, into a reused buffer.
+    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()>;
+}
+
+impl TileSource for &Archive {
+    fn header(&self) -> &pmtiles::Header {
+        &self.header
+    }
+
+    fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+
+    fn visit_entries(
+        &mut self,
+        visit: &mut dyn FnMut(&pmtiles::Entry) -> Result<()>,
+    ) -> Result<()> {
+        Archive::visit_entries(self, visit)
+    }
+
+    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
+        let body = Archive::body_at(self, offset, length)?;
+        out.clear();
+        out.extend_from_slice(body);
+        Ok(())
+    }
+}
+
+impl TileSource for ArchiveFile {
+    fn header(&self) -> &pmtiles::Header {
+        &self.header
+    }
+
+    fn metadata(&self) -> &[u8] {
+        &self.metadata
+    }
+
+    fn visit_entries(
+        &mut self,
+        visit: &mut dyn FnMut(&pmtiles::Entry) -> Result<()>,
+    ) -> Result<()> {
+        ArchiveFile::visit_entries(self, visit)
+    }
+
+    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
+        ArchiveFile::body_into(self, offset, length, out)
+    }
+}
+
 /// Merge several archives straight to `out`, holding no archive in memory.
 ///
 /// The in-memory [`merge_archives`] is fine for a metro extract and cannot do a planet
@@ -140,15 +228,15 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 /// three more copies of every body. Measured on the real 7-layer overlay merge — 36.8 M
 /// tiles, 17 GB of inputs — that is roughly 76 GB and gets killed.
 ///
-/// This keeps only a `(tile_id, offset, length)` row per input tile (12 bytes) and one
-/// tile body at a time, so peak memory is set by the tile COUNT: about 1.5 GB for that
-/// same merge, versus 76 GB.
+/// This keeps only a `(tile_id, input, offset, length)` row per input tile — 24 bytes —
+/// and one tile body at a time, so peak memory is set by the tile COUNT: about 1.5 GB
+/// for that same merge, versus 76 GB.
 ///
-/// Inputs are still read into memory by the CALLER, because a PMTiles body can only be
-/// found through its directory and the directories live in the same file. That is the
-/// remaining ceiling and it is the size of the inputs, not a multiple of it.
-pub fn merge_archives_to(
-    inputs: &[&Archive],
+/// Whether the INPUTS are resident is the caller's choice, through [`TileSource`]. Pass
+/// [`ArchiveFile`]s and nothing but their root directories is held, which is what makes
+/// a planet-sized input joinable at all; pass `&`[`Archive`]s and it behaves as before.
+pub fn merge_archives_to<S: TileSource>(
+    inputs: &mut [S],
     out: impl AsRef<Path>,
     scratch: impl Into<PathBuf>,
     progress: bool,
@@ -156,8 +244,8 @@ pub fn merge_archives_to(
     let mut min_zoom = u8::MAX;
     let mut max_zoom = 0u8;
     let mut bounds: Option<(i32, i32, i32, i32)> = None;
-    for a in inputs {
-        let h = &a.header;
+    for a in inputs.iter() {
+        let h = a.header();
         min_zoom = min_zoom.min(h.min_zoom);
         max_zoom = max_zoom.max(h.max_zoom);
         bounds = Some(match bounds {
@@ -170,6 +258,13 @@ pub fn merge_archives_to(
             ),
         });
     }
+    // Folded before the entry walk takes the mutable borrows.
+    let metadata = if inputs.is_empty() {
+        None
+    } else {
+        let metas: Vec<&[u8]> = inputs.iter().map(|a| a.metadata()).collect();
+        Some(merge_metadata(&metas))
+    };
 
     // One row per input tile, sorted by (tile_id, input index) so a tile's sources come
     // out in input order -- which is what makes a later input win a layer collision.
@@ -177,10 +272,15 @@ pub fn merge_archives_to(
     // The offset is u64. A planet layer's data section is well past u32::MAX, so a
     // narrower field wraps every body beyond 4 GiB onto the wrong bytes.
     let mut rows: Vec<(u64, u32, u64, u32)> = Vec::new();
-    for (i, a) in inputs.iter().enumerate() {
-        for (id, off, len) in a.tile_offsets()? {
-            rows.push((id, i as u32, off, len));
-        }
+    for (i, a) in inputs.iter_mut().enumerate() {
+        // Pushed straight from the walk: materialising each input's own offset list
+        // first would hold a second copy of the rows for no gain.
+        a.visit_entries(&mut |e| {
+            for k in 0..e.run_length as u64 {
+                rows.push((e.tile_id + k, i as u32, e.offset, e.length));
+            }
+            Ok(())
+        })?;
     }
     rows.sort_unstable_by_key(|(id, i, _, _)| (*id, *i));
 
@@ -196,11 +296,13 @@ pub fn merge_archives_to(
         b.center_lon_e7 = midpoint_e7(w, e);
         b.center_lat_e7 = midpoint_e7(s, n);
     }
-    if !inputs.is_empty() {
-        b.metadata = merge_metadata(inputs);
+    if let Some(m) = metadata {
+        b.metadata = m;
     }
 
     let mut bar = Progress::new("merging".to_string(), rows.len(), TILES, progress);
+    // One body buffer, reused: a planet merge visits 36.8 M tiles.
+    let mut body = Vec::new();
     let mut k = 0usize;
     while k < rows.len() {
         let id = rows[k].0;
@@ -208,27 +310,27 @@ pub fn merge_archives_to(
         while j < rows.len() && rows[j].0 == id {
             j += 1;
         }
-        let group = &rows[k..j];
-        for _ in group {
+        for _ in k..j {
             bar.tick(TILES);
         }
 
-        if let [(_, i, off, len)] = group {
-            let src = inputs[*i as usize];
-            if src.header.tile_compression == pmtiles::COMPRESSION_GZIP {
+        if let [(_, i, off, len)] = rows[k..j] {
+            let src = &mut inputs[i as usize];
+            if src.header().tile_compression == pmtiles::COMPRESSION_GZIP {
                 // Sole owner, already gzip: the producer's bytes go straight out.
-                b.add_tile_raw(id, src.body_at(*off, *len)?)?;
+                src.body_into(off, len, &mut body)?;
+                b.add_tile_raw(id, &body)?;
                 k = j;
                 continue;
             }
         }
-        let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(group.len());
-        for (_, i, off, len) in group {
-            let src = inputs[*i as usize];
-            let raw = src.body_at(*off, *len)?;
-            decoded.push(match src.header.tile_compression {
-                pmtiles::COMPRESSION_NONE => raw.to_vec(),
-                _ => crate::gz::decompress(raw)?,
+        let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(j - k);
+        for &(_, i, off, len) in &rows[k..j] {
+            let src = &mut inputs[i as usize];
+            src.body_into(off, len, &mut body)?;
+            decoded.push(match src.header().tile_compression {
+                pmtiles::COMPRESSION_NONE => body.clone(),
+                _ => crate::gz::decompress(&body)?,
             });
         }
         let merged = if decoded.len() == 1 {
@@ -314,7 +416,8 @@ pub fn merge_archives(inputs: &[&Archive]) -> Result<Vec<u8>> {
         b.center_lat_e7 = midpoint_e7(s, n);
     }
     if !inputs.is_empty() {
-        b.metadata = merge_metadata(inputs);
+        let metas: Vec<&[u8]> = inputs.iter().map(|a| a.metadata.as_slice()).collect();
+        b.metadata = merge_metadata(&metas);
     }
 
     let mut ids: Vec<u64> = collected.keys().copied().collect();
@@ -361,10 +464,10 @@ fn midpoint_e7(a: i32, b: i32) -> i32 {
 ///
 /// Hand-rolled because this crate deliberately carries no JSON dependency. Only the
 /// one array is interpreted; every other byte is passed through verbatim.
-fn merge_metadata(inputs: &[&Archive]) -> Vec<u8> {
-    let texts: Vec<String> = inputs
+fn merge_metadata(metas: &[&[u8]]) -> Vec<u8> {
+    let texts: Vec<String> = metas
         .iter()
-        .map(|a| String::from_utf8_lossy(&a.metadata).into_owned())
+        .map(|m| String::from_utf8_lossy(m).into_owned())
         .collect();
 
     let mut layers: Vec<(String, String)> = Vec::new();
@@ -696,6 +799,45 @@ mod tests {
             tile_points("l", &pts, 12, DEFAULT_EXTENT),
             tile_points("l", &pts, 12, DEFAULT_EXTENT),
         );
+    }
+
+    /// The point path's half of the threading gate: neither the per-tile MVT encode
+    /// nor the gzip loop may depend on how many threads ran them.
+    ///
+    /// Enough points spread over enough tiles that a batch boundary falls inside the
+    /// zoom at every count tried — a fixture of two points would pass no matter how
+    /// badly the fold were ordered.
+    #[test]
+    fn the_thread_count_changes_no_point_bytes() {
+        let pts: Vec<Point> = (0..500)
+            .map(|i| {
+                let f = i as f64;
+                pt(
+                    -122.5 + (f * 0.0037) % 0.9,
+                    37.2 + (f * 0.0051) % 0.7,
+                    &format!("stop{i}"),
+                )
+            })
+            .collect();
+
+        let run = |n: usize| {
+            par::set_threads(n);
+            (
+                tile_points("l", &pts, 13, DEFAULT_EXTENT),
+                build_point_archive("l", &pts, 11, 13).unwrap(),
+            )
+        };
+        let (base_tiles, base_archive) = run(1);
+        assert!(base_tiles.len() > 1, "the fixture must span several tiles");
+        for n in [2, 3, 32] {
+            let (tiles, archive) = run(n);
+            assert!(tiles == base_tiles, "{n} threads perturbed tile_points");
+            assert!(
+                archive == base_archive,
+                "{n} threads perturbed the point archive"
+            );
+        }
+        par::clear_threads();
     }
 
     #[test]
@@ -1109,7 +1251,7 @@ mod tests {
         let in_memory = merge_archives(&[&aa, &ba]).unwrap();
 
         let out = dir.join("streamed.pmtiles");
-        merge_archives_to(&[&aa, &ba], &out, dir.join("scratch.bin"), false).unwrap();
+        merge_archives_to(&mut [&aa, &ba], &out, dir.join("scratch.bin"), false).unwrap();
         let streamed = std::fs::read(&out).unwrap();
 
         assert_eq!(
@@ -1126,6 +1268,106 @@ mod tests {
             !dir.join("scratch.bin").exists(),
             "the scratch file was left behind"
         );
+
+        // And the same join driven from FILES rather than resident archives, which is
+        // the only form a planet merge can take.
+        let a_path = dir.join("a.pmtiles");
+        let b_path = dir.join("b.pmtiles");
+        std::fs::write(&a_path, &a).unwrap();
+        std::fs::write(&b_path, &b).unwrap();
+        let from_files = dir.join("from_files.pmtiles");
+        let mut files = vec![
+            ArchiveFile::open(&a_path).unwrap(),
+            ArchiveFile::open(&b_path).unwrap(),
+        ];
+        merge_archives_to(&mut files, &from_files, dir.join("scratch2.bin"), false).unwrap();
+        assert!(
+            std::fs::read(&from_files).unwrap() == in_memory,
+            "merging through ArchiveFile must produce the same bytes as merging in memory"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `ArchiveFile` and `Archive` must be interchangeable, including across the
+    /// two-level directory layout: a leaf-spilling archive is where a file-backed
+    /// reader's own bookkeeping could diverge, since it inflates one leaf at a time
+    /// into a reused buffer.
+    #[test]
+    fn the_file_reader_agrees_with_the_in_memory_one() {
+        let dir = std::env::temp_dir().join(format!("tb_afile_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Enough distinct tiles to force leaf directories, plus a repeated body so a
+        // run is present too.
+        let mut b = Builder::new();
+        b.min_zoom = 8;
+        b.max_zoom = 8;
+        b.metadata = br#"{"name":"leafy"}"#.to_vec();
+        let base = pmtiles::tile_id(8, 0, 0);
+        for k in 0..20_000u64 {
+            let body = if (5000..5004).contains(&k) {
+                "shared".to_string()
+            } else {
+                format!("tile {k}")
+            };
+            b.add_tile_raw(base + k, crate::gz::compress(body.as_bytes()));
+        }
+        let bytes = b.build().unwrap();
+        let path = dir.join("leafy.pmtiles");
+        std::fs::write(&path, &bytes).unwrap();
+
+        let mem = Archive::parse(&bytes).unwrap();
+        let mut file = ArchiveFile::open(&path).unwrap();
+        assert!(mem.header.leaf_length > 0, "the fixture must have spilled");
+        assert_eq!(file.metadata, mem.metadata);
+        assert_eq!(file.header.addressed_tiles, mem.header.addressed_tiles);
+        assert_eq!(file.header.tile_entries, mem.header.tile_entries);
+
+        // The same entries, in the same order.
+        let mut from_mem: Vec<pmtiles::Entry> = Vec::new();
+        mem.visit_entries(&mut |e| {
+            from_mem.push(*e);
+            Ok(())
+        })
+        .unwrap();
+        let mut from_file: Vec<pmtiles::Entry> = Vec::new();
+        file.visit_entries(&mut |e| {
+            from_file.push(*e);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(from_file, from_mem, "entry walks must agree");
+        assert!(
+            from_mem.iter().any(|e| e.run_length > 1),
+            "the fixture must include a coalesced run"
+        );
+
+        // And the same bodies.
+        let mut buf = Vec::new();
+        for e in &from_mem {
+            file.body_into(e.offset, e.length, &mut buf).unwrap();
+            assert_eq!(
+                buf.as_slice(),
+                mem.body_at(e.offset, e.length).unwrap(),
+                "body for tile {}",
+                e.tile_id
+            );
+        }
+
+        // An out-of-range offset must error rather than index, on both readers.
+        let past = mem.header.tile_data_length + 1;
+        assert!(mem.body_at(past, 16).is_err(), "in-memory reader must refuse");
+        assert!(
+            file.body_into(past, 16, &mut buf).is_err(),
+            "file reader must refuse the same offset"
+        );
+
+        // The header-only read sees the same archive.
+        let h = ArchiveFile::read_header(&path).unwrap();
+        assert_eq!(h.addressed_tiles, mem.header.addressed_tiles);
+        assert_eq!((h.min_zoom, h.max_zoom), (8, 8));
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 

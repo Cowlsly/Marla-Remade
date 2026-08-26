@@ -8,13 +8,21 @@
 # Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
 # table below), exactly like `scripts/maps/gtfs_ingest` and
 # `scripts/maps/osm_ingest`: it is a host binary, so `cargo build` here never
-# pulls the aarch64-android toolchain or the app crates' lints. Its single
-# dependency, `miniz_oxide`, is pure Rust and already in the local registry cache
-# (osm_ingest and the app's maps crate both pull it), so builds resolve offline.
+# pulls the aarch64-android toolchain or the app crates' lints.
 #
-# NOTE: unlike osm_ingest, this crate needs miniz_oxide's DEFLATE side too --
-# PMTiles gzips both its directories and its tiles, so we compress as well as
-# decompress.
+# Both dependencies are pure Rust and no C toolchain is involved:
+#
+#   miniz_oxide  inflate AND deflate. Unlike osm_ingest, this crate needs the
+#                DEFLATE side too -- PMTiles gzips both its directories and its
+#                tiles, so we compress as well as decompress.
+#   rayon        the tilers' work-stealing pool. Level-9 DEFLATE inside
+#                `pyramid::fit_tile` is where a layer build spends ~90% of its
+#                wall clock, and it is per-tile pure, so it threads.
+#
+# `cargo build --offline` resolves both from the local registry cache, along with
+# rayon's own tree (rayon-core, crossbeam-deque, crossbeam-utils, crossbeam-epoch,
+# either). That is a statement about THIS box's cache, not a guarantee: a clean
+# machine needs one online `cargo fetch` before it can build offline.
 [package]
 name = "tile_build"
 version = "0.1.0"
@@ -45,6 +53,7 @@ name = "pmtiles_extract"
 path = "src/bin/pmtiles_extract.rs"
 [dependencies]
 miniz_oxide = "0.8"
+rayon = "1"
 [profile.release]
 opt-level = 3
 # Detach from the repo-root workspace so this host tool builds standalone/offline.
