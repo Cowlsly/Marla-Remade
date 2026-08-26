@@ -43,13 +43,26 @@
     <string name="cable_prompt_title">在您的其他设备上登录？</string>
     <string name="cable_prompt_subtitle">验证以批准此通行密钥登录</string>
     <string name="name_required">名称不能为空</string>
-    <string name="sync_file_none">（未选择文件）</string>
+    <string name="sync_file_none">（未选择）</string>
     <string name="sync_choose_file">选择现有文件</string>
     <string name="sync_create_file">创建新文件</string>
     <string name="sync_save">保存</string>
     <string name="sync_cancel">取消</string>
-    <string name="sync_last">上次更新</string>
-    <string name="sync_never">从未同步</string>
-    <string name="sync_now">现在同步</string>
-    <string name="label_note">注释</string>
+    <string name="sync_last">上次同步</string>
+    <string name="sync_never">从未</string>
+    <string name="sync_now">立即同步</string>
+    <string name="label_note">备注</string>
+    <string name="section_note">备注</string>
+    <string name="import_source_proton_pass">Proton Pass</string>
+    <string name="sync_section">KDBX 同步</string>
+    <string name="sync_enable">与 KDBX 文件同步</string>
+    <string name="sync_enable_description">每 15 分钟以及每次更改后，保持此密码库与 KeePass 文件一致。</string>
+    <string name="sync_file">KDBX 文件</string>
+    <string name="sync_vault_password">密码库密码</string>
+    <string name="sync_vault_password_set">已保存</string>
+    <string name="sync_vault_password_unset">（未设置）</string>
+    <string name="sync_error_file_missing">无法打开 KDBX 文件。本地未进行任何更改。</string>
+    <string name="sync_error_wrong_password">密码库密码错误。本地未进行任何更改。</string>
+    <string name="sync_error_verify_failed">合并的密码库验证失败，因此未写入文件。</string>
+    <string name="sync_error_generic">同步失败：<xliff:g id="reason" example="No space left on device">%1$s</xliff:g></string>
 </resources>
