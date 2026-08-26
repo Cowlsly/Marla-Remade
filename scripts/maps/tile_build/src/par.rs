@@ -110,6 +110,12 @@ fn pool() -> Arc<rayon::ThreadPool> {
 fn build_pool(n: usize) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(n)
+        // As big as the main thread's, because that is where this work used to run.
+        // rayon workers otherwise get std's 2 MiB default, so parallelising a deep
+        // call path silently shrinks its stack by 4x -- and the failure mode is an
+        // abort partway through a planet build, not an error. 8 MiB matches what the
+        // Rust toolchain gives `main` on Windows.
+        .stack_size(8 * 1024 * 1024)
         .thread_name(|i| format!("tile_build-{i}"))
         .build()
 }

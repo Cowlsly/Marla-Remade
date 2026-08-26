@@ -118,6 +118,10 @@ fn pool() -> Arc<rayon::ThreadPool> {
 fn build_pool(n: usize) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
     rayon::ThreadPoolBuilder::new()
         .num_threads(n)
+        // As big as the main thread's, because that is where this work used to run.
+        // rayon workers otherwise get std's 2 MiB default, so parallelising a deep
+        // call path silently shrinks its stack by 4x.
+        .stack_size(8 * 1024 * 1024)
         .thread_name(|i| format!("osm_ingest-{i}"))
         .build()
 }

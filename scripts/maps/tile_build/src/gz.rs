@@ -40,8 +40,16 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
 ///
 /// Output is byte-for-byte what `compress` produces — `reset` keeps the parameters,
 /// and `the_reusable_compressor_matches_the_one_shot_one` holds the two to it.
+///
+/// The state is BOXED, and that is not cosmetic. `CompressorOxide` is 65,712 bytes of
+/// inline arrays — a 64 KiB LZ code buffer, a 32 KiB dictionary, a 64 KiB hash chain —
+/// and the tilers hand one to `rayon`'s `map_init`, which keeps a live value per split
+/// of its recursive descent. Held by value that put tens of these on a worker's stack
+/// and overflowed it: a California roads build died at z15 encode with
+/// `thread 'tile_build-1' has overflowed its stack`, 186 s in. On the heap the
+/// per-worker slot is a pointer, and the recursion costs nothing.
 pub struct Compressor {
-    state: miniz_oxide::deflate::core::CompressorOxide,
+    state: Box<miniz_oxide::deflate::core::CompressorOxide>,
     /// Grown to the largest tile seen and then reused, so the output buffer is not
     /// reallocated per tile either.
     scratch: Vec<u8>,
@@ -65,7 +73,7 @@ impl Compressor {
             0,
         );
         Compressor {
-            state: miniz_oxide::deflate::core::CompressorOxide::new(flags),
+            state: Box::new(miniz_oxide::deflate::core::CompressorOxide::new(flags)),
             scratch: Vec::new(),
             used: false,
         }
@@ -263,6 +271,22 @@ mod tests {
             );
             assert_eq!(&decompress(&got).unwrap(), data, "corpus[{i}] round trip");
         }
+    }
+
+    /// The compressor must stay small enough to live in a per-split slot.
+    ///
+    /// `rayon`'s `map_init` keeps one live value per split of its recursive descent, so
+    /// a large-by-value `Compressor` overflows a worker's 2 MiB stack rather than
+    /// merely being wasteful — which is exactly how a California roads build died
+    /// before the state was boxed. A pointer plus a `Vec` is the whole struct.
+    #[test]
+    fn the_compressor_state_stays_on_the_heap() {
+        let size = std::mem::size_of::<Compressor>();
+        assert!(
+            size <= 64,
+            "Compressor is {size} bytes; the deflate state must stay boxed, or the \
+             tilers put one of these per rayon split on a worker's stack"
+        );
     }
 
     #[test]
