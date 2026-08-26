@@ -138,7 +138,7 @@ pub fn build_point_archive_with(
             let packed: Vec<Vec<u8>> = par::install(|| {
                 chunk
                     .par_iter()
-                    .with_min_len(par::MIN_TASK_LEN)
+                    .with_min_len(par::min_task_len(chunk.len()))
                     .map_init(crate::gz::Compressor::new, |gz, (_, body)| gz.compress(body))
                     .collect()
             });
@@ -389,7 +389,7 @@ pub fn merge_archives_to<S: TileSource>(
         let done: Vec<Joined> = par::install(|| {
             chunk
                 .par_iter()
-                .with_min_len(par::MIN_TASK_LEN)
+                .with_min_len(par::min_task_len(chunk.len()))
                 .map_init(
                     || (Vec::new(), crate::gz::Compressor::new()),
                     join_group,

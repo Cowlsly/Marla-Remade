@@ -100,15 +100,20 @@ impl Value {
     /// Key for interning, so two equal values share a dictionary slot. Floats are
     /// keyed on their bit pattern: NaN never dedups, which is correct and avoids
     /// needing `Eq` on a float.
-    fn dedup_key(&self) -> (u8, u64, String) {
+    ///
+    /// The string is BORROWED. Cloning it here allocated once per string property per
+    /// feature per encode, and the drop policy's binary search encodes the same tile
+    /// about eleven times -- so on California z11 this was tens of millions of
+    /// throwaway `String`s and the single largest cost in the tiler.
+    fn dedup_key(&self) -> (u8, u64, &str) {
         match self {
-            Value::String(s) => (0, 0, s.clone()),
-            Value::Float(f) => (1, f.to_bits() as u64, String::new()),
-            Value::Double(d) => (2, d.to_bits(), String::new()),
-            Value::Int(i) => (3, *i as u64, String::new()),
-            Value::Uint(u) => (4, *u, String::new()),
-            Value::SInt(i) => (5, *i as u64, String::new()),
-            Value::Bool(b) => (6, *b as u64, String::new()),
+            Value::String(s) => (0, 0, s.as_str()),
+            Value::Float(f) => (1, f.to_bits() as u64, ""),
+            Value::Double(d) => (2, d.to_bits(), ""),
+            Value::Int(i) => (3, *i as u64, ""),
+            Value::Uint(u) => (4, *u, ""),
+            Value::SInt(i) => (5, *i as u64, ""),
+            Value::Bool(b) => (6, *b as u64, ""),
         }
     }
 
@@ -340,7 +345,7 @@ pub fn encode_layer_from<'a>(
     let mut keys: Vec<&str> = Vec::new();
     let mut key_idx: HashMap<&str, u32> = HashMap::new();
     let mut values: Vec<&Value> = Vec::new();
-    let mut value_idx: HashMap<(u8, u64, String), u32> = HashMap::new();
+    let mut value_idx: HashMap<(u8, u64, &str), u32> = HashMap::new();
 
     let mut feat_buf = Writer::new();
     let mut tag_buf = Writer::new();

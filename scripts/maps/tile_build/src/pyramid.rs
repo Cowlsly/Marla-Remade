@@ -77,6 +77,13 @@ pub struct Options {
     /// Off by default so the library stays silent: the binaries turn it on, and the
     /// tests would otherwise interleave bars with their output.
     pub progress: bool,
+    /// Print how long each zoom's bucket and encode pass took, to stderr.
+    ///
+    /// Separate from `progress` and from [`ZoomStats`]: a duration cannot go in the
+    /// report, because the report is compared for equality by the byte-identity tests.
+    /// This is the measurement that says which phase to optimise next, and guessing
+    /// that from a total is how you end up optimising the wrong one.
+    pub timing: bool,
 }
 impl Options {
     pub fn new(layer: impl Into<String>, min_zoom: u8, max_zoom: u8) -> Options {
@@ -88,6 +95,7 @@ impl Options {
             simplification: 1.0,
             max_tile_bytes: DEFAULT_MAX_TILE_BYTES,
             progress: false,
+            timing: false,
         }
     }
 
@@ -324,7 +332,7 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
             let done: Vec<Option<EncodedTile>> = par::install(|| {
                 chunk
                     .par_iter()
-                    .with_min_len(par::MIN_TASK_LEN)
+                    .with_min_len(par::min_task_len(chunk.len()))
                     .map_init(crate::gz::Compressor::new, |gz, &(id, tx, ty)| {
                         let indices = &by_tile[&(tx, ty)];
                         let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
@@ -393,6 +401,19 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
     Ok((builder.build()?, report))
 }
 
+/// Where the encode pass's time actually goes, accumulated across workers.
+///
+/// Nanoseconds, summed over every `fit_tile` probe. Only read under `--timing`, and
+/// the two `Instant::now()` calls are per PROBE (a handful per tile), not per feature,
+/// so leaving them in costs nothing measurable.
+///
+/// These exist because four rounds of plausible-sounding micro-optimisation to this
+/// function -- a galloping search, hoisting the geometry encode, borrowing the value
+/// dictionary key, boxing the compressor -- bought 3% between them. Splitting the
+/// measurement is what identified the real cost.
+static MVT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static GZIP_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Encode the largest prefix of `candidates` that fits the byte budget.
 ///
 /// Binary search on the prefix length: `O(log n)` gzip calls per tile rather than
@@ -407,38 +428,55 @@ fn fit_tile(
     opts: &Options,
     gz: &mut crate::gz::Compressor,
 ) -> Result<(Vec<u8>, usize, bool)> {
-    // Reused across the binary search's calls, so an over-budget tile does not
-    // reallocate its geometry list once per probe.
-    let mut geoms: Vec<Vec<u32>> = Vec::new();
-    let mut kept_at: Vec<usize> = Vec::new();
+    // Geometry command integers, computed ONCE for the whole tile.
+    //
+    // These do not depend on `n`, and the binary search calls `encode` about
+    // `log2(len)` times -- so building them inside the probe re-did the same work
+    // eleven times over, one fresh `Vec<u32>` allocation per candidate per probe. On
+    // California z11 that is 4.36 M records x ~11 probes of pure waste, and it was
+    // most of the 92 s that zoom spent encoding.
+    let geoms: Vec<Vec<u32>> = candidates
+        .iter()
+        .map(|c| match c.geom {
+            IntGeometry::Points(p) => mvt::encode_points(p),
+            IntGeometry::Lines(l) => mvt::encode_lines(l),
+            IntGeometry::Polygons(p) => mvt::encode_polygons(p),
+        })
+        .collect();
+    // Candidates whose geometry survived, ascending. A candidate that clips away to
+    // nothing is skipped rather than emitted, exactly as before.
+    let live: Vec<usize> = (0..candidates.len())
+        .filter(|&i| !geoms[i].is_empty())
+        .collect();
+
     let mut encode = |n: usize| -> Vec<u8> {
-        geoms.clear();
-        kept_at.clear();
-        for (at, c) in candidates[..n].iter().enumerate() {
-            let geometry = match c.geom {
-                IntGeometry::Points(p) => mvt::encode_points(p),
-                IntGeometry::Lines(l) => mvt::encode_lines(l),
-                IntGeometry::Polygons(p) => mvt::encode_polygons(p),
-            };
-            if geometry.is_empty() {
-                continue;
-            }
-            geoms.push(geometry);
-            kept_at.push(at);
-        }
-        // Properties are BORROWED here. Cloning them per candidate per tile was ~35%
-        // of this function's cost, and a feature reaching many tiles paid it once per
-        // tile. See `mvt::FeatureRef`.
-        let refs = kept_at
+        // `live` is ascending, so this is precisely the surviving candidates among the
+        // first `n` -- the same set the old per-probe loop produced.
+        let refs = live
             .iter()
-            .zip(geoms.iter())
-            .map(|(&at, geometry)| MvtFeature {
+            .take_while(|&&i| i < n)
+            .map(|&i| MvtFeature {
                 id: None,
                 geom_type,
-                geometry,
-                props: candidates[at].props,
+                geometry: &geoms[i],
+                // Properties are BORROWED. Cloning them per candidate per tile was
+                // ~35% of this function's cost, and a feature reaching many tiles paid
+                // it once per tile. See `mvt::FeatureRef`.
+                props: candidates[i].props,
             });
-        gz.compress(&mvt::encode_tile_from(layer_name, opts.extent, refs))
+        let t0 = std::time::Instant::now();
+        let body = mvt::encode_tile_from(layer_name, opts.extent, refs);
+        let t1 = std::time::Instant::now();
+        let out = gz.compress(&body);
+        MVT_NANOS.fetch_add(
+            (t1 - t0).as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        GZIP_NANOS.fetch_add(
+            t1.elapsed().as_nanos() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        out
     };
 
     let all = encode(candidates.len());
@@ -448,6 +486,13 @@ fn fit_tile(
 
     // Largest n in 1..len with encode(n) within budget. `lo` is always known to
     // fit or to be the floor of 1; `hi` is known not to.
+    //
+    // The probe SEQUENCE is part of the output contract, so do not "improve" this into
+    // a galloping search. Gzipped size is not strictly monotone in n -- adding a
+    // feature can occasionally compress to fewer bytes -- so a search that visits
+    // different n lands on a different boundary. Tried on California: galloping up
+    // from 1 changed the drop count from 710,215 to 710,217 and moved the archive,
+    // while saving nothing, because the cost here is not the number of probes.
     let mut lo = 1usize;
     let mut hi = candidates.len();
     let mut best = encode(1);
@@ -820,6 +865,7 @@ pub fn build_archive_to(
         );
         let mut touched: Vec<(u64, u64)> = Vec::new();
         let mut rec = Vec::new();
+        let phase = std::time::Instant::now();
         let mut seq = 0u64;
         // Read serially, project and clip across the pool, push serially.
         //
@@ -864,7 +910,7 @@ pub fn build_archive_to(
                     batch
                         .par_iter()
                         .enumerate()
-                        .with_min_len(par::MIN_TASK_LEN)
+                        .with_min_len(par::min_task_len(batch.len()))
                         .map_init(
                             || (Vec::new(), Vec::new()),
                             |(touched, rec), (i, f)| {
@@ -893,7 +939,9 @@ pub fn build_archive_to(
             seq += batch.len() as u64;
         }
         bar.finish(BUCKETED);
+        let bucketed_in = phase.elapsed();
         set.seal()?;
+        let phase = std::time::Instant::now();
 
         let mut bar = Progress::new(
             format!("{} z{z} encode", opts.layer),
@@ -901,6 +949,7 @@ pub fn build_archive_to(
             ENCODED,
             opts.progress,
         );
+        let mut prof = EncodeProfile::default();
         encode_buckets(
             &set,
             scratch_dir,
@@ -912,13 +961,45 @@ pub fn build_archive_to(
             &mut builder,
             &mut stats,
             &mut bar,
+            &mut prof,
         )?;
         bar.finish(ENCODED);
+        if opts.timing {
+            let (_, x, y) = pmtiles::tile_zxy(prof.max_group_id);
+            use std::sync::atomic::Ordering::Relaxed;
+            let mvt_s = MVT_NANOS.swap(0, Relaxed) as f64 / 1e9;
+            let gz_s = GZIP_NANOS.swap(0, Relaxed) as f64 / 1e9;
+            eprintln!(
+                "  z{z}: bucket {:.1}s, encode {:.1}s [mvt {:.0}s + gzip {:.0}s of \
+                 CPU across all workers] ({} record(s), {} tile(s), biggest \
+                 z{z}/{x}/{y} with {} candidate(s) = {:.1}%)",
+                bucketed_in.as_secs_f64(),
+                phase.elapsed().as_secs_f64(),
+                mvt_s,
+                gz_s,
+                set.total_records(),
+                prof.groups,
+                prof.max_group,
+                prof.max_group as f64 / set.total_records().max(1) as f64 * 100.0,
+            );
+        }
         report.push(stats);
     }
 
     builder.finish(out)?;
     Ok(report)
+}
+
+/// What the encode pass spent its time on, for `--timing`.
+///
+/// The interesting number is the LARGEST group: the encode pass parallelises across
+/// tiles, so one tile holding a large fraction of a zoom's records sets a floor no
+/// thread count can get under.
+#[derive(Default)]
+struct EncodeProfile {
+    groups: usize,
+    max_group: usize,
+    max_group_id: u64,
 }
 
 /// Drain one bucket set in ascending index, recursing into anything over budget.
@@ -937,6 +1018,7 @@ fn encode_buckets(
     builder: &mut pmtiles::StreamBuilder,
     stats: &mut ZoomStats,
     bar: &mut Progress,
+    prof: &mut EncodeProfile,
 ) -> Result<()> {
     for i in 0..set.len() {
         let records = set.records_in(i);
@@ -1003,6 +1085,7 @@ fn encode_buckets(
                 builder,
                 stats,
                 bar,
+                prof,
             )?;
             continue;
         }
@@ -1033,6 +1116,11 @@ fn encode_buckets(
                 j += 1;
             }
             groups.push((k, j));
+            prof.groups += 1;
+            if j - k > prof.max_group {
+                prof.max_group = j - k;
+                prof.max_group_id = id;
+            }
             k = j;
         }
 
@@ -1066,7 +1154,7 @@ fn encode_buckets(
             let done: Vec<EncodedTile> = par::install(|| {
                 chunk
                     .par_iter()
-                    .with_min_len(par::MIN_TASK_LEN)
+                    .with_min_len(par::min_task_len(chunk.len()))
                     .map_init(crate::gz::Compressor::new, encode_group)
                     .collect::<Result<Vec<_>>>()
             })?;
@@ -1149,7 +1237,7 @@ pub fn cli_main(name: &str, accept: Accept, argv: &[String]) -> std::process::Ex
     let usage = || {
         eprintln!("usage: {name} --geojson IN.geojsonseq --out OUT.pmtiles --layer NAME");
         eprintln!("                  [--minzoom N] [--maxzoom N] [--simplification F]");
-        eprintln!("                  [--max-tile-bytes N] [--extent N] [--threads N]");
+        eprintln!("                  [--max-tile-bytes N] [--extent N] [--threads N] [--timing]");
         eprintln!("                  [--stream [--spill-dir DIR] [--buckets N]");
         eprintln!("                            [--bucket-budget-bytes N] [--max-repartition-depth N]]");
         eprintln!();
@@ -1168,6 +1256,7 @@ pub fn cli_main(name: &str, accept: Accept, argv: &[String]) -> std::process::Ex
     let mut max_tile_bytes = DEFAULT_MAX_TILE_BYTES;
     let mut extent = DEFAULT_EXTENT;
     let mut stream = false;
+    let mut timing = false;
     let mut spill_dir: Option<String> = None;
     let mut limits = StreamLimits::default();
 
@@ -1222,6 +1311,10 @@ pub fn cli_main(name: &str, accept: Accept, argv: &[String]) -> std::process::Ex
                     return ExitCode::from(2);
                 }
                 i += 2;
+            }
+            "--timing" => {
+                timing = true;
+                i += 1;
             }
             "--threads" => {
                 let Some(raw) = value() else {
@@ -1279,6 +1372,7 @@ pub fn cli_main(name: &str, accept: Accept, argv: &[String]) -> std::process::Ex
         max_tile_bytes,
         // A planet layer spends minutes to hours per zoom, so the operator gets a bar.
         progress: true,
+        timing,
     };
 
     // Read a line at a time rather than slurping the file: a planet geojsonseq is tens

@@ -137,15 +137,26 @@ pub fn batch_len() -> usize {
     threads().saturating_mul(64).max(512)
 }
 
-/// The smallest number of items worth waking a worker for.
+/// The smallest number of items worth handing one worker, for a map of `items`.
 ///
 /// One tile's encode is tens of microseconds. Handed to rayon one at a time, the
 /// work-stealing and spinning cost more than the work: measured on 200k synthetic
 /// roads at z14, the encode pass went 4.15s at one thread to 1.81s at four and then
-/// back UP to 3.51s at 32, purely on scheduling overhead. Batching several items
-/// into each task amortises that away, which is what makes the high thread counts
-/// pay at all.
-pub const MIN_TASK_LEN: usize = 16;
+/// back UP to 3.51s at 32, purely on scheduling overhead. Batching several items into
+/// each task amortises that away.
+///
+/// But it MUST scale with the input, and a fixed floor was a serious bug. A constant
+/// 16 meant rayon refused to split any map of fewer than 32 items — and the tile
+/// encode pass maps over one BUCKET's tile groups, of which California z11 has only
+/// ~7 (1,899 tiles over 256 buckets). The whole pass therefore ran on one thread:
+/// 86.7s of wall clock for 92s of CPU, an effective parallelism of 1.06 on a 64-core
+/// box, while z16 with ~3,500 groups per bucket parallelised fine and hid it.
+///
+/// So: aim for a few tasks per thread, and never fewer tasks than there are items.
+pub fn min_task_len(items: usize) -> usize {
+    let want_tasks = threads().saturating_mul(4).max(1);
+    (items / want_tasks).max(1)
+}
 
 #[cfg(test)]
 mod tests {
@@ -172,19 +183,24 @@ mod tests {
         assert_eq!(resolve(0, Some(" 3 ")), 3, "surrounding space is tolerated");
     }
 
-    /// A batch has to hold enough tasks to keep the pool busy: at least a few
-    /// `MIN_TASK_LEN` tasks per thread, or the barrier at the end of each batch
-    /// costs more than the batch saves.
+    /// A batch has to hold enough tasks to keep the pool busy, and a small map must
+    /// still be split at all — the bug this guards is a floor so high that a map of
+    /// one bucket's ~7 tile groups became a single task on a 64-core box.
     #[test]
-    fn a_batch_holds_several_tasks_per_thread() {
+    fn a_small_map_is_still_split_across_the_pool() {
         for n in [1usize, 2, 3, 32, 64] {
             set_threads(n);
-            let tasks = batch_len() / MIN_TASK_LEN;
+            assert_eq!(min_task_len(7), 1, "{n} threads: 7 items must give 7 tasks");
+            assert_eq!(min_task_len(0), 1, "an empty map must not divide by zero");
+            let big = 100_000;
+            let tasks = big / min_task_len(big);
             assert!(
                 tasks >= n * 2,
-                "{n} threads: {tasks} task(s) of {MIN_TASK_LEN} in a batch of {}",
-                batch_len()
+                "{n} threads: {tasks} task(s) for {big} items is not enough to fill \
+                 the pool"
             );
+            let tasks_small = 7 / min_task_len(7);
+            assert!(tasks_small >= 1.min(n));
         }
         clear_threads();
     }
