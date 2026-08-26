@@ -96,7 +96,7 @@
     <string name="segments">Сегменты</string>
     <string name="laps">Круги</string>
     <string name="lap">Круг <xliff:g id="lap_index" example="1">%1$s</xliff:g></string>
-    <string name="reps"><xliff:g id="reps_count" example="12">%1$s</xliff:g> повт.</string>
+    <string name="reps"><xliff:g id="reps_count" example="12">%1$s</xliff:g> повт</string>
     <string name="route_recorded">Трек записан</string>
     <string name="ingredient">(Ингредиент)</string>
     <string name="calories">Калории</string>
