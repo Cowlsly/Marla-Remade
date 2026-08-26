@@ -298,6 +298,7 @@ fun FreeHeightBottomSheetScaffold(
     val statusBarPx = WindowInsets.statusBars.getTop(density)
     val peekPx = with(density) { sheetPeekHeight.roundToPx() } + navBarPx
     var containerHeightPx by remember { mutableIntStateOf(0) }
+    var sheetContentHeightPx by remember { mutableIntStateOf(0) }
 
     LaunchedEffect(containerHeightPx, peekPx, statusBarPx) {
         if (containerHeightPx > 0) {
@@ -336,10 +337,12 @@ fun FreeHeightBottomSheetScaffold(
                     ) {
                         BottomSheetDefaults.DragHandle()
                     }
-                    Column(
-                        Modifier.weight(1f, fill = false).padding(bottom = navBarDp),
-                        content = sheetContent,
-                    )
+                    Column(Modifier.weight(1f, fill = false).padding(bottom = navBarDp)) {
+                        Column(
+                            Modifier.onSizeChanged { sheetContentHeightPx = it.height },
+                            content = sheetContent,
+                        )
+                    }
                 }
             }
         },
@@ -357,7 +360,10 @@ fun FreeHeightBottomSheetScaffold(
         state.onContentHeight(sheet.height.toFloat(), offered.toFloat(), scope)
         layout(width, height) {
             body.place(0, 0)
-            sheet.place(0, height - sheet.height)
+            // Content that measured to nothing leaves only the drag handle and the
+            // navigation-bar inset: a blank bar resting over the host with no information
+            // in it. Measured, so the next pass sees it grow, but not drawn.
+            if (sheetContentHeightPx > 0) sheet.place(0, height - sheet.height)
         }
     }
 }
