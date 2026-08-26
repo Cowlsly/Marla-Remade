@@ -1,16 +1,17 @@
 package com.vayunmathur.openassistant.data
-import androidx.room.PrimaryKey
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.PrimaryKey
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseItem
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Entity
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Entity
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
 import com.vayunmathur.library.util.DefaultConverters
-import androidx.room.migration.Migration
+import androidx.room3.migration.Migration
 import kotlinx.coroutines.flow.Flow
 
 @Entity
@@ -98,7 +99,7 @@ interface MemoryDao {
     suspend fun delete(value: Memory): Int
 }
 
-@TypeConverters(DefaultConverters::class)
+@ColumnTypeConverters(DefaultConverters::class)
 @Database(entities = [Conversation::class, Message::class, Memory::class], version = 3, exportSchema = false)
 abstract class AppDatabase: RoomDatabase() {
     abstract fun conversationDao(): ConversationDao

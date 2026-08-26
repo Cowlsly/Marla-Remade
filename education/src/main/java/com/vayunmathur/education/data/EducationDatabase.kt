@@ -1,11 +1,11 @@
 package com.vayunmathur.education.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
 
@@ -64,6 +64,6 @@ abstract class EducationDatabase : RoomDatabase() {
     abstract fun deadlineDao(): DeadlineDao
 
     companion object : DatabaseMigrations {
-        override val migrations = emptyList<androidx.room.migration.Migration>()
+        override val migrations = emptyList<androidx.room3.migration.Migration>()
     }
 }

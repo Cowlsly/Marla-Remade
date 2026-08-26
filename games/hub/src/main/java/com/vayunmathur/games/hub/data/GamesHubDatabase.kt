@@ -1,8 +1,9 @@
 package com.vayunmathur.games.hub.data
 
-import androidx.room.Database
-import androidx.room.RoomDatabase
-import androidx.room.migration.Migration
+import androidx.room3.Database
+import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import com.vayunmathur.games.hub.data.dao.ActivityDao
 import com.vayunmathur.games.hub.data.dao.AchievementDao
 import com.vayunmathur.games.hub.data.dao.GameDao

@@ -1,7 +1,7 @@
 package com.vayunmathur.launcher.data
 
 import android.content.Context
-import androidx.room.withTransaction
+import androidx.room3.withWriteTransaction
 import com.vayunmathur.launcher.domain.AutoPlacer
 import com.vayunmathur.launcher.domain.CellRect
 import com.vayunmathur.launcher.domain.ContainerRef
@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.Flow
  * grid invariants (no two items in one cell, no folder with one child, no widget row
  * without a bound id) are enforced in one place.
  *
- * Writes that must not be seen half-done are wrapped in [withTransaction]: creating a
+ * Writes that must not be seen half-done are wrapped in [withWriteTransaction]: creating a
  * folder moves two items and inserts a third, and the workspace flow re-emits promptly
  * enough that an intermediate state would render.
  */
@@ -61,7 +61,7 @@ class LauncherRepository private constructor(context: Context) :
             return
         }
         val screen = dao.get(id)?.screen ?: 0
-        db.withTransaction {
+        db.withWriteTransaction {
             displaced.forEach { (other, to) ->
                 dao.move(other, ContainerRef.Desktop.toRaw(), screen, to.cellX, to.cellY, 0)
             }
@@ -91,8 +91,8 @@ class LauncherRepository private constructor(context: Context) :
      * screen does not get it refilled on the next launch.
      */
     suspend fun seed(spec: GridSpec, apps: List<LauncherItemEntity>, hotseat: List<LauncherItemEntity>) {
-        db.withTransaction {
-            if (dao.count() > 0) return@withTransaction
+        db.withWriteTransaction {
+            if (dao.count() > 0) return@withWriteTransaction
             val placements = AutoPlacer.placeAll(spec, emptyList(), apps.map { it.rect })
             dao.upsertAll(
                 apps.mapIndexed { index, app ->
@@ -131,7 +131,7 @@ class LauncherRepository private constructor(context: Context) :
             dao.move(id, container.toRaw(), screen, rect.cellX, rect.cellY, rank)
             return
         }
-        db.withTransaction {
+        db.withWriteTransaction {
             // Displaced items are neighbours on the same page, so only their cell changes.
             displaced.forEach { (other, to) ->
                 dao.move(other, ContainerRef.Desktop.toRaw(), screen, to.cellX, to.cellY, 0)
@@ -149,7 +149,7 @@ class LauncherRepository private constructor(context: Context) :
      * row the database still holds and the screen never draws.
      */
     suspend fun moveToHotseat(id: Long, slot: Int, spec: GridSpec) {
-        db.withTransaction {
+        db.withWriteTransaction {
             val plan = HotseatArrange.arrange(
                 current = dao.getHotseatItems().map { it.id },
                 id = id,
@@ -189,10 +189,10 @@ class LauncherRepository private constructor(context: Context) :
      * and both items become children ranked in drop order — target first, since it was
      * already there.
      */
-    suspend fun createFolder(targetId: Long, draggedId: Long): Long? = db.withTransaction {
-        val target = dao.get(targetId) ?: return@withTransaction null
-        val dragged = dao.get(draggedId) ?: return@withTransaction null
-        if (!FolderRules.canMerge(dragged.itemType, target.itemType)) return@withTransaction null
+    suspend fun createFolder(targetId: Long, draggedId: Long): Long? = db.withWriteTransaction {
+        val target = dao.get(targetId) ?: return@withWriteTransaction null
+        val dragged = dao.get(draggedId) ?: return@withWriteTransaction null
+        if (!FolderRules.canMerge(dragged.itemType, target.itemType)) return@withWriteTransaction null
 
         val folderId = dao.upsert(
             LauncherItemEntity(
@@ -212,7 +212,7 @@ class LauncherRepository private constructor(context: Context) :
 
     /** Appends [itemId] to an existing folder. */
     suspend fun addToFolder(folderId: Long, itemId: Long) {
-        db.withTransaction {
+        db.withWriteTransaction {
             val ranks = dao.getFolderChildren(folderId).map { it.rank }
             dao.move(itemId, folderId, 0, 0, 0, FolderRules.nextRank(ranks))
         }
@@ -220,7 +220,7 @@ class LauncherRepository private constructor(context: Context) :
 
     /** Moves [itemId] to [rank] within its folder, shifting the siblings it passes. */
     suspend fun reorderInFolder(folderId: Long, itemId: Long, rank: Int) {
-        db.withTransaction {
+        db.withWriteTransaction {
             val others = dao.getFolderChildren(folderId).filter { it.id != itemId }
             val reordered = others.toMutableList()
             val index = rank.coerceIn(0, reordered.size)
@@ -241,14 +241,14 @@ class LauncherRepository private constructor(context: Context) :
      * apps out of a folder look like the folder turning back into the other app.
      */
     suspend fun collapseFolderIfNeeded(folderId: Long) {
-        db.withTransaction {
+        db.withWriteTransaction {
             val remaining = dao.getFolderChildren(folderId)
             FolderRules.denseRanks(remaining.map { it.id }).forEach { (id, rank) ->
                 dao.setRank(id, rank)
             }
-            if (!FolderRules.shouldCollapse(remaining.size)) return@withTransaction
+            if (!FolderRules.shouldCollapse(remaining.size)) return@withWriteTransaction
 
-            val folder = dao.get(folderId) ?: return@withTransaction
+            val folder = dao.get(folderId) ?: return@withWriteTransaction
             remaining.singleOrNull()?.let { survivor ->
                 dao.move(
                     survivor.id,
@@ -275,8 +275,8 @@ class LauncherRepository private constructor(context: Context) :
      * the data layer, and leaking the id means the provider keeps being updated for a
      * widget nobody can see.
      */
-    suspend fun remove(id: Long): Int? = db.withTransaction {
-        val item = dao.get(id) ?: return@withTransaction null
+    suspend fun remove(id: Long): Int? = db.withWriteTransaction {
+        val item = dao.get(id) ?: return@withWriteTransaction null
         val container = item.container
         // Deleting a folder takes its children with it - they have no cell of their own to
         // fall back to, so leaving them would strand rows nothing can reach.
@@ -302,7 +302,7 @@ class LauncherRepository private constructor(context: Context) :
         installed: Set<PackageKey>,
         unavailable: Set<PackageKey>,
         boundWidgetIds: Set<Int>,
-    ): List<Int> = db.withTransaction {
+    ): List<Int> = db.withWriteTransaction {
         val all = dao.getAll()
         val actions = ReconcileUseCase.reconcile(
             items = all.map { it.toReconcileItem() },
@@ -329,7 +329,7 @@ class LauncherRepository private constructor(context: Context) :
 
     /** Re-lays out the desktop for a new grid shape. */
     suspend fun regrid(to: GridSpec) {
-        db.withTransaction {
+        db.withWriteTransaction {
             val desktop = dao.getDesktopItems()
             val moved = AutoPlacer.regrid(desktop.map { it.toGridItem() }, to)
             val before = desktop.associateBy { it.id }

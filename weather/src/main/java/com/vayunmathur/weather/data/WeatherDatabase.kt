@@ -1,9 +1,10 @@
 package com.vayunmathur.weather.data
 
 import android.content.Context
-import androidx.room.Database
-import androidx.room.RoomDatabase
-import androidx.room.migration.Migration
+import androidx.room3.Database
+import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.DatabaseMigrations
 

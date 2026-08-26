@@ -1,10 +1,10 @@
 package com.vayunmathur.launcher.data
 
-import androidx.room.ColumnInfo
-import androidx.room.Entity
-import androidx.room.Index
-import androidx.room.PrimaryKey
-import androidx.room.TypeConverter
+import androidx.room3.ColumnInfo
+import androidx.room3.ColumnTypeConverter
+import androidx.room3.Entity
+import androidx.room3.Index
+import androidx.room3.PrimaryKey
 import com.vayunmathur.launcher.domain.CellRect
 import com.vayunmathur.launcher.domain.ContainerRef
 import com.vayunmathur.launcher.domain.GridItem
@@ -121,9 +121,9 @@ data class LauncherItemEntity(
  * reordering the enum, which an ordinal column does not.
  */
 class LauncherConverters {
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromItemType(value: LauncherItemType): String = value.name
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun toItemType(value: String): LauncherItemType = LauncherItemType.valueOf(value)
 }

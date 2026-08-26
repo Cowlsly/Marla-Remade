@@ -1,15 +1,16 @@
 package com.vayunmathur.appstore.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import kotlinx.coroutines.flow.Flow
 
 const val DB_NAME = "appstore-db"
@@ -207,7 +208,7 @@ interface AccrescentTrustDao {
      * an app id it no longer lists must stop being trusted — so this clears first, in one
      * transaction, rather than merging.
      */
-    @androidx.room.Transaction
+    @androidx.room3.Transaction
     suspend fun replaceAll(entries: List<AccrescentTrustEntity>) {
         clearAll()
         upsertAll(entries)
@@ -328,28 +329,28 @@ abstract class AppDatabase : RoomDatabase() {
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
         override val migrations = listOf(
             object : Migration(1, 2) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL("DROP TABLE IF EXISTS FavoriteEntity")
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL("DROP TABLE IF EXISTS FavoriteEntity")
                 }
             },
             object : Migration(2, 3) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN targetSdk INTEGER")
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN targetSdk INTEGER")
                 }
             },
             object : Migration(3, 4) {
-                override fun migrate(db: SupportSQLiteDatabase) {
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN expectedSigners TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN apkSha256 TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN license TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN website TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN sourceCode TEXT")
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN expectedSigners TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN apkSha256 TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN license TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN website TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN sourceCode TEXT")
                     // Rows cached before this version carry no signer or hash, and the
                     // reproducible-only filter had not run yet. Drop them so nothing
                     // unverifiable survives the upgrade; the next sync repopulates.
-                    db.execSQL("DELETE FROM CachedAppEntity")
-                    db.execSQL("DELETE FROM RepoEntity")
-                    db.execSQL(
+                    connection.execSQL("DELETE FROM CachedAppEntity")
+                    connection.execSQL("DELETE FROM RepoEntity")
+                    connection.execSQL(
                         "CREATE TABLE IF NOT EXISTS PinnedStampEntity (" +
                             "packageName TEXT NOT NULL PRIMARY KEY, " +
                             "stampSha256 TEXT NOT NULL, " +
@@ -358,36 +359,36 @@ abstract class AppDatabase : RoomDatabase() {
                 }
             },
             object : Migration(4, 5) {
-                override fun migrate(db: SupportSQLiteDatabase) {
+                override suspend fun migrate(connection: SQLiteConnection) {
                     // Listing media and store metadata. All nullable or defaulted, so
                     // existing rows stay usable and fill in on the next sync.
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN screenshots TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN featureGraphic TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN rating REAL")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN ratingCount INTEGER NOT NULL DEFAULT 0")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN installs INTEGER NOT NULL DEFAULT 0")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN updatedOn TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN contentRating TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN containsAds INTEGER NOT NULL DEFAULT 0")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN antiFeatures TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN whatsNew TEXT")
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN addedTimestamp INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN screenshots TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN featureGraphic TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN rating REAL")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN ratingCount INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN installs INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN updatedOn TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN contentRating TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN containsAds INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN antiFeatures TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN whatsNew TEXT")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN addedTimestamp INTEGER NOT NULL DEFAULT 0")
                 }
             },
             object : Migration(5, 6) {
-                override fun migrate(db: SupportSQLiteDatabase) {
+                override suspend fun migrate(connection: SQLiteConnection) {
                     // Reproducibility became a per-app badge rather than an import gate, so
                     // the catalogue now lists non-reproduced F-Droid apps too. Existing rows
                     // predate the badge; the next sync repopulates it. Default false.
-                    db.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN reproducible INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE CachedAppEntity ADD COLUMN reproducible INTEGER NOT NULL DEFAULT 0")
                 }
             },
             object : Migration(6, 7) {
-                override fun migrate(db: SupportSQLiteDatabase) {
+                override suspend fun migrate(connection: SQLiteConnection) {
                     // Accrescent's signed allowlist, cached as a trust anchor. Empty until the
                     // first repodata fetch verifies and populates it; nothing installs from
                     // Accrescent until then, which is the intended fail-closed default.
-                    db.execSQL(
+                    connection.execSQL(
                         "CREATE TABLE IF NOT EXISTS AccrescentTrustEntity (" +
                             "appId TEXT NOT NULL PRIMARY KEY, " +
                             "signingCertHash TEXT NOT NULL, " +

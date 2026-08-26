@@ -3,11 +3,11 @@
 package com.vayunmathur.health.data
 
 import kotlin.uuid.Uuid
-import androidx.room.Embedded
-import androidx.room.Entity
-import androidx.room.ForeignKey
-import androidx.room.Index
-import androidx.room.PrimaryKey
+import androidx.room3.Embedded
+import androidx.room3.Entity
+import androidx.room3.ForeignKey
+import androidx.room3.Index
+import androidx.room3.PrimaryKey
 
 @Entity
 data class Ingredient(

@@ -1,6 +1,6 @@
 package com.vayunmathur.weather.data
 
-import androidx.room.Entity
+import androidx.room3.Entity
 
 /**
  * Most-recent forecast + air-quality JSON for a (lat, lon) point. Lets the

@@ -1,19 +1,20 @@
 package com.vayunmathur.health.data
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Embedded
-import androidx.room.Entity
-import androidx.room.Index
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverter
-import androidx.room.TypeConverters
-import androidx.room.Update
-import androidx.room.Delete
-import androidx.room.migration.Migration
+import androidx.room3.ColumnTypeConverter
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Embedded
+import androidx.room3.Entity
+import androidx.room3.Index
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Update
+import androidx.room3.Delete
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import kotlinx.serialization.Serializable
 import kotlinx.coroutines.flow.Flow
 import java.time.Instant
@@ -350,7 +351,7 @@ interface HealthDao {
     version = 5,
     exportSchema = false
 )
-@TypeConverters(Converters::class)
+@ColumnTypeConverters(Converters::class)
 abstract class HealthDatabase : RoomDatabase() {
     abstract fun healthDao(): HealthDao
 
@@ -369,15 +370,15 @@ abstract class HealthDatabase : RoomDatabase() {
 }
 
 class Converters {
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromTimestamp(value: Long?): Instant? = value?.let { Instant.ofEpochMilli(it) }
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun dateToTimestamp(date: Instant?): Long? = date?.toEpochMilli()
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun toTS(date: kotlin.time.Instant): Long = date.toEpochMilliseconds()
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromTS(timestamp: Long): kotlin.time.Instant = kotlin.time.Instant.fromEpochMilliseconds(timestamp)
 }

@@ -1,7 +1,7 @@
 package com.vayunmathur.photos.data
 
 import android.content.Context
-import androidx.room.migration.Migration
+import androidx.room3.migration.Migration
 import com.vayunmathur.library.room.RoomRepository
 import kotlinx.coroutines.flow.Flow
 

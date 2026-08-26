@@ -1,7 +1,7 @@
 package com.vayunmathur.passwords.data
 
 import android.content.Context
-import androidx.room.withTransaction
+import androidx.room3.withWriteTransaction
 import com.vayunmathur.library.room.RoomRepository
 import kotlinx.coroutines.flow.Flow
 
@@ -80,7 +80,7 @@ class PasswordRepository private constructor(context: Context) :
     // Transaction
     // ------------------------------------------------------------------
 
-    suspend fun <R> withTransaction(block: suspend () -> R): R = db.withTransaction(block)
+    suspend fun <R> withTransaction(block: suspend () -> R): R = db.withWriteTransaction { block() }
 
     companion object {
         @Volatile

@@ -1,12 +1,12 @@
 package com.vayunmathur.library.util
 
+import androidx.room3.ColumnTypeConverter
 import androidx.room3.Dao
 import androidx.room3.Delete
 import androidx.room3.Entity
 import androidx.room3.PrimaryKey
 import androidx.room3.Query
 import androidx.room3.RoomDatabase
-import androidx.room3.ColumnTypeConverter
 import androidx.room3.Upsert
 import androidx.room3.migration.Migration
 import kotlinx.coroutines.flow.Flow

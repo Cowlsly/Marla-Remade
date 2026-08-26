@@ -1,13 +1,14 @@
 package com.vayunmathur.youpipe.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
-import androidx.room.migration.Migration
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DefaultConverters
 import kotlinx.coroutines.flow.Flow
 
@@ -201,7 +202,7 @@ interface SubscriptionVideoDao {
     suspend fun upsertAll(values: List<SubscriptionVideo>)
 }
 
-@TypeConverters(DefaultConverters::class)
+@ColumnTypeConverters(DefaultConverters::class)
 @Database(entities = [Subscription::class, SubscriptionVideo::class, HistoryVideo::class, SubscriptionCategory::class, DownloadedVideo::class, CachedRelatedVideo::class, RecommendationImpression::class, RecommendationPreferences::class, ChannelPreference::class, KeywordPreference::class, Playlist::class, PlaylistItem::class], version = 7, exportSchema = false)
 abstract class SubscriptionDatabase : RoomDatabase() {
     abstract fun subscriptionDao(): SubscriptionDao

@@ -1,8 +1,8 @@
 package com.vayunmathur.email.data
 
-import androidx.room.ColumnInfo
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.ColumnInfo
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 import androidx.core.text.HtmlCompat
 import kotlinx.serialization.Serializable
 import com.vayunmathur.email.network.imap.MimeParser

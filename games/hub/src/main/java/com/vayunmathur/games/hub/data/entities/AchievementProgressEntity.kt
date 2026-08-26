@@ -1,6 +1,6 @@
 package com.vayunmathur.games.hub.data.entities
 
-import androidx.room.Entity
+import androidx.room3.Entity
 
 @Entity(tableName = "achievement_progress", primaryKeys = ["gameId", "achievementId"])
 data class AchievementProgressEntity(

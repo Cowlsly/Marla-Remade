@@ -160,7 +160,10 @@ dependencies {
     // Apple gs-loc request/response wire format (proto/apple_wps.proto).
     implementation(libs.protobuf.javalite)
     // Beacon-location cache (in-memory TimedLruCache in front of a Room table).
+    // No SQLCipher here — the cache holds only public beacon coordinates, so it uses
+    // AndroidSQLiteDriver (platform SQLite), which Room 3 requires to be set explicitly.
     implementRoom(libs)
+    implementation(libs.androidx.sqlite.framework)
     // Reporting loop + IO for the gs-loc queries.
     implementation(libs.kotlinx.coroutines.android)
     // The offline geocoder search runs natively (Rust/ruzstd) over the bundled geocoder.geodb

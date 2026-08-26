@@ -1,13 +1,14 @@
 package com.vayunmathur.web.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
 
@@ -200,8 +201,8 @@ abstract class WebDatabase : RoomDatabase() {
 }
 
 private val MIGRATION_1_2 = object : Migration(1, 2) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL(
+    override suspend fun migrate(connection: SQLiteConnection) {
+        connection.execSQL(
             """CREATE TABLE IF NOT EXISTS `InstalledSite` (
                 `id` TEXT NOT NULL,
                 `url` TEXT NOT NULL,
@@ -222,8 +223,8 @@ private val MIGRATION_1_2 = object : Migration(1, 2) {
 }
 
 private val MIGRATION_2_3 = object : Migration(2, 3) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL(
+    override suspend fun migrate(connection: SQLiteConnection) {
+        connection.execSQL(
             """CREATE TABLE IF NOT EXISTS `ShieldSetting` (
                 `host` TEXT NOT NULL,
                 `level` TEXT,

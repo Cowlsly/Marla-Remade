@@ -1,7 +1,7 @@
 package com.vayunmathur.games.hub.data.entities
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 
 @Entity(tableName = "activity_events")
 data class ActivityEventEntity(

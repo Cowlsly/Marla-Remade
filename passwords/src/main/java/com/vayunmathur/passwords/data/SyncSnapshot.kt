@@ -1,7 +1,7 @@
 package com.vayunmathur.passwords.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 import java.util.UUID
 
 /** Opaque 32-char identity shared between a local row and its kdbx entry. */

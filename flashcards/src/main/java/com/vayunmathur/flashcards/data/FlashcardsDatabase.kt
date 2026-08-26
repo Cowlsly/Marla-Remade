@@ -1,14 +1,15 @@
 package com.vayunmathur.flashcards.data
 
 import android.content.Context
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
-import androidx.room.migration.Migration
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Insert
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseHelper
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow

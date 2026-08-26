@@ -1,16 +1,17 @@
 package com.vayunmathur.vpn.data
 
 import android.content.Context
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseItem
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
@@ -72,8 +73,8 @@ interface VpnConfigDao {
 }
 
 val MIGRATION_1_2 = object : Migration(1, 2) {
-    override fun migrate(db: SupportSQLiteDatabase) {
-        db.execSQL("""
+    override suspend fun migrate(connection: SQLiteConnection) {
+        connection.execSQL("""
             CREATE TABLE IF NOT EXISTS `ConnectionLogEntity` (
                 `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
                 `timestampStart` INTEGER NOT NULL,
@@ -92,10 +93,10 @@ val MIGRATION_1_2 = object : Migration(1, 2) {
                 `requestCount` INTEGER NOT NULL
             )
         """.trimIndent())
-        db.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_packageName_domain_timestampLast_remoteIp_uid_protocol` ON `ConnectionLogEntity` (`packageName`, `domain`, `timestampLast`, `remoteIp`, `uid`, `protocol`)")
-        db.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_remoteIp_remotePort_protocol_uid` ON `ConnectionLogEntity` (`remoteIp`, `remotePort`, `protocol`, `uid`)")
-        db.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_domain` ON `ConnectionLogEntity` (`domain`)")
-        db.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_packageName` ON `ConnectionLogEntity` (`packageName`)")
+        connection.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_packageName_domain_timestampLast_remoteIp_uid_protocol` ON `ConnectionLogEntity` (`packageName`, `domain`, `timestampLast`, `remoteIp`, `uid`, `protocol`)")
+        connection.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_remoteIp_remotePort_protocol_uid` ON `ConnectionLogEntity` (`remoteIp`, `remotePort`, `protocol`, `uid`)")
+        connection.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_domain` ON `ConnectionLogEntity` (`domain`)")
+        connection.execSQL("CREATE INDEX IF NOT EXISTS `index_ConnectionLogEntity_packageName` ON `ConnectionLogEntity` (`packageName`)")
     }
 }
 

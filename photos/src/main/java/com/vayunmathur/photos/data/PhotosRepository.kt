@@ -2,7 +2,7 @@ package com.vayunmathur.photos.data
 
 import android.content.Context
 import com.vayunmathur.library.room.RoomRepository
-import androidx.room.withTransaction
+import androidx.room3.withWriteTransaction
 import kotlinx.coroutines.flow.Flow
 
 /**
@@ -84,7 +84,7 @@ class PhotosRepository private constructor(context: Context) :
      * them. Delete-then-insert also makes a re-scan idempotent on its own.
      */
     suspend fun commitFaceScan(photoIds: List<Long>, faces: List<PhotoFace>) =
-        db.withTransaction {
+        db.withWriteTransaction {
             faceDao.deletePhotoFacesByPhotoIds(photoIds)
             if (faces.isNotEmpty()) faceDao.insertPhotoFaces(faces)
             photoDao.setFaceScanned(photoIds)

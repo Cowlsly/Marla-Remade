@@ -1,14 +1,15 @@
 package com.vayunmathur.music.data
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DefaultConverters
 import com.vayunmathur.library.util.ManyManyMatching
 import com.vayunmathur.library.util.MatchingDao
-import androidx.room.migration.Migration
+import androidx.room3.migration.Migration
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -61,7 +62,7 @@ interface PlaylistDao {
     suspend fun deleteById(id: Long)
 }
 
-@TypeConverters(DefaultConverters::class)
+@ColumnTypeConverters(DefaultConverters::class)
 @Database(entities = [Music::class, Album::class, Artist::class, Playlist::class, ManyManyMatching::class], version = 4, exportSchema = false)
 abstract class MusicDatabase: RoomDatabase() {
     abstract fun musicDao(): MusicDao

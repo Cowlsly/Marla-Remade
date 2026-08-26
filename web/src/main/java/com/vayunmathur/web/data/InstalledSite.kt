@@ -1,7 +1,7 @@
 package com.vayunmathur.web.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 
 /**
  * Saved installed site / PWA backing for "Add to Home screen" pinned shortcuts.

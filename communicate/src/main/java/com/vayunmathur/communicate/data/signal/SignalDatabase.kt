@@ -1,17 +1,19 @@
 package com.vayunmathur.communicate.data.signal
 
 import android.content.Context
-import androidx.room.ColumnInfo
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Entity
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverter
-import androidx.room.TypeConverters
+import androidx.room3.ColumnInfo
+import androidx.room3.ColumnTypeConverter
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Entity
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseMigrations
 
 /**
@@ -43,7 +45,7 @@ import com.vayunmathur.library.util.DatabaseMigrations
     version = 5,
     exportSchema = false
 )
-@TypeConverters(SignalTypeConverters::class)
+@ColumnTypeConverters(SignalTypeConverters::class)
 abstract class SignalDatabase : RoomDatabase() {
     abstract fun deviceDao(): SignalDeviceDao
     abstract fun sessionDao(): SignalSessionDao
@@ -68,18 +70,18 @@ abstract class SignalDatabase : RoomDatabase() {
          * pre-keys, plus the (kyberPreKeyId, signedPreKeyId, baseKey) tuples that make last-resort
          * keys single-use — reusing one is what `ReusedBaseKeyException` guards against.
          */
-        private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
-            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
+        private val MIGRATION_1_2 = object : androidx.room3.migration.Migration(1, 2) {
+            override suspend fun migrate(connection: SQLiteConnection) {
                 // Must match Room's generated createAllTables statements byte for byte, including the
                 // absence of column defaults — TableInfo validation compares them and throws on a
                 // mismatch. Both tables are new, so there is nothing to backfill.
-                db.execSQL(
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `signal_e2e_kyber_pre_keys` (" +
                         "`id` INTEGER NOT NULL, `record` BLOB NOT NULL, " +
                         "`lastResort` INTEGER NOT NULL, `uploaded` INTEGER NOT NULL, " +
                         "PRIMARY KEY(`id`))",
                 )
-                db.execSQL(
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `signal_e2e_kyber_used_base_keys` (" +
                         "`kyberPreKeyId` INTEGER NOT NULL, `signedPreKeyId` INTEGER NOT NULL, " +
                         "`baseKeyB64` TEXT NOT NULL, " +
@@ -93,15 +95,15 @@ abstract class SignalDatabase : RoomDatabase() {
          * profile keys are secret material used to derive unidentified-access keys — both belong in the
          * encrypted database rather than the plaintext preferences blob.
          */
-        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
-            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                db.execSQL(
+        private val MIGRATION_2_3 = object : androidx.room3.migration.Migration(2, 3) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `signal_sender_certificate` (" +
                         "`id` INTEGER NOT NULL, `record` BLOB NOT NULL, " +
                         "`expiration` INTEGER NOT NULL, `includesE164` INTEGER NOT NULL, " +
                         "PRIMARY KEY(`id`))",
                 )
-                db.execSQL(
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS `signal_profile_keys` (" +
                         "`address` TEXT NOT NULL, `profileKey` BLOB NOT NULL, " +
                         "PRIMARY KEY(`address`))",
@@ -118,23 +120,23 @@ abstract class SignalDatabase : RoomDatabase() {
          * stored, so the new id is not recoverable from the old one — so they are dropped and will be
          * recreated from inbound traffic.
          */
-        private val MIGRATION_3_4 = object : androidx.room.migration.Migration(3, 4) {
-            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupMasterKey BLOB")
-                db.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupRevision INTEGER NOT NULL DEFAULT 0")
-                db.execSQL("DELETE FROM signal_cached_message WHERE conversationId LIKE 'group:%'")
-                db.execSQL("DELETE FROM signal_conversation WHERE chatId LIKE 'group:%'")
+        private val MIGRATION_3_4 = object : androidx.room3.migration.Migration(3, 4) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupMasterKey BLOB")
+                connection.execSQL("ALTER TABLE signal_conversation ADD COLUMN groupRevision INTEGER NOT NULL DEFAULT 0")
+                connection.execSQL("DELETE FROM signal_cached_message WHERE conversationId LIKE 'group:%'")
+                connection.execSQL("DELETE FROM signal_conversation WHERE chatId LIKE 'group:%'")
             }
         }
 
         /** v4 → v5: keep the PNI from contact discovery, which is how a new contact is addressed. */
-        private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
-            override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                db.execSQL("ALTER TABLE signal_contact ADD COLUMN pni TEXT NOT NULL DEFAULT ''")
+        private val MIGRATION_4_5 = object : androidx.room3.migration.Migration(4, 5) {
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL("ALTER TABLE signal_contact ADD COLUMN pni TEXT NOT NULL DEFAULT ''")
             }
         }
 
-        override val migrations = listOf<androidx.room.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
+        override val migrations = listOf<androidx.room3.migration.Migration>(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5)
 
         fun getDatabase(context: Context): SignalDatabase =
             SignalRepository.get(context).database()
@@ -142,10 +144,10 @@ abstract class SignalDatabase : RoomDatabase() {
 }
 
 class SignalTypeConverters {
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromStringList(value: List<String>): String = value.joinToString(",")
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun toStringList(value: String): List<String> =
         if (value.isEmpty()) emptyList() else value.split(",")
 }

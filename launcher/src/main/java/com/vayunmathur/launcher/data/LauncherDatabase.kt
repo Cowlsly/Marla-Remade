@@ -1,13 +1,13 @@
 package com.vayunmathur.launcher.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
-import androidx.room.migration.Migration
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
 import com.vayunmathur.launcher.domain.CONTAINER_DESKTOP
 import com.vayunmathur.launcher.domain.CONTAINER_HOTSEAT
 import com.vayunmathur.library.util.DatabaseMigrations
@@ -79,7 +79,7 @@ interface LauncherItemDao {
     suspend fun setRank(id: Long, rank: Int)
 }
 
-@TypeConverters(DefaultConverters::class, LauncherConverters::class)
+@ColumnTypeConverters(DefaultConverters::class, LauncherConverters::class)
 @Database(entities = [LauncherItemEntity::class], version = 1, exportSchema = false)
 abstract class LauncherDatabase : RoomDatabase() {
     abstract fun itemDao(): LauncherItemDao

@@ -1,6 +1,6 @@
 package com.vayunmathur.email.data
 
-import androidx.room.*
+import androidx.room3.*
 import com.vayunmathur.email.data.Attachment
 import com.vayunmathur.email.data.EmailAccount
 import com.vayunmathur.email.data.EmailFolder

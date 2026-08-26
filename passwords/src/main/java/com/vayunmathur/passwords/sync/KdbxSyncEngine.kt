@@ -3,7 +3,7 @@ package com.vayunmathur.passwords.sync
 import android.content.Context
 import android.net.Uri
 import androidx.core.net.toUri
-import androidx.room.withTransaction
+import androidx.room3.withWriteTransaction
 import com.vayunmathur.passwords.data.Passkey
 import com.vayunmathur.passwords.data.PasskeyDao
 import com.vayunmathur.passwords.data.Password
@@ -76,7 +76,7 @@ class KdbxSyncEngine(
         db.passkeyDao(),
         db.syncSnapshotDao(),
         codec,
-        { db.withTransaction(it) },
+        { block -> db.withWriteTransaction { block() } },
     )
 
     constructor(repository: PasswordRepository, codec: KdbxCodec) : this(

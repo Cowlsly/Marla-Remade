@@ -1,11 +1,11 @@
 package com.vayunmathur.weather.data
 
-import androidx.room.Dao
-import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.Query
-import androidx.room.Upsert
+import androidx.room3.Dao
+import androidx.room3.Delete
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
+import androidx.room3.Query
+import androidx.room3.Upsert
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -40,7 +40,7 @@ interface WeatherDao {
      * single transaction. Used by the location provider when it gets a fresh
      * GPS fix.
      */
-    @androidx.room.Transaction
+    @androidx.room3.Transaction
     suspend fun replaceCurrentDeviceLocation(newRow: SavedLocation) {
         getCurrentDeviceLocation()?.let { deleteLocation(it) }
         insertLocation(newRow.copy(isCurrent = true))

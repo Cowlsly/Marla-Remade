@@ -1,7 +1,7 @@
 package com.vayunmathur.weather.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 
 /**
  * A place the user has pinned in the weather app — either added by city

@@ -1,12 +1,14 @@
 package com.vayunmathur.travel.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Insert
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
 
@@ -95,17 +97,17 @@ abstract class TravelDatabase : RoomDatabase() {
 
     companion object : DatabaseMigrations {
         override val migrations = listOf(
-            object : androidx.room.migration.Migration(1, 2) {
-                override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                    db.execSQL("ALTER TABLE BookedTrip ADD COLUMN type TEXT NOT NULL DEFAULT 'flight'")
-                    db.execSQL("ALTER TABLE BookedTrip ADD COLUMN awaitingPayment INTEGER NOT NULL DEFAULT 0")
-                    db.execSQL("ALTER TABLE BookedTrip ADD COLUMN paymentRequiredBy TEXT NOT NULL DEFAULT ''")
-                    db.execSQL("ALTER TABLE BookedTrip ADD COLUMN remoteSyncedAt INTEGER NOT NULL DEFAULT 0")
+            object : androidx.room3.migration.Migration(1, 2) {
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL("ALTER TABLE BookedTrip ADD COLUMN type TEXT NOT NULL DEFAULT 'flight'")
+                    connection.execSQL("ALTER TABLE BookedTrip ADD COLUMN awaitingPayment INTEGER NOT NULL DEFAULT 0")
+                    connection.execSQL("ALTER TABLE BookedTrip ADD COLUMN paymentRequiredBy TEXT NOT NULL DEFAULT ''")
+                    connection.execSQL("ALTER TABLE BookedTrip ADD COLUMN remoteSyncedAt INTEGER NOT NULL DEFAULT 0")
                 }
             },
-            object : androidx.room.migration.Migration(2, 3) {
-                override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                    db.execSQL(
+            object : androidx.room3.migration.Migration(2, 3) {
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL(
                         "CREATE TABLE IF NOT EXISTS FrequentFlyer (" +
                             "airlineIata TEXT NOT NULL PRIMARY KEY, " +
                             "accountNumber TEXT NOT NULL, " +
@@ -113,9 +115,9 @@ abstract class TravelDatabase : RoomDatabase() {
                     )
                 }
             },
-            object : androidx.room.migration.Migration(3, 4) {
-                override fun migrate(db: androidx.sqlite.db.SupportSQLiteDatabase) {
-                    db.execSQL(
+            object : androidx.room3.migration.Migration(3, 4) {
+                override suspend fun migrate(connection: SQLiteConnection) {
+                    connection.execSQL(
                         "CREATE TABLE IF NOT EXISTS Customer (" +
                             "id TEXT NOT NULL PRIMARY KEY, " +
                             "email TEXT NOT NULL, " +
@@ -123,7 +125,7 @@ abstract class TravelDatabase : RoomDatabase() {
                             "familyName TEXT NOT NULL, " +
                             "phoneNumber TEXT NOT NULL DEFAULT '')"
                     )
-                    db.execSQL("ALTER TABLE BookedTrip ADD COLUMN customerId TEXT NOT NULL DEFAULT ''")
+                    connection.execSQL("ALTER TABLE BookedTrip ADD COLUMN customerId TEXT NOT NULL DEFAULT ''")
                 }
             },
         )

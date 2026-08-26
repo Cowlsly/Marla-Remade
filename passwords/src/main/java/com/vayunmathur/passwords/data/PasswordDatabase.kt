@@ -1,13 +1,14 @@
 package com.vayunmathur.passwords.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
-import androidx.room.migration.Migration
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.room3.migration.Migration
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseMigrations
 import kotlinx.coroutines.flow.Flow
 
@@ -66,7 +67,7 @@ abstract class PasskeyDao {
     version = 4,
     exportSchema = false,
 )
-@TypeConverters(Converters::class)
+@ColumnTypeConverters(Converters::class)
 abstract class PasswordDatabase : RoomDatabase() {
     abstract fun passwordDao(): PasswordDao
     abstract fun passkeyDao(): PasskeyDao

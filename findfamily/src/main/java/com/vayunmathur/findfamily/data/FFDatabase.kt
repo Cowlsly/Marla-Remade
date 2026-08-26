@@ -1,14 +1,15 @@
 package com.vayunmathur.findfamily.data
 
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Delete
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverters
-import androidx.room.Upsert
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Delete
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DefaultConverters
 import kotlinx.coroutines.flow.Flow
 
@@ -150,7 +151,7 @@ interface TemporaryLinkDao {
 }
 
 @Database(entities = [User::class, Waypoint::class, LocationValue::class, TemporaryLink::class], version = 11, exportSchema = false)
-@TypeConverters(DefaultConverters::class)
+@ColumnTypeConverters(DefaultConverters::class)
 abstract class FFDatabase : RoomDatabase() {
     abstract fun userDao(): UserDao
     abstract fun waypointDao(): WaypointDao
@@ -158,26 +159,26 @@ abstract class FFDatabase : RoomDatabase() {
     abstract fun temporaryLinkDao(): TemporaryLinkDao
 
     companion object : com.vayunmathur.library.util.DatabaseMigrations {
-        override val migrations: List<androidx.room.migration.Migration> = listOf(
-            androidx.room.migration.Migration(1, 2) {
+        override val migrations: List<androidx.room3.migration.Migration> = listOf(
+            androidx.room3.migration.Migration(1, 2) {
                 it.execSQL("CREATE INDEX IF NOT EXISTS index_LocationValue_timestamp ON LocationValue (timestamp)")
             },
-            androidx.room.migration.Migration(2, 3) {
+            androidx.room3.migration.Migration(2, 3) {
                 it.execSQL(
                     "CREATE INDEX IF NOT EXISTS `index_LocationValue_userid_timestamp` " +
                         "ON `LocationValue` (`userid`, `timestamp`)"
                 )
             },
-            androidx.room.migration.Migration(3, 4) {
+            androidx.room3.migration.Migration(3, 4) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `lastWaypointId` INTEGER")
             },
-            androidx.room.migration.Migration(4, 5) {
+            androidx.room3.migration.Migration(4, 5) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `platform` TEXT")
             },
-            androidx.room.migration.Migration(5, 6) {
+            androidx.room3.migration.Migration(5, 6) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `sharingAutoToggleAt` INTEGER")
             },
-            androidx.room.migration.Migration(6, 7) {
+            androidx.room3.migration.Migration(6, 7) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `pqcEncryptionKey` TEXT")
                 it.execSQL("ALTER TABLE `TemporaryLink` ADD COLUMN `pqcPublicKey` TEXT")
                 it.execSQL("ALTER TABLE `TemporaryLink` ADD COLUMN `pqcKey` TEXT")
@@ -192,7 +193,7 @@ abstract class FFDatabase : RoomDatabase() {
             // link expires within a week. Rows with no PQC bundle are dropped rather than
             // carried over: under PQC-only they can never publish again, so keeping them would
             // just leave dead entries in the list.
-            androidx.room.migration.Migration(7, 8) {
+            androidx.room3.migration.Migration(7, 8) {
                 it.execSQL(
                     "CREATE TABLE IF NOT EXISTS `TemporaryLink_new` (" +
                         "`name` TEXT NOT NULL, `deleteAt` INTEGER NOT NULL, " +
@@ -209,19 +210,19 @@ abstract class FFDatabase : RoomDatabase() {
                 it.execSQL("DROP TABLE `TemporaryLink`")
                 it.execSQL("ALTER TABLE `TemporaryLink_new` RENAME TO `TemporaryLink`")
             },
-            androidx.room.migration.Migration(8, 9) {
+            androidx.room3.migration.Migration(8, 9) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `sharingAutoToggleWaypointId` INTEGER")
             },
             // Custom UWB tracker support (DEV_BUILD): a `User` can now be a person or a
             // tracker. Room stores the enum as its name; existing rows default to PERSON.
-            androidx.room.migration.Migration(9, 10) {
+            androidx.room3.migration.Migration(9, 10) {
                 it.execSQL("ALTER TABLE `User` ADD COLUMN `kind` TEXT NOT NULL DEFAULT 'PERSON'")
             },
             // Share links carry a 32-byte ML-KEM seed (`pqcSeed`) instead of a full private
             // bundle, so `pqcKey` becomes nullable and only legacy rows keep it. SQLite cannot
             // drop NOT NULL in place, so rebuild the table as in Migration(7, 8). Rows keep
             // their ids — those URLs are already shared.
-            androidx.room.migration.Migration(10, 11) {
+            androidx.room3.migration.Migration(10, 11) {
                 it.execSQL(
                     "CREATE TABLE IF NOT EXISTS `TemporaryLink_new` (" +
                         "`name` TEXT NOT NULL, `deleteAt` INTEGER NOT NULL, " +

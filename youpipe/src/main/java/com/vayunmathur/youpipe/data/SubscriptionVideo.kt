@@ -1,9 +1,9 @@
 package com.vayunmathur.youpipe.data
 
-import androidx.room.ColumnInfo
-import androidx.room.Entity
-import androidx.room.ForeignKey
-import androidx.room.PrimaryKey
+import androidx.room3.ColumnInfo
+import androidx.room3.Entity
+import androidx.room3.ForeignKey
+import androidx.room3.PrimaryKey
 import com.vayunmathur.library.util.DatabaseItem
 import kotlinx.serialization.Serializable
 import kotlin.time.Instant

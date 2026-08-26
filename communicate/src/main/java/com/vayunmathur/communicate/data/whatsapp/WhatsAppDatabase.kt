@@ -1,18 +1,19 @@
 package com.vayunmathur.communicate.data.whatsapp
 
 import android.content.Context
-import androidx.room.Database
-import androidx.room.Dao
-import androidx.room.Entity
-import androidx.room.Insert
-import androidx.room.OnConflictStrategy
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.RoomDatabase
-import androidx.room.TypeConverter
-import androidx.room.TypeConverters
-import androidx.room.migration.Migration
-import androidx.sqlite.db.SupportSQLiteDatabase
+import androidx.room3.ColumnTypeConverter
+import androidx.room3.ColumnTypeConverters
+import androidx.room3.Database
+import androidx.room3.Dao
+import androidx.room3.Entity
+import androidx.room3.Insert
+import androidx.room3.OnConflictStrategy
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.RoomDatabase
+import androidx.room3.migration.Migration
+import androidx.sqlite.SQLiteConnection
+import androidx.sqlite.execSQL
 import com.vayunmathur.library.util.DatabaseMigrations
 
 /**
@@ -53,7 +54,7 @@ import com.vayunmathur.library.util.DatabaseMigrations
     version = 4,
     exportSchema = false
 )
-@TypeConverters(WhatsAppTypeConverters::class)
+@ColumnTypeConverters(WhatsAppTypeConverters::class)
 abstract class WhatsAppDatabase : RoomDatabase() {
     abstract fun deviceDao(): WhatsAppDeviceDao
     abstract fun sessionDao(): WhatsAppSessionDao
@@ -78,17 +79,17 @@ abstract class WhatsAppDatabase : RoomDatabase() {
          * columns are additive with defaults, so existing rows stay valid.
          */
         private val MIGRATION_1_2 = object : Migration(1, 2) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
                     "ALTER TABLE whatsapp_cached_message ADD COLUMN status INTEGER NOT NULL DEFAULT 0",
                 )
-                db.execSQL(
+                connection.execSQL(
                     "ALTER TABLE whatsapp_history_sync_conversation ADD COLUMN isGroup INTEGER NOT NULL DEFAULT 0",
                 )
-                db.execSQL(
+                connection.execSQL(
                     "ALTER TABLE whatsapp_history_sync_conversation ADD COLUMN name TEXT",
                 )
-                db.execSQL(
+                connection.execSQL(
                     "ALTER TABLE whatsapp_history_sync_conversation ADD COLUMN participants TEXT NOT NULL DEFAULT ''",
                 )
             }
@@ -96,8 +97,8 @@ abstract class WhatsAppDatabase : RoomDatabase() {
 
         /** v2 → v3: device-contact sync table (address book → WhatsApp LID/phone mapping). */
         private val MIGRATION_2_3 = object : Migration(2, 3) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS whatsapp_contact (" +
                         "phoneE164 TEXT NOT NULL PRIMARY KEY, " +
                         "lid TEXT NOT NULL DEFAULT '', " +
@@ -110,8 +111,8 @@ abstract class WhatsAppDatabase : RoomDatabase() {
 
         /** v3 → v4: call-log table for the WhatsApp calling stack. */
         private val MIGRATION_3_4 = object : Migration(3, 4) {
-            override fun migrate(db: SupportSQLiteDatabase) {
-                db.execSQL(
+            override suspend fun migrate(connection: SQLiteConnection) {
+                connection.execSQL(
                     "CREATE TABLE IF NOT EXISTS whatsapp_call_log (" +
                         "callId TEXT NOT NULL PRIMARY KEY, " +
                         "peerJid TEXT NOT NULL DEFAULT '', " +
@@ -133,12 +134,12 @@ abstract class WhatsAppDatabase : RoomDatabase() {
 }
 
 class WhatsAppTypeConverters {
-    @TypeConverter
+    @ColumnTypeConverter
     fun fromStringList(value: List<String>): String {
         return value.joinToString(",")
     }
 
-    @TypeConverter
+    @ColumnTypeConverter
     fun toStringList(value: String): List<String> {
         return if (value.isEmpty()) emptyList() else value.split(",")
     }

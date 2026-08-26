@@ -1,14 +1,15 @@
 package com.vayunmathur.networklocation.cache
 
 import android.content.Context
-import androidx.room.Dao
-import androidx.room.Database
-import androidx.room.Entity
-import androidx.room.PrimaryKey
-import androidx.room.Query
-import androidx.room.Room
-import androidx.room.RoomDatabase
-import androidx.room.Upsert
+import androidx.room3.Dao
+import androidx.room3.Database
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
+import androidx.room3.Query
+import androidx.room3.Room
+import androidx.room3.RoomDatabase
+import androidx.room3.Upsert
+import androidx.sqlite.driver.AndroidSQLiteDriver
 import com.vayunmathur.networklocation.BeaconFix
 import com.vayunmathur.networklocation.BeaconId
 
@@ -61,7 +62,7 @@ class BeaconCache(
             context.applicationContext,
             BeaconDatabase::class.java,
             "networklocation-beacons",
-        ).build().beaconDao()
+        ).setDriver(AndroidSQLiteDriver()).build().beaconDao()
 
     /** Fetch cached fixes for [ids], checking memory first then the DB. */
     suspend fun get(ids: List<BeaconId>): Map<BeaconId, BeaconFix> {

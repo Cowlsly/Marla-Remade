@@ -1,7 +1,7 @@
 package com.vayunmathur.travel.data
 
-import androidx.room.Entity
-import androidx.room.PrimaryKey
+import androidx.room3.Entity
+import androidx.room3.PrimaryKey
 
 /** Recent searches are flights-only now, but the column is kept for history. */
 enum class Vertical { FLIGHTS }
