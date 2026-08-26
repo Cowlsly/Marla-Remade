@@ -3,7 +3,7 @@
     <string name="app_name">אנשי קשר</string>
     <string name="contact_not_found">איש הקשר לא נמצא</string>
     <string name="share_contact">שיתוף איש קשר</string>
-    <string name="about_name">על %1$s</string>
+    <string name="about_name">מידע על &lt;xliff:g id=\"first_name\" example=\"John\"&gt;%1$s&lt;/xliff:g&gt;</string>
     <string name="birthday">יום הולדת</string>
     <string name="note">הערה</string>
     <string name="favorites">מועדפים</string>
@@ -48,4 +48,22 @@
     <string name="backup_and_export">גיבוי וייצוא</string>
     <string name="search_contacts">חיפוש אנשי קשר</string>
     <string name="telegram">טלגרם</string>
+    <string name="ringtone">צלצול</string>
+    <string name="select_ringtone">בחירת צלצול</string>
+    <string name="rename_account">שינוי שם לחשבון</string>
+    <string name="enter_account_name">נא לבחור שם לחשבון המקומי החדש:</string>
+    <string name="delete_account">מחיקת חשבון</string>
+    <string name="delete_local_account_confirm">למחוק חשבון זה יחד עם כל אנשי הקשר השמורים בו? לא ניתן לבטל פעולה זו.</string>
+    <string name="account_name_exists">כבר קיים חשבון בשם זה</string>
+    <string name="grant_calendar_permissions">הענקת הרשאת גישה ללוח השנה</string>
+    <string name="delete_selected_contacts_title">מחיקת אנשי הקשר הנבחרים</string>
+    <string name="display">תצוגה</string>
+    <string name="system_default">ברירת המחדל של המערכת</string>
+    <string name="contacts">אנשי קשר</string>
+    <string name="groups">קבוצות</string>
+    <string name="add_to_group">הוספה לקבוצה</string>
+    <string name="add_group">הוספת קבוצה</string>
+    <string name="delete_group_title">מחיקת קבוצה</string>
+    <string name="create_new_account_option">יצירת חשבון חדש</string>
+    <string name="select_account">בחירת חשבון</string>
 </resources>
