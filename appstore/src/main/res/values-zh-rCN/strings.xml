@@ -98,4 +98,6 @@
     <string name="repos_sync_sources">同步来源</string>
     <string name="source_fdroid">F-Droid</string>
     <string name="source_play">Play 商店（匿名）</string>
+    <string name="section_sandboxed_google_play">沙盒化的Google Play</string>
+    <string name="section_sandboxed_google_play_subtitle">让 Google Play 组件以普通非特权应用的形式运行</string>
 </resources>
