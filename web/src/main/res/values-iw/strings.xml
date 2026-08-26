@@ -1,3 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    </resources>
+    <string name="bookmarks">סימניות</string>
+    <string name="new_folder">תיקייה חדשה</string>
+    <string name="create">יצירה</string>
+    <string name="recent">אחרונים</string>
+</resources>
