@@ -90,7 +90,17 @@ param(
     # ProcessorCount / Jobs threads, so this is a memory dial as much as a speed one --
     # peak is roughly Jobs x the largest concurrent layer, and the roads extract alone
     # peaked at 5.00 GiB on California.
-    [int] $Jobs = 6
+    [int] $Jobs = 6,
+
+    # Run the graph stage CONCURRENTLY with pois/tiles.
+    #
+    # Off by default, and not because the stages conflict -- they genuinely do not, the
+    # graph has no consumers here and writes only to -OutDir. It is off because the
+    # graph is the most memory-hungry stage in the build by a wide margin (4.9 GiB on
+    # California, and 61.85 GiB on Europe via the reference path), so overlapping it
+    # with a fanned-out tiles stage multiplies two large peaks together. On California
+    # it hides ~34s of the wall clock.
+    [switch] $OverlapGraph
 )
 
 $ErrorActionPreference = "Stop"
@@ -292,9 +302,21 @@ if (Test-Stage "graph") {
         # One subdirectory per stage, matching the "roads" one the tiles stage uses
         # below, so the two spills stay separately measurable and deletable.
         if ($SpillDir)        { $graphArgs += @("--spill-dir", (Join-Path $SpillDir "graph")) }
-        Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
-            "--bin", "road_graph", "--") + $graphArgs)
-        Set-Stamp "graph"
+        if ($OverlapGraph -and -not $DryRun) {
+            # Backgrounded, and the gate below moves rather than disappears: the PID is
+            # waited on before the manifest, and a failure still stops the build.
+            Write-Host "=== graph: started in the background ==="
+            $script:GraphJob = Start-Job -Name "graph" -ScriptBlock {
+                param($Exe, $JobArgs)
+                & $Exe @JobArgs
+                if ($LASTEXITCODE -ne 0) { throw "road_graph failed with exit code $LASTEXITCODE" }
+            } -ArgumentList "cargo", (@("run", "--release", "--quiet", "--manifest-path",
+                $OsmManifest, "--bin", "road_graph", "--") + $graphArgs)
+        } else {
+            Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
+                "--bin", "road_graph", "--") + $graphArgs)
+            Set-Stamp "graph"
+        }
     }
 }
 
@@ -448,6 +470,26 @@ if (Test-Stage "tiles") {
         Write-Warning "admin_country and admin_region are NOT in $Out (they come from Natural Earth shapefiles, not OSM -- build under WSL for those two)"
         Set-Stamp "tiles"
     }
+}
+
+# --- the graph barrier ---
+# With -OverlapGraph the graph stage has been running alongside everything above. It
+# must be finished, and finished SUCCESSFULLY, before the manifest hashes its outputs:
+# road_graph truncates them as it writes, so a half-written nodes.bin would otherwise
+# be measured and published as though it were whole.
+if ($script:GraphJob) {
+    Write-Host "=== waiting for the background graph stage... ==="
+    $null = Wait-Job -Job $script:GraphJob
+    $child = $script:GraphJob.ChildJobs[0]
+    $child.Output | ForEach-Object { Write-Host $_ }
+    $child.Error | ForEach-Object { Write-Host $_ }
+    # State alone, never the presence of error output: road_graph writes its progress
+    # to stderr, which a PowerShell job funnels into its Error stream.
+    $died = ($script:GraphJob.State -eq 'Failed') -or ($child.JobStateInfo.State -eq 'Failed')
+    Remove-Job -Job $script:GraphJob -Force
+    $script:GraphJob = $null
+    if ($died) { throw "the graph stage failed; not writing a manifest" }
+    Set-Stamp "graph"
 }
 
 # --- manifest.txt: name, size, SHA-256 for all 11 ---
