@@ -326,6 +326,13 @@ fun ChessGame(
 
     LaunchedEffect(uiState.board.lastMove) {
         val lastMove = uiState.board.lastMove ?: return@LaunchedEffect
+        // The engine's replies land in the same board state as the human's moves, so credit the
+        // move only when the side that made it is the one the player is sitting on.
+        val playedByPlayer = when (val mode = uiState.gameMode) {
+            is GameMode.VsAI -> lastMove.piece.color == mode.playerColor
+            GameMode.TwoPlayer -> true
+        }
+        if (!playedByPlayer) return@LaunchedEffect
         if (lastMove.isCastling) {
             achievementsManager.onAchievementUnlocked("castled")
         }
