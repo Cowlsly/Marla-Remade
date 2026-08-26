@@ -42,7 +42,7 @@
 //! Both of those were bugs that had to be fixed once already.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
 use crate::compact::Chain;
@@ -778,20 +778,50 @@ pub(crate) struct PointReader {
 
 impl PointReader {
     /// Replace `out` with the `len` points starting at point index `start`.
+    ///
+    /// One positional read rather than a seek followed by a read. This is the only
+    /// random read in the graph writer — once per edge that stores a polyline — and
+    /// `osm_ingest/README.md` records that pass as 47 minutes at 21% CPU with 17.8 M
+    /// voluntary context switches, so halving its syscall count is worth the platform
+    /// split.
+    ///
+    /// Still `&mut self`, because `buf` is reused: the writer is sequential, and an
+    /// allocation per edge would cost more than the seek this removes. Making the read
+    /// positional is nonetheless what a parallel writer would need first, since the
+    /// handle's cursor is no longer part of the result.
     pub fn read(&mut self, start: u64, len: u32, out: &mut Vec<geom::Pt>) -> Result<()> {
         out.clear();
         if len == 0 {
             return Ok(());
         }
-        self.file
-            .seek(SeekFrom::Start(start * CHAIN_PT_BYTES))
-            .map_err(io_err)?;
         self.buf.clear();
         self.buf.resize(len as usize * CHAIN_PT_BYTES as usize, 0);
-        self.file.read_exact(&mut self.buf).map_err(io_err)?;
+        read_exact_at(&self.file, &mut self.buf, start * CHAIN_PT_BYTES).map_err(io_err)?;
         out.extend(self.buf.chunks_exact(CHAIN_PT_BYTES as usize).map(decode_pt));
         Ok(())
     }
+}
+
+/// Fill `buf` from `offset` in one call, without moving the file's cursor.
+///
+/// Neither platform's positional read is guaranteed to return everything at once,
+/// hence the loop; in practice it goes round once.
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "chains.pts ended mid-chain",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 fn io_err(e: std::io::Error) -> Error {

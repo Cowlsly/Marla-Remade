@@ -67,6 +67,7 @@ use crate::par;
 use crate::pbf::{self, KIND_NODES, KIND_WAYS};
 use crate::proto::{Error, Result};
 use crate::spatial::{accurate_dist_mm, spatial_from_e7};
+use rayon::prelude::*;
 use crate::tags;
 
 /// Node ids at or above this are skipped, exactly as in the C++. The bitset that
@@ -677,7 +678,14 @@ pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> 
         }
     }
     debug_assert_eq!(keys.len(), kept_count as usize);
-    keys.sort_by_key(|(spatial, _)| *spatial);
+    // The key is `(spatial, dense)`, and the loop above pushed `dense` ascending, so
+    // this is exactly the order the previous STABLE `sort_by_key(spatial)` produced:
+    // ties there fell back to insertion order, which was ascending `dense`. Spelling
+    // the tie-break into the key makes the order total, and a total order is what lets
+    // an UNSTABLE parallel sort be substituted without changing a single final id --
+    // and final ids are what `nodes.bin`, `edges.bin` and every offset in the pack are
+    // numbered by, so this is the one comparison in the build that must not move.
+    par::install(|| keys.par_sort_unstable());
 
     let mut final_of_kept = vec![0u32; kept_count as usize];
     let mut node_coords: Vec<geom::Pt> = Vec::with_capacity(kept_count as usize);
@@ -1039,10 +1047,36 @@ fn build_csr(spill: &chains::Spill, kept_count: u32, ids: &FinalIds) -> Result<C
     // Per group, so `twin_is_unique` can binary-search it. Sorting the whole array
     // would be one comparison sort over a billion elements; this is millions of
     // sorts over a handful each.
-    for v in 0..kept_count as usize {
-        let (a, b) = (edge_ptr[v] as usize, edge_ptr[v + 1] as usize);
-        targets[a..b].sort_unstable();
+    //
+    // Parallelised by carving `targets` into one disjoint slice per WORKER, each
+    // covering a contiguous span of nodes, rather than one slice per group: a
+    // `&mut [u32]` is 16 bytes, and a planet graph has around a billion groups, so
+    // collecting them all would cost more memory than the graph. Sorting `u32`s has
+    // one answer, so nothing here depends on the order the work happens in.
+    let n = kept_count as usize;
+    let workers = par::threads().min(n).max(1);
+    let mut pieces: Vec<(usize, usize, &mut [u32])> = Vec::with_capacity(workers);
+    let mut rest: &mut [u32] = &mut targets;
+    let mut consumed = 0usize;
+    for w in 0..workers {
+        let lo = n * w / workers;
+        let hi = n * (w + 1) / workers;
+        let end = edge_ptr[hi] as usize;
+        let (mine, tail) = rest.split_at_mut(end - consumed);
+        pieces.push((lo, hi, mine));
+        rest = tail;
+        consumed = end;
     }
+    let ptr = &edge_ptr;
+    par::install(|| {
+        pieces.par_iter_mut().for_each(|(lo, hi, buf)| {
+            let base = ptr[*lo] as usize;
+            for v in *lo..*hi {
+                let (a, b) = (ptr[v] as usize - base, ptr[v + 1] as usize - base);
+                buf[a..b].sort_unstable();
+            }
+        });
+    });
     println!("{total} directed edge(s) from chains");
     Ok(Csr { edge_ptr, targets })
 }
@@ -3119,6 +3153,79 @@ mod tests {
                 "{f} differs between runs"
             );
         }
+    }
+
+    /// The gate for threading the graph build: all six outputs must be byte-identical
+    /// at every thread count.
+    ///
+    /// `nodes.bin` is the one that would move first. Final node ids come from the
+    /// spatial sort, and every offset in `edges.bin`, `lanes.bin` and
+    /// `intermediate.bin` is expressed in terms of them — so a sort whose order is not
+    /// total would not corrupt one file, it would silently renumber the whole pack.
+    /// Multiple rounds are covered too, because `write_graph` partitions by source and
+    /// each round writes its own slice of `intermediate.bin`.
+    #[test]
+    fn the_thread_count_changes_no_graph_bytes() {
+        for rounds in [1u32, 3] {
+            let (pbf_path, base_dir) = testpbf::write_sample(&format!("graph_threads_{rounds}_1"));
+            let run = |n: usize, dir: &Path| {
+                crate::par::set_threads(n);
+                build_with(
+                    &pbf_path,
+                    dir,
+                    Options {
+                        rounds,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+                read_outputs(dir)
+            };
+            let base = run(1, &base_dir);
+            for n in [2, 3, 32] {
+                let (_, dir) = testpbf::write_sample(&format!("graph_threads_{rounds}_{n}"));
+                let got = run(n, &dir);
+                assert_eq!(got.meta, base.meta, "{rounds} round(s), {n} threads: metadata.bin");
+                assert_eq!(got.nodes, base.nodes, "{rounds} round(s), {n} threads: nodes.bin");
+                assert_eq!(got.edges, base.edges, "{rounds} round(s), {n} threads: edges.bin");
+                assert_eq!(got.lanes, base.lanes, "{rounds} round(s), {n} threads: lanes.bin");
+                assert_eq!(got.names, base.names, "{rounds} round(s), {n} threads: road_names.bin");
+                assert_eq!(got.inter, base.inter, "{rounds} round(s), {n} threads: intermediate.bin");
+            }
+        }
+        crate::par::clear_threads();
+    }
+
+    /// The substitution the spatial sort relies on: because the key is total, an
+    /// unstable sort produces exactly what the old stable `sort_by_key(spatial)` did.
+    ///
+    /// Ties on `spatial` are the only case where the two could differ, so the fixture
+    /// is mostly ties, with `dense` ascending as the real builder pushes them.
+    #[test]
+    fn the_spatial_key_is_total_so_an_unstable_sort_matches_the_stable_one() {
+        let keys: Vec<(u64, u32)> = vec![
+            (5, 0),
+            (3, 1),
+            (5, 2),
+            (1, 3),
+            (3, 4),
+            (5, 5),
+            (1, 6),
+            (9, 7),
+            (3, 8),
+        ];
+        // What the code used to do: stable, keyed on `spatial` alone, so ties kept
+        // their insertion order -- which was ascending `dense`.
+        let mut stable = keys.clone();
+        stable.sort_by_key(|(spatial, _)| *spatial);
+        // What it does now.
+        let mut unstable = keys;
+        unstable.par_sort_unstable();
+        assert_eq!(unstable, stable);
+        // And the property that makes it true: no two entries share a full key.
+        let mut seen = unstable.clone();
+        seen.dedup();
+        assert_eq!(seen.len(), unstable.len(), "the key must be unique per node");
     }
 
     // ---- the within-way chain path ---------------------------------------

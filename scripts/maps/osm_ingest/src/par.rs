@@ -11,7 +11,7 @@
 //! uncapped pool oversubscribes the box once they do.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 /// 0 means "not set"; any other value is an explicit cap from `--threads`.
 static OVERRIDE: AtomicUsize = AtomicUsize::new(0);
@@ -85,6 +85,46 @@ pub fn parse_threads(value: &str) -> std::result::Result<usize, String> {
         .ok()
         .filter(|n| *n > 0)
         .ok_or_else(|| format!("--threads wants a positive count, not {value}"))
+}
+
+/// Our own rayon pool rather than the global one, so the cap above governs it.
+///
+/// Cached, and rebuilt only when the requested count changes. In production that
+/// happens once, because `--threads` is read before any work starts; the reason it
+/// is not a `OnceLock` is that the byte-identity tests build the same graph at
+/// several thread counts in one process, and a pool fixed on first use would make
+/// those tests assert nothing.
+///
+/// `map_chunks` above does not use this — it owns its own scoped threads and its
+/// own ordered merge. This is for the phases that are a plain sort or map, where
+/// rayon's work stealing is worth more than a hand-rolled split.
+fn pool() -> Arc<rayon::ThreadPool> {
+    static POOL: Mutex<Option<(usize, Arc<rayon::ThreadPool>)>> = Mutex::new(None);
+    let want = threads();
+    let mut cached = POOL.lock().expect("thread pool mutex");
+    if let Some((have, p)) = cached.as_ref() {
+        if *have == want {
+            return Arc::clone(p);
+        }
+    }
+    let built = Arc::new(build_pool(want).unwrap_or_else(|e| {
+        eprintln!("WARNING: cannot start a {want}-thread pool ({e}); continuing on one thread");
+        build_pool(1).expect("a one-thread pool")
+    }));
+    *cached = Some((want, Arc::clone(&built)));
+    built
+}
+
+fn build_pool(n: usize) -> std::result::Result<rayon::ThreadPool, rayon::ThreadPoolBuildError> {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(n)
+        .thread_name(|i| format!("osm_ingest-{i}"))
+        .build()
+}
+
+/// Run `f` on the pool, so it sees our thread cap rather than rayon's global one.
+pub fn install<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    pool().install(f)
 }
 
 /// Apply `f(chunk_start, chunk)` to every chunk of `chunk_len` items, returning

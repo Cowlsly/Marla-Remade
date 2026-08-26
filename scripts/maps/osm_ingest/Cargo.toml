@@ -8,10 +8,22 @@
 #
 # Deliberately DETACHED from the Android Rust workspace (the empty [workspace]
 # table below), exactly like `scripts/maps/gtfs_ingest`: it is a host binary, so
-# `cargo build` here never pulls the aarch64-android toolchain or the app
-# crates' lints. Its single dependency, `miniz_oxide`, is a pure-Rust
-# DECODE-ONLY inflate implementation already in the local registry cache (the
-# app's maps crate pulls it via flate2), so builds still resolve offline.
+# `cargo build` here never pulls the aarch64-android toolchain or the app crates'
+# lints.
+#
+# Both dependencies are pure Rust and no C toolchain is involved:
+#
+#   miniz_oxide  DECODE-ONLY inflate. We only ever decompress the zlib blobs
+#                inside a .osm.pbf, so the deflate side is not needed here (unlike
+#                tile_build, which writes gzip).
+#   rayon        the work-stealing pool behind the spatial sort and the graph
+#                writer. Sized by `par::threads()`, so `--threads` and
+#                `MAPS_THREADS` govern it rather than the whole box.
+#
+# `cargo build --offline` resolves both from the local registry cache, along with
+# rayon's own tree (rayon-core, crossbeam-deque, crossbeam-utils, crossbeam-epoch,
+# either). That is a statement about THIS box's cache, not a guarantee: a clean
+# machine needs one online `cargo fetch` before it can build offline.
 [package]
 name = "osm_ingest"
 version = "0.1.0"
@@ -40,6 +52,7 @@ path = "src/bin/osm_extract.rs"
 # Pure-Rust inflate. We only ever DECOMPRESS the zlib blobs inside a .osm.pbf,
 # so a decode-only crate is enough and keeps the C toolchain out of the build.
 miniz_oxide = "0.8"
+rayon = "1"
 
 [profile.release]
 opt-level = 3

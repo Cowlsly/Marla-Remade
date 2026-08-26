@@ -18,7 +18,7 @@ use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use crate::proto::{self, Error, Reader, Result, WIRE_BYTES};
 
@@ -298,6 +298,16 @@ where
     let last_pct = AtomicUsize::new(usize::MAX);
     let n_threads = crate::par::threads().min(n_chunks);
     let mut first_err: Option<Error> = None;
+    // How far ahead of the sink the workers may run.
+    //
+    // Without this the reorder buffer is unbounded: a worker deposits and immediately
+    // claims another chunk, so one slow chunk 0 can park every other chunk's
+    // accumulator in `slots` at once. On a planet pass those accumulators are the
+    // largest things in the build, and raising the thread count widens the window,
+    // which is exactly the failure this plan is shaped to avoid. Two chunks per thread
+    // leaves slack for an uneven chunk without letting the buffer grow with the file.
+    let window = n_threads.saturating_mul(2).max(2);
+    let progressed = Condvar::new();
 
     std::thread::scope(|scope| {
         let mut handles = Vec::with_capacity(n_threads);
@@ -311,6 +321,15 @@ where
                     let chunk = next_chunk.fetch_add(1, Ordering::Relaxed);
                     if chunk >= n_chunks {
                         return Ok(());
+                    }
+                    // Hold off until this chunk is inside the window. The worker that
+                    // owns the lowest outstanding chunk always passes this test, so it
+                    // always makes progress and the wait cannot deadlock.
+                    {
+                        let mut d = drain.lock().expect("chunk slot mutex");
+                        while chunk >= d.next + window {
+                            d = progressed.wait(d).expect("chunk slot mutex");
+                        }
                     }
                     let start = chunk * CHUNK_BLOBS;
                     let end = ((chunk + 1) * CHUNK_BLOBS).min(blobs.len());
@@ -330,6 +349,7 @@ where
                         report(label, &done_blobs, &last_pct, blobs.len());
                     }
                     drain.lock().expect("chunk slot mutex").deposit(chunk, state);
+                    progressed.notify_all();
                 }
             }));
         }
@@ -449,6 +469,98 @@ fn report(label: &str, done: &AtomicUsize, last_pct: &AtomicUsize, total: usize)
 mod tests {
     use super::*;
     use crate::testpbf;
+
+    /// A file with enough `OSMData` blobs to span several chunks, so the reorder
+    /// buffer and its window are actually reached.
+    fn multi_chunk_pbf(chunks: usize) -> (std::path::PathBuf, std::path::PathBuf) {
+        let block = testpbf::primitive_block();
+        let blobs = chunks * CHUNK_BLOBS;
+        let refs: Vec<&[u8]> = (0..blobs).map(|_| block.as_slice()).collect();
+        let bytes = testpbf::pbf_from_blocks(refs);
+        let dir = std::env::temp_dir().join(format!(
+            "osm_ingest_window_{}_{chunks}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("many.osm.pbf");
+        std::fs::write(&path, &bytes).unwrap();
+        (path, dir)
+    }
+
+    /// The reorder buffer must not grow with the file.
+    ///
+    /// A worker deposits a finished chunk and immediately claims another, so without a
+    /// window one slow chunk 0 parks every later chunk's accumulator at once — and on a
+    /// planet pass those accumulators are the largest things in the build. Chunk 0 is
+    /// made slow here on purpose; the counter is what proves the bound, because the
+    /// pass would produce correct output either way.
+    #[test]
+    fn the_reorder_buffer_stays_bounded_when_the_first_chunk_lags() {
+        let (path, _dir) = multi_chunk_pbf(40);
+        crate::par::set_threads(4);
+        let blobs = scan_blobs(&path).unwrap();
+        let n_chunks = blobs.len().div_ceil(CHUNK_BLOBS);
+        assert!(n_chunks >= 40, "{n_chunks} chunk(s) is not enough to bound anything");
+
+        // Accumulators alive right now, and the worst it ever got.
+        let live = std::sync::Arc::new(AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(AtomicUsize::new(0));
+
+        struct Acc {
+            live: std::sync::Arc<AtomicUsize>,
+        }
+        impl Drop for Acc {
+            fn drop(&mut self) {
+                self.live.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+
+        let first_seen = AtomicUsize::new(0);
+        let (mk_live, mk_peak) = (live.clone(), peak.clone());
+        let drained = std::sync::Mutex::new(Vec::new());
+        run_pass_sink(
+            &path,
+            &blobs,
+            None,
+            KIND_NODES,
+            "window",
+            || {
+                let n = mk_live.fetch_add(1, Ordering::SeqCst) + 1;
+                mk_peak.fetch_max(n, Ordering::SeqCst);
+                Acc { live: mk_live.clone() }
+            },
+            |_acc, _block| {
+                // Only the very first chunk to start is slowed, which is enough to make
+                // every other worker run ahead of the sink.
+                if first_seen.fetch_add(1, Ordering::SeqCst) == 0 {
+                    std::thread::sleep(std::time::Duration::from_millis(300));
+                }
+                Ok(KIND_NODES)
+            },
+            |acc: Acc| {
+                drained.lock().unwrap().push(());
+                drop(acc);
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(drained.into_inner().unwrap().len(), n_chunks, "every chunk drains");
+        assert_eq!(live.load(Ordering::SeqCst), 0, "an accumulator leaked");
+        // 4 threads => a window of 8, plus the one each worker is filling. Well under
+        // the ~40 that would pile up if the workers were free to run to the end of the
+        // file, which is what makes this assertion mean something.
+        let bound = 8 + 4;
+        let got = peak.load(Ordering::SeqCst);
+        assert!(
+            got <= bound,
+            "{got} accumulators were live at once over {n_chunks} chunks; \
+             the window should have held it to {bound}"
+        );
+        crate::par::clear_threads();
+    }
 
     #[test]
     fn round_trips_a_synthetic_file() {

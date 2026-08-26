@@ -323,6 +323,15 @@ pub fn sample_pbf() -> Vec<u8> {
 }
 
 fn pbf_from_block(block: &[u8]) -> Vec<u8> {
+    pbf_from_blocks(std::iter::once(block))
+}
+
+/// A complete `.osm.pbf` with one `OSMData` blob per block.
+///
+/// Exists so a test can produce more than the one chunk `CHUNK_BLOBS` groups blobs
+/// into. Everything about `run_pass_sink` that is interesting under concurrency — the
+/// reorder buffer, its window, the ordered drain — is inert on a single-chunk file.
+pub fn pbf_from_blocks<'a>(blocks: impl IntoIterator<Item = &'a [u8]>) -> Vec<u8> {
     let mut header_block = Vec::new();
     bytes_field(4, b"OsmSchema-V0.6", &mut header_block);
     bytes_field(4, b"DenseNodes", &mut header_block);
@@ -333,7 +342,9 @@ fn pbf_from_block(block: &[u8]) -> Vec<u8> {
 
     let mut out = Vec::new();
     framed("OSMHeader", &header_blob, &mut out);
-    framed("OSMData", &data_blob(block), &mut out);
+    for block in blocks {
+        framed("OSMData", &data_blob(block), &mut out);
+    }
     out
 }
 
