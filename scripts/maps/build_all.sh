@@ -78,6 +78,13 @@ set -euo pipefail
 #     --skip-graph  --skip-pois  --skip-transit  --skip-tiles
 #     --only STAGE        run exactly one of graph|pois|transit|tiles
 #     --force             ignore stamps and redo every requested stage
+#     --jobs N            how many layer builds (tiles) and feed unzips (transit) run
+#                         at once. Default 3. Peak memory is roughly N x the largest
+#                         concurrent job, so raise it when the machine's headroom is
+#                         known rather than by default.
+#     --overlap-graph     run the graph stage alongside pois/transit/tiles instead of
+#                         before them. They share nothing, but the graph is the
+#                         hungriest stage in the build, so this is opt-in.
 #     --dry-run           print what each stage would run; change nothing
 #   Graph build-time memory (forwarded to road_graph; none change the on-disk
 #   contract, and --rounds does not change the output at all)
@@ -89,9 +96,10 @@ set -euo pipefail
 #     --rounds N          write the pack in N source-partitioned rounds instead of
 #                         one, so the write buffer is edges/N x 48 B rather than
 #                         all of it. Planet wants 3.
-#     --spill-dir DIR     put chains.pts somewhere other than --out-dir. It is the
-#                         only file the build reads RANDOMLY, so it wants cheap
-#                         seeks -- keep it off a network or /mnt/c mount even when
+#     --spill-dir DIR     put chains.pts somewhere other than --out-dir, and the roads
+#                         tiler's spill with it. Those are the only files the build
+#                         reads RANDOMLY or re-reads per zoom, so they want cheap
+#                         seeks -- keep them off a network or /mnt/c mount even when
 #                         the output lives there.
 #                         See osm_ingest/README.md 'Build-time memory'.
 #   Engines, per layer, so a ported layer rolls back with a flag
@@ -143,6 +151,19 @@ SKIP_TRANSIT=0
 SKIP_TILES=0
 ONLY=""
 FORCE=0
+# Fanned out to the tiles stage's layer builds and the transit stage's unzip loop.
+# Peak memory is roughly JOBS x the largest concurrent job, so this is a memory dial
+# as much as a speed one -- see build_v5_pmtiles.sh's own note.
+JOBS=3
+# Run the graph stage CONCURRENTLY with pois/transit/tiles.
+#
+# Off by default, and not because the stages conflict -- they genuinely do not, the
+# graph has no consumers here and writes only to $OUT_DIR. It is off because the
+# graph is the most memory-hungry stage in the build by a wide margin (61.85 GiB on
+# Europe via the reference path, which is why --within-way-chains exists), and
+# overlapping it with a fanned-out tiles stage multiplies two large peaks together.
+# Turn it on when the machine's headroom is known; the wall-clock win is real.
+OVERLAP_GRAPH=0
 DRY_RUN=0
 PUBLISH=0
 PUBLISH_DRY_RUN=0
@@ -180,6 +201,8 @@ while [[ $# -gt 0 ]]; do
         --skip-tiles) SKIP_TILES=1; shift ;;
         --only) ONLY="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
+        --jobs) JOBS="$2"; shift 2 ;;
+        --overlap-graph) OVERLAP_GRAPH=1; shift ;;
         --dry-run) DRY_RUN=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-dry-run) PUBLISH_DRY_RUN=1; shift ;;
@@ -323,10 +346,21 @@ if want_stage graph; then
         # measurable and separately deletable.
         [[ -n "$SPILL_DIR" ]] && GRAPH_ARGS+=(--spill-dir "$SPILL_DIR/graph")
         # Gated deliberately: road_graph truncates its outputs as it writes, so a
-        # failure here must not fall through to the manifest or the publish.
-        run cargo run --release --quiet --manifest-path "$HERE/osm_ingest/Cargo.toml" \
-            --bin road_graph -- "${GRAPH_ARGS[@]}"
-        mark_done graph
+        # failure here must not fall through to the manifest or the publish. With
+        # --overlap-graph that gate moves rather than disappears: the PID is waited
+        # on before the manifest below, and a non-zero status still stops the build.
+        if [[ "$OVERLAP_GRAPH" == "1" && "$DRY_RUN" != "1" ]]; then
+            mkdir -p "$WORK/logs"
+            GRAPH_LOG="$WORK/logs/graph.log"
+            echo "[all] graph: started in the background (log $GRAPH_LOG)"
+            cargo run --release --quiet --manifest-path "$HERE/osm_ingest/Cargo.toml" \
+                --bin road_graph -- "${GRAPH_ARGS[@]}" >"$GRAPH_LOG" 2>&1 &
+            GRAPH_PID=$!
+        else
+            run cargo run --release --quiet --manifest-path "$HERE/osm_ingest/Cargo.toml" \
+                --bin road_graph -- "${GRAPH_ARGS[@]}"
+            mark_done graph
+        fi
     fi
 fi
 
@@ -368,6 +402,7 @@ if want_stage transit; then
         WT_ARGS=(--work "$TRANSIT_WORK" --out "$OUT_DIR")
         [[ -n "$GTFS_MIRROR" ]] && WT_ARGS+=(--mirror-dir "$GTFS_MIRROR")
         [[ -n "$GTFS_RATE" ]] && WT_ARGS+=(--rate "$GTFS_RATE")
+        WT_ARGS+=(--jobs "$JOBS")
         if [[ -n "$GTFS_MANIFEST" ]]; then
             WT_ARGS+=(--manifest "$GTFS_MANIFEST")
         else
@@ -386,7 +421,10 @@ if want_stage tiles; then
     else
         require_pbf tiles
         echo "=== tiles -> $OUT ==="
-        V5_ARGS=(--pbf "$PBF" --out "$OUT" --workdir "$WORK/v5")
+        V5_ARGS=(--pbf "$PBF" --out "$OUT" --workdir "$WORK/v5" --jobs "$JOBS")
+        # The same mount the graph spill went to: the roads tiler re-reads its spill
+        # once per zoom, which is the other access pattern a translation layer punishes.
+        [[ -n "$SPILL_DIR" ]] && V5_ARGS+=(--spill-dir "$SPILL_DIR")
         # Overlay-only unless asked otherwise. The base options only mean anything
         # when there IS a base, and build_v5_pmtiles.sh rejects them alongside
         # --no-base rather than ignoring them, so they are passed only here.
@@ -417,6 +455,24 @@ if want_stage tiles; then
         [[ "$DRY_RUN" == "1" ]] && V5_ARGS+=(--dry-run)
         "$HERE/build_v5_pmtiles.sh" "${V5_ARGS[@]}"
         mark_done tiles
+    fi
+fi
+
+# --- the graph barrier ---
+# With --overlap-graph the graph stage has been running alongside everything above.
+# It must be finished, and finished SUCCESSFULLY, before the manifest hashes its
+# outputs -- road_graph truncates them as it writes, so a half-written nodes.bin
+# would otherwise be measured and published as if it were whole.
+if [[ -n "${GRAPH_PID:-}" ]]; then
+    echo "[all] waiting for the background graph stage..."
+    if wait "$GRAPH_PID"; then
+        cat "$GRAPH_LOG"
+        mark_done graph
+    else
+        echo "===== graph: FAILED =====" >&2
+        cat "$GRAPH_LOG" >&2
+        echo "ERROR: the graph stage failed; not writing a manifest" >&2
+        exit 1
     fi
 fi
 

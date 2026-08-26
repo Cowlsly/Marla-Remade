@@ -74,6 +74,10 @@ set -euo pipefail
 #                     base-only options (--base-mode build, --base-jar,
 #                     --base-source) rather than ignoring them.
 #   --workdir DIR     scratch dir for intermediates (default ./v5_work)
+#   --spill-dir DIR   where the roads tiler spills. It is tens of GB at planet scale
+#                     and read once per zoom, so keep it off a network or /mnt/c
+#                     mount even when the output lives there. Defaults to beside
+#                     the roads archive.
 #   --bbox BOX        metro bbox "minlon,minlat,maxlon,maxlat" (dry runs)
 #   --gtfs-manifest F feeds.manifest for the transit_stops layer (`name=dir[=motis_prefix]`
 #                     per line, as build_ca_transit.ps1 writes). Without it the
@@ -137,6 +141,7 @@ ENGINE_TRANSIT_LINES="rust"
 ENGINE_ADMIN="legacy"
 ENGINE_ADMIN_CITY="rust"
 ADMIN_REUSE=""
+SPILL_DIR=""
 DRY_RUN=0
 NO_BASE=0
 SKIP_BASE=0
@@ -150,12 +155,22 @@ GTFS_MANIFEST=""
 KEEP_WORK=0
 PUBLISH=0
 PUBLISH_KEY=""
+# How many layer builds run at once.
+#
+# Peak memory is roughly JOBS x the largest concurrent layer, and the largest is
+# the roads extract at 5.00 GiB (California, measured). Three is the default
+# because it uses the box without betting the build on it: six concurrent layers
+# on a metro extract is comfortable, six on a planet extract is not, and a script
+# that OOMs by default on a smaller machine is worse than one that is merely
+# slower. Raise it when you know the machine.
+JOBS=3
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pbf) PBF="$2"; shift 2 ;;
         --out) OUT="$2"; shift 2 ;;
         --workdir) WORK="$2"; shift 2 ;;
+        --spill-dir) SPILL_DIR="$2"; shift 2 ;;
         --bbox) BBOX="$2"; shift 2 ;;
         --base-mode) BASE_MODE="$2"; shift 2 ;;
         --base-jar) BASE_JAR="$2"; shift 2 ;;
@@ -178,6 +193,7 @@ while [[ $# -gt 0 ]]; do
         --skip-admin) SKIP_ADMIN=1; shift ;;
         --skip-transit-stops) SKIP_TRANSIT_STOPS=1; shift ;;
         --gtfs-manifest) GTFS_MANIFEST="$2"; shift 2 ;;
+        --jobs) JOBS="$2"; shift 2 ;;
         --keep-work) KEEP_WORK=1; shift ;;
         --publish) PUBLISH=1; shift ;;
         --publish-key) PUBLISH_KEY="$2"; shift 2 ;;
@@ -248,6 +264,87 @@ run() {
     "$@"
 }
 
+# --- the layer fan-out ------------------------------------------------------
+#
+# The layer builds are independent: each reads $PBF read-only, each mktemp -d's its
+# own scratch, and each writes a distinct name under $WORK (admin gets its own
+# subdirectory). So they can run at once -- but three things have to be right, and
+# none of them are free.
+#
+# 1. `set -euo pipefail` does NOT propagate a failure out of a background job. A
+#    layer that dies would otherwise reach tile_join and yield a short archive that
+#    looks fine. `wait` per PID is the only way to see each exit code, so every job
+#    is waited on individually and its status recorded.
+# 2. Each job's output goes to its own log and is replayed afterwards. Six builds
+#    interleaving progress bars on one terminal is unreadable, and the log is what
+#    makes a failure diagnosable.
+# 3. MAPS_THREADS is divided among the jobs. Without it each layer would size its
+#    own pool from the whole box -- six layers claiming 32 threads each on 32 cores
+#    is 192 threads, and finishes slower than running in sequence.
+[[ "$JOBS" =~ ^[0-9]+$ && "$JOBS" -ge 1 ]] || {
+    echo "ERROR: --jobs wants a positive count (got '$JOBS')" >&2; exit 1; }
+
+# Total threads to share out. `nproc` is not on every box, so fall back rather
+# than fail; MAPS_THREADS from the caller wins, since an operator who set it meant it.
+TOTAL_THREADS="${MAPS_THREADS:-$(nproc 2>/dev/null || echo 4)}"
+PER_JOB_THREADS=$(( TOTAL_THREADS / JOBS ))
+[[ "$PER_JOB_THREADS" -ge 1 ]] || PER_JOB_THREADS=1
+
+JOB_PIDS=()
+JOB_NAMES=()
+JOB_LOGS=()
+LOG_DIR="$WORK/logs"
+
+# Start a layer build, or run it in the foreground when --jobs 1.
+launch() {
+    local name="$1"; shift
+    if [[ "$DRY_RUN" == "1" ]]; then
+        printf '[dry-run]'
+        printf ' %q' "$@"
+        printf '\n'
+        return 0
+    fi
+    if [[ "$JOBS" -le 1 ]]; then
+        echo "[v5] $name"
+        MAPS_THREADS="$PER_JOB_THREADS" "$@"
+        return
+    fi
+    mkdir -p "$LOG_DIR"
+    local log="$LOG_DIR/$name.log"
+    echo "[v5] $name: started (MAPS_THREADS=$PER_JOB_THREADS, log $log)"
+    MAPS_THREADS="$PER_JOB_THREADS" "$@" >"$log" 2>&1 &
+    JOB_PIDS+=("$!")
+    JOB_NAMES+=("$name")
+    JOB_LOGS+=("$log")
+    # Never more than JOBS in flight, so --jobs really is a memory bound and not
+    # just a hint.
+    [[ "${#JOB_PIDS[@]}" -lt "$JOBS" ]] || reap
+}
+
+# Wait for every outstanding job, replay its log, and fail if any failed.
+reap() {
+    [[ "${#JOB_PIDS[@]}" -gt 0 ]] || return 0
+    local failed=()
+    local i
+    for i in "${!JOB_PIDS[@]}"; do
+        if wait "${JOB_PIDS[$i]}"; then
+            echo "===== ${JOB_NAMES[$i]}: ok ====="
+            cat "${JOB_LOGS[$i]}"
+        else
+            echo "===== ${JOB_NAMES[$i]}: FAILED =====" >&2
+            cat "${JOB_LOGS[$i]}" >&2
+            failed+=("${JOB_NAMES[$i]}")
+        fi
+    done
+    JOB_PIDS=()
+    JOB_NAMES=()
+    JOB_LOGS=()
+    if [[ "${#failed[@]}" -gt 0 ]]; then
+        echo "ERROR: layer build(s) failed: ${failed[*]}" >&2
+        exit 1
+    fi
+}
+
 command -v cargo >/dev/null || { echo "ERROR: cargo not installed (https://rustup.rs)" >&2; exit 1; }
 mkdir -p "$WORK"
 
@@ -256,7 +353,15 @@ mkdir -p "$WORK"
 # to share the same guard.
 OUTDIR="$(cd "$(dirname "$OUT")" && pwd)"
 
+# The merge's argv order is a CONTRACT: a later input wins a layer-name collision,
+# so `--extra-layer` must come last and the base must come first. Completion order
+# is not argv order once the layers run concurrently, so the list is assembled in
+# three fixed pieces rather than appended to as jobs finish. `INPUTS_ADMIN` is
+# separate only because its entries are existence-checked, and those files do not
+# exist until the admin job has been reaped.
 INPUTS=()
+INPUTS_ADMIN=()
+INPUTS_POST=()
 
 # --- 1. base ---
 BASE="$WORK/base.pmtiles"
@@ -271,7 +376,7 @@ else
     [[ -n "$BBOX" ]] && BASE_ARGS+=(--bbox "$BBOX")
     [[ -n "$BASE_SOURCE" ]] && BASE_ARGS+=(--source "$BASE_SOURCE")
     [[ "$BASE_MODE" == "build" ]] && BASE_ARGS+=(--jar "$BASE_JAR" --area "$BASE_AREA")
-    run "$HERE/build_base_layers.sh" "${BASE_ARGS[@]}"
+    launch base "$HERE/build_base_layers.sh" "${BASE_ARGS[@]}"
     INPUTS+=("$BASE")
 fi
 
@@ -280,7 +385,7 @@ if [[ "$SKIP_SAFETY" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for safety layer (or --skip-safety)" >&2; exit 1; }
     SAFETY_ARGS=(--pbf "$PBF" --out "$WORK/safety.pmtiles" --engine "$ENGINE_SAFETY")
     [[ -n "$BBOX" ]] && SAFETY_ARGS+=(--bbox "$BBOX")
-    run "$HERE/build_safety_layer.sh" "${SAFETY_ARGS[@]}"
+    launch safety "$HERE/build_safety_layer.sh" "${SAFETY_ARGS[@]}"
     INPUTS+=("$WORK/safety.pmtiles")
 fi
 
@@ -289,7 +394,11 @@ if [[ "$SKIP_ROADS" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for roads layer (or --skip-roads)" >&2; exit 1; }
     ROADS_ARGS=(--pbf "$PBF" --out "$WORK/roads.pmtiles")
     [[ -n "$BBOX" ]] && ROADS_ARGS+=(--bbox "$BBOX")
-    run "$HERE/build_roads_layer.sh" "${ROADS_ARGS[@]}"
+    # The roads tiler streams, so it needs somewhere to spill. Forwarded rather than
+    # left to default beside the output, because at planet scale the spill is tens of
+    # GB and the operator is the only one who knows which mount can take it.
+    [[ -n "$SPILL_DIR" ]] && ROADS_ARGS+=(--spill-dir "$SPILL_DIR/roads")
+    launch roads "$HERE/build_roads_layer.sh" "${ROADS_ARGS[@]}"
     INPUTS+=("$WORK/roads.pmtiles")
 fi
 
@@ -298,7 +407,7 @@ if [[ "$SKIP_TRANSIT_LINES" == "0" ]]; then
     [[ -n "$PBF" ]] || { echo "ERROR: --pbf required for transit_lines layer (or --skip-transit-lines)" >&2; exit 1; }
     TL_ARGS=(--pbf "$PBF" --out "$WORK/transit_lines.pmtiles" --engine "$ENGINE_TRANSIT_LINES")
     [[ -n "$BBOX" ]] && TL_ARGS+=(--bbox "$BBOX")
-    run "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
+    launch transit_lines "$HERE/build_transit_lines_layer.sh" "${TL_ARGS[@]}"
     INPUTS+=("$WORK/transit_lines.pmtiles")
 fi
 
@@ -311,7 +420,7 @@ if [[ "$SKIP_POIS" == "0" ]]; then
         --spatial-out "$OUTDIR/poi_spatial.bin" \
         --name-index-out "$OUTDIR/poi_name_index.bin")
     [[ -n "$BBOX" ]] && POIS_ARGS+=(--bbox "$BBOX")
-    run "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
+    launch ma_pois "$HERE/build_pois_layer.sh" "${POIS_ARGS[@]}"
     INPUTS+=("$WORK/ma_pois.pmtiles")
 fi
 
@@ -325,10 +434,10 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
     # archive rather than rebuilt, so build_admin_layers.sh only has to do the one
     # level OSM can supply -- and therefore needs no ogr2ogr, tippecanoe or python3.
     [[ -n "$ADMIN_REUSE" ]] && ADMIN_ARGS+=(--only-city)
-    run "$HERE/build_admin_layers.sh" "${ADMIN_ARGS[@]}"
-    for l in admin_country admin_region admin_city; do
-        [[ -f "$WORK/admin/$l.pmtiles" ]] && INPUTS+=("$WORK/admin/$l.pmtiles")
-    done
+    launch admin "$HERE/build_admin_layers.sh" "${ADMIN_ARGS[@]}"
+    # Deferred: these files do not exist until the admin job has been reaped, and
+    # `INPUTS_ADMIN` keeps their argv position regardless of when that happens.
+    ADMIN_WANTED=(admin_country admin_region admin_city)
 
     if [[ -n "$ADMIN_REUSE" ]]; then
         SRC="$ADMIN_REUSE"
@@ -349,7 +458,7 @@ if [[ "$SKIP_ADMIN" == "0" ]]; then
             --bin pmtiles_extract -- "$SRC" \
             --out "$WORK/admin/admin_reused.pmtiles" \
             --layer admin_country --layer admin_region
-        INPUTS+=("$WORK/admin/admin_reused.pmtiles")
+        ADMIN_REUSED="$WORK/admin/admin_reused.pmtiles"
     fi
 fi
 
@@ -366,14 +475,29 @@ if [[ "$SKIP_TRANSIT_STOPS" == "0" ]]; then
         # source rather than per layer. A stops layer tiled below the union has its
         # stops disappear above its own maxzoom, because the client then fetches real
         # tiles that carry no `transit_stops`.
-        run "$HERE/build_transit_stops_layer.sh" \
+        launch transit_stops "$HERE/build_transit_stops_layer.sh" \
             --manifest "$GTFS_MANIFEST" \
             --out "$WORK/transit_stops.pmtiles" \
             --workdir "$WORK/transit_stops" \
             --maxzoom 16
-        INPUTS+=("$WORK/transit_stops.pmtiles")
+        INPUTS_POST+=("$WORK/transit_stops.pmtiles")
     fi
 fi
+
+# --- 7a. every layer job has to have finished before the merge reads its output ---
+#
+# This is the barrier the whole fan-out hangs on: `reap` waits on each PID
+# individually and exits non-zero if any layer failed, because `set -e` would
+# otherwise let a dead layer through to tile_join and produce a short archive that
+# looks perfectly valid.
+reap
+
+for l in ${ADMIN_WANTED[@]+"${ADMIN_WANTED[@]}"}; do
+    [[ -f "$WORK/admin/$l.pmtiles" ]] && INPUTS_ADMIN+=("$WORK/admin/$l.pmtiles")
+done
+[[ -n "${ADMIN_REUSED:-}" ]] && INPUTS_ADMIN+=("$ADMIN_REUSED")
+
+INPUTS+=(${INPUTS_ADMIN[@]+"${INPUTS_ADMIN[@]}"} ${INPUTS_POST[@]+"${INPUTS_POST[@]}"})
 
 # --- 7b. layers the caller already built ---
 # Last in, so an --extra-layer wins a name collision with anything above it.

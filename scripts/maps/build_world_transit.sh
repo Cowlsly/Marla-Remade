@@ -79,6 +79,12 @@ OUT=""
 REGION="*"
 MAX_FEEDS=0
 MANIFEST=""
+# How many feeds to unzip at once.
+#
+# The unzip loop only; the wget mirror below stays strictly serial on purpose --
+# see its own comment. Unzipping is CPU-bound (inflate) and touches only per-feed
+# directories, so this is the one place in this script that fans out safely.
+JOBS="${MAPS_JOBS:-4}"
 MIRROR_DIR=""
 SKIP_MIRROR=0
 RATE="30m"
@@ -98,6 +104,7 @@ while [[ $# -gt 0 ]]; do
         --region) REGION="$2"; shift 2 ;;
         --max-feeds) MAX_FEEDS="$2"; shift 2 ;;
         --manifest) MANIFEST="$2"; shift 2 ;;
+        --jobs) JOBS="$2"; shift 2 ;;
         --mirror-dir) MIRROR_DIR="$2"; shift 2 ;;
         --skip-mirror) SKIP_MIRROR=1; shift ;;
         --rate) RATE="$2"; shift 2 ;;
@@ -170,6 +177,12 @@ else
         # only pulls what changed upstream. The `scripts/` transforms come along
         # because they name each feed's MOTIS id, which is worth having on disk
         # next to the zips it identifies.
+        #
+        # DO NOT fan this out. `--limit-rate` is per-process, so N parallel wgets
+        # silently multiply the load on a volunteer host by N -- the rate limit
+        # would still read 30m in the arguments while the host saw N x 30m. The
+        # unzip loop below is where this script gets its concurrency; overlap the
+        # download with CPU work instead of splitting the download.
         MIRROR_ARGS=(
             --limit-rate="$RATE" --mirror -l 2 --no-parent
             --cut-dirs=1 --no-host-directories
@@ -199,7 +212,13 @@ else
     echo "=== ${#ZIPS[@]} zip(s) in the mirror; region filter: $REGION ==="
 
     : > "$BUILD_MANIFEST"
-    used=0
+
+    # --- 3a. Select, serially, in sorted order -------------------------------
+    #
+    # Cheap (name parsing and a glob match, no I/O), and it has to be serial anyway
+    # because `--max-feeds` contractually takes a stable prefix of the name-sorted
+    # list. Unzipping is the expensive part and happens below.
+    CAND_NAME=(); CAND_DIR=(); CAND_PREFIX=(); CAND_ZIP=()
     for zip in ${ZIPS[@]+"${ZIPS[@]}"}; do
         stem="$(basename "$zip" .gtfs.zip)"
         # `<region>_<Source>`: only the FIRST underscore separates them, and the
@@ -217,24 +236,60 @@ else
             echo "  WARN: '$stem' has no <region>_<source> split; skipped" >&2
             continue
         fi
-        prefix="$region-$source_name"
-        name="$(safe_name "$stem")"
-        dir="$GTFS_ROOT/$name"
+        CAND_NAME+=("$(safe_name "$stem")")
+        CAND_PREFIX+=("$region-$source_name")
+        CAND_ZIP+=("$zip")
+        CAND_DIR+=("$GTFS_ROOT/$(safe_name "$stem")")
+    done
+    NCAND="${#CAND_NAME[@]}"
 
-        if [[ "$MAX_FEEDS" -gt 0 && "$used" -ge "$MAX_FEEDS" ]]; then break; fi
-        if [[ "$LIST_ONLY" == "1" ]]; then
-            printf '%s\t%s\t%s\n' "$name" "$prefix" "$zip"
+    if [[ "$LIST_ONLY" == "1" ]]; then
+        used=0
+        for ((i = 0; i < NCAND; i++)); do
+            [[ "$MAX_FEEDS" -gt 0 && "$used" -ge "$MAX_FEEDS" ]] && break
+            printf '%s\t%s\t%s\n' "${CAND_NAME[$i]}" "${CAND_PREFIX[$i]}" "${CAND_ZIP[$i]}"
             used=$((used + 1))
-            continue
-        fi
+        done
+        echo "=== --list-only: $used feed(s) would be used ==="
+        exit 0
+    fi
 
+    # --- 3b. Unzip, in parallel, in waves ------------------------------------
+    #
+    # Embarrassingly parallel: each feed is its own zip and its own directory. Two
+    # things constrain how:
+    #
+    #   * The manifest must stay in sorted order, so each feed writes its line to
+    #     its OWN fragment file and the fragments are concatenated by index. A
+    #     shared append would interleave and make the order completion order.
+    #   * `--max-feeds` counts feeds that actually unzipped, not feeds attempted, so
+    #     the work goes out in waves and the count is checked between them. Selecting
+    #     N candidates up front instead would silently return fewer than N whenever a
+    #     zip was corrupt.
+    #
+    # A feed that fails is a warning, not a failure: one bad zip out of hundreds must
+    # not lose the build. Failure is signalled by an ABSENT fragment rather than an
+    # exit code, so the reap loop needs no error plumbing.
+    FRAG_DIR="$WORK/frag"
+    rm -rf "$FRAG_DIR"
+    mkdir -p "$FRAG_DIR"
+
+    unzip_feed() {
+        local i="$1"
+        local zip="${CAND_ZIP[$i]}" dir="${CAND_DIR[$i]}"
+        local name="${CAND_NAME[$i]}" prefix="${CAND_PREFIX[$i]}"
+        local stem
+        stem="$(basename "$zip" .gtfs.zip)"
         if [[ ! -f "$dir/stops.txt" ]]; then
             mkdir -p "$dir"
             if ! unzip -oq "$zip" -d "$dir" 2>/dev/null; then
-                echo "  WARN: unzip failed: $stem" >&2; discard_feed_dir "$dir"; continue
+                echo "  WARN: unzip failed: $stem" >&2
+                discard_feed_dir "$dir"
+                return 0
             fi
             # Some feeds nest the txt files one dir deep; flatten if needed.
             if [[ ! -f "$dir/stops.txt" ]]; then
+                local found inner
                 found="$(find "$dir" -name stops.txt 2>/dev/null | head -n1)"
                 # Test the find RESULT, not the dirname of it. `dirname ""` is `.`,
                 # so a zip with no stops.txt anywhere used to set inner="." and run
@@ -250,17 +305,38 @@ else
             if [[ ! -f "$dir/stops.txt" ]]; then
                 echo "  WARN: no stops.txt in the zip: $stem" >&2
                 discard_feed_dir "$dir"
-                continue
+                return 0
             fi
         fi
-        printf '%s=%s=%s\n' "$name" "$dir" "$prefix" >> "$BUILD_MANIFEST"
-        used=$((used + 1))
-    done
+        printf '%s=%s=%s\n' "$name" "$dir" "$prefix" > "$FRAG_DIR/$i.line"
+        return 0
+    }
 
-    if [[ "$LIST_ONLY" == "1" ]]; then
-        echo "=== --list-only: $used feed(s) would be used ==="
-        exit 0
-    fi
+    used=0
+    next=0
+    while [[ "$next" -lt "$NCAND" ]]; do
+        [[ "$MAX_FEEDS" -gt 0 && "$used" -ge "$MAX_FEEDS" ]] && break
+        wave_pids=(); wave_idx=()
+        while [[ "${#wave_pids[@]}" -lt "$JOBS" && "$next" -lt "$NCAND" ]]; do
+            unzip_feed "$next" &
+            wave_pids+=("$!")
+            wave_idx+=("$next")
+            next=$((next + 1))
+        done
+        for p in ${wave_pids[@]+"${wave_pids[@]}"}; do
+            wait "$p" || true
+        done
+        # In index order, so the manifest stays sorted however the wave finished.
+        for i in ${wave_idx[@]+"${wave_idx[@]}"}; do
+            [[ "$MAX_FEEDS" -gt 0 && "$used" -ge "$MAX_FEEDS" ]] && break
+            if [[ -s "$FRAG_DIR/$i.line" ]]; then
+                cat "$FRAG_DIR/$i.line" >> "$BUILD_MANIFEST"
+                used=$((used + 1))
+            fi
+        done
+        echo "  ...$used feed(s) unzipped of $NCAND candidate(s)"
+    done
+    rm -rf "$FRAG_DIR"
 fi
 
 nfeeds="$(wc -l < "$BUILD_MANIFEST" | tr -d ' ')"
