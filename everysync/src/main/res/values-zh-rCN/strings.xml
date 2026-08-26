@@ -2,7 +2,7 @@
 <resources xmlns:xliff="urn:oasis:names:tc:xliff:document:1.2">
     <string name="accounts_title">EverySync</string>
     <string name="no_accounts">尚无账号。点按 + 添加一个。</string>
-    <string name="sync_now">现在同步</string>
+    <string name="sync_now">立即同步</string>
     <string name="syncing">正在同步…</string>
     <string name="last_synced">最后同步：<xliff:g id="date" example="Today 10:30 AM">%1$s</xliff:g></string>
     <string name="never_synced">从未同步</string>
