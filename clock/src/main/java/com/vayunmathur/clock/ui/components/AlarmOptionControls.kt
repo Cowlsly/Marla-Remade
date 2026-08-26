@@ -15,6 +15,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
+import android.media.RingtoneManager
 import com.vayunmathur.clock.R
 import com.vayunmathur.library.ui.DropdownMenu
 import com.vayunmathur.library.ui.DropdownMenuItem
@@ -44,7 +45,9 @@ fun AlarmOptionControls(
     val context = LocalContext.current
     Column(modifier = modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         OptionRow(label = stringResource(R.string.sound)) {
-            TextButton(onClick = onRingtoneClick) { Text(ringtoneTitle(context, ringtoneUri)) }
+            TextButton(onClick = onRingtoneClick) {
+                Text(ringtoneTitle(context, ringtoneUri, RingtoneManager.TYPE_ALARM))
+            }
         }
         OptionRow(label = stringResource(R.string.vibrate)) {
             Switch(checked = vibrate, onCheckedChange = onVibrateChange)

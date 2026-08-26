@@ -97,6 +97,8 @@
     <string name="compass_calibrate_figure_8">Move phone in a figure 8 to calibrate</string>
     <!-- Shared library: UI - RingtonePicker: label for a ringtone setting left at the system default sound -->
     <string name="ringtone_default">Default</string>
+    <!-- Shared library: UI - RingtonePicker: the system default sound, named. %1$s = the word for "Default", %2$s = the sound's name, e.g. Marimba -->
+    <string name="ringtone_default_named"><xliff:g id="default_label" example="Default">%1$s</xliff:g> (<xliff:g id="sound_name" example="Marimba">%2$s</xliff:g>)</string>
     <!-- Shared library: UI - RingtonePicker: label for a ringtone setting where the user chose no sound -->
     <string name="ringtone_silent">Silent</string>
     <!-- Shared library: UI - RingtonePicker: fallback label when the picked sound file has no readable title -->
