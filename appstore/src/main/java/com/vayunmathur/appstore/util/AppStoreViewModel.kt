@@ -309,7 +309,7 @@ class AppStoreViewModel(
         viewModelScope.launch {
             // Recompute catalogue-side updates whenever either half changes. The Play
             // half needs a network call and is driven by checkForUpdates() instead.
-            combine(catalog.packageIndex, installedRepo.apps) { _, installed -> installed }
+            combine(catalog.packageIndex, installedRepo.updatable) { _, installed -> installed }
                 .collect { installed -> _catalogUpdates.value = catalog.updatesFor(installed) }
         }
         viewModelScope.launch {
@@ -789,7 +789,7 @@ class AppStoreViewModel(
             _statusMessage.value = context.getString(R.string.updates_checking)
 
             installedRepo.refresh()
-            _catalogUpdates.value = catalog.updatesFor(installedRepo.apps.value)
+            _catalogUpdates.value = catalog.updatesFor(installedRepo.updatable.value)
 
             // Only ask Play about packages neither offline source lists — for the rest the
             // catalogue already answered, and Play would just re-answer it over the network.
@@ -797,7 +797,7 @@ class AppStoreViewModel(
             // of all three, but only GrapheneOS's are the ones this device can use, so no
             // update is better than the wrong one until its release metadata is synced.
             val index = catalog.packageIndex.value
-            val installed = installedRepo.apps.value
+            val installed = installedRepo.updatable.value
             val playCandidates = installed
                 .filter {
                     it.packageName !in index &&

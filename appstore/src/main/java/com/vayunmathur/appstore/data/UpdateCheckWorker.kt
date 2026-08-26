@@ -69,7 +69,7 @@ class UpdateCheckWorker(
         installedRepo.refresh()
         play.restore()
 
-        val installed = installedRepo.apps.value
+        val installed = installedRepo.updatable.value
         val fromCatalog = catalog.updatesFor(installed)
 
         // Only Play can answer for packages the offline catalogues have never heard of — except

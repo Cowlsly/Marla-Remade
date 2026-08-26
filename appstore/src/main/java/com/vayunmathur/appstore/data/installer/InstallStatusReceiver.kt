@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.PackageInstaller
 import android.util.Log
 import com.vayunmathur.appstore.R
+import com.vayunmathur.appstore.data.RestrictedPackages
 import com.vayunmathur.library.util.AppMessages
 
 /**
@@ -56,6 +57,8 @@ class InstallStatusReceiver : BroadcastReceiver() {
             }
             else -> {
                 Log.w(TAG, "Install failed for $pkg status=$status message=$message")
+                // A source-restricted refusal is the OS's final answer, so stop offering it.
+                RestrictedPackages.recordIfRestricted(context, pkg, message)
                 val reason = when (status) {
                     PackageInstaller.STATUS_FAILURE_INCOMPATIBLE ->
                         context.getString(R.string.install_failure_incompatible)

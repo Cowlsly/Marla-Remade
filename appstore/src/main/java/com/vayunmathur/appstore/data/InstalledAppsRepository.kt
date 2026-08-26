@@ -23,6 +23,16 @@ class InstalledAppsRepository(private val context: Context) {
     private val _apps = MutableStateFlow<List<InstalledInfo>>(emptyList())
     val apps: StateFlow<List<InstalledInfo>> = _apps.asStateFlow()
 
+    private val _updatable = MutableStateFlow<List<InstalledInfo>>(emptyList())
+
+    /**
+     * [apps] minus the packages this device won't let the store install ([RestrictedPackages]).
+     *
+     * They stay in [apps] — they are installed, and the library should say so — but every
+     * update check reads this instead, so the store never offers an update it cannot apply.
+     */
+    val updatable: StateFlow<List<InstalledInfo>> = _updatable.asStateFlow()
+
     private val _icons = MutableStateFlow<Map<String, Drawable>>(emptyMap())
     val icons: StateFlow<Map<String, Drawable>> = _icons.asStateFlow()
 
@@ -36,8 +46,12 @@ class InstalledAppsRepository(private val context: Context) {
             emptyList<ApplicationInfo>()
         }
 
-        _apps.value = userApps.mapNotNull { ai -> pm.readInstalledInfo(ai) }
+        val apps = userApps.mapNotNull { ai -> pm.readInstalledInfo(ai) }
             .sortedBy { it.name.lowercase() }
+        _apps.value = apps
+
+        val restricted = RestrictedPackages.forDevice(context)
+        _updatable.value = apps.filterNot { it.packageName in restricted }
 
         _icons.value = userApps.mapNotNull { ai ->
             try {
