@@ -551,7 +551,12 @@ fn stencilize(rgba: &mut [u8], fill_argb: u32, invert: bool) {
 
 /// Area-average downscale of an RGBA8888 buffer so its longer side is at most
 /// `max_dim`, preserving aspect. Returns `None` when no downscale is needed.
-fn downscale_rgba(data: &[u8], w: u32, h: u32, max_dim: u32) -> Option<(u32, u32, Vec<u8>)> {
+///
+/// `smooth` averages each source block, which is what a photograph wants. Bilevel art —
+/// barcodes, QR codes, scanned fax pages, stencils — must pass `false`: averaging turns its
+/// two colours into a spread of greys, and its hard 0/255 alpha into a translucent fringe,
+/// which is the difference between a scannable QR code and an unreadable one.
+fn downscale_rgba(data: &[u8], w: u32, h: u32, max_dim: u32, smooth: bool) -> Option<(u32, u32, Vec<u8>)> {
     if w == 0 || h == 0 || (w <= max_dim && h <= max_dim) {
         return None;
     }
@@ -568,6 +573,13 @@ fn downscale_rgba(data: &[u8], w: u32, h: u32, max_dim: u32) -> Option<(u32, u32
         for ox in 0..nw {
             let sx0 = ((ox as u64) * (w as u64) / (nw as u64)) as u32;
             let sx1 = ((((ox + 1) as u64) * (w as u64) / (nw as u64)) as u32).clamp(sx0 + 1, w);
+            let o = ((oy as usize) * (nw as usize) + ox as usize) * 4;
+            if !smooth {
+                // Nearest neighbour: the block's own first sample, kept exactly.
+                let i = (sy0 as usize) * (w as usize) * 4 + (sx0 as usize) * 4;
+                out[o..o + 4].copy_from_slice(&data[i..i + 4]);
+                continue;
+            }
             let (mut r, mut g, mut b, mut a, mut cnt) = (0u64, 0u64, 0u64, 0u64, 0u64);
             for sy in sy0..sy1 {
                 let row = (sy as usize) * (w as usize) * 4;
@@ -580,7 +592,6 @@ fn downscale_rgba(data: &[u8], w: u32, h: u32, max_dim: u32) -> Option<(u32, u32
                     cnt += 1;
                 }
             }
-            let o = ((oy as usize) * (nw as usize) + ox as usize) * 4;
             if cnt > 0 {
                 out[o] = (r / cnt) as u8;
                 out[o + 1] = (g / cnt) as u8;
@@ -598,13 +609,31 @@ fn downscale_rgba(data: &[u8], w: u32, h: u32, max_dim: u32) -> Option<(u32, u32
 pub(crate) fn extract_image(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
     let mut img = extract_image_inner(doc, stream, fill_argb, cs_resources)?;
     if img.format == 0 {
-        if let Some((nw, nh, ndata)) = downscale_rgba(&img.data, img.w, img.h, IMAGE_DOWNSCALE_MAX_DIM) {
+        let bilevel = is_bilevel(doc, &stream.dict);
+        if let Some((nw, nh, ndata)) =
+            downscale_rgba(&img.data, img.w, img.h, IMAGE_DOWNSCALE_MAX_DIM, !bilevel)
+        {
             img.w = nw;
             img.h = nh;
             img.data = ndata;
         }
     }
     Some(img)
+}
+
+/// Whether the source image had two colours per component: a stencil, or one bit per
+/// component. Fax-encoded images are bilevel by definition even without `/BitsPerComponent`.
+fn is_bilevel(doc: &Document, dict: &Dictionary) -> bool {
+    if matches!(dict.get(b"ImageMask").ok(), Some(Object::Boolean(true))) {
+        return true;
+    }
+    if dict.get(b"BitsPerComponent").ok().and_then(num) == Some(1.0) {
+        return true;
+    }
+    let specs = filters::filter_specs_from_dict(doc, dict);
+    specs.iter().any(|(kind, _)| {
+        matches!(kind, filters::FilterKind::Ccitt | filters::FilterKind::Jbig2)
+    })
 }
 
 fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, cs_resources: &HashMap<Vec<u8>, ObjectId>) -> Option<ImageData> {
@@ -638,11 +667,14 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
     // where the sample selects "paint" and be transparent elsewhere — not render
     // an opaque black/white raster. Detect it up front so the codec branches can
     // stencil their output.
-    let mask_stencil = matches!(dict.get(b"ImageMask").ok(), Some(Object::Boolean(true)));
-    let mask_invert = mask_stencil && matches!(
+    // `/Decode [1 0]` on a one-bit image swaps black and white. It applies to a stencil's
+    // paint/skip sense and to a plain bilevel image's colours alike.
+    let decode_inverts_1bit = matches!(
         dict.get(b"Decode").ok().and_then(|o| deref(doc, o)),
         Some(Object::Array(a)) if a.first().and_then(num) == Some(1.0)
     );
+    let mask_stencil = matches!(dict.get(b"ImageMask").ok(), Some(Object::Boolean(true)));
+    let mask_invert = mask_stencil && decode_inverts_1bit;
 
     // JBIG2: attempt with Globals
     if is_jbig2 {
@@ -756,18 +788,24 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
             if (out_w as usize) * (out_h as usize) > MAX_IMAGE_PIXELS { return None; }
             let row_bytes = columns.div_ceil(8);
             let mut rgba = vec![255u8; (out_w * out_h * 4) as usize]; // white init
+            // The filter emits one-bit DeviceGray samples, so 0 is black and 1 is white, and
+            // `decode_ccitt` has already put the pels in that form per BlackIs1. Painting a 1
+            // bit black instead rendered every default-parameter fax as its own negative,
+            // which is where the solid dark blocks over scanned pages came from.
+            let black_bit = if decode_inverts_1bit { 1 } else { 0 };
             for y in 0..rows_est {
                 for x in 0..columns {
                     let byte = packed.get(y * row_bytes + x / 8).copied().unwrap_or(0);
                     let bit = (byte >> (7 - (x % 8))) & 1;
-                    if bit == 1 {
+                    if bit == black_bit {
                         let idx = (y * out_w as usize + x) * 4;
                         if idx + 3 < rgba.len() { rgba[idx] = 0; rgba[idx+1] = 0; rgba[idx+2] = 0; rgba[idx+3] = 255; }
                     }
                 }
             }
             if mask_stencil {
-                stencilize(&mut rgba, fill_argb, mask_invert);
+                // `/Decode` is already in the raster above, so the stencil must not re-apply it.
+                stencilize(&mut rgba, fill_argb, false);
                 return Some(ImageData { w: out_w, h: out_h, format: 0, data: rgba });
             }
             let smask = read_smask(doc, dict, out_w, out_h);
@@ -839,15 +877,15 @@ fn extract_image_inner(doc: &Document, stream: &lopdf::Stream, fill_argb: u32, c
 
     let image_mask = matches!(dict.get(b"ImageMask").ok(), Some(Object::Boolean(true)));
     let bpc = if image_mask { 1 } else { dict.get(b"BitsPerComponent").ok().and_then(num).unwrap_or(8.0) as u32 };
-    let samples = stream_data(stream);
+    // This project's own chain, not lopdf's: lopdf cannot undo RunLength, ASCIIHex or a
+    // predictor, and returns the still-compressed bytes on failure. Unpacked as one-bit
+    // samples those are noise, and a stencil of noise is a solid block of fill colour.
+    let samples = stream_data_with_doc(doc, stream);
     let mut rgba = vec![0u8; (w * h * 4) as usize];
     let smask = read_smask(doc, dict, w, h);
 
     if image_mask {
-        let invert = matches!(
-            dict.get(b"Decode").ok().and_then(|o| deref(doc, o)),
-            Some(Object::Array(a)) if a.first().and_then(num) == Some(1.0)
-        );
+        let invert = decode_inverts_1bit;
         let fr = ((fill_argb >> 16) & 0xFF) as u8;
         let fg = ((fill_argb >> 8) & 0xFF) as u8;
         let fb = (fill_argb & 0xFF) as u8;
@@ -1946,6 +1984,26 @@ mod mask_tests {
         // A huge footprint clamps to the 1024 maximum.
         let huge = super::shading_device_size(&[5000.0, 0.0, 0.0, 5000.0, 0.0, 0.0]);
         assert_eq!(huge, 1024);
+    }
+
+    #[test]
+    fn bilevel_downscale_keeps_two_colours() {
+        // A 4x1 black/white checker halved. Averaging blends each pair to mid grey and is
+        // what makes a downscaled QR code unreadable; nearest keeps the pixels it picks.
+        let row = vec![
+            0u8, 0, 0, 255,
+            255, 255, 255, 255,
+            0, 0, 0, 255,
+            255, 255, 255, 255,
+        ];
+        let (w, _, smooth) = downscale_rgba(&row, 4, 1, 2, true).unwrap();
+        assert_eq!(w, 2);
+        assert!(smooth[0] > 100 && smooth[0] < 155, "averaged to grey, got {}", smooth[0]);
+
+        let (_, _, nearest) = downscale_rgba(&row, 4, 1, 2, false).unwrap();
+        assert_eq!(nearest[0], 0, "first block keeps its black sample");
+        assert_eq!(nearest[4], 0, "second block keeps its black sample");
+        assert_eq!(nearest[3], 255, "alpha is not blended either");
     }
 }
 

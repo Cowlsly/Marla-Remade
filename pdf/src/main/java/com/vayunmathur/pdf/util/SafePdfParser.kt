@@ -499,12 +499,10 @@ object SafePdfParser {
                     )
                 }
                 else -> {
-                    android.util.Log.w("SafePdfParser", "Unknown bitmap format $format, showing placeholder")
-                    // Return placeholder gray for JBIG2 failure path instead of null to show gray box with warning (Phase 1 verification)
-                    val pw = w.coerceAtMost(100)
-                    val ph = h.coerceAtMost(100)
-                    val placeholder = IntArray(pw*ph) { 0xFFCCCCCC.toInt() }
-                    android.graphics.Bitmap.createBitmap(placeholder, pw, ph, android.graphics.Bitmap.Config.ARGB_8888)
+                    // Rust returns no image at all for a format it could not produce, so an
+                    // unknown format here is a wire mismatch, not a failed decode to paper over.
+                    android.util.Log.w("SafePdfParser", "Unknown bitmap format $format")
+                    null
                 }
             }
         } catch (t: Throwable) {
