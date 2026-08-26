@@ -226,6 +226,7 @@ fn bucket_feature(
     touched: &mut Vec<(u64, u64)>,
     rec: &mut Vec<u8>,
 ) -> Result<BucketedFeature> {
+    let t0 = std::time::Instant::now();
     // Project once per feature per zoom, not once per tile: a coastline can cross
     // thousands of tiles and the projection is the expensive part.
     let projected = geom::project_geometry(&f.geometry, z, opts.extent);
@@ -256,6 +257,10 @@ fn bucket_feature(
         out.spans
             .push((pmtiles::tile_id(z, tx, ty), at, out.blob.len() - at));
     }
+    BUCKET_NANOS.fetch_add(
+        t0.elapsed().as_nanos() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
     Ok(out)
 }
 
@@ -413,6 +418,10 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
 /// measurement is what identified the real cost.
 static MVT_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static GZIP_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// CPU spent inside [`bucket_feature`], summed over workers. Compared against the
+/// bucket pass's WALL time, this says whether that pass is bound by its parallel
+/// geometry work or by the serial stream read and spill write around it.
+static BUCKET_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Encode the largest prefix of `candidates` that fits the byte budget.
 ///
@@ -970,10 +979,11 @@ pub fn build_archive_to(
             let mvt_s = MVT_NANOS.swap(0, Relaxed) as f64 / 1e9;
             let gz_s = GZIP_NANOS.swap(0, Relaxed) as f64 / 1e9;
             eprintln!(
-                "  z{z}: bucket {:.1}s, encode {:.1}s [mvt {:.0}s + gzip {:.0}s of \
-                 CPU across all workers] ({} record(s), {} tile(s), biggest \
+                "  z{z}: bucket {:.1}s [{:.0}s CPU], encode {:.1}s [mvt {:.0}s + gzip \
+                 {:.0}s of CPU across all workers] ({} record(s), {} tile(s), biggest \
                  z{z}/{x}/{y} with {} candidate(s) = {:.1}%)",
                 bucketed_in.as_secs_f64(),
+                BUCKET_NANOS.swap(0, Relaxed) as f64 / 1e9,
                 phase.elapsed().as_secs_f64(),
                 mvt_s,
                 gz_s,
