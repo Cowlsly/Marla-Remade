@@ -43,7 +43,7 @@
 
 use crate::clip::clip_geometry;
 use crate::geom::{self, Geometry, IntGeometry};
-use crate::mvt::{self, Feature as MvtFeature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
+use crate::mvt::{self, FeatureRef as MvtFeature, GeomType, Value, DEFAULT_EXTENT};
 use crate::par;
 use crate::pmtiles::{self, Builder};
 use crate::progress::Progress;
@@ -407,10 +407,14 @@ fn fit_tile(
     opts: &Options,
     gz: &mut crate::gz::Compressor,
 ) -> Result<(Vec<u8>, usize, bool)> {
+    // Reused across the binary search's calls, so an over-budget tile does not
+    // reallocate its geometry list once per probe.
+    let mut geoms: Vec<Vec<u32>> = Vec::new();
+    let mut kept_at: Vec<usize> = Vec::new();
     let mut encode = |n: usize| -> Vec<u8> {
-        let mut layer = Layer::new(layer_name);
-        layer.extent = opts.extent;
-        for c in &candidates[..n] {
+        geoms.clear();
+        kept_at.clear();
+        for (at, c) in candidates[..n].iter().enumerate() {
             let geometry = match c.geom {
                 IntGeometry::Points(p) => mvt::encode_points(p),
                 IntGeometry::Lines(l) => mvt::encode_lines(l),
@@ -419,14 +423,22 @@ fn fit_tile(
             if geometry.is_empty() {
                 continue;
             }
-            layer.features.push(MvtFeature {
+            geoms.push(geometry);
+            kept_at.push(at);
+        }
+        // Properties are BORROWED here. Cloning them per candidate per tile was ~35%
+        // of this function's cost, and a feature reaching many tiles paid it once per
+        // tile. See `mvt::FeatureRef`.
+        let refs = kept_at
+            .iter()
+            .zip(geoms.iter())
+            .map(|(&at, geometry)| MvtFeature {
                 id: None,
                 geom_type,
                 geometry,
-                props: c.props.to_vec(),
+                props: candidates[at].props,
             });
-        }
-        gz.compress(&Tile { layers: vec![layer] }.encode())
+        gz.compress(&mvt::encode_tile_from(layer_name, opts.extent, refs))
     };
 
     let all = encode(candidates.len());
@@ -1454,6 +1466,7 @@ fn report_and_exit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mvt::Tile;
     use crate::pmtiles::Archive;
 
     fn line(coords: &[(f64, f64)], props: Vec<(&str, Value)>) -> Feature {

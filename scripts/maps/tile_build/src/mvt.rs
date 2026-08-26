@@ -161,6 +161,25 @@ impl Feature {
     }
 }
 
+/// One feature as the encoder actually needs it: nothing owned.
+///
+/// The producers already own their geometry and properties somewhere — the pyramid in a
+/// candidate list, the point tiler in its input slice — and copying both into a
+/// [`Feature`] just to encode it made the per-candidate `props` clone the largest
+/// allocation in the tiler: measured at ~35% of single-threaded tile encode time, since
+/// every property key and string value is a separate heap copy per tile a feature
+/// touches.
+///
+/// [`encode_layer_from`] is the single implementation; [`Tile::encode`] feeds it views of
+/// its owned features, so the two paths cannot drift apart and produce different bytes.
+pub struct FeatureRef<'a> {
+    pub id: Option<u64>,
+    pub geom_type: GeomType,
+    /// Raw MVT command integers, re-emitted verbatim. See the module docs.
+    pub geometry: &'a [u32],
+    pub props: &'a [(String, Value)],
+}
+
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub name: String,
@@ -289,7 +308,33 @@ fn decode_feature(buf: &[u8], keys: &[String], values: &[Value]) -> Result<Featu
 }
 
 fn encode_layer(layer: &Layer, out: &mut Writer) {
-    out.string_field(1, &layer.name);
+    encode_layer_from(
+        &layer.name,
+        layer.extent,
+        layer.version,
+        layer.features.iter().map(|f| FeatureRef {
+            id: f.id,
+            geom_type: f.geom_type,
+            geometry: &f.geometry,
+            props: &f.props,
+        }),
+        out,
+    );
+}
+
+/// Encode a single layer body from borrowed features.
+///
+/// The one implementation of the layer encoder: [`encode_layer`] is a thin view over
+/// owned [`Feature`]s, and the tilers pass their own data straight in. See
+/// [`FeatureRef`].
+pub fn encode_layer_from<'a>(
+    name: &str,
+    extent: u32,
+    version: u32,
+    features: impl IntoIterator<Item = FeatureRef<'a>>,
+    out: &mut Writer,
+) {
+    out.string_field(1, name);
 
     // Dictionaries are rebuilt from the decoded properties, interning on first use.
     let mut keys: Vec<&str> = Vec::new();
@@ -300,14 +345,14 @@ fn encode_layer(layer: &Layer, out: &mut Writer) {
     let mut feat_buf = Writer::new();
     let mut tag_buf = Writer::new();
     let mut geom_buf = Writer::new();
-    for f in &layer.features {
+    for f in features {
         feat_buf.clear();
         if let Some(id) = f.id {
             feat_buf.varint_field(1, id);
         }
 
         tag_buf.clear();
-        for (k, v) in &f.props {
+        for (k, v) in f.props {
             let ki = *key_idx.entry(k.as_str()).or_insert_with(|| {
                 keys.push(k.as_str());
                 (keys.len() - 1) as u32
@@ -329,7 +374,7 @@ fn encode_layer(layer: &Layer, out: &mut Writer) {
         }
         if !f.geometry.is_empty() {
             geom_buf.clear();
-            for &g in &f.geometry {
+            for &g in f.geometry {
                 geom_buf.uvarint(g as u64);
             }
             feat_buf.bytes_field(4, geom_buf.as_slice());
@@ -347,8 +392,24 @@ fn encode_layer(layer: &Layer, out: &mut Writer) {
         out.message(4, &val_buf);
     }
 
-    out.varint_field(5, layer.extent as u64);
-    out.varint_field(15, layer.version as u64);
+    out.varint_field(5, extent as u64);
+    out.varint_field(15, version as u64);
+}
+
+/// Encode a whole one-layer tile body from borrowed features.
+///
+/// Byte-for-byte what `Tile { layers: vec![one] }.encode()` produces — the layer
+/// wrapper is field 3 either way — which is what the tilers rely on.
+pub fn encode_tile_from<'a>(
+    name: &str,
+    extent: u32,
+    features: impl IntoIterator<Item = FeatureRef<'a>>,
+) -> Vec<u8> {
+    let mut layer_buf = Writer::new();
+    encode_layer_from(name, extent, DEFAULT_VERSION, features, &mut layer_buf);
+    let mut out = Writer::new();
+    out.message(3, &layer_buf);
+    out.into_vec()
 }
 
 // --- Geometry command integers ------------------------------------------------

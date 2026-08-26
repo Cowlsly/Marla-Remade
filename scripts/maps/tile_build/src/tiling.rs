@@ -8,7 +8,7 @@
 //! which is what makes a composite lossless.
 
 use crate::geom::project;
-use crate::mvt::{self, Feature, GeomType, Layer, Tile, Value, DEFAULT_EXTENT};
+use crate::mvt::{self, GeomType, Tile, Value, DEFAULT_EXTENT};
 use crate::par;
 use crate::pmtiles::{self, Archive, ArchiveFile, Builder};
 use crate::progress::Progress;
@@ -72,18 +72,25 @@ pub fn tile_points(
             .map(|((tx, ty), pts)| {
                 // Deterministic feature order, so a rebuild is byte-identical.
                 pts.sort_by_key(|&(x, y, i)| (x, y, i));
-                let mut layer = Layer::new(layer_name);
-                layer.extent = extent;
-                for &(x, y, i) in pts.iter() {
-                    layer.features.push(Feature {
-                        id: None,
-                        geom_type: GeomType::Point,
-                        geometry: mvt::encode_points(&[(x, y)]),
-                        props: points[i].props.clone(),
-                    });
-                }
-                let tile = Tile { layers: vec![layer] };
-                (pmtiles::tile_id(z, *tx, *ty), tile.encode())
+                // Geometry first, so the borrowed views below have something to point
+                // at; properties are never copied. See `mvt::FeatureRef`.
+                let geoms: Vec<Vec<u32>> = pts
+                    .iter()
+                    .map(|&(x, y, _)| mvt::encode_points(&[(x, y)]))
+                    .collect();
+                let body = mvt::encode_tile_from(
+                    layer_name,
+                    extent,
+                    pts.iter().zip(geoms.iter()).map(|(&(_, _, i), geometry)| {
+                        mvt::FeatureRef {
+                            id: None,
+                            geom_type: GeomType::Point,
+                            geometry,
+                            props: &points[i].props,
+                        }
+                    }),
+                );
+                (pmtiles::tile_id(z, *tx, *ty), body)
             })
             .collect()
     });
@@ -772,6 +779,7 @@ pub fn merge_tiles(bodies: &[Vec<u8>]) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mvt::{Feature, Layer};
 
     const REAL_TILE: &[u8] = include_bytes!("../tests/fixtures/v5ca_z11_tile.mvt");
 
