@@ -95,69 +95,87 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
         .map_err(|e| format!("cannot create {}: {e}", index_path.display()))?;
     let mut writer = std::io::BufWriter::new(file);
 
-    // One feed at a time, each dropped before the next is read. Parsing all of
-    // them up front is what made a world build need ~400 GB: a feed's tables cost
-    // several times the feed on disk, and the builder only needs one feed's worth
-    // at once.
+    // Ingestion stays SERIAL and is overlapped with reading the next feed.
+    //
+    // `IndexBuilder` is one giant cross-feed accumulator — `StringPool::intern` hands
+    // back a byte offset that is written straight into section payloads, and
+    // `ROUTE_TRIPS` encodes `headsign_off` as a uvarint inside a varint stream — so
+    // sharding it would mean remapping every offset and re-encoding every trip list.
+    // Parsing CSV is the CPU cost; ingesting is pointer-shuffling. Overlapping the two
+    // gets most of the win for none of that risk and needs no format change.
+    //
+    // Depth ONE, deliberately. The comment above is the reason: a feed's tables cost
+    // several times the feed on disk, and parsing every feed up front is what made a
+    // world build need ~400 GB. One feed queued plus one being parsed plus one being
+    // ingested is three resident, and three is the most this is willing to spend
+    // without a measurement on real feeds to justify more.
     let mut builder = index::IndexBuilder::new(pack_name);
-    for (n, (name, dir, motis_prefix)) in specs.iter().enumerate() {
-        let require = |file: &str| -> Result<gtfs::Csv, String> {
-            gtfs::read_table(dir, file).ok_or_else(|| {
-                format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
-            })
-        };
-        let stops = require("stops.txt")?;
-        let routes = require("routes.txt")?;
-        let trips = require("trips.txt")?;
-        let calendar = gtfs::read_table(dir, "calendar.txt");
-        let calendar_dates = gtfs::read_table(dir, "calendar_dates.txt");
-        let agency = gtfs::read_table(dir, "agency.txt");
-        let shapes = gtfs::read_shapes(dir);
-        if shapes.is_none() {
+    let (tx, rx) = std::sync::mpsc::sync_channel::<Result<Loaded, String>>(1);
+    let total = specs.len();
+    let result: Result<(), String> = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            for spec in specs {
+                // A send failure means the consumer stopped, which happens only when
+                // it is already returning an error of its own.
+                if tx.send(load_feed(spec)).is_err() {
+                    return;
+                }
+            }
+        });
+
+        for (n, loaded) in rx.iter().enumerate() {
+            let f = loaded?;
+            if f.shapes.is_none() {
+                eprintln!(
+                    "gtfs_ingest: warning: feed '{}' has no shapes.txt; its ride legs \
+                     will draw stop-to-stop",
+                    f.name
+                );
+            }
+            if f.calendar.is_none() && f.calendar_dates.is_none() {
+                eprintln!(
+                    "gtfs_ingest: warning: feed '{}' has no calendar.txt or \
+                     calendar_dates.txt; its services will never be scheduled",
+                    f.name
+                );
+            }
+            // Without a timezone the device falls back to its own, which is wrong
+            // for any feed outside the user's zone.
+            if f.agency.as_ref().is_none_or(|a| {
+                a.rows.first().is_none_or(|row| a.get(row, "agency_timezone").trim().is_empty())
+            }) {
+                eprintln!(
+                    "gtfs_ingest: warning: feed '{}' has no agency_timezone; \
+                     the device will route it in its own local time",
+                    f.name
+                );
+            }
+            builder.add_feed_dir(&FeedDir {
+                name: f.name.clone(),
+                motis_prefix: f.motis_prefix.clone(),
+                dir: &f.dir,
+                stops: &f.stops,
+                routes: &f.routes,
+                trips: &f.trips,
+                calendar: f.calendar.as_ref(),
+                calendar_dates: f.calendar_dates.as_ref(),
+                agency: f.agency.as_ref(),
+                shapes: f.shapes.as_ref(),
+            })?;
+            // Per feed, so a regression in the size or count curve shows at feed 200
+            // rather than at hour six.
+            let (stops_so_far, routes_so_far, trips_so_far) = builder.counts();
             eprintln!(
-                "gtfs_ingest: warning: feed '{name}' has no shapes.txt; its ride legs \
-                 will draw stop-to-stop"
+                "gtfs_ingest: [{}/{total}] {}: {:.1} MiB of sections, {stops_so_far} stops, \
+                 {routes_so_far} routes, {trips_so_far} trips",
+                n + 1,
+                f.name,
+                builder.section_bytes() as f64 / (1024.0 * 1024.0),
             );
         }
-        if calendar.is_none() && calendar_dates.is_none() {
-            eprintln!(
-                "gtfs_ingest: warning: feed '{name}' has no calendar.txt or \
-                 calendar_dates.txt; its services will never be scheduled"
-            );
-        }
-        // Without a timezone the device falls back to its own, which is wrong
-        // for any feed outside the user's zone.
-        if agency.as_ref().is_none_or(|a| {
-            a.rows.first().is_none_or(|row| a.get(row, "agency_timezone").trim().is_empty())
-        }) {
-            eprintln!(
-                "gtfs_ingest: warning: feed '{name}' has no agency_timezone; \
-                 the device will route it in its own local time"
-            );
-        }
-        builder.add_feed_dir(&FeedDir {
-            name: name.clone(),
-            motis_prefix: motis_prefix.clone(),
-            dir,
-            stops: &stops,
-            routes: &routes,
-            trips: &trips,
-            calendar: calendar.as_ref(),
-            calendar_dates: calendar_dates.as_ref(),
-            agency: agency.as_ref(),
-            shapes: shapes.as_ref(),
-        })?;
-        // Per feed, so a regression in the size or count curve shows at feed 200
-        // rather than at hour six.
-        let (stops_so_far, routes_so_far, trips_so_far) = builder.counts();
-        eprintln!(
-            "gtfs_ingest: [{}/{}] {name}: {:.1} MiB of sections, {stops_so_far} stops, \
-             {routes_so_far} routes, {trips_so_far} trips",
-            n + 1,
-            specs.len(),
-            builder.section_bytes() as f64 / (1024.0 * 1024.0),
-        );
-    }
+        Ok(())
+    });
+    result?;
 
     let stats = builder.finish_to(&mut writer)?;
     writer
@@ -235,6 +253,48 @@ fn run(out_dir: &Path, pack_name: &str, specs: &[FeedSpec]) -> Result<(), String
     Ok(())
 }
 
+/// One feed's tables, read off disk and owned.
+///
+/// Exists so reading can happen on a different thread from ingesting: [`FeedDir`]
+/// borrows, and a borrow cannot cross the channel that carries the feed to the
+/// builder.
+struct Loaded {
+    name: String,
+    motis_prefix: String,
+    dir: PathBuf,
+    stops: gtfs::Csv,
+    routes: gtfs::Csv,
+    trips: gtfs::Csv,
+    calendar: Option<gtfs::Csv>,
+    calendar_dates: Option<gtfs::Csv>,
+    agency: Option<gtfs::Csv>,
+    shapes: Option<std::collections::HashMap<String, gtfs::Shape>>,
+}
+
+/// Read one feed's tables. `stop_times.txt` is NOT read here — `add_feed_dir`
+/// streams it from `dir`, which is why the prefetch does not carry the largest file
+/// in the feed and why its memory cost is bounded by the smaller tables.
+fn load_feed(spec: &FeedSpec) -> Result<Loaded, String> {
+    let (name, dir, motis_prefix) = spec;
+    let require = |file: &str| -> Result<gtfs::Csv, String> {
+        gtfs::read_table(dir, file).ok_or_else(|| {
+            format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
+        })
+    };
+    Ok(Loaded {
+        name: name.clone(),
+        motis_prefix: motis_prefix.clone(),
+        dir: dir.clone(),
+        stops: require("stops.txt")?,
+        routes: require("routes.txt")?,
+        trips: require("trips.txt")?,
+        calendar: gtfs::read_table(dir, "calendar.txt"),
+        calendar_dates: gtfs::read_table(dir, "calendar_dates.txt"),
+        agency: gtfs::read_table(dir, "agency.txt"),
+        shapes: gtfs::read_shapes(dir),
+    })
+}
+
 /// Minimal JSON string escaper for the manifest.
 fn json_str(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
@@ -252,4 +312,65 @@ fn json_str(s: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A minimal but complete GTFS feed, distinct per tag.
+    fn write_feed(root: &Path, tag: &str) -> PathBuf {
+        let dir = root.join(tag);
+        std::fs::create_dir_all(&dir).unwrap();
+        let w = |file: &str, body: String| std::fs::write(dir.join(file), body).unwrap();
+        w("agency.txt", format!("agency_id,agency_name,agency_timezone\nA{tag},Agency {tag},America/Los_Angeles\n"));
+        w("routes.txt", format!("route_id,agency_id,route_short_name,route_type\nR{tag},A{tag},{tag}1,3\n"));
+        w("trips.txt", format!("route_id,service_id,trip_id,trip_headsign\nR{tag},S{tag},T{tag},To {tag}\n"));
+        w("calendar.txt", format!("service_id,monday,tuesday,wednesday,thursday,friday,saturday,sunday,start_date,end_date\nS{tag},1,1,1,1,1,1,1,20260101,20271231\n"));
+        w("stops.txt", format!("stop_id,stop_name,stop_lat,stop_lon\nS{tag}1,Stop {tag} One,37.7{},-122.4{}\nS{tag}2,Stop {tag} Two,37.8{},-122.3{}\n", tag.len(), tag.len(), tag.len(), tag.len()));
+        w("stop_times.txt", format!("trip_id,arrival_time,departure_time,stop_id,stop_sequence\nT{tag},08:00:00,08:00:00,S{tag}1,1\nT{tag},08:10:00,08:10:00,S{tag}2,2\n"));
+        dir
+    }
+
+    /// The pack must depend on feed ORDER and nothing else.
+    ///
+    /// Reading is pipelined onto another thread while `IndexBuilder` ingests, so the
+    /// thing that could break is the order `add_feed_dir` sees. Two assertions pin it:
+    /// the same specs twice must be byte-identical (the pipeline is deterministic), and
+    /// reversed specs must NOT be (order genuinely decides the string-pool offsets, so
+    /// the first assertion is not passing for trivial reasons).
+    #[test]
+    fn the_pack_is_deterministic_and_order_sensitive() {
+        let root = std::env::temp_dir().join(format!("gtfs_pack_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dirs: Vec<PathBuf> = ["a", "bb", "ccc", "dddd", "eeeee"]
+            .iter()
+            .map(|t| write_feed(&root, t))
+            .collect();
+        let specs: Vec<FeedSpec> = ["a", "bb", "ccc", "dddd", "eeeee"]
+            .iter()
+            .zip(&dirs)
+            .map(|(t, d)| (t.to_string(), d.clone(), format!("p{t}")))
+            .collect();
+
+        let build = |name: &str, specs: &[FeedSpec]| -> Vec<u8> {
+            let out = root.join(name);
+            run(&out, "world", specs).unwrap();
+            std::fs::read(out.join("world.transit")).unwrap()
+        };
+
+        let once = build("one", &specs);
+        let twice = build("two", &specs);
+        assert!(once == twice, "the pipelined pack build is not deterministic");
+
+        let mut reversed = specs.clone();
+        reversed.reverse();
+        let backwards = build("rev", &reversed);
+        assert!(
+            backwards != once,
+            "feed order does not affect the pack, so the determinism check above \
+             proves nothing about ordering"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

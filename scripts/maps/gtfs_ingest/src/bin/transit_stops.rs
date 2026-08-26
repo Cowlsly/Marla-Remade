@@ -2,8 +2,8 @@
 //! as newline-delimited GeoJSON (geojsonseq), one `Point` per served GTFS stop.
 //!
 //! Usage:
-//!   transit_stops --geojson OUT.geojsonseq <feed>...
-//!   transit_stops --geojson OUT.geojsonseq --manifest FILE
+//!   transit_stops --geojson OUT.geojsonseq <feed>... [--threads N]
+//!   transit_stops --geojson OUT.geojsonseq --manifest FILE [--threads N]
 //!
 //! `<feed>` is `feed_name=gtfs_dir[=motis_prefix]` or a bare `gtfs_dir`, exactly
 //! as `gtfs_ingest` takes them, so the same `feeds.manifest`
@@ -26,6 +26,7 @@
 
 use gtfs_ingest::gtfs::{self, Csv};
 use gtfs_ingest::manifest::{parse_feed_spec, read_manifest, FeedSpec};
+use gtfs_ingest::par;
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -46,6 +47,20 @@ fn main() -> ExitCode {
             }
             "--manifest" => {
                 manifest = args.get(i + 1).map(PathBuf::from);
+                i += 2;
+            }
+            "--threads" => {
+                let Some(raw) = args.get(i + 1) else {
+                    eprintln!("transit_stops: --threads needs a value");
+                    return ExitCode::from(2);
+                };
+                match par::parse_threads(raw) {
+                    Ok(n) => par::set_threads(n),
+                    Err(e) => {
+                        eprintln!("transit_stops: {e}");
+                        return ExitCode::from(2);
+                    }
+                }
                 i += 2;
             }
             "-h" | "--help" => {
@@ -92,8 +107,8 @@ fn main() -> ExitCode {
 }
 
 fn usage() {
-    eprintln!("usage: transit_stops --geojson OUT.geojsonseq <feed>...");
-    eprintln!("       transit_stops --geojson OUT.geojsonseq --manifest FILE");
+    eprintln!("usage: transit_stops --geojson OUT.geojsonseq <feed>... [--threads N]");
+    eprintln!("       transit_stops --geojson OUT.geojsonseq --manifest FILE [--threads N]");
     eprintln!("  <feed> = feed_name=gtfs_dir[=motis_prefix]  |  gtfs_dir");
 }
 
@@ -107,87 +122,147 @@ struct Stop {
     route_type: u32,
 }
 
-fn run(geojson: &Path, specs: &[FeedSpec]) -> Result<(), String> {
-    // Dedup key: Transitous ships merged regional feeds (`SF-bayarea`) *and* the
-    // member agencies (`SFMTA`), so one physical platform appears several times.
-    // Keying on a coarsened position plus the name collapses those without
-    // merging genuinely distinct stops: 1e-4 deg is ~11 m, well under the gap
-    // between the two sides of a street.
-    let mut seen: HashMap<(i32, i32, String), usize> = HashMap::new();
-    let mut stops: Vec<Stop> = Vec::new();
-    let mut total_rows = 0usize;
+/// What one feed contributes, before any cross-feed dedup.
+struct FeedStops {
+    /// Candidates in `stops.txt` order, each with the dedup key already computed.
+    candidates: Vec<((i32, i32, String), Stop)>,
+    rows: usize,
+}
 
-    for (name, dir, motis_prefix) in specs {
-        let require = |file: &str| -> Result<Csv, String> {
-            gtfs::read_table(dir, file).ok_or_else(|| {
-                format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
-            })
-        };
-        let stops_csv = require("stops.txt")?;
-        let routes_csv = require("routes.txt")?;
-        let trips_csv = require("trips.txt")?;
-        let stop_times_csv = require("stop_times.txt")?;
-        if motis_prefix.is_empty() {
-            eprintln!(
-                "transit_stops: warning: feed '{name}' has no MOTIS prefix; its stops \
-                 will carry no motis_id and get no realtime delays"
-            );
+/// Read one feed and reduce it to candidates. Pure with respect to every other
+/// feed, which is what lets these run concurrently.
+fn read_feed(spec: &FeedSpec) -> Result<FeedStops, String> {
+    let (name, dir, motis_prefix) = spec;
+    let require = |file: &str| -> Result<Csv, String> {
+        gtfs::read_table(dir, file).ok_or_else(|| {
+            format!("feed '{name}' ({}) missing required GTFS file: {file}", dir.display())
+        })
+    };
+    let stops_csv = require("stops.txt")?;
+    let routes_csv = require("routes.txt")?;
+    let trips_csv = require("trips.txt")?;
+    if motis_prefix.is_empty() {
+        eprintln!(
+            "transit_stops: warning: feed '{name}' has no MOTIS prefix; its stops \
+             will carry no motis_id and get no realtime delays"
+        );
+    }
+
+    let stop_route_type = derive_stop_modes(&routes_csv, &trips_csv, dir).ok_or_else(|| {
+        format!(
+            "feed '{name}' ({}) missing required GTFS file: stop_times.txt",
+            dir.display()
+        )
+    })?;
+
+    let mut out = FeedStops {
+        candidates: Vec::new(),
+        rows: 0,
+    };
+    for row in &stops_csv.rows {
+        out.rows += 1;
+        let id = stops_csv.get(row, "stop_id");
+        if id.is_empty() {
+            continue;
         }
+        // A stop no trip ever calls at is not boardable, and includes the
+        // unserved parent stations GTFS feeds carry alongside their platforms.
+        let Some(&route_type) = stop_route_type.get(id) else { continue };
+        let Some((lat, lon)) =
+            gtfs::parse_lat_lon(stops_csv.get(row, "stop_lat"), stops_csv.get(row, "stop_lon"))
+        else {
+            continue;
+        };
+        let stop_name = stops_csv.get(row, "stop_name").trim();
+        let motis_id = if motis_prefix.is_empty() {
+            String::new()
+        } else {
+            format!("{motis_prefix}_{id}")
+        };
 
-        let stop_route_type = derive_stop_modes(&routes_csv, &trips_csv, &stop_times_csv);
-
-        let mut emitted = 0usize;
-        for row in &stops_csv.rows {
-            total_rows += 1;
-            let id = stops_csv.get(row, "stop_id");
-            if id.is_empty() {
-                continue;
-            }
-            // A stop no trip ever calls at is not boardable, and includes the
-            // unserved parent stations GTFS feeds carry alongside their platforms.
-            let Some(&route_type) = stop_route_type.get(id) else { continue };
-            let Some((lat, lon)) =
-                gtfs::parse_lat_lon(stops_csv.get(row, "stop_lat"), stops_csv.get(row, "stop_lon"))
-            else {
-                continue;
-            };
-            let stop_name = stops_csv.get(row, "stop_name").trim();
-            let motis_id = if motis_prefix.is_empty() {
-                String::new()
-            } else {
-                format!("{motis_prefix}_{id}")
-            };
-
-            let key = (
-                (lat * 1e4).round() as i32,
-                (lon * 1e4).round() as i32,
-                stop_name.to_lowercase(),
-            );
-            let candidate = Stop {
+        // Dedup key: Transitous ships merged regional feeds (`SF-bayarea`) *and* the
+        // member agencies (`SFMTA`), so one physical platform appears several times.
+        // Keying on a coarsened position plus the name collapses those without
+        // merging genuinely distinct stops: 1e-4 deg is ~11 m, well under the gap
+        // between the two sides of a street.
+        let key = (
+            (lat * 1e4).round() as i32,
+            (lon * 1e4).round() as i32,
+            stop_name.to_lowercase(),
+        );
+        out.candidates.push((
+            key,
+            Stop {
                 lat_e7: (lat * 1e7).round() as i32,
                 lon_e7: (lon * 1e7).round() as i32,
                 name: stop_name.to_string(),
                 motis_id,
                 route_type,
-            };
-            match seen.get(&key) {
-                // Prefer the duplicate we can name in MOTIS's id space, so the
-                // surviving pin is the one that can fetch live departures.
-                Some(&existing) => {
-                    let keep = stops[existing].motis_id.is_empty()
-                        && !candidate.motis_id.is_empty();
-                    if keep {
-                        stops[existing] = candidate;
+            },
+        ));
+    }
+    Ok(out)
+}
+
+fn run(geojson: &Path, specs: &[FeedSpec]) -> Result<(), String> {
+    let mut seen: HashMap<(i32, i32, String), usize> = HashMap::new();
+    let mut stops: Vec<Stop> = Vec::new();
+    let mut total_rows = 0usize;
+
+    // Feeds are read concurrently, in batches, and merged serially in SPEC ORDER.
+    //
+    // Per-feed reading is the cost — parsing stops/routes/trips and streaming
+    // stop_times — and it touches no cross-feed state. The merge is the opposite: the
+    // first-wins-then-upgrade rule below is order-dependent, so replaying it in spec
+    // order is what keeps the output byte-identical however the reads interleave.
+    //
+    // A batch at a time rather than all feeds at once, because a batch is what bounds
+    // live memory: a world build has hundreds of feeds and holding every feed's
+    // candidates would trade the peak this change exists to protect.
+    let batch = par::threads().max(1);
+    for chunk in specs.chunks(batch) {
+        let read: Vec<Result<FeedStops, String>> = if chunk.len() == 1 {
+            vec![read_feed(&chunk[0])]
+        } else {
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = chunk
+                    .iter()
+                    .map(|spec| scope.spawn(|| read_feed(spec)))
+                    .collect();
+                handles
+                    .into_iter()
+                    .map(|h| {
+                        h.join()
+                            .unwrap_or_else(|_| Err("a feed reader panicked".to_string()))
+                    })
+                    .collect()
+            })
+        };
+
+        for (spec, feed) in chunk.iter().zip(read) {
+            let feed = feed?;
+            total_rows += feed.rows;
+            let mut emitted = 0usize;
+            for (key, candidate) in feed.candidates {
+                match seen.get(&key) {
+                    // Prefer the duplicate we can name in MOTIS's id space, so the
+                    // surviving pin is the one that can fetch live departures.
+                    Some(&existing) => {
+                        let keep = stops[existing].motis_id.is_empty()
+                            && !candidate.motis_id.is_empty();
+                        if keep {
+                            stops[existing] = candidate;
+                        }
+                    }
+                    None => {
+                        seen.insert(key, stops.len());
+                        stops.push(candidate);
+                        emitted += 1;
                     }
                 }
-                None => {
-                    seen.insert(key, stops.len());
-                    stops.push(candidate);
-                    emitted += 1;
-                }
             }
+            eprintln!("transit_stops: feed '{}': {emitted} new stop(s)", spec.0);
         }
-        eprintln!("transit_stops: feed '{name}': {emitted} new stop(s)");
     }
 
     // Deterministic output, so a rebuild produces a byte-identical layer and the
@@ -239,7 +314,26 @@ fn run(geojson: &Path, specs: &[FeedSpec]) -> Result<(), String> {
 ///
 /// GTFS has no stop->route table, so it is recovered through
 /// `stop_times` -> `trips` -> `routes`.
-fn derive_stop_modes(routes: &Csv, trips: &Csv, stop_times: &Csv) -> HashMap<String, u32> {
+///
+/// `stop_times.txt` is **streamed**, not read into a `Csv`. It is the largest file
+/// in almost every feed — 5.8 GB for `great_britain`, and 52 GB once materialised as
+/// `Vec<Vec<String>>` — while all this needs from a row is two borrowed strs. Doing
+/// it the other way was what made sharding feeds across threads impossible: peak
+/// memory would have multiplied by the thread count.
+///
+/// `None` only when `stop_times.txt` is absent, which the caller reports as a
+/// missing required file.
+fn derive_stop_modes(routes: &Csv, trips: &Csv, dir: &Path) -> Option<HashMap<String, u32>> {
+    let trip_type = trip_modes(routes, trips);
+    let mut out: HashMap<String, u32> = HashMap::new();
+    gtfs::stream_stop_times(dir, |r| {
+        fold_stop_mode(&mut out, &trip_type, r.trip_id, r.stop_id);
+    })?;
+    Some(out)
+}
+
+/// `trip_id` -> normalized route type, for every trip whose route is known.
+fn trip_modes<'a>(routes: &'a Csv, trips: &'a Csv) -> HashMap<&'a str, u32> {
     let mut route_type: HashMap<&str, u32> = HashMap::new();
     for row in &routes.rows {
         let id = routes.get(row, "route_id");
@@ -260,22 +354,27 @@ fn derive_stop_modes(routes: &Csv, trips: &Csv, stop_times: &Csv) -> HashMap<Str
             trip_type.insert(id, rt);
         }
     }
+    trip_type
+}
 
-    let mut out: HashMap<String, u32> = HashMap::new();
-    for row in &stop_times.rows {
-        let stop_id = stop_times.get(row, "stop_id");
-        if stop_id.is_empty() {
-            continue;
-        }
-        let Some(&rt) = trip_type.get(stop_times.get(row, "trip_id")) else { continue };
-        match out.get(stop_id) {
-            Some(&existing) if mode_rank(existing) <= mode_rank(rt) => {}
-            _ => {
-                out.insert(stop_id.to_string(), rt);
-            }
+/// Fold one `stop_times` row into the per-stop mode map, keeping the most prominent
+/// mode. Order-independent: [`mode_rank`] decides, not arrival order.
+fn fold_stop_mode(
+    out: &mut HashMap<String, u32>,
+    trip_type: &HashMap<&str, u32>,
+    trip_id: &str,
+    stop_id: &str,
+) {
+    if stop_id.is_empty() {
+        return;
+    }
+    let Some(&rt) = trip_type.get(trip_id) else { return };
+    match out.get(stop_id) {
+        Some(&existing) if mode_rank(existing) <= mode_rank(rt) => {}
+        _ => {
+            out.insert(stop_id.to_string(), rt);
         }
     }
-    out
 }
 
 /// Fold GTFS's extended route types (the 100-1799 ranges) onto the basic set, so
@@ -346,6 +445,25 @@ mod tests {
     use super::*;
     use gtfs_ingest::gtfs::parse_csv;
 
+    /// The mode fold driven from a parsed `stop_times` table.
+    ///
+    /// The production path streams the file instead, but both go through
+    /// [`trip_modes`] and [`fold_stop_mode`], so this exercises the same decisions
+    /// without a 5.8 GB fixture on disk.
+    fn derive_from_csv(routes: &Csv, trips: &Csv, stop_times: &Csv) -> HashMap<String, u32> {
+        let trip_type = trip_modes(routes, trips);
+        let mut out = HashMap::new();
+        for row in &stop_times.rows {
+            fold_stop_mode(
+                &mut out,
+                &trip_type,
+                stop_times.get(row, "trip_id"),
+                stop_times.get(row, "stop_id"),
+            );
+        }
+        out
+    }
+
     #[test]
     fn extended_route_types_fold_onto_the_basic_set() {
         assert_eq!(normalize_route_type(3), 3, "plain bus is unchanged");
@@ -375,7 +493,7 @@ mod tests {
              TS,SHARED,1\n\
              TB,BUSONLY,2\n",
         );
-        let modes = derive_stop_modes(&routes, &trips, &stop_times);
+        let modes = derive_from_csv(&routes, &trips, &stop_times);
         assert_eq!(modes.get("SHARED"), Some(&1), "subway wins over bus");
         assert_eq!(modes.get("BUSONLY"), Some(&3));
     }
@@ -385,11 +503,89 @@ mod tests {
         let routes = parse_csv("route_id,route_type\nR,3\n");
         let trips = parse_csv("route_id,trip_id\nR,T\n");
         let stop_times = parse_csv("trip_id,stop_id,stop_sequence\nT,A,1\n");
-        let modes = derive_stop_modes(&routes, &trips, &stop_times);
+        let modes = derive_from_csv(&routes, &trips, &stop_times);
         // A parent station or orphan row no trip calls at is absent, which is what
         // keeps it out of the layer.
         assert_eq!(modes.get("STATION"), None);
         assert_eq!(modes.get("A"), Some(&3));
+    }
+
+    /// Sharding feeds across threads must change nothing.
+    ///
+    /// The fixture is built so the merge is genuinely order-sensitive: two feeds carry
+    /// the SAME physical stop and BOTH have a MOTIS prefix, so the first-wins rule
+    /// decides between them and only spec order can break the tie. With one prefixed
+    /// feed the rule converges regardless of order, and the test would pass even if
+    /// the merge were replayed in completion order — proving nothing.
+    #[test]
+    fn sharding_feeds_across_threads_changes_no_bytes() {
+        let root = std::env::temp_dir().join(format!("gtfs_shard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // Every feed has one shared platform — same name AND same position, so the
+        // dedup key really collides — plus one stop of its own.
+        let write_feed = |tag: &str| -> PathBuf {
+            let dir = root.join(tag);
+            std::fs::create_dir_all(&dir).unwrap();
+            let w = |file: &str, body: String| std::fs::write(dir.join(file), body).unwrap();
+            w("routes.txt", "route_id,route_type\nR1,3\nR2,1\n".to_string());
+            w("trips.txt", "route_id,trip_id\nR1,T1\nR2,T2\n".to_string());
+            w(
+                "stops.txt",
+                format!(
+                    "stop_id,stop_name,stop_lat,stop_lon\n\
+                     SHARED,Shared Platform,37.7749000,-122.4194000\n\
+                     OWN{tag},Own {tag},37.8{},-122.3{}\n",
+                    tag.len(),
+                    tag.len()
+                ),
+            );
+            w(
+                "stop_times.txt",
+                format!(
+                    "trip_id,stop_id,stop_sequence,arrival_time,departure_time\n\
+                     T1,SHARED,1,08:00:00,08:00:00\n\
+                     T2,OWN{tag},1,09:00:00,09:00:00\n"
+                ),
+            );
+            dir
+        };
+
+        // Seven feeds, so 2- and 3-thread batches both straddle a boundary. Feeds a
+        // and b both carry a prefix, so which of them wins SHARED depends on order.
+        let specs: Vec<FeedSpec> = ["a", "b", "c", "d", "e", "f", "g"]
+            .iter()
+            .map(|t| (t.to_string(), write_feed(t), format!("p{t}")))
+            .collect();
+
+        let run_at = |n: usize| -> Vec<u8> {
+            par::set_threads(n);
+            let out = root.join(format!("stops.t{n}.geojsonseq"));
+            run(&out, &specs).unwrap();
+            std::fs::read(&out).unwrap()
+        };
+
+        let base = run_at(1);
+        assert!(!base.is_empty(), "the fixture produced no stops");
+        // The shared platform survives exactly once, and it is the FIRST feed's.
+        let text = String::from_utf8(base.clone()).unwrap();
+        assert_eq!(
+            text.matches("Shared Platform").count(),
+            1,
+            "the shared stop must dedup to one feature: {text}"
+        );
+        assert!(
+            text.contains("\"pa_SHARED\""),
+            "feed 'a' comes first in spec order, so its id must survive: {text}"
+        );
+        for n in [2, 3, 7, 32] {
+            assert!(
+                run_at(n) == base,
+                "{n} threads perturbed the layer"
+            );
+        }
+        par::clear_threads();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub mod gtfs;
 pub mod index;
 pub mod json;
 pub mod manifest;
+pub mod par;
 pub mod reader;
 pub mod registry;
 pub mod shapes;
