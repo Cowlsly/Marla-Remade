@@ -198,7 +198,9 @@ if (Test-Stage "graph") {
         $graphArgs = @($Pbf, "--out", $OutDir)
         if ($WithinWayChains) { $graphArgs += "--within-way-chains" }
         if ($Rounds -gt 0)    { $graphArgs += @("--rounds", "$Rounds") }
-        if ($SpillDir)        { $graphArgs += @("--spill-dir", $SpillDir) }
+        # One subdirectory per stage, matching the "roads" one the tiles stage uses
+        # below, so the two spills stay separately measurable and deletable.
+        if ($SpillDir)        { $graphArgs += @("--spill-dir", (Join-Path $SpillDir "graph")) }
         Invoke-Step "cargo" (@("run", "--release", "--quiet", "--manifest-path", $OsmManifest,
             "--bin", "road_graph", "--") + $graphArgs)
         Set-Stamp "graph"

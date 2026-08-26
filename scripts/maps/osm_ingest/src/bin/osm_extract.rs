@@ -7,7 +7,8 @@
 
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: osm_extract IN.osm.pbf --layer NAME --out FILE [--bbox BOX]";
+const USAGE: &str =
+    "Usage: osm_extract IN.osm.pbf --layer NAME --out FILE [--bbox BOX] [--threads N]";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -22,6 +23,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(n) = args.threads {
+        osm_ingest::par::set_threads(n);
+    }
 
     let options = osm_ingest::extract::Options {
         layer: args.layer,

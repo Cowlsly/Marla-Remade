@@ -6,7 +6,7 @@
 use std::process::ExitCode;
 
 const USAGE: &str = "Usage: poi_extract IN.osm.pbf --geojson FILE --names FILE \
-                     --index FILE [--attrs FILE]";
+                     --index FILE [--attrs FILE] [--threads N]";
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -17,6 +17,10 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if let Some(n) = args.threads {
+        osm_ingest::par::set_threads(n);
+    }
 
     let started = std::time::Instant::now();
     match osm_ingest::poi_build::build(

@@ -512,6 +512,8 @@ pub struct Options {
     pub spill_pts_dir: Option<PathBuf>,
     /// Print the [`Census`] report after the build. Changes no output file.
     pub stats: bool,
+    /// Cap on the parallel pool. `None` leaves it to [`crate::par::threads`].
+    pub threads: Option<usize>,
 }
 
 impl Options {
@@ -525,6 +527,9 @@ pub fn build(input: &Path, out_dir: &Path) -> Result<Stats> {
 }
 
 pub fn build_with(input: &Path, out_dir: &Path, opts: Options) -> Result<Stats> {
+    if let Some(n) = opts.threads {
+        crate::par::set_threads(n);
+    }
     std::fs::create_dir_all(out_dir)
         .map_err(|e| Error(format!("cannot create {}: {e}", out_dir.display())))?;
 
@@ -2279,6 +2284,13 @@ pub fn parse_args(
             }
             "--within-way-chains" => opts.within_way_chains = true,
             "--stats" => opts.stats = true,
+            "--threads" => {
+                i += 1;
+                let n = args
+                    .get(i)
+                    .ok_or_else(|| "--threads needs a count".to_string())?;
+                opts.threads = Some(crate::par::parse_threads(n)?);
+            }
             "--spill-dir" => {
                 i += 1;
                 let dir = args
@@ -4126,6 +4138,13 @@ mod tests {
         assert!(parse_args(&["a".into(), "--rounds".into(), "0".into()]).is_err());
         assert!(parse_args(&["a".into(), "--rounds".into(), "many".into()]).is_err());
         assert!(parse_args(&["a".into(), "--rounds".into()]).is_err());
+        let (_, _, opts) = parse_args(&["c.pbf".into()]).unwrap();
+        assert!(opts.threads.is_none(), "the pool defaults to the box");
+        let (_, _, opts) =
+            parse_args(&["c.pbf".into(), "--threads".into(), "4".into()]).unwrap();
+        assert_eq!(opts.threads, Some(4));
+        assert!(parse_args(&["a".into(), "--threads".into(), "0".into()]).is_err());
+        assert!(parse_args(&["a".into(), "--threads".into()]).is_err());
         assert!(parse_args(&[]).is_err());
         assert!(parse_args(&["a".into(), "b".into()]).is_err());
         assert!(parse_args(&["--wat".into()]).is_err());

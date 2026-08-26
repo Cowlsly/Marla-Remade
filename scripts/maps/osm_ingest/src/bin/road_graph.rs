@@ -6,8 +6,8 @@
 use std::process::ExitCode;
 
 const USAGE: &str = "Usage: road_graph IN.osm.pbf [--out DIR] [--within-way-chains] \
-                     [--rounds N] [--spill-dir DIR] [--spill-pts-dir DIR] [--stats]   \
-                     (default --out map_data, --rounds 1)";
+                     [--rounds N] [--spill-dir DIR] [--spill-pts-dir DIR] [--threads N] \
+                     [--stats] (default --out map_data, --rounds 1)";
 
 /// Print what a narrower `edges.bin` record would cost on this extract.
 ///

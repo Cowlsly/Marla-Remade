@@ -568,10 +568,12 @@ pub struct Args {
     pub attrs: PathBuf,
     pub spatial: PathBuf,
     pub name_index: PathBuf,
+    /// `None` leaves the pool at whatever `par::threads()` decides.
+    pub threads: Option<usize>,
 }
 
 /// `poi_extract IN.osm.pbf --geojson FILE --names FILE --index FILE [--attrs FILE]`
-/// `[--spatial FILE] [--name-index FILE]`
+/// `[--spatial FILE] [--name-index FILE] [--threads N]`
 ///
 /// The optional outputs default to their conventional names beside `--index`, so a
 /// caller that predates any of them keeps working and still emits them. Making them
@@ -584,9 +586,17 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
     let mut attrs: Option<PathBuf> = None;
     let mut spatial: Option<PathBuf> = None;
     let mut name_index: Option<PathBuf> = None;
+    let mut threads: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--threads" => {
+                i += 1;
+                let value = args
+                    .get(i)
+                    .ok_or_else(|| "--threads needs a value".to_string())?;
+                threads = Some(crate::par::parse_threads(value)?);
+            }
             flag @ ("--geojson" | "--names" | "--index" | "--attrs" | "--spatial"
             | "--name-index") => {
                 let flag = flag.to_string();
@@ -631,6 +641,7 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
         attrs,
         spatial,
         name_index,
+        threads,
     })
 }
 
@@ -911,8 +922,33 @@ mod tests {
         // Defaulted beside the index, so a caller written before the sidecar existed
         // still emits one rather than silently skipping it.
         assert_eq!(ok.attrs, PathBuf::from("out/poi_attrs.bin"));
+        assert!(ok.threads.is_none(), "the pool defaults to the box");
         assert!(parse_args(&["in.pbf".into()]).is_err());
         assert!(parse_args(&["in.pbf".into(), "--geojson".into()]).is_err());
+    }
+
+    #[test]
+    fn threads_must_be_positive() {
+        let base: Vec<String> = vec![
+            "in.pbf".into(),
+            "--geojson".into(),
+            "g".into(),
+            "--names".into(),
+            "n".into(),
+            "--index".into(),
+            "i".into(),
+        ];
+        let mut with = base.clone();
+        with.extend(["--threads".to_string(), "3".to_string()]);
+        assert_eq!(parse_args(&with).unwrap().threads, Some(3));
+
+        let mut zero = base.clone();
+        zero.extend(["--threads".to_string(), "0".to_string()]);
+        assert!(parse_args(&zero).is_err());
+
+        let mut bare = base;
+        bare.push("--threads".into());
+        assert!(parse_args(&bare).is_err());
     }
 
     #[test]

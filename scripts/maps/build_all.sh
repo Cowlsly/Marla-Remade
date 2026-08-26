@@ -315,7 +315,13 @@ if want_stage graph; then
         GRAPH_ARGS=("$PBF" --out "$OUT_DIR")
         [[ "$WITHIN_WAY_CHAINS" == "1" ]] && GRAPH_ARGS+=(--within-way-chains)
         [[ -n "$ROUNDS" ]] && GRAPH_ARGS+=(--rounds "$ROUNDS")
-        [[ -n "$SPILL_DIR" ]] && GRAPH_ARGS+=(--spill-dir "$SPILL_DIR")
+        # Its own subdirectory, mirroring the "$SPILL_DIR/roads" the tiles stage
+        # hands the roads tiler below. Not a correctness fix -- chains.rs already
+        # namespaces its two files under chain_spill/, so the graph and the tiler
+        # never actually collided -- but once the two stages overlap, one
+        # subdirectory per stage is what makes their scratch separately
+        # measurable and separately deletable.
+        [[ -n "$SPILL_DIR" ]] && GRAPH_ARGS+=(--spill-dir "$SPILL_DIR/graph")
         # Gated deliberately: road_graph truncates its outputs as it writes, so a
         # failure here must not fall through to the manifest or the publish.
         run cargo run --release --quiet --manifest-path "$HERE/osm_ingest/Cargo.toml" \

@@ -1193,18 +1193,21 @@ pub struct Args {
     pub out: PathBuf,
     pub layer: Layer,
     pub bbox: Option<BBox>,
+    /// `None` leaves the pool at whatever `par::threads()` decides.
+    pub threads: Option<usize>,
 }
 
-/// `osm_extract IN.osm.pbf --layer NAME --out FILE [--bbox BOX]`
+/// `osm_extract IN.osm.pbf --layer NAME --out FILE [--bbox BOX] [--threads N]`
 pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
     let mut input: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut layer: Option<Layer> = None;
     let mut bbox: Option<BBox> = None;
+    let mut threads: Option<usize> = None;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            flag @ ("--out" | "--layer" | "--bbox") => {
+            flag @ ("--out" | "--layer" | "--bbox" | "--threads") => {
                 i += 1;
                 let value = args
                     .get(i)
@@ -1213,6 +1216,7 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
                 match flag {
                     "--out" => out = Some(PathBuf::from(value)),
                     "--layer" => layer = Some(Layer::parse(value)?),
+                    "--threads" => threads = Some(crate::par::parse_threads(value)?),
                     _ => bbox = Some(BBox::parse(value).map_err(|e| e.0)?),
                 }
             }
@@ -1231,6 +1235,7 @@ pub fn parse_args(args: &[String]) -> std::result::Result<Args, String> {
         out: out.ok_or_else(|| "--out is required".to_string())?,
         layer: layer.ok_or_else(|| "--layer is required".to_string())?,
         bbox,
+        threads,
     })
 }
 
@@ -1307,6 +1312,32 @@ mod tests {
             std::fs::read(out).unwrap()
         };
         assert_eq!(run("a"), run("b"));
+    }
+
+    /// The point of `--threads`: it must change only how fast the work happens.
+    /// Counts that do not divide the chunk count are the interesting ones.
+    #[test]
+    fn the_thread_cap_changes_no_bytes() {
+        let (pbf_path, dir) = testpbf::write_layers_sample("extract_threads");
+        let run = |n: usize| {
+            crate::par::set_threads(n);
+            let out = dir.join(format!("safety.t{n}.geojsonseq"));
+            build(
+                &pbf_path,
+                &out,
+                &Options {
+                    layer: Layer::Safety,
+                    bbox: None,
+                },
+            )
+            .unwrap();
+            std::fs::read(out).unwrap()
+        };
+        let serial = run(1);
+        for n in [2, 3, 7, 32] {
+            assert_eq!(serial, run(n), "{n} threads perturbed the output");
+        }
+        crate::par::clear_threads();
     }
 
     #[test]
@@ -1725,5 +1756,29 @@ mod tests {
             "1,2,3".into(),
         ])
         .is_err());
+    }
+
+    #[test]
+    fn threads_is_optional_and_must_be_positive() {
+        let base: Vec<String> = vec![
+            "in.pbf".into(),
+            "--layer".into(),
+            "safety".into(),
+            "--out".into(),
+            "o".into(),
+        ];
+        assert_eq!(parse_args(&base).unwrap().threads, None);
+
+        let mut with = base.clone();
+        with.extend(["--threads".to_string(), "6".to_string()]);
+        assert_eq!(parse_args(&with).unwrap().threads, Some(6));
+
+        let mut zero = base.clone();
+        zero.extend(["--threads".to_string(), "0".to_string()]);
+        assert!(parse_args(&zero).is_err());
+
+        let mut bare = base;
+        bare.push("--threads".into());
+        assert!(parse_args(&bare).is_err());
     }
 }
