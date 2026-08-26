@@ -70,4 +70,20 @@
     <string name="allow_to_access">Concedere a %1$s di accedere?</string>
     <string name="wants_to_know_your_location">%1$s desidera conoscere la tua posizione.</string>
     <string name="accepted">Accettato: %1$s</string>
+    <string name="new_tab">Nuova scheda</string>
+    <string name="new_private_tab">Nuova scheda privata</string>
+    <string name="downloads">Download</string>
+    <string name="installed_apps">App installate</string>
+    <string name="required_by_most_sites">Richiesto dalla maggior parte dei siti</string>
+    <string name="block_third_party_cookies">Blocca cookie di terze parti</string>
+    <string name="desktop_mode">Modalità desktop</string>
+    <string name="request_desktop_site">Richiedi sito desktop</string>
+    <string name="ad_tracker_blocking">Blocco dei tracker degli annunci</string>
+    <string name="blocks_doubleclick_googletagmanager_anal">Blocca doubleclick, googletagmanager, analytics</string>
+    <string name="privacy_data">Privacy e dati</string>
+    <string name="clear_browsing_data">Cancella dati di navigazione</string>
+    <string name="cookies_cache_history_storage_permission">Cookie, cache, cronologia, archiviazione, autorizzazioni</string>
+    <string name="about">Informazioni</string>
+    <string name="no_site_data_yet_cookies_localstorage_in">Nessun dato del sito ancora presente. Cookie, localStorage, IndexedDB e autorizzazioni persistono tra i caricamenti nella directory del profilo WebView. Le schede private sono escluse.</string>
+    <string name="open_a_site_and_tap_menu_install_app_add">Apri un sito e tocca Menu → Installa app / Aggiungi a schermata home. Crea una scorciatoia bloccata che avvia PwaActivity in modo autonomo (senza l\'interfaccia del browser). L\'icona utilizza l\'icona migliore 192x192 o apple-touch-icon; in alternativa usa un riaquadro con lettera.</string>
 </resources>
