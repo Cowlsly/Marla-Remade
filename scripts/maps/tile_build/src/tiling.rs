@@ -162,9 +162,10 @@ fn point_metadata(layer_name: &str, min_zoom: u8, max_zoom: u8) -> String {
 /// A merge input: its header, its metadata, its tile entries and its bodies.
 ///
 /// Implemented for both `&`[`Archive`] and [`ArchiveFile`], so one merge works whether
-/// the inputs are resident or on disk. The methods take `&mut self` because a file
-/// reader has to seek; `&Archive` implements it too and mutates nothing.
-pub trait TileSource {
+/// the inputs are resident or on disk. The entry walk takes `&mut self` because a file
+/// reader reuses one leaf buffer; `body_into` takes `&self` so the merge can pull
+/// bodies for many tiles at once.
+pub trait TileSource: Sync {
     fn header(&self) -> &pmtiles::Header;
     fn metadata(&self) -> &[u8];
     /// Every tile entry, ascending by `tile_id`, runs unexpanded.
@@ -173,7 +174,7 @@ pub trait TileSource {
         visit: &mut dyn FnMut(&pmtiles::Entry) -> Result<()>,
     ) -> Result<()>;
     /// The still-compressed body at `offset..offset + length`, into a reused buffer.
-    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()>;
+    fn body_into(&self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()>;
 }
 
 impl TileSource for &Archive {
@@ -192,7 +193,7 @@ impl TileSource for &Archive {
         Archive::visit_entries(self, visit)
     }
 
-    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
+    fn body_into(&self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
         let body = Archive::body_at(self, offset, length)?;
         out.clear();
         out.extend_from_slice(body);
@@ -216,7 +217,7 @@ impl TileSource for ArchiveFile {
         ArchiveFile::visit_entries(self, visit)
     }
 
-    fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
+    fn body_into(&self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
         ArchiveFile::body_into(self, offset, length, out)
     }
 }
@@ -301,8 +302,17 @@ pub fn merge_archives_to<S: TileSource>(
     }
 
     let mut bar = Progress::new("merging".to_string(), rows.len(), TILES, progress);
-    // One body buffer, reused: a planet merge visits 36.8 M tiles.
-    let mut body = Vec::new();
+    // The two counters that say whether threading this function pays. A tile only one
+    // input holds is a byte copy; only the overlapping groups do real work. Measured on
+    // a two-layer overlay join of 323k tiles: 30% copied, 70% re-encoded — so the
+    // deflate on those 70% dominates, and it threads.
+    let mut copied = 0usize;
+    let mut merged_groups = 0usize;
+
+    // Runs of equal `tile_id`. Each is one output tile and they are independent: bodies
+    // are read at explicit offsets (`TileSource::body_into` takes `&self`), so several
+    // workers can pull from the same archive at once.
+    let mut groups: Vec<(usize, usize)> = Vec::new();
     let mut k = 0usize;
     while k < rows.len() {
         let id = rows[k].0;
@@ -310,27 +320,46 @@ pub fn merge_archives_to<S: TileSource>(
         while j < rows.len() && rows[j].0 == id {
             j += 1;
         }
-        for _ in k..j {
-            bar.tick(TILES);
-        }
+        groups.push((k, j));
+        k = j;
+    }
+
+    // Shared for the parallel phase now the mutable entry walk above is done.
+    let inputs: &[S] = inputs;
+    // What one group produced, plus which path produced it.
+    struct Joined {
+        id: u64,
+        body: Vec<u8>,
+        was_copied: bool,
+        rows: usize,
+    }
+
+    let join_group = |scratch: &mut (Vec<u8>, crate::gz::Compressor),
+                      &(k, j): &(usize, usize)|
+     -> Result<Joined> {
+        let (body, gz) = scratch;
+        let id = rows[k].0;
 
         if let [(_, i, off, len)] = rows[k..j] {
-            let src = &mut inputs[i as usize];
+            let src = &inputs[i as usize];
             if src.header().tile_compression == pmtiles::COMPRESSION_GZIP {
                 // Sole owner, already gzip: the producer's bytes go straight out.
-                src.body_into(off, len, &mut body)?;
-                b.add_tile_raw(id, &body)?;
-                k = j;
-                continue;
+                src.body_into(off, len, body)?;
+                return Ok(Joined {
+                    id,
+                    body: body.clone(),
+                    was_copied: true,
+                    rows: j - k,
+                });
             }
         }
         let mut decoded: Vec<Vec<u8>> = Vec::with_capacity(j - k);
         for &(_, i, off, len) in &rows[k..j] {
-            let src = &mut inputs[i as usize];
-            src.body_into(off, len, &mut body)?;
+            let src = &inputs[i as usize];
+            src.body_into(off, len, body)?;
             decoded.push(match src.header().tile_compression {
                 pmtiles::COMPRESSION_NONE => body.clone(),
-                _ => crate::gz::decompress(&body)?,
+                _ => crate::gz::decompress(body)?,
             });
         }
         let merged = if decoded.len() == 1 {
@@ -338,10 +367,49 @@ pub fn merge_archives_to<S: TileSource>(
         } else {
             merge_tiles(&decoded)?
         };
-        b.add_tile_raw(id, &crate::gz::compress(&merged))?;
-        k = j;
+        Ok(Joined {
+            id,
+            body: gz.compress(&merged),
+            was_copied: false,
+            rows: j - k,
+        })
+    };
+
+    // A batch at a time, so live memory is a bounded number of output bodies rather
+    // than the whole join. The fold is sequential and in ascending group order, which
+    // is what keeps `add_tile_raw` fed ascending ids.
+    for chunk in groups.chunks(par::batch_len()) {
+        let done: Vec<Joined> = par::install(|| {
+            chunk
+                .par_iter()
+                .with_min_len(par::MIN_TASK_LEN)
+                .map_init(
+                    || (Vec::new(), crate::gz::Compressor::new()),
+                    join_group,
+                )
+                .collect::<Result<Vec<_>>>()
+        })?;
+        for t in done {
+            for _ in 0..t.rows {
+                bar.tick(TILES);
+            }
+            if t.was_copied {
+                copied += 1;
+            } else {
+                merged_groups += 1;
+            }
+            b.add_tile_raw(t.id, &t.body)?;
+        }
     }
     bar.finish(TILES);
+    if progress {
+        let total = copied + merged_groups;
+        println!(
+            "merged {total} tile(s): {copied} copied through ({:.1}%), \
+             {merged_groups} re-encoded",
+            copied as f64 / total.max(1) as f64 * 100.0
+        );
+    }
     b.finish(out)
 }
 
@@ -361,11 +429,15 @@ pub fn merge_archives_to<S: TileSource>(
 /// point a viewer at its own centre.
 ///
 /// A tile only ONE input holds is copied through as the producer's own compressed
-/// bytes: no inflate, no deflate, no MVT round trip. That is the overwhelming
-/// majority of tiles in an overlay-only merge, because the layers are disjoint and so
-/// are most of their tile sets — and deflate at [`crate::gz`]'s archive level is by
-/// far the most expensive thing this function can do. It also keeps peak memory down,
-/// since those tiles stay compressed while they wait.
+/// bytes: no inflate, no deflate, no MVT round trip, and it stays compressed while it
+/// waits, which keeps peak memory down.
+///
+/// How often that applies depends entirely on how much the inputs' coverage overlaps,
+/// and it is worth not guessing: on a two-layer overlay join of 323k tiles whose
+/// layers cover the same box, only 30% were copied and 70% needed the full round trip.
+/// Layers with genuinely disjoint coverage — a sparse camera layer against dense roads
+/// — copy far more. [`merge_archives_to`] reports the split, so a given build's ratio
+/// is a fact rather than an assumption.
 /// Merge several tilesets into one IN MEMORY, returning the archive bytes.
 ///
 /// Kept as the reference implementation and the oracle the streaming
@@ -1225,6 +1297,64 @@ mod tests {
     /// every test above, so pinning the two byte for byte inherits all of it — the
     /// header, the deduplication, the run coalescing, the directory split and the tile
     /// bodies — without restating any of it.
+    /// The join's half of the threading gate.
+    ///
+    /// Driven through [`ArchiveFile`] rather than `&Archive`, because the file reader is
+    /// the one whose concurrency is new: several workers pull bodies from one handle at
+    /// explicit offsets, and a seek-based reader would silently interleave and hand back
+    /// the wrong bytes.
+    #[test]
+    fn the_thread_count_changes_no_joined_bytes() {
+        let dir = std::env::temp_dir().join(format!("tb_join_threads_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Enough tiles that a batch boundary falls inside the join, and both layers over
+        // the same box so most tiles have two sources and take the re-encode path rather
+        // than the byte copy.
+        let mk = |tag: &str, a: f64, b: f64| -> Vec<Point> {
+            (0..300)
+                .map(|i| {
+                    let f = i as f64;
+                    pt(
+                        -122.5 + (f * a) % 0.8,
+                        37.3 + (f * b) % 0.6,
+                        &format!("{tag}{i}"),
+                    )
+                })
+                .collect()
+        };
+        let a = build_point_archive("safety", &mk("w", 0.0041, 0.0053), 10, 13).unwrap();
+        let b = build_point_archive("ma_pois", &mk("e", 0.0037, 0.0061), 10, 13).unwrap();
+        std::fs::write(dir.join("a.pmtiles"), &a).unwrap();
+        std::fs::write(dir.join("b.pmtiles"), &b).unwrap();
+
+        let run = |n: usize| {
+            par::set_threads(n);
+            let mut inputs = [
+                ArchiveFile::open(dir.join("a.pmtiles")).unwrap(),
+                ArchiveFile::open(dir.join("b.pmtiles")).unwrap(),
+            ];
+            let out = dir.join(format!("joined.t{n}.pmtiles"));
+            merge_archives_to(&mut inputs, &out, dir.join(format!("scratch.t{n}")), false).unwrap();
+            std::fs::read(&out).unwrap()
+        };
+
+        let base = run(1);
+        // Against the in-memory oracle too, so this pins the parallel join to the
+        // reference implementation rather than only to itself.
+        let (aa, ba) = (Archive::parse(&a).unwrap(), Archive::parse(&b).unwrap());
+        assert!(
+            base == merge_archives(&[&aa, &ba]).unwrap(),
+            "the one-thread streaming join already differs from the in-memory one"
+        );
+        for n in [2, 3, 32] {
+            assert!(run(n) == base, "{n} threads perturbed the joined archive");
+        }
+        par::clear_threads();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_streaming_join_is_byte_identical_to_the_in_memory_one() {
         let dir = std::env::temp_dir().join(format!("tb_stream_{}", std::process::id()));

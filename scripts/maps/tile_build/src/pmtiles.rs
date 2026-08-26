@@ -516,10 +516,14 @@ fn push_run<'a>(out: &mut Vec<(u64, &'a [u8])>, e: &Entry, data: &'a [u8]) -> Re
 /// metadata — kilobytes — and reads one leaf directory or one tile body at a time into
 /// a buffer it reuses.
 ///
-/// Its readers take `&mut self`, because seeking mutates the handle. `mmap` would
-/// avoid that and be faster, but it needs either a dependency or `unsafe libc` that
-/// would not compile on Windows, and this crate is deliberately single-dependency and
-/// offline-resolvable.
+/// Its entry walk takes `&mut self`, because reading a leaf directory reuses one
+/// buffer. [`ArchiveFile::body_into`] does **not**: it reads at an explicit offset
+/// without touching the handle's cursor, so any number of threads can pull bodies
+/// from one archive at once. That is what lets `tile_join` merge in parallel.
+///
+/// `mmap` would also allow that and would avoid the copy, but it needs a dependency
+/// and `unsafe`, and it turns a truncated file or an I/O error into a fault rather
+/// than an `Err`. A positional read gets the same concurrency for neither price.
 pub struct ArchiveFile {
     /// Declared first so the handle closes before [`Scratch`]-style cleanup or any
     /// caller's `remove_file` runs. Nothing depends on it today, but the ordering is
@@ -658,7 +662,10 @@ impl ArchiveFile {
     /// `out` is a caller-owned buffer so a merge loop allocates once rather than once
     /// per tile. `offset` is `u64`: a planet layer's data section is far past
     /// `u32::MAX`.
-    pub fn body_into(&mut self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
+    ///
+    /// Takes `&self`: see [`read_exact_at`] for why, and [`ArchiveFile`] for what it
+    /// buys.
+    pub fn body_into(&self, offset: u64, length: u32, out: &mut Vec<u8>) -> Result<()> {
         if offset
             .checked_add(length as u64)
             .filter(|e| *e <= self.header.tile_data_length)
@@ -672,14 +679,33 @@ impl ArchiveFile {
         let at = self.header.tile_data_offset + offset;
         out.clear();
         out.resize(length as usize, 0);
-        self.file
-            .seek(SeekFrom::Start(at))
-            .map_err(|e| Error(format!("seeking {} to {at}: {e}", self.path.display())))?;
-        self.file
-            .read_exact(out)
-            .map_err(|e| Error(format!("reading a tile body of {}: {e}", self.path.display())))?;
-        Ok(())
+        read_exact_at(&self.file, out, at)
+            .map_err(|e| Error(format!("reading a tile body of {}: {e}", self.path.display())))
     }
+}
+
+/// Fill `buf` from `offset` without moving the file's cursor.
+///
+/// The cursor is the only reason a read would need `&mut File`, and it is shared
+/// between clones of a handle — so seek-then-read cannot be done concurrently on one
+/// archive, while this can. Both platforms expose a positional read; neither is
+/// guaranteed to return everything at once, hence the loop.
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "file ended mid-body",
+            ));
+        }
+        buf = &mut buf[n..];
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 /// An entry's body must lie inside the data section. Shared by both readers so the
