@@ -17,7 +17,10 @@
 //!
 //! * **The normalized file** ([`NormalizedWriter`]) is the geojsonseq parsed exactly
 //!   once into a compact binary. Every zoom then re-reads that instead of re-parsing
-//!   JSON, which is the cheaper end of a trade that has to be made six times.
+//!   JSON, which is the cheaper end of a trade that has to be made six times. The same
+//!   pass records a fixed-stride offset index ([`NormalizedSummary::chunks`]), so those
+//!   re-reads can be spread across the pool via [`NormalizedChunks`] rather than pulled
+//!   through one cursor.
 //! * **The buckets** ([`BucketSet`]) hold one record per `(feature, tile)` pair for ONE
 //!   zoom, partitioned by `tile_id` range.
 //!
@@ -62,6 +65,22 @@ pub const REC_HEADER_BYTES: usize = 48;
 
 /// Bytes of fixed header before a normalized record's two variable payloads.
 pub const NORM_HEADER_BYTES: usize = 16;
+
+/// Features per entry in the normalized file's chunk index.
+///
+/// The index is what lets the bucket pass read the normalized file across the pool
+/// instead of through one cursor: a worker takes a chunk, reads its byte range
+/// positionally, and decodes the records in it. Records are self-delimiting, so an
+/// offset every `NORM_CHUNK_FEATURES` features is all that is needed — a per-feature
+/// table would cost 64x the memory to save nothing.
+///
+/// 64 is a compromise between two hard constraints. Larger chunks mean fewer tasks
+/// per batch, and the batch is bounded by memory (`par::batch_len()` features), so a
+/// stride of 1024 would leave a 64-core box with four tasks per batch. Smaller chunks
+/// mean more index entries and smaller reads. At 64 the batch is one chunk per thread
+/// at memory parity with the serial path, and the index is 8 bytes per 64 features:
+/// a 200M-feature Europe extract indexes in ~25 MB.
+pub const NORM_CHUNK_FEATURES: u64 = 64;
 
 /// A record longer than this is corruption, not a large feature. The largest plausible
 /// single OSM geometry is a coastline relation at a few million vertices, which is two
@@ -947,6 +966,20 @@ pub struct NormalizedSummary {
     /// show as wrong rendering rather than hide as a silently split layer.
     pub geom_kind: Option<GeomKind>,
     pub skipped: u64,
+    /// Byte offset of every `NORM_CHUNK_FEATURES`-th record, plus a final sentinel
+    /// holding the file's total length — so chunk `i` spans `chunks[i]..chunks[i + 1]`
+    /// and there are `chunks.len() - 1` of them.
+    ///
+    /// Built by the same single pass that writes the records, because the writer is the
+    /// only place that already knows each record's length. Empty for an empty file.
+    pub chunks: Vec<u64>,
+}
+
+impl NormalizedSummary {
+    /// How many chunks the file has, for [`NormalizedChunks::read_into`].
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len().saturating_sub(1)
+    }
 }
 
 /// Writes the geojsonseq once into a compact binary every zoom can re-read.
@@ -964,6 +997,8 @@ pub struct NormalizedWriter {
     path: PathBuf,
     summary: NormalizedSummary,
     rec: Vec<u8>,
+    /// Bytes written so far, which is the next record's offset.
+    at: u64,
 }
 
 impl NormalizedWriter {
@@ -982,6 +1017,7 @@ impl NormalizedWriter {
             path,
             summary: NormalizedSummary::default(),
             rec: Vec::new(),
+            at: 0,
         })
     }
 
@@ -1003,9 +1039,14 @@ impl NormalizedWriter {
         self.rec[4..8].copy_from_slice(&geom_len.to_le_bytes());
         self.rec[8..12].copy_from_slice(&props_len.to_le_bytes());
         self.rec[12] = GeomKind::of(geometry).tag();
+        // Index before writing, so the offset recorded is this record's own start.
+        if self.summary.count.is_multiple_of(NORM_CHUNK_FEATURES) {
+            self.summary.chunks.push(self.at);
+        }
         self.out
             .write_all(&self.rec)
             .map_err(|e| Error(format!("writing {}: {e}", self.path.display())))?;
+        self.at += self.rec.len() as u64;
 
         if self.summary.geom_kind.is_none() {
             self.summary.geom_kind = Some(GeomKind::of(geometry));
@@ -1020,6 +1061,11 @@ impl NormalizedWriter {
         self.out
             .flush()
             .map_err(|e| Error(format!("flushing {}: {e}", self.path.display())))?;
+        // Close the last chunk. Without this the final partial chunk has no end, and
+        // `chunk_count` would also over-report by one.
+        if !self.summary.chunks.is_empty() {
+            self.summary.chunks.push(self.at);
+        }
         Ok(self.summary)
     }
 }
@@ -1029,6 +1075,40 @@ impl NormalizedWriter {
 pub struct NormalizedFeature {
     pub geometry: Geometry,
     pub props: Vec<(String, Value)>,
+}
+
+/// Validate a normalized record's fixed header, returning its payload shape.
+///
+/// Shared by the sequential reader and the chunked one, so the two cannot diverge on
+/// what they accept: a record one of them rejects must not be one the other decodes.
+fn norm_header(head: &[u8; NORM_HEADER_BYTES]) -> Result<(usize, usize, GeomKind)> {
+    if head[13..NORM_HEADER_BYTES].iter().any(|v| *v != 0) {
+        return err("normalized record has a nonzero reserved tail");
+    }
+    let u32_at = |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().expect("4 bytes"));
+    let rec_len = u32_at(0) as u64;
+    let geom_len = u32_at(4) as usize;
+    let props_len = u32_at(8) as usize;
+    let want = NORM_HEADER_BYTES as u64 + geom_len as u64 + props_len as u64;
+    if rec_len != want {
+        return err(format!(
+            "normalized record claims {rec_len} byte(s) but its header adds up to {want}"
+        ));
+    }
+    if want > MAX_RECORD_BYTES {
+        return err(format!(
+            "normalized record is {want} byte(s), which is corruption"
+        ));
+    }
+    Ok((geom_len, props_len, GeomKind::from_tag(head[12])?))
+}
+
+/// Decode a validated record's payload, `geom_len` bytes of geometry then properties.
+fn norm_payload(kind: GeomKind, geom_len: usize, payload: &[u8]) -> Result<NormalizedFeature> {
+    Ok(NormalizedFeature {
+        geometry: decode_geometry(kind, &payload[..geom_len])?,
+        props: decode_props(&payload[geom_len..])?,
+    })
 }
 
 /// Sequential reader over the normalized file, rewindable because every zoom re-reads
@@ -1082,34 +1162,113 @@ impl NormalizedReader {
                 self.path.display()
             ));
         }
-        if head[13..NORM_HEADER_BYTES].iter().any(|v| *v != 0) {
-            return err("normalized record has a nonzero reserved tail");
-        }
-        let u32_at = |o: usize| u32::from_le_bytes(head[o..o + 4].try_into().expect("4 bytes"));
-        let rec_len = u32_at(0) as u64;
-        let geom_len = u32_at(4) as usize;
-        let props_len = u32_at(8) as usize;
-        let want = NORM_HEADER_BYTES as u64 + geom_len as u64 + props_len as u64;
-        if rec_len != want {
-            return err(format!(
-                "normalized record claims {rec_len} byte(s) but its header adds up to {want}"
-            ));
-        }
-        if want > MAX_RECORD_BYTES {
-            return err(format!(
-                "normalized record is {want} byte(s), which is corruption"
-            ));
-        }
-        let kind = GeomKind::from_tag(head[12])?;
+        let (geom_len, props_len, kind) = norm_header(&head)?;
         self.buf.clear();
         self.buf.resize(geom_len + props_len, 0);
         self.src.read_exact(&mut self.buf).map_err(|e| {
-            Error(format!("reading {}'s record payload: {e}", self.path.display()))
+            Error(format!(
+                "reading {}'s record payload: {e}",
+                self.path.display()
+            ))
         })?;
-        Ok(Some(NormalizedFeature {
-            geometry: decode_geometry(kind, &self.buf[..geom_len])?,
-            props: decode_props(&self.buf[geom_len..])?,
-        }))
+        Ok(Some(norm_payload(kind, geom_len, &self.buf)?))
+    }
+}
+
+/// Chunked reader over the normalized file, for reading it across a thread pool.
+///
+/// The sequential [`NormalizedReader`] is one cursor, so the decode of every feature —
+/// which allocates a `Geometry` and a `Vec` of properties, six times over a z11..z16
+/// build — happens on whichever single thread owns it, while the pool waits. This reads
+/// a whole chunk's byte range positionally instead, so the decode happens on the worker
+/// that will bucket those features.
+///
+/// Takes `&self` throughout: see [`crate::pmtiles::read_exact_at`]. One handle serves
+/// every thread.
+pub struct NormalizedChunks {
+    file: File,
+    path: PathBuf,
+    /// Chunk boundaries, `chunk_count() + 1` of them. See [`NormalizedSummary::chunks`].
+    chunks: Vec<u64>,
+}
+
+impl NormalizedChunks {
+    /// `chunks` is [`NormalizedSummary::chunks`] for this file.
+    pub fn open(path: impl Into<PathBuf>, chunks: Vec<u64>) -> Result<NormalizedChunks> {
+        let path = path.into();
+        let file = File::open(&path)
+            .map_err(|e| Error(format!("cannot read {}: {e}", path.display())))?;
+        Ok(NormalizedChunks { file, path, chunks })
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len().saturating_sub(1)
+    }
+
+    /// Decode chunk `i` into `out`, which is cleared first.
+    ///
+    /// `scratch` is the caller's per-worker byte buffer, reused across chunks so a pass
+    /// allocates once per thread rather than once per chunk.
+    ///
+    /// The first feature of chunk `i` is input feature `i * NORM_CHUNK_FEATURES`, by
+    /// construction of the index — which is what lets the caller reproduce the exact
+    /// `seq` the sequential path assigns.
+    pub fn read_into(
+        &self,
+        i: usize,
+        scratch: &mut Vec<u8>,
+        out: &mut Vec<NormalizedFeature>,
+    ) -> Result<()> {
+        out.clear();
+        let (Some(&start), Some(&end)) = (self.chunks.get(i), self.chunks.get(i + 1)) else {
+            return err(format!(
+                "normalized chunk {i} is past the {} in {}",
+                self.chunk_count(),
+                self.path.display()
+            ));
+        };
+        if end < start {
+            return err(format!(
+                "normalized chunk {i} of {} ends before it starts",
+                self.path.display()
+            ));
+        }
+        let len = (end - start) as usize;
+        scratch.clear();
+        scratch.resize(len, 0);
+        crate::pmtiles::read_exact_at(&self.file, scratch, start).map_err(|e| {
+            Error(format!(
+                "reading normalized chunk {i} of {}: {e}",
+                self.path.display()
+            ))
+        })?;
+        let mut at = 0usize;
+        while at < len {
+            if len - at < NORM_HEADER_BYTES {
+                return err(format!(
+                    "normalized chunk {i} of {} ends {} byte(s) into a \
+                     {NORM_HEADER_BYTES}-byte record header",
+                    self.path.display(),
+                    len - at
+                ));
+            }
+            let head: &[u8; NORM_HEADER_BYTES] = scratch[at..at + NORM_HEADER_BYTES]
+                .try_into()
+                .expect("a header's worth of bytes");
+            let (geom_len, props_len, kind) = norm_header(head)?;
+            let body = at + NORM_HEADER_BYTES;
+            let rec_end = body + geom_len + props_len;
+            if rec_end > len {
+                return err(format!(
+                    "normalized chunk {i} of {} holds a record running {} byte(s) past its end",
+                    self.path.display(),
+                    rec_end - len
+                ));
+            }
+            out.push(norm_payload(kind, geom_len, &scratch[body..rec_end])?);
+            at = rec_end;
+        }
+        Ok(())
     }
 }
 
@@ -1569,6 +1728,130 @@ mod tests {
         // Every zoom re-reads it from the front.
         r.rewind().unwrap();
         assert_eq!(r.next().unwrap().as_ref(), Some(&features[0]));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The chunked reader must yield exactly the sequential reader's features in exactly
+    /// its order, and its chunk boundaries must land on multiples of
+    /// `NORM_CHUNK_FEATURES` — that alignment is what the bucket pass relies on to
+    /// reconstruct `seq` without reading the whole file.
+    #[test]
+    fn the_chunked_reader_yields_what_the_sequential_one_does() {
+        let dir = tmp("normchunks");
+        let path = dir.join("features.bin");
+
+        // Deliberately not a multiple of the stride, so the last chunk is partial, and
+        // varied enough that a record-length mistake cannot cancel out.
+        let n = 2 * NORM_CHUNK_FEATURES as usize + 7;
+        let features: Vec<NormalizedFeature> = (0..n)
+            .map(|i| {
+                let f = i as f64;
+                if i % 3 == 0 {
+                    NormalizedFeature {
+                        geometry: Geometry::Points(vec![(f * 0.01, -f * 0.02)]),
+                        props: vec![("i".to_string(), Value::Uint(i as u64))],
+                    }
+                } else if i % 3 == 1 {
+                    NormalizedFeature {
+                        geometry: Geometry::Lines(vec![vec![(f * 0.01, 1.0), (f * 0.01, 2.0)]]),
+                        props: every_value(),
+                    }
+                } else {
+                    NormalizedFeature {
+                        geometry: Geometry::Lines(vec![vec![(0.0, f * 0.01), (1.0, f * 0.01)]]),
+                        props: vec![],
+                    }
+                }
+            })
+            .collect();
+
+        let mut w = NormalizedWriter::create(&path).unwrap();
+        for f in &features {
+            w.push(&f.geometry, &f.props).unwrap();
+        }
+        let summary = w.finish().unwrap();
+        assert_eq!(summary.count, n as u64);
+        assert_eq!(summary.chunk_count(), 3, "two full chunks and a partial one");
+        assert_eq!(
+            *summary.chunks.last().unwrap(),
+            std::fs::metadata(&path).unwrap().len(),
+            "the sentinel must be the file's length"
+        );
+
+        let chunks = NormalizedChunks::open(&path, summary.chunks.clone()).unwrap();
+        let mut scratch = Vec::new();
+        let mut out = Vec::new();
+        let mut back = Vec::new();
+        for i in 0..chunks.chunk_count() {
+            chunks.read_into(i, &mut scratch, &mut out).unwrap();
+            // The alignment the `seq` reconstruction depends on.
+            assert_eq!(
+                back.len() as u64,
+                i as u64 * NORM_CHUNK_FEATURES,
+                "chunk {i} must start at feature {}",
+                i as u64 * NORM_CHUNK_FEATURES
+            );
+            back.extend(out.iter().cloned());
+        }
+        assert_eq!(back, features, "the chunked read must match the input");
+
+        // And the sequential reader, so neither can drift from the other.
+        let mut r = NormalizedReader::open(&path).unwrap();
+        let mut seq = Vec::new();
+        while let Some(f) = r.next().unwrap() {
+            seq.push(f);
+        }
+        assert_eq!(back, seq, "the two readers must agree");
+
+        assert!(
+            chunks
+                .read_into(chunks.chunk_count(), &mut scratch, &mut out)
+                .is_err(),
+            "a chunk past the end must error rather than read nothing"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A corrupt chunk index must be reported, not silently mis-decoded: the offsets are
+    /// the one part of the format the records themselves cannot validate.
+    #[test]
+    fn a_chunk_index_pointing_into_a_record_errors() {
+        let dir = tmp("normchunkbad");
+        let path = dir.join("f.bin");
+        let mut w = NormalizedWriter::create(&path).unwrap();
+        for i in 0..NORM_CHUNK_FEATURES + 3 {
+            w.push(
+                &Geometry::Lines(vec![vec![(i as f64, 1.0), (i as f64, 2.0)]]),
+                &every_value(),
+            )
+            .unwrap();
+        }
+        let summary = w.finish().unwrap();
+
+        let mut scratch = Vec::new();
+        let mut out = Vec::new();
+
+        // Nudge a boundary into the middle of a record.
+        let mut bad = summary.chunks.clone();
+        bad[1] += 3;
+        let chunks = NormalizedChunks::open(&path, bad).unwrap();
+        assert!(
+            chunks.read_into(0, &mut scratch, &mut out).is_err()
+                || chunks.read_into(1, &mut scratch, &mut out).is_err(),
+            "a misaligned boundary must error"
+        );
+
+        // A boundary that runs backwards.
+        let mut backwards = summary.chunks.clone();
+        backwards[1] = backwards[0];
+        backwards[0] = *summary.chunks.last().unwrap();
+        let chunks = NormalizedChunks::open(&path, backwards).unwrap();
+        assert!(
+            chunks.read_into(0, &mut scratch, &mut out).is_err(),
+            "a backwards range must error"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
     }

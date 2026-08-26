@@ -215,9 +215,15 @@ struct BucketedFeature {
 /// this across the pool — and the reason the buffers are passed in rather than
 /// declared here is the one the serial loop had, unchanged: allocating them per
 /// feature would cost three million allocations a zoom.
+///
+/// Takes the geometry and properties rather than a [`Feature`] so the chunked read path
+/// can pass a [`crate::spill::NormalizedFeature`]'s fields straight in. The two types
+/// hold the same two things, and converting would mean copying a geometry per feature
+/// per zoom to gain nothing.
 #[allow(clippy::too_many_arguments)]
 fn bucket_feature(
-    f: &Feature,
+    geometry: &Geometry,
+    props: &[(String, Value)],
     seq: u64,
     z: u8,
     opts: &Options,
@@ -229,7 +235,7 @@ fn bucket_feature(
     let t0 = std::time::Instant::now();
     // Project once per feature per zoom, not once per tile: a coastline can cross
     // thousands of tiles and the projection is the expensive part.
-    let projected = geom::project_geometry(&f.geometry, z, opts.extent);
+    let projected = geom::project_geometry(geometry, z, opts.extent);
     geom::tiles_touched(&projected, z, opts.extent, buffer, touched);
     let mut out = BucketedFeature {
         blob: Vec::new(),
@@ -249,7 +255,7 @@ fn bucket_feature(
             seq,
             extent_of(&simplified),
             &simplified,
-            &f.props,
+            props,
             rec,
         )?;
         let at = out.blob.len();
@@ -659,6 +665,17 @@ pub trait FeatureSource {
     fn bounds(&self) -> Option<geom::Rect>;
     /// The FIRST feature's kind, the rule [`dominant_geom_type`] already applies.
     fn geom_kind(&self) -> Option<GeomKind>;
+
+    /// A positionally-readable view of the same features, when there is one.
+    ///
+    /// `Some` lets the bucket pass read and decode the source across the pool rather
+    /// than through this cursor; `None` keeps it sequential. Only the file-backed source
+    /// has one: [`SliceSource`]'s features are already resident and there is nothing to
+    /// read. It is also `None` for a file written before the index existed, or an empty
+    /// one, so the sequential path stays the fallback rather than a special case.
+    fn chunks(&self) -> Option<&spill::NormalizedChunks> {
+        None
+    }
 }
 
 /// A [`FeatureSource`] over features already in memory.
@@ -714,6 +731,7 @@ impl FeatureSource for SliceSource<'_> {
 pub struct NormalizedSource {
     reader: spill::NormalizedReader,
     summary: spill::NormalizedSummary,
+    chunks: Option<spill::NormalizedChunks>,
 }
 
 impl NormalizedSource {
@@ -724,9 +742,21 @@ impl NormalizedSource {
         path: impl Into<std::path::PathBuf>,
         summary: spill::NormalizedSummary,
     ) -> Result<NormalizedSource> {
+        let path = path.into();
+        // A second handle on the same file, for the chunked reads. Separate because the
+        // sequential reader owns a cursor and positional reads must not disturb it.
+        let chunks = if summary.chunk_count() == 0 {
+            None
+        } else {
+            Some(spill::NormalizedChunks::open(
+                path.clone(),
+                summary.chunks.clone(),
+            )?)
+        };
         Ok(NormalizedSource {
             reader: spill::NormalizedReader::open(path)?,
             summary,
+            chunks,
         })
     }
 }
@@ -754,6 +784,10 @@ impl FeatureSource for NormalizedSource {
     fn geom_kind(&self) -> Option<GeomKind> {
         self.summary.geom_kind
     }
+
+    fn chunks(&self) -> Option<&spill::NormalizedChunks> {
+        self.chunks.as_ref()
+    }
 }
 
 /// Features bucketed in one zoom's first pass.
@@ -761,6 +795,185 @@ const BUCKETED: &str = "feature(s) bucketed";
 
 /// Spill records encoded in one zoom's second pass.
 const ENCODED: &str = "record(s) encoded";
+
+/// One zoom's bucket pass: project every feature, clip it into each tile it reaches, and
+/// write a spill record per `(feature, tile)`.
+///
+/// Two read shapes, one output. Both derive `seq` from the feature's index in the source
+/// rather than from arrival order, which is what makes them interchangeable:
+/// `encode_buckets` sorts each bucket by the total key `(tile_id, extent, seq)`, so push
+/// order never reaches the archive.
+#[allow(clippy::too_many_arguments)]
+fn bucket_pass(
+    src: &mut impl FeatureSource,
+    z: u8,
+    opts: &Options,
+    buffer: f64,
+    tolerance: f64,
+    set: &mut spill::BucketSet,
+    bar: &mut Progress,
+) -> Result<()> {
+    if let Some(chunks) = src.chunks() {
+        return bucket_chunked(chunks, z, opts, buffer, tolerance, set, bar);
+    }
+    bucket_serial(src, z, opts, buffer, tolerance, set, bar)
+}
+
+/// Read serially, project and clip across the pool, push serially.
+///
+/// The fallback shape, for a source that is only a cursor. Everything between the read
+/// and the write -- projection, clipping, simplification, record encoding -- is
+/// per-feature pure and is where the time goes, so that part threads; the read does not.
+/// Live memory is one batch's records, which is what bounds the batch.
+#[allow(clippy::too_many_arguments)]
+fn bucket_serial(
+    src: &mut impl FeatureSource,
+    z: u8,
+    opts: &Options,
+    buffer: f64,
+    tolerance: f64,
+    set: &mut spill::BucketSet,
+    bar: &mut Progress,
+) -> Result<()> {
+    let mut touched: Vec<(u64, u64)> = Vec::new();
+    let mut rec = Vec::new();
+    let mut seq = 0u64;
+    let batch_len = par::batch_len();
+    let mut batch: Vec<Feature> = Vec::with_capacity(batch_len);
+    loop {
+        batch.clear();
+        while batch.len() < batch_len {
+            match src.next()? {
+                Some(f) => batch.push(f),
+                None => break,
+            }
+        }
+        if batch.is_empty() {
+            break;
+        }
+        let first = seq;
+        let encoded: Vec<Result<BucketedFeature>> = if batch.len() == 1 {
+            // One feature is not worth a pool round trip, and this is the path the
+            // single-threaded case and the tail of every stream take.
+            vec![bucket_feature(
+                &batch[0].geometry,
+                &batch[0].props,
+                first,
+                z,
+                opts,
+                buffer,
+                tolerance,
+                &mut touched,
+                &mut rec,
+            )]
+        } else {
+            par::install(|| {
+                batch
+                    .par_iter()
+                    .enumerate()
+                    .with_min_len(par::min_task_len(batch.len()))
+                    .map_init(
+                        || (Vec::new(), Vec::new()),
+                        |(touched, rec), (i, f)| {
+                            bucket_feature(
+                                &f.geometry,
+                                &f.props,
+                                first + i as u64,
+                                z,
+                                opts,
+                                buffer,
+                                tolerance,
+                                touched,
+                                rec,
+                            )
+                        },
+                    )
+                    .collect()
+            })
+        };
+        for one in encoded {
+            let one = one?;
+            for &(id, at, len) in &one.spans {
+                set.push(id, &one.blob[at..at + len])?;
+            }
+            bar.tick(BUCKETED);
+        }
+        seq += batch.len() as u64;
+    }
+    Ok(())
+}
+
+/// Read, decode, project and clip across the pool; push serially.
+///
+/// The production shape. The serial path's remaining bottleneck was `src.next()`: it
+/// decodes a geometry and a property vector per feature, allocating both, and does so
+/// once per zoom on whichever single thread owns the cursor while the pool waits. Here a
+/// worker takes a whole chunk, reads its byte range positionally, and decodes it itself,
+/// so the decode scales with the pool and the pass no longer has a serial middle.
+///
+/// Chunk `c` starts at feature `c * NORM_CHUNK_FEATURES` by construction of the index,
+/// which is what lets this reproduce the sequential path's `seq` exactly rather than
+/// approximately.
+#[allow(clippy::too_many_arguments)]
+fn bucket_chunked(
+    chunks: &spill::NormalizedChunks,
+    z: u8,
+    opts: &Options,
+    buffer: f64,
+    tolerance: f64,
+    set: &mut spill::BucketSet,
+    bar: &mut Progress,
+) -> Result<()> {
+    // One chunk per task, and as many chunks per batch as the serial path holds
+    // features, so peak live memory is unchanged: a batch's encoded records bound it
+    // either way.
+    let per_batch = (par::batch_len() / spill::NORM_CHUNK_FEATURES as usize).max(1);
+    let total = chunks.chunk_count();
+    let mut ids: Vec<usize> = Vec::with_capacity(per_batch);
+    let mut at = 0usize;
+    while at < total {
+        let end = (at + per_batch).min(total);
+        ids.clear();
+        ids.extend(at..end);
+        let encoded: Vec<Result<Vec<BucketedFeature>>> = par::install(|| {
+            ids.par_iter()
+                .with_min_len(par::min_task_len(ids.len()))
+                .map_init(
+                    || (Vec::new(), Vec::new(), Vec::new(), Vec::new()),
+                    |(scratch, feats, touched, rec), &ci| {
+                        chunks.read_into(ci, scratch, feats)?;
+                        let first = ci as u64 * spill::NORM_CHUNK_FEATURES;
+                        let mut out = Vec::with_capacity(feats.len());
+                        for (j, f) in feats.iter().enumerate() {
+                            out.push(bucket_feature(
+                                &f.geometry,
+                                &f.props,
+                                first + j as u64,
+                                z,
+                                opts,
+                                buffer,
+                                tolerance,
+                                touched,
+                                rec,
+                            )?);
+                        }
+                        Ok(out)
+                    },
+                )
+                .collect()
+        });
+        for one in encoded {
+            for f in one? {
+                for &(id, o, len) in &f.spans {
+                    set.push(id, &f.blob[o..o + len])?;
+                }
+                bar.tick(BUCKETED);
+            }
+        }
+        at = end;
+    }
+    Ok(())
+}
 
 /// Build the archive straight to `out`, with peak memory set by the tile count.
 ///
@@ -872,81 +1085,8 @@ pub fn build_archive_to(
             BUCKETED,
             opts.progress,
         );
-        let mut touched: Vec<(u64, u64)> = Vec::new();
-        let mut rec = Vec::new();
         let phase = std::time::Instant::now();
-        let mut seq = 0u64;
-        // Read serially, project and clip across the pool, push serially.
-        //
-        // The source is a `&mut` cursor and the bucket writers are buffered files, so
-        // neither end threads; everything between them -- projection, clipping,
-        // simplification, record encoding -- is per-feature pure and is where the time
-        // goes. Live memory is one batch's records, which is what bounds the batch.
-        //
-        // Push order does not matter to the output: `encode_buckets` sorts each bucket
-        // by the total key `(tile_id, extent, seq)`, and `seq` is the feature's index in
-        // the source, not its arrival order. Pushing in batch order anyway costs nothing
-        // and keeps the spill files themselves reproducible.
-        let batch_len = par::batch_len();
-        let mut batch: Vec<Feature> = Vec::with_capacity(batch_len);
-        loop {
-            batch.clear();
-            while batch.len() < batch_len {
-                match src.next()? {
-                    Some(f) => batch.push(f),
-                    None => break,
-                }
-            }
-            if batch.is_empty() {
-                break;
-            }
-            let first = seq;
-            let encoded: Vec<Result<BucketedFeature>> = if batch.len() == 1 {
-                // One feature is not worth a pool round trip, and this is the path the
-                // single-threaded case and the tail of every stream take.
-                vec![bucket_feature(
-                    &batch[0],
-                    first,
-                    z,
-                    opts,
-                    buffer,
-                    tolerance,
-                    &mut touched,
-                    &mut rec,
-                )]
-            } else {
-                par::install(|| {
-                    batch
-                        .par_iter()
-                        .enumerate()
-                        .with_min_len(par::min_task_len(batch.len()))
-                        .map_init(
-                            || (Vec::new(), Vec::new()),
-                            |(touched, rec), (i, f)| {
-                                bucket_feature(
-                                    f,
-                                    first + i as u64,
-                                    z,
-                                    opts,
-                                    buffer,
-                                    tolerance,
-                                    touched,
-                                    rec,
-                                )
-                            },
-                        )
-                        .collect()
-                })
-            };
-            for one in encoded {
-                let one = one?;
-                for &(id, at, len) in &one.spans {
-                    set.push(id, &one.blob[at..at + len])?;
-                }
-                bar.tick(BUCKETED);
-            }
-            seq += batch.len() as u64;
-        }
+        bucket_pass(src, z, opts, buffer, tolerance, &mut set, &mut bar)?;
         bar.finish(BUCKETED);
         let bucketed_in = phase.elapsed();
         set.seal()?;
@@ -2331,6 +2471,98 @@ mod tests {
         )
         .expect_err("z31 must be refused");
         assert!(e.to_string().contains("above 30"), "{e}");
+    }
+
+    /// The same normalized file forced through the sequential path, so a test can pin the
+    /// chunked reader against it. Everything delegates; `chunks` is left at its `None`
+    /// default, which is the whole point.
+    struct SerialOnly(NormalizedSource);
+
+    impl FeatureSource for SerialOnly {
+        fn rewind(&mut self) -> Result<()> {
+            self.0.rewind()
+        }
+        fn next(&mut self) -> Result<Option<Feature>> {
+            self.0.next()
+        }
+        fn len(&self) -> u64 {
+            self.0.len()
+        }
+        fn bounds(&self) -> Option<geom::Rect> {
+            self.0.bounds()
+        }
+        fn geom_kind(&self) -> Option<GeomKind> {
+            self.0.geom_kind()
+        }
+    }
+
+    /// The chunked reader is the production read path, so it must produce exactly what the
+    /// sequential one does, at every thread count.
+    ///
+    /// `tight_fixture` is 201 features against `NORM_CHUNK_FEATURES` of 64, so the index
+    /// spans four chunks and ends mid-chunk — the shape that catches an off-by-one in the
+    /// chunk-to-`seq` mapping. The tight budget matters more: it makes the drop policy
+    /// run, so a perturbed `seq` changes which features SURVIVE rather than only which
+    /// bucket they land in. Without it a wrong `seq` would still sort out and the test
+    /// would pass while the mapping was broken.
+    ///
+    /// Checked by mutation: dropping the chunk base (`first = 0`, so `seq` collides
+    /// across chunks) fails this. Adding a constant to it does NOT, and should not —
+    /// `seq` is only ever a tie-break, so a uniform shift preserves every comparison.
+    #[test]
+    fn the_chunked_reader_matches_the_sequential_one() {
+        let features = tight_fixture();
+        let mut opts = Options::new("l", 11, 11);
+        opts.max_tile_bytes = 400;
+        let limits = StreamLimits::default();
+
+        let held = Scratch::new("chunked_src");
+        let norm = held.0.join("features.bin");
+        let mut w = crate::spill::NormalizedWriter::create(&norm).unwrap();
+        for f in &features {
+            w.push(&f.geometry, &f.props).unwrap();
+        }
+        let summary = w.finish().unwrap();
+
+        // The fixture has to span several chunks and end mid-chunk, or this degenerates
+        // into the single-chunk case and asserts nothing about the mapping.
+        assert!(
+            summary.chunk_count() > 1,
+            "fixture must span several chunks, got {}",
+            summary.chunk_count()
+        );
+        assert_ne!(
+            summary.count % crate::spill::NORM_CHUNK_FEATURES,
+            0,
+            "fixture must end mid-chunk to exercise the partial tail"
+        );
+
+        let serial = {
+            let scratch = Scratch::new("chunked_serial");
+            let out = scratch.0.join("out.pmtiles");
+            let mut src = SerialOnly(NormalizedSource::open(&norm, summary.clone()).unwrap());
+            assert!(src.chunks().is_none(), "this must take the serial path");
+            let report = build_archive_to(&out, &scratch.0, &opts, &mut src, &limits).unwrap();
+            (std::fs::read(&out).unwrap(), report)
+        };
+
+        for n in [1, 2, 3, 32] {
+            par::set_threads(n);
+            let scratch = Scratch::new(&format!("chunked_{n}"));
+            let out = scratch.0.join("out.pmtiles");
+            let mut src = NormalizedSource::open(&norm, summary.clone()).unwrap();
+            assert!(src.chunks().is_some(), "this must take the chunked path");
+            let report = build_archive_to(&out, &scratch.0, &opts, &mut src, &limits).unwrap();
+            assert_eq!(
+                report, serial.1,
+                "{n} threads: the chunked reader changed the report"
+            );
+            assert!(
+                std::fs::read(&out).unwrap() == serial.0,
+                "{n} threads: the chunked reader perturbed the archive"
+            );
+        }
+        par::clear_threads();
     }
 
     /// The production source is a file, and it must yield exactly what the slice-backed

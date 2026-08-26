@@ -690,7 +690,14 @@ impl ArchiveFile {
 /// between clones of a handle — so seek-then-read cannot be done concurrently on one
 /// archive, while this can. Both platforms expose a positional read; neither is
 /// guaranteed to return everything at once, hence the loop.
-fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+///
+/// `pub(crate)` because [`crate::spill::NormalizedChunks`] needs the same thing for
+/// the same reason: many threads pulling disjoint ranges out of one file.
+pub(crate) fn read_exact_at(
+    file: &File,
+    mut buf: &mut [u8],
+    mut offset: u64,
+) -> std::io::Result<()> {
     while !buf.is_empty() {
         #[cfg(windows)]
         let n = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
