@@ -190,7 +190,7 @@ mutually consistent (same POI set, same coordinates). See
 | `build_v5_pmtiles.sh` | Tile orchestrator: base + safety + roads + transit_lines + ma_pois + admin + transit_stops → merge → `v5.pmtiles` |
 | `build_base_layers.sh` | Base tiles (Planetiler build **or** reuse a published archive). A `--bbox` reuse extract now uses our own `pmtiles_extract`; `--extractor go-pmtiles` is still accepted, and is the only practical way to clip the 137 GB planet base |
 | `build_safety_layer.sh` | **`--engine rust`** (default): `osm_ingest` `osm_extract` → geojsonseq → `tile_build` `tile_points` → `safety.pmtiles`, cargo-only. `--engine legacy`: osmium → GeoJSON → `normalize_safety.py` → tippecanoe |
-| `build_roads_layer.sh` | `osm_extract` → geojsonseq → `tile_lines` at z11-16, cargo-only. **No legacy engine**: there was never a `normalize_roads.py` to be faithful to |
+| `build_roads_layer.sh` | `osm_extract` → geojsonseq → `tile_lines --stream` at z11-16, cargo-only. **No legacy engine**: there was never a `normalize_roads.py` to be faithful to. `--spill-dir` puts the tiler's spill on a mount that can take it |
 | `build_maxspeed_layer.sh` | **Superseded** by `build_roads_layer.sh`, and no longer in any pipeline. Kept so the retired layer can still be built and diffed against `roads` — delete it once that comparison is done (same policy as [Caveats](#caveats--known-limitations) §8) |
 | `build_transit_lines_layer.sh` | **`--engine rust`** (default): `osm_extract` reads railway ways **and** route relations straight from the PBF → `tile_lines`, cargo-only, **no GDAL**. `--engine legacy`: osmium + ogr2ogr → GeoJSON → `normalize_transit_lines.py` → tippecanoe, and **requires** ogr2ogr (see [Caveats](#caveats--known-limitations) 9) |
 | `build_pois_layer.sh` | `osm_ingest` `poi_extract` → geojsonseq + `poi_names.bin` + `poi_index.bin` → `tile_points` (or tippecanoe with `--engine legacy`) → `ma_pois.pmtiles` |
@@ -406,18 +406,24 @@ as a hard failure instead.
 Not a phasing choice — a z6-16 all-classes planet roads layer is not something the
 current tiler can build:
 
-* `pyramid::build_archive` uses the non-streaming `Builder`, which holds the whole
-  archive in memory; `tile_build/src/pmtiles.rs` records 76 GB peak for a 17 GB /
-  36.8 M-tile job. A z6-16 roads layer is several times that. `StreamBuilder`
-  exists and is proven on the overlay merge, but is wired only into `tile_join`.
-* `pyramid` reads the whole geojsonseq with `read_to_string` and keeps every
-  feature parsed, plus a second projected copy per zoom.
 * **There is no per-feature zoom gating anywhere in the tiler.** No `min_zoom` on
   `Feature`, no filter in `Options`, nothing property-driven in the zoom loop.
   Dropping `residential` below z12 is exactly how a low zoom is kept small and
   correct, and it cannot be expressed.
 * The drop policy is class-blind: `extent_of` sorts by bbox span, so at z6 a long
   suburban collector outranks a motorway stretch.
+
+**z11-16 itself needed the tiler to stop holding the input.** Until the streaming
+producer landed, `pyramid::build_archive` held every feature, a second projected copy of
+every geometry per zoom, a whole zoom's `tile -> features` map, and then handed the lot
+to the non-streaming `Builder` — four things proportional to the input BYTES. The
+retired `maxspeed` layer, which is only the ways carrying a `maxspeed` tag and one zoom
+shallower, already produced a multi-gigabyte archive; `roads` is several times that, so
+this layer could not in fact be built when it was first written. `tile_lines --stream`
+now spills to disk instead, and `tile_join` opens its inputs rather than reading them,
+so both halves are bounded by the tile COUNT. See `tile_build/src/spill.rs` for the
+partition and `pyramid::build_archive_to` for the producer; `build_archive` stays as the
+oracle the streaming path is pinned against byte for byte.
 
 So the layer covers z11-16 and the handover is done in two steps, because the base
 groups its road layers into two families and `RoadsLayer` staggers by class for the
@@ -443,10 +449,17 @@ carrying this change needs an overlay archive that already has the `roads` layer
 Republish `v5-overlay.pmtiles` *before* shipping it, or the map has no roads above
 z11.
 
-Extending downward means, in dependency order: wire `StreamBuilder` into
-`build_archive` (`add_tile_raw` needs ascending `tile_id`, while the tile loop sorts
-by `(x, y)` — not Hilbert order); stream the geojsonseq input; add per-feature
-`min_zoom` gating; make the drop policy class-aware.
+Extending downward means, in dependency order: add per-feature `min_zoom` gating; make
+the drop policy class-aware. The memory work it used to depend on is done —
+`build_archive_to` streams the producer and `ArchiveFile` streams the merge — but
+neither of those makes a z6 all-classes layer *correct*, only buildable.
+
+**Before any planet `roads` run**, rehearse on a state extract and then a continent,
+recording peak RSS (`/usr/bin/time -v`), wall time and peak spill bytes per zoom, and
+tune `--buckets` from the observed worst bucket. `osm_ingest`'s `mem::peak_rss_bytes`
+cannot be called from `tile_build` — it is a separate, deliberately single-dependency
+crate — so measure externally. **This rehearsal has not been done**, which is why the
+size row below is still an estimate.
 
 ---
 
@@ -635,12 +648,12 @@ Individual layers can also be built standalone — see each script's `--help`.
 | Artifact | Extent | Approx size |
 |---|---|---|
 | `safety.pmtiles` | planet | ~0.3–1 GB (point features only) |
-| `roads.pmtiles` | planet | ~4–10 GB (every road z11–16, with its lane/width attrs) |
+| `roads.pmtiles` | planet | **estimated** ~15–40 GB (every road z11–16, with its lane/width attrs). Not measured: the earlier `~4–10 GB` was a guess the retired `maxspeed` layer contradicts — a strict subset of these ways, one zoom shallower, and already multi-gigabyte. Needs the [Caveat 11](#11-roads-starts-at-z11-and-base-roads-keep-z0-10) rehearsal |
 | `transit_lines.pmtiles` | planet | ~0.2–1 GB (rail/transit line features) |
 | `ma_pois.pmtiles` | planet | ~0.5–2 GB (named POI points) |
 | `poi_names.bin` + `poi_index.bin` + `poi_attrs.bin` + `poi_spatial.bin` + `poi_name_index.bin` | planet | ~1–3 GB combined (side files) |
 | `admin_country/region/city.pmtiles` | planet | ~50–300 MB combined |
-| **`v5-overlay.pmtiles`** | planet | ~**6–17 GB** (every overlay, no base; `roads` is most of it) |
+| **`v5-overlay.pmtiles`** | planet | **estimated** ~17–45 GB (every overlay, no base; `roads` is most of it, so this inherits its uncertainty) |
 | `v5.pmtiles` | planet | ≈ **137 GB** (base + overlays; the base is > 97% of it) |
 | `v5-sf.pmtiles` | one metro | tens of MB |
 

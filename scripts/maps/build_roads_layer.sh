@@ -40,10 +40,14 @@ set -euo pipefail
 #
 # z11-16, NOT z6-16. Base roads keep z0-10 and this layer takes over above them, so
 # there is a clean handover rather than a gap. Replacing base roads outright needs
-# tiler work that does not exist yet: `pyramid::build_archive` holds the whole
-# archive in memory (see `tile_build/src/pmtiles.rs`'s peak-RSS note) and there is
-# no per-feature min-zoom gating, without which a z6 all-classes planet roads layer
-# is neither small nor correct. See scripts/maps/README.md.
+# per-feature min-zoom gating, which does not exist: without it a z6 all-classes planet
+# roads layer is neither small nor correct. See scripts/maps/README.md.
+#
+# The tiler runs with --stream. `pyramid::build_archive` holds the whole input, a second
+# projected copy of every geometry and a whole zoom's tile map, all proportional to the
+# input BYTES -- and this layer is every road on the planet at one zoom deeper than
+# maxspeed, whose archive is already 8.3 GB. --stream spills to disk instead, so peak
+# memory tracks the tile COUNT. The output is byte-identical either way.
 #
 # Usage:
 #   ./build_roads_layer.sh --pbf planet.osm.pbf --out roads.pmtiles
@@ -55,6 +59,9 @@ set -euo pipefail
 #   --bbox BOX     Optional "minlon,minlat,maxlon,maxlat" metro extract (dry runs)
 #   --minzoom N    tiler minzoom (default 11)
 #   --maxzoom N    tiler maxzoom (default 16)
+#   --spill-dir D  put the tiler's spill somewhere other than beside --out. It is
+#                  read once per zoom and can reach tens of GB, so keep it off a
+#                  network or /mnt/c mount even when the output lives there.
 #   --geojson-out F  also keep the intermediate geojsonseq here
 #   --keep-tmp     Don't delete intermediate files
 #
@@ -68,8 +75,8 @@ BBOX=""
 MINZOOM=11
 MAXZOOM=16
 GEOJSON_OUT=""
+SPILL_DIR=""
 KEEP_TMP=0
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --pbf) PBF="$2"; shift 2 ;;
@@ -77,9 +84,10 @@ while [[ $# -gt 0 ]]; do
         --bbox) BBOX="$2"; shift 2 ;;
         --minzoom) MINZOOM="$2"; shift 2 ;;
         --maxzoom) MAXZOOM="$2"; shift 2 ;;
+        --spill-dir) SPILL_DIR="$2"; shift 2 ;;
         --geojson-out) GEOJSON_OUT="$2"; shift 2 ;;
         --keep-tmp) KEEP_TMP=1; shift ;;
-        -h|--help) sed -n '4,58p' "$0" | sed 's/^# \?//'; exit 0 ;;
+        -h|--help) sed -n '4,65p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "Unknown arg: $1" >&2; exit 1 ;;
     esac
 done
@@ -106,13 +114,17 @@ FEATURES="$(wc -l < "$GEOJSON" | tr -d ' ')"
 echo "[roads] $FEATURES feature(s)"
 [[ "$FEATURES" -gt 0 ]] || echo "[roads] WARNING: 0 features — check bbox/extract"
 
-echo "[roads] tiling -> $OUT (z$MINZOOM-$MAXZOOM)"
+echo "[roads] tiling -> $OUT (z$MINZOOM-$MAXZOOM, streaming)"
+# Beside the output unless told otherwise, matching what tile_lines defaults to.
+TILE_SPILL="${SPILL_DIR:-$OUT.spill}"
+mkdir -p "$TILE_SPILL"
 cargo run --release --quiet --manifest-path "$HERE/tile_build/Cargo.toml" \
     --bin tile_lines -- \
     --geojson "$GEOJSON" \
     --out "$OUT" \
     --layer roads \
     --minzoom "$MINZOOM" \
-    --maxzoom "$MAXZOOM"
-
+    --maxzoom "$MAXZOOM" \
+    --stream \
+    --spill-dir "$TILE_SPILL"
 echo "[roads] done: $OUT"
