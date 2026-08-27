@@ -10,4 +10,5 @@
 //! read, let alone tested. Each module here is ported from a named C++ function and
 //! host-tested against values computed by hand.
 
+pub mod dbnet;
 pub mod nms;
