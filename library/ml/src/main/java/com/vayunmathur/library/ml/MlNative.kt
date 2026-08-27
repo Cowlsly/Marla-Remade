@@ -48,6 +48,38 @@ internal object MlNative {
 
     /** Bring up MobileFaceNet face embedding. Returns 0 on failure, as [createSelfie]. */
     external fun createMobilefacenet(weights: ByteArray): Long
+    /**
+     * Bring up both PP-OCRv5 networks and the character table. Returns 0 on failure.
+     *
+     * Three assets because they are three files: DBNet detection, CTC recognition, and the
+     * 836-line dictionary the labels index. Detection runs at a fixed 960x960 square and
+     * recognition at a fixed 48x320, so each records its command buffer once.
+     *
+     * The returned handle is **not** interchangeable with the others: it is freed by
+     * [destroyOcr], not [destroy].
+     */
+    external fun createPpocr(detection: ByteArray, recognition: ByteArray, keys: String): Long
+    /**
+     * Recognise every line in [pixels] and return them tab-separated, or null on failure.
+     *
+     * One region per line of the result: the text, then eight quad coordinates in
+     * source-bitmap pixels, then the confidence, then `1` or `0` for vertical - ten
+     * tab-separated fields after the text.
+     *
+     * Detection, the rotated crops, recognition of each, the CTC collapse and reading
+     * order all happen natively, so this crosses the boundary once per bitmap rather than
+     * once per line. An empty string means no text, which is not a failure.
+     *
+     * Packing text and geometry into one string is safe rather than lucky: the dictionary
+     * holds 836 single non-whitespace characters plus a space, so no decoded line can
+     * contain a tab or a newline.
+     */
+    external fun recognizeText(
+        handle: Long,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+    ): String?
 
     /**
      * Detect faces in [pixels] and return them flattened, nine floats per face.
@@ -90,4 +122,13 @@ internal object MlNative {
      * closed.
      */
     external fun destroy(handle: Long)
+    /**
+     * Free both PP-OCRv5 networks and the dictionary. Exactly once per non-zero handle
+     * from [createPpocr].
+     *
+     * Separate from [destroy] because the handle is a different native type. Passing one to
+     * the other is undefined, which is why there are two functions rather than one that
+     * guesses.
+     */
+    external fun destroyOcr(handle: Long)
 }

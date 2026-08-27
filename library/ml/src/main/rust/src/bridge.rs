@@ -26,13 +26,17 @@
 //! and every entry point tolerates it, so a device without fp16 compute degrades to "no
 //! bokeh" rather than to a crash.
 
-use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray};
-use jni::sys::{jfloatArray, jint, jlong};
+use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray, JString};
+use jni::sys::{jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::nets::{mobilefacenet, scrfd, selfie, u2netp};
+use crate::nets::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp};
+use crate::post::ctc::Dictionary;
 use crate::post::nms::{self, Face, Maps};
-use crate::preprocess::{Letterbox, FACE_EMBED, IMAGENET, RESCALE_ONLY, SCRFD};
+use crate::post::ocr::{self, Line};
+use crate::preprocess::{
+    Letterbox, FACE_EMBED, IMAGENET, PPOCR_DET, PPOCR_REC, RESCALE_ONLY, SCRFD,
+};
 use crate::vulkan::context;
 use crate::vulkan::run::Net;
 use crate::weights::{graph, Weights};
@@ -313,6 +317,197 @@ fn detect(state: &mut Handle, width: u32, height: u32) -> Result<Vec<f32>, Strin
         flat.push(face.score);
     }
     Ok(flat)
+}
+
+/// Both PP-OCRv5 networks and the dictionary between them. A separate handle type from
+/// [`Handle`] because it owns two `Net`s, and separately destroyed for the same reason:
+/// one `destroy` that guessed which kind of pointer it had been given would be a
+/// type-confusion bug waiting for a caller to mix them up.
+struct OcrHandle {
+    det: Net,
+    rec: Net,
+    dictionary: Dictionary,
+    pixels: Vec<i32>,
+}
+
+/// `TextRecognizer`'s constructor: detection at a fixed square, recognition at a fixed
+/// width, and the character table. Returns 0 on failure, having logged why.
+///
+/// Three assets rather than one because they are three files in the APK, and the dictionary
+/// arrives as a `String` rather than bytes because Kotlin already has to decode it as UTF-8
+/// to know it is text.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env` and arrays it owns.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createPpocr<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    detection: JByteArray<'l>,
+    recognition: JByteArray<'l>,
+    keys: JString<'l>,
+) -> jlong {
+    match build_ocr(&mut env, detection, recognition, keys) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("ppocr is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_ocr<'l>(
+    env: &mut JNIEnv<'l>,
+    detection: JByteArray<'l>,
+    recognition: JByteArray<'l>,
+    keys: JString<'l>,
+) -> Result<OcrHandle, String> {
+    let det_bytes = env
+        .convert_byte_array(&detection)
+        .map_err(|e| format!("cannot read the detection weights: {e}"))?;
+    let rec_bytes = env
+        .convert_byte_array(&recognition)
+        .map_err(|e| format!("cannot read the recognition weights: {e}"))?;
+    let text: String = env
+        .get_string(&keys)
+        .map_err(|e| format!("cannot read the dictionary: {e}"))?
+        .into();
+    let dictionary = Dictionary::parse(&text)?;
+
+    let det_weights = Weights::parse(&det_bytes, graph::PPOCR_DET)?;
+    let rec_weights = Weights::parse(&rec_bytes, graph::PPOCR_REC)?;
+    let shared = context::shared()?;
+    // Both at fixed shapes so each records its command buffer once; see `post::ocr`.
+    let det_plan = ppocr_det::build(&det_weights, ppocr_det::LONG_SIDE, ppocr_det::LONG_SIDE)?;
+    let rec_plan = ppocr_rec::build(&rec_weights, ocr::REC_WIDTH)?;
+    Ok(OcrHandle {
+        det: Net::new(shared.clone(), det_plan, &det_weights, PPOCR_DET)?,
+        rec: Net::new(shared, rec_plan, &rec_weights, PPOCR_REC)?,
+        dictionary,
+        pixels: Vec::new(),
+    })
+}
+
+/// Recognise every line in `pixels` and return them as tab-separated text.
+///
+/// One line per region: `text`, then eight quad coordinates in source-bitmap pixels, then
+/// the confidence, then `1` or `0` for vertical — ten fields after the text, tab-separated,
+/// regions separated by newlines.
+///
+/// A string rather than a `float[]` plus a `String[]`, because the geometry and the text
+/// belong to the same region and two arrays would have to be kept in step across the
+/// boundary. It is safe to pack this way rather than lucky: the dictionary is 836 single
+/// non-whitespace characters plus a space, so a decoded line can contain neither a tab nor
+/// a newline, and `ctc::Dictionary::parse` rejects a file that broke that.
+///
+/// Returns null on failure or on a `0` handle. An empty string means no text, which is not
+/// an error.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a value returned by
+/// [`Java_com_vayunmathur_library_ml_MlNative_createPpocr`] and not yet destroyed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_recognizeText<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pixels: JIntArray<'l>,
+    width: jint,
+    height: jint,
+) -> jstring {
+    let null = std::ptr::null_mut();
+    if handle == 0 || width <= 0 || height <= 0 {
+        return null;
+    }
+    // SAFETY: as `segment` — the caller guarantees the handle is live and serialises this
+    // against `destroyOcr`.
+    let state = unsafe { &mut *(handle as *mut OcrHandle) };
+
+    if let Err(e) = read_pixels(&mut env, &pixels, width, height, &mut state.pixels) {
+        log(&e);
+        return null;
+    }
+    let lines = match read_text(state, width as u32, height as u32) {
+        Ok(lines) => lines,
+        Err(e) => {
+            log(&format!("OCR failed: {e}"));
+            return null;
+        }
+    };
+    match env.new_string(encode(&lines)) {
+        Ok(text) => text.into_raw(),
+        Err(e) => {
+            log(&format!("cannot return the text: {e}"));
+            null
+        }
+    }
+}
+
+/// Detect, crop, recognise and order. The Vulkan half of `post::ocr::lines`.
+fn read_text(state: &mut OcrHandle, width: u32, height: u32) -> Result<Vec<Line>, String> {
+    let fit = Letterbox::square(width, height, ppocr_det::LONG_SIDE)?;
+    let maps = state.det.infer_letterboxed(&state.pixels, width, height, &fit)?;
+    let probability = match maps.as_slice() {
+        [only] => only,
+        other => return Err(format!("detection returned {} maps, not one", other.len())),
+    };
+    let (map_w, map_h) = state.det.output_size()?;
+    // Disjoint field borrows: the recogniser is taken mutably while the pixels and the
+    // dictionary are read, which is why this is not `state.rec.infer(...)` inline.
+    let OcrHandle { rec, dictionary, pixels, .. } = state;
+    ocr::lines(
+        &ocr::Detection { probability, width: map_w, height: map_h, fit: &fit },
+        &ocr::Source { pixels, width, height },
+        dictionary,
+        |crop, crop_w, crop_h| rec.infer(crop, crop_w, crop_h),
+    )
+}
+
+/// Pack the lines into the tab-separated form described on `recognizeText`.
+fn encode(lines: &[Line]) -> String {
+    let mut out = String::new();
+    for line in lines {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&line.text);
+        for (x, y) in &line.corners {
+            out.push('\t');
+            out.push_str(&format!("{x}"));
+            out.push('\t');
+            out.push_str(&format!("{y}"));
+        }
+        out.push('\t');
+        out.push_str(&format!("{}", line.confidence));
+        out.push('\t');
+        out.push(if line.vertical { '1' } else { '0' });
+    }
+    out
+}
+
+/// Free both networks and the dictionary.
+///
+/// Separate from [`Java_com_vayunmathur_library_ml_MlNative_destroy`] because the handle is
+/// a different type; passing one to the other is undefined.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a value returned by
+/// [`Java_com_vayunmathur_library_ml_MlNative_createPpocr`], and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyOcr<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this came from `createPpocr` and has not been
+    // destroyed. Each `Net`'s Drop waits for the device to go idle.
+    drop(unsafe { Box::from_raw(handle as *mut OcrHandle) });
 }
 
 /// Copy a Java `int[]` of ARGB pixels into `into`, checking it against `width` x `height`.

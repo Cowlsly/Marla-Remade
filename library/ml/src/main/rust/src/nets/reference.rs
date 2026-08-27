@@ -1737,7 +1737,7 @@ mod tests {
             keys.push('\n');
         }
         let dictionary = crate::post::ctc::Dictionary::parse(&keys).expect("parses");
-        let decoded = crate::post::ctc::decode(&logits, &dictionary).expect("decodes");
+        let decoded = crate::post::ctc::decode(&logits, steps, &dictionary).expect("decodes");
         println!("ppocr_rec: {:?} at {:.4}", decoded.text, decoded.confidence);
         assert!(
             (0.0..=1.0).contains(&decoded.confidence),

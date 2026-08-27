@@ -43,12 +43,9 @@ dependencies {
     implementation(project(":library:map"))
     implementation(project(":library:image"))
     implementation(libs.androidx.exifinterface)
-    // No direct ncnn dependency any more: face detection (SCRFD 500M), face embedding
-    // (MobileFaceNet) and subject segmentation (U²-Net portable) all run on :library:ml,
-    // our own Vulkan compute runtime.
-    //
-    // `libncnn_android.so` is still in this APK, though, because :library:ocr below pulls
-    // it in for PP-OCRv5 text recognition. It leaves when OCR moves across.
+    // No ncnn anywhere in this APK. Face detection (SCRFD 500M), face embedding
+    // (MobileFaceNet), subject segmentation (U²-Net portable) and PP-OCRv5 text
+    // recognition all run on :library:ml, our own Vulkan compute runtime.
     implementation(project(":library:ml"))
 
     implementRoom(libs)

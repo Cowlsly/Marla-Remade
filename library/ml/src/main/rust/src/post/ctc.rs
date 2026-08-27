@@ -93,9 +93,16 @@ pub struct Decoded {
 ///
 /// # Layout: class-major, and raw
 ///
-/// `logits` is [`LOGITS`] * `steps` values in **class-major** order — every timestep's
+/// `logits` is [`LOGITS`] * `timesteps` values in **class-major** order — every timestep's
 /// value for label 0, then every one for label 1, and so on. That is `[LOGITS, 1, T]`,
 /// exactly what [`crate::nets::ppocr_rec`] writes, so nothing transposes anything.
+///
+/// `used` is how many leading timesteps to read, which is not always all of them.
+/// Recognition runs at one fixed width so that a single compiled plan serves every line, so
+/// a short crop sits in the left of the input and mid-grey padding fills the rest. Upstream
+/// PaddleOCR avoids the question by batching lines of similar aspect ratio, which makes its
+/// padding narrow; here it can be most of the strip, and decoding it invites a hallucinated
+/// character on the end of every short word.
 ///
 /// The values are **raw logits**, not probabilities. The export ends in a `Softmax` over
 /// the 838 classes and this runtime deliberately does not run it, because the decode does
@@ -111,7 +118,7 @@ pub struct Decoded {
 ///
 /// The classic CTC collapse: a label repeated across consecutive timesteps is one
 /// character, and a blank between two identical labels is what separates them into two.
-pub fn decode(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String> {
+pub fn decode(logits: &[f32], used: usize, dictionary: &Dictionary) -> Result<Decoded, String> {
     let labels = dictionary.labels();
     if labels != LOGITS {
         return Err(format!("a dictionary of {labels} labels, expected {LOGITS}"));
@@ -125,10 +132,13 @@ pub fn decode(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String
             logits.len()
         ));
     }
-    let steps = logits.len() / labels;
+    let timesteps = logits.len() / labels;
+    if used > timesteps {
+        return Err(format!("{used} of {timesteps} timesteps requested"));
+    }
     let at = |label: usize, step: usize| -> Result<f32, String> {
         logits
-            .get(label * steps + step)
+            .get(label * timesteps + step)
             .copied()
             .ok_or_else(|| format!("label {label} of timestep {step} is outside the map"))
     };
@@ -138,7 +148,7 @@ pub fn decode(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String
     let mut kept = 0u32;
     let mut previous = usize::MAX;
 
-    for step in 0..steps {
+    for step in 0..used {
         let mut best = 0;
         let mut peak = at(0, step)?;
         for label in 1..labels {
@@ -204,6 +214,11 @@ mod tests {
         map
     }
 
+    /// [`decode`] over every timestep in the map, which is what most fixtures want.
+    fn all(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String> {
+        decode(logits, logits.len() / LOGITS, dictionary)
+    }
+
     /// The softmax probability of a winner at `logit` when every other label is zero:
     /// `1 / (1 + 837 * exp(-logit))`.
     ///
@@ -233,7 +248,7 @@ mod tests {
     fn a_run_of_one_label_collapses_to_one_character() {
         let d = dictionary();
         // Different logits across the run, so "only the first is scored" is observable.
-        let got = decode(&logits(&[(1, 10.0), (1, 8.0), (1, 12.0)]), &d).expect("decodes");
+        let got = all(&logits(&[(1, 10.0), (1, 8.0), (1, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "a");
         let want = probability(10.0) as f32;
         assert!((got.confidence - want).abs() < 1e-6, "{} vs {want}", got.confidence);
@@ -245,7 +260,7 @@ mod tests {
         // probability comes from. A decoder that returned the logit itself would report
         // 10.0, and one that forgot the 836 other zero-logit classes would report 1/2.
         let d = dictionary();
-        let got = decode(&logits(&[(3, 10.0)]), &d).expect("decodes");
+        let got = all(&logits(&[(3, 10.0)]), &d).expect("decodes");
         let want = (1.0 / (1.0 + 837.0 * (-10.0f64).exp())) as f32;
         assert!((got.confidence - want).abs() < 1e-6, "{} vs {want}", got.confidence);
         // Sanity: 837 competitors at logit zero against one at 10 is confident but not
@@ -258,7 +273,7 @@ mod tests {
         // Every label equally likely is 1/838, and it is the blank that wins a tie at
         // label 0 — so nothing is emitted and the confidence falls back to zero.
         let d = dictionary();
-        let got = decode(&vec![0.5; LOGITS], &d).expect("decodes");
+        let got = all(&vec![0.5; LOGITS], &d).expect("decodes");
         assert_eq!(got.text, "");
         assert_eq!(got.confidence, 0.0);
         // With a non-blank winner the same flat field gives chance plus a little.
@@ -266,7 +281,7 @@ mod tests {
         if let Some(slot) = map.get_mut(2) {
             *slot = f32::MIN_POSITIVE;
         }
-        let got = decode(&map, &d).expect("decodes");
+        let got = all(&map, &d).expect("decodes");
         assert_eq!(got.text, "b");
         let chance = 1.0 / LOGITS as f32;
         assert!((got.confidence - chance).abs() < 1e-6, "{} vs {chance}", got.confidence);
@@ -277,14 +292,14 @@ mod tests {
         // The whole reason CTC has a blank: without it "aa" is indistinguishable from a
         // held "a".
         let d = dictionary();
-        let got = decode(&logits(&[(1, 10.0), (0, 8.0), (1, 9.0)]), &d).expect("decodes");
+        let got = all(&logits(&[(1, 10.0), (0, 8.0), (1, 9.0)]), &d).expect("decodes");
         assert_eq!(got.text, "aa");
     }
 
     #[test]
     fn blanks_contribute_no_characters_and_no_confidence() {
         let d = dictionary();
-        let got = decode(&logits(&[(0, 12.0), (0, 12.0)]), &d).expect("decodes");
+        let got = all(&logits(&[(0, 12.0), (0, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "");
         assert_eq!(got.confidence, 0.0);
     }
@@ -292,7 +307,7 @@ mod tests {
     #[test]
     fn distinct_adjacent_labels_both_survive_without_a_blank() {
         let d = dictionary();
-        let got = decode(&logits(&[(1, 10.0), (2, 8.0), (3, 12.0)]), &d).expect("decodes");
+        let got = all(&logits(&[(1, 10.0), (2, 8.0), (3, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "abc");
         // The mean of all three, since none is a repeat.
         let want =
@@ -303,7 +318,7 @@ mod tests {
     #[test]
     fn the_space_label_decodes_to_a_space() {
         let d = dictionary();
-        let got = decode(&logits(&[(1, 10.0), (LOGITS - 1, 9.0), (2, 8.0)]), &d)
+        let got = all(&logits(&[(1, 10.0), (LOGITS - 1, 9.0), (2, 8.0)]), &d)
             .expect("decodes");
         assert_eq!(got.text, "a b");
     }
@@ -322,7 +337,7 @@ mod tests {
                 *slot = 10.0;
             }
         }
-        let got = decode(&map, &d).expect("decodes");
+        let got = all(&map, &d).expect("decodes");
         assert_eq!(got.text, "a");
     }
 
@@ -337,8 +352,32 @@ mod tests {
                 *slot = value;
             }
         }
-        let got = decode(&column, &d).expect("decodes");
+        let got = all(&column, &d).expect("decodes");
         assert_eq!(got.text, "e");
+    }
+
+    #[test]
+    fn only_the_used_timesteps_are_decoded() {
+        // Recognition pads a short crop out to a fixed width, and the padded strip is not
+        // image. Reading it invents a character on the end of every short word, which is
+        // exactly the failure a fixed-width plan introduces and upstream's aspect-ratio
+        // batching avoids.
+        let d = dictionary();
+        let map = logits(&[(1, 10.0), (2, 10.0), (3, 10.0), (4, 10.0)]);
+        assert_eq!(all(&map, &d).expect("decodes").text, "abcd");
+        assert_eq!(decode(&map, 2, &d).expect("decodes").text, "ab");
+        // Zero used timesteps is a crop with no content, not an error.
+        let empty = decode(&map, 0, &d).expect("decodes");
+        assert_eq!(empty.text, "");
+        assert_eq!(empty.confidence, 0.0);
+    }
+
+    #[test]
+    fn asking_for_more_timesteps_than_the_map_holds_is_refused() {
+        let d = dictionary();
+        let map = logits(&[(1, 10.0), (2, 10.0)]);
+        let error = decode(&map, 3, &d).expect_err("three of two");
+        assert!(error.contains("3 of 2 timesteps"), "{error}");
     }
 
     #[test]
@@ -347,7 +386,7 @@ mod tests {
         // upstream. Returning empty text would make it indistinguishable from a crop that
         // genuinely holds no characters.
         let d = dictionary();
-        let error = decode(&[], &d).expect_err("an empty map");
+        let error = decode(&[], 0, &d).expect_err("an empty map");
         assert!(error.contains("no logits"), "{error}");
     }
 
@@ -383,7 +422,7 @@ mod tests {
     #[test]
     fn a_ragged_logit_array_is_refused() {
         let d = dictionary();
-        let error = decode(&[0.0; LOGITS + 3], &d).expect_err("ragged");
+        let error = decode(&[0.0; LOGITS + 3], 1, &d).expect_err("ragged");
         assert!(error.contains("not a whole number"), "{error}");
     }
 }
