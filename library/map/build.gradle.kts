@@ -1,7 +1,11 @@
 plugins {
     id("common-conventions-library")
 }
-
+android {
+    defaultConfig {
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+    }
+}
 androidComponents {
     onVariants { variant ->
         variant.sources.jniLibs?.addStaticSourceDirectory(
@@ -25,6 +29,20 @@ dependencies {
 
     // :library:image is deliberately gone: it existed to fetch and decode CARTO raster
     // PNGs, and there is no raster tile path any more.
+
+    // The on-device screenshot harness (`src/androidTest`), which is the only way to see what
+    // the renderer draws: Vulkan needs a real GPU, so the host probes can only measure the CPU
+    // pipeline. Coordinates are literal rather than catalog aliases on purpose — these are the
+    // only androidTest dependencies in the repo, and adding four aliases to the shared
+    // `gradle/libs.versions.toml` for one module's diagnostic is a conflict waiting to happen.
+    androidTestImplementation("androidx.test:runner:1.6.2")
+    androidTestImplementation("androidx.test:core:1.6.1")
+    androidTestImplementation("androidx.test.ext:junit:1.2.1")
+    androidTestImplementation(platform(libs.androidx.compose.bom))
+    androidTestImplementation(libs.androidx.activity.compose)
+    androidTestImplementation(libs.androidx.compose.foundation)
+    // Supplies the bare `ComponentActivity` the harness hosts the map in.
+    androidTestImplementation("androidx.compose.ui:ui-test-manifest")
 }
 
 // The Vulkan vector-tile renderer: `library/map/src/main/rust`, on ash.
