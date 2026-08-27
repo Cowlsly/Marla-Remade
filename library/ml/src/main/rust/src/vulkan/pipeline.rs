@@ -41,9 +41,13 @@ const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores
 const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 const LEAKY_RELU: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/leaky_relu.comp.spv"));
+const ATTN_SCORES_RELATIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
+const ATTN_APPLY_RELATIVE: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 15] = [
+const SPIRV: [&[u8]; 17] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -59,6 +63,8 @@ const SPIRV: [&[u8]; 15] = [
     SOFTMAX,
     ATTN_APPLY,
     LEAKY_RELU,
+    ATTN_SCORES_RELATIVE,
+    ATTN_APPLY_RELATIVE,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -97,6 +103,8 @@ pub struct Pipelines {
     softmax: vk::Pipeline,
     attn_apply: vk::Pipeline,
     leaky_relu: vk::Pipeline,
+    attn_scores_relative: vk::Pipeline,
+    attn_apply_relative: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -234,6 +242,8 @@ impl Pipelines {
             softmax,
             attn_apply,
             leaky_relu,
+            attn_scores_relative,
+            attn_apply_relative,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -265,6 +275,8 @@ impl Pipelines {
             softmax,
             attn_apply,
             leaky_relu,
+            attn_scores_relative,
+            attn_apply_relative,
         })
     }
 
@@ -286,6 +298,8 @@ impl Pipelines {
             Kind::Softmax => self.softmax,
             Kind::AttnApply => self.attn_apply,
             Kind::LeakyRelu => self.leaky_relu,
+            Kind::AttnScoresRelative => self.attn_scores_relative,
+            Kind::AttnApplyRelative => self.attn_apply_relative,
         }
     }
 
@@ -309,6 +323,8 @@ impl Pipelines {
             self.softmax,
             self.attn_apply,
             self.leaky_relu,
+            self.attn_scores_relative,
+            self.attn_apply_relative,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

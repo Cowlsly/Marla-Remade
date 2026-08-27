@@ -1,0 +1,62 @@
+#version 450
+//! Attention scores with VITS's relative-position term, in one pass.
+//!
+//! `scores[h][i][j] = scale * (Q[h,.,i] . K[h,.,j] + Q[h,.,i] . emb[j - i + window])`
+//!
+//! # Why the relative term is nine taps and not a skew
+//!
+//! VITS learns a table of `2 * window + 1` offsets per attention layer and adds
+//! `Q . emb[j - i]` to every score. Its ONNX export computes that as a full
+//! `[heads, T, 2T-1]` product and then *skews* it into `[heads, T, T]` with a pad, a reshape
+//! and a slice — 48 `Pad`s, 96 `Reshape`s and 42 `Slice`s across the encoder, none of which
+//! this runtime can express.
+//!
+//! None of it is necessary. The table has nine entries, so the skewed result is zero
+//! wherever `|j - i| > window`, and the surviving band is just `emb[j - i + window]` read
+//! directly. Checked against onnxruntime rather than assumed: the difference between the
+//! final scores and the content-only scores is *exactly* zero outside the band, and inside
+//! it matches this expression to fp32 accumulation noise.
+//!
+//! # Layout
+//!
+//! `p.weight` points at the table as `[2 * window + 1, head_dim]`, shared across heads —
+//! which is VITS's `heads_share` default, and was verified by reconstructing both heads from
+//! the one table. `p.kw` is the number of offsets, so the window is `(p.kw - 1) / 2`; a
+//! nine-wide kernel over the sequence is exactly what this is.
+//!
+//! `p.param0_bits` scales **both** terms, because the export divides the query by
+//! `sqrt(head_dim)` before either product.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint head, query, key;
+    unpack(index, head, query, key);
+
+    uint head_dim = p.in_c / p.group;
+    uint stride = p.in_h * p.in_w;
+    uint base = head * head_dim * stride;
+
+    float total = 0.0;
+    for (uint d = 0u; d < head_dim; d++) {
+        uint channel = base + d * stride;
+        total += float(arena[p.in0 + channel + query]) * float(arena[p.in1 + channel + key]);
+    }
+
+    // The relative band. Signed, because `key` may be either side of `query`.
+    int window = int(p.kw - 1u) / 2;
+    int offset = int(key) - int(query);
+    if (offset >= -window && offset <= window) {
+        uint row = uint(offset + window) * head_dim;
+        for (uint d = 0u; d < head_dim; d++) {
+            total += float(arena[p.in0 + base + d * stride + query])
+                * float(weights[p.weight + row + d]);
+        }
+    }
+
+    arena[p.out_at + index] = float16_t(total * uintBitsToFloat(p.param0_bits));
+}

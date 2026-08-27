@@ -1,0 +1,50 @@
+#version 450
+//! Attention's weighted sum with VITS's relative-position term, in one pass.
+//!
+//! `out[h][d][i] = sum_j P[h][i][j] * V[h][d][j] + sum_o P[h][i][i+o] * emb[o + window][d]`
+//!
+//! The value-side mirror of `attn_scores_relative`, and the same argument: the export builds
+//! a `[heads, T, 2T-1]` relative form of the attention matrix with a pad, a reshape and a
+//! slice, and every entry outside `|o| <= window` multiplies a zero. So the second term is
+//! nine taps of `P` along the diagonal, weighted by the table.
+//!
+//! Verified against onnxruntime, not assumed: this expression reproduces the export's
+//! attention output to 1.2e-07.
+//!
+//! Taps that fall outside the sequence are skipped rather than clamped. Clamping would fold
+//! a neighbour's probability in twice at the ends of the utterance, which is where a
+//! sentence's first and last phoneme live.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint channel, unused_row, query;
+    unpack(index, channel, unused_row, query);
+
+    uint keys = p.out_w;
+    uint head_dim = p.out_c / p.group;
+    uint row = p.in0 + ((channel / head_dim) * keys + query) * keys;
+    uint values = p.in1 + channel * keys;
+
+    float total = 0.0;
+    for (uint j = 0u; j < keys; j++) {
+        total += float(arena[row + j]) * float(arena[values + j]);
+    }
+
+    int window = int(p.kw - 1u) / 2;
+    uint depth = channel % head_dim;
+    for (int offset = -window; offset <= window; offset++) {
+        int key = int(query) + offset;
+        if (key < 0 || key >= int(keys)) {
+            continue;
+        }
+        uint entry = uint(offset + window) * head_dim + depth;
+        total += float(arena[row + uint(key)]) * float(weights[p.weight + entry]);
+    }
+
+    arena[p.out_at + index] = float16_t(total);
+}

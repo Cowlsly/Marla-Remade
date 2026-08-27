@@ -227,6 +227,13 @@ pub enum Kind {
     /// attention is not an op: output channel `c` belongs to head `c / head_dim` and
     /// lands where the concatenated result wants it. Head count in [`Push::group`].
     AttnApply,
+    /// [`Kind::AttnScores`] plus VITS's relative-position term, which is nine taps rather
+    /// than the `[heads, T, 2T-1]` product and skew its export spells out. Table at
+    /// [`Push::weight`] as `[2 * window + 1, head_dim]`, offset count in [`Push::kw`].
+    AttnScoresRelative,
+    /// [`Kind::AttnApply`] plus the value-side relative term. See
+    /// [`Kind::AttnScoresRelative`].
+    AttnApplyRelative,
     /// `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
     ///
     /// The only activation here that is **not** fused into the layer before it, because in
@@ -499,6 +506,23 @@ enum Node {
         v: Id,
         out: Id,
         heads: u32,
+    },
+    AttnScoresRelative {
+        q: Id,
+        k: Id,
+        out: Id,
+        heads: u32,
+        scale: f32,
+        table: u32,
+        offsets: u32,
+    },
+    AttnApplyRelative {
+        probs: Id,
+        v: Id,
+        out: Id,
+        heads: u32,
+        table: u32,
+        offsets: u32,
     },
 }
 
@@ -875,6 +899,13 @@ impl<'a> Builder<'a> {
     /// it is a property of the head geometry, not a trained value, so there is no call
     /// site that could legitimately pass a different one.
     pub fn attn_scores(&mut self, q: Id, k: Id, heads: u32) -> Id {
+        let (out, scale) = self.score_map(q, k, heads);
+        self.nodes.push(Node::AttnScores { q, k, out, heads, scale });
+        out
+    }
+
+    /// The validation, output tensor and scale every score map shares, relative or not.
+    fn score_map(&mut self, q: Id, k: Id, heads: u32) -> (Id, f32) {
         let (sq, sk) = (self.shape_of(q), self.shape_of(k));
         if sq != sk {
             self.fail(format!("attention over q {sq:?} and k {sk:?}"));
@@ -890,9 +921,7 @@ impl<'a> Builder<'a> {
         }
         let head_dim = sq.c.checked_div(heads).unwrap_or(0);
         let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
-        let out = self.tensor(Shape::new(heads, sq.w, sq.w));
-        self.nodes.push(Node::AttnScores { q, k, out, heads, scale });
-        out
+        (self.tensor(Shape::new(heads, sq.w, sq.w)), scale)
     }
 
     /// Softmax over the last axis, which for a score map is one query's distribution.
@@ -915,8 +944,70 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// [`Builder::attn_scores`] plus VITS's relative-position term.
+    ///
+    /// `table` is a `[offsets, head_dim]` tensor of learned offsets, shared across heads.
+    /// `offsets` must be odd: it is `2 * window + 1`, centred on zero displacement.
+    pub fn attn_scores_relative(
+        &mut self,
+        q: Id,
+        k: Id,
+        heads: u32,
+        table: usize,
+        offsets: u32,
+    ) -> Id {
+        let (out, scale) = self.score_map(q, k, heads);
+        let shape = self.shape_of(q);
+        let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
+        self.check_offsets(offsets, shape.w);
+        let table = self.weight(table, &[offsets, head_dim]);
+        self.nodes.push(Node::AttnScoresRelative { q, k, out, heads, scale, table, offsets });
+        out
+    }
+
+    /// [`Builder::attn_apply`] plus the value-side relative term.
+    pub fn attn_apply_relative(
+        &mut self,
+        probs: Id,
+        v: Id,
+        heads: u32,
+        table: usize,
+        offsets: u32,
+    ) -> Id {
+        let out = self.mixed(probs, v, heads);
+        let shape = self.shape_of(v);
+        let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
+        self.check_offsets(offsets, shape.w);
+        let table = self.weight(table, &[offsets, head_dim]);
+        self.nodes.push(Node::AttnApplyRelative { probs, v, out, heads, table, offsets });
+        out
+    }
+
+    /// A relative table is `2 * window + 1` entries centred on zero displacement.
+    fn check_offsets(&mut self, offsets: u32, sequence: u32) {
+        if offsets == 0 || offsets.is_multiple_of(2) {
+            self.fail(format!(
+                "{offsets} relative offsets: the table is 2 * window + 1 entries centred on \
+                 zero displacement, so an even count has no centre"
+            ));
+        }
+        if offsets > sequence * 2 {
+            self.fail(format!(
+                "{offsets} relative offsets over a sequence of {sequence}: the band is wider \
+                 than any pair of positions can be apart"
+            ));
+        }
+    }
+
     /// Apply `probs`, a `[heads, T, T]` score map, to `v`, a `[d_model, 1, T]` sequence.
     pub fn attn_apply(&mut self, probs: Id, v: Id, heads: u32) -> Id {
+        let out = self.mixed(probs, v, heads);
+        self.nodes.push(Node::AttnApply { probs, v, out, heads });
+        out
+    }
+
+    /// The validation and output tensor every weighted sum shares, relative or not.
+    fn mixed(&mut self, probs: Id, v: Id, heads: u32) -> Id {
         let (sp, sv) = (self.shape_of(probs), self.shape_of(v));
         if sp != Shape::new(heads, sv.w, sv.w) {
             self.fail(format!(
@@ -931,9 +1022,7 @@ impl<'a> Builder<'a> {
         if heads == 0 || !sv.c.is_multiple_of(heads) {
             self.fail(format!("{} channels do not split into {heads} heads", sv.c));
         }
-        let out = self.tensor(sv);
-        self.nodes.push(Node::AttnApply { probs, v, out, heads });
-        out
+        self.tensor(sv)
     }
 
     /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
@@ -1274,6 +1363,55 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::AttnScoresRelative { q, k, out, heads, scale, table, offsets } => {
+                let (si, so) = (shape(*q), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnScoresRelative,
+                    push: Push {
+                        in0: at(*q)?,
+                        in1: at(*k)?,
+                        out: at(*out)?,
+                        weight: *table,
+                        in_c: si.c,
+                        in_h: si.h,
+                        in_w: si.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        // The offset count reads as a kernel width, because that is what a
+                        // band of `2 * window + 1` taps along the sequence is.
+                        kw: *offsets,
+                        group: *heads,
+                        param0_bits: scale.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::AttnApplyRelative { probs, v, out, heads, table, offsets } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnApplyRelative,
+                    push: Push {
+                        in0: at(*probs)?,
+                        in1: at(*v)?,
+                        out: at(*out)?,
+                        weight: *table,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        kw: *offsets,
+                        group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Softmax { input, out } => {
                 let so = shape(*out);
                 // One invocation per row of the last axis, each normalising `out_w`
@@ -1354,6 +1492,8 @@ impl Node {
             | Node::Affine { out, .. }
             | Node::LayerNorm { out, .. }
             | Node::AttnScores { out, .. }
+            | Node::AttnScoresRelative { out, .. }
+            | Node::AttnApplyRelative { out, .. }
             | Node::Softmax { out, .. }
             | Node::LeakyRelu { out, .. }
             | Node::AttnApply { out, .. }
@@ -1373,7 +1513,10 @@ impl Node {
             | Node::LeakyRelu { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
-            Node::AttnScores { q: a, k: b, .. } | Node::AttnApply { probs: a, v: b, .. } => {
+            Node::AttnScores { q: a, k: b, .. }
+            | Node::AttnApply { probs: a, v: b, .. }
+            | Node::AttnScoresRelative { q: a, k: b, .. }
+            | Node::AttnApplyRelative { probs: a, v: b, .. } => {
                 vec![*a, *b]
             }
             Node::Concat { parts, .. } => parts.clone(),

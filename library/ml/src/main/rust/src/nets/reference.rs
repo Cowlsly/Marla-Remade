@@ -187,6 +187,8 @@ impl Reference {
                     Kind::Softmax => self.softmax(push),
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::LeakyRelu => self.leaky_relu(push),
+                    Kind::AttnScoresRelative => self.attn_scores_relative(push),
+                    Kind::AttnApplyRelative => self.attn_apply_relative(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -605,6 +607,71 @@ impl Reference {
         Ok(())
     }
 
+    /// [`Self::attn_scores`] plus VITS's relative-position term: nine taps of a learned
+    /// table indexed by `key - query`, in place of the export's product-and-skew.
+    ///
+    /// The scale multiplies both terms, because the export divides the query by
+    /// `sqrt(head_dim)` before either product.
+    fn attn_scores_relative(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.in_c)?;
+        let stride = p.in_h * p.in_w;
+        let scale = f32::from_bits(p.param0_bits);
+        let window = (p.kw.max(1) - 1) as i64 / 2;
+        for head in 0..p.group {
+            let base = head * head_dim * stride;
+            for query in 0..p.out_h {
+                for key in 0..p.out_w {
+                    let mut total = 0.0;
+                    for d in 0..head_dim {
+                        let channel = base + d * stride;
+                        total += self.load(p.in0, channel + query)?
+                            * self.load(p.in1, channel + key)?;
+                    }
+                    let offset = key as i64 - query as i64;
+                    if offset.abs() <= window {
+                        let row = (offset + window) as u32 * head_dim;
+                        for d in 0..head_dim {
+                            total += self.load(p.in0, base + d * stride + query)?
+                                * self.weight(p.weight, row + d)?;
+                        }
+                    }
+                    self.store(p.out, nchw(p, head, query, key), total * scale)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::attn_apply`] plus the value-side relative term. Taps outside the sequence
+    /// are skipped rather than clamped, which would double-count a neighbour at the ends.
+    fn attn_apply_relative(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.out_c)?;
+        let keys = p.out_w;
+        let window = (p.kw.max(1) - 1) as i64 / 2;
+        for channel in 0..p.out_c {
+            let row = (channel / head_dim) * keys * keys;
+            let depth = channel % head_dim;
+            for query in 0..keys {
+                let mut total = 0.0;
+                for key in 0..keys {
+                    total += self.load(p.in0, row + query * keys + key)?
+                        * self.load(p.in1, channel * keys + key)?;
+                }
+                for offset in -window..=window {
+                    let key = query as i64 + offset;
+                    if key < 0 || key >= keys as i64 {
+                        continue;
+                    }
+                    let entry = (offset + window) as u32 * head_dim + depth;
+                    total += self.load(p.in0, row + query * keys + key as u32)?
+                        * self.weight(p.weight, entry)?;
+                }
+                self.store(p.out, nchw(p, channel, 0, query), total)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `out[c][y][x] = a[c][y][x] * b[c]`, the excite half of a squeeze-excite block.
     fn mul_broadcast(&mut self, p: &Push) -> Result<(), String> {
         for oc in 0..p.out_c {
@@ -886,6 +953,28 @@ mod tests {
         record: impl FnOnce(&mut Builder, Id, Id) -> Id,
     ) -> Vec<f32> {
         let given = Given::new(&[]).expect("no tensors");
+        let mut builder = Builder::new(&given);
+        let first = builder.input(shapes.0);
+        let second = builder.input(shapes.1);
+        let last = record(&mut builder, first, second);
+        let plan = builder.finish(&[last]).expect("the fixture plan builds");
+        super::super::tests::assert_no_aliasing(&plan);
+        let outputs =
+            run_multi(&plan, given.data(), &[inputs.0, inputs.1]).expect("the fixture plan runs");
+        match <[Vec<f32>; 1]>::try_from(outputs) {
+            Ok([only]) => only,
+            Err(other) => panic!("{} outputs", other.len()),
+        }
+    }
+
+    /// [`two`], with weight tensors and independent shapes, for the relative attention.
+    fn two_weighted(
+        shapes: (Shape, Shape),
+        inputs: (&[f32], &[f32]),
+        tensors: &[(Vec<u32>, Vec<f32>)],
+        record: impl FnOnce(&mut Builder, Id, Id) -> Id,
+    ) -> Vec<f32> {
+        let given = Given::new(tensors).expect("the fixture tensors lay out");
         let mut builder = Builder::new(&given);
         let first = builder.input(shapes.0);
         let second = builder.input(shapes.1);
@@ -1569,6 +1658,103 @@ mod tests {
         let scores = b.attn_scores(q, q, 2);
         let error = b.finish(&[scores]).expect_err("a two-row sequence");
         assert!(error.contains("height above"), "{error}");
+    }
+
+    #[test]
+    fn a_relative_score_map_adds_a_banded_term_from_its_table() {
+        // Q = K = 1 everywhere over four positions, two channels, one head. The content
+        // term is then `scale * head_dim` for every pair, and the relative term adds
+        // `scale * sum_d table[j - i + window][d]` inside the band and nothing outside it.
+        //
+        // A table of three offsets whose rows sum to -10, 0 and +10, so the sign of the
+        // displacement is visible in the answer: a transposed `j - i` would mirror it.
+        let table: Vec<f32> = vec![-5.0, -5.0, 0.0, 0.0, 5.0, 5.0];
+        let got = two_weighted(
+            (Shape::new(2, 1, 4), Shape::new(2, 1, 4)),
+            (&[1.0; 8], &[1.0; 8]),
+            &[(vec![3, 2], table)],
+            |b, q, k| b.attn_scores_relative(q, k, 1, 0, 3),
+        );
+        // scale = 1/sqrt(2); content is 2 * scale for every pair.
+        let scale = 1.0 / 2.0f32.sqrt();
+        let content = 2.0 * scale;
+        let mut want = vec![0.0f32; 16];
+        for query in 0..4i64 {
+            for key in 0..4i64 {
+                let offset = key - query;
+                let relative = match offset {
+                    -1 => -10.0,
+                    0 => 0.0,
+                    1 => 10.0,
+                    _ => 0.0,
+                };
+                want[(query * 4 + key) as usize] = content + relative * scale;
+            }
+        }
+        close(&got, &want);
+    }
+
+    #[test]
+    fn a_relative_score_map_leaves_the_band_alone_outside_the_window() {
+        // The whole reason this is nine taps and not a `[heads, T, 2T-1]` product and skew:
+        // beyond the window the export's skewed tensor is exactly zero. Verified against
+        // onnxruntime on Piper's encoder, and pinned here.
+        let table: Vec<f32> = vec![7.0, 7.0, 0.0, 0.0, 7.0, 7.0];
+        let got = two_weighted(
+            (Shape::new(2, 1, 5), Shape::new(2, 1, 5)),
+            (&[1.0; 10], &[1.0; 10]),
+            &[(vec![3, 2], table)],
+            |b, q, k| b.attn_scores_relative(q, k, 1, 0, 3),
+        );
+        let scale = 1.0 / 2.0f32.sqrt();
+        let content = 2.0 * scale;
+        for query in 0..5usize {
+            for key in 0..5usize {
+                let value = got[query * 5 + key];
+                let far = (key as i64 - query as i64).abs() > 1;
+                if far {
+                    assert!(
+                        (value - content).abs() < 1e-3,
+                        "({query},{key}) is outside the band but moved: {value} vs {content}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_relative_weighted_sum_reads_the_diagonal_of_its_probabilities() {
+        // One head, two channels, three positions. Probabilities are the identity, so the
+        // content term picks V[.,i] and the relative term adds `table[window][d]` — the
+        // centre row — because the only non-zero probability is at `key == query`.
+        let probs: Vec<f32> = vec![
+            1.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, //
+            0.0, 0.0, 1.0,
+        ];
+        let values: Vec<f32> = vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0];
+        let table: Vec<f32> = vec![100.0, 200.0, 1.0, 2.0, 300.0, 400.0];
+        let got = two_weighted(
+            (Shape::new(1, 3, 3), Shape::new(2, 1, 3)),
+            (&probs, &values),
+            &[(vec![3, 2], table)],
+            |b, p, v| b.attn_apply_relative(p, v, 1, 0, 3),
+        );
+        // Channel 0 gets table[1][0] = 1, channel 1 gets table[1][1] = 2.
+        close(&got, &[2.0, 3.0, 4.0, 12.0, 22.0, 32.0]);
+    }
+
+    #[test]
+    fn a_relative_table_with_an_even_number_of_offsets_is_refused() {
+        // `2 * window + 1` is always odd, so an even count has no centre and the
+        // displacement it indexed would be ambiguous.
+        let source = Given::new(&[(vec![4, 2], vec![0.0; 8])]).expect("the fixture lays out");
+        let mut b = Builder::new(&source);
+        let q = b.input(Shape::new(2, 1, 4));
+        let k = b.input(Shape::new(2, 1, 4));
+        let out = b.attn_scores_relative(q, k, 1, 0, 4);
+        let error = b.finish(&[out]).expect_err("an even offset count");
+        assert!(error.contains("no centre"), "{error}");
     }
 
     #[test]
