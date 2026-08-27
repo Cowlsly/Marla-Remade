@@ -91,14 +91,33 @@ pub struct Decoded {
 
 /// Collapse `logits` into text: argmax per timestep, drop blanks, drop repeats.
 ///
-/// `logits` is `steps * LOGITS`, row-major — one row per timestep, already through the
-/// graph's softmax. The classic CTC collapse: a label repeated across consecutive
-/// timesteps is one character, and a blank between two identical labels is what separates
-/// them into two.
+/// # Layout: class-major, and raw
+///
+/// `logits` is [`LOGITS`] * `steps` values in **class-major** order — every timestep's
+/// value for label 0, then every one for label 1, and so on. That is `[LOGITS, 1, T]`,
+/// exactly what [`crate::nets::ppocr_rec`] writes, so nothing transposes anything.
+///
+/// The values are **raw logits**, not probabilities. The export ends in a `Softmax` over
+/// the 838 classes and this runtime deliberately does not run it, because the decode does
+/// not need it:
+///
+/// * The argmax is unchanged by a softmax, which is monotonic.
+/// * The winner's probability is `1 / sum(exp(x - peak))` — subtracting the peak makes
+///   its own term `exp(0)`, so the numerator is 1 and the denominator is at least 1. That
+///   is computed here, for the timesteps that are actually kept, which is a few hundred
+///   exponentials per line rather than a whole pass over the logit map.
+///
+/// So the softmax is not moved to the host, it is deleted.
+///
+/// The classic CTC collapse: a label repeated across consecutive timesteps is one
+/// character, and a blank between two identical labels is what separates them into two.
 pub fn decode(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String> {
     let labels = dictionary.labels();
     if labels != LOGITS {
         return Err(format!("a dictionary of {labels} labels, expected {LOGITS}"));
+    }
+    if logits.is_empty() {
+        return Err("no logits at all, so the recogniser produced no timesteps".into());
     }
     if !logits.len().is_multiple_of(labels) {
         return Err(format!(
@@ -106,24 +125,42 @@ pub fn decode(logits: &[f32], dictionary: &Dictionary) -> Result<Decoded, String
             logits.len()
         ));
     }
+    let steps = logits.len() / labels;
+    let at = |label: usize, step: usize| -> Result<f32, String> {
+        logits
+            .get(label * steps + step)
+            .copied()
+            .ok_or_else(|| format!("label {label} of timestep {step} is outside the map"))
+    };
 
     let mut text = String::new();
     let mut total = 0.0f64;
     let mut kept = 0u32;
     let mut previous = usize::MAX;
 
-    for step in logits.chunks_exact(labels) {
-        let (best, &score) = step
-            .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .ok_or("an empty timestep")?;
+    for step in 0..steps {
+        let mut best = 0;
+        let mut peak = at(0, step)?;
+        for label in 1..labels {
+            let value = at(label, step)?;
+            if value > peak {
+                peak = value;
+                best = label;
+            }
+        }
         // A repeat of the immediately preceding label is the same character held across
         // two frames. A blank resets that, which is how "aa" is spelled at all.
         if best != previous {
             if let Some(character) = dictionary.label(best) {
+                // f64, like the mean below: summing 837 small terms into a running total
+                // that already holds `exp(0) = 1` loses several f32 digits, and this
+                // number is compared against a threshold by callers.
+                let mut denominator = 0.0f64;
+                for label in 0..labels {
+                    denominator += ((at(label, step)? - peak) as f64).exp();
+                }
                 text.push_str(character);
-                total += score as f64;
+                total += 1.0 / denominator;
                 kept += 1;
             }
         }
@@ -151,15 +188,31 @@ mod tests {
         Dictionary::parse(&text).expect("the fixture dictionary parses")
     }
 
-    /// One timestep whose argmax is `label`, at probability `score`.
-    fn step(label: usize, score: f32) -> Vec<f32> {
-        let mut row = vec![0.0; LOGITS];
-        row[label] = score;
-        row
+    /// One timestep's winning label and its logit. Every other label sits at zero, which
+    /// makes the expected confidence [`probability`].
+    ///
+    /// Laid out **class-major**, the way `nets::ppocr_rec` writes it: label `l` of
+    /// timestep `t` is at `l * steps + t`. A single-timestep fixture is the same bytes
+    /// either way, which is why the argmax test below can stay a flat array.
+    fn logits(steps: &[(usize, f32)]) -> Vec<f32> {
+        let mut map = vec![0.0; LOGITS * steps.len()];
+        for (step, &(label, logit)) in steps.iter().enumerate() {
+            if let Some(slot) = map.get_mut(label * steps.len() + step) {
+                *slot = logit;
+            }
+        }
+        map
     }
 
-    fn logits(steps: &[(usize, f32)]) -> Vec<f32> {
-        steps.iter().flat_map(|&(l, s)| step(l, s)).collect()
+    /// The softmax probability of a winner at `logit` when every other label is zero:
+    /// `1 / (1 + 837 * exp(-logit))`.
+    ///
+    /// Computed here from the definition rather than from `decode`'s arithmetic, so the
+    /// fixtures below pin the confidence rather than restate it. f64 for the same reason
+    /// `decode` uses it — in f32 the two disagree in the fifth digit, which would make the
+    /// tolerance hide a real error.
+    fn probability(logit: f32) -> f64 {
+        1.0 / (1.0 + (LOGITS - 1) as f64 * (-logit as f64).exp())
     }
 
     #[test]
@@ -179,10 +232,44 @@ mod tests {
     #[test]
     fn a_run_of_one_label_collapses_to_one_character() {
         let d = dictionary();
-        let got = decode(&logits(&[(1, 0.9), (1, 0.8), (1, 0.7)]), &d).expect("decodes");
+        // Different logits across the run, so "only the first is scored" is observable.
+        let got = decode(&logits(&[(1, 10.0), (1, 8.0), (1, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "a");
-        // Only the first of the run is scored, which is what the reference does.
-        assert!((got.confidence - 0.9).abs() < 1e-6, "{}", got.confidence);
+        let want = probability(10.0) as f32;
+        assert!((got.confidence - want).abs() < 1e-6, "{} vs {want}", got.confidence);
+    }
+
+    #[test]
+    fn the_confidence_is_the_winners_softmax_probability_of_the_raw_logits() {
+        // The graph's final softmax is deliberately not run, so this is where the
+        // probability comes from. A decoder that returned the logit itself would report
+        // 10.0, and one that forgot the 836 other zero-logit classes would report 1/2.
+        let d = dictionary();
+        let got = decode(&logits(&[(3, 10.0)]), &d).expect("decodes");
+        let want = (1.0 / (1.0 + 837.0 * (-10.0f64).exp())) as f32;
+        assert!((got.confidence - want).abs() < 1e-6, "{} vs {want}", got.confidence);
+        // Sanity: 837 competitors at logit zero against one at 10 is confident but not
+        // certain, so this is well inside the unit interval rather than clamped to it.
+        assert!((0.9..0.99).contains(&got.confidence), "{}", got.confidence);
+    }
+
+    #[test]
+    fn a_flat_timestep_is_reported_at_chance() {
+        // Every label equally likely is 1/838, and it is the blank that wins a tie at
+        // label 0 — so nothing is emitted and the confidence falls back to zero.
+        let d = dictionary();
+        let got = decode(&vec![0.5; LOGITS], &d).expect("decodes");
+        assert_eq!(got.text, "");
+        assert_eq!(got.confidence, 0.0);
+        // With a non-blank winner the same flat field gives chance plus a little.
+        let mut map = vec![0.0; LOGITS];
+        if let Some(slot) = map.get_mut(2) {
+            *slot = f32::MIN_POSITIVE;
+        }
+        let got = decode(&map, &d).expect("decodes");
+        assert_eq!(got.text, "b");
+        let chance = 1.0 / LOGITS as f32;
+        assert!((got.confidence - chance).abs() < 1e-6, "{} vs {chance}", got.confidence);
     }
 
     #[test]
@@ -190,14 +277,14 @@ mod tests {
         // The whole reason CTC has a blank: without it "aa" is indistinguishable from a
         // held "a".
         let d = dictionary();
-        let got = decode(&logits(&[(1, 0.9), (0, 0.6), (1, 0.8)]), &d).expect("decodes");
+        let got = decode(&logits(&[(1, 10.0), (0, 8.0), (1, 9.0)]), &d).expect("decodes");
         assert_eq!(got.text, "aa");
     }
 
     #[test]
     fn blanks_contribute_no_characters_and_no_confidence() {
         let d = dictionary();
-        let got = decode(&logits(&[(0, 0.99), (0, 0.99)]), &d).expect("decodes");
+        let got = decode(&logits(&[(0, 12.0), (0, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "");
         assert_eq!(got.confidence, 0.0);
     }
@@ -205,29 +292,63 @@ mod tests {
     #[test]
     fn distinct_adjacent_labels_both_survive_without_a_blank() {
         let d = dictionary();
-        let got = decode(&logits(&[(1, 0.9), (2, 0.8), (3, 0.7)]), &d).expect("decodes");
+        let got = decode(&logits(&[(1, 10.0), (2, 8.0), (3, 12.0)]), &d).expect("decodes");
         assert_eq!(got.text, "abc");
-        assert!((got.confidence - 0.8).abs() < 1e-6, "{}", got.confidence);
+        // The mean of all three, since none is a repeat.
+        let want =
+            ((probability(10.0) + probability(8.0) + probability(12.0)) / 3.0) as f32;
+        assert!((got.confidence - want).abs() < 1e-6, "{} vs {want}", got.confidence);
     }
 
     #[test]
     fn the_space_label_decodes_to_a_space() {
         let d = dictionary();
-        let got = decode(&logits(&[(1, 0.9), (LOGITS - 1, 0.8), (2, 0.7)]), &d).expect("decodes");
+        let got = decode(&logits(&[(1, 10.0), (LOGITS - 1, 9.0), (2, 8.0)]), &d)
+            .expect("decodes");
         assert_eq!(got.text, "a b");
     }
 
     #[test]
-    fn the_argmax_is_taken_across_the_whole_row() {
-        // A row where the winner is not the only non-zero, so a decoder that took the
-        // first positive value rather than the largest would differ.
+    fn a_timestep_is_a_column_not_a_row() {
+        // The map is class-major, so with three timesteps the first three values are
+        // label 0 across all of them, not timestep 0 across three labels. Reading it
+        // row-major here would decode label 0 (the blank), then 1, then 2 — "ab" — from
+        // a map that actually says "a" once.
         let d = dictionary();
-        let mut row = vec![0.0; LOGITS];
-        row[1] = 0.2;
-        row[5] = 0.7;
-        row[9] = 0.1;
-        let got = decode(&row, &d).expect("decodes");
+        let (label, steps) = (1usize, 3usize);
+        let mut map = vec![0.0; LOGITS * steps];
+        for step in 0..steps {
+            if let Some(slot) = map.get_mut(label * steps + step) {
+                *slot = 10.0;
+            }
+        }
+        let got = decode(&map, &d).expect("decodes");
+        assert_eq!(got.text, "a");
+    }
+
+    #[test]
+    fn the_argmax_is_taken_across_every_label_of_the_timestep() {
+        // One timestep, so class-major and row-major coincide. The winner is not the only
+        // non-zero, so a decoder that took the first positive value would differ.
+        let d = dictionary();
+        let mut column = vec![0.0; LOGITS];
+        for (label, value) in [(1, 0.2), (5, 0.7), (9, 0.1)] {
+            if let Some(slot) = column.get_mut(label) {
+                *slot = value;
+            }
+        }
+        let got = decode(&column, &d).expect("decodes");
         assert_eq!(got.text, "e");
+    }
+
+    #[test]
+    fn an_empty_logit_map_is_refused_rather_than_decoding_to_nothing() {
+        // A zero-timestep map means the recogniser produced nothing, which is a failure
+        // upstream. Returning empty text would make it indistinguishable from a crop that
+        // genuinely holds no characters.
+        let d = dictionary();
+        let error = decode(&[], &d).expect_err("an empty map");
+        assert!(error.contains("no logits"), "{error}");
     }
 
     #[test]

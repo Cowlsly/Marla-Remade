@@ -837,7 +837,7 @@ fn uniform(state: &mut u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{mobilefacenet, ppocr_det, scrfd, selfie, u2netp, Act, Builder};
+    use super::super::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, Act, Builder};
     use super::*;
 
     /// Build a plan whose only ops come from `record`, run it, and return the output.
@@ -1697,6 +1697,53 @@ mod tests {
             };
             assert!(value.abs() <= bound, "{value} exceeds {bound}");
         }
+    }
+
+    #[test]
+    fn the_ppocr_rec_net_runs_end_to_end_and_decodes() {
+        // The whole recognition pass, at width 16 rather than the 320 it runs at on
+        // device: `T` is 2 instead of 40, which still exercises all 56 layers, both
+        // attentions, all five layer norms, both squeeze-excites and the pool. Invented
+        // weights, so no asset is needed.
+        //
+        // Width 16 rather than 8 on purpose. At `T` 1 a softmax over one key is 1.0
+        // whatever the scores were, so the attention would run without its indexing being
+        // observable at all. Two costs about a second more in a debug build and makes the
+        // query and key axes distinguishable.
+        let source = Invented::new(ppocr_rec::TENSORS);
+        let plan = ppocr_rec::build(&source, 16).expect("ppocr_rec builds at width 16");
+        let data = source.into_data();
+        let shape = plan.input().expect("one input").shape;
+        let logits = run(&plan, &data, &blob(shape)).expect("ppocr_rec runs");
+
+        let steps = 16 / 8;
+        assert_eq!(logits.len(), ppocr_rec::LOGITS as usize * steps);
+        // Raw logits, so the only thing to assert about the values themselves is that fp16
+        // did not saturate anywhere down 56 layers — an infinity or a NaN here is what a
+        // misindexed weight or an aliased arena produces.
+        for (i, &value) in logits.iter().enumerate() {
+            assert!(value.is_finite(), "logit {i} is {value}");
+        }
+        let low = logits.iter().fold(f32::MAX, |a, &b| a.min(b));
+        let high = logits.iter().fold(f32::MIN, |a, &b| a.max(b));
+        println!("ppocr_rec at 48x16: logits in {low:.4}..{high:.4}");
+
+        // And it feeds the decode. The text is meaningless — the weights are invented —
+        // but the confidence must be a probability, which is the end-to-end check that the
+        // class-major layout the net writes is the one `ctc::decode` reads.
+        let mut keys = String::new();
+        for index in 0..crate::post::ctc::DICTIONARY_ENTRIES {
+            keys.push((b'a' + (index % 26) as u8) as char);
+            keys.push('\n');
+        }
+        let dictionary = crate::post::ctc::Dictionary::parse(&keys).expect("parses");
+        let decoded = crate::post::ctc::decode(&logits, &dictionary).expect("decodes");
+        println!("ppocr_rec: {:?} at {:.4}", decoded.text, decoded.confidence);
+        assert!(
+            (0.0..=1.0).contains(&decoded.confidence),
+            "confidence {}",
+            decoded.confidence
+        );
     }
 
     /// The shipped `.vkml` for `name`, or `None` if it is not checked out.

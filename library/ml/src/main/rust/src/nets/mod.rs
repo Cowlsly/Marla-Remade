@@ -33,6 +33,7 @@
 pub mod reference;
 pub mod mobilefacenet;
 pub mod ppocr_det;
+pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
 pub mod u2netp;
