@@ -32,6 +32,7 @@
 #[cfg(test)]
 pub mod reference;
 pub mod mobilefacenet;
+pub mod ppocr_det;
 pub mod scrfd;
 pub mod selfie;
 pub mod u2netp;

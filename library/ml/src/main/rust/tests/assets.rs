@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use modelrunner::nets::{mobilefacenet, scrfd, selfie, u2netp};
+use modelrunner::nets::{mobilefacenet, ppocr_det, scrfd, selfie, u2netp};
 use modelrunner::weights::{graph, Weights};
 
 /// The repo root, found by walking up for `settings.gradle.kts` rather than by counting
@@ -87,6 +87,19 @@ fn the_scrfd_pass_builds_at_every_letterbox_shape_a_photo_can_produce() {
             assert_eq!(plan.outputs.len(), 9, "{width}x{height}");
         }
     }
+}
+
+#[test]
+fn the_shipped_ppocr_det_asset_builds_the_ppocr_det_forward_pass() {
+    let weights = load("library/ocr/src/main/assets/ppocr_det.vkml", graph::PPOCR_DET);
+    assert_eq!(weights.len(), ppocr_det::TENSORS);
+    let plan = ppocr_det::build(&weights, ppocr_det::LONG_SIDE, ppocr_det::LONG_SIDE)
+        .expect("the shipped asset matches nets::ppocr_det");
+    // Full-resolution probability map, which is what DBNet thresholds.
+    assert_eq!(
+        plan.output().expect("one output").shape.h,
+        ppocr_det::LONG_SIDE
+    );
 }
 
 #[test]

@@ -669,7 +669,7 @@ fn uniform(state: &mut u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{mobilefacenet, scrfd, selfie, u2netp, Act, Builder};
+    use super::super::{mobilefacenet, ppocr_det, scrfd, selfie, u2netp, Act, Builder};
     use super::*;
 
     /// Build a plan whose only ops come from `record`, run it, and return the output.
@@ -1402,5 +1402,25 @@ mod tests {
         let cosine = dot / (magnitude(&first) * magnitude(&second));
         println!("mobilefacenet: cosine between the two {cosine:.4}");
         assert!(cosine < 0.99, "two unlike inputs embed to the same direction");
+    }
+
+    #[test]
+    #[ignore = "runs the full shipped nets; minutes in a debug build"]
+    fn the_shipped_ppocr_det_net_produces_a_usable_probability_map() {
+        let Some(bytes) = asset("library/ocr/src/main/assets/ppocr_det.vkml") else {
+            return;
+        };
+        let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::PPOCR_DET)
+            .expect("the shipped ppocr_det asset parses");
+        // 128x128 rather than 960: the plan lowers at any multiple of 32, and this
+        // exercises all 62 convolutions, both squeeze-excite kinds, the one surviving
+        // affine, all six nearest upsamples and both transposed convolutions for a
+        // fraction of the arithmetic.
+        let plan = ppocr_det::build(&weights, 128, 128).expect("builds at 128x128");
+        assert_eq!(plan.output().expect("one output").shape, Shape::new(1, 128, 128));
+        // The output is a per-pixel text probability at full resolution, so it is a mask
+        // in exactly the sense `assert_usable_mask` means — including that a synthetic
+        // image contains no text, which makes a near-empty map the honest answer.
+        assert_usable_mask("ppocr_det", &plan, weights.data());
     }
 }

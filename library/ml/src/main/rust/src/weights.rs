@@ -35,6 +35,10 @@ pub mod graph {
     pub const SCRFD: u32 = 3;
     /// MobileFaceNet face embedding, 112x112 in, 512-d out.
     pub const MOBILEFACENET: u32 = 4;
+    /// PP-OCRv5 mobile text detection, 960 on the long side.
+    pub const PPOCR_DET: u32 = 5;
+    /// PP-OCRv5 mobile text recognition, 48 tall.
+    pub const PPOCR_REC: u32 = 6;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

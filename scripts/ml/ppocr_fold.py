@@ -296,7 +296,49 @@ def normalise(model):
         else:
             ops.append(Op(node.op_type, inputs_of[id(node)], node.output[0]))
 
-    return merge_affines(ops, consumers), layers, tensors
+    ops = merge_affines(ops, consumers)
+    ops = fold_affine_into_convs(ops, tensors)
+    return ops, layers, tensors
+
+
+def fold_affine_into_convs(ops, tensors):
+    """Push each scalar `Affine` into the convolutions it feeds, where they are all convs.
+
+    `conv(a * x + t)[m]` is `a * conv(x)[m] + t * sum(W[m])`, so an affine on a
+    convolution's *input* folds into its weight and bias just as one on its output does.
+    The sum is over every weight axis but the output-channel one, which for a grouped or
+    depthwise convolution is exactly the channels that output reads.
+
+    This is only valid when the affine's result is not needed anywhere else, so it is
+    applied only when every consumer is a convolution. In the detection graph that is 23
+    of the 24: the one exception feeds a squeeze-excite branch, and stays an op.
+    """
+    consumers = {}
+    for op in ops:
+        for name in op.inputs:
+            consumers.setdefault(name, []).append(op)
+
+    dropped = set()
+    for op in ops:
+        if op.kind != "Affine":
+            continue
+        following = consumers.get(op.output, [])
+        if not following or any(f.kind not in ("Conv", "ConvTranspose") for f in following):
+            continue
+        scale = op.extra["scale"]
+        shift = op.extra["shift"]
+        for conv in following:
+            first = conv.extra["t"]
+            weight = tensors[first]
+            bias = tensors[first + 1]
+            # The row sum comes from the *unscaled* weight, so compute it first.
+            axes = (0, 2, 3) if conv.kind == "ConvTranspose" else (1, 2, 3)
+            tensors[first + 1] = bias + shift * weight.sum(axis=axes)
+            tensors[first] = weight * scale
+            # The convolution now reads what fed the affine.
+            conv.inputs = [op.inputs[0] if i == op.output else i for i in conv.inputs]
+        dropped.add(id(op))
+    return [op for op in ops if id(op) not in dropped]
 
 
 def merge_affines(ops, consumers):
