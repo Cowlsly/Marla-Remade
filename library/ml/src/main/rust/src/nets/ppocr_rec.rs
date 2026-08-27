@@ -94,6 +94,40 @@ pub const LOGITS: u32 = crate::post::ctc::LOGITS as u32;
 /// the head including the classifier — `(33 + 2 + 16 + 1 + 4) * 2`.
 pub const TENSORS: usize = 112;
 
+/// The learnable affine blocks that survive the fold, in graph order.
+///
+/// `scripts/ml/ppocr_fold.py` pushes an affine into the convolution it feeds wherever that
+/// is exact, which is wherever the convolution is **unpadded**. These sixteen are the ones
+/// that are not: thirteen feed a padded depthwise, two feed a squeeze-excite's pool and
+/// multiply, and the last feeds the sequence pool.
+///
+/// The padding is the whole reason. `conv(a * x + t)` is `a * conv(x) + t * sum(W)` at an
+/// interior pixel, but a padded convolution reads zero rather than `t` outside the input,
+/// so the constant's real contribution at the border is `t` times the sum of only the
+/// in-bounds taps. Folding anyway biases the border of every feature map — 27% of a 12x16
+/// map at a 3x3 kernel — and it compounds. ncnn's conversion of this model runs all 100 of
+/// these as explicit elementwise ops; sixteen is what is left after the exact ones fold.
+///
+/// They are scalars, so they live here rather than in the `.vkml`, which holds tensors.
+const AFFINES: [(f32, f32); 16] = [
+    (0.15316115, -0.25247484),
+    (0.1658402, -0.41049767),
+    (0.2158067, -0.13324346),
+    (0.25548476, -0.3735239),
+    (0.36402965, -0.035169836),
+    (0.44559416, -0.27406755),
+    (0.4579334, -0.15619978),
+    (0.56647635, 0.074552566),
+    (0.6249867, 0.1702801),
+    (0.53231597, 0.17400852),
+    (1.0831748, -1.0197166),
+    (0.65120953, 0.05214425),
+    (1.5772517, -1.7144594),
+    (0.5974116, 0.17121108),
+    (0.36693764, 0.11679397),
+    (3.71384, -0.29614934),
+];
+
 /// Hands out `.vkml` tensor indices in the order the layers appear. Every folded layer is
 /// a weight followed by a bias, including the layer norms, whose gamma and beta land in
 /// the same pair.
@@ -201,25 +235,40 @@ pub fn build(weights: &dyn WeightSource, width: u32) -> Result<Plan, String> {
     let mut builder = Builder::new(weights);
     let b = &mut builder;
     let input = b.input(Shape::new(3, HEIGHT, width));
+    let affine = |b: &mut Builder, x: Id, which: usize| -> Id {
+        let (scale, shift) = AFFINES[which];
+        b.affine(x, scale, shift)
+    };
 
-    // Stem: the only convolution that strides both axes.
-    let mut x = b.conv(input, l.take(), 16, (3, 3), (2, 2), (1, 1), (1, 1, 1, 1), 1, Act::HardSwish);
+    // Stem. The only convolution that strides both axes, and the only one in the backbone
+    // with **no** activation: the export puts its batch norm here and the affine and
+    // HardSwish after the depthwise that follows.
+    let mut x = b.conv(input, l.take(), 16, (3, 3), (2, 2), (1, 1), (1, 1, 1, 1), 1, Act::None);
 
-    // Six depthwise/pointwise pairs at 3x3, striding one axis at a time.
-    for (out, stride) in [
+    // Six depthwise/pointwise pairs at 3x3, striding one axis at a time. Each pair after
+    // the first is preceded by an affine, because the depthwise it feeds is padded; the
+    // first is not, because the stem it follows has no affine to leave behind.
+    for (index, (out, stride)) in [
         (32, (1, 1)),
         (64, (1, 1)),
         (64, (1, 1)),
         (128, (2, 1)),
         (128, (1, 1)),
         (240, (1, 2)),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if index > 0 {
+            x = affine(b, x, index - 1);
+        }
         x = depthwise(b, l, x, 3, stride);
         x = point(b, l, x, out, Act::HardSwish);
     }
 
     // Four depthwise/pointwise pairs at 5x5, all at 240 channels.
-    for _ in 0..4 {
+    for index in 0..4 {
+        x = affine(b, x, 5 + index);
         x = depthwise(b, l, x, 5, (1, 1));
         x = point(b, l, x, 240, Act::HardSwish);
     }
@@ -227,18 +276,25 @@ pub fn build(weights: &dyn WeightSource, width: u32) -> Result<Plan, String> {
     // directly. There is no pointwise between the two — this is the one place the
     // backbone's depthwise/pointwise alternation breaks, and pairing it up regardless
     // reads every subsequent tensor one layer out of step.
+    x = affine(b, x, 9);
     x = depthwise(b, l, x, 5, (2, 1));
+    x = affine(b, x, 10);
     x = squeeze_excite(b, l, x, 60);
 
     x = point(b, l, x, FEATURES, Act::HardSwish);
+    x = affine(b, x, 11);
     x = depthwise(b, l, x, 5, (1, 1));
+    x = affine(b, x, 12);
     x = squeeze_excite(b, l, x, 120);
 
     x = point(b, l, x, FEATURES, Act::HardSwish);
+    x = affine(b, x, 13);
     x = depthwise(b, l, x, 5, (2, 1));
     x = point(b, l, x, FEATURES, Act::HardSwish);
+    x = affine(b, x, 14);
     x = depthwise(b, l, x, 5, (1, 1));
     x = point(b, l, x, FEATURES, Act::HardSwish);
+    x = affine(b, x, 15);
 
     // Where a feature map becomes a sequence: the three surviving rows collapse to one
     // and the width halves a final time.
@@ -354,12 +410,15 @@ mod tests {
         assert_eq!(counts.get("AttnApply"), Some(&2), "{counts:?}");
         // Two residuals per block.
         assert_eq!(counts.get("Add"), Some(&4), "{counts:?}");
+        // The sixteen learnable affine blocks that could not fold; see `AFFINES`.
+        assert_eq!(counts.get("Affine"), Some(&16), "{counts:?}");
         // The one concatenation, lowered to two copies and no shader.
         assert_eq!(copies, 2, "{counts:?}");
-        // Nothing else. In particular no `Affine`: unlike detection, every scalar affine
-        // in this export folds away, because each one feeds a convolution and nothing
-        // else.
-        assert_eq!(counts.len(), 9, "{counts:?}");
+        // Nothing else. The op inventory below matches `ppocr_fold.py`'s, which is the
+        // check that the transcription and the converter agree about the graph:
+        //   Conv 38 + Linear 13 = 51, LayerNorm 5, Affine 16, GlobalAveragePool 2,
+        //   Mul 2, AveragePool 1, MatMul 4, Softmax 2, Add 4, Concat 1.
+        assert_eq!(counts.len(), 10, "{counts:?}");
     }
 
     #[test]

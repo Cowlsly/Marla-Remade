@@ -60,14 +60,37 @@ const NECK: u32 = 96;
 /// Channels each head branch produces, four of which concatenate back to [`NECK`].
 const HEAD: u32 = 24;
 
-/// The one surviving learnable affine block's scale, from the folded graph.
+/// The learnable affine blocks that survive the fold, in graph order.
 ///
-/// It is a *weight*, not a hyperparameter — it is here rather than in the `.vkml` because
-/// `.vkml` holds tensors and this is a scalar, and putting a one-element tensor in the
-/// table for it would mean the whole ordered table shifted by one.
-const AFFINE_SCALE: f32 = 1.2535226345062256;
-/// Its shift.
-const AFFINE_SHIFT: f32 = -1.0351486206054688;
+/// `scripts/ml/ppocr_fold.py` pushes an affine into the convolution it feeds wherever that
+/// is exact, which is wherever the convolution is **unpadded**. These fourteen are the ones
+/// that are not: twelve feed a padded depthwise, and two feed a squeeze-excite's pool and
+/// multiply at once.
+///
+/// The padding is the reason. `conv(a * x + t)` is `a * conv(x) + t * sum(W)` at an
+/// interior pixel, but a padded convolution reads zero rather than `t` outside the input,
+/// so the constant's real contribution at the border is `t` times the sum of only the
+/// in-bounds taps — position-dependent, and therefore not a bias. Folding anyway biases
+/// the border of every feature map and compounds down the backbone.
+///
+/// They are scalars, so they live here rather than in the `.vkml`, which holds tensors:
+/// putting a one-element tensor in the table for each would shift the whole ordered table.
+const AFFINES: [(f32, f32); 14] = [
+    (0.6775133, -0.22914815),
+    (0.36771294, -0.87113833),
+    (1.4989212, -0.5550208),
+    (0.5583892, -0.9510202),
+    (1.5417316, -0.05748394),
+    (0.6538819, -0.815451),
+    (0.790457, -0.1132517),
+    (0.72976404, 0.04859176),
+    (0.8216482, 0.1775174),
+    (1.3613669, 0.18224998),
+    (0.9679641, 0.13799295),
+    (1.2535226, -1.0351486),
+    (0.919406, 0.25822622),
+    (0.93593925, 0.16590087),
+];
 
 /// Hands out `.vkml` tensor indices in the order the layers appear. Every folded layer is
 /// a convolution with a weight and a bias, so this steps by two throughout.
@@ -138,6 +161,15 @@ fn residual_excite(b: &mut Builder, l: &mut Layers, x: Id, reduce: u32) -> Id {
 
 /// Compile the forward pass for an input of `height` x `width`.
 pub fn build(weights: &dyn WeightSource, height: u32, width: u32) -> Result<Plan, String> {
+    compile(weights, height, width, false)
+}
+
+fn compile(
+    weights: &dyn WeightSource,
+    height: u32,
+    width: u32,
+    backbone: bool,
+) -> Result<Plan, String> {
     if height == 0 || width == 0 {
         return Err(format!("a {width}x{height} input"));
     }
@@ -154,46 +186,56 @@ pub fn build(weights: &dyn WeightSource, height: u32, width: u32) -> Result<Plan
     let input = b.input(Shape::new(3, height, width));
 
     // Backbone. Stem to 1/2, then depthwise/pointwise stages; the branch is always the
-    // last pointwise before a stride-2 depthwise.
+    // last pointwise before a stride-2 depthwise, taken *after* that stage's affine
+    // because the export's lateral reads the affined tensor rather than the convolution's
+    // own output.
     let x = spatial_strided(&mut b, l, input, 16, 2, Act::None);
     let x = depthwise(&mut b, l, x, 3, 1, Act::HardSwish);
     let x = point(&mut b, l, x, 32, Act::HardSwish);
+    let x = affine(&mut b, x, 0);
 
     let x = depthwise(&mut b, l, x, 3, 2, Act::None);
     let x = point(&mut b, l, x, 48, Act::HardSwish);
+    let x = affine(&mut b, x, 1);
     let x = depthwise(&mut b, l, x, 3, 1, Act::HardSwish);
     // 1/4, 48 channels.
-    let c2 = point(&mut b, l, x, 48, Act::HardSwish);
+    let x = point(&mut b, l, x, 48, Act::HardSwish);
+    let c2 = affine(&mut b, x, 2);
 
     let x = depthwise(&mut b, l, c2, 3, 2, Act::None);
     let x = point(&mut b, l, x, 96, Act::HardSwish);
+    let x = affine(&mut b, x, 3);
     let x = depthwise(&mut b, l, x, 3, 1, Act::HardSwish);
     // 1/8, 96 channels.
-    let c3 = point(&mut b, l, x, 96, Act::HardSwish);
+    let x = point(&mut b, l, x, 96, Act::HardSwish);
+    let c3 = affine(&mut b, x, 4);
 
     let mut x = depthwise(&mut b, l, c3, 3, 2, Act::None);
     // Four 5x5 depthwise/pointwise pairs at 192 channels.
-    for _ in 0..4 {
+    for index in 0..4 {
         x = point(&mut b, l, x, 192, Act::HardSwish);
+        x = affine(&mut b, x, 5 + index);
         x = depthwise(&mut b, l, x, 5, 1, Act::HardSwish);
     }
     // 1/16, 192 channels. The loop above ends on a depthwise, so the branch is the
     // pointwise that closes the stage.
-    let c4 = point(&mut b, l, x, 192, Act::HardSwish);
+    let x = point(&mut b, l, x, 192, Act::HardSwish);
+    let c4 = affine(&mut b, x, 9);
 
     let x = depthwise(&mut b, l, c4, 5, 2, Act::None);
     let x = squeeze_excite(&mut b, l, x, 48);
     let x = point(&mut b, l, x, 384, Act::HardSwish);
+    let x = affine(&mut b, x, 10);
     let x = depthwise(&mut b, l, x, 5, 1, Act::HardSwish);
-    // The one learnable affine block the fold could not absorb: its output feeds both the
-    // squeeze-excite's pool and its multiply, so it is not a single-convolution consumer.
-    let x = b.affine(x, AFFINE_SCALE, AFFINE_SHIFT);
+    let x = affine(&mut b, x, 11);
     let mut x = squeeze_excite(&mut b, l, x, 96);
-    for _ in 0..2 {
+    for index in 0..2 {
         x = point(&mut b, l, x, 384, Act::HardSwish);
+        x = affine(&mut b, x, 12 + index);
         x = depthwise(&mut b, l, x, 5, 1, Act::HardSwish);
     }
-    // 1/32, 384 channels.
+    // 1/32, 384 channels. The only stage whose branch has no affine after it — the
+    // export's coarsest lateral reads this convolution's output directly.
     let c5 = point(&mut b, l, x, 384, Act::HardSwish);
 
     // Neck laterals, in the export's order: fine to coarse, and each to its own width.
@@ -235,7 +277,24 @@ pub fn build(weights: &dyn WeightSource, height: u32, width: u32) -> Result<Plan
     let x = b.conv_transpose(x, l.take(), HEAD, (2, 2), (2, 2), (0, 0, 0, 0), Act::Relu);
     let probability =
         b.conv_transpose(x, l.take(), 1, (2, 2), (2, 2), (0, 0, 0, 0), Act::Sigmoid);
+    if backbone {
+        return b.finish(&[probability, c5]);
+    }
     b.finish(&[probability])
+}
+
+/// [`build`], plus the backbone's output as a second binding.
+///
+/// Only for `scripts/ml/onnx_parity.py`: detection's own output is a text probability that
+/// saturates to zero on a synthetic input, so comparing it against the export compares
+/// zeros. `c5` is where all fourteen of the surviving [`AFFINES`] are, which is the part a
+/// numerical check needs to see.
+pub fn build_with_backbone(
+    weights: &dyn WeightSource,
+    height: u32,
+    width: u32,
+) -> Result<Plan, String> {
+    compile(weights, height, width, true)
 }
 
 /// A 3x3 convolution at `stride`, for the stem.
@@ -248,6 +307,12 @@ fn spatial_strided(
     act: Act,
 ) -> Id {
     b.conv(x, l.take(), out, (3, 3), (stride, stride), (1, 1), (1, 1, 1, 1), 1, act)
+}
+
+/// One of the [`AFFINES`], by position in the folded graph.
+fn affine(b: &mut Builder, x: Id, which: usize) -> Id {
+    let (scale, shift) = AFFINES[which];
+    b.affine(x, scale, shift)
 }
 
 /// A neck level: 1x1 to [`NECK`] channels, then a residual squeeze-excite at 24.
@@ -291,7 +356,7 @@ mod tests {
         assert_eq!(dispatches(&plan, Kind::MulBroadcast), 10);
         assert_eq!(dispatches(&plan, Kind::Add), 11);
         assert_eq!(dispatches(&plan, Kind::ResizeNearest), 6);
-        assert_eq!(dispatches(&plan, Kind::Affine), 1);
+        assert_eq!(dispatches(&plan, Kind::Affine), 14);
         // The export's six `Resize` nodes are all nearest, so the bilinear pipeline must
         // not appear anywhere.
         assert_eq!(dispatches(&plan, Kind::Resize), 0);

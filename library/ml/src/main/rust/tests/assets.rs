@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use modelrunner::nets::{mobilefacenet, ppocr_det, scrfd, selfie, u2netp};
+use modelrunner::nets::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp};
 use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
 
@@ -101,6 +101,34 @@ fn the_shipped_ppocr_det_asset_builds_the_ppocr_det_forward_pass() {
         plan.output().expect("one output").shape.h,
         ppocr_det::LONG_SIDE
     );
+}
+
+#[test]
+fn the_shipped_ppocr_rec_asset_builds_the_ppocr_rec_forward_pass() {
+    let weights = load("library/ocr/src/main/assets/ppocr_rec.vkml", graph::PPOCR_REC);
+    assert_eq!(weights.len(), ppocr_rec::TENSORS);
+    // Building against the real file checks every one of the 112 tensors' shapes, because
+    // `Builder::weight` asks for each by index *and* dimensions — so a converter that
+    // transposed a linear, split the fused QKV projection the wrong way, or emitted a
+    // layer norm's gamma and beta in the wrong order fails here rather than on device.
+    let plan = ppocr_rec::build(&weights, 320)
+        .expect("the shipped asset matches nets::ppocr_rec");
+    assert_eq!(
+        plan.output().expect("one output").shape,
+        modelrunner::nets::Shape::new(ppocr_rec::LOGITS, 1, 40)
+    );
+}
+
+#[test]
+fn the_shipped_ppocr_rec_asset_builds_at_every_padded_line_width() {
+    // A line crop is resized to 48 tall and padded to a multiple of 8, so the plan has to
+    // lower at whatever width the batcher lands on.
+    let weights = load("library/ocr/src/main/assets/ppocr_rec.vkml", graph::PPOCR_REC);
+    for width in [8u32, 64, 160, 320, 640, 1024] {
+        let plan = ppocr_rec::build(&weights, width)
+            .unwrap_or_else(|e| panic!("at width {width}: {e}"));
+        assert_eq!(plan.output().expect("one output").shape.w, width / 8);
+    }
 }
 
 #[test]

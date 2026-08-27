@@ -154,10 +154,24 @@ pub enum Kind {
     ///
     /// One pass over the data for two multiplies. It exists because these sit *after* an
     /// activation, so unlike everything else constant in that export they cannot be
-    /// folded into the preceding convolution's weight — and pushing them into the
-    /// *following* one needs `b' += shift * sum(W)` per output row, which is only valid
-    /// when the tensor feeds nothing but convolutions. 24 uses in detection, of which 23
-    /// do fold, leaving one.
+    /// folded into the preceding convolution's weight.
+    ///
+    /// # Why they cannot all fold forward either
+    ///
+    /// Pushing one into the *following* convolution looks free: `conv(a * x + t)[m]` is
+    /// `a * conv(x)[m] + t * sum(W[m])`. That identity holds at an interior pixel and
+    /// **fails at a border one**, because a padded convolution reads zero outside the
+    /// input rather than `t`, so the constant's real contribution there is `t` times the
+    /// sum of only the in-bounds taps. The correction varies per output position, so it is
+    /// not a bias and there is no fold.
+    ///
+    /// `scripts/ml/ppocr_fold.py` therefore folds an affine only into an *unpadded*
+    /// convolution, which leaves 14 in detection and 16 in recognition — all of them
+    /// feeding either a padded depthwise or a squeeze-excite's two branches.
+    ///
+    /// Getting this wrong is invisible to every structural check: the layer table, the
+    /// tensor count and the digest are all unchanged, and only the weight *values* differ.
+    /// `scripts/ml/onnx_parity.py` is what caught it.
     Affine,
     /// Layer normalisation **over the channel axis**, with a per-channel affine.
     ///

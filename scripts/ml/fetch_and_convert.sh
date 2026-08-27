@@ -8,6 +8,7 @@
 #   photos/src/main/assets/scrfd_500m.vkml            SCRFD 500M (face detection)
 #   photos/src/main/assets/w600k_mbf.vkml             MobileFaceNet (face embedding)
 #   library/ocr/src/main/assets/ppocr_det.vkml        PP-OCRv5 mobile (text detection)
+#   library/ocr/src/main/assets/ppocr_rec.vkml        PP-OCRv5 mobile latin (text recognition)
 #
 # The first two are Apache-2.0. The two face models are InsightFace's buffalo_s pack
 # under InsightFace's own licence, which permits **non-commercial research use only** —
@@ -22,8 +23,13 @@
 #
 # The conversion is deliberately not a graph import. `:library:ml` hardcodes each
 # forward pass in Rust, so `.vkml` carries ordered tensors and nothing else, and
-# vkml_convert.py pins a digest over the whole ordered layer table — an upstream
+# vkml_convert.py pins a digest over the whole ordered layer table - an upstream
 # re-export that reorders or re-pads one layer fails here rather than shipping a
+# net that infers nonsense. See scripts/ml/vkml_convert.py.
+#
+# The digest pins *structure*, not weight values. For the two folded models it is worth
+# also running scripts/ml/onnx_parity.py, which checks the numbers against onnxruntime;
+# it is how two silently-wrong folds were found. See that script's header.
 # net that infers nonsense. See scripts/ml/vkml_convert.py.
 #
 #   ./scripts/ml/fetch_and_convert.sh            # verify pinned hashes, rebuild assets
@@ -48,6 +54,7 @@ MODELS=(
   "photos/src/main/assets/scrfd_500m.vkml         scrfd  5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/detection/model.onnx"
   "photos/src/main/assets/w600k_mbf.vkml          mobilefacenet 9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/recognition/model.onnx"
   "library/ocr/src/main/assets/ppocr_det.vkml     ppocr_det a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/inference.onnx ppocr_fold.py"
+  "library/ocr/src/main/assets/ppocr_rec.vkml     ppocr_rec 7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498 https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.onnx ppocr_fold.py"
 )
 
 if [ ! -f settings.gradle.kts ]; then

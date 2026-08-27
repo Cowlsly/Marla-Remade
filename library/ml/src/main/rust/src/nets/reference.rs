@@ -1746,6 +1746,57 @@ mod tests {
         );
     }
 
+    /// Run a shipped net on an input from disk and write its output back, for
+    /// `scripts/ml/onnx_parity.py` to compare against onnxruntime.
+    ///
+    /// Ignored, and a no-op without `PARITY_DIR`: it exists to be driven by that script,
+    /// which needs the export's ONNX and an `onnxruntime` install that CI does not have.
+    /// See the script's header for what the comparison is worth and what it has caught.
+    #[test]
+    #[ignore = "driven by scripts/ml/onnx_parity.py"]
+    fn dump_reference_output() {
+        let Ok(dir) = std::env::var("PARITY_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let graph = std::env::var("PARITY_GRAPH").expect("PARITY_GRAPH");
+        let width: u32 = std::env::var("PARITY_WIDTH")
+            .expect("PARITY_WIDTH")
+            .parse()
+            .expect("a width");
+        let raw = std::fs::read(dir.join("input.f32")).expect("the input");
+        let input: Vec<f32> = raw
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        let (path, id) = match graph.as_str() {
+            "ppocr_rec" => ("library/ocr/src/main/assets/ppocr_rec.vkml", crate::weights::graph::PPOCR_REC),
+            "ppocr_det" => ("library/ocr/src/main/assets/ppocr_det.vkml", crate::weights::graph::PPOCR_DET),
+            other => panic!("no parity probe for {other}"),
+        };
+        let bytes = asset(path).unwrap_or_else(|| panic!("{path} is not checked out"));
+        let weights = crate::weights::Weights::parse(&bytes, id).expect("the asset parses");
+        // Detection's own output is a saturated probability map, so the probe is its
+        // backbone output — where all fourteen of its surviving affines are.
+        let plan = match graph.as_str() {
+            "ppocr_rec" => ppocr_rec::build(&weights, width).expect("ppocr_rec builds"),
+            _ => ppocr_det::build_with_backbone(&weights, width, width).expect("det builds"),
+        };
+        let outputs = run_multi(&plan, weights.data(), &[&input]).expect("the net runs");
+        let probe = match graph.as_str() {
+            "ppocr_rec" => outputs.first(),
+            _ => outputs.get(1),
+        }
+        .expect("a probe output");
+        let mut out = Vec::with_capacity(probe.len() * 4);
+        for value in probe {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        std::fs::write(dir.join("reference.f32"), out).expect("writes");
+        println!("{graph} at {width}: wrote {} values", probe.len());
+    }
+
     /// The shipped `.vkml` for `name`, or `None` if it is not checked out.
     fn asset(name: &str) -> Option<Vec<u8>> {
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
