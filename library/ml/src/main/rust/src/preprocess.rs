@@ -21,28 +21,73 @@
 
 use crate::nets::Shape;
 
-/// The per-channel affine each network wants applied after scaling to `0..1`.
+/// How a pixel becomes a network's input: the channel order, and the per-channel affine
+/// applied after scaling to `0..1`.
 ///
-/// Both are `(value / 255 - mean) / std`; they differ only in whether the mean and std
-/// are the identity.
+/// The affine is always `(value / 255 - mean) / std`. `mean` and `std` are indexed by
+/// **destination** channel, not by colour — so for a BGR net `mean[0]` applies to blue.
+/// That is PaddleOCR's own semantics: its `DecodeImage` produces BGR and its
+/// `NormalizeImage` then subtracts `[0.485, 0.456, 0.406]` positionally, which lands the
+/// ImageNet *red* mean on the blue channel. Reproducing the quirk matters more than
+/// tidying it.
 #[derive(Clone, Copy, Debug)]
 pub struct Normalise {
-    /// Subtracted per channel, in RGB order.
+    /// Subtracted per destination channel.
     pub mean: [f32; 3],
-    /// Divided per channel, in RGB order.
+    /// Divided per destination channel.
     pub std: [f32; 3],
+    /// Write blue first rather than red — what both PP-OCRv5 exports want.
+    ///
+    /// A channel order rather than a mean is the honest place for this: swapping the mean
+    /// and std entries would normalise correctly and still feed the net red where it
+    /// expects blue, which is a shift no output range would reveal.
+    pub bgr: bool,
+}
+
+impl Normalise {
+    /// The index into [`pixel`]'s `[R, G, B]` that destination channel `channel` reads.
+    fn source(&self, channel: usize) -> usize {
+        if self.bgr {
+            2 - channel.min(2)
+        } else {
+            channel.min(2)
+        }
+    }
 }
 
 /// Scale to `0..1` and nothing else.
 ///
 /// What MediaPipe Selfie Segmentation wants: its processor sets `do_normalize: false`
 /// with `rescale_factor: 1/255`.
-pub const RESCALE_ONLY: Normalise = Normalise { mean: [0.0; 3], std: [1.0; 3] };
+pub const RESCALE_ONLY: Normalise = Normalise { mean: [0.0; 3], std: [1.0; 3], bgr: false };
 
 /// ImageNet statistics, which is what U^2-Netp was trained with and what the ncnn path
 /// this replaces already used.
 pub const IMAGENET: Normalise =
-    Normalise { mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225] };
+    Normalise { mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], bgr: false };
+
+/// What PP-OCRv5 **detection** wants: ImageNet statistics over BGR channels.
+///
+/// From the export's own `inference.yml`: `DecodeImage: img_mode: BGR`, then
+/// `NormalizeImage` with the ImageNet constants and `order: hwc`, then `ToCHWImage`. So
+/// channel 0 of the input is blue and carries the 0.485 mean. See [`Normalise`].
+pub const PPOCR_DET: Normalise =
+    Normalise { mean: IMAGENET.mean, std: IMAGENET.std, bgr: true };
+
+/// What PP-OCRv5 **recognition** wants: `(value / 255 - 0.5) / 0.5` over BGR channels.
+///
+/// Its `inference.yml` has no `NormalizeImage` at all — `RecResizeImg` normalises inside
+/// itself, as `img.transpose(2,0,1) / 255; img -= 0.5; img /= 0.5` on the BGR array
+/// `DecodeImage` produced. Numerically the same affine as [`FACE_EMBED`], and a separate
+/// constant because it is not the same channel order.
+pub const PPOCR_REC: Normalise =
+    Normalise { mean: [0.5; 3], std: [0.5; 3], bgr: true };
+
+// The channel order is per net, not global, and swapping one silently degrades that model
+// alone. Checked at compile time rather than in a test, because it is knowable there.
+const _: () = assert!(PPOCR_DET.bgr && PPOCR_REC.bgr);
+const _: () = assert!(!IMAGENET.bgr && !RESCALE_ONLY.bgr);
+const _: () = assert!(!SCRFD.bgr && !FACE_EMBED.bgr);
 
 /// `(value - 127.5) / 128` on the `0..255` scale, which is what SCRFD wants.
 ///
@@ -53,12 +98,16 @@ pub const IMAGENET: Normalise =
 /// mean, so a swapped constant shifts every embedding slightly and every box slightly,
 /// with no symptom either would fail on. `scrfd.cpp:310` and the MobileFaceNet
 /// preprocessing are the two places that disagree.
-pub const SCRFD: Normalise =
-    Normalise { mean: [0.5, 0.5, 0.5], std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0] };
+pub const SCRFD: Normalise = Normalise {
+    mean: [0.5, 0.5, 0.5],
+    std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0],
+    bgr: false,
+};
 
 /// `(value - 127.5) / 127.5` on the `0..255` scale, which is what MobileFaceNet wants.
 /// See [`SCRFD`] for why these are two constants and not one.
-pub const FACE_EMBED: Normalise = Normalise { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] };
+pub const FACE_EMBED: Normalise =
+    Normalise { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5], bgr: false };
 
 /// How an image was fitted into the detector's input, and what it takes to undo it.
 ///
@@ -239,8 +288,9 @@ pub fn to_letterboxed_f16(
             let p11 = pixel(pixels, width, x1, y1);
 
             for channel in 0..3usize {
-                let top_row = lerp(p00[channel], p10[channel], wx);
-                let bottom_row = lerp(p01[channel], p11[channel], wx);
+                let source = norm.source(channel);
+                let top_row = lerp(p00[source], p10[source], wx);
+                let bottom_row = lerp(p01[source], p11[source], wx);
                 let value = lerp_f32(top_row, bottom_row, wy) / 255.0;
                 let mean = norm.mean.get(channel).copied().unwrap_or(0.0);
                 let std = norm.std.get(channel).copied().unwrap_or(1.0);
@@ -306,8 +356,9 @@ pub fn to_planar_f16(
             for channel in 0..3usize {
                 // Interpolating the 0..255 values and normalising once is both cheaper
                 // and closer to the reference than normalising four taps first.
-                let top = lerp(p00[channel], p10[channel], wx);
-                let bottom = lerp(p01[channel], p11[channel], wx);
+                let source = norm.source(channel);
+                let top = lerp(p00[source], p10[source], wx);
+                let bottom = lerp(p01[source], p11[source], wx);
                 let value = lerp_f32(top, bottom, wy) / 255.0;
                 let normalised = (value - norm.mean[channel]) / norm.std[channel];
                 let slot = dst
@@ -481,6 +532,33 @@ mod tests {
         assert!((got[0] - 10.0).abs() < 0.5, "{got:?}");
         assert!((got[1] - 20.0).abs() < 0.5, "{got:?}");
         assert!((got[2] - 30.0).abs() < 0.5, "{got:?}");
+    }
+
+    #[test]
+    fn a_bgr_normalisation_writes_blue_into_channel_zero() {
+        // Both PP-OCRv5 exports decode BGR. Feeding a BGR net RGB is a shift no output
+        // range reveals — the mask or the probability map still looks like one — so the
+        // order is pinned with three distinct values.
+        let pixels = vec![argb(10, 20, 30)];
+        let shape = Shape::new(3, 1, 1);
+        let mut out = vec![0u16; 3];
+        let bgr = Normalise { mean: [0.0; 3], std: [1.0; 3], bgr: true };
+        to_planar_f16(&pixels, 1, 1, shape, &bgr, &mut out).expect("preprocesses");
+        let got: Vec<f32> = out.iter().map(|&h| f16_to_f32(h) * 255.0).collect();
+        assert!((got[0] - 30.0).abs() < 0.5, "blue first: {got:?}");
+        assert!((got[1] - 20.0).abs() < 0.5, "{got:?}");
+        assert!((got[2] - 10.0).abs() < 0.5, "{got:?}");
+    }
+
+    #[test]
+    fn the_ppocr_normalisations_reuse_the_existing_affines() {
+        // Detection reuses ImageNet's constants verbatim — only the order differs.
+        assert_eq!(PPOCR_DET.mean, IMAGENET.mean);
+        assert_eq!(PPOCR_DET.std, IMAGENET.std);
+        // Recognition's affine is FACE_EMBED's, and deliberately a separate constant so
+        // that the two cannot drift into one and lose the channel order with it.
+        assert_eq!(PPOCR_REC.mean, FACE_EMBED.mean);
+        assert_eq!(PPOCR_REC.std, FACE_EMBED.std);
     }
 
     #[test]
