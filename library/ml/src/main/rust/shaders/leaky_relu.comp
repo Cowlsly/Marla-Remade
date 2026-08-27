@@ -1,0 +1,39 @@
+#version 450
+//! `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
+//!
+//! # Why this is an op and not an activation
+//!
+//! Every other activation in this runtime fuses into the layer that produced its input, so
+//! there is no standalone pass at all — see `common.glsl`'s `activate`. HiFi-GAN's
+//! LeakyReLUs cannot, for two reasons, and both had to be read out of the graph rather than
+//! assumed:
+//!
+//! * They are **pre**-activations. A ResBlock is `h = h + conv(lrelu(h))`, so the LeakyReLU
+//!   sits in front of its convolution, not behind one.
+//! * The tensor it reads is *also* the residual's other operand. Folding it into the `Add`
+//!   that produced `h` would consume `h`, and the skip connection needs it unchanged.
+//!
+//! # Alpha travels
+//!
+//! In `param0_bits`, because this export uses **two** different slopes: 0.1 for the fifteen
+//! inside the upsampling stages and 0.01 for the one in front of `conv_post`. A hardcoded
+//! 0.1 would be wrong for the last layer before the waveform, which is exactly the kind of
+//! error that survives every shape check and comes out as a quieter, duller sound.
+//!
+//! Distinct from `ACT_PRELU`, which is the same function with a *learned* slope per channel
+//! read from the weights buffer. Here the slope is one constant for the whole tensor and is
+//! not in the file at all.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float value = float(arena[p.in0 + index]);
+    float alpha = uintBitsToFloat(p.param0_bits);
+    // The branch is on the sign of a loaded value, so it diverges within a wave. A `mix`
+    // on the comparison would too, and this reads as the definition does.
+    arena[p.out_at + index] = float16_t(value < 0.0 ? value * alpha : value);
+}

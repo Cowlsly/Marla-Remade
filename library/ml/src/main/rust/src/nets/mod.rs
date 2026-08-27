@@ -37,6 +37,7 @@ pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
 pub mod u2netp;
+pub mod vits_dec;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,6 +103,12 @@ pub enum Act {
     /// Seven uses in PP-OCRv5 recognition, where the export spells it out as
     /// `Mul(x, Sigmoid(x))`; the fold recognises that the way it recognises HardSwish.
     Swish,
+    /// `tanh(x)`.
+    ///
+    /// One use: the last thing Piper's HiFi-GAN vocoder does, which is what bounds its
+    /// output to a waveform. It follows `conv_post` directly, so unlike that net's
+    /// LeakyReLUs it does fuse — see [`Kind::LeakyRelu`].
+    Tanh,
 }
 
 impl Act {
@@ -114,6 +121,7 @@ impl Act {
             Act::PRelu(_) => 4,
             Act::Clip01 => 5,
             Act::Swish => 6,
+            Act::Tanh => 7,
         }
     }
 }
@@ -213,10 +221,27 @@ pub enum Kind {
     Softmax,
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
     ///
+    /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
+    ///
     /// Writes `[d_model, 1, T]`, so the head concatenation that normally follows
     /// attention is not an op: output channel `c` belongs to head `c / head_dim` and
     /// lands where the concatenated result wants it. Head count in [`Push::group`].
     AttnApply,
+    /// `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
+    ///
+    /// The only activation here that is **not** fused into the layer before it, because in
+    /// a HiFi-GAN ResBlock it is not behind a layer at all: the block is
+    /// `h = h + conv(lrelu(h))`, so it sits in front of its convolution, and the tensor it
+    /// reads is also the residual's other operand — folding it backwards would consume the
+    /// skip connection.
+    ///
+    /// `alpha` arrives in [`Push::param0_bits`] rather than being hardcoded, because the
+    /// export uses two slopes: 0.1 for the fifteen inside the upsampling stages and 0.01
+    /// for the one in front of `conv_post`.
+    ///
+    /// Distinct from [`Act::PRelu`], which is the same function with a *learned* slope per
+    /// channel read from the weights file.
+    LeakyRelu,
 }
 
 /// The push-constant block every shader declares.
@@ -463,6 +488,11 @@ enum Node {
     Softmax {
         input: Id,
         out: Id,
+    },
+    LeakyRelu {
+        input: Id,
+        out: Id,
+        alpha: f32,
     },
     AttnApply {
         probs: Id,
@@ -876,6 +906,15 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// `x < 0 ? alpha * x : x`, as its own pass. See [`Kind::LeakyRelu`] for why it is not
+    /// fused into the layer before it.
+    pub fn leaky_relu(&mut self, input: Id, alpha: f32) -> Id {
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::LeakyRelu { input, out, alpha });
+        out
+    }
+
     /// Apply `probs`, a `[heads, T, T]` score map, to `v`, a `[d_model, 1, T]` sequence.
     pub fn attn_apply(&mut self, probs: Id, v: Id, heads: u32) -> Id {
         let (sp, sv) = (self.shape_of(probs), self.shape_of(v));
@@ -1278,6 +1317,26 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::LeakyRelu { input, out, alpha } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::LeakyRelu,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        param0_bits: alpha.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
         }
         Ok(())
     }
@@ -1296,6 +1355,7 @@ impl Node {
             | Node::LayerNorm { out, .. }
             | Node::AttnScores { out, .. }
             | Node::Softmax { out, .. }
+            | Node::LeakyRelu { out, .. }
             | Node::AttnApply { out, .. }
             | Node::Concat { out, .. } => *out,
         }
@@ -1310,6 +1370,7 @@ impl Node {
             | Node::Affine { input, .. }
             | Node::LayerNorm { input, .. }
             | Node::Softmax { input, .. }
+            | Node::LeakyRelu { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::AttnScores { q: a, k: b, .. } | Node::AttnApply { probs: a, v: b, .. } => {

@@ -97,6 +97,7 @@ GRAPHS = {
     # Folded ahead of time by `scripts/ml/ppocr_fold.py`, not by this script.
     "ppocr_det": 5,
     "ppocr_rec": 6,
+    "vits_dec": 7,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -108,6 +109,7 @@ EXPECTED_DIGEST = {
     "mobilefacenet": "40987839aec03378958581deba29ce9fd9dd1ae9aa88d0c7ad04a885a2e2122c",
     "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
+    "vits_dec": "",
 }
 
 # What each graph is exported at, as `[channels, height, width]` after the batch

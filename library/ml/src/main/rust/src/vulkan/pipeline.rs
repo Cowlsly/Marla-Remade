@@ -40,9 +40,10 @@ const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.com
 const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores.comp.spv"));
 const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
+const LEAKY_RELU: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/leaky_relu.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 14] = [
+const SPIRV: [&[u8]; 15] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -57,6 +58,7 @@ const SPIRV: [&[u8]; 14] = [
     ATTN_SCORES,
     SOFTMAX,
     ATTN_APPLY,
+    LEAKY_RELU,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -94,6 +96,7 @@ pub struct Pipelines {
     attn_scores: vk::Pipeline,
     softmax: vk::Pipeline,
     attn_apply: vk::Pipeline,
+    leaky_relu: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -230,6 +233,7 @@ impl Pipelines {
             attn_scores,
             softmax,
             attn_apply,
+            leaky_relu,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -260,6 +264,7 @@ impl Pipelines {
             attn_scores,
             softmax,
             attn_apply,
+            leaky_relu,
         })
     }
 
@@ -280,6 +285,7 @@ impl Pipelines {
             Kind::AttnScores => self.attn_scores,
             Kind::Softmax => self.softmax,
             Kind::AttnApply => self.attn_apply,
+            Kind::LeakyRelu => self.leaky_relu,
         }
     }
 
@@ -302,6 +308,7 @@ impl Pipelines {
             self.attn_scores,
             self.softmax,
             self.attn_apply,
+            self.leaky_relu,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

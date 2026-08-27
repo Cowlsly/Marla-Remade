@@ -59,6 +59,8 @@ mod act {
     pub const CLIP01: u32 = 5;
     /// `x * sigmoid(x)`.
     pub const SWISH: u32 = 6;
+    /// `tanh(x)`.
+    pub const TANH: u32 = 7;
 }
 
 /// The fused activation, mirroring `activate` in `common.glsl`.
@@ -79,6 +81,7 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
         }
         act::CLIP01 => x.clamp(0.0, 1.0),
         act::SWISH => x / (1.0 + (-x).exp()),
+        act::TANH => x.tanh(),
         _ => x,
     }
 }
@@ -183,6 +186,7 @@ impl Reference {
                     Kind::AttnScores => self.attn_scores(push),
                     Kind::Softmax => self.softmax(push),
                     Kind::AttnApply => self.attn_apply(push),
+                    Kind::LeakyRelu => self.leaky_relu(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -454,6 +458,16 @@ impl Reference {
                 total += self.load(p.in0, plane + i)?;
             }
             self.store(p.out, channel, total / elements as f32)?;
+        }
+        Ok(())
+    }
+
+    /// `x < 0 ? alpha * x : x`, elementwise, with `alpha` carried as raw bits.
+    fn leaky_relu(&mut self, p: &Push) -> Result<(), String> {
+        let alpha = f32::from_bits(p.param0_bits);
+        for i in 0..p.count {
+            let value = self.load(p.in0, i)?;
+            self.store(p.out, i, if value < 0.0 { value * alpha } else { value })?;
         }
         Ok(())
     }
@@ -1125,6 +1139,7 @@ mod tests {
         assert_eq!(Act::PRelu(0).code(), act::PRELU);
         assert_eq!(Act::Clip01.code(), act::CLIP01);
         assert_eq!(Act::Swish.code(), act::SWISH);
+        assert_eq!(Act::Tanh.code(), act::TANH);
     }
 
     #[test]
@@ -1552,6 +1567,46 @@ mod tests {
         let scores = b.attn_scores(q, q, 2);
         let error = b.finish(&[scores]).expect_err("a two-row sequence");
         assert!(error.contains("height above"), "{error}");
+    }
+
+    #[test]
+    fn a_leaky_relu_scales_only_the_negative_side() {
+        // HiFi-GAN's slope. A standalone pass rather than a fused activation, because in a
+        // ResBlock it sits in front of its convolution; see `Kind::LeakyRelu`.
+        let got = one(Shape::new(1, 1, 5), &[-4.0, -1.0, 0.0, 1.0, 4.0], &[], |b, x| {
+            b.leaky_relu(x, 0.1)
+        });
+        close(&got, &[-0.4, -0.1, 0.0, 1.0, 4.0]);
+    }
+
+    #[test]
+    fn a_leaky_relu_carries_its_own_slope() {
+        // The vocoder uses 0.1 for fifteen of its sixteen and 0.01 for the one in front of
+        // `conv_post`, so a hardcoded slope would be wrong for the last layer before the
+        // waveform — quieter and duller, and caught by nothing else.
+        let steep = one(Shape::new(1, 1, 2), &[-2.0, 2.0], &[], |b, x| b.leaky_relu(x, 0.1));
+        let shallow = one(Shape::new(1, 1, 2), &[-2.0, 2.0], &[], |b, x| b.leaky_relu(x, 0.01));
+        close(&steep, &[-0.2, 2.0]);
+        close(&shallow, &[-0.02, 2.0]);
+        // At slope zero it is a ReLU, and at one the identity.
+        close(&one(Shape::new(1, 1, 2), &[-3.0, 3.0], &[], |b, x| b.leaky_relu(x, 0.0)), &[0.0, 3.0]);
+        close(&one(Shape::new(1, 1, 2), &[-3.0, 3.0], &[], |b, x| b.leaky_relu(x, 1.0)), &[-3.0, 3.0]);
+    }
+
+    #[test]
+    fn tanh_bounds_its_output_to_the_unit_interval() {
+        // What makes the vocaster's last layer a waveform. Saturates rather than clipping,
+        // so the ends are not exactly +/-1.
+        let inputs = [-8.0f32, -1.0, 0.0, 1.0, 8.0];
+        let got = one(
+            Shape::new(1, 1, 5),
+            &inputs,
+            &[(vec![1, 1, 1, 1], vec![1.0]), (vec![1], vec![0.0])],
+            |b, x| b.conv_same(x, 0, 1, 1, 1, Act::Tanh),
+        );
+        let want: Vec<f32> = inputs.iter().map(|&x| x.tanh()).collect();
+        close(&got, &want);
+        assert!(got.iter().all(|v| (-1.0..=1.0).contains(v)), "{got:?}");
     }
 
     #[test]

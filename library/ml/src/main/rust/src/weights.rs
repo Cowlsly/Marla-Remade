@@ -39,6 +39,12 @@ pub mod graph {
     pub const PPOCR_DET: u32 = 5;
     /// PP-OCRv5 mobile text recognition, 48 tall.
     pub const PPOCR_REC: u32 = 6;
+    /// Piper's VITS vocoder — the `dec` module, 192 latent channels to a 16 kHz waveform.
+    ///
+    /// Only the vocoder: the text encoder, the flow and the duration predictor are separate
+    /// graphs, because VITS's duration predictor samples noise and builds its alignment out
+    /// of ops no plan can express. See [`crate::nets::vits_dec`].
+    pub const VITS_DEC: u32 = 7;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
