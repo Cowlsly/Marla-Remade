@@ -31,6 +31,10 @@ pub mod graph {
     pub const SELFIE: u32 = 1;
     /// U^2-Net portable, 320x320.
     pub const U2NETP: u32 = 2;
+    /// SCRFD 500M face detection, 640 on the long side.
+    pub const SCRFD: u32 = 3;
+    /// MobileFaceNet face embedding, 112x112 in, 512-d out.
+    pub const MOBILEFACENET: u32 = 4;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

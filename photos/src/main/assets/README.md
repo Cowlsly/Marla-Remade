@@ -23,12 +23,36 @@ upstream export is dynamic-shape; we keep the straight resize to 320×320 that t
 ncnn path already used, **not** the HuggingFace processor's `keep_aspect_ratio`
 letterbox, which would change existing behaviour.
 
-## The ncnn face models
+## The face models
 
-`scrfd_500m_kps-opt2.{param,bin}` (face detection) and `w600k_mbf.ncnn.{param,bin}`
-(face embedding) still run on ncnn, and are not covered here. `:library:ml`
-implements only the two pure-CNN vision models; face detection and recognition are
-a later phase.
+`scrfd_500m.vkml` (face detection) and `w600k_mbf.vkml` (face embedding) are
+InsightFace's **buffalo_s** pack, from
+https://huggingface.co/immich-app/buffalo_s @ `0ff1751885575e62e084dff70549ce24a11fa5dc`:
+
+| asset | source ONNX | SHA-256 |
+|---|---|---|
+| `scrfd_500m.vkml` | `detection/model.onnx`, 2,524,817 B | `5e4447f5…d8b4ea3a` |
+| `w600k_mbf.vkml` | `recognition/model.onnx`, 13,616,099 B | `9cc6e4a7…b319eb4f` |
+
+**Licence: InsightFace's own, which permits non-commercial research use only** —
+https://github.com/deepinsight/insightface/tree/master/python-package#license. This is
+*not* Apache-2.0 like the two models above, and it is the one licence constraint among
+the bundled weights. These are the same weights the repo already shipped as
+`scrfd_500m_kps-opt2.{param,bin}` and `w600k_mbf.ncnn.{param,bin}`, which arrived with
+no upstream URL and no licence recorded at all; re-sourcing them from a licensed ONNX
+export makes the constraint visible rather than introducing it.
+
+SCRFD runs at 640 on the long side with the short side padded to a multiple of 32, so
+its `.vkml` is the only one whose graph is dynamically shaped. MobileFaceNet runs at a
+fixed 112×112 and returns a 512-d embedding.
+
+Two nodes are rewritten during conversion rather than needing a shader — see
+`scripts/ml/vkml_convert.py`: MobileFaceNet's final `Gemm` becomes a `[512, 64, 7, 7]`
+convolution kernel, and the `BatchNormalization` after it is folded into that layer's
+weight and bias.
+
+The ncnn `.param`/`.bin` files are still present and still what `FaceRecognizer.kt`
+loads; they go once the Kotlin moves across to `:library:ml`.
 
 ## `clip/`
 
