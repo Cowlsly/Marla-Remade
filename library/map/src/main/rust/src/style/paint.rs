@@ -1,4 +1,4 @@
-//! Line width read from the authored style instead of transcribed into constants.
+//! Paint read from the authored style instead of transcribed into constants.
 //!
 //! A stroke width is not a property of a layer, it is a function of the camera's zoom: every
 //! road width in `style/basemap.json` is an `interpolate` on `["zoom"]` that starts at zero
@@ -13,10 +13,25 @@
 //! camera's zoom is fractional and continuous, and quantising it to the integer tile zoom
 //! would make roads jump in width at each level instead of growing smoothly.
 //!
-//! Scoped to `line-width` and `line-gap-width`. Colour, dashes, fills and per-feature filters
-//! still come from [`super::layers`]' constants.
+//! ## Fills
+//!
+//! [`FillStyle`] does the same job for `fill` layers, but the answer it computes is a *layer
+//! list* rather than a per-frame number. Fill colour reaches the GPU as one push constant per
+//! (layer, tile) draw, so a `fill-color` that varies per feature cannot be expressed in one
+//! draw — it has to become one synthetic layer per colour. Only two of the authored fill
+//! layers are data-driven (`landcover`'s `match` on `kind` and `landuse_park`'s `case`), and
+//! expanding those by evaluating the authored expression per admitted `kind` is what
+//! [`super::layers`] now does instead of transcribing 20 colours by eye.
+//!
+//! Fill opacity is evaluated per frame too, for the same reason and with the same machinery.
+//! The authored ramps are the whole of how low zooms are meant to look: `landcover` fades from
+//! 1 at z5 to 0 at z7 and `landuse_park` rises from 0 at z6 to 1 at z11. Baking either into a
+//! constant alpha plus an integer zoom gate draws `landcover` at **full** strength at z6 where
+//! the ramp asks for half, which lays a flat mint blanket over a whole continent, and pops
+//! `landuse_park` on at full strength at z7 where the ramp asks for a fifth. Both were plainly
+//! visible on device; neither shows up in a host test that only measures tessellated area.
 
-use super::expr::{self, Context};
+use super::expr::{self, Context, Value};
 use super::Layer;
 use serde_json::Value as Json;
 use std::collections::HashMap;
@@ -27,6 +42,12 @@ use std::sync::OnceLock;
 /// Compiled in rather than read from assets: it is 61 KB, it is the same file for every host
 /// app, and it makes the loader host-testable rather than reachable only from a device.
 const BASEMAP: &str = include_str!("../../style/basemap.json");
+
+/// The deepest zoom the renderer draws at, and the top of every derived zoom gate.
+///
+/// The archive stops at z14 and the renderer overzooms past it; 22 is where
+/// [`super::Layer::max_zoom`] has always been pinned.
+pub const MAX_ZOOM: u8 = 22;
 
 /// `line-width`'s default in the style spec. `line-gap-width`'s is zero.
 const DEFAULT_WIDTH_DP: f32 = 1.0;
@@ -107,8 +128,8 @@ impl LinePaint {
         // width, because a guess is constant across zoom and a constant width is the defect
         // this replaces.
         let (Some(width_dp), Some(gap_width_dp)) = (
-            evaluate(self.width.as_ref(), zoom, DEFAULT_WIDTH_DP),
-            evaluate(self.gap_width.as_ref(), zoom, 0.0),
+            evaluate(self.width.as_ref(), zoom, DEFAULT_WIDTH_DP, "LineString"),
+            evaluate(self.gap_width.as_ref(), zoom, 0.0, "LineString"),
         ) else {
             return Stroke::NONE;
         };
@@ -121,13 +142,29 @@ impl LinePaint {
 /// Width ramps key on nothing but zoom, so there is no feature to evaluate against. An absent
 /// property is the spec default; an expression that *fails* is not, and the two are
 /// deliberately different — see [`LinePaint::stroke`].
-fn evaluate(expr: Option<&Json>, zoom: f64, default: f32) -> Option<f32> {
+fn evaluate(expr: Option<&Json>, zoom: f64, default: f32, geometry_type: &str) -> Option<f32> {
     let Some(expr) = expr else {
         return Some(default);
     };
     let properties = HashMap::new();
-    let context = Context { zoom, properties: &properties, geometry_type: "LineString" };
+    let context = Context { zoom, properties: &properties, geometry_type };
     expr::eval(expr, &context).ok()?.as_number().map(|width| width as f32)
+}
+
+/// Evaluate a colour-valued paint property, for one feature's properties at one zoom.
+///
+/// The seam [`super::expr`]'s `mix` points at: a colour is a string to the evaluator and an
+/// ARGB word to everything downstream, and this is the only place that knows both. An exact
+/// stop lookup, which is all the authored fill paint needs — no `fill-color` in the file
+/// interpolates.
+pub fn color_at(
+    paint: Option<&Json>,
+    zoom: f64,
+    properties: &HashMap<String, Value>,
+) -> Option<u32> {
+    let context = Context { zoom, properties, geometry_type: "Polygon" };
+    let value = expr::eval(paint?, &context).ok()?;
+    expr::parse_color(value.as_str()?)
 }
 
 /// The authored style's `line` paint.
@@ -184,6 +221,294 @@ impl LineStyle {
 pub fn authored() -> &'static LineStyle {
     static AUTHORED: OnceLock<LineStyle> = OnceLock::new();
     AUTHORED.get_or_init(|| LineStyle::parse(BASEMAP).unwrap_or_default())
+}
+
+// --- fills ---------------------------------------------------------------------------------
+
+/// The parsed style, held for the whole process so what it borrows out lives as long.
+///
+/// [`super::Layer`] carries `&'static str` for its id and its `kind` whitelist, so the derived
+/// fill layers have to borrow their strings from somewhere permanent. Borrowing them from a
+/// parse that lives in a `static` is what makes that work without leaking a string per kind.
+fn root() -> &'static Json {
+    static ROOT: OnceLock<Json> = OnceLock::new();
+    ROOT.get_or_init(|| serde_json::from_str(BASEMAP).unwrap_or(Json::Null))
+}
+
+/// One colour an authored `fill` layer paints, and the feature `kind`s that take it.
+///
+/// An authored layer whose `fill-color` is a literal string has exactly one of these. The two
+/// that are data-driven have one per distinct colour, because fill colour reaches the GPU as
+/// one push constant per (layer, tile) draw: a `match` on `kind` cannot be expressed inside a
+/// draw, so it has to become several draws.
+pub struct FillDraw {
+    /// The authored layer's id, suffixed with the first `kind` of the arm when the layer
+    /// paints more than one colour.
+    pub id: String,
+    /// The authored layer this was derived from, which is what owns the `fill-opacity` ramp.
+    pub authored: &'static str,
+    pub source_layer: &'static str,
+    /// The `kind`s that take this colour, or empty for every feature the layer admits.
+    ///
+    /// Empty only ever happens for the arm derived from the authored expression's *fallback*,
+    /// and only when the authored layer has no `kind` filter to restrict it — which is why the
+    /// fallback is emitted first and the specific arms paint over it.
+    pub kinds: Vec<&'static str>,
+    /// ARGB at **full** `fill-opacity`.
+    ///
+    /// The ramp is not folded in here: it is a function of the camera's zoom, so it is
+    /// evaluated per frame by [`FillStyle::opacity`] exactly as a line's width is. Any alpha in
+    /// this word came from the authored colour itself, e.g. an `rgba()` literal.
+    pub color: u32,
+}
+
+/// One authored `fill` layer, and the draws derived from it.
+pub struct FillPaint {
+    pub id: &'static str,
+    pub source_layer: &'static str,
+    min_zoom: f64,
+    max_zoom: f64,
+    filter: Option<&'static Json>,
+    color: Option<&'static Json>,
+    opacity: Option<&'static Json>,
+    draws: Vec<FillDraw>,
+}
+
+impl FillPaint {
+    fn parse(json: &'static Json) -> Option<FillPaint> {
+        let paint = json.get("paint");
+        let mut layer = FillPaint {
+            id: json.get("id").and_then(Json::as_str)?,
+            source_layer: json.get("source-layer").and_then(Json::as_str)?,
+            min_zoom: json.get("minzoom").and_then(Json::as_f64).unwrap_or(0.0),
+            max_zoom: json.get("maxzoom").and_then(Json::as_f64).unwrap_or(f64::INFINITY),
+            filter: json.get("filter"),
+            color: paint.and_then(|p| p.get("fill-color")),
+            opacity: paint.and_then(|p| p.get("fill-opacity")),
+            draws: Vec::new(),
+        };
+        layer.draws = layer.derive_draws();
+        Some(layer)
+    }
+
+    /// Does this authored layer draw at `zoom`?
+    ///
+    /// `maxzoom` is exclusive, as the spec defines it. No `fill` layer in the file sets either
+    /// bound, so today this is the identity — but a restyle that adds one should be followed
+    /// rather than ignored.
+    fn covers(&self, zoom: f64) -> bool {
+        zoom >= self.min_zoom && zoom < self.max_zoom
+    }
+
+    fn opacity_at(&self, zoom: f64) -> f32 {
+        // An opacity ramp this evaluator cannot read leaves the layer undrawn, for the same
+        // reason a width ramp does: a guessed constant is the defect being removed.
+        evaluate(self.opacity, zoom, 1.0, "Polygon").unwrap_or(0.0)
+    }
+
+    /// The shallowest integer zoom the authored `fill-opacity` is non-zero at, if any.
+    ///
+    /// Used only to pick a zoom at which to *read the colour*. It is deliberately **not** a
+    /// gate: [`super::Layer::min_zoom`] is about which tiles carry the layer, and deriving it
+    /// from the ramp instead made the geometry that exists depend on which pyramid level
+    /// happened to be resident — so shapes came and went as the camera zoomed, which is a far
+    /// worse defect than the one it was meant to avoid.
+    fn first_drawn_zoom(&self) -> Option<u8> {
+        (0..=MAX_ZOOM).find(|&zoom| self.covers(zoom as f64) && self.opacity_at(zoom as f64) > 0.0)
+    }
+
+    /// The colour this layer paints a feature of `kind`, at full opacity.
+    fn color_for(&self, kind: Option<&'static str>, zoom: f64) -> Option<u32> {
+        let mut properties = HashMap::new();
+        if let Some(kind) = kind {
+            properties.insert("kind".to_string(), Value::String(kind.to_string()));
+        }
+        color_at(self.color, zoom, &properties)
+    }
+
+    fn derive_draws(&self) -> Vec<FillDraw> {
+        // A layer whose ramp is zero everywhere draws nothing at any zoom.
+        let Some(first_zoom) = self.first_drawn_zoom() else {
+            return Vec::new();
+        };
+        let admitted = filter_kinds(self.filter);
+        // Where the candidate `kind`s come from: a layer with a `kind` filter can only ever
+        // draw those, so any arm of its colour expression outside the filter is unreachable. A
+        // layer without one can draw anything, so the only kinds worth asking about are the
+        // ones its own colour expression names.
+        let candidates: Vec<&'static str> = if admitted.is_empty() {
+            self.color.map(kind_labels).unwrap_or_default()
+        } else {
+            admitted.clone()
+        };
+        // Colour is read at the shallowest zoom the layer draws at. No `fill-color` in the file
+        // keys on zoom, so this only has to be a zoom the layer is actually drawn at.
+        let zoom = first_zoom as f64;
+
+        let mut draws: Vec<FillDraw> = Vec::new();
+        let make = |id: String, kinds: Vec<&'static str>, color: u32| FillDraw {
+            id,
+            authored: self.id,
+            source_layer: self.source_layer,
+            kinds,
+            color,
+        };
+
+        // The expression's fallback arm, drawn first so the specific kinds paint over it. Only
+        // for a layer with no `kind` filter: an unfiltered draw over a filtered layer would
+        // paint the very kinds the authored filter excludes.
+        if admitted.is_empty() {
+            if let Some(color) = self.color_for(None, zoom) {
+                draws.push(make(self.id.to_string(), Vec::new(), color));
+            }
+        }
+        for kind in candidates {
+            let Some(color) = self.color_for(Some(kind), zoom) else { continue };
+            match draws.iter_mut().find(|draw| draw.color == color) {
+                // Already drawn: either by the unfiltered fallback, which covers this kind
+                // anyway, or by an earlier arm this kind shares a colour with.
+                Some(draw) if draw.kinds.is_empty() => {}
+                Some(draw) => draw.kinds.push(kind),
+                None => draws.push(make(format!("{}:{kind}", self.id), vec![kind], color)),
+            }
+        }
+        // A layer that paints one colour needs no arm suffix, which is 13 of the 15.
+        if let [only] = draws.as_mut_slice() {
+            only.id = self.id.to_string();
+        }
+        draws
+    }
+}
+
+/// The `kind` values an authored filter admits, or an empty list for "any of them".
+///
+/// The four shapes `style/basemap.json` uses on its `fill` layers, and no more. Anything else
+/// reads as unrestricted, which is what MapLibre would draw if the filter passed everything —
+/// the permissive answer, so a restyle shows up as too much on screen rather than a layer
+/// silently missing.
+fn filter_kinds(filter: Option<&'static Json>) -> Vec<&'static str> {
+    let Some(Json::Array(items)) = filter else {
+        return Vec::new();
+    };
+    let op = items.first().and_then(Json::as_str).unwrap_or_default();
+    let args = &items[1..];
+    match op {
+        // `["==", "kind", K]`. A `$type` filter restricts geometry, not `kind`.
+        "==" if args.first().and_then(Json::as_str) == Some("kind") => {
+            args.get(1).and_then(Json::as_str).into_iter().collect()
+        }
+        // `["in", "kind", K, ...]`
+        "in" if args.first().and_then(Json::as_str) == Some("kind") => {
+            args[1..].iter().filter_map(Json::as_str).collect()
+        }
+        // `["any", inner, ...]` — a union, and unrestricted if any branch is.
+        "any" => {
+            let mut out = Vec::new();
+            for inner in args {
+                let kinds = filter_kinds(Some(inner));
+                if kinds.is_empty() {
+                    return Vec::new();
+                }
+                out.extend(kinds);
+            }
+            out
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Every `kind` value a colour expression names, in the order it names them.
+///
+/// Used only to discover which kinds are worth asking [`FillPaint::color_for`] about; the
+/// colour itself always comes from evaluating the authored expression, never from reading its
+/// shape. Strings that are colours, operator names or the `kind` key itself are not kinds.
+fn kind_labels(paint: &'static Json) -> Vec<&'static str> {
+    let mut out = Vec::new();
+    collect_labels(paint, &mut out);
+    out
+}
+
+fn collect_labels(paint: &'static Json, out: &mut Vec<&'static str>) {
+    match paint {
+        Json::String(s) => {
+            if s != "kind" && expr::parse_color(s).is_none() && !out.contains(&s.as_str()) {
+                out.push(s);
+            }
+        }
+        Json::Array(items) => {
+            let op = items.first().and_then(Json::as_str);
+            // `["get", k]` and friends name a property, not a value it can take.
+            if matches!(op, Some("get") | Some("has") | Some("!has")) {
+                return;
+            }
+            for item in &items[usize::from(op.is_some())..] {
+                collect_labels(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The authored style's `fill` paint, expanded to one entry per colour.
+#[derive(Default)]
+pub struct FillStyle {
+    layers: Vec<FillPaint>,
+}
+
+impl FillStyle {
+    /// Read the `fill` layers out of an already-parsed style.
+    ///
+    /// Takes the parsed root rather than the source text, unlike [`LineStyle::parse`], because
+    /// what it produces borrows from it — see [`root`].
+    pub fn read(root: &'static Json) -> Result<FillStyle, String> {
+        let layers = root
+            .get("layers")
+            .and_then(Json::as_array)
+            .ok_or("basemap.json has no `layers` array")?;
+        Ok(FillStyle {
+            layers: layers
+                .iter()
+                .filter(|layer| layer.get("type").and_then(Json::as_str) == Some("fill"))
+                .filter_map(FillPaint::parse)
+                .collect(),
+        })
+    }
+
+    pub fn get(&self, id: &str) -> Option<&FillPaint> {
+        self.layers.iter().find(|layer| layer.id == id)
+    }
+
+    /// Every derived draw, in the authored file's own layer order.
+    ///
+    /// Order **is** draw order, which is why this is a flat list rather than a lookup: the
+    /// authored style draws `landuse_park` through `landuse_runway` before `water` and only
+    /// `landuse_pedestrian` and `landuse_pier` after it, and getting that wrong puts parks on
+    /// top of rivers.
+    pub fn draws(&self) -> impl Iterator<Item = &FillDraw> {
+        self.layers.iter().flat_map(|layer| layer.draws.iter())
+    }
+
+    /// The `fill-opacity` `layer` draws at `zoom`, in 0..=1.
+    ///
+    /// The fill counterpart of [`LineStyle::stroke`], and per *frame* for the same reason: the
+    /// camera's zoom is fractional and continuous, so quantising it to the integer tile zoom is
+    /// what makes a layer appear at a step instead of fading in.
+    ///
+    /// A layer naming no authored counterpart is fully opaque, which is what leaves the
+    /// hand-written line layers alone. A ramp this evaluator cannot read draws nothing, exactly
+    /// as an unreadable width ramp does: a guessed constant is the defect being removed.
+    pub fn opacity(&self, layer: &Layer, zoom: f64) -> f32 {
+        if layer.fill_paint.is_empty() {
+            return 1.0;
+        }
+        self.get(layer.fill_paint).map_or(0.0, |paint| paint.opacity_at(zoom))
+    }
+}
+
+/// The vendored style's fill paint, parsed and expanded once.
+pub fn authored_fills() -> &'static FillStyle {
+    static AUTHORED: OnceLock<FillStyle> = OnceLock::new();
+    AUTHORED.get_or_init(|| FillStyle::read(root()).unwrap_or_default())
 }
 
 #[cfg(test)]
@@ -450,6 +775,191 @@ mod tests {
     #[test]
     fn a_sub_pixel_gap_is_left_alone() {
         assert_eq!(Stroke { width_dp: 2.0, gap_width_dp: 0.1 }.half_px(3.0).1, 0.15);
+    }
+
+    // --- fills -------------------------------------------------------------
+
+    fn fills() -> &'static FillStyle {
+        authored_fills()
+    }
+
+    #[test]
+    fn the_vendored_style_parses_and_holds_its_fill_layers() {
+        // 15 `fill` layers in the authored file.
+        assert_eq!(fills().layers.len(), 15, "found {} fill layers", fills().layers.len());
+        assert!(fills().get("earth").is_some());
+        assert!(fills().get("landuse_park").is_some());
+        // A `line` layer must not be picked up by the `fill` filter.
+        assert!(fills().get("roads_highway").is_none());
+    }
+
+    /// The derived draws are in the authored file's own order, which is draw order. The authored
+    /// style puts `landuse_park` through `landuse_runway` *before* `water` and only
+    /// `landuse_pedestrian` and `landuse_pier` after it; flattening landuse to one side of water
+    /// puts parks on top of rivers or rivers on top of parks.
+    #[test]
+    fn the_derived_draws_keep_the_authored_order() {
+        let ids: Vec<&str> = fills().draws().map(|draw| draw.id.as_str()).collect();
+        let at = |id: &str| ids.iter().position(|other| *other == id).unwrap_or_else(|| panic!("{id}"));
+        assert!(at("earth") < at("landcover"));
+        assert!(at("landuse_park:national_park") < at("water"));
+        assert!(at("landuse_runway") < at("water"));
+        assert!(at("water") < at("landuse_pedestrian"));
+        assert!(at("landuse_pier") < at("buildings"));
+    }
+
+    /// A data-driven `fill-color` becomes one draw per colour, with the expression's **fallback
+    /// first**: it is unfiltered, so it has to draw under the specific kinds rather than over
+    /// them. Drawn last it collapses seven colours into one.
+    #[test]
+    fn an_unfiltered_fallback_arm_is_derived_first() {
+        let landcover = fills().get("landcover").expect("landcover");
+        let (first, rest) = landcover.draws.split_first().expect("at least the fallback");
+        assert_eq!(first.id, "landcover");
+        assert!(first.kinds.is_empty(), "the fallback draws every kind");
+        assert_eq!(rest.len(), 6, "one per authored `match` arm");
+        for draw in rest {
+            assert!(!draw.kinds.is_empty(), "{} must be filtered", draw.id);
+        }
+    }
+
+    /// A layer whose authored filter is a `kind` whitelist gets **no** unfiltered arm: one would
+    /// draw the very kinds the filter excludes, in the fallback colour.
+    #[test]
+    fn a_filtered_layer_derives_no_unfiltered_arm() {
+        for id in ["landuse_park", "buildings", "landuse_school"] {
+            let layer = fills().get(id).expect(id);
+            for draw in &layer.draws {
+                assert!(!draw.kinds.is_empty(), "{} derived an unfiltered arm", draw.id);
+            }
+        }
+        // And the kinds it does derive are all admitted by the authored filter.
+        let admitted = filter_kinds(fills().get("landuse_park").expect("landuse_park").filter);
+        for draw in &fills().get("landuse_park").expect("landuse_park").draws {
+            for kind in &draw.kinds {
+                assert!(admitted.contains(kind), "`{kind}` is outside the authored filter");
+            }
+        }
+    }
+
+    /// The authored `fill-opacity` ramp is the *only* thing that gates a fill, and it is
+    /// continuous. Pinned at the zooms that were visibly wrong on device.
+    #[test]
+    fn the_opacity_ramp_is_the_only_gate_and_it_is_continuous() {
+        for id in ["landcover", "landuse_park"] {
+            let layer = fills().get(id).expect(id);
+            let mut previous = f32::NAN;
+            for tenth in 0..=(MAX_ZOOM as u32 * 10) {
+                let zoom = tenth as f64 / 10.0;
+                let opacity = layer.opacity_at(zoom);
+                assert!((0.0..=1.0).contains(&opacity), "{id} at z{zoom} is {opacity}");
+                // No step larger than the ramp's own slope between adjacent tenths: a jump
+                // means something quantised the zoom, which is how a layer pops instead of
+                // fading.
+                if previous.is_finite() {
+                    assert!(
+                        (opacity - previous).abs() < 0.06,
+                        "{id} jumped {previous} -> {opacity} at z{zoom}",
+                    );
+                }
+                previous = opacity;
+            }
+        }
+        // And the shallowest drawn zoom, which is only used to pick a zoom to read colour at.
+        assert_eq!(fills().get("landcover").expect("landcover").first_drawn_zoom(), Some(0));
+        assert_eq!(fills().get("landuse_park").expect("landuse_park").first_drawn_zoom(), Some(7));
+    }
+
+    /// `fill-opacity` is **not** folded into the layer table: it is a function of the camera's
+    /// zoom, so it is evaluated per frame. Baking it in drew `landcover` at full strength at z6
+    /// where the authored ramp asks for half.
+    #[test]
+    fn fill_opacity_is_a_ramp_evaluated_per_frame_not_a_baked_alpha() {
+        let alpha = |id: &str| {
+            fills().draws().find(|d| d.id == id).unwrap_or_else(|| panic!("{id}")).color >> 24
+        };
+        assert_eq!(alpha("buildings"), 0xFF, "the 0.5 is the ramp's, not the colour's");
+        assert_eq!(alpha("landuse_urban_green"), 0xFF);
+        assert_eq!(alpha("earth"), 0xFF);
+        assert_eq!(alpha("landcover:glacier"), 0xFF, "rgba(255, 255, 255, 1)");
+
+        // And the ramps themselves read the authored values.
+        let at = |id: &str, zoom: f64| fills().get(id).unwrap_or_else(|| panic!("{id}")).opacity_at(zoom);
+        assert_eq!(at("buildings", 16.0), 0.5, "a literal fill-opacity");
+        assert_eq!(at("landuse_urban_green", 16.0), 0.7);
+        assert_eq!(at("earth", 4.0), 1.0, "no fill-opacity is fully opaque");
+        // The two ramps, at the zooms that were visibly wrong on device.
+        assert_eq!(at("landcover", 5.0), 1.0);
+        assert_eq!(at("landcover", 6.0), 0.5, "half, not the full blanket");
+        assert_eq!(at("landcover", 7.0), 0.0);
+        assert_eq!(at("landuse_park", 6.0), 0.0);
+        assert!((at("landuse_park", 7.0) - 0.2).abs() < 1e-6, "a fifth, not full green");
+        assert_eq!(at("landuse_park", 11.0), 1.0);
+    }
+
+    /// The fill counterpart of `LineStyle::stroke`, resolved through a real derived layer.
+    #[test]
+    fn the_opacity_of_a_derived_layer_follows_its_authored_ramp() {
+        let layers = crate::style::layers();
+        let of = |id: &str| layers.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("{id}"));
+        let grassland = of("landcover:grassland");
+        assert_eq!(fills().opacity(grassland, 5.0), 1.0);
+        assert_eq!(fills().opacity(grassland, 6.0), 0.5, "an arm inherits its layer's ramp");
+        assert_eq!(fills().opacity(grassland, 7.0), 0.0, "which is also its gate");
+        // Continuous, not stepped: the whole point of evaluating per frame.
+        let half = fills().opacity(grassland, 6.5);
+        assert!(half > 0.2 && half < 0.3, "got {half}");
+        // A layer naming no authored fill paint is opaque, which leaves the line layers alone.
+        let road = of("roads-major");
+        assert_eq!(fills().opacity(road, 10.0), 1.0);
+    }
+
+    /// A filter shape this does not understand reads as unrestricted, which is the permissive
+    /// answer: too much on screen is a visible bug, a silently missing layer is not.
+    #[test]
+    fn the_filter_reader_handles_the_shapes_the_style_uses() {
+        let read = |source: &str| {
+            let json: Json = serde_json::from_str(source).expect("valid JSON");
+            // Leaked so the borrow is 'static, as it is in the real parse.
+            filter_kinds(Some(Box::leak(Box::new(json))))
+        };
+        assert_eq!(read(r#"["==","kind","pier"]"#), vec!["pier"]);
+        assert_eq!(read(r#"["in","kind","school","college"]"#), vec!["school", "college"]);
+        assert_eq!(read(r#"["any",["in","kind","runway","taxiway"]]"#), vec!["runway", "taxiway"]);
+        // `$type` restricts geometry, not `kind`, so it admits everything.
+        assert!(read(r#"["==","$type","Polygon"]"#).is_empty());
+        assert!(filter_kinds(None).is_empty());
+        assert!(read(r#"["!in","kind","pier"]"#).is_empty(), "unrecognised reads as any");
+    }
+
+    /// The kind labels are only used to decide which kinds are worth asking about; the colour
+    /// itself always comes from evaluating the authored expression.
+    #[test]
+    fn the_kind_labels_of_a_colour_expression_exclude_colours_and_operators() {
+        let expr: &'static Json = Box::leak(Box::new(
+            serde_json::from_str(
+                r##"["match",["get","kind"],"grassland","rgba(1, 2, 3, 1)","barren","#fff3d7","#c4e7d2"]"##,
+            )
+            .expect("valid JSON"),
+        ));
+        assert_eq!(kind_labels(expr), vec!["grassland", "barren"]);
+    }
+
+    #[test]
+    fn color_at_reads_a_data_driven_colour_for_one_feature() {
+        let paint: &Json = &serde_json::json!([
+            "case",
+            ["in", ["get", "kind"], ["literal", ["military"]]],
+            "#c6dcdc",
+            "#e2dfda",
+        ]);
+        let mut properties = HashMap::new();
+        properties.insert("kind".to_string(), Value::String("military".to_string()));
+        assert_eq!(color_at(Some(paint), 8.0, &properties), Some(0xFFC6DCDC));
+        assert_eq!(color_at(Some(paint), 8.0, &HashMap::new()), Some(0xFFE2DFDA), "the fallback");
+        // A colour this cannot read is `None`, never a substituted default.
+        assert_eq!(color_at(Some(&serde_json::json!("chartreuse")), 8.0, &HashMap::new()), None);
+        assert_eq!(color_at(None, 8.0, &HashMap::new()), None);
     }
 
     /// What should actually appear on a density-3 phone at the zooms the defect was measured at.

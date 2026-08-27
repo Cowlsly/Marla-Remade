@@ -1,17 +1,22 @@
 //! Which layers are drawn, in what order, in what colour - in light and dark.
 //!
-//! # Being replaced
+//! # Where the fills come from
 //!
-//! The constants below are a hand-written approximation of `style/basemap.json`, and they
-//! could not converge on it: 34 `landuse` kinds, opacity ramps and per-kind colour cases are
-//! already written down in a file MapLibre renders correctly, so transcribing it by eye was
-//! never going to work. [`expr`] evaluates that file instead, and these constants go once it
-//! is wired through.
+//! Every `fill` layer in [`layers`] is **derived** from `style/basemap.json` rather than
+//! transcribed: draw order, `source-layer`, the `kind` whitelist, the colour and the zoom gate
+//! all come from the file, via [`paint::FillStyle`]. That file is what MapLibre renders
+//! correctly, and the previous hand-written table could not converge on it — 34 `landuse`
+//! kinds collapsed into 13 layers, opacity ramps approximated as hard zoom cutoffs, and no
+//! fallback layer at all, so an unlisted `kind` simply was not drawn.
 //!
-//! Deliberately flat and constant: no expressions, no data-driven paint. Phase 3 replaces
-//! the constants with the small expression evaluator the plan scopes out (`interpolate`,
-//! `step`, `case`, `match`, `get`, `coalesce`), and this is the seam that lets the
-//! renderer be finished and profiled first.
+//! Two things are still by hand, and both are deliberate:
+//!
+//! * **The dark column.** `basemap.json` is light-only.
+//!   [`DARK_FILL`] is a per-authored-layer override, sourced from the contrast-checked values
+//!   in `maps/src/main/java/com/vayunmathur/maps/ui/theme/BasemapPalette.kt` (see below). A
+//!   missing entry is a test failure rather than a light colour rendered on a dark map.
+//! * **The line layers.** Their widths already come from the authored ramps through
+//!   [`paint::LineStyle`]; their colours, dashes and `kind` filters do not yet.
 //!
 //! Order in [`layers`] **is** draw order, and it is global rather than per tile: a road
 //! casing from one tile must never cover the road fill of the tile next to it, so the
@@ -132,6 +137,13 @@ pub struct Layer {
     /// `*_casing_early`/`*_casing_late` pairs are followed: they are one layer split in two
     /// at z12, and [`paint::LineStyle::stroke`] picks whichever covers the camera's zoom.
     pub line_paint: &'static [&'static str],
+    /// The authored `fill` layer id whose `fill-opacity` ramp governs this layer.
+    ///
+    /// Empty means fully opaque. Evaluated per frame by [`paint::FillStyle::opacity`] against
+    /// the camera's fractional zoom, exactly as [`line_paint`](Self::line_paint)'s widths are —
+    /// a constant alpha plus an integer zoom gate is what drew `landcover` at full strength at
+    /// z6 where the authored ramp asks for half.
+    pub fill_paint: &'static str,
     /// Dash and gap lengths in line widths, as `line-dasharray` defines them.
     pub dash: (f32, f32),
     pub min_zoom: u8,
@@ -215,164 +227,148 @@ const fn layer(
         width_dp: 0.0,
         gap_width_dp: 0.0,
         line_paint: &[],
+        fill_paint: "",
         dash: NO_DASH,
         min_zoom: 0,
         max_zoom: 22,
     }
 }
 
-/// A `landuse` fill.
+/// The dark colour of each authored fill layer, RGB only.
 ///
-/// `min_zoom` is 6 because the authored style ramps this family's `fill-opacity` from 0 at
-/// z6 to 1 at z11. Drawing it below that puts continent-sized `national_park`,
-/// `nature_reserve` and `military` polygons on the map, and their tile-clipped edges read as
-/// straight cuts slashed across the shape.
-const fn landuse(
-    id: &'static str,
-    kinds: &'static [&'static str],
-    light: u32,
-    dark: u32,
-) -> Layer {
-    Layer { min_zoom: LANDUSE_MIN_ZOOM, ..layer(id, "landuse", LayerKind::Fill, kinds, light, dark) }
+/// `basemap.json` is light-only, so this is the one part of fill paint still maintained by
+/// hand. Keyed by the id [`paint::FillDraw`] derives — the authored layer's own id, suffixed
+/// with a `kind` for the two layers that paint more than one colour — so a restyle that
+/// renames or re-splits a layer breaks the lookup loudly.
+///
+/// Alpha is **not** here: it comes from the authored `fill-opacity` in both variants, because
+/// a translucent layer is translucent for a reason that has nothing to do with the theme.
+///
+/// Values are `BasemapPalette.darkFill`'s by role. Where the authored file has an arm the
+/// palette has no counterpart for, the nearest role is used and noted.
+const DARK_FILL: &[(&str, u32)] = &[
+    // Not `BasemapPalette.Fill.Background`, which is what `earth` maps to there: that palette
+    // was built for a raster style where the background *is* the land, so collapsing the two
+    // is harmless. Here earth is a polygon drawn over water, and giving it the background
+    // colour erased the coastline outright — the map became a single flat navy field with no
+    // way to tell land from ocean. So dark earth is lifted to a neutral clearly above the
+    // water, in the same family as the palette's Buildings (#22262C) and Other (#26282E).
+    ("earth", 0x24262C),
+    // Landcover's authored paint is near-white pastels that would wash out a dark map. Each is
+    // a tint of the same hue held a few units off `earth`, which is what keeps a gap in
+    // landcover coverage from reading as a different surface: earth is blue-dominant, so a
+    // green-dominant tint of the same luminance shows up as a mauve patch where cover stops.
+    ("landcover", 0x262B2A),
+    ("landcover:grassland", 0x262C28),
+    ("landcover:barren", 0x2C2A24),
+    ("landcover:urban_area", 0x2A2B2E),
+    ("landcover:farmland", 0x272D29),
+    ("landcover:glacier", 0x34373D),
+    ("landcover:scrub", 0x2A2C26),
+    ("landuse_park:national_park", 0x1E2B20),
+    ("landuse_park:wood", 0x1E2B20),
+    ("landuse_park:scrub", 0x1F2A22),
+    ("landuse_park:military", 0x26282E),
+    ("landuse_urban_green", 0x23362A),
+    ("landuse_hospital", 0x2B2528),
+    ("landuse_industrial", 0x20262B),
+    ("landuse_school", 0x282520),
+    ("landuse_beach", 0x2C2A22),
+    ("landuse_zoo", 0x213030),
+    ("landuse_aerodrome", 0x212228),
+    // No palette counterpart: the authored #e9e9ed is a shade off `landuse_aerodrome`'s
+    // #dadbdf, so the dark value is held the same distance the other way.
+    ("landuse_runway", 0x262931),
+    // BasemapPalette.Fill.Water, and the same value `background` uses.
+    ("water", 0x0D1B2A),
+    ("landuse_pedestrian", 0x242229),
+    ("landuse_pier", 0x202225),
+    ("buildings", 0x22262C),
+];
+
+/// Zoom ranges the renderer imposes on a derived fill for its own reasons, not the style's.
+///
+/// A derived fill is otherwise gated by nothing but its authored `fill-opacity` ramp, and that
+/// is deliberate. [`Layer::min_zoom`] and [`Layer::max_zoom`] are compared against the *tile's*
+/// pyramid level in `tile::geometry::build`, so deriving them from the ramp — which is a
+/// function of the *camera* — meant `landcover` geometry was never built for a tile deeper than
+/// z6 even though the ramp wants it visible up to camera z7. Whether a shape existed then
+/// depended on which pyramid level happened to be resident, so shapes appeared and vanished as
+/// the camera zoomed. Cost is handled instead by the archive itself: `geometry::build` skips a
+/// layer the tile does not contain, and Planetiler only puts `landcover` in shallow tiles and
+/// `landuse`/`buildings` in deep ones.
+///
+/// `buildings` keeps a floor because that one *is* a cost decision rather than a paint one: it
+/// is the densest layer in the schema, and a tessellation pass plus a draw call per tile is
+/// worth avoiding even where the archive would return nothing.
+const ZOOM_FLOOR: &[(&str, u8)] = &[("buildings", 14)];
+
+/// The dark colour for a derived fill, or a safe neutral if the table has fallen behind.
+///
+/// A missing entry is pinned as a test failure by `every_derived_fill_has_a_dark_override`;
+/// falling back to the dark earth here means the worst a stale table can do at runtime is
+/// paint a layer the colour of the land, rather than a light colour on a dark map.
+fn dark_fill(id: &str) -> u32 {
+    const EARTH: u32 = 0x24262C;
+    DARK_FILL.iter().find(|(key, _)| *key == id).map_or(EARTH, |(_, rgb)| *rgb)
 }
 
-/// Where the authored style's `landuse` opacity ramp leaves zero.
-pub const LANDUSE_MIN_ZOOM: u8 = 6;
-
-/// A `landcover` tint: light is the authored style's own paint, dark is a same-hue tint
-/// lifted just off `earth`, and both are gone above z7 where the authored style's opacity
-/// ramp reaches zero.
-const fn landcover(
-    id: &'static str,
-    kinds: &'static [&'static str],
-    light: u32,
-    dark: u32,
-) -> Layer {
-    Layer {
-        max_zoom: LANDCOVER_MAX_ZOOM,
-        ..layer(id, "landcover", LayerKind::Fill, kinds, light, dark)
-    }
-}
-
-/// Where the authored style's `landcover` opacity ramp reaches zero.
-pub const LANDCOVER_MAX_ZOOM: u8 = 7;
-
-/// The stand-in style: enough to see the basemap and judge the geometry renderer.
+/// Every layer the renderer draws, in draw order.
 ///
-/// The authored style is Phase 3's job and is scoped to ~15–20 layers against `maps`' 71
-/// authored (141 at runtime). What matters here is that every *code path* the real style
-/// needs is exercised: fills, plain strokes, casings via `line-gap-width`, and dashes
-/// including the degenerate `[2, 0]`.
+/// The fills are derived from `style/basemap.json`; the line layers below them are still a
+/// hand-written table, though their widths come from the authored ramps through
+/// [`paint::LineStyle`]. All fills precede all lines, which is both the authored order and what
+/// `casings_are_drawn_under_their_fills` pins.
 ///
 /// Layer and `kind` names follow the Protomaps v4 schema the archive is built to — as
 /// `tilecodec`'s `v5ca_z11_tile.mvt` fixture shows.
 pub fn layers() -> Vec<Layer> {
+    let mut out: Vec<Layer> = paint::authored_fills().draws().map(fill_layer).collect();
+    out.extend(line_layers());
+    out
+}
+
+/// One derived fill draw as a [`Layer`].
+///
+/// Everything but the dark colour and the renderer's own zoom floor comes from the authored
+/// file. The `&'static str`s borrow from the parsed style, which lives for the process — see
+/// [`paint::authored_fills`].
+///
+/// The zoom range is the **whole** range unless [`ZOOM_FLOOR`] says otherwise: what a frame
+/// shows is decided by the authored `fill-opacity` ramp against the camera, and the geometry has
+/// to exist at every pyramid level the archive carries it at or shapes come and go with zoom.
+fn fill_layer(draw: &'static paint::FillDraw) -> Layer {
+    let min_zoom = ZOOM_FLOOR
+        .iter()
+        .find(|(id, _)| *id == draw.id)
+        .map_or(0, |(_, floor)| *floor);
+    Layer {
+        id: &draw.id,
+        source_layer: draw.source_layer,
+        kind: LayerKind::Fill,
+        kinds: &draw.kinds,
+        light: draw.color,
+        // Alpha comes from the authored colour itself in both variants; only the hue is themed.
+        // The `fill-opacity` ramp is not baked in here — see `Layer::fill_paint`.
+        dark: (draw.color & 0xFF00_0000) | dark_fill(&draw.id),
+        width_dp: 0.0,
+        gap_width_dp: 0.0,
+        line_paint: &[],
+        fill_paint: draw.authored,
+        dash: NO_DASH,
+        min_zoom,
+        max_zoom: paint::MAX_ZOOM,
+    }
+}
+
+/// The line layers, still hand-written.
+///
+/// Only the widths are authored, via [`Layer::line_paint`]. Colour, dashes and the `kind`
+/// whitelists are transcribed, and the same derivation the fills now use would replace them —
+/// but a line layer's colour is not the only thing to derive: `line-dasharray` is a `step`, and
+/// the authored file splits a single road class across bridge, tunnel and casing layers.
+fn line_layers() -> Vec<Layer> {
     vec![
-        // The land itself, and the only thing separating it from the sea.
-        //
-        // Light is the authored style's own `earth` paint. Dark is **not**
-        // `BasemapPalette.Fill.Background`, which is what `earth` maps to there: that palette
-        // was built for a raster style where the background *is* the land, so collapsing the
-        // two is harmless. Here earth is a polygon drawn over water, and giving it the
-        // background colour erased the coastline outright — the map became a single flat
-        // navy field with no way to tell land from ocean. So dark earth is lifted to a
-        // neutral clearly above the water, in the same family as the palette's Buildings
-        // (#22262C) and Other (#26282E).
-        layer("earth", "earth", LayerKind::Fill, &[], 0xFFE2DFDA, 0xFF24262C),
-        // Landcover is a **low-zoom tint**, not a landmass.
-        //
-        // The authored style ramps `fill-opacity` from 1 at z5 to 0 at z7, so above z7 it
-        // is not drawn at all, and its colours are light pastels keyed on `kind`. Painting
-        // it one solid colour at every zoom instead — which is what this did — lays a
-        // blanket over the whole map that follows coarse vegetation polygons rather than
-        // coastlines or borders, so it lines up with nothing. That is the single most
-        // visible way to get a basemap wrong.
-        //
-        // Without expression support there is no opacity ramp yet, so the ramp's endpoint
-        // becomes a hard `max_zoom` of 7.
-        //
-        // The authored `fill-color` is a `match` on `kind`, where a feature takes exactly one
-        // arm. Here each arm is a separate layer, so the unfiltered fallback — which
-        // `matches()` every kind — has to be drawn *first* and let the specific kinds paint
-        // over it. Drawn last it overpaints all of them, collapsing seven colours into one.
-        //
-        // The dark column is not the authored paint: those are near-white pastels that would
-        // wash out a dark map. Each is a tint of the same hue held a few units off `earth`
-        // (#24262C), which is what keeps a gap in landcover coverage from reading as a
-        // different surface. Earth is blue-dominant, so a green-dominant tint of the same
-        // luminance shows up as a mauve patch wherever coverage stops.
-        landcover("landcover-other", &[], 0xFFC4E7D2, 0xFF262B2A),
-        landcover("landcover-grassland", &["grassland"], 0xFFD2EFCF, 0xFF262C28),
-        landcover("landcover-farmland", &["farmland"], 0xFFD8EFD2, 0xFF272D29),
-        landcover("landcover-scrub", &["scrub"], 0xFFEAEFD2, 0xFF2A2C26),
-        landcover("landcover-barren", &["barren"], 0xFFFFF3D7, 0xFF2C2A24),
-        landcover("landcover-glacier", &["glacier"], 0xFFFFFFFF, 0xFF34373D),
-        landcover("landcover-urban", &["urban_area"], 0xFFE6E6E6, 0xFF2A2B2E),
-        // Water, including the ocean — `water.kind` really does contain `ocean`, so the sea
-        // is a polygon rather than the backdrop showing through. `#80deea` is the authored
-        // paint: a bright cyan, and deliberately nothing like `earth`. A washed-out blue
-        // here is what made land and sea indistinguishable. Drawn further down, in the
-        // authored position between landuse_runway and landuse_pedestrian.
-        // Landuse, by the authored style's own grouping, paint **and order**.
-        //
-        // Order matters: the authored style draws `landuse_park` through `landuse_runway`
-        // *before* `water` (indices 3-13 against water's 14), and only `landuse_pedestrian`
-        // and `landuse_pier` after it. Drawing all of landuse after water instead puts parks
-        // and industrial areas on top of rivers and coastline.
-        //
-        // Two things here were badly wrong before. Its `fill-opacity` ramps from 0 at z6 to
-        // 1 at z11, so it must not be drawn at world zoom at all — drawing it everywhere put
-        // continent-sized `national_park`, `nature_reserve` and `military` polygons on the
-        // map, whose tile-clipped edges are the straight "random cuts" across the shapes.
-        // And they are not all green: `military` is a pale blue-grey, `sand` is stone, and
-        // the fallback is simply the earth colour.
-        landuse(
-            "landuse-park",
-            &[
-                "national_park",
-                "park",
-                "cemetery",
-                "protected_area",
-                "nature_reserve",
-                "forest",
-                "golf_course",
-            ],
-            0xFF9CD3B4,
-            0xFF1E2B20,
-        ),
-        landuse("landuse-wood", &["wood"], 0xFFA0D9A0, 0xFF1E2B20),
-        landuse("landuse-grass", &["scrub", "grassland", "grass", "meadow"], 0xFF99D2BB, 0xFF1F2A22),
-        landuse(
-            "landuse-urban-green",
-            &["allotments", "village_green", "playground", "garden", "dog_park", "pitch"],
-            0xFF9CD3B4,
-            0xFF23362A,
-        ),
-        landuse("landuse-military", &["military", "naval_base", "airfield"], 0xFFC6DCDC, 0xFF26282E),
-        landuse("landuse-zoo", &["zoo"], 0xFFC6DCDC, 0xFF213030),
-        landuse("landuse-hospital", &["hospital"], 0xFFE4DAD9, 0xFF2B2528),
-        landuse("landuse-industrial", &["industrial", "railway"], 0xFFD1DDE1, 0xFF20262B),
-        landuse("landuse-school", &["school", "university", "college"], 0xFFE4DED7, 0xFF282520),
-        landuse("landuse-beach", &["beach", "sand", "bare_rock"], 0xFFE8E4D0, 0xFF2C2A22),
-        landuse("landuse-aerodrome", &["aerodrome"], 0xFFDADBDF, 0xFF212228),
-        // Water sits here: after most of landuse, before pedestrian and pier, exactly as the
-        // authored style orders them.
-        layer("water", "water", LayerKind::Fill, &[], 0xFF80DEEA, 0xFF0D1B2A),
-        landuse("landuse-pedestrian", &["pedestrian", "dam"], 0xFFE3E0D4, 0xFF242229),
-        landuse("landuse-pier", &["pier"], 0xFFE0E0E0, 0xFF202225),
-        // The authored style draws buildings at `fill-opacity` 0.5 over whatever is beneath,
-        // so the alpha is part of the colour rather than a solid slab of grey.
-        Layer {
-            min_zoom: 14,
-            ..layer(
-                "buildings",
-                "buildings",
-                LayerKind::Fill,
-                &["building", "building_part"],
-                0x80CCCCCC,
-                0xFF22262C,
-            )
-        },
         // Casings first, then fills, so each road reads as one line rather than a chain of
         // overlapping outlines. Both use line-gap-width. In dark mode a casing is *darker*
         // than the road it outlines, which is what separates two adjacent roads when the
@@ -496,19 +492,112 @@ mod tests {
 
     #[test]
     fn landcover_is_a_low_zoom_tint_and_stops_before_street_level() {
-        // The authored style ramps landcover's opacity to zero by z7. Drawing it at every
-        // zoom lays a blanket over the map that follows vegetation polygons rather than
-        // coastlines or borders, which lines up with nothing — the exact bug this pins.
+        // The authored `fill-opacity` ramps landcover from 1 at z5 to 0 at z7, and that ramp is
+        // the only thing that gates it. Drawing it at every zoom — which the transcribed table
+        // did, because it had no ramp to read — lays a blanket over the map that follows
+        // vegetation polygons rather than coastlines or borders, so it lines up with nothing.
         let layers = layers();
+        let fills = paint::authored_fills();
         let landcovers: Vec<&Layer> =
             layers.iter().filter(|l| l.source_layer == "landcover").collect();
         assert!(!landcovers.is_empty(), "landcover must still be drawn at low zoom");
         for l in &landcovers {
-            assert_eq!(l.max_zoom, LANDCOVER_MAX_ZOOM, "{} must stop at z7", l.id);
-            assert!(l.draws_at(4), "{} should tint low zooms", l.id);
-            assert!(!l.draws_at(8), "{} must be gone by z8", l.id);
-            assert!(!l.draws_at(14), "{} must not reach street level", l.id);
+            assert!(fills.opacity(l, 4.0) > 0.0, "{} should tint low zooms", l.id);
+            assert_eq!(fills.opacity(l, 7.0), 0.0, "{} is at zero opacity by z7", l.id);
+            assert_eq!(fills.opacity(l, 14.0), 0.0, "{} must not reach street level", l.id);
         }
+    }
+
+    /// The other half of the same derivation: `landuse_park`'s ramp is 0 at z6 rising to 1 at
+    /// z11, so it must not be drawn at world zoom. Ignoring it put continent-sized
+    /// `national_park`, `nature_reserve` and `military` polygons on the map, whose tile-clipped
+    /// edges read as straight cuts slashed across the shape.
+    #[test]
+    fn the_landuse_park_family_is_gated_off_at_world_zoom() {
+        let layers = layers();
+        let fills = paint::authored_fills();
+        let parks: Vec<&Layer> =
+            layers.iter().filter(|l| l.id.starts_with("landuse_park")).collect();
+        assert!(!parks.is_empty(), "the authored landuse_park layer must be derived");
+        for l in &parks {
+            assert_eq!(fills.opacity(l, 6.0), 0.0, "{} is at zero opacity at z6", l.id);
+            assert_eq!(fills.opacity(l, 11.0), 1.0, "{} is fully on by z11", l.id);
+        }
+    }
+
+    /// The gate that decides whether geometry is *built* must not come from the opacity ramp.
+    ///
+    /// `Layer::min_zoom`/`max_zoom` are compared against the **tile's** pyramid level in
+    /// `tile::geometry::build`, while the ramp is a function of the **camera**. Deriving one
+    /// from the other meant `landcover` was never tessellated for a tile deeper than z6 even
+    /// though its ramp wants it visible up to camera z7 — so whether a shape existed depended on
+    /// which pyramid level happened to be resident, and shapes appeared and vanished while
+    /// zooming. Every ramp-driven fill therefore spans the whole zoom range.
+    #[test]
+    fn a_fills_zoom_range_is_not_derived_from_its_opacity_ramp() {
+        for l in layers().iter().filter(|l| l.kind == LayerKind::Fill) {
+            let floor = ZOOM_FLOOR.iter().find(|(id, _)| *id == l.id).map_or(0, |(_, z)| *z);
+            assert_eq!(
+                (l.min_zoom, l.max_zoom),
+                (floor, paint::MAX_ZOOM),
+                "`{}` carries a zoom gate that is not a declared cost floor",
+                l.id,
+            );
+        }
+    }
+
+    /// The dark table is the only part of fill paint still written by hand, so a restyle that
+    /// renames or re-splits a layer must not silently leave it painted light-on-dark.
+    #[test]
+    fn every_derived_fill_has_a_dark_override() {
+        for l in layers().iter().filter(|l| l.kind == LayerKind::Fill) {
+            assert!(
+                DARK_FILL.iter().any(|(id, _)| *id == l.id),
+                "`{}` is derived from basemap.json but has no entry in DARK_FILL",
+                l.id,
+            );
+        }
+        // And nothing stale in the other direction, which would be a colour nobody reads.
+        let ids: Vec<&str> = layers().iter().map(|l| l.id).collect();
+        for (id, _) in DARK_FILL {
+            assert!(ids.contains(id), "DARK_FILL names `{id}`, which no layer is derived as");
+        }
+    }
+
+    /// Fill paint comes from the file, not from this module. Spot-checked against the authored
+    /// values rather than asserting a count, so a restyle changes one colour rather than
+    /// breaking the test.
+    #[test]
+    fn fill_colour_is_the_authored_colour() {
+        let layers = layers();
+        let color = |id: &str| {
+            layers.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("{id}")).light
+        };
+        assert_eq!(color("earth"), 0xFFE2DFDA, "the authored `#e2dfda`");
+        assert_eq!(color("water"), 0xFF80DEEA, "the authored `#80deea`");
+        // A `match` arm written as `rgba(210, 239, 207, 1)`, spaces and all.
+        assert_eq!(color("landcover:grassland"), 0xFFD2EFCF);
+        // A `case` arm reached through `landuse_park`'s `in` conditions.
+        assert_eq!(color("landuse_park:military"), 0xFFC6DCDC);
+        // `fill-opacity` is a per-frame ramp now, not a baked alpha: see
+        // `paint::fill_opacity_is_a_ramp_evaluated_per_frame_not_a_baked_alpha`.
+        assert_eq!(color("buildings"), 0xFFCCCCCC);
+        assert_eq!(color("landuse_urban_green"), 0xFF9CD3B4);
+    }
+
+    /// A kind the authored `case` gives its own colour must get its own layer, and a kind that
+    /// shares a colour with an earlier arm must share its layer rather than adding a draw.
+    #[test]
+    fn a_data_driven_fill_becomes_one_layer_per_colour() {
+        let layers = layers();
+        let park: Vec<&Layer> =
+            layers.iter().filter(|l| l.id.starts_with("landuse_park")).collect();
+        // Four distinct colours across the authored `case`'s reachable arms.
+        assert_eq!(park.len(), 4, "{:?}", park.iter().map(|l| l.id).collect::<Vec<_>>());
+        let of = |kind: &str| park.iter().find(|l| l.matches(Some(kind))).map(|l| l.light);
+        assert_eq!(of("national_park"), of("cemetery"), "one arm, one colour, one layer");
+        assert_ne!(of("national_park"), of("military"));
+        assert_eq!(of("pier"), None, "a kind the authored filter excludes is not drawn here");
     }
 
     #[test]
@@ -527,7 +616,7 @@ mod tests {
                 }
                 seen.push((colour, l.id));
             }
-            assert_eq!(seen.len(), 7, "every authored `match` arm needs an arm here");
+            assert_eq!(seen.len(), 7, "every authored `match` arm needs a layer here");
         }
     }
 
@@ -799,12 +888,15 @@ mod tests {
 
     #[test]
     fn buildings_are_translucent_as_the_authored_style_draws_them() {
-        // `fill-opacity: 0.5` in the authored style. Pinned because it is the one layer
-        // whose alpha is load-bearing, and because it means tile overspill drawn twice
-        // would darken visibly — unlike an opaque layer, where double-drawing is harmless.
+        // `fill-opacity: 0.5` in the authored style. Pinned because it is the one layer whose
+        // translucency is load-bearing, and because it means tile overspill drawn twice would
+        // darken visibly — unlike an opaque layer, where double-drawing is harmless.
+        //
+        // The 0.5 lives in the authored ramp and is applied per frame, so it is asserted
+        // through `FillStyle::opacity` rather than on the layer's own alpha.
         let layers = layers();
         let buildings = layers.iter().find(|l| l.id == "buildings").expect("buildings");
-        assert_eq!(buildings.light >> 24, 0x80, "the authored style draws these at half alpha");
+        assert_eq!(paint::authored_fills().opacity(buildings, 16.0), 0.5);
     }
 
     #[test]

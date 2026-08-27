@@ -371,14 +371,72 @@ fn interpolate(args: &[Json], context: &Context) -> Result<Value> {
 fn mix(a: &Value, b: &Value, t: f64) -> Result<Value> {
     match (a, b) {
         (Value::Number(a), Value::Number(b)) => Ok(Value::Number(a + (b - a) * t)),
-        // Colour stops are strings at this level. Returning the nearer endpoint would be a
-        // visible banding artifact, so the colour-typed caller interpolates instead; see
-        // `paint::color_at`.
+        // Colour stops are strings at this level, and blending them means parsing them, which
+        // is [`super::paint::color_at`]'s job rather than this evaluator's. Returning the
+        // nearer endpoint bands a colour ramp; no *fill* colour in this style interpolates, so
+        // nothing renders wrong today, and a `line-color` ramp that needs it should go through
+        // `color_at` instead of widening `Value`.
         (Value::String(_), Value::String(_)) => {
             Ok(if t < 0.5 { a.clone() } else { b.clone() })
         }
         _ => Err("cannot interpolate between these value types".into()),
     }
+}
+
+/// Parse a style colour string into ARGB.
+///
+/// The two spellings `style/basemap.json` uses, and no more: `#rrggbb` for the 13 literal
+/// fill colours and `rgba(r, g, b, a)` -- with the spaces the file writes -- for the seven
+/// `landcover` arms. `#rgb`, `#rrggbbaa` and `rgb(...)` fall out of the same two branches for
+/// free.
+///
+/// `None` rather than a default: a colour that will not parse must leave the layer undrawn,
+/// because any substituted colour is a plausible-looking wrong map.
+pub fn parse_color(source: &str) -> Option<u32> {
+    let source = source.trim();
+    if let Some(hex) = source.strip_prefix('#') {
+        if !hex.is_ascii() {
+            return None;
+        }
+        let digit = |i: usize| u32::from_str_radix(&hex[i..i + 1], 16).ok();
+        let pair = |i: usize| u32::from_str_radix(&hex[i..i + 2], 16).ok();
+        return match hex.len() {
+            // The shorthand doubles each digit, so `#abc` is `#aabbcc`.
+            3 | 4 => {
+                let a = if hex.len() == 4 { digit(3)? * 0x11 } else { 0xFF };
+                Some(
+                    (a << 24)
+                        | ((digit(0)? * 0x11) << 16)
+                        | ((digit(1)? * 0x11) << 8)
+                        | (digit(2)? * 0x11),
+                )
+            }
+            6 | 8 => {
+                let a = if hex.len() == 8 { pair(6)? } else { 0xFF };
+                Some((a << 24) | (pair(0)? << 16) | (pair(2)? << 8) | pair(4)?)
+            }
+            _ => None,
+        };
+    }
+
+    let (name, rest) = source.split_once('(')?;
+    if !matches!(name.trim(), "rgb" | "rgba") {
+        return None;
+    }
+    let parts: Vec<f64> = rest
+        .strip_suffix(')')?
+        .split(',')
+        .map(|part| part.trim().parse::<f64>())
+        .collect::<std::result::Result<_, _>>()
+        .ok()?;
+    let channel = |v: f64| v.round().clamp(0.0, 255.0) as u32;
+    // Alpha is 0..1 in the functional notation, unlike the 0..255 of the channels.
+    let alpha = match parts.len() {
+        3 => 0xFF,
+        4 => channel(parts[3] * 255.0),
+        _ => return None,
+    };
+    Some((alpha << 24) | (channel(parts[0]) << 16) | (channel(parts[1]) << 8) | channel(parts[2]))
 }
 
 #[cfg(test)]
@@ -631,5 +689,30 @@ mod tests {
         assert!(Value::Number(1.0).truthy());
         assert!(!Value::String(String::new()).truthy());
         assert!(s("x").truthy());
+    }
+
+    #[test]
+    fn both_colour_spellings_the_style_uses_parse() {
+        // The 13 literal fill colours.
+        assert_eq!(parse_color("#80deea"), Some(0xFF80DEEA));
+        assert_eq!(parse_color("#E2DFDA"), Some(0xFFE2DFDA), "case does not matter");
+        // The seven `landcover` arms, spaces and all.
+        assert_eq!(parse_color("rgba(196, 231, 210, 1)"), Some(0xFFC4E7D2));
+        assert_eq!(parse_color("rgba(255,255,255,1)"), Some(0xFFFFFFFF));
+        // A fractional alpha is 0..1 in the functional notation, not 0..255.
+        assert_eq!(parse_color("rgba(0, 0, 0, 0.5)"), Some(0x80000000));
+        assert_eq!(parse_color("rgb(1, 2, 3)"), Some(0xFF010203));
+        // Shorthand and the eight-digit form.
+        assert_eq!(parse_color("#abc"), Some(0xFFAABBCC));
+        assert_eq!(parse_color("#11223380"), Some(0x80112233));
+    }
+
+    /// A colour that will not parse has to be `None`: any substituted colour renders a
+    /// plausible-looking wrong map, which is the failure mode with no symptom.
+    #[test]
+    fn an_unparseable_colour_is_none_rather_than_a_default() {
+        for source in ["", "#", "#12345", "#gg0000", "cornflowerblue", "hsl(0, 0%, 0%)", "rgba(1,2)", "rgba(1,2,3"] {
+            assert_eq!(parse_color(source), None, "{source:?} must not parse");
+        }
     }
 }

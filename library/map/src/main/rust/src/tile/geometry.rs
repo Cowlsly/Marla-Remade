@@ -152,7 +152,10 @@ mod tests {
         // one that would still cost a draw.
         assert!(mesh_for(&mesh, &layers, "buildings").is_none(), "no buildings layer here");
         assert!(mesh_for(&mesh, &layers, "roads-highway").is_none(), "the road is a major_road");
-        assert!(mesh_for(&mesh, &layers, "landuse-park").is_none(), "no landuse layer");
+        assert!(
+            mesh_for(&mesh, &layers, "landuse_park:national_park").is_none(),
+            "no landuse layer",
+        );
     }
 
     #[test]
@@ -329,6 +332,7 @@ mod tests {
             width_dp: 1.0,
             gap_width_dp: 0.0,
             line_paint: &[],
+            fill_paint: "",
             dash: (0.0, 0.0),
             min_zoom: 0,
             max_zoom: 22,

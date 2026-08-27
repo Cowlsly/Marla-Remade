@@ -401,21 +401,27 @@ impl Renderer {
         ordered.sort_by_key(|tile| tile.z);
 
         for (index, layer) in layers.iter().enumerate() {
-            // Visibility is the camera's business, not the tile's. Meshes are tessellated for
-            // a *window* of zooms (see `geometry::build`), so an ancestor standing in below
-            // its own zoom carries layers that the style says have already faded out — a z5
-            // tile's landcover is still in its buffers at camera z9, where the authored
-            // opacity ramp reached zero two levels earlier. Gating here is what makes a
-            // fill's zoom range follow the camera the way the authored ramps do.
+            // `min_zoom`/`max_zoom` are a data-and-cost gate, not paint: they say which zooms
+            // the archive is worth asking for this layer at. Paint is the authored ramp below.
             if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
                 continue;
             }
-            // Width comes from the authored style, evaluated against the *camera's* fractional
-            // zoom rather than the tile's, so a stroke grows smoothly while zooming instead of
-            // jumping a step at every level. It is a push constant, so this re-tessellates
-            // nothing, and it does not vary per tile.
-            let stroke = match layer.kind {
-                LayerKind::Fill => Stroke::NONE,
+            // Width and opacity come from the authored style, evaluated against the *camera's*
+            // fractional zoom rather than the tile's, so a stroke grows and a fill fades
+            // smoothly while zooming instead of jumping a step at every level. Both are push
+            // constants, so this re-tessellates nothing, and neither varies per tile.
+            let (stroke, opacity) = match layer.kind {
+                // The ramp is what makes a fill visible, and it is the *only* thing: gating a
+                // fill on an integer zoom drew `landcover` at full strength at z6 where the
+                // ramp asks for half, and popped `landuse_park` on at full strength at z7
+                // where it asks for a fifth.
+                LayerKind::Fill => {
+                    let opacity = paint::authored_fills().opacity(layer, camera.zoom);
+                    if opacity <= 0.0 {
+                        continue;
+                    }
+                    (Stroke::NONE, opacity)
+                }
                 LayerKind::Line => {
                     let stroke = paint::authored().stroke(layer, camera.zoom);
                     // The authored ramps reach zero outside the zooms a layer is meant for,
@@ -424,7 +430,7 @@ impl Renderer {
                     if !stroke.visible() {
                         continue;
                     }
-                    stroke
+                    (stroke, 1.0)
                 }
             };
             for tile in &ordered {
@@ -447,7 +453,7 @@ impl Renderer {
                 let (half_width_px, half_gap_px) = stroke.half_px(camera.density);
                 let push = Push {
                     tile_to_clip: camera.tile_to_clip(tile.z, tile.x, tile.y),
-                    color: argb_to_rgba(layer.color(palette)),
+                    color: argb_to_rgba(scale_alpha(layer.color(palette), opacity)),
                     line: [half_width_px, half_gap_px, layer.dash.0, layer.dash.1],
                     misc: [camera.tile_span_px(tile.z), 0.0, 0.0, 0.0],
                 };
@@ -532,6 +538,18 @@ impl Drop for Renderer {
             }
         }
     }
+}
+
+/// Multiply a colour's alpha by `opacity`, for the authored `fill-opacity` ramps.
+///
+/// The ramp is applied here rather than folded into the layer table because it is a function of
+/// the camera's zoom: a fill has to fade across a zoom, not switch at one.
+fn scale_alpha(argb: u32, opacity: f32) -> u32 {
+    if opacity >= 1.0 {
+        return argb;
+    }
+    let alpha = (((argb >> 24) & 0xFF) as f32 * opacity.clamp(0.0, 1.0)).round() as u32;
+    (alpha << 24) | (argb & 0x00FF_FFFF)
 }
 
 /// ARGB to the linear RGBA the shaders and clear values take.
