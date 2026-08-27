@@ -851,7 +851,9 @@ fn uniform(state: &mut u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, Act, Builder};
+    use super::super::{
+        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, Act, Builder,
+    };
     use super::*;
 
     /// Build a plan whose only ops come from `record`, run it, and return the output.
@@ -1825,9 +1827,29 @@ mod tests {
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
 
+        // A voice is a runtime download rather than a bundled asset, so the vocoder's
+        // `.vkml` is given by path instead of being looked up in the tree.
+        if graph == "vits_dec" {
+            let path = std::env::var("PARITY_VKML").expect("PARITY_VKML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_DEC)
+                .expect("the vocoder asset parses");
+            let plan = vits_dec::build(&weights, width).expect("vits_dec builds");
+            let audio = run(&plan, weights.data(), &input).expect("the vocoder runs");
+            write(&dir.join("reference.f32"), &audio);
+            println!("vits_dec at {width} frames: wrote {} samples", audio.len());
+            return;
+        }
+
         let (path, id) = match graph.as_str() {
-            "ppocr_rec" => ("library/ocr/src/main/assets/ppocr_rec.vkml", crate::weights::graph::PPOCR_REC),
-            "ppocr_det" => ("library/ocr/src/main/assets/ppocr_det.vkml", crate::weights::graph::PPOCR_DET),
+            "ppocr_rec" => (
+                "library/ocr/src/main/assets/ppocr_rec.vkml",
+                crate::weights::graph::PPOCR_REC,
+            ),
+            "ppocr_det" => (
+                "library/ocr/src/main/assets/ppocr_det.vkml",
+                crate::weights::graph::PPOCR_DET,
+            ),
             other => panic!("no parity probe for {other}"),
         };
         let bytes = asset(path).unwrap_or_else(|| panic!("{path} is not checked out"));
@@ -1844,12 +1866,17 @@ mod tests {
             _ => outputs.get(1),
         }
         .expect("a probe output");
-        let mut out = Vec::with_capacity(probe.len() * 4);
-        for value in probe {
+        write(&dir.join("reference.f32"), probe);
+        println!("{graph} at {width}: wrote {} values", probe.len());
+    }
+
+    /// `values` as little-endian `f32`, for the parity script to read back.
+    fn write(path: &std::path::Path, values: &[f32]) {
+        let mut out = Vec::with_capacity(values.len() * 4);
+        for value in values {
             out.extend_from_slice(&value.to_le_bytes());
         }
-        std::fs::write(dir.join("reference.f32"), out).expect("writes");
-        println!("{graph} at {width}: wrote {} values", probe.len());
+        std::fs::write(path, out).expect("writes");
     }
 
     /// The shipped `.vkml` for `name`, or `None` if it is not checked out.

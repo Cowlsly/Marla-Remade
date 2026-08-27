@@ -109,14 +109,27 @@ EXPECTED_DIGEST = {
     "mobilefacenet": "40987839aec03378958581deba29ce9fd9dd1ae9aa88d0c7ad04a885a2e2122c",
     "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
-    "vits_dec": "",
+    "vits_dec": "ac3fa714b9c0074e7fb7fa1d5f5b65e30bf558df0817b014897cd56b6e850020",
 }
 
-# What each graph is exported at, as `[channels, height, width]` after the batch
-# dimension. `None` is a dimension the export leaves symbolic, which only SCRFD does:
-# it runs at 640 on the long side and whatever the short side pads up to, so baking a
-# size in would bake in one photo's aspect ratio.
+# Graphs that are one **module** of a larger export, keyed by the node-name prefix that
+# selects it.
 #
+# Piper's VITS is a single 2755-node ONNX and it cannot be one plan: its duration predictor
+# samples noise and builds a monotonic alignment out of `NonZero`, `ScatterND` and
+# `GatherND`, and the length of everything after it depends on the durations it predicted.
+# But the export keeps its Torch module paths, so the graph partitions along exactly the
+# lines the model was written in - `enc_p`, `dp`, `flow`, `dec` - and the three static ones
+# convert independently. See `nets::vits_dec`.
+#
+# A module-scoped graph has no GEOMETRY entry: its input is another module's output rather
+# than a graph input, so there is nothing at the boundary to check a shape against. What is
+# checked instead is the op inventory within the module, which is the same guard by another
+# route.
+MODULES = {
+    "vits_dec": "/dec/",
+}
+
 # `outputs` are the graph outputs the Rust forward pass corresponds to; the export may
 # declare more (U^2-Netp declares all seven of its side outputs and we read one).
 GEOMETRY = {
@@ -171,6 +184,11 @@ EXPECTED_OPS = {
         "Conv": 49, "PRelu": 34, "Add": 12, "BatchNormalization": 1, "Flatten": 1,
         "Gemm": 1,
     },
+    # Counted within `/dec/` only; see `MODULES`. The `Div`s are the three that average each
+    # stage's residual blocks, which `nets::vits_dec` lowers to `Kind::Affine` at 1/3.
+    "vits_dec": {
+        "Conv": 20, "ConvTranspose": 3, "LeakyRelu": 16, "Add": 24, "Div": 3, "Tanh": 1,
+    },
 }
 
 
@@ -194,15 +212,52 @@ class Layer:
         return self._key
 
 
-def convolution_key(node, weight, bias):
-    """The digest key for a `Conv`/`ConvTranspose`.
+def lift_to_2d(weight, node):
+    """A 1-D convolution's rank-3 weight as the rank-4 one this runtime indexes.
 
-    Byte-for-byte the string the first version of this script produced, so the pinned
-    selfie and u2netp digests survive every later addition here.
+    A tensor here is `[c, h, w]` with no rank-3 case, so a 1-D convolution is a 2-D one
+    whose kernel is `1 x k` — which is exactly what `nets::vits_dec` transcribes. Inserting
+    the height axis is a reshape of the same bytes in the same order, and doing it here means
+    the Rust reads `[out, in, 1, k]` like every other kernel rather than carrying a special
+    case for audio.
+
+    Returns `(weight, spatial)`, where `spatial` is the kernel/dilation/pad/stride form the
+    digest key should record: also lifted to two dimensions, so a reader comparing the key
+    against the Rust sees the same `(1, k)` the Rust wrote.
     """
     attrs = {a.name: a for a in node.attribute}
 
     def ints(name, default):
+        return list(attrs[name].ints) if name in attrs else list(default)
+
+    if weight.ndim != 3:
+        return weight, None
+    lifted = weight.reshape(weight.shape[0], weight.shape[1], 1, weight.shape[2])
+    # ONNX orders pads as all the begins then all the ends, so a 1-D `[before, after]`
+    # becomes `[0, before, 0, after]` rather than being padded on the right.
+    pads = ints("pads", (0, 0))
+    return lifted, {
+        "kernel_shape": [1] + ints("kernel_shape", [weight.shape[2]]),
+        "dilations": [1] + ints("dilations", [1]),
+        "strides": [1] + ints("strides", [1]),
+        "pads": [0, pads[0], 0, pads[1]],
+    }
+
+
+def convolution_key(node, weight, bias, spatial=None):
+    """The digest key for a `Conv`/`ConvTranspose`.
+
+    Byte-for-byte the string the first version of this script produced, so the pinned
+    selfie and u2netp digests survive every later addition here.
+
+    `spatial` overrides the node's own attributes, for a 1-D convolution that
+    [`lift_to_2d`] has turned into a `1 x k` one.
+    """
+    attrs = {a.name: a for a in node.attribute}
+
+    def ints(name, default):
+        if spatial is not None and name in spatial:
+            return list(spatial[name])
         return list(attrs[name].ints) if name in attrs else list(default)
 
     return (
@@ -274,12 +329,28 @@ def fold_batch_norm(node, inits, weight, bias):
     return folded_weight, folded_bias
 
 
-def collect_layers(model):
-    """The weighted nodes in topological order, with the tensors each contributes."""
+def collect_layers(model, prefix=None):
+    """The weighted nodes in topological order, with the tensors each contributes.
+
+    `prefix` restricts the walk to one Torch module; see [`MODULES`].
+    """
     graph = model.graph
     inits = {i.name: i for i in graph.initializer}
+    # A module-scoped export keeps its weights in `Constant` nodes rather than the
+    # initializer list, the way PP-OCRv5's recognition export does.
+    constants = {}
+    for node in graph.node:
+        if node.op_type == "Constant":
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    constants[node.output[0]] = attribute.t
     shapes = inferred_shapes(model)
-    array = lambda name: numpy_helper.to_array(inits[name])  # noqa: E731
+
+    def held(name):
+        return name in inits or name in constants
+
+    def array(name):
+        return numpy_helper.to_array(inits[name] if name in inits else constants[name])
 
     # Which node's output each BatchNormalization consumes, so the layer producing it
     # can absorb it.
@@ -289,26 +360,32 @@ def collect_layers(model):
     layers = []
     tensors = []
     for node in graph.node:
+        if prefix is not None and not node.name.startswith(prefix):
+            continue
         first_tensor = len(tensors)
         if node.op_type in ("Conv", "ConvTranspose"):
-            missing = [n for n in node.input[1:] if n not in inits]
+            missing = [n for n in node.input[1:] if not held(n)]
             if missing:
                 raise SystemExit(
-                    f"{node.output[0]}: weight/bias {missing} is not an initializer. "
+                    f"{node.output[0]}: weight/bias {missing} is not a constant. "
                     "A computed weight means this is not the frozen export we lower."
                 )
             weight = array(node.input[1])
+            weight, spatial = lift_to_2d(weight, node)
             bias = array(node.input[2]) if len(node.input) > 2 else None
             if bias is None:
-                raise SystemExit(
-                    f"{node.output[0]}: no bias. The shaders always add one, so a "
-                    "bias-less layer would need a zero tensor synthesised here."
-                )
-            key = convolution_key(node, weight, bias)
+                # The shaders always add a bias, so a layer without one gets a zero. Exact,
+                # and recorded in the key so the digest notices if a layer that used to have
+                # a bias stops having one — which would otherwise look like the same table.
+                channels = weight.shape[1] if node.op_type == "ConvTranspose" else weight.shape[0]
+                bias = np.zeros(channels, dtype=np.float32)
+                key = convolution_key(node, weight, bias, spatial) + " b0=synthesised"
+            else:
+                key = convolution_key(node, weight, bias, spatial)
             tensors.append(weight)
             tensors.append(bias)
         elif node.op_type == "PRelu":
-            if node.input[1] not in inits:
+            if not held(node.input[1]):
                 raise SystemExit(f"{node.output[0]}: a computed PRelu slope")
             slope = array(node.input[1])
             key = f"PRelu s={list(slope.shape)}"
@@ -324,7 +401,7 @@ def collect_layers(model):
                     f"{node.output[0]}: Gemm alpha={alpha} beta={beta} transA={trans_a} "
                     f"transB={trans_b}; only the plain `x @ W.T + b` form is lowered."
                 )
-            missing = [n for n in node.input[1:] if n not in inits]
+            missing = [n for n in node.input[1:] if not held(n)]
             if missing:
                 raise SystemExit(f"{node.output[0]}: Gemm operand {missing} is computed")
             weight = array(node.input[1])
@@ -382,30 +459,40 @@ def layer_table_digest(layers):
 
 def check_graph(model, graph_id_name):
     graph = model.graph
-    want = GEOMETRY[graph_id_name]
+    prefix = MODULES.get(graph_id_name)
+    nodes = [n for n in graph.node if prefix is None or n.name.startswith(prefix)]
 
-    names = [i.name for i in graph.input]
-    if names != [want["input"]]:
-        raise SystemExit(f"inputs are {names}, expected [{want['input']!r}]")
-    dims = [d.dim_value or d.dim_param for d in graph.input[0].type.tensor_type.shape.dim]
-    # Batch may be symbolic. A spatial dim may be too, but only where the expected
-    # shape says so: for the fixed-size nets every folded Resize target and pad below
-    # was resolved at exactly this size, so a dynamic one would silently mislower.
-    got = list(dims[1:])
-    expect = want["shape"]
-    mismatched = len(got) != len(expect) or any(
-        e is not None and g != e for g, e in zip(got, expect)
-    )
-    if mismatched:
-        raise SystemExit(f"input shape {dims}, expected [batch] + {expect}")
+    if prefix is None:
+        want = GEOMETRY[graph_id_name]
+        names = [i.name for i in graph.input]
+        if names != [want["input"]]:
+            raise SystemExit(f"inputs are {names}, expected [{want['input']!r}]")
+        dims = [
+            d.dim_value or d.dim_param for d in graph.input[0].type.tensor_type.shape.dim
+        ]
+        # Batch may be symbolic. A spatial dim may be too, but only where the expected
+        # shape says so: for the fixed-size nets every folded Resize target and pad below
+        # was resolved at exactly this size, so a dynamic one would silently mislower.
+        got = list(dims[1:])
+        expect = want["shape"]
+        mismatched = len(got) != len(expect) or any(
+            e is not None and g != e for g, e in zip(got, expect)
+        )
+        if mismatched:
+            raise SystemExit(f"input shape {dims}, expected [batch] + {expect}")
 
-    outputs = [o.name for o in graph.output]
-    absent = [o for o in want["outputs"] if o not in outputs]
-    if absent:
-        raise SystemExit(f"outputs are {outputs}, expected {absent} among them")
+        outputs = [o.name for o in graph.output]
+        absent = [o for o in want["outputs"] if o not in outputs]
+        if absent:
+            raise SystemExit(f"outputs are {outputs}, expected {absent} among them")
+    elif not nodes:
+        raise SystemExit(
+            f"no nodes are named {prefix!r}. A module-scoped graph relies on the export "
+            "keeping its Torch module paths, which this one has not."
+        )
 
     counts = {}
-    for node in graph.node:
+    for node in nodes:
         counts[node.op_type] = counts.get(node.op_type, 0) + 1
     expected = EXPECTED_OPS[graph_id_name]
     if counts != expected:
@@ -465,7 +552,7 @@ def main():
 
     model = onnx.load(args.onnx)
     check_graph(model, args.graph)
-    layers, tensors = collect_layers(model)
+    layers, tensors = collect_layers(model, MODULES.get(args.graph))
 
     digest = layer_table_digest(layers)
     if args.print_digest:

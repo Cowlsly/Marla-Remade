@@ -52,6 +52,18 @@ from onnx import numpy_helper
 PROBE = {
     "ppocr_rec": None,
     "ppocr_det": "p2o.pd_op.hardswish.23.0",
+    "vits_dec": None,
+}
+
+# Graphs that are one module of a larger export, and have to be cut out of it before they can
+# be run at all.
+#
+# The vocoder's input is the flow's output, so there is no way to reach it from the graph's
+# own input without also running the duration predictor — which samples noise, so two runs
+# would not even agree with each other. `onnx.utils.extract_model` cuts the subgraph at the
+# vocoder's first convolution instead, and the input is random latents.
+SUBGRAPH = {
+    "vits_dec": {"first": "/dec/conv_pre/Conv", "channels": 192},
 }
 
 
@@ -110,22 +122,35 @@ def main():
     parser.add_argument("graph", choices=sorted(PROBE))
     parser.add_argument("onnx")
     parser.add_argument("--width", type=int, default=64)
+    parser.add_argument("--vkml", help="the .vkml, for a graph that is a runtime download")
     args = parser.parse_args()
 
     onnxruntime.set_default_logger_severity(3)
     model = onnx.load(args.onnx)
+    work = tempfile.mkdtemp(prefix="vkml_parity_")
+
+    cut = SUBGRAPH.get(args.graph)
+    if cut is not None:
+        model = extract(args.onnx, model, cut, work)
     probe = PROBE[args.graph] or final_logits(model)
     if probe not in {o.name for o in model.graph.output}:
         model.graph.output.append(
             onnx.helper.make_tensor_value_info(probe, onnx.TensorProto.FLOAT, None)
         )
 
-    height = 48 if args.graph == "ppocr_rec" else args.width
-    work = tempfile.mkdtemp(prefix="vkml_parity_")
-    # Deterministic and free of transcendentals, so both sides read identical bytes.
-    count = 3 * height * args.width
-    ramp = ((np.arange(count, dtype=np.int64) * 37) % 255).astype(np.float32) / 255.0 - 0.5
-    x = ramp.reshape(1, 3, height, args.width)
+    if cut is not None:
+        # Random latents, deterministic. The vocoder is not a classifier, so there is no
+        # "sensible" input; what matters is that both sides see the same one.
+        rng = np.random.default_rng(20240827)
+        x = rng.standard_normal((1, cut["channels"], args.width)).astype(np.float32)
+    else:
+        height = 48 if args.graph == "ppocr_rec" else args.width
+        # Deterministic and free of transcendentals, so both sides read identical bytes.
+        count = 3 * height * args.width
+        ramp = (
+            (np.arange(count, dtype=np.int64) * 37) % 255
+        ).astype(np.float32) / 255.0 - 0.5
+        x = ramp.reshape(1, 3, height, args.width)
     x.tofile(os.path.join(work, "input.f32"))
 
     reference = run(model, probe, x)
@@ -133,6 +158,8 @@ def main():
 
     environment = dict(os.environ, PARITY_DIR=work, PARITY_GRAPH=args.graph)
     environment["PARITY_WIDTH"] = str(args.width)
+    if args.vkml:
+        environment["PARITY_VKML"] = os.path.abspath(args.vkml)
     subprocess.run(
         [
             "cargo", "test", "--release", "-p", "modelrunner", "--lib",
@@ -164,6 +191,23 @@ def main():
     print(f"{args.graph} at {args.width} wide, tensor {probe}:")
     report("fp16 weights alone (the bar)", want, bound)
     report("the runtime", want, got)
+
+
+def extract(path, model, cut, work):
+    """Cut one module out of a larger export, so it can be run on its own.
+
+    The module's input is whatever fed its first layer, which `onnx.utils.extract_model`
+    promotes to a graph input.
+    """
+    first = next((n for n in model.graph.node if n.name == cut["first"]), None)
+    if first is None:
+        raise SystemExit(f"{cut['first']} is not in this export")
+    outputs = [
+        o for o in (n.output[0] for n in model.graph.node if n.name.startswith("/dec/"))
+    ]
+    target = os.path.join(work, "subgraph.onnx")
+    onnx.utils.extract_model(path, target, [first.input[0]], [outputs[-1]])
+    return onnx.load(target)
 
 
 if __name__ == "__main__":
