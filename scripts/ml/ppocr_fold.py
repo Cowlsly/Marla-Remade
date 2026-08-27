@@ -101,14 +101,25 @@ def normalise(model):
     """
     graph = model.graph
     inits = {i.name: numpy_helper.to_array(i) for i in graph.initializer}
+    # The recognition export puts its weights in `Constant` *nodes* rather than in the
+    # initializer list — 330 of them — so those count as constants too. Detection uses
+    # initializers, so both have to work.
+    for node in graph.node:
+        if node.op_type == "Constant":
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    inits[node.output[0]] = numpy_helper.to_array(attribute.t)
 
     # Rewire Identity without mutating the nodes: build an alias map and read every
-    # input through it.
+    # input through it. `Cast` is aliased too — paddle2onnx inserts one in front of every
+    # transposed convolution's weight, and it is a no-op between two float types.
     alias = {}
     for node in graph.node:
-        if node.op_type == "Identity":
+        if node.op_type == "Identity" or (
+            node.op_type == "Cast" and node.input and node.input[0] in inits
+        ):
             alias[node.output[0]] = node.input[0]
-    nodes = [n for n in graph.node if n.op_type != "Identity"]
+    nodes = [n for n in graph.node if n.op_type not in ("Identity", "Constant")]
     inputs_of = {id(n): [resolve(i, alias) for i in n.input] for n in nodes}
 
     producer = {}
