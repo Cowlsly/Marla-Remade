@@ -130,6 +130,13 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
         // 32-bit devices (Google TV) opt in with `nativeAbis { armv7 = true }`.
         ndk {
             abiFilters.add(ABI_ARM64)
+            // `-PemulatorAbi=x86_64` additionally packages x86_64, so a native module can
+            // be run in an emulator on an x86_64 host. Off unless asked for, so no release
+            // build is affected. abiFilters only filters what was built, so the module
+            // must also opt in via `rustNativeLib(extraAbis = ...)`.
+            if (providers.gradleProperty("emulatorAbi").orNull == ABI_X86_64) {
+                abiFilters.add(ABI_X86_64)
+            }
         }
     }
 
@@ -184,6 +191,9 @@ configure<com.android.build.api.dsl.ApplicationExtension> {
             ndk {
                 abiFilters.clear()
                 abiFilters.add(ABI_ARM64)
+                if (providers.gradleProperty("emulatorAbi").orNull == ABI_X86_64) {
+                    abiFilters.add(ABI_X86_64)
+                }
             }
             // initWith(release) copied DEV_BUILD=false; dev is a developer build, so flip it on.
             buildConfigField("boolean", "DEV_BUILD", "true")

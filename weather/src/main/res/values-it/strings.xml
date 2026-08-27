@@ -7,7 +7,6 @@
     <string name="weather_title">Meteo</string>
     <string name="add_location">Aggiungi una località</string>
     <string name="map_time">Tempo</string>
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="weather_widget_description">Ora, data e meteo a colpo d\'occhio — tocca per le previsioni</string>
     <string name="no_locations_yet">Nessuna località</string>
     <string name="add_a_city_or_use_your_current_location">Aggiunti una città o utilizza la posizione attuale per vedere le previsioni.</string>

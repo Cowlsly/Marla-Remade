@@ -8,7 +8,6 @@
     <string name="weather_title">Počasí</string>
     <string name="add_location">Přidat místo</string>
     <string name="map_time">Čas</string>
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="no_locations_yet">Zatím žádné místa</string>
     <string name="add_a_city_or_use_your_current_location">Přidejte město nebo použijte vaši aktuální polohu pro zobrazení předpovědi.</string>
     <string name="use_current_location">Použít aktuální polohu</string>

@@ -135,14 +135,20 @@ class MetadataPreviews {
     )
 
     /**
-     * Stands in for the live [MapView] in the `map` slot. Layoutlib cannot fetch the network
-     * raster tiles the real [MapView] draws, so instead of a synthetic grid we bundle a real
-     * CARTO Voyager basemap mosaic (`preview_map_sf.png`, a screenshotTest-only classpath
+     * Stands in for the live [MapView] in the `map` slot. Layoutlib cannot reach the network,
+     * and the real [MapView] now draws through Vulkan besides, so instead of a synthetic grid
+     * we bundle a real basemap mosaic (`preview_map_sf.png`, a screenshotTest-only classpath
      * resource centered on [mayaLocation]) and overlay the sample person marker exactly like
      * the app does. The mosaic is a JVM resource rather than an Android drawable so it never
-     * ships in the app APK. The "© CARTO © OpenStreetMap" attribution is required by the
-     * basemap terms and must stay visible. Image + static overlays only — no network or
-     * effects — so it renders under Layoutlib.
+     * ships in the app APK. Image + static overlays only — no network or effects — so it
+     * renders under Layoutlib.
+     *
+     * **The mosaic is stale.** It is a CARTO Voyager capture, and the app no longer renders
+     * CARTO tiles — it renders the self-hosted Protomaps archive. The attribution below still
+     * credits CARTO because that is what this *image* is, and crediting Protomaps for a CARTO
+     * capture would be a worse error than the staleness. Regenerating it means capturing the
+     * Vulkan renderer on a device, which has to wait until that is verified on hardware; the
+     * attribution moves to "© OpenStreetMap contributors · Protomaps" in the same change.
      */
     @Composable
     private fun StaticMapBackdrop() {

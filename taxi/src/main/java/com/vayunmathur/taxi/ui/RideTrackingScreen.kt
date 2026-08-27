@@ -38,8 +38,7 @@ import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
-import com.vayunmathur.library.map.RasterMap
-import com.vayunmathur.library.map.TileSource
+import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.ui.AlertDialog
 import com.vayunmathur.library.ui.AppScaffold
@@ -282,7 +281,7 @@ private fun TrackingMap(ride: ActiveRide?, driverLoc: DriverLocation?, modifier:
     }
 
     Box(modifier) {
-        RasterMap(cameraState = camera, tileSource = TileSource.CartoVoyager)
+        VectorMap(cameraState = camera)
         val projection = camera.projection
         if (projection != null) {
             pickup?.let {

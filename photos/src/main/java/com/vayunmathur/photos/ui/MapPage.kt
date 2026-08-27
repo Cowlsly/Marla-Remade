@@ -50,8 +50,7 @@ import kotlinx.coroutines.withContext
 import androidx.compose.runtime.snapshotFlow
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
-import com.vayunmathur.library.map.RasterMap
-import com.vayunmathur.library.map.TileSource
+import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 
 // Helper class to hold cluster data
@@ -138,9 +137,8 @@ fun MapPage(
     // would break the immersive map) and the body is not a LazyColumn.
     Scaffold(bottomBar = { NavigationBar(Route.Map, backStack) }) { paddingValues ->
         Box(Modifier.padding(paddingValues).fillMaxSize()) {
-            RasterMap(
+            VectorMap(
                 cameraState = cameraState,
-                tileSource = TileSource.CartoVoyager,
                 onMapClick = {
                     selectedCluster = null
                 },

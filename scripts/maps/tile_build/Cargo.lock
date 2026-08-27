@@ -74,4 +74,12 @@ version = "0.1.0"
 dependencies = [
  "miniz_oxide",
  "rayon",
+ "tilecodec",
+]
+
+[[package]]
+name = "tilecodec"
+version = "0.1.0"
+dependencies = [
+ "miniz_oxide",
 ]

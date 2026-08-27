@@ -74,8 +74,8 @@ import com.vayunmathur.library.map.GestureOptions
 import com.vayunmathur.library.map.ImageOverlay
 import com.vayunmathur.library.map.MapOptions
 import com.vayunmathur.library.map.OrnamentOptions
-import com.vayunmathur.library.map.RasterMap
-import com.vayunmathur.library.map.TileSource
+import com.vayunmathur.library.map.MapStyle
+import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.map.GeoBounds
 import com.vayunmathur.library.map.GeoPoint
@@ -290,14 +290,19 @@ fun WeatherMapPage(
     val valueFormatter = metricValueFormatter(selectedMetric, tempUnit, windUnit, pressureUnit)
 
     Box(modifier = Modifier.fillMaxSize()) {
-        RasterMap(
+        VectorMap(
             modifier = Modifier.fillMaxSize(),
             cameraState = camera,
-            tileSource = TileSource.CartoPositron,
+            // Muted, so the colour-ramp overlay below reads over the basemap rather than
+            // competing with it. This is what TileSource.CartoPositron was for.
+            style = MapStyle.Muted,
             options = MapOptions(
                 // Lock rotation/tilt so the north-up image quad stays aligned.
                 gestureOptions = GestureOptions.RotationLocked,
-                // Weather shows its own attribution in the bottom panel.
+                // Ornaments off. Note attribution is NOT an ornament any more: the map
+                // renders it unconditionally, because it is a licence condition of the
+                // OpenStreetMap data rather than a preference. Weather's own copy in the
+                // bottom panel was removed rather than duplicated.
                 ornamentOptions = OrnamentOptions.AllDisabled,
             ),
             imageOverlay = overlay?.let { bmp ->
@@ -387,12 +392,6 @@ fun WeatherMapPage(
                     metric = selectedMetric,
                     minLabel = valueFormatter(ramp.first().value),
                     maxLabel = valueFormatter(ramp.last().value),
-                )
-                Text(
-                    text = stringResource(R.string.map_attribution),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 6.dp),
                 )
             }
         }

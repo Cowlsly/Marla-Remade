@@ -53,8 +53,6 @@
 
     <!-- Map time slider label when layer time is null fallback. Noun -->
     <string name="map_time">Time</string>
-    <!-- Attribution footer for OpenStreetMap &amp; CARTO tile sources on map. Keep © symbols and names -->
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
 
     <!-- Condition: clear sky. Adjective/noun -->
     <string name="condition_clear">Clear</string>

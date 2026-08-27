@@ -1,0 +1,682 @@
+//! Turns MVT polygon geometry into fill triangles.
+//!
+//! The bridge between `tilecodec::mvt::decode_polygons`'s `[polygon][ring]` output
+//! and [`super::earcut`]'s single flat array plus hole offsets. Fill vertices carry
+//! position only — colour is a per-draw push constant, since a style layer is one
+//! colour by definition and per-vertex colour would quadruple the vertex buffer for
+//! nothing.
+//!
+//! # Why the rings are regrouped before they reach earcut
+//!
+//! Earcut's model is one exterior ring plus holes that are inside it and disjoint from
+//! each other. The published archive does not honour that. Its z0 ocean polygon carries
+//! 105 holes of which 40 overlap another hole, 6 straddle the exterior boundary, 4 lie
+//! wholly outside it, and 13 are lakes nested *inside* a continent hole. Handing that
+//! straight to earcut is what produced the fan of slivers over the Arctic: a bridged ring
+//! that self-intersects has no ears, so clipping stalls, the split-and-retry fallback
+//! fires dozens of times, and it emits triangles that span the polygon. The geometry is
+//! only 0.0016 of the tile wrong; the tessellation came out 0.089 wrong — 12% of the tile
+//! painted blue over land.
+//!
+//! So [`polygons`] rebuilds the ring nesting the way the fill rules define it: a ring at
+//! even nesting depth is an exterior, a ring at odd depth is a hole of the ring that
+//! encloses it most closely, and each exterior is tessellated separately. That alone fixes
+//! the nested lakes, which earcut has no way to express. The remaining conflicts — a hole
+//! that crosses its own exterior, or two holes that overlap — cannot be expressed either,
+//! and those holes are dropped, largest first so the biggest island survives. Filling in a
+//! small island costs far less area than the slivers do.
+//!
+//! Earcut itself now matches upstream v2.2.4 exactly and is deliberately kept that way, so
+//! it can still be diffed against the reference; nothing here works around a defect in it.
+//!
+//! The invalid geometry very likely originates in our own tile build, which clips each
+//! ring independently — see `scripts/maps`. The renderer has to cope with the archive that
+//! exists regardless.
+
+use super::earcut;
+
+/// Floats per vertex: `x, y`.
+pub const FLOATS_PER_VERTEX: usize = 2;
+
+/// Coordinates below this many make a ring that encloses nothing.
+const MIN_RING_COORDS: usize = 6;
+
+/// Tessellate one polygon: the exterior ring first, then holes, each flat and
+/// **closed** as `decode_polygons` returns them.
+pub fn tessellate(
+    rings: &[Vec<(i32, i32)>],
+    extent: u32,
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+) {
+    // Earcut wants rings with no repeated closing vertex, in one flat array.
+    let mut open: Vec<&[(i32, i32)]> = Vec::with_capacity(rings.len());
+    for (r, ring) in rings.iter().enumerate() {
+        let length = open_length(ring);
+        if length * 2 < MIN_RING_COORDS {
+            // A dropped exterior takes its holes with it — a hole with nothing around
+            // it renders as solid fill, which is worse than the feature being absent.
+            // A dropped hole is only a missing hole.
+            if r == 0 {
+                return;
+            }
+            continue;
+        }
+        open.push(&ring[..length]);
+    }
+    if open.is_empty() {
+        return;
+    }
+
+    // Only the rings that made it into a group are emitted, so a dropped hole leaves no
+    // unreferenced vertices behind — the z0 ocean drops enough of them to matter. `offsets`
+    // maps a ring to where its vertices land, so a group's triangles can be mapped back
+    // after being renumbered for its own earcut call.
+    let groups = polygons(&open);
+    let mut offsets = vec![usize::MAX; open.len()];
+    let mut emitted: Vec<usize> = Vec::with_capacity(open.len());
+    let mut vertex_count = 0usize;
+    for group in &groups {
+        for &r in group {
+            if offsets[r] == usize::MAX {
+                offsets[r] = vertex_count;
+                vertex_count += open[r].len();
+                emitted.push(r);
+            }
+        }
+    }
+
+    let mut triangles: Vec<u32> = Vec::new();
+    let mut coords: Vec<i32> = Vec::new();
+    let mut hole_starts: Vec<usize> = Vec::new();
+    let mut global: Vec<u32> = Vec::new();
+    for group in &groups {
+        coords.clear();
+        hole_starts.clear();
+        global.clear();
+        for (position, &r) in group.iter().enumerate() {
+            if position > 0 {
+                hole_starts.push(coords.len() / 2);
+            }
+            for (v, &(x, y)) in open[r].iter().enumerate() {
+                coords.push(x);
+                coords.push(y);
+                global.push((offsets[r] + v) as u32);
+            }
+        }
+        triangles.extend(
+            earcut::triangulate(&coords, &hole_starts).iter().map(|&t| global[t as usize]),
+        );
+    }
+    if triangles.is_empty() {
+        return;
+    }
+
+    let scale = 1.0 / extent as f32;
+    let base = (vertices.len() / FLOATS_PER_VERTEX) as u32;
+    for &r in &emitted {
+        for &(x, y) in open[r].iter() {
+            vertices.push(x as f32 * scale);
+            vertices.push(y as f32 * scale);
+        }
+    }
+    indices.extend(triangles.iter().map(|&t| base + t));
+}
+
+/// Bounding box, as `(min_x, min_y, max_x, max_y)`. Assumes a non-empty ring, which the
+/// [`MIN_RING_COORDS`] gate in [`tessellate`] guarantees.
+fn bounds(ring: &[(i32, i32)]) -> (i32, i32, i32, i32) {
+    let mut box_ = (ring[0].0, ring[0].1, ring[0].0, ring[0].1);
+    for &(x, y) in &ring[1..] {
+        box_.0 = box_.0.min(x);
+        box_.1 = box_.1.min(y);
+        box_.2 = box_.2.max(x);
+        box_.3 = box_.3.max(y);
+    }
+    box_
+}
+
+fn boxes_overlap(a: (i32, i32, i32, i32), b: (i32, i32, i32, i32)) -> bool {
+    a.0 <= b.2 && a.2 >= b.0 && a.1 <= b.3 && a.3 >= b.1
+}
+
+fn box_area(box_: (i32, i32, i32, i32)) -> i64 {
+    (box_.2 as i64 - box_.0 as i64) * (box_.3 as i64 - box_.1 as i64)
+}
+
+/// Even-odd point-in-ring.
+///
+/// The crossing test is an integer cross product rather than a division, as in
+/// [`super::earcut`]: truncation would put a vertex on one side of an edge here and the
+/// other side there, and the ring grouping this feeds has to be the same on every device.
+fn point_in_ring(x: i32, y: i32, ring: &[(i32, i32)]) -> bool {
+    let mut inside = false;
+    for i in 0..ring.len() {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % ring.len()];
+        if (y1 > y) != (y2 > y) {
+            let dy = y2 as i64 - y1 as i64;
+            let along = (x as i64 - x1 as i64) * dy;
+            let at = (y as i64 - y1 as i64) * (x2 as i64 - x1 as i64);
+            if if dy > 0 { along < at } else { along > at } {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// Twice the unsigned area of the ring.
+fn ring_area2(ring: &[(i32, i32)]) -> i64 {
+    let mut sum = 0i64;
+    for i in 0..ring.len() {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % ring.len()];
+        sum += x1 as i64 * y2 as i64 - x2 as i64 * y1 as i64;
+    }
+    sum.abs()
+}
+
+/// Does either ring have a vertex inside the other? Cheaper than an edge-crossing test and
+/// enough to spot the overlapping holes, which overlap over an area rather than just
+/// grazing.
+fn rings_overlap(a: &[(i32, i32)], b: &[(i32, i32)]) -> bool {
+    a.iter().any(|&(x, y)| point_in_ring(x, y, b))
+        || b.iter().any(|&(x, y)| point_in_ring(x, y, a))
+}
+
+/// Regroup rings into polygons earcut can actually express — see the module docs for why.
+///
+/// Each returned group is `[exterior, hole, hole, ..]` as indices into `rings`.
+fn polygons(rings: &[&[(i32, i32)]]) -> Vec<Vec<usize>> {
+    let count = rings.len();
+    let boxes: Vec<(i32, i32, i32, i32)> = rings.iter().map(|r| bounds(r)).collect();
+
+    // Enclosing rings per ring, each with the vote that decided it. A majority vote rather
+    // than one probe vertex, so a ring that poked a few vertices outside its container
+    // during clipping is still recognised as being inside it — and the vote doubles as the
+    // straddle test below, at no extra cost.
+    let mut enclosing: Vec<Vec<(usize, usize)>> = vec![Vec::new(); count];
+    for j in 0..count {
+        for i in 0..count {
+            // Only a ring with a larger box can enclose a smaller one. That prunes the
+            // hole-against-hole half of this cheaply; every hole is still swept against the
+            // exterior, which is what the cost actually goes on.
+            if i == j
+                || !boxes_overlap(boxes[i], boxes[j])
+                || box_area(boxes[i]) < box_area(boxes[j])
+            {
+                continue;
+            }
+            let votes =
+                rings[j].iter().filter(|&&(x, y)| point_in_ring(x, y, rings[i])).count();
+            if votes * 2 > rings[j].len() {
+                enclosing[j].push((i, votes));
+            }
+        }
+    }
+    let depth: Vec<usize> = enclosing.iter().map(|e| e.len()).collect();
+
+    let mut groups = Vec::new();
+    for exterior in 0..count {
+        if depth[exterior] % 2 != 0 {
+            continue;
+        }
+
+        let mut holes: Vec<(usize, usize)> = Vec::new();
+        for j in 0..count {
+            if depth[j] % 2 == 0 {
+                continue;
+            }
+            // The most deeply nested enclosing ring is the one this is a hole of.
+            let mut closest: Option<(usize, usize)> = None;
+            for &(ring, votes) in &enclosing[j] {
+                if closest.map_or(true, |(held, _)| depth[ring] > depth[held]) {
+                    closest = Some((ring, votes));
+                }
+            }
+            if closest.is_some_and(|(ring, _)| ring == exterior) {
+                holes.push((j, closest.unwrap().1));
+            }
+        }
+        // Largest first, so where a conflict forces a hole out it is the smaller island
+        // that gets filled in. Cached keys: the shoelace walk is O(ring), and coastline
+        // holes run to a thousand vertices.
+        holes.sort_by_cached_key(|&(j, _)| std::cmp::Reverse(ring_area2(rings[j])));
+
+        let mut group = vec![exterior];
+        for (j, votes) in holes {
+            // A hole that straddles its exterior, or overlaps a hole already taken, makes
+            // the bridged ring self-intersecting, and earcut answers that with slivers
+            // spanning the whole polygon. Losing the hole costs far less area.
+            //
+            // Both tests are vertex votes rather than exact edge-crossing tests, which is
+            // an order of magnitude cheaper and, on the archive's worst polygon, selects
+            // exactly the holes that do cross: no ring is dropped that did not need to be.
+            // A hole that crosses out and back between two consecutive vertices is missed,
+            // and is simply tolerated — one such ring survives on the z0 ocean.
+            let straddles = votes != rings[j].len();
+            let overlaps = group[1..].iter().any(|&k| {
+                boxes_overlap(boxes[j], boxes[k]) && rings_overlap(rings[j], rings[k])
+            });
+            if !straddles && !overlaps {
+                group.push(j);
+            }
+        }
+        groups.push(group);
+    }
+    groups
+}
+
+/// Vertex count of `ring` with any repeated closing vertices excluded.
+fn open_length(ring: &[(i32, i32)]) -> usize {
+    let mut length = ring.len();
+    while length >= 2 && ring[0] == ring[length - 1] {
+        length -= 1;
+    }
+    length
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Total unsigned area of the emitted triangles, in tile-normalised units.
+    fn covered_area(vertices: &[f32], indices: &[u32]) -> f64 {
+        let mut total = 0.0;
+        for t in indices.chunks_exact(3) {
+            let p = |i: u32| -> (f64, f64) {
+                let at = i as usize * FLOATS_PER_VERTEX;
+                (vertices[at] as f64, vertices[at + 1] as f64)
+            };
+            let (ax, ay) = p(t[0]);
+            let (bx, by) = p(t[1]);
+            let (cx, cy) = p(t[2]);
+            total += ((bx - ax) * (cy - ay) - (cx - ax) * (by - ay)).abs() / 2.0;
+        }
+        total
+    }
+
+    fn square(size: i32) -> Vec<(i32, i32)> {
+        // Closed, as decode_polygons returns rings.
+        vec![(0, 0), (size, 0), (size, size), (0, size), (0, 0)]
+    }
+
+    #[test]
+    fn a_closed_ring_loses_its_repeated_vertex() {
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&[square(4096)], 4096, &mut v, &mut idx);
+        assert_eq!(v.len() / FLOATS_PER_VERTEX, 4, "the closing vertex is not a vertex");
+        assert_eq!(idx.len(), 6);
+        // The whole tile, so area 1 in tile-normalised units.
+        assert!((covered_area(&v, &idx) - 1.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn positions_are_tile_normalised() {
+        let mut v = Vec::new();
+        tessellate(&[square(4096)], 4096, &mut v, &mut Vec::new());
+        for f in &v {
+            assert!(*f >= 0.0 && *f <= 1.0, "{f} is not tile-normalised");
+        }
+    }
+
+    /// The area a correct tessellation must cover: the even-odd region of every ring.
+    ///
+    /// Not `exterior - sum(holes)`. The published archive contains holes that overlap each
+    /// other and lakes nested inside continent holes, so subtracting each ring's area
+    /// independently double-counts both — on the z0 ocean that reads 0.7096 against a true
+    /// 0.7135. Even-odd and non-zero winding agree on this figure, and it is what a
+    /// rasteriser would paint, so integrate it directly instead of approximating it.
+    fn expected_area(rings: &[Vec<(i32, i32)>], extent: u32) -> f64 {
+        let mut edges: Vec<((i32, i32), (i32, i32))> = Vec::new();
+        for ring in rings {
+            let n = open_length(ring);
+            if n < 3 {
+                continue;
+            }
+            for i in 0..n {
+                let (a, b) = (ring[i], ring[(i + 1) % n]);
+                // Horizontal edges cross no scanline.
+                if a.1 != b.1 {
+                    edges.push((a, b));
+                }
+            }
+        }
+        if edges.is_empty() {
+            return 0.0;
+        }
+        let lo = edges.iter().map(|e| e.0 .1.min(e.1 .1)).min().unwrap();
+        let hi = edges.iter().map(|e| e.0 .1.max(e.1 .1)).max().unwrap();
+
+        // Coordinates are integers, so which edges cross a scanline can only change at an
+        // integer y. Sampling each unit band at its midpoint therefore integrates that band
+        // exactly, bar the fractional-y crossings the overlapping rings introduce; those
+        // move the total by under 1e-7 of the tile, checked against an 8x finer sweep.
+        let mut crossings: Vec<f64> = Vec::new();
+        let mut total = 0.0f64;
+        for row in lo..hi {
+            let y = row as f64 + 0.5;
+            crossings.clear();
+            for &((x1, y1), (x2, y2)) in &edges {
+                if (y1 as f64 > y) != (y2 as f64 > y) {
+                    let t = (y - y1 as f64) / (y2 as f64 - y1 as f64);
+                    crossings.push(x1 as f64 + t * (x2 as f64 - x1 as f64));
+                }
+            }
+            crossings.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let mut i = 0;
+            while i + 1 < crossings.len() {
+                total += crossings[i + 1] - crossings[i];
+                i += 2;
+            }
+        }
+        let scale = 1.0 / extent as f64;
+        total * scale * scale
+    }
+
+    /// Every polygon of every layer of the published tile, as the renderer sees them.
+    fn real_polygons() -> Vec<(String, u32, Vec<Vec<(i32, i32)>>)> {
+        const REAL_TILE: &[u8] = include_bytes!("../../tests/fixtures/v5ca_z11_tile.mvt");
+        let tile = tilecodec::mvt::Tile::decode(REAL_TILE).expect("the published tile decodes");
+        let mut out = Vec::new();
+        for layer in &tile.layers {
+            for feature in &layer.features {
+                if feature.geom_type != tilecodec::mvt::GeomType::Polygon {
+                    continue;
+                }
+                let Some(polygons) = tilecodec::mvt::decode_polygons(&feature.geometry) else {
+                    continue;
+                };
+                for rings in polygons {
+                    out.push((layer.name.clone(), layer.extent, rings));
+                }
+            }
+        }
+        out
+    }
+
+    /// The published **z0** tile, whose `water` layer holds the ocean as one polygon with 105
+    /// holes — one per continent and major island.
+    ///
+    /// This is here because synthetic cases are not hard enough. A grid of a hundred square
+    /// holes tessellates exactly; this does not, and it is what the app actually draws. Real
+    /// coastlines are clipped at the tile edge, contain long collinear runs, and have holes
+    /// that touch the exterior ring.
+    const REAL_Z0_TILE: &[u8] = include_bytes!("../../tests/fixtures/v4_z0_tile.mvt");
+
+    /// The z0 ocean, which is the hardest polygon in the archive and the one that exposed
+    /// how invalid the published geometry is.
+    ///
+    /// Synthetic cases are not hard enough: a grid of a hundred square holes tessellates
+    /// exactly, and this does not. Real coastlines are clipped at the tile edge, contain
+    /// long collinear runs, and have holes that touch the exterior.
+    ///
+    /// This once covered 0.8004 of the tile against a true 0.7135, and on device showed a
+    /// fan of long thin slivers radiating from the Arctic corner. Two things were ruled out
+    /// the expensive way and are worth recording, because both look like the obvious
+    /// culprit and neither is:
+    ///
+    /// * **The earcut port matches upstream.** A literal transliteration of upstream v2.2.4,
+    ///   built independently over object references rather than an index arena, produces
+    ///   byte-identical output on this polygon — the same 5532 triangles in the same order.
+    ///   Upstream earcut is equally wrong here. That agreement holds only with the undoubled
+    ///   `dy` in earcut's `middle_inside`; without it the port emits 5540 triangles for
+    ///   0.8060, so it did once diverge and this comparison is evidence for that fix rather
+    ///   than grounds to undo it.
+    /// * **A vetted crate would not have helped.** Upstream's own later rework of the
+    ///   fallback paths, `compareXYSlope` hole ordering included, still gives 0.7694 on
+    ///   this input. `compareXYSlope` in isolation changes nothing at all, because it only
+    ///   engages when two holes share a leftmost *point* and none here do.
+    ///
+    /// What was actually wrong was the input, and [`super::polygons`] is the fix. See the
+    /// module docs.
+    #[test]
+    fn the_published_ocean_polygon_conserves_area() {
+        // The ocean is drawn over `earth`, so any area it covers beyond its true extent is a
+        // continent painted blue. At its worst this covered 0.981 of the tile and the map had
+        // no coastlines at all.
+        let tile = tilecodec::mvt::Tile::decode(REAL_Z0_TILE).expect("the published z0 tile");
+        let water = tile.layer("water").expect("a water layer");
+
+        let mut checked = 0;
+        for feature in &water.features {
+            if feature.geom_type != tilecodec::mvt::GeomType::Polygon {
+                continue;
+            }
+            let Some(polygons) = tilecodec::mvt::decode_polygons(&feature.geometry) else {
+                continue;
+            };
+            for rings in &polygons {
+                if rings.len() < 50 {
+                    // Only the ocean group is interesting; the lakes are single rings and were
+                    // never wrong.
+                    continue;
+                }
+                checked += 1;
+                let mut v = Vec::new();
+                let mut idx = Vec::new();
+                tessellate(rings, water.extent, &mut v, &mut idx);
+                let want = expected_area(rings, water.extent);
+                let got = covered_area(&v, &idx);
+
+                assert!(
+                    (got - want).abs() <= want * 0.02,
+                    "the ocean covers {got:.4} of the tile but is only {want:.4} \
+                     ({} rings) — that surplus is land painted over. {} triangles emitted",
+                    rings.len(),
+                    idx.len() / 3,
+                );
+            }
+        }
+        assert_eq!(checked, 1, "the z0 ocean polygon must be present and checked");
+    }
+
+    #[test]
+    fn many_holes_are_all_cut_out() {
+        // The bug that made the whole basemap wrong. The published ocean polygon has 105
+        // holes — one per continent and island — and earcut found and grouped every one of
+        // them correctly, then tessellated straight over them: expected 0.711 of the tile,
+        // produced 0.981. Some tiles were 81% over. So the ocean painted across the land, and
+        // the only layer that looked right was the one that is drawn as lines.
+        //
+        // Two holes pass, which is why the existing tests missed it. This uses a hundred.
+        const SIZE: i32 = 4096;
+        const GRID: i32 = 10;
+        const CELL: i32 = SIZE / GRID;
+        const HOLE: i32 = CELL / 2;
+
+        let mut rings = vec![vec![(0, 0), (SIZE, 0), (SIZE, SIZE), (0, SIZE), (0, 0)]];
+        for row in 0..GRID {
+            for column in 0..GRID {
+                let x = column * CELL + CELL / 4;
+                let y = row * CELL + CELL / 4;
+                // Wound opposite to the exterior, as a hole must be.
+                rings.push(vec![
+                    (x, y),
+                    (x, y + HOLE),
+                    (x + HOLE, y + HOLE),
+                    (x + HOLE, y),
+                    (x, y),
+                ]);
+            }
+        }
+        assert_eq!(rings.len(), 1 + (GRID * GRID) as usize, "one exterior and a hundred holes");
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&rings, SIZE as u32, &mut v, &mut idx);
+
+        let want = expected_area(&rings, SIZE as u32);
+        let got = covered_area(&v, &idx);
+        assert!(
+            (got - want).abs() <= want * 0.02 + 1e-6,
+            "covered {got:.4} but the polygon is only {want:.4} — {} holes were not cut out",
+            rings.len() - 1,
+        );
+    }
+
+    #[test]
+    fn a_lake_inside_a_continent_hole_is_filled_again() {
+        // Nesting depth, not ring order, decides what is a hole. The z0 ocean carries 13 of
+        // these: ocean, a continent cut out of it, and a lake cut back into the continent.
+        // Earcut cannot express a hole inside a hole, so the lake has to become its own
+        // exterior — otherwise it is left dry.
+        let ocean = vec![(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+        let continent = vec![(200, 200), (200, 800), (800, 800), (800, 200), (200, 200)];
+        let lake = vec![(400, 400), (400, 600), (600, 600), (600, 400), (400, 400)];
+        let rings = vec![ocean, continent, lake];
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&rings, 1000, &mut v, &mut idx);
+
+        // The tile minus the continent, plus the lake back: 1 - 0.36 + 0.04.
+        let want = expected_area(&rings, 1000);
+        assert!((want - 0.68).abs() < 1e-6, "the even-odd region is {want}");
+        assert!(
+            (covered_area(&v, &idx) - want).abs() <= want * 0.02,
+            "covered {} against {want}",
+            covered_area(&v, &idx),
+        );
+    }
+
+    #[test]
+    fn two_overlapping_holes_do_not_leave_a_surplus() {
+        // 40 of the z0 ocean's holes overlap another one. Bridging both into the exterior
+        // makes the ring self-intersecting, and earcut answers that by fanning slivers
+        // across the whole polygon — far more area than dropping one hole costs. So exactly
+        // one of an overlapping pair survives, and the fill is generous by the other.
+        let outer = vec![(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+        let a = vec![(200, 200), (200, 600), (600, 600), (600, 200), (200, 200)];
+        let b = vec![(400, 400), (400, 800), (800, 800), (800, 400), (400, 400)];
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&vec![outer, a, b], 1000, &mut v, &mut idx);
+
+        // One 400x400 hole of a 1000x1000 tile cut out, and only one.
+        assert!(
+            (covered_area(&v, &idx) - 0.84).abs() < 1e-6,
+            "expected exactly one of the two holes to survive, covered {}",
+            covered_area(&v, &idx),
+        );
+        // The dropped hole's vertices are not emitted, so they cannot sit unreferenced in
+        // the buffer: the outer ring plus one hole, four vertices each.
+        assert_eq!(v.len() / FLOATS_PER_VERTEX, 8);
+    }
+
+    #[test]
+    fn tessellation_conserves_area_on_the_published_tile() {
+        // The invariant that catches a bad triangulation. A fill whose triangles do not sum
+        // to the polygon's own area is drawing the wrong shape — which on screen looks like
+        // land that does not line up with the coastline and borders drawn over it, with
+        // straight-edged wedges where the ear clipping went wrong.
+        let polygons = real_polygons();
+        assert!(!polygons.is_empty(), "the fixture must contain polygons");
+        for (name, extent, rings) in &polygons {
+            let mut v = Vec::new();
+            let mut idx = Vec::new();
+            tessellate(rings, *extent, &mut v, &mut idx);
+            let want = expected_area(rings, *extent);
+            let got = covered_area(&v, &idx);
+            // Generous: exact only up to f32 vertex precision.
+            assert!(
+                (got - want).abs() <= want * 0.02 + 1e-6,
+                "{name}: covered {got:.6} but the polygon is {want:.6} \
+                 ({} rings, {} triangles)",
+                rings.len(),
+                idx.len() / 3,
+            );
+        }
+    }
+
+    #[test]
+    fn tessellation_conserves_area_on_a_concave_polygon_with_holes() {
+        // A comb-shaped exterior with two holes: the case simple squares never exercise and
+        // real coastlines are full of.
+        let mut outer = vec![(0, 0)];
+        for i in 0..8 {
+            let x = i * 500;
+            outer.push((x, 3000));
+            outer.push((x + 250, 3000));
+            outer.push((x + 250, 500));
+            outer.push((x + 500, 500));
+        }
+        outer.push((4000, 0));
+        outer.push((0, 0));
+        let hole_a = vec![(100, 100), (100, 300), (300, 300), (300, 100), (100, 100)];
+        let hole_b = vec![(3600, 100), (3600, 400), (3900, 400), (3900, 100), (3600, 100)];
+        let rings = vec![outer, hole_a, hole_b];
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&rings, 4096, &mut v, &mut idx);
+        let want = expected_area(&rings, 4096);
+        let got = covered_area(&v, &idx);
+        assert!(
+            (got - want).abs() <= want * 0.02 + 1e-6,
+            "covered {got:.6} but the polygon is {want:.6}",
+        );
+    }
+
+    #[test]
+    fn a_hole_is_excluded() {
+        let outer = square(100);
+        let hole = vec![(40, 40), (40, 60), (60, 60), (60, 40), (40, 40)];
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&[outer, hole], 100, &mut v, &mut idx);
+        // 100x100 minus 20x20, over an extent of 100. Vertices are `f32`, so 0.4 and
+        // 0.6 are not exact and the tolerance is set by that rather than by the maths.
+        assert!(
+            (covered_area(&v, &idx) - (1.0 - 0.04)).abs() < 1e-6,
+            "covered {}",
+            covered_area(&v, &idx),
+        );
+    }
+
+    #[test]
+    fn a_degenerate_exterior_drops_the_whole_polygon() {
+        // A hole with nothing around it renders as solid fill in the layer's colour,
+        // which is worse than the feature being absent.
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(
+            &[vec![(0, 0), (5, 0), (0, 0)], vec![(40, 40), (40, 60), (60, 60), (60, 40), (40, 40)]],
+            100,
+            &mut v,
+            &mut idx,
+        );
+        assert!(v.is_empty());
+        assert!(idx.is_empty());
+    }
+
+    #[test]
+    fn a_degenerate_hole_leaves_the_exterior() {
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&[square(100), vec![(5, 5), (6, 5)]], 100, &mut v, &mut idx);
+        assert!((covered_area(&v, &idx) - 1.0).abs() < 1e-6, "the exterior still fills");
+    }
+
+    #[test]
+    fn empty_input_emits_nothing() {
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&[], 4096, &mut v, &mut idx);
+        assert!(v.is_empty() && idx.is_empty());
+    }
+
+    #[test]
+    fn a_second_polygon_indices_are_based_at_its_own_vertices() {
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&[square(100)], 100, &mut v, &mut idx);
+        let first = idx.len();
+        tessellate(&[square(100)], 100, &mut v, &mut idx);
+        assert!(idx[first..].iter().all(|&i| i >= 4), "the second polygon rebases: {:?}", &idx[first..]);
+        assert_eq!(v.len() / FLOATS_PER_VERTEX, 8);
+    }
+}

@@ -7,7 +7,6 @@
     <string name="weather_title">天气</string>
     <string name="add_location">添加位置</string>
     <string name="map_time">时间</string>
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="weather_widget_description">一览当前时间、日期和天气 - 点按即可查看天气预报</string>
     <string name="add_a_city_or_use_your_current_location">添加城市或使用当前位置查看天气预报。</string>
     <string name="locations">位置</string>

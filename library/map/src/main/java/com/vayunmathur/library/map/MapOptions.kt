@@ -18,9 +18,16 @@ data class GestureOptions(
 }
 
 /**
- * Map ornaments. Only the attribution label is supported. CARTO/OSM terms
- * require visible attribution, so leave it enabled unless the host renders its
- * own (e.g. weather shows attribution in its bottom panel).
+ * Map ornaments.
+ *
+ * Attribution is **not** one of them any more, despite [isAttributionEnabled] still being
+ * here: `VectorMap` renders it unconditionally, because the OpenStreetMap data's ODbL and
+ * the Protomaps schema both require visible credit, and that is a licence condition rather
+ * than a host preference. [AllDisabled] therefore cannot hide it — `weather` passes
+ * [AllDisabled] and still gets attribution, which is the intended behaviour.
+ *
+ * The flag is kept because it is part of the options object's shape; it currently governs
+ * nothing else, since attribution is the only ornament that was ever implemented.
  */
 data class OrnamentOptions(
     val isAttributionEnabled: Boolean = true,

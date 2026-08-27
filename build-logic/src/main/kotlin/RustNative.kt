@@ -28,6 +28,8 @@ data class RustAbi(val abiDir: String, val triple: String, val clangPrefix: Stri
 private val KNOWN_RUST_ABIS = listOf(
     RustAbi(ABI_ARM64, "aarch64-linux-android", "aarch64-linux-android"),
     RustAbi(ABI_ARMV7, "armv7-linux-androideabi", "armv7a-linux-androideabi"),
+    // Emulator-only; see [ABI_X86_64]. Never packaged by default.
+    RustAbi(ABI_X86_64, "x86_64-linux-android", "x86_64-linux-android"),
 )
 
 /**

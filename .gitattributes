@@ -42,6 +42,11 @@ gradlew text eol=lf
 *.dat     -text
 *.db      -text
 *.pmtiles -text
+# Vector tiles are protobuf, and the test fixtures are regenerated from the live archive by
+# `probe_archive`. They happen to carry a NUL early enough for git's heuristic to guess binary
+# today, but they also carry CRLF pairs, so a regenerated tile that guessed "text" would have
+# bytes stripped and fail to decode as a protobuf error rather than a corruption.
+*.mvt     -text
 *.spv     -text
 
 # ---- Archives / compressed ----

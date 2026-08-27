@@ -52,8 +52,7 @@ import kotlinx.coroutines.withContext
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.CameraState
 import com.vayunmathur.library.map.GeoPoint
-import com.vayunmathur.library.map.RasterMap
-import com.vayunmathur.library.map.TileSource
+import com.vayunmathur.library.map.VectorMap
 import kotlin.io.encoding.Base64
 import kotlin.math.abs
 import kotlin.math.cos
@@ -102,9 +101,8 @@ fun MapView(
                 )
             }
         }) {
-            RasterMap(
+            VectorMap(
                 cameraState = camera,
-                tileSource = TileSource.CartoVoyager,
                 zoomRange = 0f..20f,
                 onMapClick = { onMapClick() },
             )

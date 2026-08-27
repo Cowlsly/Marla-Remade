@@ -37,8 +37,7 @@ import com.vayunmathur.library.ui.ExternalIntents
 import com.vayunmathur.library.image.compose.AsyncImage
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
-import com.vayunmathur.library.map.RasterMap
-import com.vayunmathur.library.map.TileSource
+import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Button
@@ -219,7 +218,7 @@ private fun TrackingMap(order: Order, modifier: Modifier = Modifier) {
     }
 
     Box(modifier) {
-        RasterMap(cameraState = camera, tileSource = TileSource.CartoVoyager)
+        VectorMap(cameraState = camera)
         val projection = camera.projection
         if (projection != null) {
             // Distinct glyph per pin: menu = restaurant, arrow = courier, home = you.

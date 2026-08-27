@@ -7,7 +7,6 @@
     <string name="map_time">Heure</string>
     <string name="search_location">Rechercher un lieu</string>
     <string name="app_name">Météo</string>
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="weather_widget_description">L\'heure, la date et la météo du moment en un coup d\'œil - appuyez pour consulter les prévisions</string>
     <string name="add_a_city_or_use_your_current_location">Ajoutez une ville ou utilisez votre position actuelle pour consulter les prévisions.</string>
     <string name="locations">Lieux</string>

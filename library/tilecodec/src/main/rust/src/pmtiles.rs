@@ -691,9 +691,11 @@ impl ArchiveFile {
 /// archive, while this can. Both platforms expose a positional read; neither is
 /// guaranteed to return everything at once, hence the loop.
 ///
-/// `pub(crate)` because [`crate::spill::NormalizedChunks`] needs the same thing for
-/// the same reason: many threads pulling disjoint ranges out of one file.
-pub(crate) fn read_exact_at(
+/// `pub` because [`crate::stream::StreamArchive`] and `tile_build`'s
+/// `spill::NormalizedChunks` both need the same thing for the same reason: many
+/// threads pulling disjoint ranges out of one file. It was `pub(crate)` while the
+/// only caller lived in this crate.
+pub fn read_exact_at(
     file: &File,
     mut buf: &mut [u8],
     mut offset: u64,
@@ -752,7 +754,7 @@ fn read_section(
 
 /// Find the entry covering `want`: the last entry whose `tile_id <= want`, then a
 /// bounds check against its run.
-fn find_entry(entries: &[Entry], want: u64) -> Option<&Entry> {
+pub(crate) fn find_entry(entries: &[Entry], want: u64) -> Option<&Entry> {
     let idx = match entries.binary_search_by(|e| e.tile_id.cmp(&want)) {
         Ok(i) => i,
         Err(0) => return None,
@@ -770,7 +772,7 @@ fn find_entry(entries: &[Entry], want: u64) -> Option<&Entry> {
     }
 }
 
-fn decompress(kind: u8, data: &[u8]) -> Result<Vec<u8>> {
+pub(crate) fn decompress(kind: u8, data: &[u8]) -> Result<Vec<u8>> {
     match kind {
         COMPRESSION_NONE => Ok(data.to_vec()),
         COMPRESSION_GZIP => gz::decompress(data),

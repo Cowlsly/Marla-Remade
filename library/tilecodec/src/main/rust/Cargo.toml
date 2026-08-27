@@ -1,0 +1,34 @@
+# The PMTiles v3 and MVT 2.1 codec, shared by the offline tiler and the app.
+#
+# Extracted from `scripts/maps/tile_build`, which is still its older consumer.
+# The Android vector renderer in `:library:map` needs to read exactly the archives
+# that crate writes, and a second implementation of either format would be a
+# second thing to keep in agreement with the published basemap. So there is one.
+#
+# DETACHED from both workspaces (the empty `[workspace]` table below), for the same
+# reason `tile_build` is: it is consumed by a host binary AND by an
+# aarch64-linux-android cdylib, and being a member of either workspace would drag
+# that workspace's toolchain, profiles and lockfile into the other's build.
+#
+# `miniz_oxide` is the only dependency and is pure Rust, so this builds for the
+# host and cross-compiles for Android with no C toolchain and nothing to configure.
+# PMTiles gzips both its directories and its tiles, so the DEFLATE side is needed
+# as well as INFLATE.
+
+[package]
+name = "tilecodec"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "PMTiles v3 + Mapbox Vector Tile 2.1 codec shared by the Maps tiler and the Android renderer"
+
+[lib]
+name = "tilecodec"
+path = "src/lib.rs"
+
+[dependencies]
+miniz_oxide = "0.8"
+
+# Detach from both the repo-root Android workspace and `tile_build`'s.
+[workspace]

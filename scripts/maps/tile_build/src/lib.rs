@@ -56,13 +56,19 @@
 pub mod clip;
 pub mod geojson;
 pub mod geom;
-pub mod gz;
-pub mod mvt;
 pub mod par;
-pub mod pmtiles;
 pub mod progress;
-pub mod proto;
 pub mod pyramid;
 pub mod simplify;
 pub mod spill;
 pub mod tiling;
+
+// The formats themselves live in `tilecodec`, shared with the Android renderer in
+// `:library:map` — it has to read exactly what this crate writes, and one codec is
+// one thing to keep in agreement with the published archive.
+//
+// Re-exported at the crate root rather than referenced as `tilecodec::mvt`, so
+// every `crate::mvt` / `crate::pmtiles` / `crate::gz` / `crate::proto` path in
+// `pyramid`, `tiling`, `spill` and `geom` keeps resolving unchanged. The extraction
+// is meant to be invisible to the tiler.
+pub use tilecodec::{gz, mvt, pmtiles, proto};

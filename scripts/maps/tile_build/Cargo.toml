@@ -52,6 +52,10 @@ path = "src/bin/pmtiles_dump.rs"
 name = "pmtiles_extract"
 path = "src/bin/pmtiles_extract.rs"
 [dependencies]
+# The PMTiles + MVT codec, shared with the Android renderer in `:library:map`.
+# A path dependency on a detached crate: `tilecodec` belongs to no workspace, so
+# depending on it from here pulls in neither the app workspace nor its toolchain.
+tilecodec = { path = "../../../library/tilecodec/src/main/rust" }
 miniz_oxide = "0.8"
 rayon = "1"
 [profile.release]

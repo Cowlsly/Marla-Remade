@@ -23,7 +23,6 @@
     <string name="from_gusts"><xliff:g id="direction" example="NW">%1$s</xliff:g> の風 · 最大瞬間風速 <xliff:g id="gusts" example="18 km/h">%2$s</xliff:g></string>
     <string name="not_enough_data_to_plot">グラフを描く十分なデータがありません。</string>
     <string name="map_time">時間</string>
-    <string name="map_attribution">© OpenStreetMap · © CARTO</string>
     <string name="condition_clear">快晴</string>
     <string name="condition_mostly_clear">晴れ</string>
     <string name="condition_partly_cloudy">晴れ</string>

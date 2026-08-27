@@ -1,0 +1,52 @@
+# The Vulkan vector-tile renderer for `:library:map`.
+#
+# Replaces the CARTO raster basemap in findfamily, photos, weather, taxi and
+# fooddelivery (#615) with our own renderer over the self-hosted pmtiles archive.
+#
+# Why Vulkan and not `androidx.webgpu`: that wrapper bundles Dawn as a 5.79 MB
+# `libwebgpu_c_bundled.so` per ABI, to translate to the Vulkan that is already on
+# every device we target (minSdk 31). `ash` with `features = ["loaded"]` links
+# nothing and dlopen's `libvulkan.so` at run time, so the only native code we ship
+# is our own. It also drops a `1.0.0-alpha05` dependency whose API changes between
+# alphas, and lets us feed SPIR-V straight to the driver instead of through Dawn's
+# SPIR-V path, which is gated behind an unsafe-API toggle in some configurations.
+#
+# `games/voxels` is the in-repo precedent for all of this and the same ash version.
+
+[package]
+name = "map_renderer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "Vulkan vector-tile map renderer: PMTiles + MVT in, triangles out"
+
+[lib]
+name = "map_renderer"
+# cdylib for the JNI surface; rlib so the host test binary can link it and run the
+# whole CPU pipeline — tessellation, tile selection, the cache — without a device.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni.workspace = true
+# Cache keys are SHA-256(url + range), as the Kotlin cache in `maps` uses. Already a
+# workspace dependency, so this adds nothing to the lockfile.
+sha2.workspace = true
+# The authored MapLibre style is parsed at startup rather than transcribed into constants.
+# Hand-copying it could not converge: MapLibre renders this exact file correctly, so the
+# file is the source of truth and the only way to match it is to evaluate it.
+serde_json.workspace = true
+
+# The PMTiles + MVT codec, shared with `scripts/maps/tile_build`, which writes the
+# archives this reads. One implementation, so the two cannot drift.
+tilecodec = { path = "../../../../tilecodec/src/main/rust" }
+
+# HTTP goes back out through Kotlin: this crate opens no sockets and carries no TLS
+# stack, so pmtiles range requests keep `library:network`'s reduced CA bundle.
+jni_http = { path = "../../../../jni-http/src/main/rust" }
+
+# `default-features = false` drops the `linked` feature, so nothing links against
+# libvulkan at build time; `loaded` dlopen's it, which is what an Android app must
+# do anyway.
+[target.'cfg(target_os = "android")'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded"] }

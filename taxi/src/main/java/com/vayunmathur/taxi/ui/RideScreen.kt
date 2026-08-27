@@ -46,7 +46,7 @@ import androidx.compose.ui.unit.DpOffset
 import androidx.compose.ui.unit.dp
 import com.vayunmathur.library.map.CameraPosition
 import com.vayunmathur.library.map.GeoPoint
-import com.vayunmathur.library.map.RasterMap
+import com.vayunmathur.library.map.VectorMap
 import com.vayunmathur.library.map.rememberCameraState
 import com.vayunmathur.library.ui.AppScaffold
 import com.vayunmathur.library.ui.Card
@@ -244,7 +244,7 @@ fun RideScreen(bookingTrip: MutableState<BookingTrip?>? = null) {
                     .height(220.dp)
                     .clip(RoundedCornerShape(bottomStart = 24.dp, bottomEnd = 24.dp)),
             ) {
-                RasterMap(cameraState = camera, modifier = Modifier.fillMaxSize())
+                VectorMap(cameraState = camera, modifier = Modifier.fillMaxSize())
                 // Overlay pins for pickup and destination, positioned from the live camera
                 // projection so they track pan/zoom (same pattern as fooddelivery's map).
                 val projection = camera.projection

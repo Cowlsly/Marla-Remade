@@ -7,6 +7,18 @@ const val ABI_ARM64 = "arm64-v8a"
 const val ABI_ARMV7 = "armeabi-v7a"
 
 /**
+ * 64-bit x86, which no shipping device uses — it is what the Android emulator runs on an
+ * x86_64 host.
+ *
+ * No app should package this: `arm64-v8a` covers every phone and tablet, and on Apple
+ * Silicon the emulator is arm64 too. It exists so a native module can be *tested* in an
+ * emulator on an x86_64 host, where the alternative is a full-system QEMU translation of an
+ * arm64 image. Opt in per module through `rustNativeLib`'s `extraAbis`, and gate it on a
+ * Gradle property so release builds never carry it.
+ */
+const val ABI_X86_64 = "x86_64"
+
+/**
  * Per-app ABI opt-in, consumed by `common-conventions-app`. Apps stay arm64-only
  * unless they declare otherwise:
  *
