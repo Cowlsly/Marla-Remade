@@ -31,6 +31,8 @@
 /// so it adds nothing to the shipped `.so`.
 #[cfg(test)]
 pub mod reference;
+pub mod mobilefacenet;
+pub mod scrfd;
 pub mod selfie;
 pub mod u2netp;
 

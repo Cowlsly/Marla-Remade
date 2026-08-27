@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use modelrunner::nets::{selfie, u2netp};
+use modelrunner::nets::{mobilefacenet, scrfd, selfie, u2netp};
 use modelrunner::weights::{graph, Weights};
 
 /// The repo root, found by walking up for `settings.gradle.kts` rather than by counting
@@ -54,6 +54,39 @@ fn the_shipped_u2netp_asset_builds_the_u2netp_forward_pass() {
     assert_eq!(weights.len(), u2netp::TENSORS);
     let plan = u2netp::build(&weights).expect("the shipped asset matches nets::u2netp");
     assert!(!plan.ops.is_empty());
+}
+
+#[test]
+fn the_shipped_mobilefacenet_asset_builds_the_mobilefacenet_forward_pass() {
+    let weights = load("photos/src/main/assets/w600k_mbf.vkml", graph::MOBILEFACENET);
+    assert_eq!(weights.len(), mobilefacenet::TENSORS);
+    let plan =
+        mobilefacenet::build(&weights).expect("the shipped asset matches nets::mobilefacenet");
+    assert!(!plan.ops.is_empty());
+}
+
+#[test]
+fn the_shipped_scrfd_asset_builds_the_scrfd_forward_pass() {
+    let weights = load("photos/src/main/assets/scrfd_500m.vkml", graph::SCRFD);
+    assert_eq!(weights.len(), scrfd::TENSORS);
+    let plan = scrfd::build(&weights, scrfd::LONG_SIDE, scrfd::LONG_SIDE)
+        .expect("the shipped asset matches nets::scrfd");
+    assert_eq!(plan.outputs.len(), 9);
+}
+
+#[test]
+fn the_scrfd_pass_builds_at_every_letterbox_shape_a_photo_can_produce() {
+    // The detector is compiled per shape, so the whole family has to lower — not just
+    // the square case. These are the short sides a 640-long-side letterbox rounds to for
+    // aspect ratios from 1:1 to about 3:1, which covers any real photo.
+    let weights = load("photos/src/main/assets/scrfd_500m.vkml", graph::SCRFD);
+    for short in (scrfd::EXTENT_MULTIPLE..=scrfd::LONG_SIDE).step_by(32) {
+        for (height, width) in [(short, scrfd::LONG_SIDE), (scrfd::LONG_SIDE, short)] {
+            let plan = scrfd::build(&weights, height, width)
+                .unwrap_or_else(|e| panic!("{width}x{height}: {e}"));
+            assert_eq!(plan.outputs.len(), 9, "{width}x{height}");
+        }
+    }
 }
 
 #[test]

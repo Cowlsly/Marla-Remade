@@ -654,7 +654,7 @@ fn uniform(state: &mut u32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{selfie, u2netp, Act, Builder};
+    use super::super::{mobilefacenet, scrfd, selfie, u2netp, Act, Builder};
     use super::*;
 
     /// Build a plan whose only ops come from `record`, run it, and return the output.
@@ -1250,5 +1250,85 @@ mod tests {
             Shape::new(1, u2netp::SIZE, u2netp::SIZE)
         );
         assert_usable_mask("u2netp", &plan, weights.data());
+    }
+
+    #[test]
+    #[ignore = "runs the full shipped nets; minutes in a debug build"]
+    fn the_shipped_scrfd_net_produces_usable_detection_maps() {
+        let Some(bytes) = asset("photos/src/main/assets/scrfd_500m.vkml") else {
+            return;
+        };
+        let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::SCRFD)
+            .expect("the shipped scrfd asset parses");
+        // 128x128 rather than the 640 it runs at on device: the plan lowers at any
+        // multiple of 32, and a 1/25th-area run exercises every one of the 60 layers,
+        // both nearest upsamples and all nine heads for a twenty-fifth of the arithmetic.
+        let plan = scrfd::build(&weights, 128, 128).expect("scrfd builds at 128x128");
+        let shape = plan.input().expect("one input").shape;
+        let got = run_multi(&plan, weights.data(), &[&blob(shape)]).expect("scrfd runs");
+
+        assert_eq!(got.len(), 9);
+        for (group, stride) in got.chunks_exact(3).zip(scrfd::STRIDES) {
+            let [score, bbox, keypoints] = match group {
+                [a, b, c] => [a, b, c],
+                other => panic!("stride {stride}: {} maps", other.len()),
+            };
+            // Scores come through a sigmoid, so they are probabilities. Boxes and
+            // keypoints are raw distances in stride units and only have to be finite.
+            for (i, &value) in score.iter().enumerate() {
+                assert!((0.0..=1.0).contains(&value), "stride {stride} score {i} is {value}");
+            }
+            for (name, map) in [("box", bbox), ("keypoint", keypoints)] {
+                for (i, &value) in map.iter().enumerate() {
+                    assert!(value.is_finite(), "stride {stride} {name} {i} is {value}");
+                }
+            }
+            let peak = score.iter().fold(0.0f32, |a, &b| a.max(b));
+            let spread = bbox.iter().fold(0.0f32, |a, &b| a.max(b.abs()));
+            println!("scrfd/{stride}: peak score {peak:.4} largest box distance {spread:.3}");
+            // A box map that is identically zero means the regression branch never ran,
+            // which is what reading the wrong tensor index for a head produces.
+            assert!(spread > 1e-3, "stride {stride} predicts no box extent at all");
+        }
+    }
+
+    #[test]
+    #[ignore = "runs the full shipped nets; minutes in a debug build"]
+    fn the_shipped_mobilefacenet_net_embeds_two_faces_differently() {
+        let Some(bytes) = asset("photos/src/main/assets/w600k_mbf.vkml") else {
+            return;
+        };
+        let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::MOBILEFACENET)
+            .expect("the shipped mobilefacenet asset parses");
+        let plan = mobilefacenet::build(&weights).expect("mobilefacenet builds");
+        let shape = plan.input().expect("one input").shape;
+        assert_eq!(
+            plan.output().expect("one output").shape,
+            Shape::new(mobilefacenet::EMBEDDING, 1, 1)
+        );
+
+        let first = run(&plan, weights.data(), &ramp(shape)).expect("embeds a ramp");
+        let second = run(&plan, weights.data(), &blob(shape)).expect("embeds a blob");
+        for (label, embedding) in [("ramp", &first), ("blob", &second)] {
+            assert_eq!(embedding.len(), mobilefacenet::EMBEDDING as usize);
+            for (i, &value) in embedding.iter().enumerate() {
+                assert!(value.is_finite(), "{label} component {i} is {value}");
+            }
+            let norm = embedding.iter().map(|v| v * v).sum::<f32>().sqrt();
+            println!("mobilefacenet/{label}: L2 norm {norm:.4}");
+            // Unnormalised on purpose — `FaceRecognizer` L2-normalises in Kotlin — so
+            // this only has to be a vector rather than the origin. A collapsed net,
+            // which is what a wrong PReLU slope index produces, lands at zero.
+            assert!(norm > 1e-2, "{label} embeds to the origin");
+        }
+
+        // Cosine similarity, which is exactly what the clustering compares. Two inputs
+        // this unlike must not map to the same direction; a net whose final `Gemm` was
+        // reshaped wrongly tends to return near-identical vectors for everything.
+        let dot: f32 = first.iter().zip(&second).map(|(a, b)| a * b).sum();
+        let magnitude = |v: &[f32]| v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        let cosine = dot / (magnitude(&first) * magnitude(&second));
+        println!("mobilefacenet: cosine between the two {cosine:.4}");
+        assert!(cosine < 0.99, "two unlike inputs embed to the same direction");
     }
 }
