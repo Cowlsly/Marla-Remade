@@ -308,7 +308,7 @@ fn main() {
         // whose fill covers far less than the polygons it was given is dropping geometry,
         // which on screen is ocean showing through the middle of a continent.
         for m in &mesh.meshes {
-            let id = layers[m.layer_index].id;
+            let id = &layers[m.layer_index].id;
             let stride = match m.kind {
                 style::LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 style::LayerKind::Line => stroke::FLOATS_PER_VERTEX,

@@ -1,7 +1,7 @@
 //! The frame: tile residency, and one render pass per frame.
 
 use crate::camera::Camera;
-use crate::style::paint::{self, Stroke};
+use crate::style::paint::Stroke;
 use crate::style::{Layer, LayerKind, Palette};
 use crate::tile::geometry::TileMesh;
 use crate::vulkan::buffers::Buffer;
@@ -402,11 +402,11 @@ impl Renderer {
 
         for (index, layer) in layers.iter().enumerate() {
             // `min_zoom`/`max_zoom` are a data-and-cost gate, not paint: they say which zooms
-            // the archive is worth asking for this layer at. Paint is the authored ramp below.
+            // the archive is worth asking for this layer at. Paint is the ramp below.
             if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
                 continue;
             }
-            // Width and opacity come from the authored style, evaluated against the *camera's*
+            // Width and opacity come from the flat style, evaluated against the *camera's*
             // fractional zoom rather than the tile's, so a stroke grows and a fill fades
             // smoothly while zooming instead of jumping a step at every level. Both are push
             // constants, so this re-tessellates nothing, and neither varies per tile.
@@ -416,17 +416,17 @@ impl Renderer {
                 // ramp asks for half, and popped `landuse_park` on at full strength at z7
                 // where it asks for a fifth.
                 LayerKind::Fill => {
-                    let opacity = paint::authored_fills().opacity(layer, camera.zoom);
+                    let opacity = layer.opacity_at(camera.zoom);
                     if opacity <= 0.0 {
                         continue;
                     }
                     (Stroke::NONE, opacity)
                 }
                 LayerKind::Line => {
-                    let stroke = paint::authored().stroke(layer, camera.zoom);
-                    // The authored ramps reach zero outside the zooms a layer is meant for,
-                    // and that is the style's own gate: several road layers carry no
-                    // `min_zoom` and rely on it.
+                    let stroke = layer.stroke(camera.zoom);
+                    // The ramps reach zero outside the zooms a layer is meant for, and that is
+                    // the style's own gate: several road layers carry no `min_zoom` and rely on
+                    // it.
                     if !stroke.visible() {
                         continue;
                     }
@@ -540,7 +540,7 @@ impl Drop for Renderer {
     }
 }
 
-/// Multiply a colour's alpha by `opacity`, for the authored `fill-opacity` ramps.
+/// Multiply a colour's alpha by `opacity`, for the style's fill-opacity ramps.
 ///
 /// The ramp is applied here rather than folded into the layer table because it is a function of
 /// the camera's zoom: a fill has to fade across a zoom, not switch at one.

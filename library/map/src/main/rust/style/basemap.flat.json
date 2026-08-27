@@ -1,0 +1,374 @@
+{
+  "version": 1,
+  "background": { "light": "#80deea", "dark": "#0d1b2a" },
+  "layers": [
+    {
+      "id": "earth",
+      "authored": "earth",
+      "source": "earth",
+      "type": "fill",
+      "light": "#e2dfda",
+      "dark": "#24262c"
+    },
+    {
+      "id": "landcover",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "light": "#c4e7d2",
+      "dark": "#262b2a",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:grassland",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["grassland"],
+      "light": "#d2efcf",
+      "dark": "#262c28",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:barren",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["barren"],
+      "light": "#fff3d7",
+      "dark": "#2c2a24",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:urban_area",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["urban_area"],
+      "light": "#e6e6e6",
+      "dark": "#2a2b2e",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:farmland",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["farmland"],
+      "light": "#d8efd2",
+      "dark": "#272d29",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:glacier",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["glacier"],
+      "light": "#ffffff",
+      "dark": "#34373d",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landcover:scrub",
+      "authored": "landcover",
+      "source": "landcover",
+      "type": "fill",
+      "kinds": ["scrub"],
+      "light": "#eaefd2",
+      "dark": "#2a2c26",
+      "opacity": { "interpolate": "linear", "stops": [[5, 1], [7, 0]] }
+    },
+    {
+      "id": "landuse_park:national_park",
+      "authored": "landuse_park",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": [
+        "national_park",
+        "park",
+        "cemetery",
+        "protected_area",
+        "nature_reserve",
+        "forest",
+        "golf_course"
+      ],
+      "light": "#9cd3b4",
+      "dark": "#1e2b20",
+      "opacity": { "interpolate": "linear", "stops": [[6, 0], [11, 1]] }
+    },
+    {
+      "id": "landuse_park:wood",
+      "authored": "landuse_park",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["wood"],
+      "light": "#a0d9a0",
+      "dark": "#1e2b20",
+      "opacity": { "interpolate": "linear", "stops": [[6, 0], [11, 1]] }
+    },
+    {
+      "id": "landuse_park:scrub",
+      "authored": "landuse_park",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["scrub", "grassland", "grass"],
+      "light": "#99d2bb",
+      "dark": "#1f2a22",
+      "opacity": { "interpolate": "linear", "stops": [[6, 0], [11, 1]] }
+    },
+    {
+      "id": "landuse_park:military",
+      "authored": "landuse_park",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["military", "naval_base", "airfield"],
+      "light": "#c6dcdc",
+      "dark": "#26282e",
+      "opacity": { "interpolate": "linear", "stops": [[6, 0], [11, 1]] }
+    },
+    {
+      "id": "landuse_urban_green",
+      "authored": "landuse_urban_green",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["allotments", "village_green", "playground"],
+      "light": "#9cd3b4",
+      "dark": "#23362a",
+      "opacity": 0.7
+    },
+    {
+      "id": "landuse_hospital",
+      "authored": "landuse_hospital",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["hospital"],
+      "light": "#e4dad9",
+      "dark": "#2b2528"
+    },
+    {
+      "id": "landuse_industrial",
+      "authored": "landuse_industrial",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["industrial"],
+      "light": "#d1dde1",
+      "dark": "#20262b"
+    },
+    {
+      "id": "landuse_school",
+      "authored": "landuse_school",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["school", "university", "college"],
+      "light": "#e4ded7",
+      "dark": "#282520"
+    },
+    {
+      "id": "landuse_beach",
+      "authored": "landuse_beach",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["beach"],
+      "light": "#e8e4d0",
+      "dark": "#2c2a22"
+    },
+    {
+      "id": "landuse_zoo",
+      "authored": "landuse_zoo",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["zoo"],
+      "light": "#c6dcdc",
+      "dark": "#213030"
+    },
+    {
+      "id": "landuse_aerodrome",
+      "authored": "landuse_aerodrome",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["aerodrome"],
+      "light": "#dadbdf",
+      "dark": "#212228"
+    },
+    {
+      "id": "landuse_runway",
+      "authored": "landuse_runway",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["runway", "taxiway"],
+      "light": "#e9e9ed",
+      "dark": "#262931"
+    },
+    {
+      "id": "water",
+      "authored": "water",
+      "source": "water",
+      "type": "fill",
+      "light": "#80deea",
+      "dark": "#0d1b2a"
+    },
+    {
+      "id": "landuse_pedestrian",
+      "authored": "landuse_pedestrian",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["pedestrian", "dam"],
+      "light": "#e3e0d4",
+      "dark": "#242229"
+    },
+    {
+      "id": "landuse_pier",
+      "authored": "landuse_pier",
+      "source": "landuse",
+      "type": "fill",
+      "kinds": ["pier"],
+      "light": "#e0e0e0",
+      "dark": "#202225"
+    },
+    {
+      "id": "buildings",
+      "authored": "buildings",
+      "source": "buildings",
+      "type": "fill",
+      "kinds": ["building", "building_part"],
+      "light": "#cccccc",
+      "dark": "#22262c",
+      "opacity": 0.5,
+      "minzoom": 14
+    },
+    {
+      "id": "roads-minor-casing",
+      "authored": "roads_minor_casing",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["minor_road", "other"],
+      "light": "#d5d0c6",
+      "dark": "#111318",
+      "minzoom": 13,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[12, 0], [12.5, 1]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-major-casing",
+      "authored": "roads_major_casing_late",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["major_road"],
+      "light": "#d8c9a6",
+      "dark": "#111318",
+      "minzoom": 9,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[9, 0], [9.5, 1]] },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+      }
+    },
+    {
+      "id": "roads-highway-casing",
+      "authored": "roads_highway_casing_late",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway"],
+      "light": "#e0b96a",
+      "dark": "#111318",
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[7, 0], [7.5, 1], [20, 15]]
+      },
+      "gap_width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[3, 0], [3.5, 0.5], [18, 15]]
+      }
+    },
+    {
+      "id": "roads-path",
+      "authored": "roads_other",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["path"],
+      "light": "#c7bfae",
+      "dark": "#26282e",
+      "minzoom": 15,
+      "width": { "interpolate": "exponential", "base": 1.6, "stops": [[14, 0], [20, 7]] },
+      "dash": [2, 1.5]
+    },
+    {
+      "id": "roads-minor",
+      "authored": "roads_minor",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["minor_road", "other"],
+      "light": "#ffffff",
+      "dark": "#34383f",
+      "minzoom": 13,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[11, 0], [12.5, 0.5], [15, 2], [18, 11]]
+      }
+    },
+    {
+      "id": "roads-major",
+      "authored": "roads_major",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["major_road"],
+      "light": "#fff8e6",
+      "dark": "#464b54",
+      "minzoom": 9,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[6, 0], [12, 1.6], [15, 3], [18, 13]]
+      }
+    },
+    {
+      "id": "roads-highway",
+      "authored": "roads_highway",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["highway"],
+      "light": "#ffe9b0",
+      "dark": "#464b54",
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[3, 0], [6, 1.1], [12, 1.6], [15, 5], [18, 15]]
+      }
+    },
+    {
+      "id": "roads-rail",
+      "authored": "roads_rail",
+      "source": "roads",
+      "type": "line",
+      "kinds": ["rail"],
+      "light": "#c0bab0",
+      "dark": "#3a3e45",
+      "minzoom": 13,
+      "width": {
+        "interpolate": "exponential",
+        "base": 1.6,
+        "stops": [[3, 0], [6, 0.15], [18, 9]]
+      },
+      "dash": [3, 3]
+    },
+    {
+      "id": "boundaries",
+      "authored": "boundaries_country",
+      "source": "boundaries",
+      "type": "line",
+      "light": "#a8a296",
+      "dark": "#4a4f57",
+      "width": 0.7,
+      "dash": [2, 0]
+    }
+  ]
+}

@@ -47,7 +47,7 @@ pub fn build(tile: &Tile, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
         if layer.min_zoom > deepest || layer.max_zoom < z {
             continue;
         }
-        let source = match tile.layer(layer.source_layer) {
+        let source = match tile.layer(&layer.source_layer) {
             Some(l) => l,
             None => continue,
         };
@@ -124,6 +124,7 @@ fn as_str(value: &Value) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::style::paint::Ramp;
     use crate::style;
 
     const REAL_TILE: &[u8] = include_bytes!("../../tests/fixtures/v5ca_z11_tile.mvt");
@@ -194,7 +195,7 @@ mod tests {
         let mesh = build(&real(), &layers, 11, 339, 770);
         assert!(!mesh.meshes.is_empty());
         for m in &mesh.meshes {
-            let id = layers[m.layer_index].id;
+            let id = &layers[m.layer_index].id;
             let stride = match m.kind {
                 LayerKind::Fill => fill::FLOATS_PER_VERTEX,
                 LayerKind::Line => stroke::FLOATS_PER_VERTEX,
@@ -323,19 +324,19 @@ mod tests {
     fn a_line_layer_also_strokes_polygon_outlines() {
         // A lake shoreline and an administrative boundary are lines over area features.
         let outline = vec![Layer {
-            id: "water-edge",
-            source_layer: "water",
+            id: "water-edge".to_string(),
+            source_layer: "water".to_string(),
             kind: LayerKind::Line,
-            kinds: &[],
+            kinds: Vec::new(),
             light: 0xFF000000,
             dark: 0xFF000000,
-            width_dp: 1.0,
-            gap_width_dp: 0.0,
-            line_paint: &[],
-            fill_paint: "",
+            opacity: Ramp::constant(1.0),
+            width: Ramp::constant(1.0),
+            gap_width: Ramp::constant(0.0),
             dash: (0.0, 0.0),
             min_zoom: 0,
             max_zoom: 22,
+            authored: "water".to_string(),
         }];
         let mesh = build(&real(), &outline, 11, 339, 770);
         assert_eq!(mesh.meshes.len(), 1, "the water polygons' outlines stroke");

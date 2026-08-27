@@ -92,7 +92,7 @@ enum TileResult {
 /// Everything one map surface owns. Handed to Kotlin as an opaque `jlong`.
 struct MapHandle {
     renderer: Renderer,
-    layers: Vec<Layer>,
+    layers: &'static [Layer],
     /// Meshes finished by the workers, waiting to be uploaded on the render thread.
     finished: Receiver<(u64, TileResult)>,
     /// Tiles the workers should fetch.
