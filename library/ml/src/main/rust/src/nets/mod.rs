@@ -171,12 +171,35 @@ pub enum Kind {
     /// `d_model` 120 that is 120 loads a stride apart per position, which is nothing
     /// against what a contiguous layout would cost in permutes.
     LayerNorm,
+    /// `S[h][i][j] = scale * sum_d Q[h][d][i] * K[h][d][j]`, attention's score map.
+    ///
+    /// Contracts over the *middle* axis of `[heads, head_dim, T]`, which is what makes
+    /// the head split free — see [`Kind::LayerNorm`]. Takes the head count in
+    /// [`Push::group`] and `1 / sqrt(head_dim)` in [`Push::param0_bits`].
+    ///
+    /// The output is `[heads, T, T]` with the key index innermost, so the row a
+    /// [`Kind::Softmax`] normalises is contiguous.
+    AttnScores,
+    /// Softmax over the last axis, one row at a time.
+    ///
+    /// Kept separate from [`Kind::AttnScores`] rather than fused into it. Fusing would
+    /// save writing a `heads * T * T` intermediate — 100 KiB at the recogniser's sizes,
+    /// which is not a cost worth a shader that does two things — and would give up the
+    /// per-score parallelism, since a fused pass has to be one invocation per *row* to
+    /// see the whole distribution it is normalising.
+    Softmax,
+    /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
+    ///
+    /// Writes `[d_model, 1, T]`, so the head concatenation that normally follows
+    /// attention is not an op: output channel `c` belongs to head `c / head_dim` and
+    /// lands where the concatenated result wants it. Head count in [`Push::group`].
+    AttnApply,
 }
 
 /// The push-constant block every shader declares.
 ///
 /// `repr(C)` so field order is declaration order, which is what the SPIR-V offsets
-/// assume. Deliberately one block shared by all seven pipelines: it fits inside the
+/// assume. Deliberately one block shared by every pipeline: it fits inside the
 /// 128 bytes the spec guarantees (asserted in [`tests`]), so there is a single
 /// pipeline layout, no uniform buffers and no descriptor writes after setup.
 #[repr(C)]
@@ -227,7 +250,8 @@ pub struct Push {
     /// Element offset of the per-channel slope [`Act::PRelu`] reads, in the weights
     /// buffer. Zero and unread for every other activation.
     pub act_weight: u32,
-    /// [`Kind::Affine`]'s multiplier, as raw bits. Unread by everything else.
+    /// [`Kind::Affine`]'s multiplier, or [`Kind::AttnScores`]'s `1 / sqrt(head_dim)`,
+    /// as raw bits. Unread by everything else.
     ///
     /// `f32` bits rather than an `f32` field so [`Push`] stays all-`u32` and
     /// `push_bytes` can keep treating it as a plain byte block with no padding.
@@ -235,6 +259,9 @@ pub struct Push {
     /// [`Kind::Affine`]'s addend, or [`Kind::LayerNorm`]'s epsilon.
     pub param1_bits: u32,
     /// Output elements, so an over-dispatched workgroup can bail.
+    ///
+    /// Not always the element count: [`Kind::LayerNorm`] and [`Kind::Softmax`] each run
+    /// one invocation over a whole reduction, so for them this is the number of those.
     pub count: u32,
 }
 
@@ -396,6 +423,23 @@ enum Node {
         gamma: u32,
         beta: u32,
         epsilon: f32,
+    },
+    AttnScores {
+        q: Id,
+        k: Id,
+        out: Id,
+        heads: u32,
+        scale: f32,
+    },
+    Softmax {
+        input: Id,
+        out: Id,
+    },
+    AttnApply {
+        probs: Id,
+        v: Id,
+        out: Id,
+        heads: u32,
     },
 }
 
@@ -739,6 +783,64 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Attention scores from `q` and `k`, both `[d_model, 1, T]`, into `[heads, T, T]`.
+    ///
+    /// The `1 / sqrt(head_dim)` scale is derived here rather than taken as an argument:
+    /// it is a property of the head geometry, not a trained value, so there is no call
+    /// site that could legitimately pass a different one.
+    pub fn attn_scores(&mut self, q: Id, k: Id, heads: u32) -> Id {
+        let (sq, sk) = (self.shape_of(q), self.shape_of(k));
+        if sq != sk {
+            self.fail(format!("attention over q {sq:?} and k {sk:?}"));
+        }
+        if sq.h != 1 {
+            self.fail(format!(
+                "attention on {sq:?}: a sequence is [d_model, 1, T], so a height above \
+                 one would silently reinterpret the layout"
+            ));
+        }
+        if heads == 0 || !sq.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sq.c));
+        }
+        let head_dim = sq.c.checked_div(heads).unwrap_or(0);
+        let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
+        let out = self.tensor(Shape::new(heads, sq.w, sq.w));
+        self.nodes.push(Node::AttnScores { q, k, out, heads, scale });
+        out
+    }
+
+    /// Softmax over the last axis, which for a score map is one query's distribution.
+    pub fn softmax(&mut self, input: Id) -> Id {
+        let shape = self.shape_of(input);
+        if shape.w == 0 {
+            self.fail(format!("a softmax over {shape:?}, whose last axis is empty"));
+        }
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Softmax { input, out });
+        out
+    }
+
+    /// Apply `probs`, a `[heads, T, T]` score map, to `v`, a `[d_model, 1, T]` sequence.
+    pub fn attn_apply(&mut self, probs: Id, v: Id, heads: u32) -> Id {
+        let (sp, sv) = (self.shape_of(probs), self.shape_of(v));
+        if sp != Shape::new(heads, sv.w, sv.w) {
+            self.fail(format!(
+                "attention weights {sp:?} do not match {heads} heads over a sequence of \
+                 {} from {sv:?}",
+                sv.w
+            ));
+        }
+        if sv.h != 1 {
+            self.fail(format!("attention values {sv:?} are not [d_model, 1, T]"));
+        }
+        if heads == 0 || !sv.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sv.c));
+        }
+        let out = self.tensor(sv);
+        self.nodes.push(Node::AttnApply { probs, v, out, heads });
+        out
+    }
+
     /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
     pub fn finish(mut self, outputs: &[Id]) -> Result<Plan, String> {
         self.pinned.extend_from_slice(outputs);
@@ -1032,6 +1134,71 @@ impl<'a> Builder<'a> {
                     invocations: positions,
                 });
             }
+            Node::AttnScores { q, k, out, heads, scale } => {
+                let (si, so) = (shape(*q), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnScores,
+                    push: Push {
+                        in0: at(*q)?,
+                        in1: at(*k)?,
+                        out: at(*out)?,
+                        in_c: si.c,
+                        in_h: si.h,
+                        in_w: si.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        group: *heads,
+                        param0_bits: scale.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::Softmax { input, out } => {
+                let so = shape(*out);
+                // One invocation per row of the last axis, each normalising `out_w`
+                // contiguous elements, so the dispatch is rows rather than elements.
+                let rows = so.c * so.h;
+                ops.push(Op::Dispatch {
+                    kind: Kind::Softmax,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: rows,
+                        ..Push::default()
+                    },
+                    invocations: rows,
+                });
+            }
+            Node::AttnApply { probs, v, out, heads } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnApply,
+                    push: Push {
+                        in0: at(*probs)?,
+                        in1: at(*v)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
         }
         Ok(())
     }
@@ -1047,6 +1214,9 @@ impl Node {
             | Node::Binary { out, .. }
             | Node::Affine { out, .. }
             | Node::LayerNorm { out, .. }
+            | Node::AttnScores { out, .. }
+            | Node::Softmax { out, .. }
+            | Node::AttnApply { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -1058,8 +1228,12 @@ impl Node {
             | Node::Resize { input, .. }
             | Node::Affine { input, .. }
             | Node::LayerNorm { input, .. }
+            | Node::Softmax { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
+            Node::AttnScores { q: a, k: b, .. } | Node::AttnApply { probs: a, v: b, .. } => {
+                vec![*a, *b]
+            }
             Node::Concat { parts, .. } => parts.clone(),
         }
     }
@@ -1208,15 +1382,25 @@ pub(crate) mod tests {
                 Op::Copy { src, dst, elems } => ((dst, elems), vec![(src, elems)]),
                 Op::Dispatch { kind, push, .. } => {
                     let dense = push.in_c * push.in_h * push.in_w;
+                    // Not `push.count`: the reducing kinds dispatch one invocation per
+                    // reduction rather than per element, so their `count` understates
+                    // what they write. Every output here is dense.
+                    let written = push.out_c * push.out_h * push.out_w;
                     let reads = match kind {
-                        Kind::Add => vec![(push.in0, push.count), (push.in1, push.count)],
+                        Kind::Add => vec![(push.in0, written), (push.in1, written)],
                         // The gate is one value per channel, broadcast over H and W.
                         Kind::MulBroadcast => {
-                            vec![(push.in0, push.count), (push.in1, push.in_c)]
+                            vec![(push.in0, written), (push.in1, push.in_c)]
+                        }
+                        // Q and K are both whole sequences.
+                        Kind::AttnScores => vec![(push.in0, dense), (push.in1, dense)],
+                        // The score map is `[heads, T, T]`; V is a sequence.
+                        Kind::AttnApply => {
+                            vec![(push.in0, push.group * push.out_w * push.out_w), (push.in1, dense)]
                         }
                         _ => vec![(push.in0, dense)],
                     };
-                    ((push.out, push.count), reads)
+                    ((push.out, written), reads)
                 }
             };
             for read in reads {

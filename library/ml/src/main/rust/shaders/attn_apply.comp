@@ -1,0 +1,48 @@
+#version 450
+//! `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, the second half of attention.
+//!
+//! Two uses, one per transformer block in PP-OCRv5 recognition.
+//!
+//! # Back into the layout it started in
+//!
+//! `S` is `[heads, T, T]` from `softmax.comp`; `V` and the output are `[d_model, 1, T]`,
+//! the same layout every projection in this runtime reads and writes. So the head
+//! concatenation that follows attention is not an op: output channel `c` belongs to head
+//! `c / head_dim` and is written in place, which *is* the concatenated result. No
+//! `Reshape` and no `Permute` on this side either.
+//!
+//! One invocation per output element, reducing over the `T` keys. Note that `V` needs no
+//! head arithmetic at all — channel `c` of `V` is exactly channel `c` of the output — so
+//! the head index is used only to pick which of `S`'s planes to read.
+//!
+//! # Precision
+//!
+//! `S` is a distribution, so every product is bounded by the corresponding `V`, and the
+//! sum of a convex combination cannot exceed `V`'s range. Accumulating in `float` like
+//! everywhere else here is more than enough; the fp16 store at the end is the only
+//! rounding.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[d_model, 1, T]`, so this is (channel, 0, query).
+    uint channel, unused_row, query;
+    unpack(index, channel, unused_row, query);
+
+    uint keys = p.out_w;
+    uint head_dim = p.out_c / p.group;
+    // `S[head][query][*]`, contiguous in the key index.
+    uint row = p.in0 + ((channel / head_dim) * keys + query) * keys;
+    // `V[channel][*]`, likewise contiguous, because `V`'s height is 1.
+    uint values = p.in1 + channel * keys;
+
+    float total = 0.0;
+    for (uint j = 0u; j < keys; j++) {
+        total += float(arena[row + j]) * float(arena[values + j]);
+    }
+    arena[p.out_at + index] = float16_t(total);
+}

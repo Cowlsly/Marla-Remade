@@ -1,4 +1,4 @@
-//! The eight compute pipelines, and the one descriptor set they all share.
+//! The compute pipelines, and the one descriptor set they all share.
 //!
 //! # One layout, one descriptor set, written once
 //!
@@ -36,6 +36,26 @@ const ADD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.comp.spv"));
 const MUL_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_bcast.comp.spv"));
 const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.comp.spv"));
 const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.comp.spv"));
+const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores.comp.spv"));
+const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
+const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
+
+/// Every shader, in the order [`Pipelines::create`] destructures them.
+const SPIRV: [&[u8]; 13] = [
+    CONV,
+    CONV_TRANSPOSE,
+    MAXPOOL,
+    RESIZE,
+    RESIZE_NEAREST,
+    GAP,
+    ADD,
+    MUL_BCAST,
+    AFFINE,
+    LAYERNORM,
+    ATTN_SCORES,
+    SOFTMAX,
+    ATTN_APPLY,
+];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
 /// workgroups, and each shader bails on the over-dispatched tail.
@@ -52,7 +72,7 @@ pub const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
 
 /// Every compute pipeline, plus the layout and descriptor set they share.
 pub struct Pipelines {
-    /// Shared by all eight, so a bind never invalidates push constants.
+    /// Shared by all of them, so a bind never invalidates push constants.
     pub layout: vk::PipelineLayout,
     /// The one set: arena at binding 0, weights at binding 1.
     pub descriptor_set: vk::DescriptorSet,
@@ -68,10 +88,13 @@ pub struct Pipelines {
     mul_bcast: vk::Pipeline,
     affine: vk::Pipeline,
     layernorm: vk::Pipeline,
+    attn_scores: vk::Pipeline,
+    softmax: vk::Pipeline,
+    attn_apply: vk::Pipeline,
 }
 
 impl Pipelines {
-    /// Build all eight and point the descriptor set at `arena` and `weights`.
+    /// Build all of them and point the descriptor set at `arena` and `weights`.
     pub fn new(
         context: &Context,
         arena: vk::Buffer,
@@ -176,18 +199,7 @@ impl Pipelines {
         cleanup.layout = Some(layout);
 
         let mut built = Vec::new();
-        for spirv in [
-            CONV,
-            CONV_TRANSPOSE,
-            MAXPOOL,
-            RESIZE,
-            RESIZE_NEAREST,
-            GAP,
-            ADD,
-            MUL_BCAST,
-            AFFINE,
-            LAYERNORM,
-        ] {
+        for spirv in SPIRV {
             match compute_pipeline(device, layout, spirv) {
                 Ok(pipeline) => built.push(pipeline),
                 Err(e) => {
@@ -198,6 +210,8 @@ impl Pipelines {
                 }
             }
         }
+        // A fixed-size array rather than a slice pattern of thirteen bindings, so
+        // adding a shader is one entry in `SPIRV` and one name here.
         let [
             conv,
             conv_transpose,
@@ -209,9 +223,17 @@ impl Pipelines {
             mul_bcast,
             affine,
             layernorm,
-        ] = match built.as_slice() {
-            [a, b, c, d, e, f, g, h, i, j] => [*a, *b, *c, *d, *e, *f, *g, *h, *i, *j],
-            _ => return Err("wrong pipeline count".into()),
+            attn_scores,
+            softmax,
+            attn_apply,
+        ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
+            Ok(all) => all,
+            Err(built) => {
+                for pipeline in built {
+                    device.destroy_pipeline(pipeline, None);
+                }
+                return Err("wrong pipeline count".into());
+            }
         };
 
         cleanup.disarm();
@@ -230,6 +252,9 @@ impl Pipelines {
             mul_bcast,
             affine,
             layernorm,
+            attn_scores,
+            softmax,
+            attn_apply,
         })
     }
 
@@ -246,6 +271,9 @@ impl Pipelines {
             Kind::MulBroadcast => self.mul_bcast,
             Kind::Affine => self.affine,
             Kind::LayerNorm => self.layernorm,
+            Kind::AttnScores => self.attn_scores,
+            Kind::Softmax => self.softmax,
+            Kind::AttnApply => self.attn_apply,
         }
     }
 
@@ -264,6 +292,9 @@ impl Pipelines {
             self.mul_bcast,
             self.affine,
             self.layernorm,
+            self.attn_scores,
+            self.softmax,
+            self.attn_apply,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

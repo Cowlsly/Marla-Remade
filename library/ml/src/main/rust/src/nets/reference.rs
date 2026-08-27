@@ -179,6 +179,9 @@ impl Reference {
                     Kind::MulBroadcast => self.mul_broadcast(push),
                     Kind::Affine => self.affine(push),
                     Kind::LayerNorm => self.layer_norm(push),
+                    Kind::AttnScores => self.attn_scores(push),
+                    Kind::Softmax => self.softmax(push),
+                    Kind::AttnApply => self.attn_apply(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -476,6 +479,83 @@ impl Reference {
         Ok(())
     }
 
+    /// `S[h][i][j] = scale * sum_d Q[h][d][i] * K[h][d][j]`.
+    ///
+    /// Q and K are `[d_model, 1, T]`; the output is `[heads, T, T]`. A head is a run of
+    /// `in_c / group` consecutive channels, which is what makes the split free — there is
+    /// no transpose anywhere in this, by construction.
+    fn attn_scores(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.in_c)?;
+        let stride = p.in_h * p.in_w;
+        let scale = f32::from_bits(p.param0_bits);
+        for head in 0..p.group {
+            let base = head * head_dim * stride;
+            for query in 0..p.out_h {
+                for key in 0..p.out_w {
+                    let mut total = 0.0;
+                    for d in 0..head_dim {
+                        let channel = base + d * stride;
+                        total += self.load(p.in0, channel + query)?
+                            * self.load(p.in1, channel + key)?;
+                    }
+                    self.store(p.out, nchw(p, head, query, key), total * scale)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Softmax over the last axis, `count` contiguous rows of `out_w`.
+    ///
+    /// The row maximum is subtracted first, as `softmax.comp` does. That is not a
+    /// refinement: without it a row containing a large score exponentiates to infinity in
+    /// fp32 and every probability in it becomes a NaN.
+    fn softmax(&mut self, p: &Push) -> Result<(), String> {
+        if p.out_w == 0 {
+            return Err("a softmax over an empty axis".into());
+        }
+        for row in 0..p.count {
+            let at = row * p.out_w;
+            let mut peak = -65504.0f32;
+            for i in 0..p.out_w {
+                peak = peak.max(self.load(p.in0, at + i)?);
+            }
+            let mut total = 0.0;
+            for i in 0..p.out_w {
+                total += (self.load(p.in0, at + i)? - peak).exp();
+            }
+            // The peak's own term is `exp(0)`, so this is at least 1.
+            let inverse = 1.0 / total;
+            for i in 0..p.out_w {
+                let value = (self.load(p.in0, at + i)? - peak).exp() * inverse;
+                self.store(p.out, at + i, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`.
+    ///
+    /// `S` is `[heads, T, T]` at `in0`; `V` and the output are `[d_model, 1, T]`. The
+    /// head index picks a plane of `S` and nothing else — channel `c` of `V` is channel
+    /// `c` of the output — which is why concatenating the heads afterwards is not an op.
+    fn attn_apply(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.out_c)?;
+        let keys = p.out_w;
+        for channel in 0..p.out_c {
+            let row = (channel / head_dim) * keys * keys;
+            for query in 0..keys {
+                let mut total = 0.0;
+                for key in 0..keys {
+                    total += self.load(p.in0, row + query * keys + key)?
+                        * self.load(p.in1, channel * keys + key)?;
+                }
+                self.store(p.out, nchw(p, channel, 0, query), total)?;
+            }
+        }
+        Ok(())
+    }
+
     /// `out[c][y][x] = a[c][y][x] * b[c]`, the excite half of a squeeze-excite block.
     fn mul_broadcast(&mut self, p: &Push) -> Result<(), String> {
         for oc in 0..p.out_c {
@@ -490,6 +570,19 @@ impl Reference {
         }
         Ok(())
     }
+}
+
+/// `channels / group`, the head dimension, refusing the split the builder should have
+/// caught.
+fn heads(p: &Push, channels: u32) -> Result<u32, String> {
+    if p.group == 0 || !channels.is_multiple_of(p.group) {
+        return Err(format!("{channels} channels do not split into {} heads", p.group));
+    }
+    let head_dim = channels / p.group;
+    if head_dim == 0 {
+        return Err(format!("{} heads for {channels} channels", p.group));
+    }
+    Ok(head_dim)
 }
 
 /// `(in_c / group, out_c / group)`, refusing the divisions the builder should have
@@ -731,6 +824,31 @@ mod tests {
         run(&plan, given.data(), input).expect("the fixture plan runs")
     }
 
+    /// [`one`], for the ops whose two operands are different shapes.
+    ///
+    /// Attention cannot be checked with one tensor used twice: `Q . K^T` is symmetric
+    /// when `Q == K`, so a fixture built that way passes with the two operands swapped
+    /// and with the query and key axes transposed.
+    fn two(
+        shapes: (Shape, Shape),
+        inputs: (&[f32], &[f32]),
+        record: impl FnOnce(&mut Builder, Id, Id) -> Id,
+    ) -> Vec<f32> {
+        let given = Given::new(&[]).expect("no tensors");
+        let mut builder = Builder::new(&given);
+        let first = builder.input(shapes.0);
+        let second = builder.input(shapes.1);
+        let last = record(&mut builder, first, second);
+        let plan = builder.finish(&[last]).expect("the fixture plan builds");
+        super::super::tests::assert_no_aliasing(&plan);
+        let outputs =
+            run_multi(&plan, given.data(), &[inputs.0, inputs.1]).expect("the fixture plan runs");
+        match <[Vec<f32>; 1]>::try_from(outputs) {
+            Ok([only]) => only,
+            Err(other) => panic!("{} outputs", other.len()),
+        }
+    }
+
     fn close(got: &[f32], want: &[f32]) {
         assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
         for (i, (&g, &w)) in got.iter().zip(want).enumerate() {
@@ -915,6 +1033,9 @@ mod tests {
         assert_eq!(Act::Relu.code(), act::RELU);
         assert_eq!(Act::HardSwish.code(), act::HARDSWISH);
         assert_eq!(Act::Sigmoid.code(), act::SIGMOID);
+        assert_eq!(Act::PRelu(0).code(), act::PRELU);
+        assert_eq!(Act::Clip01.code(), act::CLIP01);
+        assert_eq!(Act::Swish.code(), act::SWISH);
     }
 
     #[test]
@@ -1161,6 +1282,187 @@ mod tests {
         // Zero variance, so both come out at beta rather than as NaN.
         close(&got, &[0.0, 0.0]);
         assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
+    }
+
+    #[test]
+    fn attention_scores_contract_over_channels_and_keep_the_key_axis_last() {
+        // d_model 2, one head, T 2, so `scale` is 1/sqrt(2). Q and K are `[c, 1, T]`
+        // channel-major, so Q's columns are (1,3) and (2,4) and K's are (5,7) and (6,8).
+        //
+        // Distinct operands on purpose: Q.K^T with Q == K is symmetric, and a symmetric
+        // fixture passes with the query and key axes transposed. Here S[0][1] is 30 and
+        // S[1][0] is 38.
+        let got = two(
+            (Shape::new(2, 1, 2), Shape::new(2, 1, 2)),
+            (&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0]),
+            |b, q, k| b.attn_scores(q, k, 1),
+        );
+        let scale = 1.0 / 2f32.sqrt();
+        close(&got, &[26.0 * scale, 30.0 * scale, 38.0 * scale, 44.0 * scale]);
+    }
+
+    #[test]
+    fn attention_scores_never_mix_two_heads() {
+        // d_model 4 in two heads, so head 0 owns channels 0-1 and head 1 channels 2-3.
+        // The second head's values are a decade larger, so any leak across the boundary
+        // moves head 0's scores by about a hundredfold rather than subtly.
+        //
+        // Q == K here, which is fine: what is under test is the channel range each head
+        // reads, and the axis convention is pinned by the fixture above.
+        let sequence = [1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0];
+        let got = two(
+            (Shape::new(4, 1, 2), Shape::new(4, 1, 2)),
+            (&sequence, &sequence),
+            |b, q, k| b.attn_scores(q, k, 2),
+        );
+        // head_dim is 2, so the scale is still 1/sqrt(2).
+        let scale = 1.0 / 2f32.sqrt();
+        close(
+            &got,
+            &[
+                10.0 * scale, 14.0 * scale, 14.0 * scale, 20.0 * scale, //
+                1000.0 * scale, 1400.0 * scale, 1400.0 * scale, 2000.0 * scale,
+            ],
+        );
+    }
+
+    #[test]
+    fn attention_scale_is_the_inverse_root_of_the_head_dimension() {
+        // Four channels in four heads is head_dim 1, where the scale is exactly 1, so
+        // this fixture is the raw product and isolates the scale from the contraction.
+        // At one head the same tensors would be divided by 2 instead.
+        let got = two(
+            (Shape::new(4, 1, 1), Shape::new(4, 1, 1)),
+            (&[1.0, 2.0, 3.0, 4.0], &[5.0, 6.0, 7.0, 8.0]),
+            |b, q, k| b.attn_scores(q, k, 4),
+        );
+        close(&got, &[5.0, 12.0, 21.0, 32.0]);
+    }
+
+    #[test]
+    fn softmax_normalises_each_row_of_the_last_axis_on_its_own() {
+        // `[2, 2, 2]` is four rows of two, the shape a score map has. Rows are (1,2),
+        // (5,5), (0,100) and (-3,-3): a plain pair, two ties at different offsets, and
+        // one row whose spread would overflow.
+        let got = one(
+            Shape::new(2, 2, 2),
+            &[1.0, 2.0, 5.0, 5.0, 0.0, 100.0, -3.0, -3.0],
+            &[],
+            |b, x| b.softmax(x),
+        );
+        let pair = (-1.0f32).exp() / (1.0 + (-1.0f32).exp());
+        close(
+            &got,
+            &[
+                pair, 1.0 - pair, //
+                0.5, 0.5, //
+                0.0, 1.0, //
+                0.5, 0.5,
+            ],
+        );
+        // Every row is a distribution. Two equal values summing to 1 is what a shader
+        // that forgot to divide would also produce for rows 2 and 4, so the sum is
+        // checked for all of them.
+        for (row, pair) in got.chunks_exact(2).enumerate() {
+            let total: f32 = pair.iter().sum();
+            assert!((total - 1.0).abs() < 2e-3, "row {row} sums to {total}");
+        }
+    }
+
+    #[test]
+    fn softmax_subtracts_the_row_maximum_rather_than_exponentiating_directly() {
+        // exp overflows fp32 a little past 88, so a row containing 100 sums to infinity
+        // and every probability in it becomes a NaN. Subtracting the maximum first makes
+        // the largest term exp(0), which cannot overflow and also floors the denominator
+        // at 1.
+        let got = one(Shape::new(1, 1, 3), &[100.0, 99.0, -100.0], &[], |b, x| b.softmax(x));
+        assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
+        let expected = 1.0 / (1.0 + (-1.0f32).exp());
+        close(&got, &[expected, 1.0 - expected, 0.0]);
+    }
+
+    #[test]
+    fn attention_applies_a_row_of_weights_across_the_keys_not_the_queries() {
+        // One head, d_model 2, T 2. Weights are `[heads, T, T]` with the key innermost,
+        // so query 0 mixes (0.25, 0.75) and query 1 takes key 0 alone.
+        //
+        // V's columns are (10, 3) and (20, 7). Reading the weight matrix transposed gives
+        // 22.5 for the first output instead of 17.5, which is why the rows differ.
+        let got = two(
+            (Shape::new(1, 2, 2), Shape::new(2, 1, 2)),
+            (&[0.25, 0.75, 1.0, 0.0], &[10.0, 20.0, 3.0, 7.0]),
+            |b, probs, v| b.attn_apply(probs, v, 1),
+        );
+        close(&got, &[17.5, 10.0, 6.0, 3.0]);
+    }
+
+    #[test]
+    fn attention_uses_the_head_only_to_pick_a_plane_of_weights() {
+        // Two heads over d_model 4. Head 0's weights are the identity and head 1's swap
+        // the two keys, so the expected output is V with its last two channels reversed
+        // along T and the first two untouched.
+        //
+        // This is the claim that makes the head concatenation free: channel `c` of V is
+        // channel `c` of the output, and the head index selects nothing but which plane
+        // of the score map to read.
+        let got = two(
+            (Shape::new(2, 2, 2), Shape::new(4, 1, 2)),
+            (
+                &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+                &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+            ),
+            |b, probs, v| b.attn_apply(probs, v, 2),
+        );
+        close(&got, &[1.0, 2.0, 3.0, 4.0, 6.0, 5.0, 8.0, 7.0]);
+    }
+
+    #[test]
+    fn a_whole_attention_averages_its_values_when_every_score_is_equal() {
+        // The three ops composed. Q and K are zero, so every score is zero, so every
+        // softmax row is uniform at 1/T, so each output position is the mean of V over
+        // the sequence — the same value at all four positions.
+        //
+        // That pins all three at once in a way none of them can fake: a missing scale
+        // still gives zeros, but a softmax that did not normalise scales the mean by T,
+        // and a weighted sum that indexed V by query rather than key returns V itself.
+        let got = two(
+            (Shape::new(2, 1, 4), Shape::new(2, 1, 4)),
+            (
+                &[0.0; 8],
+                &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+            ),
+            |b, zeros, v| {
+                let scores = b.attn_scores(zeros, zeros, 1);
+                let probs = b.softmax(scores);
+                b.attn_apply(probs, v, 1)
+            },
+        );
+        close(&got, &[2.5, 2.5, 2.5, 2.5, 25.0, 25.0, 25.0, 25.0]);
+    }
+
+    #[test]
+    fn a_head_count_that_does_not_divide_the_channels_fails_the_build() {
+        // d_model 120 in 8 heads is the recogniser's geometry; anything that does not
+        // divide would silently reinterpret the channel runs as overlapping heads.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let q = b.input(Shape::new(6, 1, 2));
+        let scores = b.attn_scores(q, q, 4);
+        let error = b.finish(&[scores]).expect_err("6 channels in 4 heads");
+        assert!(error.contains("do not split into 4 heads"), "{error}");
+    }
+
+    #[test]
+    fn a_sequence_with_a_height_above_one_is_refused() {
+        // `[d_model, 1, T]` is what makes the head split a reinterpretation rather than
+        // a copy. A taller tensor would be read as if the extra rows were sequence
+        // positions, which is wrong and produces an output of a plausible shape.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let q = b.input(Shape::new(4, 2, 2));
+        let scores = b.attn_scores(q, q, 2);
+        let error = b.finish(&[scores]).expect_err("a two-row sequence");
+        assert!(error.contains("height above"), "{error}");
     }
 
     #[test]

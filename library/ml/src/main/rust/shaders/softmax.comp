@@ -1,0 +1,62 @@
+#version 450
+//! Softmax over the **last** axis, one invocation per row.
+//!
+//! Two uses, both on an attention score map in PP-OCRv5 recognition.
+//!
+//! # Why the last axis, and why that needs no indexing
+//!
+//! The scores are `[heads, T, T]` with the key index innermost, so a row — one query's
+//! distribution over every key — is a contiguous run of `out_w` elements. The row a
+//! given invocation owns is therefore just `row * out_w`, and `p.count` is the number of
+//! rows (`out_c * out_h`) rather than the element count. No `unpack` and no stride.
+//!
+//! That is only true because `nets::Kind::AttnScores` chose to emit the key index last.
+//! A softmax over any other axis of this runtime's tensors would be a different shader,
+//! and there is no use for one.
+//!
+//! # The maximum is subtracted, and it is not optional
+//!
+//! `exp` here is fp32, which overflows to infinity a little past 88. Scores are scaled
+//! by `1 / sqrt(head_dim)` before they arrive so they are usually well inside that, but
+//! "usually" is doing no work in a shader: one saturated activation upstream turns the
+//! whole row into `inf / inf` and every probability into a NaN. Subtracting the row
+//! maximum first makes the largest term exactly `exp(0)`, which also means the
+//! denominator is at least 1 and the division cannot blow up.
+//!
+//! The result is unchanged in exact arithmetic — `exp(x - m) / sum(exp(x - m))` is the
+//! same function — so this costs one extra pass over a row of `T` and buys the property
+//! that the output is always a distribution.
+//!
+//! # Three passes over the row
+//!
+//! Maximum, then sum, then store, re-evaluating `exp` in the third rather than keeping
+//! the row in registers: `T` is around 80 for a line of text, which is far too large for
+//! a fixed-size local array and too small for the bandwidth to matter.
+
+#include "common.glsl"
+
+void main() {
+    uint row = global_index();
+    if (row >= p.count) {
+        return;
+    }
+    uint at = p.in0 + row * p.out_w;
+
+    // The most negative fp16 rather than -inf, matching `maxpool.comp`: every row here
+    // is non-empty, so the seed is never the answer.
+    float peak = -65504.0;
+    for (uint i = 0u; i < p.out_w; i++) {
+        peak = max(peak, float(arena[at + i]));
+    }
+
+    float total = 0.0;
+    for (uint i = 0u; i < p.out_w; i++) {
+        total += exp(float(arena[at + i]) - peak);
+    }
+    float inverse = 1.0 / total;
+
+    uint out_row = p.out_at + row * p.out_w;
+    for (uint i = 0u; i < p.out_w; i++) {
+        arena[out_row + i] = float16_t(exp(float(arena[at + i]) - peak) * inverse);
+    }
+}

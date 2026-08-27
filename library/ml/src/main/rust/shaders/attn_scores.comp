@@ -1,0 +1,61 @@
+#version 450
+//! `S[h][i][j] = scale * sum_d Q[h][d][i] * K[h][d][j]`, the first half of attention.
+//!
+//! Two uses, one per transformer block in PP-OCRv5 recognition.
+//!
+//! # The contraction is over the middle axis, and that is the whole point
+//!
+//! Q and K arrive as `[d_model, 1, T]` — the layout the CNN backbone already produces,
+//! see `nets::Kind::LayerNorm` for why this runtime keeps it. Read as `[heads, head_dim,
+//! T]` those are the same bytes in the same order, so a head is a run of channels and
+//! splitting `d_model` into heads costs nothing: no `Permute`, no `Reshape`, no copy.
+//! `p.group` carries the head count and this indexes accordingly.
+//!
+//! What it costs is that the reduction walks `head_dim` channels a stride apart rather
+//! than a contiguous vector. At `head_dim` 15 that is 15 strided pairs per score. The
+//! alternative — transposing to `[T, d_model]` so each head's vector is contiguous —
+//! buys a contiguous read here and pays two permutes of the whole sequence per
+//! attention, twice per block.
+//!
+//! # One invocation per score
+//!
+//! The output is `[heads, T, T]`, so there are `heads * T * T` invocations and each
+//! reduces `head_dim` products. That is the parallel axis: `T` is around 80 for a line
+//! of text, so this is tens of thousands of independent invocations against `head_dim`
+//! serial steps each — the opposite balance to `gap.comp`, which has only channels to
+//! spread across.
+//!
+//! # Scale
+//!
+//! `1 / sqrt(head_dim)`, arriving as raw `f32` bits in `p.param0_bits`. It is derived
+//! from the head geometry by `nets::Builder::attn_scores` rather than read from the
+//! weights file, because it is not a trained value — it is a property of the shape.
+//!
+//! Applied here, to the accumulator, rather than to Q's projection weights: folding it
+//! there would work and would make the scale invisible in the one place a reader looks
+//! to check it.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[heads, T, T]`, so `unpack` gives head, query and key directly.
+    uint head, query, key;
+    unpack(index, head, query, key);
+
+    // Q and K are `[d_model, 1, T]`: one channel every `in_h * in_w` elements, which is
+    // `T`. A head owns `head_dim` consecutive channels starting at `head * head_dim`.
+    uint head_dim = p.in_c / p.group;
+    uint stride = p.in_h * p.in_w;
+    uint base = head * head_dim * stride;
+
+    float total = 0.0;
+    for (uint d = 0u; d < head_dim; d++) {
+        uint channel = base + d * stride;
+        total += float(arena[p.in0 + channel + query]) * float(arena[p.in1 + channel + key]);
+    }
+    arena[p.out_at + index] = float16_t(total * uintBitsToFloat(p.param0_bits));
+}
