@@ -44,6 +44,173 @@ pub const RESCALE_ONLY: Normalise = Normalise { mean: [0.0; 3], std: [1.0; 3] };
 pub const IMAGENET: Normalise =
     Normalise { mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225] };
 
+/// `(value - 127.5) / 128` on the `0..255` scale, which is what SCRFD wants.
+///
+/// Expressed against the `0..1` rescale every [`Normalise`] applies: `127.5 / 255` is
+/// exactly `0.5`, and dividing by `128 / 255` is dividing by 128 after the rescale.
+///
+/// **Not** [`FACE_EMBED`], whose divisor is 127.5. The two differ by 0.4% and share a
+/// mean, so a swapped constant shifts every embedding slightly and every box slightly,
+/// with no symptom either would fail on. `scrfd.cpp:310` and the MobileFaceNet
+/// preprocessing are the two places that disagree.
+pub const SCRFD: Normalise =
+    Normalise { mean: [0.5, 0.5, 0.5], std: [128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0] };
+
+/// `(value - 127.5) / 127.5` on the `0..255` scale, which is what MobileFaceNet wants.
+/// See [`SCRFD`] for why these are two constants and not one.
+pub const FACE_EMBED: Normalise = Normalise { mean: [0.5, 0.5, 0.5], std: [0.5, 0.5, 0.5] };
+
+/// How an image was fitted into the detector's input, and what it takes to undo it.
+///
+/// SCRFD runs at 640 on the long side with the short side padded up to a multiple of 32,
+/// the image centred in the padding. Every box and keypoint the net predicts is in this
+/// padded space, so [`Letterbox`] is carried alongside them until
+/// `post::nms::to_source` maps them back.
+///
+/// The arithmetic is `scrfd.cpp:286-308` reproduced exactly, integer truncation
+/// included. Two details are load-bearing:
+///
+/// * The resized extent is `(original * scale) as u32` — a **truncation**, not a round.
+///   At 640 on the long side that differs by a pixel often enough to matter, and the
+///   padding is derived from it.
+/// * The padding is split `pad / 2` above and `pad - pad / 2` below, with **integer**
+///   division, so an odd pad puts the extra row at the bottom. Undoing it subtracts the
+///   same integer `pad / 2`, which is why that value is stored rather than recomputed
+///   from a float.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Letterbox {
+    /// What the source was multiplied by to reach [`Letterbox::resized`].
+    pub scale: f32,
+    /// `(width, height)` after scaling, before padding.
+    pub resized: (u32, u32),
+    /// `(width, height)` after padding. Both are multiples of the requested multiple.
+    pub padded: (u32, u32),
+    /// `(left, top)` padding, which is what a coordinate has subtracted from it.
+    pub offset: (u32, u32),
+}
+
+impl Letterbox {
+    /// Fit a `width` x `height` image to `long_side`, padding up to `multiple`.
+    pub fn new(
+        width: u32,
+        height: u32,
+        long_side: u32,
+        multiple: u32,
+    ) -> Result<Letterbox, String> {
+        if width == 0 || height == 0 {
+            return Err(format!("a {width}x{height} image"));
+        }
+        if long_side == 0 || multiple == 0 {
+            return Err(format!("a {long_side} long side at a multiple of {multiple}"));
+        }
+        // The long side goes to `long_side`; the short side follows by the same scale,
+        // truncated. `.max(1)` only bites at aspect ratios beyond about 640:1.
+        let (scale, resized) = if width > height {
+            let scale = long_side as f32 / width as f32;
+            (scale, (long_side, ((height as f32 * scale) as u32).max(1)))
+        } else {
+            let scale = long_side as f32 / height as f32;
+            (scale, (((width as f32 * scale) as u32).max(1), long_side))
+        };
+        let pad = |extent: u32| extent.div_ceil(multiple) * multiple - extent;
+        let (pad_w, pad_h) = (pad(resized.0), pad(resized.1));
+        Ok(Letterbox {
+            scale,
+            resized,
+            padded: (resized.0 + pad_w, resized.1 + pad_h),
+            offset: (pad_w / 2, pad_h / 2),
+        })
+    }
+
+    /// The net's input shape for this fit.
+    pub fn shape(&self) -> Shape {
+        Shape::new(3, self.padded.1, self.padded.0)
+    }
+}
+
+/// Resize `pixels` into `fit`'s padded extent and write it as planar fp16.
+///
+/// The image is scaled to `fit.resized`, centred at `fit.offset`, and everything outside
+/// it is filled with **raw zero put through `norm`** — not with zero. `scrfd.cpp` pads
+/// before it normalises, so the border a detection can see is `(0 - 127.5) / 128`, which
+/// is about `-0.996` rather than neutral grey. Filling with 0.0 instead changes what the
+/// net sees along two edges of every non-square photo.
+pub fn to_letterboxed_f16(
+    pixels: &[i32],
+    width: u32,
+    height: u32,
+    fit: &Letterbox,
+    norm: &Normalise,
+    dst: &mut [u16],
+) -> Result<(), String> {
+    if width == 0 || height == 0 {
+        return Err("a zero-sized bitmap".into());
+    }
+    let expected = (width as usize)
+        .checked_mul(height as usize)
+        .ok_or("bitmap dimensions overflow")?;
+    if pixels.len() != expected {
+        return Err(format!("{} pixels for a {width}x{height} bitmap", pixels.len()));
+    }
+    let shape = fit.shape();
+    if dst.len() != shape.len() as usize {
+        return Err(format!("{} output elements for {shape:?}", dst.len()));
+    }
+
+    let plane = (shape.h * shape.w) as usize;
+    let (out_w, out_h) = fit.resized;
+    let (left, top) = fit.offset;
+    let x_scale = width as f32 / out_w as f32;
+    let y_scale = height as f32 / out_h as f32;
+
+    // The border value, computed once: raw 0 through the normalisation.
+    let border: [u16; 3] = [0, 1, 2].map(|c| {
+        let mean = norm.mean.get(c).copied().unwrap_or(0.0);
+        let std = norm.std.get(c).copied().unwrap_or(1.0);
+        f32_to_f16((0.0 - mean) / std)
+    });
+
+    for out_y in 0..shape.h {
+        let inside_row = out_y >= top && out_y < top + out_h;
+        let (y0, y1, wy) = if inside_row {
+            sample(out_y - top, y_scale, height)
+        } else {
+            (0, 0, 0.0)
+        };
+        for out_x in 0..shape.w {
+            let at = (out_y * shape.w + out_x) as usize;
+            if !inside_row || out_x < left || out_x >= left + out_w {
+                for channel in 0..3usize {
+                    let slot = dst
+                        .get_mut(channel * plane + at)
+                        .ok_or("letterboxing wrote past the end of its output")?;
+                    *slot = border.get(channel).copied().unwrap_or(0);
+                }
+                continue;
+            }
+            let (x0, x1, wx) = sample(out_x - left, x_scale, width);
+
+            let p00 = pixel(pixels, width, x0, y0);
+            let p10 = pixel(pixels, width, x1, y0);
+            let p01 = pixel(pixels, width, x0, y1);
+            let p11 = pixel(pixels, width, x1, y1);
+
+            for channel in 0..3usize {
+                let top_row = lerp(p00[channel], p10[channel], wx);
+                let bottom_row = lerp(p01[channel], p11[channel], wx);
+                let value = lerp_f32(top_row, bottom_row, wy) / 255.0;
+                let mean = norm.mean.get(channel).copied().unwrap_or(0.0);
+                let std = norm.std.get(channel).copied().unwrap_or(1.0);
+                let slot = dst
+                    .get_mut(channel * plane + at)
+                    .ok_or("letterboxing wrote past the end of its output")?;
+                *slot = f32_to_f16((value - mean) / std);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resize `pixels` to `shape` and write it as planar fp16.
 ///
 /// `pixels` is `ARGB_8888` as `Bitmap.getPixels` produces it — `0xAARRGGBB` per entry,
@@ -328,6 +495,96 @@ mod tests {
         assert!(f16_to_f32(f32_to_f16(f32::NAN)).is_nan());
         // Underflow keeps its sign, so a mask never gains a positive value from one.
         assert!(f16_to_f32(f32_to_f16(-1e-30)).is_sign_negative());
+    }
+
+    #[test]
+    fn the_scrfd_and_embedder_normalisations_share_a_mean_but_not_a_divisor() {
+        // Both are `(v - 127.5) / d`, with d = 128 and d = 127.5. The 0.4% difference is
+        // invisible in any output, so the two constants are pinned against a direct
+        // computation on the 0..255 scale rather than against each other.
+        let through = |norm: &Normalise, raw: f32| (raw / 255.0 - norm.mean[0]) / norm.std[0];
+        for raw in [0.0f32, 127.5, 255.0] {
+            assert!((through(&SCRFD, raw) - (raw - 127.5) / 128.0).abs() < 1e-6, "{raw}");
+            assert!(
+                (through(&FACE_EMBED, raw) - (raw - 127.5) / 127.5).abs() < 1e-6,
+                "{raw}"
+            );
+        }
+        // And they really are different, so a swap is a change.
+        assert_ne!(SCRFD.std[0], FACE_EMBED.std[0]);
+    }
+
+    #[test]
+    fn letterbox_padding_is_normalised_zero_and_not_zero() {
+        // `scrfd.cpp` pads with raw 0 *before* it normalises, so the border the net sees
+        // is (0 - 127.5) / 128. Filling with 0.0 instead — the obvious reading of "pad
+        // with zero" — puts a mid-grey frame around every non-square photo.
+        //
+        // 64x20 at a long side of 64: no scaling, and the height pads 20 up to 32, so
+        // 6 rows above and 6 below.
+        let pixels = vec![argb(255, 255, 255); 64 * 20];
+        let fit = Letterbox::new(64, 20, 64, 32).expect("fits");
+        assert_eq!(fit.resized, (64, 20));
+        assert_eq!(fit.padded, (64, 32));
+        assert_eq!(fit.offset, (0, 6));
+
+        let shape = fit.shape();
+        let mut out = vec![0u16; shape.len() as usize];
+        to_letterboxed_f16(&pixels, 64, 20, &fit, &SCRFD, &mut out).expect("letterboxes");
+
+        let want_border = (0.0 - 127.5) / 128.0;
+        let want_image = (255.0 - 127.5) / 128.0;
+        let row = |y: u32| f16_to_f32(out[(y * shape.w) as usize]);
+        // Row 0 and row 5 are padding, row 6 is the first image row.
+        assert!((row(0) - want_border).abs() < 2e-3, "row 0 is {}", row(0));
+        assert!((row(5) - want_border).abs() < 2e-3, "row 5 is {}", row(5));
+        assert!((row(6) - want_image).abs() < 2e-3, "row 6 is {}", row(6));
+        // Row 25 is the last image row, 26 and 31 are the bottom padding.
+        assert!((row(25) - want_image).abs() < 2e-3, "row 25 is {}", row(25));
+        assert!((row(26) - want_border).abs() < 2e-3, "row 26 is {}", row(26));
+        assert!((row(31) - want_border).abs() < 2e-3, "row 31 is {}", row(31));
+    }
+
+    #[test]
+    fn a_letterboxed_image_lands_centred_at_the_offset() {
+        // A single white column in an otherwise black source, so its position after
+        // padding is unambiguous. 20x64 portrait at a long side of 64: no scaling, and
+        // the width pads 20 up to 32, so 6 columns on the left.
+        let mut pixels = vec![argb(0, 0, 0); 20 * 64];
+        for row in 0..64 {
+            pixels[row * 20 + 10] = argb(255, 255, 255);
+        }
+        let fit = Letterbox::new(20, 64, 64, 32).expect("fits");
+        assert_eq!(fit.resized, (20, 64));
+        assert_eq!(fit.padded, (32, 64));
+        assert_eq!(fit.offset, (6, 0));
+
+        let shape = fit.shape();
+        let mut out = vec![0u16; shape.len() as usize];
+        to_letterboxed_f16(&pixels, 20, 64, &fit, &RESCALE_ONLY, &mut out)
+            .expect("letterboxes");
+
+        // The bright column was at source x = 10, so it is at output x = 10 + 6 = 16.
+        let row = (shape.h / 2 * shape.w) as usize;
+        let brightest = (0..shape.w)
+            .max_by(|&a, &b| {
+                f16_to_f32(out[row + a as usize]).total_cmp(&f16_to_f32(out[row + b as usize]))
+            })
+            .expect("a row");
+        assert_eq!(brightest, 16);
+        // And the padding either side really is the border, not a smeared edge pixel.
+        assert_eq!(f16_to_f32(out[row]), 0.0);
+        assert_eq!(f16_to_f32(out[row + 31]), 0.0);
+    }
+
+    #[test]
+    fn a_mismatched_letterbox_output_length_is_refused() {
+        let pixels = vec![argb(0, 0, 0); 4];
+        let fit = Letterbox::new(2, 2, 64, 32).expect("fits");
+        let mut out = vec![0u16; 8];
+        let error = to_letterboxed_f16(&pixels, 2, 2, &fit, &SCRFD, &mut out)
+            .expect_err("wrong length");
+        assert!(error.contains("output elements"), "{error}");
     }
 
     #[test]

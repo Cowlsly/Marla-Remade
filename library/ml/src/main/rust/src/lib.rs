@@ -36,6 +36,7 @@
 //! arena arithmetic and the preprocessing, with no device and no asset.
 
 pub mod nets;
+pub mod post;
 pub mod preprocess;
 pub mod weights;
 
