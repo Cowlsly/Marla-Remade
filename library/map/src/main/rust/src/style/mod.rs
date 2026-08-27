@@ -239,13 +239,18 @@ const fn landuse(
 /// Where the authored style's `landuse` opacity ramp leaves zero.
 pub const LANDUSE_MIN_ZOOM: u8 = 6;
 
-/// A `landcover` tint: light in the authored style's own paint, dark from
-/// `BasemapPalette.Fill.Landcover`, and gone above z7 where the authored style's opacity
+/// A `landcover` tint: light is the authored style's own paint, dark is a same-hue tint
+/// lifted just off `earth`, and both are gone above z7 where the authored style's opacity
 /// ramp reaches zero.
-const fn landcover(id: &'static str, kinds: &'static [&'static str], light: u32) -> Layer {
+const fn landcover(
+    id: &'static str,
+    kinds: &'static [&'static str],
+    light: u32,
+    dark: u32,
+) -> Layer {
     Layer {
         max_zoom: LANDCOVER_MAX_ZOOM,
-        ..layer(id, "landcover", LayerKind::Fill, kinds, light, 0xFF1F2A22)
+        ..layer(id, "landcover", LayerKind::Fill, kinds, light, dark)
     }
 }
 
@@ -284,18 +289,25 @@ pub fn layers() -> Vec<Layer> {
         // visible way to get a basemap wrong.
         //
         // Without expression support there is no opacity ramp yet, so the ramp's endpoint
-        // becomes a hard `max_zoom` of 7. Per-kind colours are worth having because they
-        // are most of what makes low zooms read correctly. In dark mode `BasemapPalette`
-        // deliberately collapses every landcover kind to one value, so the dark column does
-        // the same.
-        landcover("landcover-grassland", &["grassland"], 0xFFD2EFCF),
-        landcover("landcover-farmland", &["farmland"], 0xFFD8EFD2),
-        landcover("landcover-scrub", &["scrub"], 0xFFEAEFD2),
-        landcover("landcover-barren", &["barren"], 0xFFFFF3D7),
-        landcover("landcover-glacier", &["glacier"], 0xFFFFFFFF),
-        landcover("landcover-urban", &["urban_area"], 0xFFE6E6E6),
-        // The authored style's fallback for every other kind.
-        landcover("landcover-other", &[], 0xFFC4E7D2),
+        // becomes a hard `max_zoom` of 7.
+        //
+        // The authored `fill-color` is a `match` on `kind`, where a feature takes exactly one
+        // arm. Here each arm is a separate layer, so the unfiltered fallback — which
+        // `matches()` every kind — has to be drawn *first* and let the specific kinds paint
+        // over it. Drawn last it overpaints all of them, collapsing seven colours into one.
+        //
+        // The dark column is not the authored paint: those are near-white pastels that would
+        // wash out a dark map. Each is a tint of the same hue held a few units off `earth`
+        // (#24262C), which is what keeps a gap in landcover coverage from reading as a
+        // different surface. Earth is blue-dominant, so a green-dominant tint of the same
+        // luminance shows up as a mauve patch wherever coverage stops.
+        landcover("landcover-other", &[], 0xFFC4E7D2, 0xFF262B2A),
+        landcover("landcover-grassland", &["grassland"], 0xFFD2EFCF, 0xFF262C28),
+        landcover("landcover-farmland", &["farmland"], 0xFFD8EFD2, 0xFF272D29),
+        landcover("landcover-scrub", &["scrub"], 0xFFEAEFD2, 0xFF2A2C26),
+        landcover("landcover-barren", &["barren"], 0xFFFFF3D7, 0xFF2C2A24),
+        landcover("landcover-glacier", &["glacier"], 0xFFFFFFFF, 0xFF34373D),
+        landcover("landcover-urban", &["urban_area"], 0xFFE6E6E6, 0xFF2A2B2E),
         // Water, including the ocean — `water.kind` really does contain `ocean`, so the sea
         // is a polygon rather than the backdrop showing through. `#80deea` is the authored
         // paint: a bright cyan, and deliberately nothing like `earth`. A washed-out blue
@@ -500,6 +512,26 @@ mod tests {
     }
 
     #[test]
+    fn every_landcover_kind_has_its_own_colour_in_both_palettes() {
+        // The authored `fill-color` gives each kind a different colour, and that difference is
+        // most of what makes a low zoom readable: it is why the Sahara does not look like the
+        // Congo. Collapsing a palette's whole column to one literal paints every landmass a
+        // single flat tint that follows vegetation polygons and lines up with nothing.
+        let layers = layers();
+        for palette in [Palette::new(false, false), Palette::new(true, false)] {
+            let mut seen: Vec<(u32, &str)> = Vec::new();
+            for l in layers.iter().filter(|l| l.source_layer == "landcover") {
+                let colour = l.color(palette);
+                if let Some((_, other)) = seen.iter().find(|(c, _)| *c == colour) {
+                    panic!("{} and {} share {colour:#010X} in {palette:?}", l.id, other);
+                }
+                seen.push((colour, l.id));
+            }
+            assert_eq!(seen.len(), 7, "every authored `match` arm needs an arm here");
+        }
+    }
+
+    #[test]
     fn landcover_kinds_are_lighter_than_the_earth_they_tint() {
         // A tint sits *on* the land, so in light mode it must not be darker than the land
         // itself or it reads as a separate landmass.
@@ -515,7 +547,7 @@ mod tests {
     }
 
     #[test]
-    fn the_unfiltered_landcover_layer_is_drawn_last_so_specific_kinds_win() {
+    fn the_unfiltered_landcover_layer_is_drawn_first_so_specific_kinds_win() {
         // The authored style's `match` has a fallback arm; here that is a separate
         // unfiltered layer, which only behaves like a fallback if it draws under nothing
         // else — i.e. it must come first, before the kind-specific ones paint over it.
@@ -531,8 +563,8 @@ mod tests {
                 continue;
             }
             assert!(
-                *index < fallback.0,
-                "{} must precede the unfiltered fallback so its colour is not overpainted",
+                *index > fallback.0,
+                "{} must follow the unfiltered fallback so its colour is not overpainted",
                 l.id,
             );
         }
