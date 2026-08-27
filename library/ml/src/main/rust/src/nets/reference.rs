@@ -53,14 +53,26 @@ mod act {
     pub const HARDSWISH: u32 = 2;
     /// The logistic function.
     pub const SIGMOID: u32 = 3;
+    /// `x < 0 ? slope[c] * x : x`.
+    pub const PRELU: u32 = 4;
 }
 
 /// The fused activation, mirroring `activate` in `common.glsl`.
-fn activate(x: f32, kind: u32) -> f32 {
+///
+/// `slope` is the PReLU coefficient for this output channel, already fetched; the
+/// others ignore it.
+fn activate(x: f32, kind: u32, slope: f32) -> f32 {
     match kind {
         act::RELU => x.max(0.0),
         act::HARDSWISH => x * (x * (1.0 / 6.0) + 0.5).clamp(0.0, 1.0),
         act::SIGMOID => 1.0 / (1.0 + (-x).exp()),
+        act::PRELU => {
+            if x < 0.0 {
+                x * slope
+            } else {
+                x
+            }
+        }
         _ => x,
     }
 }
@@ -70,16 +82,32 @@ fn through_f16(value: f32) -> f32 {
     f16_to_f32(f32_to_f16(value))
 }
 
-/// Run `plan` on the host and return its output.
+/// Run `plan` on the host and return its outputs, in [`Plan::outputs`] order.
 ///
 /// `weights` is the `.vkml` data section verbatim — the same bytes the device gets —
 /// so this accepts [`crate::weights::Weights::data`] and a shipped asset directly.
-/// `input` is fp32 in the plan's input shape; it is rounded to fp16 on the way in,
-/// exactly as an upload would.
-pub fn run(plan: &Plan, weights: &[u8], input: &[f32]) -> Result<Vec<f32>, String> {
-    let mut reference = Reference::new(plan, weights, input)?;
+/// `inputs` is one fp32 slice per [`Plan::inputs`] entry; each is rounded to fp16 on
+/// the way in, exactly as an upload would.
+pub fn run_multi(
+    plan: &Plan,
+    weights: &[u8],
+    inputs: &[&[f32]],
+) -> Result<Vec<Vec<f32>>, String> {
+    let mut reference = Reference::new(plan, weights, inputs)?;
     reference.execute(plan)?;
-    reference.read(plan.output, plan.output_shape.len())
+    plan.outputs
+        .iter()
+        .map(|out| reference.read(out.at, out.shape.len()))
+        .collect()
+}
+
+/// [`run_multi`] for the single-input, single-output nets.
+pub fn run(plan: &Plan, weights: &[u8], input: &[f32]) -> Result<Vec<f32>, String> {
+    let outputs = run_multi(plan, weights, &[input])?;
+    match <[Vec<f32>; 1]>::try_from(outputs) {
+        Ok([only]) => Ok(only),
+        Err(other) => Err(format!("this net has {} outputs, not one", other.len())),
+    }
 }
 
 /// A host execution of a [`Plan`]: the activation arena, and the weights it reads.
@@ -93,12 +121,12 @@ pub struct Reference {
 }
 
 impl Reference {
-    fn new(plan: &Plan, weights: &[u8], input: &[f32]) -> Result<Reference, String> {
-        if input.len() != plan.input_shape.len() as usize {
+    fn new(plan: &Plan, weights: &[u8], inputs: &[&[f32]]) -> Result<Reference, String> {
+        if inputs.len() != plan.inputs.len() {
             return Err(format!(
-                "{} input values for {:?}",
-                input.len(),
-                plan.input_shape
+                "{} input slices for a net with {} inputs",
+                inputs.len(),
+                plan.inputs.len()
             ));
         }
         if !weights.len().is_multiple_of(2) {
@@ -114,8 +142,17 @@ impl Reference {
 
         let mut reference =
             Reference { arena: vec![0.0; plan.arena_elems as usize], weights: decoded };
-        for (i, &value) in input.iter().enumerate() {
-            reference.store(plan.input, i as u32, value)?;
+        for (binding, values) in plan.inputs.iter().zip(inputs) {
+            if values.len() != binding.shape.len() as usize {
+                return Err(format!(
+                    "{} input values for {:?}",
+                    values.len(),
+                    binding.shape
+                ));
+            }
+            for (i, &value) in values.iter().enumerate() {
+                reference.store(binding.at, i as u32, value)?;
+            }
         }
         Ok(reference)
     }
@@ -130,6 +167,7 @@ impl Reference {
                     Kind::ConvTranspose => self.conv_transpose(push),
                     Kind::MaxPool => self.max_pool(push),
                     Kind::Resize => self.resize(push),
+                    Kind::ResizeNearest => self.resize_nearest(push),
                     Kind::GlobalAvgPool => self.global_avg_pool(push),
                     Kind::Add => self.add(push),
                     Kind::MulBroadcast => self.mul_broadcast(push),
@@ -195,6 +233,7 @@ impl Reference {
         for oc in 0..p.out_c {
             let first_in = (oc / out_per_group) * in_per_group;
             let kernel_at = p.weight + oc * in_per_group * p.kh * p.kw;
+            let slope = self.slope(p, oc)?;
             for oy in 0..p.out_h {
                 for ox in 0..p.out_w {
                     let mut acc = self.weight(p.bias, oc)?;
@@ -218,11 +257,20 @@ impl Reference {
                             }
                         }
                     }
-                    self.store(p.out, nchw(p, oc, oy, ox), activate(acc, p.act))?;
+                    self.store(p.out, nchw(p, oc, oy, ox), activate(acc, p.act, slope))?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// The PReLU slope for output channel `c`, or zero when the activation is not PReLU.
+    fn slope(&self, p: &Push, c: u32) -> Result<f32, String> {
+        if p.act == act::PRELU {
+            self.weight(p.act_weight, c)
+        } else {
+            Ok(0.0)
+        }
     }
 
     /// Transposed convolution: ONNX semantics, weights `[in_c, out_c / group, kh, kw]`.
@@ -239,6 +287,7 @@ impl Reference {
             return Err(format!("a transposed convolution in {} groups", p.group));
         }
         for oc in 0..p.out_c {
+            let slope = self.slope(p, oc)?;
             for oy in 0..p.out_h {
                 for ox in 0..p.out_w {
                     let mut acc = self.weight(p.bias, oc)?;
@@ -261,7 +310,7 @@ impl Reference {
                             }
                         }
                     }
-                    self.store(p.out, nchw(p, oc, oy, ox), activate(acc, p.act))?;
+                    self.store(p.out, nchw(p, oc, oy, ox), activate(acc, p.act, slope))?;
                 }
             }
         }
@@ -317,6 +366,29 @@ impl Reference {
                     let bottom =
                         lerp(self.load(p.in0, row1 + x0)?, self.load(p.in0, row1 + x1)?, tx);
                     self.store(p.out, nchw(p, oc, oy, ox), lerp(top, bottom, ty))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Nearest-neighbour resize, ONNX `asymmetric` coordinates with `floor` rounding:
+    /// `src = floor(dst * in / out)`, which in integers is an exact division.
+    ///
+    /// SCRFD's feature pyramid, and deliberately a different function from
+    /// [`Reference::resize`] rather than a mode flag — the two agree nowhere.
+    fn resize_nearest(&mut self, p: &Push) -> Result<(), String> {
+        if p.out_h == 0 || p.out_w == 0 || p.in_h == 0 || p.in_w == 0 {
+            return Err("a resize of a zero extent".into());
+        }
+        for oc in 0..p.out_c {
+            let plane = oc * p.in_h * p.in_w;
+            for oy in 0..p.out_h {
+                let iy = (oy * p.in_h / p.out_h).min(p.in_h - 1);
+                for ox in 0..p.out_w {
+                    let ix = (ox * p.in_w / p.out_w).min(p.in_w - 1);
+                    let value = self.load(p.in0, plane + iy * p.in_w + ix)?;
+                    self.store(p.out, nchw(p, oc, oy, ox), value)?;
                 }
             }
         }
@@ -597,10 +669,10 @@ mod tests {
         record: impl FnOnce(&mut Builder, Id) -> Id,
     ) -> Vec<f32> {
         let given = Given::new(tensors).expect("the fixture tensors are consistent");
-        let mut builder = Builder::new(&given, input_shape);
-        let first = builder.input();
+        let mut builder = Builder::new(&given);
+        let first = builder.input(input_shape);
         let last = record(&mut builder, first);
-        let plan = builder.finish(last).expect("the fixture plan builds");
+        let plan = builder.finish(&[last]).expect("the fixture plan builds");
         run(&plan, given.data(), input).expect("the fixture plan runs")
     }
 
@@ -791,6 +863,111 @@ mod tests {
     }
 
     #[test]
+    fn prelu_scales_only_the_negative_side_and_per_channel() {
+        // Two channels with different slopes, so a PReLU that read one slope for the
+        // whole tensor — or indexed it by element instead of by channel — is visible.
+        // Slopes 0.25 and 4.0; inputs -2 and 3 in each channel.
+        let got = one(
+            Shape::new(2, 1, 2),
+            &[-2.0, 3.0, -2.0, 3.0],
+            &[
+                (vec![2, 1, 1, 1], vec![1.0, 1.0]),
+                (vec![2], vec![0.0, 0.0]),
+                (vec![2, 1, 1], vec![0.25, 4.0]),
+            ],
+            |b, x| {
+                b.conv(x, 0, 2, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 2, Act::PRelu(2))
+            },
+        );
+        close(&got, &[-0.5, 3.0, -8.0, 3.0]);
+    }
+
+    #[test]
+    fn prelu_at_slope_one_is_the_identity_and_at_zero_is_relu() {
+        // The two degenerate slopes, which pin the sign convention: a shader that
+        // scaled the positive side instead would pass the identity case and fail this.
+        let got = one(
+            Shape::new(2, 1, 2),
+            &[-4.0, 4.0, -4.0, 4.0],
+            &[
+                (vec![2, 1, 1, 1], vec![1.0, 1.0]),
+                (vec![2], vec![0.0, 0.0]),
+                (vec![2, 1, 1], vec![1.0, 0.0]),
+            ],
+            |b, x| {
+                b.conv(x, 0, 2, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 2, Act::PRelu(2))
+            },
+        );
+        close(&got, &[-4.0, 4.0, 0.0, 4.0]);
+    }
+
+    #[test]
+    fn a_nearest_resize_repeats_each_source_pixel_rather_than_blending() {
+        // Two columns to four, `asymmetric` + `floor`: src = floor(dst * 2 / 4) = dst/2,
+        // so 0, 0, 1, 1. The bilinear kernel gives 0, 1, 3, 4 for the same input, which
+        // is what makes this the discriminating fixture.
+        let got = one(Shape::new(1, 1, 2), &[0.0, 4.0], &[], |b, x| {
+            let like = b.resize_to(x, 1, 4);
+            b.resize_nearest_like(x, like)
+        });
+        close(&got, &[0.0, 0.0, 4.0, 4.0]);
+    }
+
+    #[test]
+    fn a_nearest_resize_upsamples_both_axes_together() {
+        // A 2x2 doubled to 4x4. Each source pixel becomes a 2x2 block, so a row/column
+        // transposition in the index arithmetic changes the answer.
+        let got = one(Shape::new(1, 2, 2), &[1.0, 2.0, 3.0, 4.0], &[], |b, x| {
+            let like = b.resize_to(x, 4, 4);
+            b.resize_nearest_like(x, like)
+        });
+        close(
+            &got,
+            &[
+                1.0, 1.0, 2.0, 2.0, //
+                1.0, 1.0, 2.0, 2.0, //
+                3.0, 3.0, 4.0, 4.0, //
+                3.0, 3.0, 4.0, 4.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn a_plan_can_declare_more_than_one_input_and_output() {
+        // SCRFD needs nine outputs and the VITS duration predictor three inputs, so the
+        // plan's bindings are lists. This checks both ends: two inputs land at distinct
+        // arena offsets, and two outputs come back in the order `finish` was given.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let first = b.input(Shape::new(1, 1, 2));
+        let second = b.input(Shape::new(1, 1, 2));
+        let sum = b.add(first, second);
+        let doubled = b.add(sum, sum);
+        let plan = b.finish(&[doubled, sum]).expect("builds");
+
+        assert_eq!(plan.inputs.len(), 2);
+        assert_ne!(
+            plan.inputs.first().map(|b| b.at),
+            plan.inputs.get(1).map(|b| b.at),
+            "the two inputs share an offset"
+        );
+        let got = run_multi(&plan, given.data(), &[&[1.0, 2.0], &[10.0, 20.0]])
+            .expect("the two-input plan runs");
+        assert_eq!(got, vec![vec![22.0, 44.0], vec![11.0, 22.0]]);
+    }
+
+    #[test]
+    fn a_single_output_helper_refuses_a_multi_output_plan() {
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let first = b.input(Shape::new(1, 1, 1));
+        let same = b.add(first, first);
+        let plan = b.finish(&[same, first]).expect("builds");
+        let error = run(&plan, given.data(), &[1.0]).expect_err("two outputs");
+        assert!(error.contains("2 outputs"), "{error}");
+    }
+
+    #[test]
     fn relu_clamps_at_zero_without_touching_positives() {
         let got = one(
             Shape::new(1, 1, 2),
@@ -842,9 +1019,10 @@ mod tests {
     #[test]
     fn a_mismatched_input_length_is_refused_rather_than_padded() {
         let given = Given::new(&[]).expect("no tensors");
-        let mut builder = Builder::new(&given, Shape::new(1, 2, 2));
-        let out = builder.resize_to(builder.input(), 2, 2);
-        let plan = builder.finish(out).expect("builds");
+        let mut builder = Builder::new(&given);
+        let input = builder.input(Shape::new(1, 2, 2));
+        let out = builder.resize_to(input, 2, 2);
+        let plan = builder.finish(&[out]).expect("builds");
         let error = run(&plan, given.data(), &[1.0, 2.0]).expect_err("too few values");
         assert!(error.contains("2 input values"), "{error}");
     }
@@ -854,8 +1032,9 @@ mod tests {
     /// This is what keeps the interpreter itself honest on every `cargo test`: the two
     /// real nets below are hundreds of times larger and have to be opted into.
     fn miniature(weights: &dyn WeightSource) -> Result<Plan, String> {
-        let mut b = Builder::new(weights, Shape::new(3, 8, 8));
-        let x = b.conv(b.input(), 0, 8, (3, 3), (2, 2), (1, 1), (0, 0, 1, 1), 1, Act::HardSwish);
+        let mut b = Builder::new(weights);
+        let first = b.input(Shape::new(3, 8, 8));
+        let x = b.conv(first, 0, 8, (3, 3), (2, 2), (1, 1), (0, 0, 1, 1), 1, Act::HardSwish);
         let pooled = b.global_avg_pool(x);
         let gate = b.conv_same(pooled, 2, 8, 1, 1, Act::Sigmoid);
         let gated = b.mul_channel(x, gate);
@@ -865,7 +1044,7 @@ mod tests {
         let merged = b.add(gated, up);
         let joined = b.concat(&[merged, up]);
         let out = b.conv_transpose(joined, 6, 1, (2, 2), (2, 2), (0, 0, 0, 0), Act::Sigmoid);
-        b.finish(out)
+        b.finish(&[out])
     }
 
     #[test]
@@ -873,12 +1052,12 @@ mod tests {
         let source = Invented::new(8);
         let plan = miniature(&source).expect("the miniature net builds");
         let data = source.into_data();
-        let input: Vec<f32> = (0..plan.input_shape.len())
+        let input: Vec<f32> = (0..plan.input().expect("one input").shape.len())
             .map(|i| (i as f32 * 0.37).sin())
             .collect();
         let got = run(&plan, &data, &input).expect("the miniature net runs");
 
-        assert_eq!(got.len(), plan.output_shape.len() as usize);
+        assert_eq!(got.len(), plan.output().expect("one output").shape.len() as usize);
         // A sigmoid output, so every value is a probability. A NaN or an fp16 overflow
         // anywhere upstream lands outside this.
         for (i, &value) in got.iter().enumerate() {
@@ -894,7 +1073,7 @@ mod tests {
         let source = Invented::new(8);
         let plan = miniature(&source).expect("builds");
         let data = source.into_data();
-        let input = vec![0.25; plan.input_shape.len() as usize];
+        let input = vec![0.25; plan.input().expect("one input").shape.len() as usize];
         assert_eq!(
             run(&plan, &data, &input).expect("first run"),
             run(&plan, &data, &input).expect("second run")
@@ -997,11 +1176,12 @@ mod tests {
     /// `tests/assets.rs` prints its memory figures: the numbers are what a reviewer
     /// wants to see, and pinning them would pin this runtime's fp16 rounding.
     fn assert_usable_mask(name: &str, plan: &Plan, weights: &[u8]) {
-        let inputs = [("ramp", ramp(plan.input_shape)), ("blob", blob(plan.input_shape))];
+        let shape = plan.input().expect("one input").shape;
+        let inputs = [("ramp", ramp(shape)), ("blob", blob(shape))];
         let mut masks = Vec::new();
         for (label, input) in &inputs {
             let mask = run(plan, weights, input).unwrap_or_else(|e| panic!("{name}/{label}: {e}"));
-            assert_eq!(mask.len(), plan.output_shape.len() as usize);
+            assert_eq!(mask.len(), plan.output().expect("one output").shape.len() as usize);
             for (i, &value) in mask.iter().enumerate() {
                 assert!(
                     value.is_finite() && (0.0..=1.0).contains(&value),
@@ -1049,7 +1229,10 @@ mod tests {
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::SELFIE)
             .expect("the shipped selfie asset parses");
         let plan = selfie::build(&weights).expect("selfie builds");
-        assert_eq!(plan.output_shape, Shape::new(1, selfie::SIZE, selfie::SIZE));
+        assert_eq!(
+            plan.output().expect("one output").shape,
+            Shape::new(1, selfie::SIZE, selfie::SIZE)
+        );
         assert_usable_mask("selfie", &plan, weights.data());
     }
 
@@ -1062,7 +1245,10 @@ mod tests {
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::U2NETP)
             .expect("the shipped u2netp asset parses");
         let plan = u2netp::build(&weights).expect("u2netp builds");
-        assert_eq!(plan.output_shape, Shape::new(1, u2netp::SIZE, u2netp::SIZE));
+        assert_eq!(
+            plan.output().expect("one output").shape,
+            Shape::new(1, u2netp::SIZE, u2netp::SIZE)
+        );
         assert_usable_mask("u2netp", &plan, weights.data());
     }
 }

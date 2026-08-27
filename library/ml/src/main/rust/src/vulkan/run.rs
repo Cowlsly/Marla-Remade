@@ -80,10 +80,11 @@ impl Net {
     ) -> Result<Net, String> {
         let arena_bytes = (plan.arena_elems as vk::DeviceSize) * 2;
         let weights_bytes = weights.data().len() as vk::DeviceSize;
-        let input_elems = plan.input_shape.len() as usize;
-        let output_elems = plan.output_shape.len() as usize;
-        // One staging buffer for both directions: the input and the output are never in
-        // flight at the same time, because an inference is a single blocking submit.
+        let input_elems = binding_elems(&plan.inputs);
+        let output_elems = binding_elems(&plan.outputs);
+        // One staging buffer for both directions: the inputs and the outputs are never in
+        // flight at the same time, because an inference is a single blocking submit. Each
+        // side packs its bindings end to end from offset 0, in declaration order.
         let staging_bytes = (input_elems.max(output_elems) as vk::DeviceSize) * 2;
 
         let weights_buffer = Buffer::device_local(&context, weights_bytes)?;
@@ -224,17 +225,24 @@ impl Net {
                 &[],
             );
 
-            let input_bytes = (self.plan.input_shape.len() as vk::DeviceSize) * 2;
-            let region = vk::BufferCopy::default()
-                .src_offset(0)
-                .dst_offset((self.plan.input as vk::DeviceSize) * 2)
-                .size(input_bytes);
-            device.cmd_copy_buffer(
-                buffer,
-                self.staging.buffer,
-                self.arena.buffer,
-                std::slice::from_ref(&region),
-            );
+            // One copy per input, packed end to end in the staging buffer in declaration
+            // order. Both shipping nets have exactly one; SCRFD's nine outputs come back
+            // the same way below.
+            let mut staged = 0u64;
+            for input in &self.plan.inputs {
+                let bytes = (input.shape.len() as vk::DeviceSize) * 2;
+                let region = vk::BufferCopy::default()
+                    .src_offset(staged)
+                    .dst_offset((input.at as vk::DeviceSize) * 2)
+                    .size(bytes);
+                device.cmd_copy_buffer(
+                    buffer,
+                    self.staging.buffer,
+                    self.arena.buffer,
+                    std::slice::from_ref(&region),
+                );
+                staged += bytes;
+            }
             self.barrier(buffer);
 
             for op in &self.plan.ops {
@@ -292,17 +300,21 @@ impl Net {
                 self.barrier(buffer);
             }
 
-            let output_bytes = (self.plan.output_shape.len() as vk::DeviceSize) * 2;
-            let region = vk::BufferCopy::default()
-                .src_offset((self.plan.output as vk::DeviceSize) * 2)
-                .dst_offset(0)
-                .size(output_bytes);
-            device.cmd_copy_buffer(
-                buffer,
-                self.arena.buffer,
-                self.staging.buffer,
-                std::slice::from_ref(&region),
-            );
+            let mut read_back = 0u64;
+            for output in &self.plan.outputs {
+                let bytes = (output.shape.len() as vk::DeviceSize) * 2;
+                let region = vk::BufferCopy::default()
+                    .src_offset((output.at as vk::DeviceSize) * 2)
+                    .dst_offset(read_back)
+                    .size(bytes);
+                device.cmd_copy_buffer(
+                    buffer,
+                    self.arena.buffer,
+                    self.staging.buffer,
+                    std::slice::from_ref(&region),
+                );
+                read_back += bytes;
+            }
 
             // Waiting on a fence makes the copy's writes *available*, but the device-to-host
             // domain operation still needs a memory dependency naming HOST_READ — and
@@ -401,6 +413,10 @@ impl Net {
     ///
     /// `pixels` is `ARGB_8888` as `Bitmap.getPixels` produces it. The returned mask is
     /// `output_shape.h * output_shape.w` long, row-major.
+    ///
+    /// Single-input, single-output: this is the bitmap-in, mask-out path both shipping
+    /// nets use, and it refuses a plan shaped otherwise rather than silently reading only
+    /// the first binding.
     pub fn infer(
         &mut self,
         pixels: &[i32],
@@ -410,11 +426,16 @@ impl Net {
         if self.poisoned {
             return Err("a previous submission timed out; this network is unusable".into());
         }
+        let input = self.plan.input()?;
+        // Reject a multi-output plan here rather than returning only the first binding:
+        // `output_scratch` spans every output, so the concatenation would look like a
+        // mask of the wrong size instead of an error.
+        let _single_output = self.plan.output()?;
         preprocess::to_planar_f16(
             pixels,
             width,
             height,
-            self.plan.input_shape,
+            input.shape,
             &self.normalise,
             &mut self.input_scratch,
         )?;
@@ -459,9 +480,15 @@ impl Net {
     }
 
     /// The mask's dimensions, which is what the Kotlin wrapper reports to its caller.
-    pub fn output_size(&self) -> (u32, u32) {
-        (self.plan.output_shape.w, self.plan.output_shape.h)
+    pub fn output_size(&self) -> Result<(u32, u32), String> {
+        let output = self.plan.output()?;
+        Ok((output.shape.w, output.shape.h))
     }
+}
+
+/// Total elements across `bindings`, which is how much staging space one direction needs.
+fn binding_elems(bindings: &[crate::nets::Binding]) -> usize {
+    bindings.iter().map(|b| b.shape.len() as usize).sum()
 }
 
 /// Long enough that a slow first dispatch on a cold driver is not mistaken for a hang,

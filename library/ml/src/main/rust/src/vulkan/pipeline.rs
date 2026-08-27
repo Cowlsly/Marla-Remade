@@ -1,4 +1,4 @@
-//! The seven compute pipelines, and the one descriptor set they all share.
+//! The eight compute pipelines, and the one descriptor set they all share.
 //!
 //! # One layout, one descriptor set, written once
 //!
@@ -29,6 +29,8 @@ const CONV_TRANSPOSE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_transpose.comp.spv"));
 const MAXPOOL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/maxpool.comp.spv"));
 const RESIZE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/resize.comp.spv"));
+const RESIZE_NEAREST: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/resize_nearest.comp.spv"));
 const GAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gap.comp.spv"));
 const ADD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.comp.spv"));
 const MUL_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_bcast.comp.spv"));
@@ -48,7 +50,7 @@ pub const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
 
 /// Every compute pipeline, plus the layout and descriptor set they share.
 pub struct Pipelines {
-    /// Shared by all seven, so a bind never invalidates push constants.
+    /// Shared by all eight, so a bind never invalidates push constants.
     pub layout: vk::PipelineLayout,
     /// The one set: arena at binding 0, weights at binding 1.
     pub descriptor_set: vk::DescriptorSet,
@@ -58,13 +60,14 @@ pub struct Pipelines {
     conv_transpose: vk::Pipeline,
     maxpool: vk::Pipeline,
     resize: vk::Pipeline,
+    resize_nearest: vk::Pipeline,
     gap: vk::Pipeline,
     add: vk::Pipeline,
     mul_bcast: vk::Pipeline,
 }
 
 impl Pipelines {
-    /// Build all seven and point the descriptor set at `arena` and `weights`.
+    /// Build all eight and point the descriptor set at `arena` and `weights`.
     pub fn new(
         context: &Context,
         arena: vk::Buffer,
@@ -169,7 +172,7 @@ impl Pipelines {
         cleanup.layout = Some(layout);
 
         let mut built = Vec::new();
-        for spirv in [CONV, CONV_TRANSPOSE, MAXPOOL, RESIZE, GAP, ADD, MUL_BCAST] {
+        for spirv in [CONV, CONV_TRANSPOSE, MAXPOOL, RESIZE, RESIZE_NEAREST, GAP, ADD, MUL_BCAST] {
             match compute_pipeline(device, layout, spirv) {
                 Ok(pipeline) => built.push(pipeline),
                 Err(e) => {
@@ -180,10 +183,11 @@ impl Pipelines {
                 }
             }
         }
-        let [conv, conv_transpose, maxpool, resize, gap, add, mul_bcast] = match built.as_slice() {
-            [a, b, c, d, e, f, g] => [*a, *b, *c, *d, *e, *f, *g],
-            _ => return Err("wrong pipeline count".into()),
-        };
+        let [conv, conv_transpose, maxpool, resize, resize_nearest, gap, add, mul_bcast] =
+            match built.as_slice() {
+                [a, b, c, d, e, f, g, h] => [*a, *b, *c, *d, *e, *f, *g, *h],
+                _ => return Err("wrong pipeline count".into()),
+            };
 
         cleanup.disarm();
         Ok(Pipelines {
@@ -195,6 +199,7 @@ impl Pipelines {
             conv_transpose,
             maxpool,
             resize,
+            resize_nearest,
             gap,
             add,
             mul_bcast,
@@ -208,6 +213,7 @@ impl Pipelines {
             Kind::ConvTranspose => self.conv_transpose,
             Kind::MaxPool => self.maxpool,
             Kind::Resize => self.resize,
+            Kind::ResizeNearest => self.resize_nearest,
             Kind::GlobalAvgPool => self.gap,
             Kind::Add => self.add,
             Kind::MulBroadcast => self.mul_bcast,
@@ -223,6 +229,7 @@ impl Pipelines {
             self.conv_transpose,
             self.maxpool,
             self.resize,
+            self.resize_nearest,
             self.gap,
             self.add,
             self.mul_bcast,

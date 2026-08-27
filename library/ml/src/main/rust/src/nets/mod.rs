@@ -64,6 +64,10 @@ impl Shape {
 /// The activation a layer folds into its own store, saving a full pass over the
 /// output. U^2-Netp is 112 ReLUs over up to 6.5M elements each; not fusing them would
 /// roughly double its memory traffic.
+///
+/// Fusing is not merely an optimisation for [`Act::PRelu`]: MobileFaceNet's 34 `PRelu`
+/// nodes each follow a `Conv` directly, so there is no shape of graph in which one
+/// would need to stand alone.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Act {
     /// Store the accumulator as-is.
@@ -74,6 +78,13 @@ pub enum Act {
     HardSwish,
     /// `1 / (1 + exp(-x))`.
     Sigmoid,
+    /// ONNX `PRelu`: `x < 0 ? slope[c] * x : x`, one slope per output channel.
+    ///
+    /// Unlike the others this carries state — the slope's position in the `.vkml`
+    /// tensor table, which [`Builder`] resolves to an offset like any other weight and
+    /// passes down in [`Push::act_weight`]. A plain `Relu` is the same thing at slope
+    /// zero, and is kept separate because it needs no memory traffic at all.
+    PRelu(usize),
 }
 
 impl Act {
@@ -83,6 +94,7 @@ impl Act {
             Act::Relu => 1,
             Act::HardSwish => 2,
             Act::Sigmoid => 3,
+            Act::PRelu(_) => 4,
         }
     }
 }
@@ -98,6 +110,13 @@ pub enum Kind {
     MaxPool,
     /// Bilinear resize, `half_pixel` coordinates.
     Resize,
+    /// Nearest-neighbour resize, `asymmetric` coordinates and `floor` rounding.
+    ///
+    /// SCRFD's feature-pyramid upsamples are `mode=nearest`, which is a different
+    /// pipeline rather than a flag on [`Kind::Resize`] because the two share no
+    /// arithmetic: `src = floor(dst * in / out)` against `(dst + 0.5) * in / out - 0.5`.
+    /// Running an FPN through the bilinear one blurs every lateral it adds.
+    ResizeNearest,
     /// Mean over H and W, keeping C. The squeeze in a squeeze-excite block.
     GlobalAvgPool,
     /// Elementwise sum of two equal shapes.
@@ -157,6 +176,9 @@ pub struct Push {
     pub group: u32,
     /// [`Act::code`].
     pub act: u32,
+    /// Element offset of the per-channel slope [`Act::PRelu`] reads, in the weights
+    /// buffer. Zero and unread for every other activation.
+    pub act_weight: u32,
     /// Output elements, so an over-dispatched workgroup can bail.
     pub count: u32,
 }
@@ -189,6 +211,15 @@ pub enum Op {
     },
 }
 
+/// Where one of a net's inputs or outputs lives, and what shape it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Binding {
+    /// Element offset in the activation arena.
+    pub at: u32,
+    /// The tensor's shape, so the host does not restate it.
+    pub shape: Shape,
+}
+
 /// A compiled forward pass: what to run, and how much scratch it needs.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Plan {
@@ -196,14 +227,35 @@ pub struct Plan {
     pub ops: Vec<Op>,
     /// Elements the activation arena must hold.
     pub arena_elems: u32,
-    /// Where the preprocessed input goes, in elements.
-    pub input: u32,
-    /// The input's shape, so preprocessing does not restate it.
-    pub input_shape: Shape,
-    /// Where the mask comes back from, in elements.
-    pub output: u32,
-    /// The output's shape.
-    pub output_shape: Shape,
+    /// Where the preprocessed inputs go, in the order they were declared.
+    ///
+    /// A `Vec` rather than one binding because the models this runtime is growing into
+    /// are not single-input: VITS's duration predictor takes three tensors and the
+    /// SMaLL-100 decoder four. Both shipping nets declare exactly one.
+    pub inputs: Vec<Binding>,
+    /// Where the results come back from, in the order [`Builder::finish`] was given.
+    ///
+    /// SCRFD has **nine** — score, box and keypoint maps at each of three strides —
+    /// which is the reason this is a list.
+    pub outputs: Vec<Binding>,
+}
+
+impl Plan {
+    /// The only input, for the nets that have exactly one.
+    pub fn input(&self) -> Result<Binding, String> {
+        match self.inputs.as_slice() {
+            [only] => Ok(*only),
+            other => Err(format!("this net has {} inputs, not one", other.len())),
+        }
+    }
+
+    /// The only output, for the nets that have exactly one.
+    pub fn output(&self) -> Result<Binding, String> {
+        match self.outputs.as_slice() {
+            [only] => Ok(*only),
+            other => Err(format!("this net has {} outputs, not one", other.len())),
+        }
+    }
 }
 
 /// Where a net's weights come from.
@@ -248,6 +300,8 @@ enum Node {
         pad: (u32, u32),
         group: u32,
         act: Act,
+        /// Resolved offset of [`Act::PRelu`]'s slope, zero otherwise.
+        act_weight: u32,
         transpose: bool,
     },
     MaxPool {
@@ -259,6 +313,7 @@ enum Node {
     Resize {
         input: Id,
         out: Id,
+        nearest: bool,
     },
     GlobalAvgPool {
         input: Id,
@@ -281,12 +336,14 @@ pub struct Builder<'a> {
     weights: &'a dyn WeightSource,
     shapes: Vec<Shape>,
     nodes: Vec<Node>,
-    /// Tensors that must keep a stable offset for the whole pass: the input and the
-    /// output. Everything else is free to be reused once its last reader has run.
+    /// Tensors that must keep a stable offset for the whole pass: the inputs and the
+    /// outputs. Everything else is free to be reused once its last reader has run.
     pinned: Vec<Id>,
     error: Option<String>,
-    input: Id,
-    input_shape: Shape,
+    inputs: Vec<Id>,
+    /// One flag per tensor in the file, set when the pass reads it. See
+    /// [`Builder::finish`], which insists every one was.
+    read: Vec<bool>,
 }
 
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
@@ -294,25 +351,28 @@ pub struct Builder<'a> {
 const ALIGN_ELEMS: u32 = 8;
 
 impl<'a> Builder<'a> {
-    /// Start a pass whose input is `shape`.
-    pub fn new(weights: &'a dyn WeightSource, shape: Shape) -> Builder<'a> {
-        let mut builder = Builder {
+    /// Start recording a pass. Declare its inputs with [`Builder::input`].
+    pub fn new(weights: &'a dyn WeightSource) -> Builder<'a> {
+        Builder {
+            read: vec![false; weights.count()],
             weights,
             shapes: Vec::new(),
             nodes: Vec::new(),
             pinned: Vec::new(),
             error: None,
-            input: Id(0),
-            input_shape: shape,
-        };
-        builder.input = builder.tensor(shape);
-        builder.pinned.push(builder.input);
-        builder
+            inputs: Vec::new(),
+        }
     }
 
-    /// The network's input tensor.
-    pub fn input(&self) -> Id {
-        self.input
+    /// Declare an input of `shape`.
+    ///
+    /// Callable more than once, in which case [`Plan::inputs`] lists them in this
+    /// order and the host must upload them in the same one.
+    pub fn input(&mut self, shape: Shape) -> Id {
+        let id = self.tensor(shape);
+        self.inputs.push(id);
+        self.pinned.push(id);
+        id
     }
 
     fn tensor(&mut self, shape: Shape) -> Id {
@@ -378,6 +438,7 @@ impl<'a> Builder<'a> {
         let (pad_t, pad_l, pad_b, pad_r) = pads;
         let out_h = conv_out(in_shape.h, kh, stride.0, dilation.0, pad_t + pad_b);
         let out_w = conv_out(in_shape.w, kw, stride.1, dilation.1, pad_l + pad_r);
+        let act_weight = self.act_weight(act, m);
         let out = self.tensor(Shape::new(m, out_h, out_w));
         self.nodes.push(Node::Conv {
             input,
@@ -390,9 +451,19 @@ impl<'a> Builder<'a> {
             pad: (pad_t, pad_l),
             group,
             act,
+            act_weight,
             transpose: false,
         });
         out
+    }
+
+    /// Resolve [`Act::PRelu`]'s slope tensor, which is `[channels, 1, 1]` in the ONNX
+    /// exports this reads.
+    fn act_weight(&mut self, act: Act, channels: u32) -> u32 {
+        match act {
+            Act::PRelu(index) => self.weight(index, &[channels, 1, 1]),
+            _ => 0,
+        }
     }
 
     /// The common case in both nets: `3x3` or `1x1`, stride 1, `pad == dilation`
@@ -442,6 +513,7 @@ impl<'a> Builder<'a> {
         let (pad_t, pad_l, pad_b, pad_r) = pads;
         let out_h = deconv_out(in_shape.h, kh, stride.0, pad_t + pad_b);
         let out_w = deconv_out(in_shape.w, kw, stride.1, pad_l + pad_r);
+        let act_weight = self.act_weight(act, m);
         let out = self.tensor(Shape::new(m, out_h, out_w));
         self.nodes.push(Node::Conv {
             input,
@@ -454,12 +526,20 @@ impl<'a> Builder<'a> {
             pad: (pad_t, pad_l),
             group: 1,
             act,
+            act_weight,
             transpose: true,
         });
         out
     }
 
     fn weight(&mut self, index: usize, dims: &[u32]) -> u32 {
+        match self.read.get_mut(index) {
+            Some(slot) => *slot = true,
+            None => self.fail(format!(
+                "tensor {index}: the file holds {}",
+                self.weights.count()
+            )),
+        }
         match self.weights.shaped(index, dims) {
             Ok(offset) => offset,
             Err(e) => {
@@ -493,8 +573,8 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Bilinear resize to `like`'s spatial size, which is how both nets always use it
-    /// — U^2-Net's `_upsample_like`, and the selfie net's decoder skips.
+    /// Bilinear resize to `like`'s spatial size, which is how both shipping nets always
+    /// use it — U^2-Net's `_upsample_like`, and the selfie net's decoder skips.
     pub fn resize_like(&mut self, input: Id, like: Id) -> Id {
         let target = self.shape_of(like);
         self.resize_to(input, target.h, target.w)
@@ -504,7 +584,16 @@ impl<'a> Builder<'a> {
     pub fn resize_to(&mut self, input: Id, h: u32, w: u32) -> Id {
         let in_shape = self.shape_of(input);
         let out = self.tensor(Shape::new(in_shape.c, h, w));
-        self.nodes.push(Node::Resize { input, out });
+        self.nodes.push(Node::Resize { input, out, nearest: false });
+        out
+    }
+
+    /// Nearest-neighbour resize to `like`'s spatial size — SCRFD's two FPN upsamples.
+    pub fn resize_nearest_like(&mut self, input: Id, like: Id) -> Id {
+        let target = self.shape_of(like);
+        let in_shape = self.shape_of(input);
+        let out = self.tensor(Shape::new(in_shape.c, target.h, target.w));
+        self.nodes.push(Node::Resize { input, out, nearest: true });
         out
     }
 
@@ -561,24 +650,26 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// Pack the arena and resolve every offset, with `output` as the result tensor.
-    pub fn finish(mut self, output: Id) -> Result<Plan, String> {
-        self.pinned.push(output);
+    /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
+    pub fn finish(mut self, outputs: &[Id]) -> Result<Plan, String> {
+        self.pinned.extend_from_slice(outputs);
         if let Some(e) = self.error.take() {
             return Err(e);
         }
-        let consumed = self.weights.count();
-        // Every tensor in the file must have been read. An unread tail is the shape
-        // of a forward pass that stopped early, which is otherwise invisible.
-        let read = self
-            .nodes
-            .iter()
-            .filter(|n| matches!(n, Node::Conv { .. }))
-            .count()
-            * 2;
-        if read != consumed {
+        if self.inputs.is_empty() {
+            return Err("a pass with no input".into());
+        }
+        if outputs.is_empty() {
+            return Err("a pass with no output".into());
+        }
+        // Every tensor in the file must have been read. An unread one is the shape of a
+        // forward pass that stopped early or skipped a layer, which is otherwise
+        // invisible — the file loads, the pass runs, and one layer convolves with
+        // whatever its neighbour's weights happen to be.
+        if let Some(index) = self.read.iter().position(|&read| !read) {
             return Err(format!(
-                "the forward pass reads {read} tensors but the file holds {consumed}"
+                "the forward pass never reads tensor {index} of {}",
+                self.read.len()
             ));
         }
 
@@ -625,23 +716,24 @@ impl<'a> Builder<'a> {
             }
         }
 
-        let input = offsets
-            .get(self.input.0)
-            .copied()
-            .flatten()
-            .ok_or("the input was never allocated")?;
-        let out_offset = offsets
-            .get(output.0)
-            .copied()
-            .flatten()
-            .ok_or("the output was never written")?;
+        let binding = |id: Id| -> Result<Binding, String> {
+            let at = offsets
+                .get(id.0)
+                .copied()
+                .flatten()
+                .ok_or_else(|| format!("tensor {} was never allocated", id.0))?;
+            let shape = self
+                .shapes
+                .get(id.0)
+                .copied()
+                .ok_or_else(|| format!("tensor {} has no shape", id.0))?;
+            Ok(Binding { at, shape })
+        };
         Ok(Plan {
             ops,
             arena_elems: arena.high_water,
-            input,
-            input_shape: self.input_shape,
-            output: out_offset,
-            output_shape: self.shapes.get(output.0).copied().ok_or("bad output id")?,
+            inputs: self.inputs.iter().map(|&id| binding(id)).collect::<Result<_, _>>()?,
+            outputs: outputs.iter().map(|&id| binding(id)).collect::<Result<_, _>>()?,
         })
     }
 
@@ -677,6 +769,7 @@ impl<'a> Builder<'a> {
                 pad,
                 group,
                 act,
+                act_weight,
                 transpose,
             } => {
                 let (si, so) = (shape(*input), shape(*out));
@@ -703,6 +796,7 @@ impl<'a> Builder<'a> {
                         pad_l: pad.1,
                         group: *group,
                         act: act.code(),
+                        act_weight: *act_weight,
                         count: so.len(),
                         ..Push::default()
                     },
@@ -732,10 +826,10 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::Resize { input, out } => {
+            Node::Resize { input, out, nearest } => {
                 let (si, so) = (shape(*input), shape(*out));
                 ops.push(Op::Dispatch {
-                    kind: Kind::Resize,
+                    kind: if *nearest { Kind::ResizeNearest } else { Kind::Resize },
                     push: Push {
                         in0: at(*input)?,
                         out: at(*out)?,
@@ -1014,7 +1108,7 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 22 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 23 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
     }
 
@@ -1086,29 +1180,33 @@ pub(crate) mod tests {
                 2
             }
         }
-        let mut builder = Builder::new(&Wrong, Shape::new(3, 8, 8));
-        let out = builder.conv_same(builder.input(), 0, 4, 3, 1, Act::Relu);
-        let error = builder.finish(out).expect_err("bad weights");
+        let mut builder = Builder::new(&Wrong);
+        let input = builder.input(Shape::new(3, 8, 8));
+        let out = builder.conv_same(input, 0, 4, 3, 1, Act::Relu);
+        let error = builder.finish(&[out]).expect_err("bad weights");
         assert!(error.contains("tensor 0"), "{error}");
     }
 
     #[test]
     fn a_pass_that_leaves_tensors_unread_fails_the_build() {
         let source = Shapes::new(4);
-        let mut builder = Builder::new(&source, Shape::new(3, 8, 8));
-        let out = builder.conv_same(builder.input(), 0, 4, 3, 1, Act::Relu);
-        let error = builder.finish(out).expect_err("short pass");
-        assert!(error.contains("reads 2 tensors but the file holds 4"), "{error}");
+        let mut builder = Builder::new(&source);
+        let input = builder.input(Shape::new(3, 8, 8));
+        let out = builder.conv_same(input, 0, 4, 3, 1, Act::Relu);
+        let error = builder.finish(&[out]).expect_err("short pass");
+        // Named by index, not just counted: a pass that skipped a layer in the middle
+        // reads the right *number* of tensors and the wrong ones.
+        assert!(error.contains("never reads tensor 2 of 4"), "{error}");
     }
 
     #[test]
     fn concat_lowers_to_contiguous_copies_and_no_shader() {
         let source = Shapes::new(0);
-        let mut builder = Builder::new(&source, Shape::new(2, 2, 2));
-        let a = builder.input();
+        let mut builder = Builder::new(&source);
+        let a = builder.input(Shape::new(2, 2, 2));
         let b = builder.resize_to(a, 2, 2);
         let joined = builder.concat(&[a, b]);
-        let plan = builder.finish(joined).expect("builds");
+        let plan = builder.finish(&[joined]).expect("builds");
         let copies: Vec<&Op> = plan.ops.iter().filter(|o| matches!(o, Op::Copy { .. })).collect();
         assert_eq!(copies.len(), 2);
         // The second part lands exactly one part's worth of elements after the first:

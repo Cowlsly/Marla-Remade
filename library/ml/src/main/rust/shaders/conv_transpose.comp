@@ -60,5 +60,5 @@ void main() {
         }
     }
 
-    arena[p.out_at + index] = float16_t(activate(acc, p.act));
+    arena[p.out_at + index] = float16_t(activate(acc, p.act, oc));
 }

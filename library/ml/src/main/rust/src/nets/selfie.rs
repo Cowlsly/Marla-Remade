@@ -128,10 +128,10 @@ fn final_block(b: &mut Builder, layers: &mut Layers, deep: Id, skip: Id, channel
 
 /// Compile the whole forward pass.
 pub fn build(weights: &dyn WeightSource) -> Result<Plan, String> {
-    let mut b = Builder::new(weights, Shape::new(3, SIZE, SIZE));
+    let mut b = Builder::new(weights);
     let mut layers = Layers { next: 0 };
     let l = &mut layers;
-    let input = b.input();
+    let input = b.input(Shape::new(3, SIZE, SIZE));
 
     // Stem. `pads = [0, 0, 1, 1]` on all three strided 3x3s: no padding above or left.
     // 256 -> 128 -> 64 -> 32.
@@ -181,7 +181,7 @@ pub fn build(weights: &dyn WeightSource) -> Result<Plan, String> {
 
     // 128 -> 256, and the sigmoid that makes it an alpha.
     let alphas = b.conv_transpose(x, l.take(), 1, (2, 2), (2, 2), (0, 0, 0, 0), Act::Sigmoid);
-    b.finish(alphas)
+    b.finish(&[alphas])
 }
 
 #[cfg(test)]
@@ -257,8 +257,8 @@ mod tests {
     #[test]
     fn the_input_and_output_are_the_shapes_kotlin_expects() {
         let plan = plan();
-        assert_eq!(plan.input_shape, Shape::new(3, SIZE, SIZE));
-        assert_eq!(plan.output_shape, Shape::new(1, SIZE, SIZE));
+        assert_eq!(plan.input().expect("one input").shape, Shape::new(3, SIZE, SIZE));
+        assert_eq!(plan.output().expect("one output").shape, Shape::new(1, SIZE, SIZE));
     }
 
     #[test]

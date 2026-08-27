@@ -189,7 +189,11 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_maskWidth
         return 0;
     }
     // SAFETY: as `segment`.
-    unsafe { &*(handle as *const Handle) }.net.output_size().0 as jint
+    unsafe { &*(handle as *const Handle) }
+        .net
+        .output_size()
+        .map(|(width, _)| width as jint)
+        .unwrap_or(0)
 }
 
 /// The mask's height.
@@ -207,7 +211,11 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_maskHeigh
         return 0;
     }
     // SAFETY: as `segment`.
-    unsafe { &*(handle as *const Handle) }.net.output_size().1 as jint
+    unsafe { &*(handle as *const Handle) }
+        .net
+        .output_size()
+        .map(|(_, height)| height as jint)
+        .unwrap_or(0)
 }
 
 /// Free everything the handle owns, waiting for the GPU to go idle first.

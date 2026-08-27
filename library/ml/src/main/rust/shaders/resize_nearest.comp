@@ -1,0 +1,43 @@
+#version 450
+//! Nearest-neighbour resize, `asymmetric` coordinates and `floor` rounding. Two uses,
+//! both SCRFD feature-pyramid upsamples.
+//!
+//! # Why this is not a flag on `resize.comp`
+//!
+//! The two conventions share no arithmetic. Bilinear `half_pixel` samples at
+//! `(dst + 0.5) * in / out - 0.5` and blends four taps; this picks one tap at
+//! `floor(dst * in / out)`. SCRFD's neck adds each upsampled level to a lateral
+//! convolution of the level below, so running it through the bilinear kernel would
+//! smear every one of those additions — an error that leaves the detector working and
+//! quietly worse at small faces.
+//!
+//! # Exact in integers
+//!
+//! `asymmetric` with `floor` is `floor(dst * in / out)`, which for unsigned integers is
+//! just `dst * in / out`. So there is no float here at all, and a 2x upsample lands
+//! exactly on `dst / 2` rather than within a rounding error of it. `in_w` and `out_w`
+//! are both at most a few thousand, so the product cannot overflow `uint`.
+
+#include "common.glsl"
+
+// The source index for `dst`, clamped. ONNX would never generate an out-of-range index
+// for an upsample, but a downsample with a rounding quirk could, and a clamp is cheaper
+// than reasoning about it.
+uint nearest(uint dst, uint in_extent, uint out_extent) {
+    return min(dst * in_extent / out_extent, in_extent - 1u);
+}
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    uint iy = nearest(oy, p.in_h, p.out_h);
+    uint ix = nearest(ox, p.in_w, p.out_w);
+
+    uint plane = p.in0 + oc * p.in_h * p.in_w;
+    arena[p.out_at + index] = arena[plane + iy * p.in_w + ix];
+}

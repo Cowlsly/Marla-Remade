@@ -65,6 +65,7 @@ layout(push_constant) uniform Push {
     uint pad_l;
     uint group;
     uint act;
+    uint act_weight;
     uint count;
 } p;
 
@@ -73,6 +74,7 @@ layout(push_constant) uniform Push {
 #define ACT_RELU 1u
 #define ACT_HARDSWISH 2u
 #define ACT_SIGMOID 3u
+#define ACT_PRELU 4u
 
 // This invocation's output element, across a 2D grid of workgroups.
 //
@@ -89,10 +91,14 @@ uint global_index() {
     return group * gl_WorkGroupSize.x + gl_LocalInvocationID.x;
 }
 
-// The activation fused into a layer's store. Every ReLU, HardSwish and Sigmoid in both
-// networks directly follows a convolution, so this is the only place activations
-// happen and there is no standalone activation pass.
-float activate(float x, uint kind) {
+// The activation fused into a layer's store. Every ReLU, HardSwish, Sigmoid and PReLU in
+// every network here directly follows a convolution, so this is the only place
+// activations happen and there is no standalone activation pass.
+//
+// `channel` is the output channel, needed only by PReLU, whose slope is one value per
+// channel at `p.act_weight` in the weights buffer. Passing it unconditionally costs a
+// register and keeps one signature.
+float activate(float x, uint kind, uint channel) {
     if (kind == ACT_RELU) {
         return max(x, 0.0);
     }
@@ -102,6 +108,12 @@ float activate(float x, uint kind) {
     }
     if (kind == ACT_SIGMOID) {
         return 1.0 / (1.0 + exp(-x));
+    }
+    if (kind == ACT_PRELU) {
+        // ONNX PRelu. The branch is on the sign of the accumulator, so it diverges
+        // within a wave; a `mix` on the comparison would too, and this reads as the
+        // definition does.
+        return x < 0.0 ? x * float(weights[p.act_weight + channel]) : x;
     }
     return x;
 }
