@@ -55,6 +55,8 @@ mod act {
     pub const SIGMOID: u32 = 3;
     /// `x < 0 ? slope[c] * x : x`.
     pub const PRELU: u32 = 4;
+    /// `clamp(x, 0, 1)`, a normalised `HardSigmoid`.
+    pub const CLIP01: u32 = 5;
 }
 
 /// The fused activation, mirroring `activate` in `common.glsl`.
@@ -73,6 +75,7 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
                 x
             }
         }
+        act::CLIP01 => x.clamp(0.0, 1.0),
         _ => x,
     }
 }
@@ -171,6 +174,7 @@ impl Reference {
                     Kind::GlobalAvgPool => self.global_avg_pool(push),
                     Kind::Add => self.add(push),
                     Kind::MulBroadcast => self.mul_broadcast(push),
+                    Kind::Affine => self.affine(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -408,6 +412,17 @@ impl Reference {
                 total += self.load(p.in0, plane + i)?;
             }
             self.store(p.out, channel, total / elements as f32)?;
+        }
+        Ok(())
+    }
+
+    /// `out = in * scale + shift`, both scalars carried as raw bits in the push block.
+    fn affine(&mut self, p: &Push) -> Result<(), String> {
+        let scale = f32::from_bits(p.scale_bits);
+        let shift = f32::from_bits(p.shift_bits);
+        for i in 0..p.count {
+            let value = self.load(p.in0, i)?;
+            self.store(p.out, i, value * scale + shift)?;
         }
         Ok(())
     }
@@ -965,6 +980,63 @@ mod tests {
         let plan = b.finish(&[same, first]).expect("builds");
         let error = run(&plan, given.data(), &[1.0]).expect_err("two outputs");
         assert!(error.contains("2 outputs"), "{error}");
+    }
+
+    #[test]
+    fn an_affine_scales_and_shifts_every_element_by_the_same_scalars() {
+        let got = one(Shape::new(1, 1, 4), &[-2.0, 0.0, 1.0, 4.0], &[], |b, x| {
+            b.affine(x, 0.5, 3.0)
+        });
+        close(&got, &[2.0, 3.0, 3.5, 5.0]);
+    }
+
+    #[test]
+    fn an_affine_carries_its_scalars_through_the_push_block_as_bits() {
+        // The two parameters are `f32` bits in a `u32` field so `Push` stays all-`u32`.
+        // A value with a non-trivial mantissa catches a reinterpretation that happens to
+        // work for small integers.
+        let got = one(Shape::new(1, 1, 2), &[1.0, 2.0], &[], |b, x| {
+            b.affine(x, 0.3, -0.7)
+        });
+        close(&got, &[0.3 - 0.7, 0.6 - 0.7]);
+    }
+
+    #[test]
+    fn clip01_clamps_to_the_unit_interval() {
+        // A normalised HardSigmoid: `ppocr_fold.py` folds alpha and beta into the
+        // convolution, so what reaches the shader is the bare clamp.
+        let got = one(
+            Shape::new(1, 1, 5),
+            &[-4.0, -0.5, 0.25, 1.0, 9.0],
+            &[(vec![1, 1, 1, 1], vec![1.0]), (vec![1], vec![0.0])],
+            |b, x| b.conv_same(x, 0, 1, 1, 1, Act::Clip01),
+        );
+        close(&got, &[0.0, 0.0, 0.25, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_folded_hard_sigmoid_matches_the_onnx_definition() {
+        // The fold's claim: `clamp(alpha * (w*x + b) + beta, 0, 1)` equals
+        // `clamp(w'*x + b', 0, 1)` with `w' = alpha*w` and `b' = alpha*b + beta`. Checked
+        // here against ONNX's formula computed directly, at both alphas PP-OCRv5 uses.
+        for alpha in [0.2f32, 1.0 / 6.0] {
+            let (w, bias) = (2.0f32, -0.5f32);
+            let inputs = [-3.0f32, -0.4, 0.0, 0.9, 5.0];
+            let got = one(
+                Shape::new(1, 1, 5),
+                &inputs,
+                &[
+                    (vec![1, 1, 1, 1], vec![alpha * w]),
+                    (vec![1], vec![alpha * bias + 0.5]),
+                ],
+                |b, x| b.conv_same(x, 0, 1, 1, 1, Act::Clip01),
+            );
+            let want: Vec<f32> = inputs
+                .iter()
+                .map(|&x| (alpha * (w * x + bias) + 0.5).clamp(0.0, 1.0))
+                .collect();
+            close(&got, &want);
+        }
     }
 
     #[test]

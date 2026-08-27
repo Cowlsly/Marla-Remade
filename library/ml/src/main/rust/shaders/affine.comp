@@ -1,0 +1,36 @@
+#version 450
+//! `out = in * scale + shift`, both scalars. 24 uses, all in PP-OCRv5 detection.
+//!
+//! # What this is
+//!
+//! PP-HGNetV2's "learnable affine block": a per-tensor, not per-channel, affine. Two
+//! trained scalars, applied to every element of a feature map.
+//!
+//! # Why it is an op at all
+//!
+//! Almost everything constant in the PP-OCRv5 export folds into a convolution — the
+//! bias, the batch norms, the affine blocks that sit *before* an activation, even
+//! HardSigmoid's alpha and beta. `scripts/ml/ppocr_fold.py` does all of that ahead of
+//! time, which is why 117 `Add`s and 86 `Mul`s in the ONNX become 11 and 10 here.
+//!
+//! These 24 are the ones that survive, because they sit *after* an activation. Folding
+//! one into the *following* convolution is possible — `b' += shift * sum(W)` over each
+//! output row — but only when the tensor feeds nothing except convolutions, and making
+//! the conversion depend on that is how a subtle wrong answer gets shipped. One
+//! elementwise pass is the honest version, and detection runs once per OCR request
+//! rather than once per frame.
+//!
+//! The two scalars arrive as raw `f32` bits in the push block, so `nets::Push` stays
+//! entirely `u32` and needs no padding.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float scale = uintBitsToFloat(p.scale_bits);
+    float shift = uintBitsToFloat(p.shift_bits);
+    arena[p.out_at + index] = float16_t(float(arena[p.in0 + index]) * scale + shift);
+}

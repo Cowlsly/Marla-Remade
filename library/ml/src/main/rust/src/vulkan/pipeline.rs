@@ -34,6 +34,7 @@ const RESIZE_NEAREST: &[u8] =
 const GAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gap.comp.spv"));
 const ADD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.comp.spv"));
 const MUL_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_bcast.comp.spv"));
+const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.comp.spv"));
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
 /// workgroups, and each shader bails on the over-dispatched tail.
@@ -64,6 +65,7 @@ pub struct Pipelines {
     gap: vk::Pipeline,
     add: vk::Pipeline,
     mul_bcast: vk::Pipeline,
+    affine: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -172,7 +174,17 @@ impl Pipelines {
         cleanup.layout = Some(layout);
 
         let mut built = Vec::new();
-        for spirv in [CONV, CONV_TRANSPOSE, MAXPOOL, RESIZE, RESIZE_NEAREST, GAP, ADD, MUL_BCAST] {
+        for spirv in [
+            CONV,
+            CONV_TRANSPOSE,
+            MAXPOOL,
+            RESIZE,
+            RESIZE_NEAREST,
+            GAP,
+            ADD,
+            MUL_BCAST,
+            AFFINE,
+        ] {
             match compute_pipeline(device, layout, spirv) {
                 Ok(pipeline) => built.push(pipeline),
                 Err(e) => {
@@ -183,9 +195,9 @@ impl Pipelines {
                 }
             }
         }
-        let [conv, conv_transpose, maxpool, resize, resize_nearest, gap, add, mul_bcast] =
+        let [conv, conv_transpose, maxpool, resize, resize_nearest, gap, add, mul_bcast, affine] =
             match built.as_slice() {
-                [a, b, c, d, e, f, g, h] => [*a, *b, *c, *d, *e, *f, *g, *h],
+                [a, b, c, d, e, f, g, h, i] => [*a, *b, *c, *d, *e, *f, *g, *h, *i],
                 _ => return Err("wrong pipeline count".into()),
             };
 
@@ -203,6 +215,7 @@ impl Pipelines {
             gap,
             add,
             mul_bcast,
+            affine,
         })
     }
 
@@ -217,6 +230,7 @@ impl Pipelines {
             Kind::GlobalAvgPool => self.gap,
             Kind::Add => self.add,
             Kind::MulBroadcast => self.mul_bcast,
+            Kind::Affine => self.affine,
         }
     }
 
@@ -233,6 +247,7 @@ impl Pipelines {
             self.gap,
             self.add,
             self.mul_bcast,
+            self.affine,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

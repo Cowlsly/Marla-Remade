@@ -94,6 +94,9 @@ GRAPHS = {
     "u2netp": 2,
     "scrfd": 3,
     "mobilefacenet": 4,
+    # Folded ahead of time by `scripts/ml/ppocr_fold.py`, not by this script.
+    "ppocr_det": 5,
+    "ppocr_rec": 6,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -103,6 +106,8 @@ EXPECTED_DIGEST = {
     "u2netp": "f5199e05e4d4e93a6af601d04e3e0516bb68b9f292bb81d474704ea0b4e591d0",
     "scrfd": "d2ce2880a432af03b0ef594029d3ab03d86de54bd0a9f10ea2c8e412309b0f46",
     "mobilefacenet": "40987839aec03378958581deba29ce9fd9dd1ae9aa88d0c7ad04a885a2e2122c",
+    "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
+    "ppocr_rec": "",
 }
 
 # What each graph is exported at, as `[channels, height, width]` after the batch

@@ -87,6 +87,14 @@ pub enum Act {
     /// passes down in [`Push::act_weight`]. A plain `Relu` is the same thing at slope
     /// zero, and is kept separate because it needs no memory traffic at all.
     PRelu(usize),
+    /// `clamp(x, 0, 1)`.
+    ///
+    /// This is a **normalised** `HardSigmoid`. ONNX's is `clamp(alpha * x + beta, 0, 1)`
+    /// and PP-OCRv5 uses two different alphas, but `alpha` and `beta` fold into the
+    /// convolution's weight and bias — `scripts/ml/ppocr_fold.py` does it — so the
+    /// runtime needs one parameterless clamp rather than an activation carrying two
+    /// floats through the push block.
+    Clip01,
 }
 
 impl Act {
@@ -97,6 +105,7 @@ impl Act {
             Act::HardSwish => 2,
             Act::Sigmoid => 3,
             Act::PRelu(_) => 4,
+            Act::Clip01 => 5,
         }
     }
 }
@@ -125,6 +134,14 @@ pub enum Kind {
     Add,
     /// `a * b` where `b` is `C x 1 x 1`. The excite in a squeeze-excite block.
     MulBroadcast,
+    /// `x * scale + shift`, both scalars. PP-OCRv5's "learnable affine block".
+    ///
+    /// One pass over the data for two multiplies. It exists because these sit *after* an
+    /// activation, so unlike everything else constant in that export they cannot be
+    /// folded into the preceding convolution's weight — and pushing them into the
+    /// *following* one needs `b' += shift * sum(W)` per output row, which is only valid
+    /// when the tensor feeds nothing but convolutions. 24 uses in detection.
+    Affine,
 }
 
 /// The push-constant block every shader declares.
@@ -181,6 +198,13 @@ pub struct Push {
     /// Element offset of the per-channel slope [`Act::PRelu`] reads, in the weights
     /// buffer. Zero and unread for every other activation.
     pub act_weight: u32,
+    /// [`Kind::Affine`]'s multiplier, as raw bits. Unread by everything else.
+    ///
+    /// `f32` bits rather than an `f32` field so [`Push`] stays all-`u32` and
+    /// `push_bytes` can keep treating it as a plain byte block with no padding.
+    pub scale_bits: u32,
+    /// [`Kind::Affine`]'s addend, as raw bits.
+    pub shift_bits: u32,
     /// Output elements, so an over-dispatched workgroup can bail.
     pub count: u32,
 }
@@ -330,6 +354,12 @@ enum Node {
     Concat {
         parts: Vec<Id>,
         out: Id,
+    },
+    Affine {
+        input: Id,
+        out: Id,
+        scale: f32,
+        shift: f32,
     },
 }
 
@@ -652,6 +682,14 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// `x * scale + shift`, elementwise with scalar parameters. See [`Kind::Affine`].
+    pub fn affine(&mut self, input: Id, scale: f32, shift: f32) -> Id {
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Affine { input, out, scale, shift });
+        out
+    }
+
     /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
     pub fn finish(mut self, outputs: &[Id]) -> Result<Plan, String> {
         self.pinned.extend_from_slice(outputs);
@@ -899,6 +937,27 @@ impl<'a> Builder<'a> {
                     written += len;
                 }
             }
+            Node::Affine { input, out, scale, shift } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Affine,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        scale_bits: scale.to_bits(),
+                        shift_bits: shift.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
         }
         Ok(())
     }
@@ -912,6 +971,7 @@ impl Node {
             | Node::Resize { out, .. }
             | Node::GlobalAvgPool { out, .. }
             | Node::Binary { out, .. }
+            | Node::Affine { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -921,6 +981,7 @@ impl Node {
             Node::Conv { input, .. }
             | Node::MaxPool { input, .. }
             | Node::Resize { input, .. }
+            | Node::Affine { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::Concat { parts, .. } => parts.clone(),
@@ -1110,7 +1171,7 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 23 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 25 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
     }
 

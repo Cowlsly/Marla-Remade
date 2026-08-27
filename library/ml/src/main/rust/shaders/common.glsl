@@ -66,6 +66,8 @@ layout(push_constant) uniform Push {
     uint group;
     uint act;
     uint act_weight;
+    uint scale_bits;
+    uint shift_bits;
     uint count;
 } p;
 
@@ -75,6 +77,7 @@ layout(push_constant) uniform Push {
 #define ACT_HARDSWISH 2u
 #define ACT_SIGMOID 3u
 #define ACT_PRELU 4u
+#define ACT_CLIP01 5u
 
 // This invocation's output element, across a 2D grid of workgroups.
 //
@@ -114,6 +117,12 @@ float activate(float x, uint kind, uint channel) {
         // within a wave; a `mix` on the comparison would too, and this reads as the
         // definition does.
         return x < 0.0 ? x * float(weights[p.act_weight + channel]) : x;
+    }
+    if (kind == ACT_CLIP01) {
+        // A normalised ONNX HardSigmoid: its alpha and beta were folded into this
+        // layer's weight and bias by `scripts/ml/ppocr_fold.py`, so what is left is the
+        // clamp. See `nets::Act::Clip01`.
+        return clamp(x, 0.0, 1.0);
     }
     return x;
 }
