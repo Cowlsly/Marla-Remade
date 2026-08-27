@@ -27,6 +27,7 @@ pub mod graph_build;
 pub mod maxspeed;
 pub mod mem;
 pub mod names;
+pub mod nodeloc;
 pub mod osm;
 pub mod par;
 pub mod pbf;
