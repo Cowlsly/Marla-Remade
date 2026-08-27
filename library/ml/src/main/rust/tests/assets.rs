@@ -121,6 +121,27 @@ fn report_the_device_memory_each_net_needs() {
                 .expect("u2netp")
                 .arena_elems,
         ),
+        (
+            "mobilefacenet",
+            load("photos/src/main/assets/w600k_mbf.vkml", graph::MOBILEFACENET),
+            mobilefacenet::build(&load(
+                "photos/src/main/assets/w600k_mbf.vkml",
+                graph::MOBILEFACENET,
+            ))
+            .expect("mobilefacenet")
+            .arena_elems,
+        ),
+        (
+            "scrfd@640",
+            load("photos/src/main/assets/scrfd_500m.vkml", graph::SCRFD),
+            scrfd::build(
+                &load("photos/src/main/assets/scrfd_500m.vkml", graph::SCRFD),
+                scrfd::LONG_SIDE,
+                scrfd::LONG_SIDE,
+            )
+            .expect("scrfd")
+            .arena_elems,
+        ),
     ] {
         let weight_bytes = weights.data().len();
         let arena_bytes = arena as usize * 2;
