@@ -6,6 +6,7 @@
 
 use crate::style::{Layer, LayerKind};
 use crate::tess::{fill, stroke};
+use crate::tile::select::ANCESTOR_DEPTH;
 use tilecodec::mvt::{self, GeomType, Tile, Value};
 
 /// Tessellated geometry for one layer of one tile.
@@ -25,12 +26,25 @@ pub struct TileMesh {
     pub meshes: Vec<LayerMesh>,
 }
 
-/// Tessellate every layer of `tile` that `layers` draws at zoom `z`.
+/// Tessellate every layer of `tile` that could be drawn while this tile is on screen.
+///
+/// A tile is displayed at its own zoom *and* as a stand-in ancestor for up to
+/// [`ANCESTOR_DEPTH`] levels below it, so the camera can be anywhere in `z ..= z +
+/// ANCESTOR_DEPTH` while this mesh is resident. Gating on `z` alone — the tile's own zoom —
+/// bakes a decision that only holds at the moment of tessellation: an ancestor then carries
+/// no `landuse` or `buildings` at all, because those layers' `min_zoom` is above its own,
+/// and whole families of geometry appear only once the exact-zoom tiles land rather than
+/// the ancestor standing in for them.
+///
+/// So the gate here is the *widest* it could need to be, and the renderer decides what is
+/// actually visible against the camera's own zoom every frame. Layers outside the window
+/// are still skipped, which keeps this bounded: a z5 tile does not tessellate buildings.
 pub fn build(tile: &Tile, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
+    let deepest = z.saturating_add(ANCESTOR_DEPTH);
 
     for (index, layer) in layers.iter().enumerate() {
-        if !layer.draws_at(z) {
+        if layer.min_zoom > deepest || layer.max_zoom < z {
             continue;
         }
         let source = match tile.layer(layer.source_layer) {
@@ -139,6 +153,36 @@ mod tests {
         assert!(mesh_for(&mesh, &layers, "buildings").is_none(), "no buildings layer here");
         assert!(mesh_for(&mesh, &layers, "roads-highway").is_none(), "the road is a major_road");
         assert!(mesh_for(&mesh, &layers, "landuse-park").is_none(), "no landuse layer");
+    }
+
+    #[test]
+    fn an_ancestor_carries_the_layers_it_will_stand_in_for() {
+        // A tile is displayed as a stand-in ancestor up to ANCESTOR_DEPTH levels below its
+        // own zoom, so tessellation has to cover that whole window. Gating on the tile's own
+        // zoom instead means an ancestor holds no geometry for any layer whose `min_zoom` is
+        // deeper than it, and those layers appear only once the exact-zoom tiles arrive.
+        //
+        // `roads-major` has min_zoom 9 and the published tile really does carry a
+        // `major_road`, so this is decided by data rather than by the layer table alone.
+        let layers = style::layers();
+        let major = layers.iter().find(|l| l.id == "roads-major").expect("roads-major");
+        assert_eq!(major.min_zoom, 9, "this test is calibrated to roads-major's min_zoom");
+
+        // z6 is within reach of z9 (6 + 4 = 10), so the road is tessellated ready for the
+        // camera to descend onto it. The old tile-zoom gate dropped it here.
+        let reaching = build(&real(), &layers, 6, 339, 770);
+        assert!(
+            mesh_for(&reaching, &layers, "roads-major").is_some(),
+            "a z6 ancestor must carry the roads it will stand in for at z9",
+        );
+
+        // z4 is not (4 + 4 = 8 < 9), so the window stays bounded and this is not simply
+        // tessellating everything at every zoom.
+        let out_of_reach = build(&real(), &layers, 4, 339, 770);
+        assert!(
+            mesh_for(&out_of_reach, &layers, "roads-major").is_none(),
+            "the window must stay bounded, or every tile pays for every layer",
+        );
     }
 
     #[test]

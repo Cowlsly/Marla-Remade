@@ -401,6 +401,15 @@ impl Renderer {
         ordered.sort_by_key(|tile| tile.z);
 
         for (index, layer) in layers.iter().enumerate() {
+            // Visibility is the camera's business, not the tile's. Meshes are tessellated for
+            // a *window* of zooms (see `geometry::build`), so an ancestor standing in below
+            // its own zoom carries layers that the style says have already faded out — a z5
+            // tile's landcover is still in its buffers at camera z9, where the authored
+            // opacity ramp reached zero two levels earlier. Gating here is what makes a
+            // fill's zoom range follow the camera the way the authored ramps do.
+            if !layer.draws_at(camera.zoom.floor().clamp(0.0, 22.0) as u8) {
+                continue;
+            }
             // Width comes from the authored style, evaluated against the *camera's* fractional
             // zoom rather than the tile's, so a stroke grows smoothly while zooming instead of
             // jumping a step at every level. It is a push constant, so this re-tessellates
