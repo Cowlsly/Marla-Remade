@@ -43,6 +43,30 @@ internal object MlNative {
     /** Bring up U²-Net portable. Returns 0 on failure, as [createSelfie]. */
     external fun createU2netp(weights: ByteArray): Long
 
+    /** Bring up SCRFD 500M face detection. Returns 0 on failure, as [createSelfie]. */
+    external fun createScrfd(weights: ByteArray): Long
+
+    /** Bring up MobileFaceNet face embedding. Returns 0 on failure, as [createSelfie]. */
+    external fun createMobilefacenet(weights: ByteArray): Long
+
+    /**
+     * Detect faces in [pixels] and return them flattened, nine floats per face.
+     *
+     * The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,
+     * rightEyeY, score`, every coordinate a fraction of the bitmap. Letterboxing, the
+     * forward pass, the anchor decode and non-maximum suppression all happen natively, so
+     * this crosses the boundary once per bitmap rather than once per proposal.
+     *
+     * An empty array means no faces — the common case, and not a failure. Null is a
+     * failure.
+     */
+    external fun detectFaces(
+        handle: Long,
+        pixels: IntArray,
+        width: Int,
+        height: Int,
+    ): FloatArray?
+
     /**
      * Run the network over [pixels] and return the mask, or null on failure.
      *

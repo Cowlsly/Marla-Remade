@@ -28,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -69,7 +70,13 @@ fun PeoplePage(
     val indexing by galleryViewModel.faceIndexing.collectAsState()
     val scanned by galleryViewModel.faceScannedCount.collectAsState()
     val target by galleryViewModel.indexTargetCount.collectAsState()
-    val modelsAvailable = remember { FaceRecognizer.modelsAvailable(context) }
+    // Off the main thread: `modelsAvailable` brings the models up, and on `:library:ml`
+    // that means parsing two `.vkml` blobs and uploading 7.9 MB to the GPU. Doing it in a
+    // bare `remember { }` blocked the first composition of this screen for as long as
+    // that took.
+    val modelsAvailable by produceState(initialValue = false, context) {
+        value = withContext(Dispatchers.IO) { FaceRecognizer.modelsAvailable(context) }
+    }
 
     // The contact picker's result carries only the picked contact, with nothing to
     // say which cluster was being named, so the cluster id is parked here across

@@ -9,30 +9,32 @@ import android.graphics.Rect
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
-import com.vayunmathur.ncnn.FaceDetector
-import com.vayunmathur.ncnn.FaceEmbedder
+import com.vayunmathur.library.ml.DetectedFaceBox
+import com.vayunmathur.library.ml.FaceDetector
+import com.vayunmathur.library.ml.FaceEmbedder
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import kotlin.math.sqrt
 
 /**
- * On-device face detection + recognition. Everything runs locally on **ncnn**
- * (CPU-only, BSD-3 — no ONNX Runtime, no Google Play Services, F-Droid clean).
+ * On-device face detection + recognition. Everything runs locally on `:library:ml`'s
+ * Vulkan compute runtime — no ONNX Runtime, no Google Play Services, F-Droid clean.
  *
  * Pipeline:
- *  1. Detection — **SCRFD** ([FaceDetector], nihui's `scrfd_500m_kps`) finds
- *     faces and returns a bounding box + 5 landmarks (the two eyes are used for
- *     alignment). Anchor decode + NMS run natively.
+ *  1. Detection — **SCRFD 500M** ([FaceDetector]) finds faces and returns a bounding box
+ *     + 5 landmarks (the two eyes are used for alignment). Letterboxing, anchor decode
+ *     and NMS all run natively.
  *  2. Alignment — the two eye landmarks drive a similarity transform (rotate +
  *     uniform scale + translate) onto a canonical [INPUT_SIZE]² crop.
  *  3. Embedding — **MobileFaceNet** ([FaceEmbedder], insightface `w600k_mbf`,
  *     ArcFace-trained) produces a 512-d embedding from the aligned crop. Pixels
- *     are normalised (px - 127.5)/127.5 (handled natively). The result is
- *     L2-normalised here.
+ *     are normalised (px - 127.5)/127.5 natively. The result is L2-normalised here.
  *  4. Matching — cosine similarity clusters faces of the same person
  *     (see [CLUSTER_THRESHOLD]).
  *
- * The models live inside the `ncnn-android` AAR, so they are always available.
+ * The models ship as `.vkml` assets in this app. They are **GPU-only**: on a device
+ * without Vulkan fp16 compute [modelsAvailable] is false and people clustering turns off,
+ * rather than falling back to a second implementation.
  */
 object FaceRecognizer {
 
@@ -44,9 +46,12 @@ object FaceRecognizer {
      * worker compares it against a stored value and, on mismatch, clears existing
      * clusters and re-scans so photos are re-grouped with the new embeddings.
      * (v5 = BlazeFace + EdgeFace on ONNX Runtime; v6 = SCRFD detector +
-     * MobileFaceNet embedder on ncnn — different embeddings, so a re-scan runs.)
+     * MobileFaceNet embedder on ncnn; v7 = the same two models on `:library:ml`'s
+     * Vulkan runtime — fp16 weights, fp32 accumulation and our own letterbox, so the
+     * embeddings are close to v6's but not identical, and mixing the two spaces in one
+     * index would cluster badly.)
      */
-    const val EMBEDDER_VERSION = 6
+    const val EMBEDDER_VERSION = 7
 
     /**
      * Minimum cosine similarity for a face to join an existing cluster. ArcFace
@@ -78,12 +83,11 @@ object FaceRecognizer {
         val bottom: Float,
     )
 
-    private val lock = Any()
     @Volatile private var detector: FaceDetector? = null
     @Volatile private var embedder: FaceEmbedder? = null
     @Volatile private var initFailed = false
 
-    /** True if the native models could be loaded (they ship inside the AAR). */
+    /** True if the native models could be loaded and the device has fp16 compute. */
     fun modelsAvailable(context: Context): Boolean = ensureInit(context)
 
     @Synchronized
@@ -92,8 +96,19 @@ object FaceRecognizer {
         if (initFailed) return false
         return try {
             val app = context.applicationContext
-            detector = FaceDetector(app, "scrfd_500m_kps-opt2.param", "scrfd_500m_kps-opt2.bin")
-            embedder = FaceEmbedder(app, "w600k_mbf.ncnn.param", "w600k_mbf.ncnn.bin")
+            val newDetector = FaceDetector(app)
+            val newEmbedder = FaceEmbedder(app)
+            // GPU-only: a device without Vulkan fp16 compute reports unavailable rather
+            // than throwing, so the constructors succeeding is not enough.
+            if (!newDetector.isAvailable || !newEmbedder.isAvailable) {
+                Log.w(TAG, "no Vulkan fp16 compute; face clustering is off")
+                newDetector.close()
+                newEmbedder.close()
+                initFailed = true
+                return false
+            }
+            detector = newDetector
+            embedder = newEmbedder
             true
         } catch (e: Throwable) {
             Log.e(TAG, "Face models unavailable", e)
@@ -128,16 +143,20 @@ object FaceRecognizer {
             val rect = faceRect(f, argb.width, argb.height) ?: continue
             val aligned = alignFace(argb, f, rect) ?: continue
             try {
-                val embedding = l2Normalize(emb.embed(aligned))
+                // Null means the inference failed on this crop; the others may still be
+                // fine, so skip this face rather than abandoning the photo.
+                val raw = emb.embed(aligned)
+                if (raw == null) {
+                    Log.e(TAG, "Face embedding failed")
+                    continue
+                }
                 out += DetectedFace(
-                    embedding = embedding,
+                    embedding = l2Normalize(raw),
                     left = f.left,
                     top = f.top,
                     right = f.right,
                     bottom = f.bottom,
                 )
-            } catch (e: Exception) {
-                Log.e(TAG, "Face embedding failed", e)
             } finally {
                 aligned.recycle()
             }
@@ -151,7 +170,7 @@ object FaceRecognizer {
      * in an [INPUT_SIZE] crop (similarity transform). Falls back to a plain box
      * crop when landmarks are unusable.
      */
-    private fun alignFace(src: Bitmap, f: FaceDetector.Face, box: Rect): Bitmap? {
+    private fun alignFace(src: Bitmap, f: DetectedFaceBox, box: Rect): Bitmap? {
         val hasEyes = f.leftEyeX != 0f || f.leftEyeY != 0f || f.rightEyeX != 0f || f.rightEyeY != 0f
         if (hasEyes) {
             // Sort eyes by x so the left-most maps to the left canonical eye.
@@ -182,7 +201,7 @@ object FaceRecognizer {
     }
 
     /** Expand the normalised detector box by a small margin and clamp to pixels. */
-    private fun faceRect(f: FaceDetector.Face, w: Int, h: Int): Rect? {
+    private fun faceRect(f: DetectedFaceBox, w: Int, h: Int): Rect? {
         val bw = (f.right - f.left) * w
         val bh = (f.bottom - f.top) * h
         val marginX = bw * 0.15f

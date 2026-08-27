@@ -30,8 +30,9 @@ use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray};
 use jni::sys::{jfloatArray, jint, jlong};
 use jni::JNIEnv;
 
-use crate::nets::{selfie, u2netp};
-use crate::preprocess::{IMAGENET, RESCALE_ONLY};
+use crate::nets::{mobilefacenet, scrfd, selfie, u2netp};
+use crate::post::nms::{self, Face, Maps};
+use crate::preprocess::{Letterbox, FACE_EMBED, IMAGENET, RESCALE_ONLY, SCRFD};
 use crate::vulkan::context;
 use crate::vulkan::run::Net;
 use crate::weights::{graph, Weights};
@@ -75,6 +76,34 @@ pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createU2netp<'l>
     open(&mut env, weights, graph::U2NETP, "u2netp")
 }
 
+/// `FaceDetector`'s constructor: SCRFD 500M at a fixed square. Returns 0 on failure.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env` and a `weights` array it owns.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createScrfd<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    weights: JByteArray<'l>,
+) -> jlong {
+    open(&mut env, weights, graph::SCRFD, "scrfd")
+}
+
+/// `FaceEmbedder`'s constructor: MobileFaceNet at 112x112. Returns 0 on failure.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env` and a `weights` array it owns.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createMobilefacenet<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    weights: JByteArray<'l>,
+) -> jlong {
+    open(&mut env, weights, graph::MOBILEFACENET, "mobilefacenet")
+}
+
 fn open<'l>(env: &mut JNIEnv<'l>, weights: JByteArray<'l>, graph_id: u32, name: &str) -> jlong {
     match build(env, weights, graph_id) {
         Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
@@ -103,6 +132,13 @@ fn build<'l>(
     let (plan, normalise) = match graph_id {
         graph::SELFIE => (selfie::build(&parsed)?, RESCALE_ONLY),
         graph::U2NETP => (u2netp::build(&parsed)?, IMAGENET),
+        // A fixed square rather than the tight multiple-of-32 letterbox `scrfd.cpp` uses;
+        // see `preprocess::Letterbox::square` for why, and what it costs.
+        graph::SCRFD => (
+            scrfd::build(&parsed, scrfd::LONG_SIDE, scrfd::LONG_SIDE)?,
+            SCRFD,
+        ),
+        graph::MOBILEFACENET => (mobilefacenet::build(&parsed)?, FACE_EMBED),
         other => return Err(format!("no forward pass for graph {other}")),
     };
     Ok(Handle {
@@ -172,6 +208,132 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_segment<'
             null
         }
     }
+}
+
+/// Detect faces in `pixels` and return them flattened, nine floats each.
+///
+/// The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,
+/// rightEyeY, score` — deliberately the argument order of the old ncnn JNI's `Face`
+/// constructor, so the Kotlin mapping is a straight read and a reviewer can diff the two.
+/// Every coordinate is a fraction of the source bitmap, so it survives the caller
+/// resizing.
+///
+/// A flat `float[]` rather than an array of objects: constructing `n` Java objects across
+/// JNI is `n` class lookups and `n` constructor calls, and the Kotlin side has to allocate
+/// its own data class anyway.
+///
+/// Returns null on failure or on a `0` handle. An empty array means no faces, which is
+/// the common case and not an error.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a value returned by
+/// [`Java_com_vayunmathur_library_ml_MlNative_createScrfd`] and not yet destroyed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_detectFaces<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pixels: JIntArray<'l>,
+    width: jint,
+    height: jint,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 || width <= 0 || height <= 0 {
+        return null;
+    }
+    // SAFETY: as `segment` — the caller guarantees the handle is live and serialises this
+    // against `destroy`.
+    let state = unsafe { &mut *(handle as *mut Handle) };
+
+    if let Err(e) = read_pixels(&mut env, &pixels, width, height, &mut state.pixels) {
+        log(&e);
+        return null;
+    }
+    match detect(state, width as u32, height as u32) {
+        Ok(flat) => match new_float_array(&mut env, &flat) {
+            Ok(array) => array,
+            Err(e) => {
+                log(&format!("cannot return the detections: {e}"));
+                null
+            }
+        },
+        Err(e) => {
+            log(&format!("face detection failed: {e}"));
+            null
+        }
+    }
+}
+
+/// Nine floats per detected face. See the entry point above for the order.
+const FACE_FLOATS: usize = 9;
+
+/// Letterbox, run, decode, suppress, and flatten.
+fn detect(state: &mut Handle, width: u32, height: u32) -> Result<Vec<f32>, String> {
+    let fit = Letterbox::square(width, height, scrfd::LONG_SIDE)?;
+    let maps = state.net.infer_letterboxed(&state.pixels, width, height, &fit)?;
+    let shapes: Vec<crate::nets::Shape> =
+        state.net.output_shapes().iter().map(|b| b.shape).collect();
+    if maps.len() != shapes.len() || maps.len() != scrfd::STRIDES.len() * 3 {
+        return Err(format!("{} output maps, expected {}", maps.len(), scrfd::STRIDES.len() * 3));
+    }
+
+    let mut faces: Vec<Face> = Vec::new();
+    for (level, stride) in scrfd::STRIDES.iter().enumerate() {
+        let at = level * 3;
+        let (score, bbox, keypoints) = match (maps.get(at), maps.get(at + 1), maps.get(at + 2)) {
+            (Some(s), Some(b), Some(k)) => (s, b, k),
+            _ => return Err(format!("stride {stride} is missing a map")),
+        };
+        let shape = shapes.get(at).copied().ok_or("a map with no shape")?;
+        nms::decode(
+            &Maps { score, bbox, keypoints, shape },
+            *stride,
+            nms::SCORE_THRESHOLD,
+            &mut faces,
+        )?;
+    }
+    nms::suppress(&mut faces, nms::IOU_THRESHOLD);
+    nms::to_source(&mut faces, &fit, width, height);
+
+    let mut flat = Vec::with_capacity(faces.len() * FACE_FLOATS);
+    for face in &faces {
+        flat.extend_from_slice(&face.bounds);
+        // Landmarks 0 and 1 are the eyes, which is all the alignment in
+        // `FaceRecognizer.alignFace` uses. The nose and mouth corners are decoded and
+        // dropped here rather than carried across a boundary nothing reads them through.
+        let (left_eye, right_eye) = match (face.keypoints.first(), face.keypoints.get(1)) {
+            (Some(a), Some(b)) => (*a, *b),
+            _ => ((0.0, 0.0), (0.0, 0.0)),
+        };
+        flat.push(left_eye.0);
+        flat.push(left_eye.1);
+        flat.push(right_eye.0);
+        flat.push(right_eye.1);
+        flat.push(face.score);
+    }
+    Ok(flat)
+}
+
+/// Copy a Java `int[]` of ARGB pixels into `into`, checking it against `width` x `height`.
+fn read_pixels<'l>(
+    env: &mut JNIEnv<'l>,
+    pixels: &JIntArray<'l>,
+    width: jint,
+    height: jint,
+    into: &mut Vec<i32>,
+) -> Result<(), String> {
+    let count = match env.get_array_length(pixels) {
+        Ok(n) if n >= 0 => n as usize,
+        Ok(n) => return Err(format!("a pixel array of length {n}")),
+        Err(e) => return Err(format!("cannot size the pixel array: {e}")),
+    };
+    if count != (width as usize) * (height as usize) {
+        return Err(format!("{count} pixels for a {width}x{height} bitmap"));
+    }
+    into.resize(count, 0);
+    env.get_int_array_region(pixels, 0, into)
+        .map_err(|e| format!("cannot read the pixel array: {e}"))
 }
 
 /// The mask's width, so Kotlin does not have to know either network's input size.

@@ -122,6 +122,49 @@ impl Letterbox {
         })
     }
 
+    /// Fit a `width` x `height` image into a `side` x `side` square, padding both axes.
+    ///
+    /// The scale is identical to [`Letterbox::new`]'s — `side / long side` — so a
+    /// detection lands in the same place; only the amount of padding differs, and padding
+    /// is a constant border either way.
+    ///
+    /// # Why the square and not the tight fit
+    ///
+    /// `scrfd.cpp` pads only the short side, to the next multiple of 32, which makes the
+    /// net's input shape a function of the photo's aspect ratio. Supporting that properly
+    /// means compiling a plan and re-recording a command buffer per shape, which is real
+    /// machinery the runtime does not have yet (and which PP-OCR and VITS will need for
+    /// their own reasons).
+    ///
+    /// A square costs up to 2x the arithmetic on a panorama and nothing on a square
+    /// photo. Detection runs once per photo during indexing rather than per frame, and
+    /// SCRFD's arena at 640x640 is 9.3 MB, so that is a cheap way to avoid the machinery
+    /// until something actually needs it. [`crate::nets::scrfd::build`] already accepts
+    /// any multiple of 32, so nothing is given up by starting here.
+    pub fn square(width: u32, height: u32, side: u32) -> Result<Letterbox, String> {
+        if width == 0 || height == 0 {
+            return Err(format!("a {width}x{height} image"));
+        }
+        if side == 0 {
+            return Err("a zero-sided square".into());
+        }
+        // Same truncation as `new`: the long side lands exactly on `side`, the short one
+        // follows by the same scale and is truncated.
+        let (scale, resized) = if width > height {
+            let scale = side as f32 / width as f32;
+            (scale, (side, ((height as f32 * scale) as u32).max(1).min(side)))
+        } else {
+            let scale = side as f32 / height as f32;
+            (scale, (((width as f32 * scale) as u32).max(1).min(side), side))
+        };
+        Ok(Letterbox {
+            scale,
+            resized,
+            padded: (side, side),
+            offset: ((side - resized.0) / 2, (side - resized.1) / 2),
+        })
+    }
+
     /// The net's input shape for this fit.
     pub fn shape(&self) -> Shape {
         Shape::new(3, self.padded.1, self.padded.0)
@@ -575,6 +618,62 @@ mod tests {
         // And the padding either side really is the border, not a smeared edge pixel.
         assert_eq!(f16_to_f32(out[row]), 0.0);
         assert_eq!(f16_to_f32(out[row + 31]), 0.0);
+    }
+
+    #[test]
+    fn a_square_letterbox_pads_both_axes_and_keeps_the_scale() {
+        // The same 1280x720 photo as the tight-fit test: scale 0.5 and a 640x360 image
+        // either way, but padded to 640x640 with 140 rows above instead of 12.
+        let tight = Letterbox::new(1280, 720, 640, 32).expect("fits");
+        let square = Letterbox::square(1280, 720, 640).expect("fits");
+        assert_eq!(square.scale, tight.scale);
+        assert_eq!(square.resized, tight.resized);
+        assert_eq!(square.padded, (640, 640));
+        assert_eq!(square.offset, (0, 140));
+    }
+
+    #[test]
+    fn a_square_letterbox_recovers_the_original_fraction() {
+        // The undo has to work against the larger offset too, which is the whole reason
+        // the offset is stored rather than recomputed.
+        let fit = Letterbox::square(1280, 720, 640).expect("fits");
+        let mut faces = vec![super::super::post::nms::Face {
+            score: 0.9,
+            bounds: [0.0, 140.0, 640.0, 500.0],
+            keypoints: [(320.0, 320.0); 5],
+        }];
+        super::super::post::nms::to_source(&mut faces, &fit, 1280, 720);
+        let got = faces.first().copied().expect("one face");
+        assert!((got.bounds[0] - 0.0).abs() < 1e-6, "{:?}", got.bounds);
+        assert!((got.bounds[1] - 0.0).abs() < 1e-6, "{:?}", got.bounds);
+        assert!((got.bounds[2] - 1279.0 / 1280.0).abs() < 1e-6, "{:?}", got.bounds);
+        assert!((got.bounds[3] - 719.0 / 720.0).abs() < 1e-6, "{:?}", got.bounds);
+        // The centre of the padded square is the centre of the photo.
+        let (x, y) = got.keypoints[0];
+        assert!((x - 0.5).abs() < 2e-3, "{x}");
+        assert!((y - 0.5).abs() < 2e-3, "{y}");
+    }
+
+    #[test]
+    fn a_square_letterbox_is_always_exactly_the_side_it_was_asked_for() {
+        for (width, height) in [
+            (4032, 3024),
+            (3024, 4032),
+            (1920, 1080),
+            (640, 480),
+            (1, 4000),
+            (4000, 1),
+            (1, 1),
+            (639, 641),
+        ] {
+            let fit = Letterbox::square(width, height, 640).expect("fits");
+            assert_eq!(fit.padded, (640, 640), "{width}x{height}");
+            // The image must fit inside the square with the padding it claims.
+            assert!(
+                fit.offset.0 + fit.resized.0 <= 640 && fit.offset.1 + fit.resized.1 <= 640,
+                "{width}x{height}: {fit:?}"
+            );
+        }
     }
 
     #[test]

@@ -414,18 +414,15 @@ impl Net {
     /// `pixels` is `ARGB_8888` as `Bitmap.getPixels` produces it. The returned mask is
     /// `output_shape.h * output_shape.w` long, row-major.
     ///
-    /// Single-input, single-output: this is the bitmap-in, mask-out path both shipping
-    /// nets use, and it refuses a plan shaped otherwise rather than silently reading only
-    /// the first binding.
+    /// Single-input, single-output: this is the bitmap-in, mask-out path the two
+    /// segmenters and the face embedder use. It refuses a plan shaped otherwise rather
+    /// than silently returning only the first binding.
     pub fn infer(
         &mut self,
         pixels: &[i32],
         width: u32,
         height: u32,
     ) -> Result<Vec<f32>, String> {
-        if self.poisoned {
-            return Err("a previous submission timed out; this network is unusable".into());
-        }
         let input = self.plan.input()?;
         // Reject a multi-output plan here rather than returning only the first binding:
         // `output_scratch` spans every output, so the concatenation would look like a
@@ -439,8 +436,73 @@ impl Net {
             &self.normalise,
             &mut self.input_scratch,
         )?;
-        // SAFETY: the scratch buffer is `input_shape.len()` fp16 elements, which is
-        // exactly what the recorded copy region moves.
+        self.submit()?;
+        Ok(self.output_scratch.iter().map(|&h| preprocess::f16_to_f32(h)).collect())
+    }
+
+    /// Letterbox `pixels` into the plan's input shape, run, and return **every** output.
+    ///
+    /// SCRFD's path: nine maps come back, in [`crate::nets::Plan::outputs`] order. `fit`
+    /// must have been computed for the shape this net was built at, which
+    /// [`preprocess::Letterbox::square`] guarantees for a fixed side.
+    pub fn infer_letterboxed(
+        &mut self,
+        pixels: &[i32],
+        width: u32,
+        height: u32,
+        fit: &preprocess::Letterbox,
+    ) -> Result<Vec<Vec<f32>>, String> {
+        let input = self.plan.input()?;
+        if fit.shape() != input.shape {
+            return Err(format!(
+                "a letterbox of {:?} for a net built at {:?}",
+                fit.shape(),
+                input.shape
+            ));
+        }
+        preprocess::to_letterboxed_f16(
+            pixels,
+            width,
+            height,
+            fit,
+            &self.normalise,
+            &mut self.input_scratch,
+        )?;
+        self.submit()?;
+        self.split_outputs()
+    }
+
+    /// Split the concatenated readback into one vector per output binding.
+    ///
+    /// The recorded command buffer packs the outputs end to end from offset 0 in the
+    /// staging buffer, in declaration order, so this is the mirror of `record`.
+    fn split_outputs(&self) -> Result<Vec<Vec<f32>>, String> {
+        let mut outputs = Vec::with_capacity(self.plan.outputs.len());
+        let mut at = 0usize;
+        for binding in &self.plan.outputs {
+            let len = binding.shape.len() as usize;
+            let end = at.checked_add(len).ok_or("an output offset overflowed")?;
+            let slice = self
+                .output_scratch
+                .get(at..end)
+                .ok_or_else(|| format!("the readback is shorter than {end} elements"))?;
+            outputs.push(slice.iter().map(|&h| preprocess::f16_to_f32(h)).collect());
+            at = end;
+        }
+        Ok(outputs)
+    }
+
+    /// Upload `input_scratch`, submit the recorded buffer, and read `output_scratch` back.
+    ///
+    /// Factored out of the two `infer` variants because it is the whole of the unsafe,
+    /// order-sensitive part: everything about poisoning, the fence and the queue lock is
+    /// here once rather than twice.
+    fn submit(&mut self) -> Result<(), String> {
+        if self.poisoned {
+            return Err("a previous submission timed out; this network is unusable".into());
+        }
+        // SAFETY: the scratch buffer is exactly the fp16 elements the recorded copy
+        // regions move, and `u16` has no padding or invalid bit patterns.
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 self.input_scratch.as_ptr().cast::<u8>(),
@@ -475,14 +537,19 @@ impl Net {
             self.poisoned = false;
         }
 
-        self.staging.read_f16(&mut self.output_scratch)?;
-        Ok(self.output_scratch.iter().map(|&h| preprocess::f16_to_f32(h)).collect())
+        self.staging.read_f16(&mut self.output_scratch)
     }
 
     /// The mask's dimensions, which is what the Kotlin wrapper reports to its caller.
     pub fn output_size(&self) -> Result<(u32, u32), String> {
         let output = self.plan.output()?;
         Ok((output.shape.w, output.shape.h))
+    }
+
+    /// Every output binding, so a multi-output caller can size and shape the maps
+    /// [`Net::infer_letterboxed`] returns without rebuilding the plan.
+    pub fn output_shapes(&self) -> &[crate::nets::Binding] {
+        &self.plan.outputs
     }
 }
 

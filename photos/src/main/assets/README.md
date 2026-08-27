@@ -51,8 +51,10 @@ Two nodes are rewritten during conversion rather than needing a shader — see
 convolution kernel, and the `BatchNormalization` after it is folded into that layer's
 weight and bias.
 
-The ncnn `.param`/`.bin` files are still present and still what `FaceRecognizer.kt`
-loads; they go once the Kotlin moves across to `:library:ml`.
+The ncnn `.param`/`.bin` files these replace (`scrfd_500m_kps-opt2.*`,
+`w600k_mbf.ncnn.*`, 7.9 MB together) are gone. `libncnn_android.so` is still in this
+APK, but only because `:library:ocr` pulls it in for PP-OCRv5 text recognition — nothing
+in `:photos` itself uses ncnn any more.
 
 ## `clip/`
 
