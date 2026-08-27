@@ -166,6 +166,35 @@ fn point_in_ring(x: i32, y: i32, ring: &[(i32, i32)]) -> bool {
     inside
 }
 
+/// Is the point exactly on one of the ring's edges?
+///
+/// [`point_in_ring`] is an even-odd crossing test, so it answers inconsistently for a point
+/// that lies *on* the boundary — which side it lands on depends on which edge it sits on.
+/// Real coastline holes touch their exterior, so that ambiguity has to be resolved
+/// deliberately rather than left to the crossing parity.
+fn on_boundary(x: i32, y: i32, ring: &[(i32, i32)]) -> bool {
+    for i in 0..ring.len() {
+        let (x1, y1) = ring[i];
+        let (x2, y2) = ring[(i + 1) % ring.len()];
+        let cross = (x as i64 - x1 as i64) * (y2 as i64 - y1 as i64)
+            - (y as i64 - y1 as i64) * (x2 as i64 - x1 as i64);
+        if cross == 0
+            && x >= x1.min(x2)
+            && x <= x1.max(x2)
+            && y >= y1.min(y2)
+            && y <= y1.max(y2)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Is the point inside the ring, counting its boundary as inside?
+fn point_within_ring(x: i32, y: i32, ring: &[(i32, i32)]) -> bool {
+    point_in_ring(x, y, ring) || on_boundary(x, y, ring)
+}
+
 /// Twice the unsigned area of the ring.
 fn ring_area2(ring: &[(i32, i32)]) -> i64 {
     let mut sum = 0i64;
@@ -195,7 +224,9 @@ fn polygons(rings: &[&[(i32, i32)]]) -> Vec<Vec<usize>> {
     // Enclosing rings per ring, each with the vote that decided it. A majority vote rather
     // than one probe vertex, so a ring that poked a few vertices outside its container
     // during clipping is still recognised as being inside it — and the vote doubles as the
-    // straddle test below, at no extra cost.
+    // straddle test below, at no extra cost. The boundary counts as inside: a hole that
+    // shares an edge with its exterior is touching it, not straddling it, and reading those
+    // vertices as outside discarded real islands.
     let mut enclosing: Vec<Vec<(usize, usize)>> = vec![Vec::new(); count];
     for j in 0..count {
         for i in 0..count {
@@ -209,7 +240,7 @@ fn polygons(rings: &[&[(i32, i32)]]) -> Vec<Vec<usize>> {
                 continue;
             }
             let votes =
-                rings[j].iter().filter(|&&(x, y)| point_in_ring(x, y, rings[i])).count();
+                rings[j].iter().filter(|&&(x, y)| point_within_ring(x, y, rings[i])).count();
             if votes * 2 > rings[j].len() {
                 enclosing[j].push((i, votes));
             }
@@ -250,11 +281,19 @@ fn polygons(rings: &[&[(i32, i32)]]) -> Vec<Vec<usize>> {
             // the bridged ring self-intersecting, and earcut answers that with slivers
             // spanning the whole polygon. Losing the hole costs far less area.
             //
-            // Both tests are vertex votes rather than exact edge-crossing tests, which is
-            // an order of magnitude cheaper and, on the archive's worst polygon, selects
-            // exactly the holes that do cross: no ring is dropped that did not need to be.
-            // A hole that crosses out and back between two consecutive vertices is missed,
-            // and is simply tolerated — one such ring survives on the z0 ocean.
+            // Both tests are vertex votes rather than exact edge-crossing tests, an order of
+            // magnitude cheaper. The cost of that is measurable and worth knowing: across the
+            // archive's low zooms this discards 773 holes, each one an island or lake filled
+            // in solid, and 301 of those straddle by a single vertex out of ten to forty-five.
+            //
+            // That distribution invites tolerating a one-vertex straddle. It was tried and it
+            // is worse: summed surplus over 19372 polygon groups rises from 0.399 to 0.441,
+            // because those really do cross and their bridged rings really do self-intersect.
+            // Recovering the islands means clipping the offending vertex back onto the
+            // exterior, which keeps the hole without the crossing — not relaxing this test.
+            //
+            // A hole that crosses out and back between two consecutive vertices is missed
+            // entirely and simply tolerated.
             let straddles = votes != rings[j].len();
             let overlaps = group[1..].iter().any(|&k| {
                 boxes_overlap(boxes[j], boxes[k]) && rings_overlap(rings[j], rings[k])
@@ -565,6 +604,60 @@ mod tests {
         // The dropped hole's vertices are not emitted, so they cannot sit unreferenced in
         // the buffer: the outer ring plus one hole, four vertices each.
         assert_eq!(v.len() / FLOATS_PER_VERTEX, 8);
+    }
+
+    #[test]
+    fn a_hole_touching_its_exterior_is_still_cut_out() {
+        // Real coastline holes share an edge with their exterior. `point_in_ring` is an
+        // even-odd crossing test and answers inconsistently for a point lying exactly on the
+        // boundary, so without treating the boundary as inside these read as straddling and
+        // the whole hole was discarded — an island filled in solid for no reason. Eleven of
+        // them across the archive's low zooms.
+        let outer = vec![(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+        // Left and right edges of the hole sit exactly on the exterior's left and right edges.
+        let spanning = vec![(0, 400), (1000, 400), (1000, 600), (0, 600), (0, 400)];
+        let rings = vec![outer, spanning];
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&rings, 1000, &mut v, &mut idx);
+
+        let want = expected_area(&rings, 1000);
+        assert!((want - 0.8).abs() < 1e-6, "the even-odd region is {want}");
+        assert!(
+            (covered_area(&v, &idx) - want).abs() < 1e-6,
+            "the hole must still be cut out: covered {} against {want}",
+            covered_area(&v, &idx),
+        );
+    }
+
+    #[test]
+    fn a_hole_crossing_its_exterior_by_one_vertex_is_still_dropped() {
+        // Guards the STRICTNESS of the straddle test, which nothing else does: relaxing it to
+        // tolerate one outside vertex leaves every other test in this module green.
+        //
+        // One vertex here sits genuinely outside the exterior — outside, not on the edge, so
+        // `on_boundary` cannot rescue it. Four of five are inside, so it is still classified as
+        // this exterior's hole; only the strictness decides its fate.
+        //
+        // Dropping it fills in an island, which reads as the wrong trade until measured:
+        // tolerating single-vertex straddles raises summed surplus over 19372 polygon groups
+        // from 0.399 to 0.441, because these really cross and their bridged rings really
+        // self-intersect. The strict form is deliberate, and this pins it.
+        let outer = vec![(0, 0), (1000, 0), (1000, 1000), (0, 1000), (0, 0)];
+        let crossing =
+            vec![(400, 300), (400, 700), (700, 700), (1010, 500), (700, 300), (400, 300)];
+
+        let mut v = Vec::new();
+        let mut idx = Vec::new();
+        tessellate(&vec![outer, crossing], 1000, &mut v, &mut idx);
+
+        // Dropped, so the fill is exactly the exterior. Keeping it covers 0.8965 instead.
+        assert!(
+            (covered_area(&v, &idx) - 1.0).abs() < 1e-6,
+            "the crossing hole must be dropped, not bridged: covered {}",
+            covered_area(&v, &idx),
+        );
     }
 
     #[test]
