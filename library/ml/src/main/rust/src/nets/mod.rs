@@ -27,6 +27,10 @@
 //! [`WeightSource`] rather than a [`crate::weights::Weights`], so `cargo test` builds
 //! both real networks, in full, with no device and no asset.
 
+/// A CPU implementation of every op, to check the resolved plans against. Test-only,
+/// so it adds nothing to the shipped `.so`.
+#[cfg(test)]
+pub mod reference;
 pub mod selfie;
 pub mod u2netp;
 
