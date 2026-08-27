@@ -1,0 +1,50 @@
+#version 450
+//! Max pooling. 33 uses, all of them 2x2 stride 2 in U^2-Netp.
+//!
+//! The kernel and stride still come from push constants rather than being hardcoded to
+//! 2, because that costs nothing here and keeps the shader honest about what the plan
+//! actually asked for.
+//!
+//! ONNX marks all 33 `ceil_mode=1`; this floors. Every pooled extent in U^2-Netp is even
+//! — 320 halves five times to 10 — so the two agree, and `nets::Builder::max_pool_2x2`
+//! refuses an odd extent rather than letting the difference pass silently.
+//!
+//! There is no padding: all 33 have `pads = [0, 0, 0, 0]`, so no `-inf` initial value is
+//! needed and every window is fully inside the input.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    uint plane = p.in0 + oc * p.in_h * p.in_w;
+    uint top = oy * p.stride_h;
+    uint left = ox * p.stride_w;
+
+    // The most negative fp16, rather than a literal -inf: every one of the 33 pools has
+    // `pads = [0, 0, 0, 0]` and an even extent, so this initial value is never actually
+    // the answer, and a real -inf would be relying on GLSL's division-by-zero behaviour
+    // for a value that cannot be observed.
+    float best = -65504.0;
+    for (uint ky = 0u; ky < p.kh; ky++) {
+        uint iy = top + ky;
+        if (iy >= p.in_h) {
+            continue;
+        }
+        uint row = plane + iy * p.in_w;
+        for (uint kx = 0u; kx < p.kw; kx++) {
+            uint ix = left + kx;
+            if (ix >= p.in_w) {
+                continue;
+            }
+            best = max(best, float(arena[row + ix]));
+        }
+    }
+
+    arena[p.out_at + index] = float16_t(best);
+}

@@ -1,0 +1,64 @@
+#version 450
+//! Transposed convolution, written as a gather.
+//!
+//! One use in either network: the selfie net's final 2x2 stride-2 upsample from
+//! 16x128x128 to 1x256x256, which is what turns the decoder's feature map into an alpha.
+//!
+//! # Gather, not scatter
+//!
+//! The natural reading of a transposed convolution scatters — each input element adds
+//! into `kh * kw` outputs — which needs atomics or a separate clear-and-accumulate pass.
+//! Inverting it costs only a divisibility test: output row `oy` is fed by input row
+//! `(oy + pad_t - ky) / stride_h`, when that division is exact. So this stays one
+//! invocation per output element like every other shader here, with no atomics.
+//!
+//! The weight layout is ONNX's, which for `ConvTranspose` is `[in_c, out_c / group,
+//! kh, kw]` — input channels outermost, the transpose of `Conv`'s. That inversion is the
+//! one place the two convolution shaders genuinely differ, and getting it backwards
+//! would produce a mask that looks like noise rather than one that looks nearly right.
+//!
+//! `group` is 1 at the only call site and is not modelled: a grouped transposed
+//! convolution would need the input-channel range restricted the way `conv.comp` does it.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    float acc = float(weights[p.bias + oc]);
+
+    for (uint ic = 0u; ic < p.in_c; ic++) {
+        uint plane = p.in0 + ic * p.in_h * p.in_w;
+        uint kernel_at = p.weight + (ic * p.out_c + oc) * p.kh * p.kw;
+        for (uint ky = 0u; ky < p.kh; ky++) {
+            int numerator = int(oy + p.pad_t) - int(ky);
+            if (numerator < 0 || uint(numerator) % p.stride_h != 0u) {
+                continue;
+            }
+            uint iy = uint(numerator) / p.stride_h;
+            if (iy >= p.in_h) {
+                continue;
+            }
+            uint row = plane + iy * p.in_w;
+            uint tap = kernel_at + ky * p.kw;
+            for (uint kx = 0u; kx < p.kw; kx++) {
+                int denominator = int(ox + p.pad_l) - int(kx);
+                if (denominator < 0 || uint(denominator) % p.stride_w != 0u) {
+                    continue;
+                }
+                uint ix = uint(denominator) / p.stride_w;
+                if (ix >= p.in_w) {
+                    continue;
+                }
+                acc += float(arena[row + ix]) * float(weights[tap + kx]);
+            }
+        }
+    }
+
+    arena[p.out_at + index] = float16_t(activate(acc, p.act));
+}

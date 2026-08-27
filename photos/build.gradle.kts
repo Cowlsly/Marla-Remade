@@ -15,7 +15,7 @@ android {
         applicationId = "com.vayunmathur.photos"
     }
     androidResources {
-        // ncnn model files (face/segmentation here, OCR via :library:ocr) are
+        // ncnn model files (the two face models here, OCR via :library:ocr) are
         // bundled in this app's assets and their paths passed to the wrappers;
         // the AAR ships none.
         //
@@ -23,11 +23,10 @@ android {
         // uncompressed: int8 weights barely deflate, and a compressed asset would have to be
         // inflated into a 24 MB heap buffer before ORT could open it.
         noCompress += "onnx"
-    }
-    packaging {
-        jniLibs {
-            pickFirsts.add("**/libc++_shared.so")
-        }
+        // u2netp.vkml is read straight out of the APK by SubjectSegmenter for the same
+        // reason: fp16 weights barely deflate, and a compressed asset would have to be
+        // inflated into a 2.2 MB heap buffer before it could be uploaded.
+        noCompress += "vkml"
     }
 }
 
@@ -48,10 +47,15 @@ dependencies {
     implementation(project(":library:map"))
     implementation(project(":library:image"))
     implementation(libs.androidx.exifinterface)
-    // On-device face detection (SCRFD), face embedding (MobileFaceNet) and
-    // subject segmentation (U²-Net) run on ncnn via the generalist AAR (BSD-3,
-    // no ONNX Runtime / Play Services / MediaPipe). OCR uses it via :library:ocr.
+    // On-device face detection (SCRFD) and face embedding (MobileFaceNet) run on ncnn
+    // via the generalist AAR (BSD-3, no ONNX Runtime / Play Services / MediaPipe). OCR
+    // uses it via :library:ocr.
+    //
+    // Subject segmentation left: U²-Net now runs on :library:ml, our own Vulkan compute
+    // runtime. The two face models are transformer-adjacent enough that porting them is a
+    // later phase, so ncnn stays for now.
     implementation(libs.ncnn.android)
+    implementation(project(":library:ml"))
 
     implementRoom(libs)
     implementation(project(":library:room"))

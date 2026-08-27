@@ -10,9 +10,12 @@ members = [
   "networklocation/src/main/rust",
   "euicc/src/main/rust",
   "passwords/src/main/rust",
+  "appstore/src/main/rust",
   "vpn/src/main/rust",
   "library/e2ee-p2p/src/main/rust",
   "library/jni-http/src/main/rust",
+  "library/map/src/main/rust",
+  "library/ml/src/main/rust",
   "library/vision/src/main/rust",
   "measure/src/main/rust",
   "communicate/src/main/rust",
@@ -39,6 +42,12 @@ members = [
   "third_party/betocore/ukey2_proto",
   "third_party/betocore/ukey2_connections",
 ]
+# `tilecodec` is a workspace root of its own, because it is consumed both by this
+# workspace's `map_renderer` cdylib and by the detached host tool
+# `scripts/maps/tile_build`. It lives inside this tree, so it has to be excluded
+# explicitly or cargo reports "multiple workspace roots found in the same workspace"
+# as soon as a member depends on it.
+exclude = ["library/tilecodec/src/main/rust"]
 resolver = "2"
 
 [workspace.package]

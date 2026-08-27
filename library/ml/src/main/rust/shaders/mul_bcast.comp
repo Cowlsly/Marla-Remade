@@ -1,0 +1,25 @@
+#version 450
+//! `out[c][y][x] = a[c][y][x] * b[c]`, the excite half of a squeeze-excite block.
+//!
+//! Ten uses, all in the selfie net, `b` always the `C x 1 x 1` output of `gap.comp` put
+//! through a 1x1 convolution and a sigmoid.
+//!
+//! The broadcast is over H and W only, so the second operand is indexed by channel
+//! alone. Four of the ten multiply a tensor that is **not** the one that was pooled —
+//! see the note in `nets::selfie` — which is why the two operands are separate push
+//! constants rather than one tensor read twice.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    float value = float(arena[p.in0 + index]);
+    float gate = float(arena[p.in1 + oc]);
+    arena[p.out_at + index] = float16_t(value * gate);
+}

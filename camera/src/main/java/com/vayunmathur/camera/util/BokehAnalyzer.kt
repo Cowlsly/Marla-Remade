@@ -8,7 +8,7 @@ import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.core.graphics.scale
-import com.vayunmathur.ncnn.PortraitSegmenter
+import com.vayunmathur.library.ml.SelfieSegmenter
 
 private const val TEMPORAL_WEIGHT = 0.35f
 // Throttle segmentation to avoid running more than ~15 fps even if analysis
@@ -26,8 +26,9 @@ class BokehAnalyzer(
 
     // Guard for the native handle and buffer fields – analyze() runs on bokehExecutor
     // while close() runs on the main composable's DisposableEffect. Without mutual
-    // exclusion, close() destroys the ncnn net while openmp_worker threads are still
-    // reading it → SEGV_MTESERR tagged fault in libncnn_android.so.
+    // exclusion, close() destroys the net while the GPU is still reading the buffers it
+    // owns → the SEGV_MTESERR tagged fault this used to hit in libncnn_android.so. The
+    // model changed; the hazard did not.
     private val lock = Any()
     private var prevMask: FloatArray? = null
     private var blurTemp: FloatArray? = null
@@ -35,7 +36,9 @@ class BokehAnalyzer(
     private var pixelBuffer: IntArray? = null
     private var lastSegmentMs: Long = 0L
     @Volatile private var closed = false
-    private var segmenter: PortraitSegmenter? = PortraitSegmenter(context, "erdnet.param", "erdnet.bin")
+    // GPU-only: null-returning rather than throwing when the device has no Vulkan fp16
+    // compute, in which case the preview simply stays sharp.
+    private var segmenter: SelfieSegmenter? = SelfieSegmenter(context)
 
     @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
     override fun analyze(imageProxy: ImageProxy) {
@@ -73,8 +76,9 @@ class BokehAnalyzer(
             }
 
             // Synchronous forward pass; runs on dedicated bokehExecutor with KEEP_ONLY_LATEST.
-            // Hold lock across the native call so close() blocks until OpenMP workers finish,
-            // preventing the SEGV_MTESERR use-after-free seen in tombstones.
+            // Hold lock across the native call so close() blocks until the submitted command
+            // buffer has been waited on, preventing the SEGV_MTESERR use-after-free seen in
+            // tombstones.
             val result = synchronized(lock) {
                 if (closed) {
                     frame.recycle()
@@ -85,11 +89,9 @@ class BokehAnalyzer(
                     frame.recycle()
                     return
                 }
-                try {
-                    seg.segment(frame)
-                } catch (e: IllegalStateException) {
-                    // PortraitSegmenter is closed – analyzer disposed while frame in-flight
-                    Log.w("BokehAnalyzer", "segmenter closed mid-frame", e)
+                // Null on an unavailable GPU or a failed submit; either way there is no
+                // mask this frame and the preview keeps the last one.
+                seg.segment(frame) ?: run {
                     frame.recycle()
                     return
                 }
@@ -144,7 +146,7 @@ class BokehAnalyzer(
     }
 
     fun close() {
-        val toClose: PortraitSegmenter?
+        val toClose: SelfieSegmenter?
         synchronized(lock) {
             if (closed) return
             closed = true
@@ -156,8 +158,8 @@ class BokehAnalyzer(
             pixelBuffer = null
         }
         // Destroy outside lock after nulling handle, but close() itself was blocked until
-        // any in-flight segment() finished (lock held across native call), so no OpenMP
-        // worker is still reading the net.
+        // any in-flight segment() finished (lock held across native call), so the GPU is
+        // no longer reading the buffers this frees.
         try { toClose?.close() } catch (_: Exception) {}
     }
 

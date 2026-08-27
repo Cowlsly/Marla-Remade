@@ -1,0 +1,41 @@
+# The Vulkan compute ML runtime for `:library:ml`.
+#
+# Replaces `com.github.vayun-mathur:ncnn-android` for the two pure-CNN vision models
+# the repo ships: MediaPipe Selfie Segmentation (`:camera` portrait bokeh) and U^2-Net
+# portable (`:photos` auto-select-subject). ncnn stays for the two face models in
+# `:photos` and for `:library:ocr`, `:pdf`, `:translate` and `:speech`.
+#
+# Why this exists: the ncnn fork is built CPU-only (`NCNN_VULKAN=OFF`) and compiles
+# ncnn's entire layer registry into one `libncnn_android.so` for models that use a
+# small fraction of it. This runs on Vulkan compute with our own weights encoding and
+# only the ~11 shaders these two nets need.
+#
+# Why `ash` and not `androidx.webgpu`: the same reasoning as `library/map` — read the
+# header comment there. `features = ["loaded"]` dlopens `libvulkan.so` and links
+# nothing, so the only native code shipped is our own.
+#
+# There is no graph interpreter: each net's forward pass is hardcoded Rust in `nets/`,
+# so a `.vkml` file carries ordered tensors and no topology. See `src/weights.rs`.
+
+[package]
+name = "modelrunner"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "Vulkan compute ML runtime: .vkml weights in, segmentation mask out"
+
+[lib]
+name = "modelrunner"
+# cdylib for the JNI surface; rlib so the host test binary can link it and exercise
+# the `.vkml` reader and the CPU preprocessing without a device.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+jni.workspace = true
+
+# `default-features = false` drops the `linked` feature, so nothing links against
+# libvulkan at build time; `loaded` dlopens it, which is what an Android app must do
+# anyway.
+[target.'cfg(target_os = "android")'.dependencies]
+ash = { version = "0.38", default-features = false, features = ["loaded"] }

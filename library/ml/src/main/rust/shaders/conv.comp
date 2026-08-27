@@ -1,0 +1,66 @@
+#version 450
+//! Convolution: dense, grouped, depthwise and dilated, with a fused activation.
+//!
+//! One shader for all 173 convolutions across both networks. The variants that would
+//! usually get their own kernel — 1x1, 3x3, 5x5, depthwise, dilation 1/2/4/8, stride 1/2,
+//! asymmetric padding — differ only in the loop bounds and strides below, all of which
+//! come from push constants.
+//!
+//! # Gather, not scatter
+//!
+//! Each invocation owns one output element and reads everything it needs. Nothing is
+//! written twice, so there are no atomics and no clearing pass, and the bias is simply
+//! the accumulator's initial value rather than a separate op.
+//!
+//! Weights are ONNX's layout verbatim, `[m, in_c / group, kh, kw]` row-major, so
+//! `vkml_convert.py` transposes nothing and there is no layout to disagree about.
+//!
+//! # What this deliberately does not do
+//!
+//! No tiling, no shared-memory staging of the input patch, no vectorised loads. A
+//! tiled kernel would read each input element once per output tile instead of once per
+//! output element, which is the obvious next optimisation if U^2-Netp's ~2.2 GMAC at
+//! 320x320 turns out too slow. It is not done yet because a naive gather is the version
+//! whose indexing can be reasoned about, and there is no numeric reference to catch a
+//! tiling bug.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    // Grouped convolution: output channel `oc` reads only its own group's slice of the
+    // input. group == in_c == out_c is depthwise, where this collapses to one channel.
+    uint in_per_group = p.in_c / p.group;
+    uint out_per_group = p.out_c / p.group;
+    uint first_in = (oc / out_per_group) * in_per_group;
+
+    float acc = float(weights[p.bias + oc]);
+    uint kernel_at = p.weight + oc * in_per_group * p.kh * p.kw;
+
+    for (uint ic = 0u; ic < in_per_group; ic++) {
+        uint plane = p.in0 + (first_in + ic) * p.in_h * p.in_w;
+        for (uint ky = 0u; ky < p.kh; ky++) {
+            int iy = int(oy * p.stride_h + ky * p.dil_h) - int(p.pad_t);
+            if (iy < 0 || iy >= int(p.in_h)) {
+                continue;
+            }
+            uint row = plane + uint(iy) * p.in_w;
+            uint tap = kernel_at + (ic * p.kh + ky) * p.kw;
+            for (uint kx = 0u; kx < p.kw; kx++) {
+                int ix = int(ox * p.stride_w + kx * p.dil_w) - int(p.pad_l);
+                if (ix < 0 || ix >= int(p.in_w)) {
+                    continue;
+                }
+                acc += float(arena[row + uint(ix)]) * float(weights[tap + kx]);
+            }
+        }
+    }
+
+    arena[p.out_at + index] = float16_t(activate(acc, p.act));
+}

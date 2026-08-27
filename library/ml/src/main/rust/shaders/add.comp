@@ -1,0 +1,20 @@
+#version 450
+//! Elementwise sum of two equally-shaped tensors. 25 uses: U^2-Netp's 11 RSU residuals
+//! and the selfie net's 14.
+//!
+//! Not fused into the producing convolution the way activations are. It could be — the
+//! convolution's accumulator could start from the skip instead of from the bias — but
+//! every one of these adds a tensor that is *also* read elsewhere, so the fused form
+//! would need a second input binding and a flag on the conv shader for a saving of one
+//! pass over data that is already in cache.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float sum = float(arena[p.in0 + index]) + float(arena[p.in1 + index]);
+    arena[p.out_at + index] = float16_t(sum);
+}

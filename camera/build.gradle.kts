@@ -14,6 +14,12 @@ android {
     defaultConfig {
         applicationId = "com.vayunmathur.camera"
     }
+    androidResources {
+        // selfie_segmentation.vkml is read straight out of the APK by SelfieSegmenter, so
+        // leave it uncompressed: fp16 weights barely deflate, and a compressed asset would
+        // have to be inflated into a heap buffer before it could be uploaded.
+        noCompress += "vkml"
+    }
 }
 
 androidComponents {
@@ -37,6 +43,10 @@ dependencies {
     implementation(libs.androidx.camera.extensions)
     implementation(libs.androidx.exifinterface)
     implementation(libs.zxing.core)
-    // On-device portrait segmentation via ncnn (Tencent, BSD-3, CPU-only), forked AAR.
-    implementation(libs.ncnn.android)
+    // On-device portrait segmentation. MediaPipe Selfie Segmentation (Apache-2.0) on our
+    // own Vulkan compute runtime; see camera/src/main/assets/README.md.
+    //
+    // ncnn is gone from this app entirely: PortraitSegmenter was its only user, so
+    // libncnn_android.so is no longer in the APK.
+    implementation(project(":library:ml"))
 }

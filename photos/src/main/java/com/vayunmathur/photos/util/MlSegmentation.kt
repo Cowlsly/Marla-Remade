@@ -5,22 +5,28 @@ import android.graphics.Bitmap
 import android.os.Handler
 import android.os.Looper
 import android.util.Log
-import com.vayunmathur.ncnn.Segmenter
+import com.vayunmathur.library.ml.SubjectSegmenter
 import com.vayunmathur.photos.data.Selection
 
 /**
  * Auto-select the foreground subject with an on-device neural model —
- * **U²-Net portable** salient-object detection on **ncnn** (CPU-only, BSD-3, no
- * ONNX Runtime, no MediaPipe, no Google Play Services, F-Droid clean).
+ * **U²-Net portable** salient-object detection on **`:library:ml`**, our own Vulkan
+ * compute runtime (Apache-2.0 weights, no ONNX Runtime, no MediaPipe, no Google Play
+ * Services, F-Droid clean).
  *
  * U²-Net predicts a general per-pixel saliency map, so it selects arbitrary
  * subjects. Pixels above [FG_THRESHOLD] form the selection; the hard edge is
  * feathered slightly so cutouts aren't jagged. Runs off the main thread;
  * [onResult] is posted to the main thread (null on failure).
  *
- * The model + preprocessing live inside the `ncnn-android` AAR ([Segmenter]);
- * input 320×320 RGB, ImageNet-normalised; output a 320×320 saliency map through
- * a sigmoid.
+ * Input 320×320 RGB, ImageNet-normalised; output a 320×320 saliency map through a
+ * sigmoid. Both the resize and the normalisation now happen in
+ * `library/ml/src/main/rust/src/preprocess.rs` rather than inside an out-of-repo AAR.
+ *
+ * This is the same network as the ncnn `u2netp` it replaces, re-sourced from a licensed
+ * ONNX export, so the selections should look as they did. It is **GPU-only**: on a device
+ * without Vulkan fp16 compute this returns null, which the caller already treats as "no
+ * subject found".
  */
 fun segmentSubject(context: Context, bitmap: Bitmap, onResult: (Selection?) -> Unit) {
     Thread {
@@ -32,28 +38,18 @@ fun segmentSubject(context: Context, bitmap: Bitmap, onResult: (Selection?) -> U
 
 private const val FG_THRESHOLD = 0.5f
 
+/**
+ * Serialises the segmenter, which is not thread-safe.
+ *
+ * Nothing is cached between calls: the segmenter is built, used and closed inside one
+ * [runSegmenter]. Its activation arena is **76 MiB of device memory**, and auto-select-
+ * subject is a deliberate tap rather than something that happens continuously, so holding
+ * that across the whole process to save the setup would be the wrong trade. Closing it also
+ * releases the shared `VkDevice`, since `:photos` has no other user of `:library:ml`.
+ */
 private val segLock = Any()
-@Volatile private var segmenter: Segmenter? = null
-@Volatile private var segInitTried = false
-
-private fun ensureSegmenter(context: Context): Segmenter? {
-    segmenter?.let { return it }
-    synchronized(segLock) {
-        segmenter?.let { return it }
-        if (segInitTried) return null
-        segInitTried = true
-        return try {
-            Segmenter(context.applicationContext, "u2netp.ncnn.param", "u2netp.ncnn.bin").also { segmenter = it }
-        } catch (e: Throwable) {
-            Log.e("MlSegmentation", "U\u00b2-Net segmenter unavailable", e)
-            null
-        }
-    }
-}
 
 private fun runSegmenter(context: Context, bitmap: Bitmap): Selection? {
-    val seg = ensureSegmenter(context) ?: return null
-
     // Cap the returned mask resolution for speed/memory; the model runs at its
     // fixed input size and we upsample the saliency map to this.
     val maxDim = 512
@@ -61,12 +57,17 @@ private fun runSegmenter(context: Context, bitmap: Bitmap): Selection? {
     val w = (bitmap.width * scale).toInt().coerceAtLeast(1)
     val h = (bitmap.height * scale).toInt().coerceAtLeast(1)
 
-    val safe = if (bitmap.config == Bitmap.Config.HARDWARE || bitmap.config == null) {
-        bitmap.copy(Bitmap.Config.ARGB_8888, false)
-    } else bitmap
-
-    val result = synchronized(segLock) { seg.segment(safe) }
-    if (safe != bitmap) safe.recycle()
+    val result = synchronized(segLock) {
+        SubjectSegmenter(context.applicationContext).use { seg ->
+            if (!seg.isAvailable) {
+                Log.e("MlSegmentation", "U\u00b2-Net unavailable; see the ModelRunner log tag")
+                return null
+            }
+            // HARDWARE and unknown bitmap configs are handled inside SubjectSegmenter,
+            // which has to deal with them anyway to call getPixels.
+            seg.segment(bitmap)
+        }
+    } ?: return null
 
     val sw = result.width
     val sh = result.height

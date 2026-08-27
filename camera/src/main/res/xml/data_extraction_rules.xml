@@ -13,9 +13,9 @@
   app's.
 
   Intermediate capture files (motion_*.mp4, VID_*.mp4, TL_*.mp4) go to cacheDir,
-  which the platform excludes from every backup on its own. erdnet.param /
-  erdnet.bin are bundled ncnn assets loaded from the APK by PortraitSegmenter,
-  not downloads.
+  which the platform excludes from every backup on its own.
+  selfie_segmentation.vkml is a bundled model asset read out of the APK by
+  SelfieSegmenter, not a download.
 
   Nothing large, nothing personal — back the settings up in both directions.
 -->

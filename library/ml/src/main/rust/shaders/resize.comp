@@ -1,0 +1,52 @@
+#version 450
+//! Bilinear resize with `half_pixel` coordinates. 41 uses across both networks.
+//!
+//! # One convention, everywhere
+//!
+//! `src = (dst + 0.5) * in / out - 0.5`. The selfie net's three `Resize` nodes are
+//! `coordinate_transformation_mode=half_pixel`; U^2-Netp's 38 are `pytorch_half_pixel`,
+//! which differs from `half_pixel` only when the resized extent is 1 — and none of these
+//! are, since every one is an exact 2x upsample. So both lower to this, and
+//! `preprocess::to_planar_f16` uses the same formula for the input resize.
+//!
+//! That agreement is load-bearing rather than tidy: U^2-Netp's decoder upsamples and then
+//! *adds* to an encoder skip five times over, so a half-pixel shift between the two paths
+//! would misregister every residual in the net.
+//!
+//! Coordinates outside the source clamp to the edge, which is what ONNX `Resize` does
+//! with its default `nearest_mode`/exclude-outside behaviour for linear sampling.
+
+#include "common.glsl"
+
+// The two bracketing source indices and the weight of the second, at `half_pixel`.
+void bracket(uint dst, uint in_extent, uint out_extent, out uint low, out uint high, out float t) {
+    float source = (float(dst) + 0.5) * float(in_extent) / float(out_extent) - 0.5;
+    source = max(source, 0.0);
+    float base = floor(source);
+    t = source - base;
+    low = min(uint(base), in_extent - 1u);
+    high = min(low + 1u, in_extent - 1u);
+}
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    uint y0, y1, x0, x1;
+    float ty, tx;
+    bracket(oy, p.in_h, p.out_h, y0, y1, ty);
+    bracket(ox, p.in_w, p.out_w, x0, x1, tx);
+
+    uint plane = p.in0 + oc * p.in_h * p.in_w;
+    uint row0 = plane + y0 * p.in_w;
+    uint row1 = plane + y1 * p.in_w;
+
+    float top = mix(float(arena[row0 + x0]), float(arena[row0 + x1]), tx);
+    float bottom = mix(float(arena[row1 + x0]), float(arena[row1 + x1]), tx);
+
+    arena[p.out_at + index] = float16_t(mix(top, bottom, ty));
+}

@@ -1,0 +1,44 @@
+# `:photos` bundled model assets
+
+## `u2netp.vkml` — salient-object detection
+
+Apache-2.0, from https://huggingface.co/BritishWerewolf/U-2-Netp
+@ `7112208dbac3a3642496c8d54e2f0f9bb3dc1dc8` (`onnx/model.onnx`, 4,574,861 B fp32,
+SHA-256 `309c8469…4c76f4ddd8`) — U²-Net *portable*, the small variant of the
+salient-object detector.
+
+Not the ONNX itself: `scripts/ml/fetch_and_convert.sh` converts it to the fp16
+`.vkml` weights container that `:library:ml` reads. The source ONNX SHA-256 is in
+the `.vkml` header, so a shipped asset traces back to this line.
+
+Run at 320×320 RGB, ImageNet mean/std, output a 320×320 saliency map through a
+sigmoid. Consumed by `SubjectSegmenter` from `MlSegmentation.kt` for
+auto-select-subject.
+
+This replaces `u2netp.ncnn.{param,bin}`, which was added in `72dde80df` with no
+upstream URL or license. Its op inventory (Convolution 119, Pooling 33, Interp 38)
+matches this ONNX exactly (Conv 119, MaxPool 33, Resize 38), so it is the same
+network re-sourced from a licensed export rather than a different model. The
+upstream export is dynamic-shape; we keep the straight resize to 320×320 that the
+ncnn path already used, **not** the HuggingFace processor's `keep_aspect_ratio`
+letterbox, which would change existing behaviour.
+
+## The ncnn face models
+
+`scrfd_500m_kps-opt2.{param,bin}` (face detection) and `w600k_mbf.ncnn.{param,bin}`
+(face embedding) still run on ncnn, and are not covered here. `:library:ml`
+implements only the two pure-CNN vision models; face detection and recognition are
+a later phase.
+
+## `clip/`
+
+See `SUPPLY_CHAIN_RISKS.md` for the TinyCLIP int8 ONNX read by `ClipEmbedder`.
+
+Update: `./scripts/ml/fetch_and_convert.sh --update`, which reports the moved
+SHA-256 to re-pin. If the ordered layer table changed too, the converter says so
+and the hardcoded forward pass in
+`library/ml/src/main/rust/src/nets/u2netp.rs` has to be updated with it.
+
+This file is inside `assets/`, so it is packaged into the APK. That is deliberate
+rather than overlooked: it is ~1 KB, and Apache-2.0 §4 asks that attribution
+notices travel with the distributed work, which here is the weights next to it.

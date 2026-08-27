@@ -1,0 +1,510 @@
+//! Recording a [`Plan`] into one command buffer, and running it.
+//!
+//! # Recorded once, submitted per inference
+//!
+//! The whole network — 350 dispatches for U^2-Netp, 150 for the selfie net, with a barrier
+//! between each — is recorded into a single primary command buffer at [`Net::new`] and
+//! never re-recorded. An inference is then exactly:
+//!
+//! 1. preprocess the bitmap into the staging buffer on the CPU,
+//! 2. one `vkQueueSubmit`,
+//! 3. one `vkWaitForFences`,
+//! 4. read the mask back out of the staging buffer.
+//!
+//! Nothing is allocated, no descriptor is written and no command is recorded per frame.
+//! That is what makes this viable on `:camera`'s ~15 fps preview path, where the recording
+//! cost — hundreds of `vkCmd` calls — would otherwise be paid 15 times a second while the
+//! UI is also using the GPU.
+//!
+//! The input copy is *inside* the recorded buffer, so the host writes only to the staging
+//! buffer and the GPU does the transfer into device-local memory itself.
+//!
+//! # Barriers
+//!
+//! One full barrier between every op, covering both the compute and transfer stages in
+//! each direction. Every layer reads what the one before it wrote, into the same
+//! `VkBuffer`, so there is no dependency to skip: the arena is a single buffer and a
+//! finer-grained barrier would have to name byte ranges that the ops already overlap by
+//! design. About 350 barriers per inference is the cost of that simplicity, and it is the
+//! first thing to look at if U^2-Netp is slower than it should be.
+
+use std::sync::Arc;
+
+use ash::vk;
+
+use crate::nets::{Op, Plan};
+use crate::preprocess::{self, Normalise};
+use crate::weights::Weights;
+
+use super::buffers::Buffer;
+use super::context::Context;
+use super::pipeline::{Pipelines, MAX_WORKGROUPS_PER_DIM, WORKGROUP};
+
+/// A compiled, recorded network ready to run.
+pub struct Net {
+    context: Arc<Context>,
+    plan: Plan,
+    normalise: Normalise,
+    weights: Buffer,
+    arena: Buffer,
+    staging: Buffer,
+    pipelines: Pipelines,
+    command_buffer: vk::CommandBuffer,
+    fence: vk::Fence,
+    /// Set when a submission was left pending, after which this net is unusable.
+    ///
+    /// A `wait_for_fences` timeout returns an error while the submission is **still in
+    /// flight**. Nothing can cancel it, so resetting the fence, resubmitting the command
+    /// buffer or rewriting the staging buffer would all be illegal — and since the
+    /// five-second timeout exists precisely so a hung GPU does not block forever, this is
+    /// an anticipated path rather than a theoretical one. Once poisoned, every later
+    /// `infer` fails immediately without touching Vulkan, and only `Drop` — which waits
+    /// for the device to go idle first — cleans up.
+    poisoned: bool,
+    /// Scratch for the fp16 input and the fp16 output, so an inference allocates nothing.
+    input_scratch: Vec<u16>,
+    output_scratch: Vec<u16>,
+}
+
+impl Net {
+    /// Allocate, upload the weights and record the plan.
+    ///
+    /// `weights` is consumed for its data but not retained: once the blob is in
+    /// device-local memory the host copy is dropped, which for U^2-Netp gives back 2.1 MB
+    /// of heap.
+    pub fn new(
+        context: Arc<Context>,
+        plan: Plan,
+        weights: &Weights,
+        normalise: Normalise,
+    ) -> Result<Net, String> {
+        let arena_bytes = (plan.arena_elems as vk::DeviceSize) * 2;
+        let weights_bytes = weights.data().len() as vk::DeviceSize;
+        let input_elems = plan.input_shape.len() as usize;
+        let output_elems = plan.output_shape.len() as usize;
+        // One staging buffer for both directions: the input and the output are never in
+        // flight at the same time, because an inference is a single blocking submit.
+        let staging_bytes = (input_elems.max(output_elems) as vk::DeviceSize) * 2;
+
+        let weights_buffer = Buffer::device_local(&context, weights_bytes)?;
+        let arena = Buffer::device_local(&context, arena_bytes)?;
+        let staging = Buffer::staging(&context, staging_bytes)?;
+
+        let pipelines = Pipelines::new(
+            &context,
+            arena.buffer,
+            arena_bytes,
+            weights_buffer.buffer,
+            weights_bytes,
+        )?;
+
+        let mut net = Net {
+            context,
+            plan,
+            normalise,
+            weights: weights_buffer,
+            arena,
+            staging,
+            pipelines,
+            command_buffer: vk::CommandBuffer::null(),
+            fence: vk::Fence::null(),
+            poisoned: false,
+            input_scratch: vec![0u16; input_elems],
+            output_scratch: vec![0u16; output_elems],
+        };
+
+        net.upload_weights(weights.data())?;
+        net.command_buffer = net.allocate_command_buffer()?;
+        net.fence = net.create_fence()?;
+        net.record()?;
+        Ok(net)
+    }
+
+    /// Copy the weights blob to device-local memory through the staging buffer.
+    ///
+    /// Its own one-shot command buffer and its own staging allocation, because the
+    /// permanent staging buffer is sized for one input and the weights are ten times
+    /// that. Both are freed before returning; this happens once per net.
+    fn upload_weights(&self, data: &[u8]) -> Result<(), String> {
+        let staging = Buffer::staging(&self.context, data.len() as vk::DeviceSize)?;
+        staging.write(data)?;
+        let command_buffer = self.allocate_command_buffer()?;
+        // SAFETY: the command buffer was just allocated from this device's pool and is
+        // freed on every path below; the copy is bounds-checked by construction, since both
+        // buffers are exactly `data.len()` bytes.
+        unsafe {
+            let device = &self.context.device;
+            let record = || -> Result<(), String> {
+                device
+                    .begin_command_buffer(
+                        command_buffer,
+                        &vk::CommandBufferBeginInfo::default()
+                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                    )
+                    .map_err(|e| format!("begin_command_buffer {e:?}"))?;
+                let region = vk::BufferCopy::default().size(data.len() as vk::DeviceSize);
+                device.cmd_copy_buffer(
+                    command_buffer,
+                    staging.buffer,
+                    self.weights.buffer,
+                    std::slice::from_ref(&region),
+                );
+                device
+                    .end_command_buffer(command_buffer)
+                    .map_err(|e| format!("end_command_buffer {e:?}"))?;
+                self.submit_and_wait(command_buffer)
+            };
+            let outcome = record();
+            device.free_command_buffers(self.context.command_pool, &[command_buffer]);
+            // `staging` drops here, after the fence has been waited on.
+            outcome
+        }
+    }
+
+    fn allocate_command_buffer(&self) -> Result<vk::CommandBuffer, String> {
+        let info = vk::CommandBufferAllocateInfo::default()
+            .command_pool(self.context.command_pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
+        // SAFETY: an allocation from a pool this context owns, under the lock the pool
+        // requires — `:camera` allocates the still renderer's command buffer while the
+        // preview is submitting from another thread.
+        let guard = self.context.lock_queue();
+        let buffers = unsafe { self.context.device.allocate_command_buffers(&info) }
+            .map_err(|e| format!("allocate_command_buffers {e:?}"))?;
+        drop(guard);
+        buffers
+            .first()
+            .copied()
+            .ok_or_else(|| "allocate_command_buffers returned nothing".into())
+    }
+
+    fn create_fence(&self) -> Result<vk::Fence, String> {
+        // SAFETY: a plain object creation on a device this net holds an `Arc` to.
+        unsafe {
+            self.context
+                .device
+                .create_fence(&vk::FenceCreateInfo::default(), None)
+                .map_err(|e| format!("create_fence {e:?}"))
+        }
+    }
+
+    /// Record the whole plan: input copy, every op with a barrier between, output copy.
+    fn record(&self) -> Result<(), String> {
+        let device = &self.context.device;
+        let buffer = self.command_buffer;
+        // SAFETY: `buffer` is a primary command buffer from this device's pool, not
+        // currently pending, and every handle referenced below outlives it (they are all
+        // fields of `self`, dropped after it in `Drop`).
+        unsafe {
+            device
+                .begin_command_buffer(buffer, &vk::CommandBufferBeginInfo::default())
+                .map_err(|e| format!("begin_command_buffer {e:?}"))?;
+
+            // The weights were written by `upload_weights`, in a different submission. A
+            // fence wait between submissions orders them but is not a memory dependency, so
+            // making that TRANSFER_WRITE visible to every SHADER_READ below needs a real
+            // barrier. Recorded once at the top rather than folded into `barrier`, because
+            // the weights buffer is never written again.
+            let weights_visible = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.weights.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            device.cmd_pipeline_barrier(
+                buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                std::slice::from_ref(&weights_visible),
+                &[],
+            );
+
+            let input_bytes = (self.plan.input_shape.len() as vk::DeviceSize) * 2;
+            let region = vk::BufferCopy::default()
+                .src_offset(0)
+                .dst_offset((self.plan.input as vk::DeviceSize) * 2)
+                .size(input_bytes);
+            device.cmd_copy_buffer(
+                buffer,
+                self.staging.buffer,
+                self.arena.buffer,
+                std::slice::from_ref(&region),
+            );
+            self.barrier(buffer);
+
+            for op in &self.plan.ops {
+                match *op {
+                    Op::Dispatch { kind, push, invocations } => {
+                        device.cmd_bind_pipeline(
+                            buffer,
+                            vk::PipelineBindPoint::COMPUTE,
+                            self.pipelines.for_kind(kind),
+                        );
+                        device.cmd_bind_descriptor_sets(
+                            buffer,
+                            vk::PipelineBindPoint::COMPUTE,
+                            self.pipelines.layout,
+                            0,
+                            &[self.pipelines.descriptor_set],
+                            &[],
+                        );
+                        device.cmd_push_constants(
+                            buffer,
+                            self.pipelines.layout,
+                            vk::ShaderStageFlags::COMPUTE,
+                            0,
+                            push_bytes(&push),
+                        );
+                        // Split across x and y: the widest layer here needs 102,400
+                        // workgroups and `maxComputeWorkGroupCount` is only guaranteed to
+                        // be 65,535 per dimension. `global_index()` in the shaders
+                        // flattens the grid back, and the grid over-covers, which is what
+                        // `push.count` is checked against.
+                        let groups = invocations.div_ceil(WORKGROUP);
+                        device.cmd_dispatch(
+                            buffer,
+                            groups.min(MAX_WORKGROUPS_PER_DIM),
+                            groups.div_ceil(MAX_WORKGROUPS_PER_DIM),
+                            1,
+                        );
+                    }
+                    Op::Copy { src, dst, elems } => {
+                        // Same buffer for source and destination. The spec allows that as
+                        // long as the regions do not overlap, which the arena allocator
+                        // guarantees and `nets::u2netp` asserts.
+                        let region = vk::BufferCopy::default()
+                            .src_offset((src as vk::DeviceSize) * 2)
+                            .dst_offset((dst as vk::DeviceSize) * 2)
+                            .size((elems as vk::DeviceSize) * 2);
+                        device.cmd_copy_buffer(
+                            buffer,
+                            self.arena.buffer,
+                            self.arena.buffer,
+                            std::slice::from_ref(&region),
+                        );
+                    }
+                }
+                self.barrier(buffer);
+            }
+
+            let output_bytes = (self.plan.output_shape.len() as vk::DeviceSize) * 2;
+            let region = vk::BufferCopy::default()
+                .src_offset((self.plan.output as vk::DeviceSize) * 2)
+                .dst_offset(0)
+                .size(output_bytes);
+            device.cmd_copy_buffer(
+                buffer,
+                self.arena.buffer,
+                self.staging.buffer,
+                std::slice::from_ref(&region),
+            );
+
+            // Waiting on a fence makes the copy's writes *available*, but the device-to-host
+            // domain operation still needs a memory dependency naming HOST_READ — and
+            // HOST_COHERENT only removes the need for `vkInvalidateMappedMemoryRanges`, not
+            // for this. Without it the readback in `infer` works on unified-memory parts and
+            // is undefined on others, which is the worst kind of bug to leave in.
+            let host_visible = vk::BufferMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::HOST_READ)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(self.staging.buffer)
+                .offset(0)
+                .size(vk::WHOLE_SIZE);
+            device.cmd_pipeline_barrier(
+                buffer,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::HOST,
+                vk::DependencyFlags::empty(),
+                &[],
+                std::slice::from_ref(&host_visible),
+                &[],
+            );
+
+            device
+                .end_command_buffer(buffer)
+                .map_err(|e| format!("end_command_buffer {e:?}"))
+        }
+    }
+
+    /// # Safety
+    ///
+    /// `buffer` must be inside a `begin`/`end` pair.
+    unsafe fn barrier(&self, buffer: vk::CommandBuffer) {
+        // Whole-buffer rather than per-range: consecutive ops address overlapping parts
+        // of one arena by design, so there is nothing to narrow to.
+        let barrier = vk::BufferMemoryBarrier::default()
+            .src_access_mask(vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::TRANSFER_WRITE)
+            .dst_access_mask(
+                vk::AccessFlags::SHADER_READ
+                    | vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_READ
+                    | vk::AccessFlags::TRANSFER_WRITE,
+            )
+            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .buffer(self.arena.buffer)
+            .offset(0)
+            .size(vk::WHOLE_SIZE);
+        self.context.device.cmd_pipeline_barrier(
+            buffer,
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+            vk::PipelineStageFlags::COMPUTE_SHADER | vk::PipelineStageFlags::TRANSFER,
+            vk::DependencyFlags::empty(),
+            &[],
+            std::slice::from_ref(&barrier),
+            &[],
+        );
+    }
+
+    /// # Safety
+    ///
+    /// `buffer` must be recorded and not already pending.
+    unsafe fn submit_and_wait(&self, buffer: vk::CommandBuffer) -> Result<(), String> {
+        let device = &self.context.device;
+        let fence = device
+            .create_fence(&vk::FenceCreateInfo::default(), None)
+            .map_err(|e| format!("create_fence {e:?}"))?;
+        let buffers = [buffer];
+        let submit = vk::SubmitInfo::default().command_buffers(&buffers);
+        let guard = self.context.lock_queue();
+        let submitted = device
+            .queue_submit(self.context.queue, std::slice::from_ref(&submit), fence)
+            .map_err(|e| format!("queue_submit {e:?}"));
+        drop(guard);
+
+        let result = submitted.and_then(|()| {
+            device
+                .wait_for_fences(&[fence], true, FENCE_TIMEOUT_NS)
+                .map_err(|e| format!("wait_for_fences {e:?}"))
+        });
+        // On a timeout the submission is still in flight, and the caller is about to drop
+        // both the fence and the staging buffer it reads from. Wait the device out first:
+        // destroying either while a queue operation references it is undefined, and a
+        // one-off weights upload has nowhere to defer the cleanup to.
+        if result.is_err() {
+            let guard = self.context.lock_queue();
+            let _ = device.device_wait_idle();
+            drop(guard);
+        }
+        device.destroy_fence(fence, None);
+        result
+    }
+
+    /// Preprocess `pixels`, run the network, and return the mask as `0..1` floats.
+    ///
+    /// `pixels` is `ARGB_8888` as `Bitmap.getPixels` produces it. The returned mask is
+    /// `output_shape.h * output_shape.w` long, row-major.
+    pub fn infer(
+        &mut self,
+        pixels: &[i32],
+        width: u32,
+        height: u32,
+    ) -> Result<Vec<f32>, String> {
+        if self.poisoned {
+            return Err("a previous submission timed out; this network is unusable".into());
+        }
+        preprocess::to_planar_f16(
+            pixels,
+            width,
+            height,
+            self.plan.input_shape,
+            &self.normalise,
+            &mut self.input_scratch,
+        )?;
+        // SAFETY: the scratch buffer is `input_shape.len()` fp16 elements, which is
+        // exactly what the recorded copy region moves.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                self.input_scratch.as_ptr().cast::<u8>(),
+                std::mem::size_of_val(self.input_scratch.as_slice()),
+            )
+        };
+        self.staging.write(bytes)?;
+
+        let device = &self.context.device;
+        let buffers = [self.command_buffer];
+        let submit = vk::SubmitInfo::default().command_buffers(&buffers);
+        // SAFETY: the fence is reset before the submit and waited on after it, so the
+        // command buffer is never resubmitted while pending and the staging buffer is
+        // never read while the GPU is writing it. `poisoned` is what keeps that true when
+        // the wait times out. The queue and the pool are shared process-wide, hence the
+        // lock around the submit; the fence wait is deliberately outside it.
+        unsafe {
+            device.reset_fences(&[self.fence]).map_err(|e| format!("reset_fences {e:?}"))?;
+            // Poison first: from here until the wait returns, a submission may be pending,
+            // and every path out of that state other than a successful wait is one this
+            // net cannot recover from.
+            self.poisoned = true;
+            let guard = self.context.lock_queue();
+            let submitted = device
+                .queue_submit(self.context.queue, std::slice::from_ref(&submit), self.fence)
+                .map_err(|e| format!("queue_submit {e:?}"));
+            drop(guard);
+            submitted?;
+            device
+                .wait_for_fences(&[self.fence], true, FENCE_TIMEOUT_NS)
+                .map_err(|e| format!("wait_for_fences {e:?}"))?;
+            self.poisoned = false;
+        }
+
+        self.staging.read_f16(&mut self.output_scratch)?;
+        Ok(self.output_scratch.iter().map(|&h| preprocess::f16_to_f32(h)).collect())
+    }
+
+    /// The mask's dimensions, which is what the Kotlin wrapper reports to its caller.
+    pub fn output_size(&self) -> (u32, u32) {
+        (self.plan.output_shape.w, self.plan.output_shape.h)
+    }
+}
+
+/// Long enough that a slow first dispatch on a cold driver is not mistaken for a hang,
+/// short enough that a genuinely hung GPU does not block a UI thread forever. `:camera`
+/// runs this on a dedicated executor, `:photos` on its own thread, so neither blocks the
+/// main thread even at the limit.
+const FENCE_TIMEOUT_NS: u64 = 5_000_000_000;
+
+fn push_bytes(push: &crate::nets::Push) -> &[u8] {
+    // SAFETY: `Push` is `repr(C)` and entirely `u32`, so it has no padding and no
+    // uninitialised bytes; it is read as exactly its own size.
+    unsafe {
+        std::slice::from_raw_parts(
+            (push as *const crate::nets::Push).cast::<u8>(),
+            std::mem::size_of::<crate::nets::Push>(),
+        )
+    }
+}
+
+impl Drop for Net {
+    fn drop(&mut self) {
+        // SAFETY: `vkDeviceWaitIdle` returns only once nothing on the device is pending, so
+        // after it everything below is safe to destroy — including the case where `infer`
+        // timed out and left a submission in flight, which is why `poisoned` only has to
+        // block further submits and not the teardown.
+        //
+        // The result is ignored because the only ways it fails are device loss and host
+        // OOM. After a lost device the spec explicitly permits destroying objects, and a
+        // host OOM here means the process is about to die anyway; in both cases leaking
+        // every handle instead would be worse.
+        //
+        // The lock is held across the wait because `vkDeviceWaitIdle` needs every queue on
+        // the device to itself, and across `free_command_buffers` because the pool is
+        // shared process-wide. The three `Buffer` fields free themselves afterwards through
+        // their own Drop, which runs after this body.
+        unsafe {
+            let device = &self.context.device;
+            let guard = self.context.lock_queue();
+            let _ = device.device_wait_idle();
+            device.destroy_fence(self.fence, None);
+            device.free_command_buffers(self.context.command_pool, &[self.command_buffer]);
+            drop(guard);
+            self.pipelines.destroy(device);
+        }
+    }
+}

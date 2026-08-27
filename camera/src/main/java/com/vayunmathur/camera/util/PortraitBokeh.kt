@@ -22,7 +22,7 @@ import android.os.Build
 import android.util.Log
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.scale
-import com.vayunmathur.ncnn.PortraitSegmenter
+import com.vayunmathur.library.ml.SelfieSegmenter
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -183,7 +183,9 @@ internal fun maskToBitmap(mask: FloatArray, w: Int, h: Int, pixels: IntArray): B
 }
 
 // Segmentation input: the model runs at 256x256 internally, so there is nothing to gain from
-// feeding it the full-resolution still. Matches the preview analyzer's cap.
+// feeding it the full-resolution still. Matches the preview analyzer's cap. The downscale and
+// the normalise both happen natively now (library/ml/src/main/rust/src/preprocess.rs), so this
+// only bounds how much gets copied across JNI.
 private const val SEGMENT_INPUT_MAX_SIDE = 512
 
 // The shader's tap spacing is in surface pixels and was tuned against a phone-sized viewfinder, so
@@ -195,12 +197,14 @@ private const val BLUR_LONG_SIDE = 1440
 /**
  * Bakes the portrait bokeh the viewfinder previews into a captured still.
  *
- * Owns its own [PortraitSegmenter] (created on first use) because the preview's instance lives in
- * [BokehAnalyzer], which is disposed with the composable and runs on a different thread.
+ * Owns its own [SelfieSegmenter] (created on first use) because the preview's instance lives in
+ * [BokehAnalyzer], which is disposed with the composable and runs on a different thread. The two
+ * share one `VkDevice` regardless — `:library:ml` reference-counts it — so this costs buffers and
+ * pipelines, not a second driver context.
  */
 class StillBokehRenderer(private val context: Context) : AutoCloseable {
 
-    private var segmenter: PortraitSegmenter? = null
+    private var segmenter: SelfieSegmenter? = null
     @Volatile private var closed = false
 
     /**
@@ -226,12 +230,14 @@ class StillBokehRenderer(private val context: Context) : AutoCloseable {
         // The blur pass is AGSL, which needs RuntimeShader (API 33+). Below that
         // there is no bokeh; the caller keeps the sharp frame.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
-        val mask = try {
-            buildMask(src, rotationDegrees)
-        } catch (e: Throwable) {
-            Log.e("StillBokeh", "segmentation failed", e)
-            return null
-        }
+        val mask = (
+            try {
+                buildMask(src, rotationDegrees)
+            } catch (e: Throwable) {
+                Log.e("StillBokeh", "segmentation failed", e)
+                null
+            }
+            ) ?: return null
 
         // Blurred background, viewfinder-sized: alpha is punched out where the subject is so it can
         // be laid straight over the sharp frame.
@@ -278,11 +284,11 @@ class StillBokehRenderer(private val context: Context) : AutoCloseable {
 
     /**
      * Runs the segmenter on a downscaled, upright copy of [src] and returns the softened mask
-     * rotated back into [src]'s orientation.
+     * rotated back into [src]'s orientation, or null when the GPU cannot run it — in which case
+     * the caller keeps the sharp frame.
      */
-    private fun buildMask(src: Bitmap, rotationDegrees: Int): Bitmap {
-        val seg = segmenter ?: PortraitSegmenter(context, "erdnet.param", "erdnet.bin")
-            .also { segmenter = it }
+    private fun buildMask(src: Bitmap, rotationDegrees: Int): Bitmap? {
+        val seg = segmenter ?: SelfieSegmenter(context).also { segmenter = it }
 
         // Both helpers hand back their input when there is nothing to do, so only recycle the
         // intermediates we actually allocated – never the caller's bitmap.
@@ -290,11 +296,13 @@ class StillBokehRenderer(private val context: Context) : AutoCloseable {
         val upright = rotate(downscaled, rotationDegrees.toFloat())
         if (downscaled !== src && downscaled !== upright) downscaled.recycle()
 
-        val result = try {
-            seg.segment(upright)
-        } finally {
-            if (upright !== src) upright.recycle()
-        }
+        val result = (
+            try {
+                seg.segment(upright)
+            } finally {
+                if (upright !== src) upright.recycle()
+            }
+            ) ?: return null
 
         val w = result.width
         val h = result.height

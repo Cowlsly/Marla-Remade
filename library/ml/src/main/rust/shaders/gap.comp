@@ -1,0 +1,30 @@
+#version 450
+//! Mean over H and W, to `C x 1 x 1`. The squeeze half of a squeeze-excite block.
+//!
+//! Ten uses, all in the selfie net, and all on a small map: the largest is 128x16x16, so
+//! one invocation per *channel* reducing 256 elements serially is the right shape. A
+//! tree reduction across a workgroup would be faster per channel and slower overall,
+//! because there are only 16 to 128 channels to keep the GPU busy with.
+//!
+//! ONNX calls this `ReduceMean` with `axes = [2, 3]` and `keepdims = 1`, which is why the
+//! output keeps its two trailing unit dimensions and `mul_bcast.comp` can index it by
+//! channel alone.
+
+#include "common.glsl"
+
+void main() {
+    uint channel = global_index();
+    if (channel >= p.count) {
+        return;
+    }
+
+    uint plane = p.in0 + channel * p.in_h * p.in_w;
+    uint elements = p.in_h * p.in_w;
+
+    float total = 0.0;
+    for (uint i = 0u; i < elements; i++) {
+        total += float(arena[plane + i]);
+    }
+
+    arena[p.out_at + channel] = float16_t(total / float(elements));
+}
