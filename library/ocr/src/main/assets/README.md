@@ -45,12 +45,35 @@ From the export's own `inference.yml`, not guessed:
 * DBNet post-processing: `thresh: 0.3`, `box_thresh: 0.6`, `max_candidates: 1000`,
   `unclip_ratio: 1.5`.
 
+## `ppocr_keys.txt` — the recogniser's character dictionary
+
+836 characters, one per line, UTF-8, LF. Extracted from the same export's
+`inference.yml` (`PostProcess.character_dict`, `CTCLabelDecode`), so it carries the same
+Apache-2.0 provenance as the weights and needs no separate pin.
+
+**Its order is the decode.** The recogniser's final layer emits 838 logits positionally:
+
+| label | meaning |
+|---|---|
+| 0 | the CTC blank |
+| 1..=836 | this file's lines, in order |
+| 837 | the space, which `use_space_char` appends |
+
+So a character is `line[label - 1]`, and a file that lost or reordered a line decodes to
+fluent-looking nonsense rather than failing. `post::ctc` checks the length at load, and
+`tests/assets.rs` checks that length against the model's logit count.
+
+The space is deliberately **not** in the file — no entry in it is whitespace — so that a
+text editor or a line-ending conversion cannot silently eat it. `post::ctc::Dictionary`
+appends it.
+
 ## Recognition
 
 `latin_PP_OCRv5_mobile_rec.ncnn.{param,bin}` still runs on ncnn, and is what keeps
 `libncnn_android.so` in `:photos`, `:pdf` and `:translate`. Its replacement needs a
-transformer stack the runtime does not have yet (2 multi-head attentions, 5 layer norms,
-batched matmul, softmax) plus the 838-entry character dictionary and CTC decoding.
+transformer stack the runtime does not have yet: the export decomposes each of its 5 layer
+norms into `ReduceMean`/`Sub`/`Pow`/`Sqrt`/`Div`, and its attention into 13 `MatMul`s, 3
+`Softmax`es and 9 `Transpose`s. The dictionary and the CTC decode for it are already here.
 
 `PP_OCRv5_mobile_det.ncnn.{param,bin}` is superseded by `ppocr_det.vkml` but still
 present, because `OcrEngine.kt` loads both models through the one ncnn wrapper and cannot

@@ -14,6 +14,7 @@
 use std::path::{Path, PathBuf};
 
 use modelrunner::nets::{mobilefacenet, ppocr_det, scrfd, selfie, u2netp};
+use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
 
 /// The repo root, found by walking up for `settings.gradle.kts` rather than by counting
@@ -100,6 +101,24 @@ fn the_shipped_ppocr_det_asset_builds_the_ppocr_det_forward_pass() {
         plan.output().expect("one output").shape.h,
         ppocr_det::LONG_SIDE
     );
+}
+
+#[test]
+fn the_shipped_character_dictionary_matches_the_recogniser_label_space() {
+    // The model's final layer emits 838 logits positionally, so the dictionary's *length*
+    // is a hard constraint and its *order* is the whole decode. A file that lost a line
+    // to an editor would shift every character above it.
+    let path = repo_root().join("library/ocr/src/main/assets/ppocr_keys.txt");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let dictionary = ctc::Dictionary::parse(&text).expect("the shipped dictionary parses");
+    assert_eq!(dictionary.labels(), ctc::LOGITS);
+    // Spot-check the ends against the export's `inference.yml`: digits first, and the
+    // appended space last.
+    assert_eq!(dictionary.label(0), None, "label 0 is the CTC blank");
+    assert_eq!(dictionary.label(1), Some("0"));
+    assert_eq!(dictionary.label(11), Some("A"));
+    assert_eq!(dictionary.label(ctc::LOGITS - 1), Some(" "));
 }
 
 #[test]
