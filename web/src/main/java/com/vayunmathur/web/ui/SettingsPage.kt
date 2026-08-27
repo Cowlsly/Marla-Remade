@@ -95,6 +95,16 @@ fun SettingsPage(
 
             item {
                 ListItem(
+                    headlineContent = { Text(stringResource(R.string.toolbar_at_bottom)) },
+                    supportingContent = { Text(stringResource(R.string.keeps_the_address_bar_within_thumb_reach)) },
+                    trailingContent = {
+                        Switch(checked = viewModel.searchBarAtBottom, onCheckedChange = { viewModel.updateSearchBarAtBottom(it) })
+                    }
+                )
+            }
+
+            item {
+                ListItem(
                     headlineContent = { Text(stringResource(R.string.javascript)) },
                     supportingContent = { Text(stringResource(R.string.required_by_most_sites)) },
                     trailingContent = {

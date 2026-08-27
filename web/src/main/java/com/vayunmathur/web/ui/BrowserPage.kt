@@ -15,11 +15,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -169,47 +173,55 @@ fun BrowserPage(
 
     Box(Modifier.fillMaxSize()) {
         if (viewModel.omniboxFocused) {
-            AppScaffold(
-                title = {
-                    OutlinedTextField(
-                        value = viewModel.searchDraft,
-                        onValueChange = { viewModel.searchDraft = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(searchFocusRequester),
-                        placeholder = { Text(stringResource(R.string.search_or_enter_address)) },
-                        leadingIcon = { IconSearch() },
-                        trailingIcon = if (viewModel.searchDraft.isNotEmpty()) {
-                            {
-                                IconButton(onClick = { viewModel.searchDraft = "" }) { IconClose() }
-                            }
-                        } else null,
-                        shape = RoundedCornerShape(28.dp),
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
-                        keyboardActions = KeyboardActions(onSearch = {
-                            if (viewModel.searchDraft.isNotBlank()) {
-                                viewModel.navigateActiveTab(viewModel.searchDraft)
-                                focusManager.clearFocus()
-                                viewModel.omniboxFocused = false
-                            }
-                        })
-                    )
-                },
-                navigationIcon = {
-                    IconButton(onClick = {
-                        focusManager.clearFocus()
-                        viewModel.omniboxFocused = false
-                    }) { IconBack() }
-                },
-                scrollBehavior = appBarScrollBehavior(),
-            ) { paddingValues ->
+            val omniboxField: @Composable (Modifier) -> Unit = { fieldModifier ->
+                OutlinedTextField(
+                    value = viewModel.searchDraft,
+                    onValueChange = { viewModel.searchDraft = it },
+                    modifier = fieldModifier.focusRequester(searchFocusRequester),
+                    placeholder = { Text(stringResource(R.string.search_or_enter_address)) },
+                    leadingIcon = { IconSearch() },
+                    trailingIcon = if (viewModel.searchDraft.isNotEmpty()) {
+                        {
+                            IconButton(onClick = { viewModel.searchDraft = "" }) { IconClose() }
+                        }
+                    } else null,
+                    shape = RoundedCornerShape(28.dp),
+                    singleLine = true,
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Search),
+                    keyboardActions = KeyboardActions(onSearch = {
+                        if (viewModel.searchDraft.isNotBlank()) {
+                            viewModel.navigateActiveTab(viewModel.searchDraft)
+                            focusManager.clearFocus()
+                            viewModel.omniboxFocused = false
+                        }
+                    })
+                )
+            }
+            val dismissOmnibox: @Composable () -> Unit = {
+                IconButton(onClick = {
+                    focusManager.clearFocus()
+                    viewModel.omniboxFocused = false
+                }) { IconBack() }
+            }
+            val suggestions: @Composable (PaddingValues) -> Unit = { paddingValues ->
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(paddingValues),
-                    verticalArrangement = Arrangement.spacedBy(2.dp),
-                    contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp)
+                    // Anchored to the omnibox, so a short list stacks up from the field
+                    // instead of hanging off the far edge of the screen. Note this is not
+                    // reverseLayout: the section headers are separate items that have to
+                    // stay above the rows they label.
+                    verticalArrangement = if (viewModel.searchBarAtBottom) {
+                        Arrangement.spacedBy(2.dp, Alignment.Bottom)
+                    } else {
+                        Arrangement.spacedBy(2.dp)
+                    },
+                    contentPadding = if (viewModel.searchBarAtBottom) {
+                        PaddingValues(top = 24.dp, bottom = 8.dp)
+                    } else {
+                        PaddingValues(top = 8.dp, bottom = 24.dp)
+                    }
                 ) {
                     if (currentDraft.isNotBlank()) {
                         item {
@@ -314,6 +326,33 @@ fun BrowserPage(
                     }
                 }
             }
+            if (viewModel.searchBarAtBottom) {
+                // RAW SCAFFOLD EXCEPTION: with the toolbar at the bottom the editing
+                // omnibox has no top bar at all, which AppScaffold cannot express - its
+                // top bar is mandatory and would leave an empty bar hanging above the
+                // suggestions.
+                Scaffold(
+                    bottomBar = {
+                        Surface(Modifier.fillMaxWidth()) {
+                            Row(
+                                modifier = Modifier
+                                    .navigationBarsPadding()
+                                    .padding(start = 4.dp, end = 12.dp, top = 4.dp, bottom = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                dismissOmnibox()
+                                omniboxField(Modifier.weight(1f))
+                            }
+                        }
+                    },
+                ) { paddingValues -> suggestions(paddingValues) }
+            } else {
+                AppScaffold(
+                    title = { omniboxField(Modifier.fillMaxWidth()) },
+                    navigationIcon = dismissOmnibox,
+                    scrollBehavior = appBarScrollBehavior(),
+                ) { paddingValues -> suggestions(paddingValues) }
+            }
         } else {
             BrowserChrome(
                 omniboxText = viewModel.omniboxText,
@@ -321,6 +360,7 @@ fun BrowserPage(
                 canGoBack = canGoBack,
                 canGoForward = canGoForward,
                 progress = if (activeTab != null && !isNewTabActive) progress else 0f,
+                atBottom = viewModel.searchBarAtBottom,
                 onBack = { if (canGoBack) activeTab?.let { webViewPool[it.id]?.goBack() } },
                 onForward = { if (canGoForward) activeTab?.let { webViewPool[it.id]?.goForward() } },
                 onOmniboxClick = {
@@ -622,6 +662,7 @@ private fun BrowserChrome(
     canGoBack: Boolean = false,
     canGoForward: Boolean = false,
     progress: Float = 0f,
+    atBottom: Boolean = false,
     onBack: () -> Unit = {},
     onForward: () -> Unit = {},
     onOmniboxClick: () -> Unit = {},
@@ -633,60 +674,87 @@ private fun BrowserChrome(
     menu: @Composable () -> Unit = {},
     content: @Composable (PaddingValues) -> Unit,
 ) {
-    // RAW SCAFFOLD EXCEPTION: bespoke browser toolbar chrome. The top bar is a
+    // RAW SCAFFOLD EXCEPTION: bespoke browser toolbar chrome. The bar is a
     // Column of a custom TopAppBar (back/forward nav row, a tappable read-only
     // address pill as the title, and shield + tab-count + overflow-menu actions
     // on a surface-colored bar) with a page LinearProgressIndicator drawn
-    // underneath it. That composite bar has no equivalent in the shared
-    // scaffolds, and the content is the full-bleed WebView.
-    Scaffold(
-        topBar = {
-            Column {
-                TopAppBar(
-                    navigationIcon = {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            IconButton(onClick = onBack, enabled = canGoBack) { IconBack() }
-                            IconButton(onClick = onForward, enabled = canGoForward) { IconArrowForward() }
-                        }
-                    },
-                    title = {
-                        DisplayOnlyAddressPill(
-                            fullUrl = omniboxText,
-                            onClick = onOmniboxClick,
-                            modifier = Modifier.fillMaxWidth()
-                        )
-                    },
-                    actions = {
-                        if (shieldHost != null) {
-                            ShieldChip(blockedCount = blockedCount, onClick = onShieldClick)
-                            Spacer(Modifier.width(4.dp))
-                        }
-                        Surface(
-                            shape = RoundedCornerShape(20.dp),
-                            color = MaterialTheme.colorScheme.secondaryContainer,
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(20.dp))
-                                .clickable(onClick = onTabSwitcherClick)
-                        ) {
-                            Text(
-                                text = tabCount.toString(),
-                                style = MaterialTheme.typography.labelLarge,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
-                            )
-                        }
+    // alongside it, and it can sit in either the top or the bottom slot. That
+    // composite bar has no equivalent in the shared scaffolds, and the content
+    // is the full-bleed WebView.
+    val bar: @Composable () -> Unit = {
+        // At the bottom, TopAppBar's hardcoded top inset would be a status bar's
+        // height of dead space, and nothing else applies the navigation bar inset.
+        // The bar's own container color stops at the padding, so the surface is
+        // painted here instead to reach the screen edge. The IME inset is left alone
+        // on purpose: MainNavigation already owns it, and navigationBarsPadding
+        // resolves to zero once the keyboard has consumed more than a navigation
+        // bar's height.
+        val barModifier = if (atBottom) {
+            Modifier
+                .background(MaterialTheme.colorScheme.surface)
+                .navigationBarsPadding()
+                .consumeWindowInsets(WindowInsets.statusBars)
+        } else {
+            Modifier
+        }
+        Column(barModifier) {
+            // The progress bar belongs against the web content, so it moves to the
+            // far side of the toolbar when the toolbar moves to the bottom.
+            if (atBottom) PageProgress(progress)
+            TopAppBar(
+                navigationIcon = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        IconButton(onClick = onBack, enabled = canGoBack) { IconBack() }
+                        IconButton(onClick = onForward, enabled = canGoForward) { IconArrowForward() }
+                    }
+                },
+                title = {
+                    DisplayOnlyAddressPill(
+                        fullUrl = omniboxText,
+                        onClick = onOmniboxClick,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                },
+                actions = {
+                    if (shieldHost != null) {
+                        ShieldChip(blockedCount = blockedCount, onClick = onShieldClick)
                         Spacer(Modifier.width(4.dp))
-                        IconButton(onClick = onMenuClick) { IconMoreVert() }
-                        menu()
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
-                )
-                if (progress in 0.01f..0.99f) {
-                    LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(2.dp))
-                }
-            }
-        },
+                    }
+                    Surface(
+                        shape = RoundedCornerShape(20.dp),
+                        color = MaterialTheme.colorScheme.secondaryContainer,
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(20.dp))
+                            .clickable(onClick = onTabSwitcherClick)
+                    ) {
+                        Text(
+                            text = tabCount.toString(),
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                    Spacer(Modifier.width(4.dp))
+                    IconButton(onClick = onMenuClick) { IconMoreVert() }
+                    menu()
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.surface)
+            )
+            if (!atBottom) PageProgress(progress)
+        }
+    }
+    Scaffold(
+        topBar = { if (!atBottom) bar() },
+        bottomBar = { if (atBottom) bar() },
         content = content,
     )
+}
+
+/** The page load indicator, drawn only while a load is actually in flight. */
+@Composable
+private fun PageProgress(progress: Float) {
+    if (progress in 0.01f..0.99f) {
+        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth().height(2.dp))
+    }
 }
 
 /**

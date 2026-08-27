@@ -25,6 +25,8 @@
     <string name="may_break_logins">May break logins</string>
     <string name="desktop_mode">Desktop mode</string>
     <string name="request_desktop_site">Request desktop site</string>
+    <string name="toolbar_at_bottom">Toolbar at bottom</string>
+    <string name="keeps_the_address_bar_within_thumb_reach">Keeps the address bar within thumb reach</string>
     <string name="ad_tracker_blocking">Ad-tracker blocking</string>
     <string name="blocks_doubleclick_googletagmanager_anal">Blocks doubleclick, googletagmanager, analytics</string>
     <string name="privacy_data">Privacy &amp; data</string>

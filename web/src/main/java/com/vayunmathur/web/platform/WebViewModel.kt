@@ -51,6 +51,7 @@ private const val P_SHIELD_COSMETIC = "web_shield_cosmetic"
 private const val P_SHIELD_FINGERPRINT = "web_shield_fingerprint"
 private const val P_SHIELD_HTTPS = "web_shield_https"
 private const val P_LOCAL_NETWORK_DENIED = "web_local_network_denied"
+private const val P_SEARCH_BAR_BOTTOM = "web_search_bar_bottom"
 
 data class PermissionPrompt(
     val id: String = Uuid.random().toString(),
@@ -104,6 +105,9 @@ class WebViewModel(
     var jsEnabled by mutableStateOf(true)
     var blockThirdPartyCookies by mutableStateOf(false)
     var desktopMode by mutableStateOf(false)
+
+    /** Toolbar edge. Defaults to the bottom, within thumb reach on a phone. */
+    var searchBarAtBottom by mutableStateOf(true)
 
     /** Global Brave Shields defaults; per-site overrides live in [shieldSettings]. */
     var shields by mutableStateOf(ShieldsSettings.AGGRESSIVE_DEFAULTS)
@@ -196,6 +200,7 @@ class WebViewModel(
                     val blockThird = sp.getBoolean(P_BLOCK_THIRD_PARTY, false)
                     val desktop = sp.getBoolean(P_DESKTOP_MODE, false)
                     val lanDenied = sp.getBoolean(P_LOCAL_NETWORK_DENIED, false)
+                    val barAtBottom = sp.getBoolean(P_SEARCH_BAR_BOTTOM, true)
                     val defaults = ShieldsSettings.AGGRESSIVE_DEFAULTS
                     val savedShields = ShieldsSettings(
                         level = sp.getString(P_SHIELD_LEVEL, null)
@@ -214,6 +219,7 @@ class WebViewModel(
                         blockThirdPartyCookies = blockThird
                         desktopMode = desktop
                         localNetworkDenied = lanDenied
+                        searchBarAtBottom = barAtBottom
 
                         // Capture any tabs that were already created (e.g., from an external intent arriving before restore finishes)
                         val preExisting = tabs.toList()
@@ -577,6 +583,11 @@ class WebViewModel(
         persistPrefs()
     }
 
+    fun updateSearchBarAtBottom(atBottom: Boolean) {
+        searchBarAtBottom = atBottom
+        persistPrefs()
+    }
+
     // ---- PWA / Installed sites ----
     fun installAsPwa(
         tabId: String,
@@ -849,6 +860,7 @@ class WebViewModel(
                     .putBoolean(P_JS_ENABLED, jsEnabled)
                     .putBoolean(P_BLOCK_THIRD_PARTY, blockThirdPartyCookies)
                     .putBoolean(P_DESKTOP_MODE, desktopMode)
+                    .putBoolean(P_SEARCH_BAR_BOTTOM, searchBarAtBottom)
                     .putString(P_SHIELD_LEVEL, shields.level?.name)
                     .putBoolean(P_SHIELD_TRACKERS, shields.blockTrackers != false)
                     .putBoolean(P_SHIELD_COSMETIC, shields.cosmeticFiltering != false)
