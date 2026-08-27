@@ -655,14 +655,13 @@ fn sort_linked(ring: &mut Ring, list_in: usize) {
 /// Only polygons past [`triangulate`]'s 80-vertex threshold take this path, which is why
 /// small test cases passed and every real tile was wrong.
 ///
-/// **No test currently catches this.** Reintroducing the second scale leaves every test in
-/// this module green, including
-/// `a_ring_large_enough_to_use_the_z_order_index_still_triangulates_exactly`, which looks
-/// like it would cover it: that ring is a circle, and on a convex ring every candidate ear
-/// is a real ear, so a corrupted Z-order cannot produce the false acceptance the bug needs.
-/// Catching it requires a concave ring past the threshold. Until one exists, this line rests
-/// on the reasoning above and not on CI, so do not treat a green suite as licence to
-/// simplify it.
+/// Size alone is a weak guard, which is what makes this fragile. A ring exercises the hashed
+/// lookup once it is past the threshold, but it only *depends* on the lookup being correct if
+/// some candidate ear has to be rejected by finding a vertex inside it. Convex and monotone
+/// rings never do — an ear is always available, so they come out exact however corrupted the
+/// codes are, at any vertex count. Forcing the dependency takes interior points the lookup
+/// must actually reach, and holes are the cheapest way to get them; see
+/// `a_hashed_ring_rejects_ears_that_contain_a_hole_vertex`.
 fn z_order(x_in: i32, y_in: i32, min_x: i32, min_y: i32, inv_size: f64) -> i32 {
     let mut x = ((x_in - min_x) as f64 * inv_size) as i32;
     let mut y = ((y_in - min_y) as f64 * inv_size) as i32;
@@ -1017,7 +1016,10 @@ mod tests {
     #[test]
     fn a_ring_large_enough_to_use_the_z_order_index_still_triangulates_exactly() {
         // Above 80 vertices this switches to the hashed ear test — a different code
-        // path, and the one every coastline tile takes.
+        // path, and the one every coastline tile takes. This exercises that path but does
+        // not guard it: a convex ring has an ear at every vertex, so it comes out right
+        // even if the hash returns nothing useful. See
+        // `a_hashed_ring_rejects_ears_that_contain_a_hole_vertex`.
         let n = 400;
         let mut coords = vec![0i32; n * 2];
         for i in 0..n {
@@ -1029,6 +1031,40 @@ mod tests {
         let expected = shoelace(&coords).abs() / 2.0;
         assert!(
             (covered_area(&coords, &triangles) - expected).abs() < 1.0,
+            "covered {} vs {expected}",
+            covered_area(&coords, &triangles),
+        );
+        assert_no_degenerate(&coords, &triangles);
+    }
+
+    #[test]
+    fn a_hashed_ring_rejects_ears_that_contain_a_hole_vertex() {
+        // The guard on [`z_order`]'s scaling, which nothing else here provides. A convex
+        // ring cannot be that guard, and neither can a monotone one: both have an ear
+        // available at every step, so the hashed lookup can miss every candidate point and
+        // the triangulation still comes out exact by luck. Noticing that the Z codes have
+        // stopped tracking position takes a shape where the lookup *must* find an interior
+        // point in order to reject a bad ear — so, holes, and enough vertices to cross the
+        // threshold that turns the hashed path on at all.
+        let side: i32 = 1000;
+        let holes_per_axis: i32 = 6;
+        let step = side / (holes_per_axis + 1);
+        let hole = step / 3;
+        let mut coords = vec![0, 0, side, 0, side, side, 0, side];
+        let mut hole_starts = Vec::new();
+        for gy in 1..=holes_per_axis {
+            for gx in 1..=holes_per_axis {
+                let (x, y) = (gx * step, gy * step);
+                hole_starts.push(coords.len() / 2);
+                coords.extend_from_slice(&[x, y, x + hole, y, x + hole, y + hole, x, y + hole]);
+            }
+        }
+        assert!(coords.len() > 80 * 2, "must be past the hashed-path threshold");
+
+        let triangles = triangulate(&coords, &hole_starts);
+        let expected = (side * side - holes_per_axis * holes_per_axis * hole * hole) as f64;
+        assert!(
+            (covered_area(&coords, &triangles) - expected).abs() < 1e-6,
             "covered {} vs {expected}",
             covered_area(&coords, &triangles),
         );
