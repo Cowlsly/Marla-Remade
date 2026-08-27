@@ -234,6 +234,13 @@ pub enum Kind {
     /// [`Kind::AttnApply`] plus the value-side relative term. See
     /// [`Kind::AttnScoresRelative`].
     AttnApplyRelative,
+    /// `out[c][t] = table[id(t)][c]`, an embedding lookup.
+    ///
+    /// The only op here whose addresses depend on the data. Ids arrive as an ordinary fp16
+    /// tensor, which is exact for the 130 phoneme symbols VITS uses — fp16 holds every
+    /// integer to 2048. Table at [`Push::weight`], its row count in [`Push::in_w`], and an
+    /// out-of-range id clamps rather than reading past the table.
+    Embed,
     /// `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
     ///
     /// The only activation here that is **not** fused into the layer before it, because in
@@ -500,6 +507,12 @@ enum Node {
         input: Id,
         out: Id,
         alpha: f32,
+    },
+    Embed {
+        ids: Id,
+        out: Id,
+        table: u32,
+        rows: u32,
     },
     AttnApply {
         probs: Id,
@@ -932,6 +945,26 @@ impl<'a> Builder<'a> {
         }
         let out = self.tensor(shape);
         self.nodes.push(Node::Softmax { input, out });
+        out
+    }
+
+    /// An embedding lookup: `out[c][t] = table[id(t)][c]`, over a `[1, 1, T]` id tensor.
+    ///
+    /// `table` indexes a `[rows, channels]` tensor. The `sqrt(d_model)` scale VITS applies
+    /// after the lookup belongs in the table, not here; see [`Kind::Embed`].
+    pub fn embed(&mut self, ids: Id, table: usize, rows: u32, channels: u32) -> Id {
+        let shape = self.shape_of(ids);
+        if shape.c != 1 || shape.h != 1 {
+            self.fail(format!(
+                "embedding {shape:?}: ids are one per position, so a [1, 1, T] tensor"
+            ));
+        }
+        if rows == 0 || channels == 0 {
+            self.fail(format!("an embedding table of {rows} x {channels}"));
+        }
+        let table = self.weight(table, &[rows, channels]);
+        let out = self.tensor(Shape::new(channels, 1, shape.w));
+        self.nodes.push(Node::Embed { ids, out, table, rows });
         out
     }
 
@@ -1412,6 +1445,27 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::Embed { ids, out, table, rows } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Embed,
+                    push: Push {
+                        in0: at(*ids)?,
+                        out: at(*out)?,
+                        weight: *table,
+                        // The table's row count, not the id tensor's extent: the shader
+                        // clamps against it so an unknown symbol mispronounces a word
+                        // rather than reading whatever follows the embedding.
+                        in_w: *rows,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Softmax { input, out } => {
                 let so = shape(*out);
                 // One invocation per row of the last axis, each normalising `out_w`
@@ -1496,6 +1550,7 @@ impl Node {
             | Node::AttnApplyRelative { out, .. }
             | Node::Softmax { out, .. }
             | Node::LeakyRelu { out, .. }
+            | Node::Embed { out, .. }
             | Node::AttnApply { out, .. }
             | Node::Concat { out, .. } => *out,
         }
@@ -1511,6 +1566,7 @@ impl Node {
             | Node::LayerNorm { input, .. }
             | Node::Softmax { input, .. }
             | Node::LeakyRelu { input, .. }
+            | Node::Embed { ids: input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::AttnScores { q: a, k: b, .. }

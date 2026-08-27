@@ -45,9 +45,10 @@ const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
 const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
+const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 17] = [
+const SPIRV: [&[u8]; 18] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -65,6 +66,7 @@ const SPIRV: [&[u8]; 17] = [
     LEAKY_RELU,
     ATTN_SCORES_RELATIVE,
     ATTN_APPLY_RELATIVE,
+    EMBED,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -105,6 +107,7 @@ pub struct Pipelines {
     leaky_relu: vk::Pipeline,
     attn_scores_relative: vk::Pipeline,
     attn_apply_relative: vk::Pipeline,
+    embed: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -244,6 +247,7 @@ impl Pipelines {
             leaky_relu,
             attn_scores_relative,
             attn_apply_relative,
+            embed,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -277,6 +281,7 @@ impl Pipelines {
             leaky_relu,
             attn_scores_relative,
             attn_apply_relative,
+            embed,
         })
     }
 
@@ -300,6 +305,7 @@ impl Pipelines {
             Kind::LeakyRelu => self.leaky_relu,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
+            Kind::Embed => self.embed,
         }
     }
 
@@ -325,6 +331,7 @@ impl Pipelines {
             self.leaky_relu,
             self.attn_scores_relative,
             self.attn_apply_relative,
+            self.embed,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

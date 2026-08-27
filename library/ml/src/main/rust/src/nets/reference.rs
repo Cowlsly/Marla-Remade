@@ -189,6 +189,7 @@ impl Reference {
                     Kind::LeakyRelu => self.leaky_relu(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
+                    Kind::Embed => self.embed(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -460,6 +461,25 @@ impl Reference {
                 total += self.load(p.in0, plane + i)?;
             }
             self.store(p.out, channel, total / elements as f32)?;
+        }
+        Ok(())
+    }
+
+    /// `out[c][t] = table[id(t)][c]`, with the id read out of the arena as fp16.
+    fn embed(&mut self, p: &Push) -> Result<(), String> {
+        let rows = p.in_w;
+        if rows == 0 {
+            return Err("an embedding table with no rows".into());
+        }
+        for position in 0..p.out_w {
+            let raw = self.load(p.in0, position)?;
+            // Round rather than truncate, and clamp: an unknown symbol should mispronounce
+            // a word rather than read past the table.
+            let id = ((raw + 0.5).max(0.0) as u32).min(rows - 1);
+            for channel in 0..p.out_c {
+                let value = self.weight(p.weight, id * p.out_c + channel)?;
+                self.store(p.out, nchw(p, channel, 0, position), value)?;
+            }
         }
         Ok(())
     }
@@ -1658,6 +1678,77 @@ mod tests {
         let scores = b.attn_scores(q, q, 2);
         let error = b.finish(&[scores]).expect_err("a two-row sequence");
         assert!(error.contains("height above"), "{error}");
+    }
+
+    #[test]
+    fn an_embedding_gathers_the_row_each_id_names() {
+        // Four symbols of three channels, looked up in an order that is neither ascending
+        // nor a permutation — 2, 0, 3, 0 — so a lookup that ignored the ids and copied the
+        // table straight through would be visible.
+        let table: Vec<f32> = vec![
+            10.0, 11.0, 12.0, //
+            20.0, 21.0, 22.0, //
+            30.0, 31.0, 32.0, //
+            40.0, 41.0, 42.0,
+        ];
+        let got = one(
+            Shape::new(1, 1, 4),
+            &[2.0, 0.0, 3.0, 0.0],
+            &[(vec![4, 3], table)],
+            |b, ids| b.embed(ids, 0, 4, 3),
+        );
+        // Channel-major, so all four positions of channel 0, then channel 1, then 2.
+        close(
+            &got,
+            &[
+                30.0, 10.0, 40.0, 10.0, //
+                31.0, 11.0, 41.0, 11.0, //
+                32.0, 12.0, 42.0, 12.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn an_embedding_id_survives_the_round_trip_through_fp16() {
+        // Ids travel in the arena as fp16 like everything else. That is exact here only
+        // because fp16 holds every integer to 2048 and a phoneme table has 130 rows; the
+        // highest id must come back as itself and not as its neighbour.
+        let rows = 130u32;
+        let table: Vec<f32> = (0..rows).map(|r| r as f32).collect();
+        let ids: Vec<f32> = vec![0.0, 1.0, 64.0, 127.0, 128.0, 129.0];
+        let got = one(
+            Shape::new(1, 1, ids.len() as u32),
+            &ids,
+            &[(vec![rows, 1], table)],
+            |b, x| b.embed(x, 0, rows, 1),
+        );
+        close(&got, &ids);
+    }
+
+    #[test]
+    fn an_embedding_id_past_the_table_clamps_rather_than_reading_on() {
+        // A phonemiser that emitted an unknown symbol should mispronounce a word, not
+        // sample whatever weights happen to follow the table.
+        let table: Vec<f32> = vec![7.0, 8.0, 9.0];
+        let got = one(
+            Shape::new(1, 1, 3),
+            &[0.0, 2.0, 99.0],
+            &[(vec![3, 1], table)],
+            |b, ids| b.embed(ids, 0, 3, 1),
+        );
+        close(&got, &[7.0, 9.0, 9.0]);
+    }
+
+    #[test]
+    fn an_embedding_over_a_multi_channel_id_tensor_is_refused() {
+        // Ids are one per position. A `[2, 1, T]` input would silently embed only the first
+        // channel and drop the second.
+        let source = Given::new(&[(vec![4, 3], vec![0.0; 12])]).expect("the fixture lays out");
+        let mut b = Builder::new(&source);
+        let ids = b.input(Shape::new(2, 1, 4));
+        let out = b.embed(ids, 0, 4, 3);
+        let error = b.finish(&[out]).expect_err("two channels of ids");
+        assert!(error.contains("one per position"), "{error}");
     }
 
     #[test]

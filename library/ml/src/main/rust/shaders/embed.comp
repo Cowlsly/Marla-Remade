@@ -1,0 +1,44 @@
+#version 450
+//! An embedding lookup: `out[c][t] = table[id(t)][c]`.
+//!
+//! VITS's text encoder starts by looking up one row of a `[symbols, d_model]` table per
+//! phoneme. That is the only op in this runtime whose *addresses* depend on the data rather
+//! than on the plan.
+//!
+//! # Integer ids in an fp16 arena
+//!
+//! The ids arrive as a `[1, 1, T]` tensor in the arena like anything else, so the host does
+//! not need a second input path and the plan still reads every tensor in its file. fp16
+//! holds every integer up to 2048 exactly, and this table has 130 rows, so a round trip
+//! through the arena cannot move an id to its neighbour — 130 is nowhere near the 2048 where
+//! the gaps between representable integers open up.
+//!
+//! `p.in_w` is the table's row count. An id outside it clamps rather than reading past the
+//! table: a phonemiser that emitted an unknown symbol should mispronounce a word, not sample
+//! whatever weights follow the embedding.
+//!
+//! # The scale is in the table
+//!
+//! VITS multiplies the embedding by `sqrt(d_model)`. The converter folds that into the table
+//! itself, which is both one op fewer and one rounding fewer — `round(table * sqrt(d))` is
+//! closer than `round(table) * sqrt(d)`.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint channel, unused_row, position;
+    unpack(index, channel, unused_row, position);
+
+    // Round rather than truncate: an id that came back as 41.9997 is 42.
+    float raw = float(arena[p.in0 + position]);
+    uint id = uint(max(raw + 0.5, 0.0));
+    uint rows = p.in_w;
+    if (id >= rows) {
+        id = rows - 1u;
+    }
+    arena[p.out_at + index] = weights[p.weight + id * p.out_c + channel];
+}
