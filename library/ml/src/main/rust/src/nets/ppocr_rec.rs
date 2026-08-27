@@ -87,7 +87,7 @@ pub const FFN: u32 = 240;
 /// Logits per timestep, which is the CTC label space and not a free choice.
 pub const LOGITS: u32 = crate::post::ctc::LOGITS as u32;
 
-/// Tensors the `.vkml` must hold: 56 folded layers, each a weight and a bias.
+/// Tensors the `.maml` must hold: 56 folded layers, each a weight and a bias.
 ///
 /// 33 backbone convolutions (of which 4 are the two squeeze-excite blocks' squeeze and
 /// expand), 2 into the sequence, 8 per transformer block, the final layer norm, and 4 in
@@ -108,7 +108,7 @@ pub const TENSORS: usize = 112;
 /// map at a 3x3 kernel — and it compounds. ncnn's conversion of this model runs all 100 of
 /// these as explicit elementwise ops; sixteen is what is left after the exact ones fold.
 ///
-/// They are scalars, so they live here rather than in the `.vkml`, which holds tensors.
+/// They are scalars, so they live here rather than in the `.maml`, which holds tensors.
 const AFFINES: [(f32, f32); 16] = [
     (0.15316115, -0.25247484),
     (0.1658402, -0.41049767),
@@ -128,7 +128,7 @@ const AFFINES: [(f32, f32); 16] = [
     (3.71384, -0.29614934),
 ];
 
-/// Hands out `.vkml` tensor indices in the order the layers appear. Every folded layer is
+/// Hands out `.maml` tensor indices in the order the layers appear. Every folded layer is
 /// a weight followed by a bias, including the layer norms, whose gamma and beta land in
 /// the same pair.
 struct Layers {

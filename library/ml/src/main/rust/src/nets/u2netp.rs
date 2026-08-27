@@ -47,9 +47,9 @@ const OUT: u32 = 64;
 /// Tensors in the file: 119 layers, weight and bias each.
 pub const TENSORS: usize = 238;
 
-/// Hands out `.vkml` tensor indices in the order the layers appear.
+/// Hands out `.maml` tensor indices in the order the layers appear.
 ///
-/// The whole contract with `scripts/ml/vkml_convert.py` is this order, so it is
+/// The whole contract with `scripts/ml/maml_convert.py` is this order, so it is
 /// consumed by a counter rather than written out per layer: a counter cannot
 /// accidentally skip or repeat an index, and [`Builder::finish`] rejects a pass that
 /// did not consume the file exactly.
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn the_op_inventory_matches_the_onnx() {
-        // These are the counts `scripts/ml/vkml_convert.py` asserts against the ONNX
+        // These are the counts `scripts/ml/maml_convert.py` asserts against the ONNX
         // itself, rederived here from the RSU structure. If the two ever disagree, one
         // of them is wrong about the network.
         let plan = plan();
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn the_layer_table_matches_the_onnx_export() {
         // Spot-checks at the boundaries the structure is derived from, taken from
-        // `vkml_convert.py --print-layers` on the pinned ONNX. Every one of these is a
+        // `maml_convert.py --print-layers` on the pinned ONNX. Every one of these is a
         // place a miscounted block would first show up.
         let source = Shapes::new(TENSORS);
         let _ = build(&source);

@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 #
-# Refresh the bundled `.vkml` weights that `:library:ml` runs, from the ONNX exports
+# Refresh the bundled `.maml` weights that `:library:ml` runs, from the ONNX exports
 # they are converted from.
 #
-#   camera/src/main/assets/selfie_segmentation.vkml   MediaPipe Selfie Segmentation
-#   photos/src/main/assets/u2netp.vkml                U^2-Net portable (saliency)
-#   photos/src/main/assets/scrfd_500m.vkml            SCRFD 500M (face detection)
-#   photos/src/main/assets/w600k_mbf.vkml             MobileFaceNet (face embedding)
-#   library/ocr/src/main/assets/ppocr_det.vkml        PP-OCRv5 mobile (text detection)
-#   library/ocr/src/main/assets/ppocr_rec.vkml        PP-OCRv5 mobile latin (text recognition)
+#   camera/src/main/assets/selfie_segmentation.maml   MediaPipe Selfie Segmentation
+#   photos/src/main/assets/u2netp.maml                U^2-Net portable (saliency)
+#   photos/src/main/assets/scrfd_500m.maml            SCRFD 500M (face detection)
+#   photos/src/main/assets/w600k_mbf.maml             MobileFaceNet (face embedding)
+#   library/ocr/src/main/assets/ppocr_det.maml        PP-OCRv5 mobile (text detection)
+#   library/ocr/src/main/assets/ppocr_rec.maml        PP-OCRv5 mobile latin (text recognition)
 #
 # The first two are Apache-2.0. The two face models are InsightFace's buffalo_s pack
 # under InsightFace's own licence, which permits **non-commercial research use only** —
@@ -16,21 +16,21 @@
 # shipped as ncnn `.param`/`.bin`, re-sourced from a licensed ONNX export so the
 # provenance is recorded rather than absent.
 #
-# No ONNX is vendored: it is 2x the size of the fp16 `.vkml` we actually ship and
+# No ONNX is vendored: it is 2x the size of the fp16 `.maml` we actually ship and
 # nothing reads it at run time. So this is the only record of where the weights came
 # from, alongside the README.md next to each asset and the source ONNX SHA-256 baked
-# into each `.vkml` header.
+# into each `.maml` header.
 #
 # The conversion is deliberately not a graph import. `:library:ml` hardcodes each
-# forward pass in Rust, so `.vkml` carries ordered tensors and nothing else, and
-# vkml_convert.py pins a digest over the whole ordered layer table - an upstream
+# forward pass in Rust, so `.maml` carries ordered tensors and nothing else, and
+# maml_convert.py pins a digest over the whole ordered layer table - an upstream
 # re-export that reorders or re-pads one layer fails here rather than shipping a
-# net that infers nonsense. See scripts/ml/vkml_convert.py.
+# net that infers nonsense. See scripts/ml/maml_convert.py.
 #
 # The digest pins *structure*, not weight values. For the two folded models it is worth
 # also running scripts/ml/onnx_parity.py, which checks the numbers against onnxruntime;
 # it is how two silently-wrong folds were found. See that script's header.
-# net that infers nonsense. See scripts/ml/vkml_convert.py.
+# net that infers nonsense. See scripts/ml/maml_convert.py.
 #
 #   ./scripts/ml/fetch_and_convert.sh            # verify pinned hashes, rebuild assets
 #   ./scripts/ml/fetch_and_convert.sh --update   # re-download and rewrite hashes
@@ -40,21 +40,21 @@ set -euo pipefail
 
 # repo-relative-dest  graph  sha256(onnx)  url  [converter]
 #
-# The converter defaults to vkml_convert.py. PP-OCRv5 uses ppocr_fold.py instead: its
+# The converter defaults to maml_convert.py. PP-OCRv5 uses ppocr_fold.py instead: its
 # export spells every convolution as a chain of constant Add/Mul/HardSigmoid nodes that
-# has to be folded first, and doing that inside vkml_convert.py would make "the tensors
+# has to be folded first, and doing that inside maml_convert.py would make "the tensors
 # verbatim" stop being true for every other model. See that script's header.
 #
 # Pinned to a commit rather than to `main`: the file SHA-256 below would catch a
 # silent upstream change anyway, but a pinned revision means --update tells you the
 # upstream *revision* that moved, not just that some bytes differ.
 MODELS=(
-  "camera/src/main/assets/selfie_segmentation.vkml selfie 3241ac4ad8aa35bdaf33946776db29f7c283a413aa0b0dacb9483594b4531aad https://huggingface.co/onnx-community/mediapipe_selfie_segmentation/resolve/be49485c8e027524be38591817fc5cd31bd9d00e/onnx/model.onnx"
-  "photos/src/main/assets/u2netp.vkml             u2netp 309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8 https://huggingface.co/BritishWerewolf/U-2-Netp/resolve/7112208dbac3a3642496c8d54e2f0f9bb3dc1dc8/onnx/model.onnx"
-  "photos/src/main/assets/scrfd_500m.vkml         scrfd  5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/detection/model.onnx"
-  "photos/src/main/assets/w600k_mbf.vkml          mobilefacenet 9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/recognition/model.onnx"
-  "library/ocr/src/main/assets/ppocr_det.vkml     ppocr_det a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/inference.onnx ppocr_fold.py"
-  "library/ocr/src/main/assets/ppocr_rec.vkml     ppocr_rec 7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498 https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.onnx ppocr_fold.py"
+  "camera/src/main/assets/selfie_segmentation.maml selfie 3241ac4ad8aa35bdaf33946776db29f7c283a413aa0b0dacb9483594b4531aad https://huggingface.co/onnx-community/mediapipe_selfie_segmentation/resolve/be49485c8e027524be38591817fc5cd31bd9d00e/onnx/model.onnx"
+  "photos/src/main/assets/u2netp.maml             u2netp 309c8469258dda742793dce0ebea8e6dd393174f89934733ecc8b14c76f4ddd8 https://huggingface.co/BritishWerewolf/U-2-Netp/resolve/7112208dbac3a3642496c8d54e2f0f9bb3dc1dc8/onnx/model.onnx"
+  "photos/src/main/assets/scrfd_500m.maml         scrfd  5e4447f50245bbd7966bd6c0fa52938c61474a04ec7def48753668a9d8b4ea3a https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/detection/model.onnx"
+  "photos/src/main/assets/w600k_mbf.maml          mobilefacenet 9cc6e4a75f0e2bf0b1aed94578f144d15175f357bdc05e815e5c4a02b319eb4f https://huggingface.co/immich-app/buffalo_s/resolve/0ff1751885575e62e084dff70549ce24a11fa5dc/recognition/model.onnx"
+  "library/ocr/src/main/assets/ppocr_det.maml     ppocr_det a431985659dc921974177a95adcfbb90fd9e51989a5e04d70d0b75f597b6e61d https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx/resolve/e6f4fa85f00e168c862bc462aebca69eef9b3d3d/inference.onnx ppocr_fold.py"
+  "library/ocr/src/main/assets/ppocr_rec.maml     ppocr_rec 7888113072263cb471b93f66dd5e2ad70548dc526fa1ace760d0d973dd121498 https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx/resolve/89d3a50e2c27e2e7cceeab0e944c25c807d5db4f/inference.onnx ppocr_fold.py"
 )
 
 if [ ! -f settings.gradle.kts ]; then
@@ -97,7 +97,7 @@ for entry in "${MODELS[@]}"; do
   graph="$2"
   want="$3"
   url="$4"
-  converter="${5:-vkml_convert.py}"
+  converter="${5:-maml_convert.py}"
   onnx="${work}/${graph}.onnx"
 
   echo "Downloading ${graph} from ${url}..."
@@ -109,7 +109,7 @@ for entry in "${MODELS[@]}"; do
   elif [ "$update" = 1 ]; then
     printf '  CHANGED  %-8s\n             was %s\n             now %s\n' "$graph" "$want" "$got"
     echo "             ^ update the pin for ${graph} in this script, then re-pin the"
-    echo "               layer digest with vkml_convert.py --print-digest"
+    echo "               layer digest with maml_convert.py --print-digest"
     fail=1
   else
     printf '  MISMATCH %-8s\n             want %s\n             got  %s\n' "$graph" "$want" "$got"

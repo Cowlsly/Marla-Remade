@@ -29,7 +29,7 @@ data class RecognizedLine(
  *
  * Replaces the ncnn PP-OCR path. The detector is DBNet over a PP-HGNetV2 backbone and the
  * recogniser is a PP-LCNetV3 backbone into a two-block transformer with a CTC head, both
- * converted to `.vkml` by `scripts/ml/ppocr_fold.py`. The recogniser is the **latin** model
+ * converted to `.maml` by `scripts/ml/ppocr_fold.py`. The recogniser is the **latin** model
  * - 836 characters covering Latin-script languages, no CJK - which is what keeps it under
  * 4 MB.
  *
@@ -122,8 +122,8 @@ class TextRecognizer(
 
     private companion object {
         private const val TAG = "TextRecognizer"
-        const val DETECTION_ASSET = "ppocr_det.vkml"
-        const val RECOGNITION_ASSET = "ppocr_rec.vkml"
+        const val DETECTION_ASSET = "ppocr_det.maml"
+        const val RECOGNITION_ASSET = "ppocr_rec.maml"
         const val DICTIONARY_ASSET = "ppocr_keys.txt"
 
         /** Text, then eight quad coordinates, then confidence, then the vertical flag. */

@@ -78,14 +78,14 @@ const SLOPE: f32 = 0.1;
 /// and duller, which no shape or range check would notice.
 const FINAL_SLOPE: f32 = 0.01;
 
-/// Tensors the `.vkml` must hold: 23 layers, each a weight and a bias.
+/// Tensors the `.maml` must hold: 23 layers, each a weight and a bias.
 ///
 /// `conv_pre`, three transposed convolutions, `3 * 2` convolutions per stage, and
 /// `conv_post` — `(1 + 3 + 18 + 1) * 2`. `conv_post` carries no bias in the export, so the
 /// converter writes a zero one and the runtime stays uniform.
 pub const TENSORS: usize = 46;
 
-/// Hands out `.vkml` tensor indices in the order the layers appear.
+/// Hands out `.maml` tensor indices in the order the layers appear.
 struct Layers {
     next: usize,
 }

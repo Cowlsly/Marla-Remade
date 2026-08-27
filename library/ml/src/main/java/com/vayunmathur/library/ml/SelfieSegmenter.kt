@@ -20,7 +20,7 @@ import android.graphics.Bitmap
  * Not thread-safe: [segment] and [close] must not overlap.
  *
  * @param context used only to read the asset; not retained.
- * @param assetName the `.vkml` in the app's assets.
+ * @param assetName the `.maml` in the app's assets.
  */
 class SelfieSegmenter(context: Context, assetName: String = DEFAULT_ASSET) : AutoCloseable {
 
@@ -41,6 +41,6 @@ class SelfieSegmenter(context: Context, assetName: String = DEFAULT_ASSET) : Aut
 
     companion object {
         /** What `:camera` ships. */
-        const val DEFAULT_ASSET: String = "selfie_segmentation.vkml"
+        const val DEFAULT_ASSET: String = "selfie_segmentation.maml"
     }
 }

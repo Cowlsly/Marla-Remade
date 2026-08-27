@@ -64,7 +64,7 @@ const NECK: u32 = 16;
 /// Channels inside each head.
 const HEAD: u32 = 64;
 
-/// Hands out `.vkml` tensor indices in the order the layers appear. Every layer here is
+/// Hands out `.maml` tensor indices in the order the layers appear. Every layer here is
 /// a convolution, so this steps by two throughout — unlike
 /// [`super::mobilefacenet`]'s, which has `PRelu` slopes to interleave.
 struct Layers {
@@ -81,7 +81,7 @@ impl Layers {
 
 /// The backbone's 14 depthwise/pointwise pairs, as `(stride, output channels)`.
 ///
-/// Read off `vkml_convert.py --print-layers`. The stem convolution before them is
+/// Read off `maml_convert.py --print-layers`. The stem convolution before them is
 /// written out at its call site because it is the only dense one.
 const TRUNK: [(u32, u32); 14] = [
     (1, 16),
@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn the_op_inventory_matches_the_onnx() {
-        // The counts `scripts/ml/vkml_convert.py` asserts against the ONNX itself.
+        // The counts `scripts/ml/maml_convert.py` asserts against the ONNX itself.
         let plan = plan();
         assert_eq!(dispatches(&plan, Kind::Conv), 60);
         assert_eq!(dispatches(&plan, Kind::Add), 4);

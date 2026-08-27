@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""ONNX to `.vkml`, the weights container `:library:ml` reads.
+"""ONNX to `.maml`, the weights container `:library:ml` reads.
 
 `:library:ml` is not a graph interpreter: each network's forward pass is hardcoded
-Rust in `library/ml/src/main/rust/src/nets/`. So a `.vkml` file carries **only
+Rust in `library/ml/src/main/rust/src/nets/`. So a `.maml` file carries **only
 ordered tensors** — no operators, no topology, no names. The Rust net module
 indexes the tensor table positionally.
 
@@ -39,9 +39,9 @@ byte layout). ONNX tensor layout is preserved verbatim — `[M, C/group, kH, kW]
 `Conv`, `[C, M/group, kH, kW]` for `ConvTranspose` — so nothing here has to agree
 with the shaders about a transpose.
 
-    ./scripts/ml/vkml_convert.py --check model.onnx --graph u2netp
-    ./scripts/ml/vkml_convert.py model.onnx --graph u2netp -o out.vkml
-    ./scripts/ml/vkml_convert.py model.onnx --graph u2netp --print-layers
+    ./scripts/ml/maml_convert.py --check model.onnx --graph u2netp
+    ./scripts/ml/maml_convert.py model.onnx --graph u2netp -o out.maml
+    ./scripts/ml/maml_convert.py model.onnx --graph u2netp --print-layers
 """
 
 import argparse
@@ -53,13 +53,13 @@ import numpy as np
 import onnx
 from onnx import numpy_helper, shape_inference
 
-# --- .vkml ---------------------------------------------------------------------
+# --- .maml ---------------------------------------------------------------------
 #
 # One contiguous blob, so the whole file becomes one VkBuffer and one staging
 # upload. Little-endian throughout; every device we target is.
 #
 #   header, 64 bytes
-#     0   4   magic b"VKML"
+#     0   4   magic b"MAML"
 #     4   4   u32 format version
 #     8   4   u32 graph id — the runtime rejects a file built for another net
 #    12   4   u32 tensor count
@@ -76,7 +76,7 @@ from onnx import numpy_helper, shape_inference
 #    28   4   u32 element count
 #
 #   data, fp16, each tensor padded to ALIGNMENT
-MAGIC = b"VKML"
+MAGIC = b"MAML"
 FORMAT_VERSION = 1
 HEADER_BYTES = 64
 TENSOR_ENTRY_BYTES = 32
@@ -200,7 +200,7 @@ class Layer:
         self.op = op
         self.name = name
         self._key = key
-        # Where this layer's tensors start in the `.vkml` table, and how many it has.
+        # Where this layer's tensors start in the `.maml` table, and how many it has.
         # The Rust indexes by tensor, and with `PRelu` in the mix that is no longer
         # `2 * layer` — so --print-layers reports it rather than leaving a transcriber
         # to count.
@@ -540,7 +540,7 @@ def main():
     parser = argparse.ArgumentParser(description=SPEC.splitlines()[0])
     parser.add_argument("onnx")
     parser.add_argument("--graph", required=True, choices=sorted(GRAPHS))
-    parser.add_argument("-o", "--out", help="where to write the .vkml")
+    parser.add_argument("-o", "--out", help="where to write the .maml")
     parser.add_argument("--check", action="store_true", help="validate only")
     parser.add_argument("--print-layers", action="store_true")
     parser.add_argument("--print-digest", action="store_true")

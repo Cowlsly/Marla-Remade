@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check a `.vkml` forward pass against onnxruntime, numerically.
+"""Check a `.maml` forward pass against onnxruntime, numerically.
 
 Nothing else in this repo compares the *numbers* `:library:ml` produces against the export
 they came from. The per-op fixtures in `nets::reference` check each op against hand
@@ -17,7 +17,7 @@ So this exists, and is worth running whenever `ppocr_fold.py` or a net module ch
 
 # How to run it
 
-    ./scripts/ml/fetch_and_convert.sh                       # produce the .vkml first
+    ./scripts/ml/fetch_and_convert.sh                       # produce the .maml first
     python scripts/ml/onnx_parity.py <graph> <inference.onnx> [--width N]
 
 It writes a scratch directory, runs onnxruntime, then asks the Rust reference interpreter
@@ -27,7 +27,7 @@ for the same tensor and reports the difference. `onnxruntime` is an extra depend
 
 # What "agreeing" means
 
-`.vkml` is fp16, so the two cannot agree exactly. The bar is that the difference is no
+`.maml` is fp16, so the two cannot agree exactly. The bar is that the difference is no
 larger than fp16 weight quantisation alone accounts for, which this script measures by
 running onnxruntime a second time with every weight rounded through fp16. A difference
 materially above that line is a bug, not precision.
@@ -122,12 +122,12 @@ def main():
     parser.add_argument("graph", choices=sorted(PROBE))
     parser.add_argument("onnx")
     parser.add_argument("--width", type=int, default=64)
-    parser.add_argument("--vkml", help="the .vkml, for a graph that is a runtime download")
+    parser.add_argument("--maml", help="the .maml, for a graph that is a runtime download")
     args = parser.parse_args()
 
     onnxruntime.set_default_logger_severity(3)
     model = onnx.load(args.onnx)
-    work = tempfile.mkdtemp(prefix="vkml_parity_")
+    work = tempfile.mkdtemp(prefix="maml_parity_")
 
     cut = SUBGRAPH.get(args.graph)
     if cut is not None:
@@ -158,8 +158,8 @@ def main():
 
     environment = dict(os.environ, PARITY_DIR=work, PARITY_GRAPH=args.graph)
     environment["PARITY_WIDTH"] = str(args.width)
-    if args.vkml:
-        environment["PARITY_VKML"] = os.path.abspath(args.vkml)
+    if args.maml:
+        environment["PARITY_MAML"] = os.path.abspath(args.maml)
     subprocess.run(
         [
             "cargo", "test", "--release", "-p", "modelrunner", "--lib",

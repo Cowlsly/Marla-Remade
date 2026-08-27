@@ -124,7 +124,7 @@ fn build<'l>(
     graph_id: u32,
 ) -> Result<Handle, String> {
     // The blob arrives as bytes rather than a path because an asset lives inside the APK
-    // and has no filesystem path unless it is extracted first. Both `.vkml` files are
+    // and has no filesystem path unless it is extracted first. Both `.maml` files are
     // `noCompress`, so Kotlin's read is a straight copy out of the mapped APK.
     let bytes = env
         .convert_byte_array(&weights)

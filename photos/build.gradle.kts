@@ -19,10 +19,10 @@ android {
         // uncompressed: int8 weights barely deflate, and a compressed asset would have to be
         // inflated into a 24 MB heap buffer before ORT could open it.
         noCompress += "onnx"
-        // The three .vkml files are read straight out of the APK for the same reason: fp16
+        // The three .maml files are read straight out of the APK for the same reason: fp16
         // weights barely deflate, and a compressed asset would have to be inflated into a
         // heap buffer — 6.6 MB for the face embedder — before it could be uploaded.
-        noCompress += "vkml"
+        noCompress += "maml"
     }
 }
 

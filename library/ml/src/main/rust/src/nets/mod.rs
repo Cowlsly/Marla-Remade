@@ -4,7 +4,7 @@
 //!
 //! Each network is code: [`u2netp::build`] and [`selfie::build`] call [`Builder`] in
 //! the order the ONNX nodes run. There is no operator table, no name lookup and no
-//! topology in the weights file — a `.vkml` is ordered tensors and nothing else.
+//! topology in the weights file — a `.maml` is ordered tensors and nothing else.
 //!
 //! But the *shape* of the pass being code does not mean the offsets should be. So a
 //! builder call records a [`Node`] against symbolic tensor ids, and [`Builder::finish`]
@@ -85,7 +85,7 @@ pub enum Act {
     Sigmoid,
     /// ONNX `PRelu`: `x < 0 ? slope[c] * x : x`, one slope per output channel.
     ///
-    /// Unlike the others this carries state — the slope's position in the `.vkml`
+    /// Unlike the others this carries state — the slope's position in the `.maml`
     /// tensor table, which [`Builder`] resolves to an offset like any other weight and
     /// passes down in [`Push::act_weight`]. A plain `Relu` is the same thing at slope
     /// zero, and is kept separate because it needs no memory traffic at all.
@@ -407,7 +407,7 @@ impl Plan {
 /// An indirection purely so the net modules are host-testable: the real
 /// implementation is [`crate::weights::Weights`], and [`tests::Shapes`] is a stub that
 /// only checks the shapes it is asked for. That lets `cargo test` build both networks
-/// in full with no `.vkml` on disk.
+/// in full with no `.maml` on disk.
 pub trait WeightSource {
     /// The fp16 element offset of tensor `index`, which must have shape `dims`.
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String>;
@@ -555,7 +555,7 @@ pub struct Builder<'a> {
 }
 
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
-/// boundary `.vkml` aligns its tensors to.
+/// boundary `.maml` aligns its tensors to.
 const ALIGN_ELEMS: u32 = 8;
 
 impl<'a> Builder<'a> {
@@ -612,7 +612,7 @@ impl<'a> Builder<'a> {
     /// A convolution, with ONNX's semantics: weights `[m, in_c/group, kh, kw]`, pads
     /// `[top, left, bottom, right]`, output size floor-divided.
     ///
-    /// `weight_index` and `bias_index` are positions in the `.vkml` tensor table, so a
+    /// `weight_index` and `bias_index` are positions in the `.maml` tensor table, so a
     /// net module reads as the ordered list of layers that it is.
     #[allow(clippy::too_many_arguments)]
     pub fn conv(
@@ -895,7 +895,7 @@ impl<'a> Builder<'a> {
 
     /// Layer normalisation over the channel axis, with a per-channel affine.
     ///
-    /// `weight_index` is the gamma tensor's position in the `.vkml` table; beta follows
+    /// `weight_index` is the gamma tensor's position in the `.maml` table; beta follows
     /// it, the way a convolution's bias follows its weight.
     pub fn layer_norm(&mut self, input: Id, weight_index: usize, epsilon: f32) -> Id {
         let shape = self.shape_of(input);
@@ -1684,7 +1684,7 @@ pub(crate) mod tests {
     /// It hands back the tensor index as the offset, which is meaningless as an
     /// address but makes the plan reproducible, and it records every shape it was
     /// asked for so a test can assert the whole ordered layer table without a
-    /// `.vkml`.
+    /// `.maml`.
     pub struct Shapes {
         pub asked: std::cell::RefCell<Vec<(usize, Vec<u32>)>>,
         pub count: usize,

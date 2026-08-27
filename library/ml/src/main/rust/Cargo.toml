@@ -15,7 +15,7 @@
 # nothing, so the only native code shipped is our own.
 #
 # There is no graph interpreter: each net's forward pass is hardcoded Rust in `nets/`,
-# so a `.vkml` file carries ordered tensors and no topology. See `src/weights.rs`.
+# so a `.maml` file carries ordered tensors and no topology. See `src/weights.rs`.
 
 [package]
 name = "modelrunner"
@@ -23,12 +23,12 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "GPL-2.0-only"
-description = "Vulkan compute ML runtime: .vkml weights in, segmentation mask out"
+description = "Vulkan compute ML runtime: .maml weights in, segmentation mask out"
 
 [lib]
 name = "modelrunner"
 # cdylib for the JNI surface; rlib so the host test binary can link it and exercise
-# the `.vkml` reader and the CPU preprocessing without a device.
+# the `.maml` reader and the CPU preprocessing without a device.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]

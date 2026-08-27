@@ -52,7 +52,7 @@ data class DetectedFaceBox(
  * [NativeSegmenter] about why the lock lives with the caller's threading rather than here.
  *
  * @param context used only to read the asset; not retained.
- * @param assetName the `.vkml` in the app's assets.
+ * @param assetName the `.maml` in the app's assets.
  */
 class FaceDetector(context: Context, assetName: String = DEFAULT_ASSET) : AutoCloseable {
 
@@ -140,7 +140,7 @@ class FaceDetector(context: Context, assetName: String = DEFAULT_ASSET) : AutoCl
 
     companion object {
         /** What `:photos` ships. */
-        const val DEFAULT_ASSET: String = "scrfd_500m.vkml"
+        const val DEFAULT_ASSET: String = "scrfd_500m.maml"
         private const val TAG = "FaceDetector"
         private const val FLOATS_PER_FACE = 9
     }
@@ -155,7 +155,7 @@ class FaceDetector(context: Context, assetName: String = DEFAULT_ASSET) : AutoCl
  * Not thread-safe: [embed] and [close] must not overlap.
  *
  * @param context used only to read the asset; not retained.
- * @param assetName the `.vkml` in the app's assets.
+ * @param assetName the `.maml` in the app's assets.
  */
 class FaceEmbedder(context: Context, assetName: String = DEFAULT_ASSET) : AutoCloseable {
 
@@ -187,7 +187,7 @@ class FaceEmbedder(context: Context, assetName: String = DEFAULT_ASSET) : AutoCl
 
     companion object {
         /** What `:photos` ships. */
-        const val DEFAULT_ASSET: String = "w600k_mbf.vkml"
+        const val DEFAULT_ASSET: String = "w600k_mbf.maml"
         /** Length of the embedding MobileFaceNet produces. */
         const val EMBEDDING_LENGTH = 512
         private const val TAG = "FaceEmbedder"

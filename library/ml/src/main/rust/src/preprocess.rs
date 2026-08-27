@@ -404,7 +404,7 @@ fn lerp_f32(a: f32, b: f32, t: f32) -> f32 {
 ///
 /// Hand-written because Rust's `f16` is not stable on the toolchain this repo pins
 /// (`rust-toolchain.toml`), and because a `half` dependency would be a whole crate for
-/// two functions. Weights are converted by numpy in `scripts/ml/vkml_convert.py`; this
+/// two functions. Weights are converted by numpy in `scripts/ml/maml_convert.py`; this
 /// is only for the input, whose values sit in roughly `-2.2..2.2` after normalisation.
 pub fn f32_to_f16(value: f32) -> u16 {
     let bits = value.to_bits();

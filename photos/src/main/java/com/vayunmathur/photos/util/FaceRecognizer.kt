@@ -32,7 +32,7 @@ import kotlin.math.sqrt
  *  4. Matching — cosine similarity clusters faces of the same person
  *     (see [CLUSTER_THRESHOLD]).
  *
- * The models ship as `.vkml` assets in this app. They are **GPU-only**: on a device
+ * The models ship as `.maml` assets in this app. They are **GPU-only**: on a device
  * without Vulkan fp16 compute [modelsAvailable] is false and people clustering turns off,
  * rather than falling back to a second implementation.
  */

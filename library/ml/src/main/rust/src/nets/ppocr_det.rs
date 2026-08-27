@@ -73,7 +73,7 @@ const HEAD: u32 = 24;
 /// in-bounds taps — position-dependent, and therefore not a bias. Folding anyway biases
 /// the border of every feature map and compounds down the backbone.
 ///
-/// They are scalars, so they live here rather than in the `.vkml`, which holds tensors:
+/// They are scalars, so they live here rather than in the `.maml`, which holds tensors:
 /// putting a one-element tensor in the table for each would shift the whole ordered table.
 const AFFINES: [(f32, f32); 14] = [
     (0.6775133, -0.22914815),
@@ -92,7 +92,7 @@ const AFFINES: [(f32, f32); 14] = [
     (0.93593925, 0.16590087),
 ];
 
-/// Hands out `.vkml` tensor indices in the order the layers appear. Every folded layer is
+/// Hands out `.maml` tensor indices in the order the layers appear. Every folded layer is
 /// a convolution with a weight and a bias, so this steps by two throughout.
 struct Layers {
     next: usize,

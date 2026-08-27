@@ -7,9 +7,9 @@
 //! to 128x128, then a 2x2 transposed convolution to 256x256 and a sigmoid.
 //!
 //! Unlike U^2-Netp this graph is irregular, so it is written out layer by layer against
-//! the ordered `.vkml` indices, with the three repeated shapes ([`squeeze_excite`],
+//! the ordered `.maml` indices, with the three repeated shapes ([`squeeze_excite`],
 //! [`inverted_residual`], [`final_block`]) factored out. The layer table it is
-//! transcribed from is `vkml_convert.py --print-layers` on the pinned ONNX.
+//! transcribed from is `maml_convert.py --print-layers` on the pinned ONNX.
 //!
 //! # Three things about it that are easy to get wrong
 //!
@@ -37,7 +37,7 @@ pub const SIZE: u32 = 256;
 /// Tensors in the file: 55 layers, weight and bias each.
 pub const TENSORS: usize = 110;
 
-/// Hands out `.vkml` tensor indices in the order the layers appear. See
+/// Hands out `.maml` tensor indices in the order the layers appear. See
 /// [`super::u2netp`] for why this is a counter.
 struct Layers {
     next: usize,
@@ -204,7 +204,7 @@ mod tests {
 
     #[test]
     fn the_op_inventory_matches_the_onnx() {
-        // The counts `scripts/ml/vkml_convert.py` asserts against the ONNX itself.
+        // The counts `scripts/ml/maml_convert.py` asserts against the ONNX itself.
         let plan = plan();
         assert_eq!(dispatches(&plan, Kind::Conv), 54);
         assert_eq!(dispatches(&plan, Kind::ConvTranspose), 1);

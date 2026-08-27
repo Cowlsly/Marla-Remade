@@ -13,7 +13,7 @@
 //! the accumulator's initial value rather than a separate op.
 //!
 //! Weights are ONNX's layout verbatim, `[m, in_c / group, kh, kw]` row-major, so
-//! `vkml_convert.py` transposes nothing and there is no layout to disagree about.
+//! `maml_convert.py` transposes nothing and there is no layout to disagree about.
 //!
 //! # What this deliberately does not do
 //!

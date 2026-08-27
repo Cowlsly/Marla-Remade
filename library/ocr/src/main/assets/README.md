@@ -1,18 +1,18 @@
 # `:library:ocr` bundled model assets
 
-## `ppocr_det.vkml` — text detection
+## `ppocr_det.maml` — text detection
 
 Apache-2.0, from https://huggingface.co/PaddlePaddle/PP-OCRv5_mobile_det_onnx
 @ `e6f4fa85f00e168c862bc462aebca69eef9b3d3d` (`inference.onnx`, 4,826,518 B fp32,
 SHA-256 `a4319856…597b6e61d`) — the official PaddleOCR export of PP-OCRv5 mobile
-detection. The source ONNX SHA-256 is in the `.vkml` header, so a shipped asset traces
+detection. The source ONNX SHA-256 is in the `.maml` header, so a shipped asset traces
 back to this line.
 
 Rebuild with `./scripts/ml/fetch_and_convert.sh`.
 
 ### It is folded, not copied
 
-Unlike every other `.vkml`, this one is **not** the ONNX's tensors verbatim. The export
+Unlike every other `.maml`, this one is **not** the ONNX's tensors verbatim. The export
 is PP-HGNetV2 as `paddle2onnx` spells it, and every convolution arrives as a chain:
 
     Conv (no bias) → Add(bias) → Mul(scalar) → Add(scalar)
@@ -72,7 +72,7 @@ The space is deliberately **not** in the file — no entry in it is whitespace �
 text editor or a line-ending conversion cannot silently eat it. `post::ctc::Dictionary`
 appends it.
 
-## `ppocr_rec.vkml` - text recognition
+## `ppocr_rec.maml` - text recognition
 Apache-2.0, from https://huggingface.co/PaddlePaddle/latin_PP-OCRv5_mobile_rec_onnx
 @ `89d3a50e2c27e2e7cceeab0e944c25c807d5db4f` (`inference.onnx`, 8,042,023 B fp32,
 SHA-256 `78881130.dd121498`) - the official export of the **latin** PP-OCRv5 mobile

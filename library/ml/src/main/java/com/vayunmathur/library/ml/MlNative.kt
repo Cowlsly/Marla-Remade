@@ -32,7 +32,7 @@ internal object MlNative {
     }
 
     /**
-     * Bring up MediaPipe Selfie Segmentation from a `.vkml` blob. Returns 0 on failure.
+     * Bring up MediaPipe Selfie Segmentation from a `.maml` blob. Returns 0 on failure.
      *
      * Failure is expected and normal on a device without `VK_KHR_shader_float16_int8`,
      * which is a Vulkan 1.2 promotion and so optional at the 1.1 floor minSdk 31

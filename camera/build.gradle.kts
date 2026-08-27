@@ -15,10 +15,10 @@ android {
         applicationId = "com.vayunmathur.camera"
     }
     androidResources {
-        // selfie_segmentation.vkml is read straight out of the APK by SelfieSegmenter, so
+        // selfie_segmentation.maml is read straight out of the APK by SelfieSegmenter, so
         // leave it uncompressed: fp16 weights barely deflate, and a compressed asset would
         // have to be inflated into a heap buffer before it could be uploaded.
-        noCompress += "vkml"
+        noCompress += "maml"
     }
 }
 

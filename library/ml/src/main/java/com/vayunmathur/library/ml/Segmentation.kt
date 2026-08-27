@@ -60,7 +60,7 @@ internal class NativeSegmenter(
         0L
     } else {
         try {
-            // `.vkml` is `noCompress` in both apps, so this is a straight copy out of the
+            // `.maml` is `noCompress` in both apps, so this is a straight copy out of the
             // mapped APK rather than an inflate into a second buffer.
             create(context.assets.open(assetName).use { it.readBytes() })
         } catch (e: Throwable) {

@@ -17,7 +17,7 @@
 //!   which carries the slope tensor's index. The slope is per *channel*, so a shader
 //!   that broadcast one value would still produce a plausible-looking embedding.
 //! * **The final `Gemm` is a convolution here, not an inner product.** Its weight is
-//!   `[512, 3136]` over a flattened `64 x 7 x 7`, and `scripts/ml/vkml_convert.py`
+//!   `[512, 3136]` over a flattened `64 x 7 x 7`, and `scripts/ml/maml_convert.py`
 //!   reshapes that to `[512, 64, 7, 7]` — a kernel covering the whole spatial extent,
 //!   which the existing `conv.comp` computes exactly. That is why there is no
 //!   `InnerProduct` pipeline.
@@ -42,7 +42,7 @@ pub const EMBEDDING: u32 = 512;
 /// `PRelu` slopes at one.
 pub const TENSORS: usize = 134;
 
-/// Hands out `.vkml` tensor indices in the order the layers appear.
+/// Hands out `.maml` tensor indices in the order the layers appear.
 ///
 /// Unlike [`super::selfie`]'s, this cannot be a counter that steps by two: a `PRelu`
 /// contributes one tensor and a convolution two, so the two kinds are asked for
@@ -213,7 +213,7 @@ mod tests {
 
     #[test]
     fn the_op_inventory_matches_the_onnx() {
-        // The counts `scripts/ml/vkml_convert.py` asserts against the ONNX itself. The
+        // The counts `scripts/ml/maml_convert.py` asserts against the ONNX itself. The
         // 49 convolutions include the `Gemm`, which is lowered as one, so the export's
         // 49 `Conv` plus 1 `Gemm` is 50 dispatches here.
         let plan = plan();

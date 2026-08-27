@@ -1,6 +1,6 @@
 # `:photos` bundled model assets
 
-## `u2netp.vkml` — salient-object detection
+## `u2netp.maml` — salient-object detection
 
 Apache-2.0, from https://huggingface.co/BritishWerewolf/U-2-Netp
 @ `7112208dbac3a3642496c8d54e2f0f9bb3dc1dc8` (`onnx/model.onnx`, 4,574,861 B fp32,
@@ -8,8 +8,8 @@ SHA-256 `309c8469…4c76f4ddd8`) — U²-Net *portable*, the small variant of th
 salient-object detector.
 
 Not the ONNX itself: `scripts/ml/fetch_and_convert.sh` converts it to the fp16
-`.vkml` weights container that `:library:ml` reads. The source ONNX SHA-256 is in
-the `.vkml` header, so a shipped asset traces back to this line.
+`.maml` weights container that `:library:ml` reads. The source ONNX SHA-256 is in
+the `.maml` header, so a shipped asset traces back to this line.
 
 Run at 320×320 RGB, ImageNet mean/std, output a 320×320 saliency map through a
 sigmoid. Consumed by `SubjectSegmenter` from `MlSegmentation.kt` for
@@ -25,14 +25,14 @@ letterbox, which would change existing behaviour.
 
 ## The face models
 
-`scrfd_500m.vkml` (face detection) and `w600k_mbf.vkml` (face embedding) are
+`scrfd_500m.maml` (face detection) and `w600k_mbf.maml` (face embedding) are
 InsightFace's **buffalo_s** pack, from
 https://huggingface.co/immich-app/buffalo_s @ `0ff1751885575e62e084dff70549ce24a11fa5dc`:
 
 | asset | source ONNX | SHA-256 |
 |---|---|---|
-| `scrfd_500m.vkml` | `detection/model.onnx`, 2,524,817 B | `5e4447f5…d8b4ea3a` |
-| `w600k_mbf.vkml` | `recognition/model.onnx`, 13,616,099 B | `9cc6e4a7…b319eb4f` |
+| `scrfd_500m.maml` | `detection/model.onnx`, 2,524,817 B | `5e4447f5…d8b4ea3a` |
+| `w600k_mbf.maml` | `recognition/model.onnx`, 13,616,099 B | `9cc6e4a7…b319eb4f` |
 
 **Licence: InsightFace's own, which permits non-commercial research use only** —
 https://github.com/deepinsight/insightface/tree/master/python-package#license. This is
@@ -43,11 +43,11 @@ no upstream URL and no licence recorded at all; re-sourcing them from a licensed
 export makes the constraint visible rather than introducing it.
 
 SCRFD runs at 640 on the long side with the short side padded to a multiple of 32, so
-its `.vkml` is the only one whose graph is dynamically shaped. MobileFaceNet runs at a
+its `.maml` is the only one whose graph is dynamically shaped. MobileFaceNet runs at a
 fixed 112×112 and returns a 512-d embedding.
 
 Two nodes are rewritten during conversion rather than needing a shader — see
-`scripts/ml/vkml_convert.py`: MobileFaceNet's final `Gemm` becomes a `[512, 64, 7, 7]`
+`scripts/ml/maml_convert.py`: MobileFaceNet's final `Gemm` becomes a `[512, 64, 7, 7]`
 convolution kernel, and the `BatchNormalization` after it is folded into that layer's
 weight and bias.
 

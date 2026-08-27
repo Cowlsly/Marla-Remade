@@ -1,8 +1,8 @@
-//! The `.vkml` reader.
+//! The `.maml` reader.
 //!
-//! `.vkml` is a **weights container only** — ordered tensors, no operators and no
+//! `.maml` is a **weights container only** — ordered tensors, no operators and no
 //! topology — because each network's forward pass is hardcoded in [`crate::nets`]
-//! rather than interpreted. See `scripts/ml/vkml_convert.py`, which writes it, for
+//! rather than interpreted. See `scripts/ml/maml_convert.py`, which writes it, for
 //! the byte layout; this is the other half of that contract.
 //!
 //! Two consequences worth stating plainly:
@@ -15,8 +15,8 @@
 //!   in the file and its offset in device memory. That is the reason the format is
 //!   one contiguous blob.
 
-/// `b"VKML"`, little-endian, at offset 0.
-const MAGIC: [u8; 4] = *b"VKML";
+/// `b"MAML"`, little-endian, at offset 0.
+const MAGIC: [u8; 4] = *b"MAML";
 /// Bumped when the layout below changes incompatibly.
 const FORMAT_VERSION: u32 = 1;
 const HEADER_BYTES: usize = 64;
@@ -25,7 +25,7 @@ const DTYPE_F16: u32 = 0;
 /// Every tensor starts on this boundary, so an offset is a valid fp16 index too.
 const ALIGNMENT: u32 = 16;
 
-/// Graph ids, shared with `GRAPHS` in `scripts/ml/vkml_convert.py`.
+/// Graph ids, shared with `GRAPHS` in `scripts/ml/maml_convert.py`.
 pub mod graph {
     /// MediaPipe Selfie Segmentation, 256x256.
     pub const SELFIE: u32 = 1;
@@ -67,7 +67,7 @@ impl Tensor {
     }
 }
 
-/// A parsed `.vkml` file: the tensor table, and the data section to upload.
+/// A parsed `.maml` file: the tensor table, and the data section to upload.
 #[derive(Debug)]
 pub struct Weights {
     /// Which network this file is for. See [`graph`].
@@ -87,10 +87,10 @@ impl Weights {
     /// the symptom would be a driver reset, not an error.
     pub fn parse(bytes: &[u8], expect_graph: u32) -> Result<Weights, String> {
         if bytes.len() < HEADER_BYTES {
-            return Err(format!("{} bytes is shorter than a .vkml header", bytes.len()));
+            return Err(format!("{} bytes is shorter than a .maml header", bytes.len()));
         }
         if bytes[0..4] != MAGIC {
-            return Err("not a .vkml file (bad magic)".into());
+            return Err("not a .maml file (bad magic)".into());
         }
         let version = u32(bytes, 4);
         if version != FORMAT_VERSION {

@@ -12,7 +12,7 @@ import kotlinx.coroutines.withContext
  * compute runtime in `:library:ml`.
  *
  * Detection is DBNet over a PP-HGNetV2 backbone; recognition is a PP-LCNetV3 backbone into a
- * two-block transformer with a CTC head. Both are converted ahead of time to `.vkml` by
+ * two-block transformer with a CTC head. Both are converted ahead of time to `.maml` by
  * `scripts/ml/ppocr_fold.py` and shipped in this module's assets. The recogniser is the
  * **latin** model (836-char dict covering 47 Latin-script languages; no CJK) for a much
  * smaller footprint.

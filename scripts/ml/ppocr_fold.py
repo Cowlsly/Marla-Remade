@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fold a PP-OCRv5 `paddle2onnx` export into `.vkml`, ahead of time.
+"""Fold a PP-OCRv5 `paddle2onnx` export into `.maml`, ahead of time.
 
 PP-OCRv5's official ONNX (Apache-2.0, `PaddlePaddle/PP-OCRv5_*_onnx`) is PP-HGNetV2 as
 `paddle2onnx` spells it, which is not a form `:library:ml` can lower. Every convolution
@@ -18,12 +18,12 @@ gates. Everything else is constant.
 
 # Why this is a separate script
 
-`vkml_convert.py`'s contract is that a `.vkml` is the ONNX's tensors *verbatim*, so the
+`maml_convert.py`'s contract is that a `.maml` is the ONNX's tensors *verbatim*, so the
 Rust can index them positionally and nothing has to agree about a rewrite. Teaching it to
 constant-fold a graph would make that contract "verbatim, except for these seven
 rewrites", and the rewrites would then run on every model it converts.
 
-So the fold happens here instead, once, ahead of time. The output is a `.vkml` whose
+So the fold happens here instead, once, ahead of time. The output is a `.maml` whose
 tensors are the folded weights and biases, and the input is the official export with its
 SHA-256 recorded in the header exactly as before. Provenance is unchanged; only the place
 the arithmetic happens moves.
@@ -48,7 +48,7 @@ convolutions and nothing else. Rather than depend on that, those are emitted as 
 `Affine` op the runtime runs as an elementwise pass. There are a couple of dozen, and
 detection runs once per OCR request rather than per frame.
 
-    ./scripts/ml/ppocr_fold.py det.onnx --graph ppocr_det -o out.vkml
+    ./scripts/ml/ppocr_fold.py det.onnx --graph ppocr_det -o out.maml
     ./scripts/ml/ppocr_fold.py det.onnx --graph ppocr_det --print-graph
 """
 
@@ -62,14 +62,14 @@ import onnx
 from onnx import numpy_helper
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-import vkml_convert  # noqa: E402  (needs the path above)
+import maml_convert  # noqa: E402  (needs the path above)
 
 # ONNX `HardSigmoid` defaults to alpha 0.2; Paddle's hard-swish uses 1/6. Both appear in
 # these graphs, so the value is read per node and checked rather than assumed.
 HARDSWISH_ALPHA = 1.0 / 6.0
 TOLERANCE = 1e-4
 
-# Ops that only rearrange or relabel, and are therefore aliases in `.vkml`'s layout.
+# Ops that only rearrange or relabel, and are therefore aliases in `.maml`'s layout.
 #
 # This runtime's tensors are `[c, h, w]` with batch always 1, and `nets::ppocr_rec` keeps a
 # transformer's sequence as `[d_model, 1, T]` precisely so that the export's reshapes and
@@ -117,7 +117,7 @@ def normalise(model):
     """Strip `Identity`, fold the constant affine chains, and return the ops and tensors.
 
     Returns `(ops, layers, tensors)`: the normalised op list for transcription, the
-    `Layer` records the digest is taken over, and the fp16 tensors in `.vkml` order.
+    `Layer` records the digest is taken over, and the fp16 tensors in `.maml` order.
     """
     graph = model.graph
     inits = {i.name: numpy_helper.to_array(i) for i in graph.initializer}
@@ -214,7 +214,7 @@ def normalise(model):
             f"g={attrs['group'].i if 'group' in attrs else 1} act={act}"
         )
         layers.append(
-            vkml_convert.Layer(len(layers), node.op_type, output, key, first, 2)
+            maml_convert.Layer(len(layers), node.op_type, output, key, first, 2)
         )
         ops.append(
             Op(
@@ -246,7 +246,7 @@ def normalise(model):
             f"Linear w={list(kernel.shape)} b={list(bias.shape)} "
             f"k=[1, 1] d=[1, 1] p=[0, 0, 0, 0] s=[1, 1] g=1 act={act}"
         )
-        layers.append(vkml_convert.Layer(len(layers), "MatMul", output, key, first, 2))
+        layers.append(maml_convert.Layer(len(layers), "MatMul", output, key, first, 2))
         ops.append(
             Op("Linear", [source], output, w=list(kernel.shape), act=act, t=first)
         )
@@ -257,7 +257,7 @@ def normalise(model):
         tensors.append(np.array(gamma, dtype=np.float32).flatten())
         tensors.append(np.array(beta, dtype=np.float32).flatten())
         key = f"LayerNorm c={gamma.size} eps={epsilon:.9g}"
-        layers.append(vkml_convert.Layer(len(layers), "LayerNorm", output, key, first, 2))
+        layers.append(maml_convert.Layer(len(layers), "LayerNorm", output, key, first, 2))
         ops.append(Op("LayerNorm", [source], output, c=int(gamma.size), eps=epsilon, t=first))
 
     def absorb(cursor, weight, bias, channels, is_transpose):
@@ -829,8 +829,8 @@ def fold_batch_norm(node, inits, weight, bias, op_type):
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("onnx")
-    parser.add_argument("--graph", required=True, choices=sorted(vkml_convert.GRAPHS))
-    parser.add_argument("-o", "--out", help="where to write the .vkml")
+    parser.add_argument("--graph", required=True, choices=sorted(maml_convert.GRAPHS))
+    parser.add_argument("-o", "--out", help="where to write the .maml")
     parser.add_argument("--print-graph", action="store_true", help="dump the folded ops")
     parser.add_argument("--print-layers", action="store_true")
     parser.add_argument("--print-digest", action="store_true")
@@ -850,10 +850,10 @@ def main():
         for layer in layers:
             print(f"{layer.index:4d} t{layer.first_tensor:<4d} {layer.key()}  # {layer.name}")
 
-    digest = vkml_convert.layer_table_digest(layers)
+    digest = maml_convert.layer_table_digest(layers)
     if args.print_digest:
         print(f'    "{args.graph}": "{digest}",')
-    pinned = vkml_convert.EXPECTED_DIGEST.get(args.graph, "")
+    pinned = maml_convert.EXPECTED_DIGEST.get(args.graph, "")
     if digest != pinned and not args.print_digest:
         raise SystemExit(
             f"layer table digest {digest}\n           pinned  {pinned}\n"
@@ -862,8 +862,8 @@ def main():
             "re-pin with --print-digest."
         )
 
-    blob, count = vkml_convert.build(
-        layers, tensors, vkml_convert.GRAPHS[args.graph], onnx_sha256
+    blob, count = maml_convert.build(
+        layers, tensors, maml_convert.GRAPHS[args.graph], onnx_sha256
     )
     if args.out:
         with open(args.out, "wb") as f:

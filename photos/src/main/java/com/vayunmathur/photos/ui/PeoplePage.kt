@@ -71,7 +71,7 @@ fun PeoplePage(
     val scanned by galleryViewModel.faceScannedCount.collectAsState()
     val target by galleryViewModel.indexTargetCount.collectAsState()
     // Off the main thread: `modelsAvailable` brings the models up, and on `:library:ml`
-    // that means parsing two `.vkml` blobs and uploading 7.9 MB to the GPU. Doing it in a
+    // that means parsing two `.maml` blobs and uploading 7.9 MB to the GPU. Doing it in a
     // bare `remember { }` blocked the first composition of this screen for as long as
     // that took.
     val modelsAvailable by produceState(initialValue = false, context) {

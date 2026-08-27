@@ -93,7 +93,7 @@ fn through_f16(value: f32) -> f32 {
 
 /// Run `plan` on the host and return its outputs, in [`Plan::outputs`] order.
 ///
-/// `weights` is the `.vkml` data section verbatim — the same bytes the device gets —
+/// `weights` is the `.maml` data section verbatim — the same bytes the device gets —
 /// so this accepts [`crate::weights::Weights::data`] and a shipped asset directly.
 /// `inputs` is one fp32 slice per [`Plan::inputs`] entry; each is rounded to fp16 on
 /// the way in, exactly as an upload would.
@@ -780,7 +780,7 @@ fn nchw(p: &Push, c: u32, y: u32, x: u32) -> u32 {
     (c * p.out_h + y) * p.out_w + x
 }
 
-/// Lay tensors out the way `.vkml` does: 16-byte aligned, fp16, in index order.
+/// Lay tensors out the way `.maml` does: 16-byte aligned, fp16, in index order.
 fn pack(tensors: &[(Vec<u32>, Vec<f32>)]) -> Result<(Vec<u32>, Vec<u8>), String> {
     let mut offsets = Vec::with_capacity(tensors.len());
     let mut data: Vec<u8> = Vec::new();
@@ -804,7 +804,7 @@ fn pack(tensors: &[(Vec<u32>, Vec<f32>)]) -> Result<(Vec<u32>, Vec<u8>), String>
 ///
 /// Unlike [`super::tests::Shapes`], which hands back the tensor index as a stand-in
 /// offset, this lays the tensors out for real — 16-byte aligned fp16 in index order,
-/// exactly as `vkml_convert.py` writes them — so a plan built against it can actually
+/// exactly as `maml_convert.py` writes them — so a plan built against it can actually
 /// be run.
 pub struct Given {
     offsets: Vec<u32>,
@@ -813,7 +813,7 @@ pub struct Given {
 }
 
 impl Given {
-    /// Lay out `(dims, values)` pairs in `.vkml` index order.
+    /// Lay out `(dims, values)` pairs in `.maml` index order.
     pub fn new(tensors: &[(Vec<u32>, Vec<f32>)]) -> Result<Given, String> {
         let (offsets, data) = pack(tensors)?;
         let lengths = tensors.iter().map(|(_, v)| v.len() as u64).collect();
@@ -2105,9 +2105,9 @@ mod tests {
             .collect();
 
         // A voice is a runtime download rather than a bundled asset, so the vocoder's
-        // `.vkml` is given by path instead of being looked up in the tree.
+        // `.maml` is given by path instead of being looked up in the tree.
         if graph == "vits_dec" {
-            let path = std::env::var("PARITY_VKML").expect("PARITY_VKML");
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
             let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_DEC)
                 .expect("the vocoder asset parses");
@@ -2120,11 +2120,11 @@ mod tests {
 
         let (path, id) = match graph.as_str() {
             "ppocr_rec" => (
-                "library/ocr/src/main/assets/ppocr_rec.vkml",
+                "library/ocr/src/main/assets/ppocr_rec.maml",
                 crate::weights::graph::PPOCR_REC,
             ),
             "ppocr_det" => (
-                "library/ocr/src/main/assets/ppocr_det.vkml",
+                "library/ocr/src/main/assets/ppocr_det.maml",
                 crate::weights::graph::PPOCR_DET,
             ),
             other => panic!("no parity probe for {other}"),
@@ -2156,7 +2156,7 @@ mod tests {
         std::fs::write(path, out).expect("writes");
     }
 
-    /// The shipped `.vkml` for `name`, or `None` if it is not checked out.
+    /// The shipped `.maml` for `name`, or `None` if it is not checked out.
     fn asset(name: &str) -> Option<Vec<u8>> {
         let mut dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         while !dir.join("settings.gradle.kts").is_file() {
@@ -2267,7 +2267,7 @@ mod tests {
     #[test]
     #[ignore = "runs the full shipped nets; minutes in a debug build"]
     fn the_shipped_selfie_net_produces_a_usable_mask() {
-        let Some(bytes) = asset("camera/src/main/assets/selfie_segmentation.vkml") else {
+        let Some(bytes) = asset("camera/src/main/assets/selfie_segmentation.maml") else {
             return;
         };
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::SELFIE)
@@ -2283,7 +2283,7 @@ mod tests {
     #[test]
     #[ignore = "runs the full shipped nets; minutes in a debug build"]
     fn the_shipped_u2netp_net_produces_a_usable_mask() {
-        let Some(bytes) = asset("photos/src/main/assets/u2netp.vkml") else {
+        let Some(bytes) = asset("photos/src/main/assets/u2netp.maml") else {
             return;
         };
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::U2NETP)
@@ -2299,7 +2299,7 @@ mod tests {
     #[test]
     #[ignore = "runs the full shipped nets; minutes in a debug build"]
     fn the_shipped_scrfd_net_produces_usable_detection_maps() {
-        let Some(bytes) = asset("photos/src/main/assets/scrfd_500m.vkml") else {
+        let Some(bytes) = asset("photos/src/main/assets/scrfd_500m.maml") else {
             return;
         };
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::SCRFD)
@@ -2339,7 +2339,7 @@ mod tests {
     #[test]
     #[ignore = "runs the full shipped nets; minutes in a debug build"]
     fn the_shipped_mobilefacenet_net_embeds_two_faces_differently() {
-        let Some(bytes) = asset("photos/src/main/assets/w600k_mbf.vkml") else {
+        let Some(bytes) = asset("photos/src/main/assets/w600k_mbf.maml") else {
             return;
         };
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::MOBILEFACENET)
@@ -2379,7 +2379,7 @@ mod tests {
     #[test]
     #[ignore = "runs the full shipped nets; minutes in a debug build"]
     fn the_shipped_ppocr_det_net_produces_a_usable_probability_map() {
-        let Some(bytes) = asset("library/ocr/src/main/assets/ppocr_det.vkml") else {
+        let Some(bytes) = asset("library/ocr/src/main/assets/ppocr_det.maml") else {
             return;
         };
         let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::PPOCR_DET)

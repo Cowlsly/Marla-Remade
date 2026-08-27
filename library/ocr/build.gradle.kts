@@ -3,7 +3,7 @@ plugins {
 }
 dependencies {
     // On-device OCR via PP-OCRv5 on the Vulkan compute runtime in `:library:ml`. Both
-    // models ship as `.vkml` in this module's assets and the whole detect-crop-recognise
+    // models ship as `.maml` in this module's assets and the whole detect-crop-recognise
     // pipeline is Rust; consumers only see the OcrEngine API.
     //
     // `implementation` is enough even though `:library:ml` supplies `libmodelrunner.so`:

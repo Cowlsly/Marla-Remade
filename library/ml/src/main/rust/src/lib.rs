@@ -7,7 +7,7 @@
 //!
 //! # Layout
 //!
-//! * [`weights`] — the `.vkml` reader. Ordered tensors, no topology.
+//! * [`weights`] — the `.maml` reader. Ordered tensors, no topology.
 //! * [`nets`] — the two hardcoded forward passes, and the small compiler that packs
 //!   their activations into one arena and resolves every offset.
 //! * [`preprocess`] — bitmap to fp16 NCHW, and the fp16 conversions.
@@ -32,7 +32,7 @@
 //! # Host builds
 //!
 //! Everything except the Vulkan and JNI layers compiles and tests on the host, so
-//! `cargo test` builds **both** networks in full, checks the `.vkml` round trip, the
+//! `cargo test` builds **both** networks in full, checks the `.maml` round trip, the
 //! arena arithmetic and the preprocessing, with no device and no asset.
 
 pub mod nets;

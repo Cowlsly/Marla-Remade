@@ -1,6 +1,6 @@
 # `:camera` bundled model assets
 
-## `selfie_segmentation.vkml`
+## `selfie_segmentation.maml`
 
 Apache-2.0, from https://huggingface.co/onnx-community/mediapipe_selfie_segmentation
 @ `be49485c8e027524be38591817fc5cd31bd9d00e` (`onnx/model.onnx`, 462,352 B fp32,
@@ -8,8 +8,8 @@ SHA-256 `3241ac4a…4531aad`) — an ONNX export of Google's MediaPipe Selfie
 Segmentation, the model purpose-built for exactly this job.
 
 Not the ONNX itself: `scripts/ml/fetch_and_convert.sh` converts it to the fp16
-`.vkml` weights container that `:library:ml` reads, which is half the size and the
-only form anything here loads. The source ONNX SHA-256 is in the `.vkml` header, so
+`.maml` weights container that `:library:ml` reads, which is half the size and the
+only form anything here loads. The source ONNX SHA-256 is in the `.maml` header, so
 a shipped asset traces back to this line without needing the ONNX on disk.
 
 Run at 256×256 RGB, rescale 1/255 and **no** mean/std (`do_normalize: false`
