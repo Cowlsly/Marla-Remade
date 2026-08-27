@@ -23,7 +23,8 @@
 //!     integer tile coordinates out.
 //!   * [`clip`] — Liang-Barsky for lines, Sutherland-Hodgman for polygons, against
 //!     a tile's buffered rect.
-//!   * [`simplify`] — Douglas-Peucker in integer tile coordinates.
+//!   * [`simplify`] — Douglas-Peucker once per feature to score every vertex, then
+//!     a per-zoom threshold on those scores.
 //!   * [`pyramid`] — the tile pyramid driver and the drop policy.
 //!   * [`par`] — the thread budget (`--threads`, `MAPS_THREADS`) and the pool the
 //!     tilers run on. Parallelism never changes an output byte.

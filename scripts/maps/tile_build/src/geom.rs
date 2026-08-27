@@ -5,10 +5,11 @@
 //!
 //! ```text
 //! lon/lat  --project_geometry-->  world     (tile units x extent, per zoom)
+//! world    --simplify::annotate->  world     (per-vertex significance, in place)
 //! world    --clip::clip_geometry->  world   (against one tile's buffered rect)
+//! world    --simplify::filter---->  world   (fewer vertices)
 //! world    --translate----------->  tile    (origin at the tile's corner)
 //! tile     --quantize------------>  integer tile coordinates
-//! integer  --simplify::simplify-->  integer (fewer vertices)
 //! integer  --mvt::encode_*------->  command stream
 //! ```
 //!
@@ -38,6 +39,84 @@ pub type Pt = (f64, f64);
 /// A vertex on the integer tile grid, ready to encode.
 pub type IPt = (i32, i32);
 
+/// A world-space vertex carrying how much shape it is responsible for.
+///
+/// `sig` is the squared distance the vertex deviates from the chord
+/// [`crate::simplify::annotate`] measured it against, in the same world units as
+/// `x` and `y`. It is the whole point of this type: significance is computed
+/// **once** on the unclipped source ring and then compared against a per-zoom
+/// threshold, so a vertex is kept or dropped identically in every ring and every
+/// tile it appears in. Simplifying each clipped ring on its own is what let a
+/// hole and the exterior it shared a tile-boundary edge with thin differently and
+/// drift apart.
+///
+/// A named struct rather than a three-wide tuple so the compiler names every site
+/// that has to think about the extra field.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SigPt {
+    pub x: f64,
+    pub y: f64,
+    pub sig: f64,
+}
+
+/// The significance of a vertex no threshold may remove: a path's own endpoints,
+/// and every vertex the clipper invents on a tile boundary.
+pub const ALWAYS: f64 = f64::INFINITY;
+
+impl SigPt {
+    /// A vertex whose significance is not yet known. [`crate::simplify::annotate`]
+    /// overwrites this; a vertex it never chooses is genuinely worth nothing and
+    /// zero is the right answer.
+    pub fn new(x: f64, y: f64) -> SigPt {
+        SigPt { x, y, sig: 0.0 }
+    }
+}
+
+/// A vertex the geometry pipeline can carry: enough to be clipped, translated and
+/// quantised without knowing whether it also carries significance.
+///
+/// [`Pt`] and [`SigPt`] both implement it, which is what lets [`clip`] and the
+/// coordinate-only parts of this module be written once and tested on plain pairs.
+///
+/// [`clip`]: crate::clip
+pub trait Vertex: Copy {
+    fn xy(self) -> Pt;
+
+    /// The same vertex moved to `to`, keeping everything else about it.
+    fn moved(self, to: Pt) -> Self;
+
+    /// A vertex invented at `at`, where an edge crosses a clip boundary.
+    ///
+    /// It is not in the source, so no annotation pass ever measured it, and
+    /// nothing downstream may remove it: it is the only thing holding two rings
+    /// that share a boundary edge to the same vertex set.
+    fn boundary(at: Pt) -> Self;
+}
+
+impl Vertex for Pt {
+    fn xy(self) -> Pt {
+        self
+    }
+    fn moved(self, to: Pt) -> Pt {
+        to
+    }
+    fn boundary(at: Pt) -> Pt {
+        at
+    }
+}
+
+impl Vertex for SigPt {
+    fn xy(self) -> Pt {
+        (self.x, self.y)
+    }
+    fn moved(self, (x, y): Pt) -> SigPt {
+        SigPt { x, y, sig: self.sig }
+    }
+    fn boundary((x, y): Pt) -> SigPt {
+        SigPt { x, y, sig: ALWAYS }
+    }
+}
+
 /// Tile-boundary overspill, in extent units at [`DEFAULT_EXTENT`].
 ///
 /// Geometry is clipped to the tile rect grown by this much, so a line crossing a
@@ -60,14 +139,18 @@ pub fn buffer_for(extent: u32) -> f64 {
 /// singular cases removes a whole layer of branching from the clipper and the
 /// encoders, and MVT itself draws no distinction -- geometry type is per feature,
 /// not per part.
+///
+/// `V` is the vertex type: [`Pt`] in lon/lat, which is what a source and a spill
+/// record hold, and [`SigPt`] from [`project_geometry`] onwards, where the
+/// pipeline needs each vertex's significance.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Geometry {
-    Points(Vec<Pt>),
-    Lines(Vec<Vec<Pt>>),
+pub enum Geometry<V = Pt> {
+    Points(Vec<V>),
+    Lines(Vec<Vec<V>>),
     /// Each polygon is `[exterior, hole, hole, ...]`. Ring orientation is *not*
     /// significant here; [`crate::mvt::encode_polygons`] derives it from the
     /// signed area rather than trusting the input.
-    Polygons(Vec<Vec<Vec<Pt>>>),
+    Polygons(Vec<Vec<Vec<V>>>),
 }
 
 /// The integer counterpart of [`Geometry`], always in one tile's coordinates.
@@ -138,8 +221,14 @@ pub fn project_scaled(lon: f64, lat: f64, z: u8, extent: u32) -> Pt {
 }
 
 /// Project a whole lon/lat geometry into world coordinates for one zoom.
-pub fn project_geometry(g: &Geometry, z: u8, extent: u32) -> Geometry {
-    let p = |&(lon, lat): &Pt| project_scaled(lon, lat, z, extent);
+///
+/// The result's vertices carry no significance yet; [`crate::simplify::annotate`]
+/// is what fills that in, and it is the next step in the pipeline.
+pub fn project_geometry(g: &Geometry, z: u8, extent: u32) -> Geometry<SigPt> {
+    let p = |&(lon, lat): &Pt| {
+        let (x, y) = project_scaled(lon, lat, z, extent);
+        SigPt::new(x, y)
+    };
     match g {
         Geometry::Points(pts) => Geometry::Points(pts.iter().map(p).collect()),
         Geometry::Lines(lines) => {
@@ -159,7 +248,7 @@ pub fn project_geometry(g: &Geometry, z: u8, extent: u32) -> Geometry {
 /// Non-finite vertices are skipped. They should not exist -- [`project`] clamps --
 /// but a `NaN` reaching [`tile_range`] would silently produce an empty range,
 /// and dropping it here at least keeps the rest of the geometry.
-pub fn bounds(g: &Geometry) -> Option<Rect> {
+pub fn bounds<V: Vertex>(g: &Geometry<V>) -> Option<Rect> {
     let mut r: Option<Rect> = None;
     let mut add = |(x, y): Pt| {
         if !x.is_finite() || !y.is_finite() {
@@ -176,9 +265,9 @@ pub fn bounds(g: &Geometry) -> Option<Rect> {
         });
     };
     match g {
-        Geometry::Points(pts) => pts.iter().for_each(|p| add(*p)),
-        Geometry::Lines(lines) => lines.iter().flatten().for_each(|p| add(*p)),
-        Geometry::Polygons(polys) => polys.iter().flatten().flatten().for_each(|p| add(*p)),
+        Geometry::Points(pts) => pts.iter().for_each(|p| add(p.xy())),
+        Geometry::Lines(lines) => lines.iter().flatten().for_each(|p| add(p.xy())),
+        Geometry::Polygons(polys) => polys.iter().flatten().flatten().for_each(|p| add(p.xy())),
     }
     r
 }
@@ -252,12 +341,19 @@ impl TileRange {
 ///
 /// Polygons keep whole-ring boxes: a polygon legitimately covers its interior tiles,
 /// and per-segment boxes would drop every tile strictly inside the ring.
-pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(u64, u64)>) {
+pub fn tiles_touched<V: Vertex>(
+    g: &Geometry<V>,
+    z: u8,
+    extent: u32,
+    pad: f64,
+    out: &mut Vec<(u64, u64)>,
+) {
     out.clear();
     match g {
         // A point's box is a point; one range call each is already tight.
         Geometry::Points(pts) => {
-            for &(x, y) in pts {
+            for p in pts {
+                let (x, y) = p.xy();
                 push_box(out, x, y, x, y, z, extent, pad);
             }
         }
@@ -266,10 +362,13 @@ pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(
                 match line.as_slice() {
                     [] => {}
                     // A degenerate one-point "line" still occupies a tile.
-                    [(x, y)] => push_box(out, *x, *y, *x, *y, z, extent, pad),
+                    [p] => {
+                        let (x, y) = p.xy();
+                        push_box(out, x, y, x, y, z, extent, pad)
+                    }
                     _ => {
                         for seg in line.windows(2) {
-                            push_segment(out, seg[0], seg[1], z, extent, pad, 0);
+                            push_segment(out, seg[0].xy(), seg[1].xy(), z, extent, pad, 0);
                         }
                     }
                 }
@@ -282,7 +381,8 @@ pub fn tiles_touched(g: &Geometry, z: u8, extent: u32, pad: f64, out: &mut Vec<(
                 let Some(ext) = rings.first() else { continue };
                 let mut min = (f64::INFINITY, f64::INFINITY);
                 let mut max = (f64::NEG_INFINITY, f64::NEG_INFINITY);
-                for &(x, y) in ext {
+                for p in ext {
+                    let (x, y) = p.xy();
                     if !x.is_finite() || !y.is_finite() {
                         continue;
                     }
@@ -414,8 +514,11 @@ pub fn tile_rect(tx: u64, ty: u64, extent: u32, buffer: f64) -> Rect {
 
 /// Shift a geometry by `(dx, dy)`. Applied after the clip, with the tile's world
 /// origin negated, to put the geometry in tile coordinates.
-pub fn translate(g: &Geometry, dx: f64, dy: f64) -> Geometry {
-    let t = |&(x, y): &Pt| (x + dx, y + dy);
+pub fn translate<V: Vertex>(g: &Geometry<V>, dx: f64, dy: f64) -> Geometry<V> {
+    let t = |v: &V| {
+        let (x, y) = v.xy();
+        v.moved((x + dx, y + dy))
+    };
     match g {
         Geometry::Points(pts) => Geometry::Points(pts.iter().map(t).collect()),
         Geometry::Lines(lines) => {
@@ -432,7 +535,7 @@ pub fn translate(g: &Geometry, dx: f64, dy: f64) -> Geometry {
 
 /// Convenience for the two steps that always follow a clip: translate into the
 /// tile, then round onto the integer grid.
-pub fn to_tile(g: &Geometry, tx: u64, ty: u64, extent: u32) -> IntGeometry {
+pub fn to_tile<V: Vertex>(g: &Geometry<V>, tx: u64, ty: u64, extent: u32) -> IntGeometry {
     let e = extent as f64;
     quantize(&translate(g, -(tx as f64 * e), -(ty as f64 * e)))
 }
@@ -444,7 +547,7 @@ pub fn to_tile(g: &Geometry, tx: u64, ty: u64, extent: u32) -> IntGeometry {
 /// wasted three bytes that some renderers treat as a degenerate segment. Rings
 /// keep their explicit closing vertex here; [`crate::mvt::encode_polygons`]
 /// strips it, since `ClosePath` implies it.
-pub fn quantize(g: &Geometry) -> IntGeometry {
+pub fn quantize<V: Vertex>(g: &Geometry<V>) -> IntGeometry {
     match g {
         Geometry::Points(pts) => IntGeometry::Points(pts.iter().map(round_pt).collect()),
         Geometry::Lines(lines) => {
@@ -459,7 +562,8 @@ pub fn quantize(g: &Geometry) -> IntGeometry {
     }
 }
 
-fn round_pt(&(x, y): &Pt) -> IPt {
+fn round_pt<V: Vertex>(v: &V) -> IPt {
+    let (x, y) = v.xy();
     (round_i32(x), round_i32(y))
 }
 
@@ -539,7 +643,7 @@ mod tests {
             bounds(&g),
             Some(Rect { min_x: -3.0, min_y: 0.0, max_x: 10.0, max_y: 20.0 })
         );
-        assert_eq!(bounds(&Geometry::Points(vec![])), None);
+        assert_eq!(bounds(&Geometry::<Pt>::Points(vec![])), None);
 
         // A NaN vertex is skipped rather than poisoning the whole box.
         let g = Geometry::Points(vec![(1.0, 2.0), (f64::NAN, 0.0), (3.0, 4.0)]);

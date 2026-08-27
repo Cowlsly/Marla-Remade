@@ -17,10 +17,22 @@
 //! It clips against each of the four half-planes in turn, and it is exact for a
 //! convex polygon. For a **concave** polygon whose clipped result is two or more
 //! disjoint pieces, it returns a single ring joined by a degenerate sliver running
-//! along the boundary: zero area, so it renders correctly, but it is one ring
-//! where a strict result would be two. Splitting them requires a general polygon
-//! clipper (Vatti or Greiner-Hormann), which is a large piece of work for a defect
-//! that is invisible at render time. Documented here rather than pretended away.
+//! along the boundary. That sliver has zero area, so a scanline rasteriser fills
+//! the right pixels, but it is one ring where a strict result would be two, and
+//! that is not free: earcut cannot triangulate a self-touching ring reliably (see
+//! `library/map/src/main/rust/src/tess/fill.rs`), so the renderer is left doing
+//! the repair. Splitting them requires a general polygon clipper (Vatti or
+//! Greiner-Hormann), which is a large piece of work. Documented here rather than
+//! pretended away.
+//!
+//! ## Clip-introduced vertices are never removed
+//!
+//! A crossing this module interpolates is not in the source, so no annotation pass
+//! measured it: it comes out of [`crate::geom::Vertex::boundary`] with significance
+//! [`crate::geom::ALWAYS`]. That is what holds an exterior and a hole that both
+//! reach the same tile edge to the same vertices along it. Thinning those two
+//! coincident edges independently is what used to push a hole out through its own
+//! exterior.
 //!
 //! ## The `NaN` question
 //!
@@ -31,18 +43,21 @@
 //! so they should not arise, but the clipper is the last place that can still tell
 //! the difference between "outside" and "unknown".
 
-use crate::geom::{Geometry, Pt, Rect};
+use crate::geom::{Geometry, Pt, Rect, Vertex};
 
 /// Clip a geometry to `rect`, in the same coordinate space as the input.
 ///
 /// Points are kept or dropped whole; lines are partitioned; polygon rings are
 /// clipped into new rings. Parts that vanish entirely are removed, so an empty
 /// result means the geometry does not touch the rect at all.
-pub fn clip_geometry(g: &Geometry, rect: &Rect) -> Geometry {
+pub fn clip_geometry<V: Vertex>(g: &Geometry<V>, rect: &Rect) -> Geometry<V> {
     match g {
-        Geometry::Points(pts) => {
-            Geometry::Points(pts.iter().copied().filter(|p| finite(*p) && rect.contains(*p)).collect())
-        }
+        Geometry::Points(pts) => Geometry::Points(
+            pts.iter()
+                .copied()
+                .filter(|p| finite(*p) && rect.contains(p.xy()))
+                .collect(),
+        ),
         Geometry::Lines(lines) => {
             let mut out = Vec::new();
             for line in lines {
@@ -63,7 +78,8 @@ pub fn clip_geometry(g: &Geometry, rect: &Rect) -> Geometry {
     }
 }
 
-fn finite((x, y): Pt) -> bool {
+fn finite<V: Vertex>(v: V) -> bool {
+    let (x, y) = v.xy();
     x.is_finite() && y.is_finite()
 }
 
@@ -72,9 +88,9 @@ fn finite((x, y): Pt) -> bool {
 /// Consecutive segments that survive the clip and still meet are welded back into
 /// one output line; a gap starts a new one. That is what makes the result a
 /// partition of the original rather than a bag of segments.
-pub fn clip_line(line: &[Pt], rect: &Rect) -> Vec<Vec<Pt>> {
-    let mut out: Vec<Vec<Pt>> = Vec::new();
-    let mut current: Vec<Pt> = Vec::new();
+pub fn clip_line<V: Vertex>(line: &[V], rect: &Rect) -> Vec<Vec<V>> {
+    let mut out: Vec<Vec<V>> = Vec::new();
+    let mut current: Vec<V> = Vec::new();
 
     for w in line.windows(2) {
         let (a, b) = (w[0], w[1]);
@@ -96,7 +112,10 @@ pub fn clip_line(line: &[Pt], rect: &Rect) -> Vec<Vec<Pt>> {
                 }
             }
             Some((ca, cb)) => {
-                if current.last() == Some(&ca) {
+                // By position, not by vertex: the near end of this segment and the
+                // far end of the last are the same place but need not be the same
+                // vertex -- one may be a source vertex and the other a crossing.
+                if current.last().map(|v| v.xy()) == Some(ca.xy()) {
                     current.push(cb);
                 } else {
                     if current.len() > 1 {
@@ -123,23 +142,28 @@ pub fn clip_line(line: &[Pt], rect: &Rect) -> Vec<Vec<Pt>> {
 /// each of the four boundaries; the segment is outside as soon as the interval
 /// closes.
 ///
+/// An endpoint the interval did not move is returned as itself, significance and
+/// all; an endpoint it did move is a new vertex on the boundary.
+///
 /// A non-finite endpoint is `None`. Every comparison below would be false for a
 /// `NaN`, so it would fall through as "inside" and emit a `NaN` intersection.
-pub fn clip_segment(a: Pt, b: Pt, rect: &Rect) -> Option<(Pt, Pt)> {
+pub fn clip_segment<V: Vertex>(a: V, b: V, rect: &Rect) -> Option<(V, V)> {
     if !finite(a) || !finite(b) {
         return None;
     }
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let (ax, ay) = a.xy();
+    let (bx, by) = b.xy();
+    let (dx, dy) = (bx - ax, by - ay);
     let mut t0 = 0.0f64;
     let mut t1 = 1.0f64;
 
     // Each boundary is `p * t <= q`, where p is the direction component and q the
     // distance to the boundary.
     for &(p, q) in &[
-        (-dx, a.0 - rect.min_x),
-        (dx, rect.max_x - a.0),
-        (-dy, a.1 - rect.min_y),
-        (dy, rect.max_y - a.1),
+        (-dx, ax - rect.min_x),
+        (dx, rect.max_x - ax),
+        (-dy, ay - rect.min_y),
+        (dy, rect.max_y - ay),
     ] {
         if p == 0.0 {
             // Parallel to this boundary: inside iff already on the right side.
@@ -167,9 +191,10 @@ pub fn clip_segment(a: Pt, b: Pt, rect: &Rect) -> Option<(Pt, Pt)> {
             }
         }
     }
+    let at = |t: f64| (ax + t * dx, ay + t * dy);
     Some((
-        (a.0 + t0 * dx, a.1 + t0 * dy),
-        (a.0 + t1 * dx, a.1 + t1 * dy),
+        if t0 == 0.0 { a } else { V::boundary(at(t0)) },
+        if t1 == 1.0 { b } else { V::boundary(at(t1)) },
     ))
 }
 
@@ -179,8 +204,8 @@ pub fn clip_segment(a: Pt, b: Pt, rect: &Rect) -> Option<(Pt, Pt)> {
 /// disappears the whole polygon does, holes included: a hole with no surrounding
 /// area is not a shape, and emitting one would render as a solid patch of the
 /// wrong colour.
-pub fn clip_polygon(rings: &[Vec<Pt>], rect: &Rect) -> Vec<Vec<Pt>> {
-    let mut out: Vec<Vec<Pt>> = Vec::new();
+pub fn clip_polygon<V: Vertex>(rings: &[Vec<V>], rect: &Rect) -> Vec<Vec<V>> {
+    let mut out: Vec<Vec<V>> = Vec::new();
     for (i, ring) in rings.iter().enumerate() {
         let clipped = clip_ring(ring, rect);
         if clipped.len() < 3 {
@@ -197,12 +222,14 @@ pub fn clip_polygon(rings: &[Vec<Pt>], rect: &Rect) -> Vec<Vec<Pt>> {
 /// Sutherland-Hodgman: clip one ring against the four boundaries in turn.
 ///
 /// The caller's closure convention is preserved: an explicitly closed ring
-/// (first == last) is normalised on the way in and re-closed on the way out, and
-/// an unclosed one stays unclosed. Fewer than three distinct vertices out means
-/// the ring did not survive.
-pub fn clip_ring(ring: &[Pt], rect: &Rect) -> Vec<Pt> {
-    let was_closed = ring.len() > 1 && ring.first() == ring.last();
-    let open: Vec<Pt> = ring[..ring.len() - usize::from(was_closed)]
+/// (first == last) is normalised on the way in and re-closed on the way out with a
+/// **copy of the surviving first vertex**, so the two carry the same significance
+/// and no later filter can open the ring by keeping one and dropping the other. An
+/// unclosed ring stays unclosed. Fewer than three distinct vertices out means the
+/// ring did not survive.
+pub fn clip_ring<V: Vertex>(ring: &[V], rect: &Rect) -> Vec<V> {
+    let was_closed = ring.len() > 1 && ring.first().map(|v| v.xy()) == ring.last().map(|v| v.xy());
+    let open: Vec<V> = ring[..ring.len() - usize::from(was_closed)]
         .iter()
         .copied()
         .filter(|p| finite(*p))
@@ -221,28 +248,28 @@ pub fn clip_ring(ring: &[Pt], rect: &Rect) -> Vec<Pt> {
         if current.len() < 3 {
             return Vec::new();
         }
-        let mut next: Vec<Pt> = Vec::with_capacity(current.len() + 4);
+        let mut next: Vec<V> = Vec::with_capacity(current.len() + 4);
         for i in 0..current.len() {
             let a = current[(i + current.len() - 1) % current.len()];
             let b = current[i];
-            let (a_in, b_in) = (edge.inside(a), edge.inside(b));
+            let (a_in, b_in) = (edge.inside(a.xy()), edge.inside(b.xy()));
             if b_in {
                 // Entering: the crossing comes first, then the vertex itself.
                 if !a_in {
-                    next.push(edge.intersect(a, b));
+                    next.push(V::boundary(edge.intersect(a.xy(), b.xy())));
                 }
                 next.push(b);
             } else if a_in {
                 // Leaving: only the crossing.
-                next.push(edge.intersect(a, b));
+                next.push(V::boundary(edge.intersect(a.xy(), b.xy())));
             }
         }
         current = next;
     }
 
     // The clip can put two crossings on the same boundary point.
-    current.dedup();
-    if current.len() > 1 && current.first() == current.last() {
+    current.dedup_by(|a, b| a.xy() == b.xy());
+    if current.len() > 1 && current.first().map(|v| v.xy()) == current.last().map(|v| v.xy()) {
         current.pop();
     }
     if current.len() < 3 {
@@ -459,7 +486,7 @@ mod tests {
     #[test]
     fn a_single_vertex_line_yields_nothing() {
         assert!(clip_line(&[(5.0, 5.0)], &r()).is_empty());
-        assert!(clip_line(&[], &r()).is_empty());
+        assert!(clip_line::<Pt>(&[], &r()).is_empty());
     }
 
     // --- polygons ----------------------------------------------------------
@@ -520,7 +547,7 @@ mod tests {
 
     #[test]
     fn a_degenerate_ring_disappears() {
-        assert!(clip_ring(&[], &r()).is_empty());
+        assert!(clip_ring::<Pt>(&[], &r()).is_empty());
         assert!(clip_ring(&[(1.0, 1.0), (2.0, 2.0)], &r()).is_empty());
         // A closed ring of two distinct vertices is a line, not an area.
         assert!(clip_ring(&[(1.0, 1.0), (2.0, 2.0), (1.0, 1.0)], &r()).is_empty());
@@ -616,5 +643,54 @@ mod tests {
         let line = vec![(4090.0, 100.0), (4200.0, 100.0)];
         let out = clip_line(&line, &rect);
         assert!(close(out[0][1], (4096.0 + DEFAULT_BUFFER, 100.0)), "{out:?}");
+    }
+
+    // --- significance ------------------------------------------------------
+
+    /// Every vertex the clip interpolates is marked as one no threshold may drop,
+    /// and every vertex that merely passes through keeps whatever it arrived with.
+    /// That is the contract [`crate::simplify::filter`] relies on to keep two rings
+    /// sharing a boundary edge on the same vertices.
+    #[test]
+    fn a_crossing_is_marked_unremovable_and_a_pass_through_keeps_its_significance() {
+        use crate::geom::{SigPt, ALWAYS};
+
+        let at = |x: f64, y: f64, sig: f64| SigPt { x, y, sig };
+        // In from the west, out to the east: both ends are crossings, the middle
+        // vertex is the source's own and keeps its score.
+        let line = [at(-5.0, 5.0, 7.0), at(5.0, 5.0, 3.0), at(15.0, 5.0, 9.0)];
+        let out = clip_line(&line, &r());
+        assert_eq!(out.len(), 1, "{out:?}");
+        let piece = &out[0];
+        assert_eq!(piece.len(), 3);
+        assert_eq!(piece[0], at(0.0, 5.0, ALWAYS), "the western crossing");
+        assert_eq!(piece[1], at(5.0, 5.0, 3.0), "untouched, score and all");
+        assert_eq!(piece[2], at(10.0, 5.0, ALWAYS), "the eastern crossing");
+
+        // A segment entirely inside is handed back as the very same vertices, not
+        // as recomputed ones: `a + 1.0 * (b - a)` is not always `b`.
+        let inside = [at(2.0, 2.0, 4.0), at(8.0, 7.0, 6.0)];
+        assert_eq!(clip_line(&inside, &r())[0], inside.to_vec());
+    }
+
+    /// A ring re-closed after clipping must close on a **copy** of its first
+    /// surviving vertex. Two ends with different significance is how a filter opens
+    /// a ring: it keeps one and drops the other.
+    #[test]
+    fn a_re_closed_ring_closes_on_a_copy_of_its_first_vertex() {
+        use crate::geom::SigPt;
+
+        let at = |x: f64, y: f64, sig: f64| SigPt { x, y, sig };
+        // Half in, half out, so the ring is genuinely rebuilt by the clip.
+        let ring = [
+            at(5.0, 2.0, 1.0),
+            at(15.0, 2.0, 2.0),
+            at(15.0, 8.0, 3.0),
+            at(5.0, 8.0, 4.0),
+            at(5.0, 2.0, 1.0),
+        ];
+        let out = clip_ring(&ring, &r());
+        assert!(out.len() > 3, "{out:?}");
+        assert_eq!(out.first(), out.last(), "closed, on the same vertex exactly");
     }
 }

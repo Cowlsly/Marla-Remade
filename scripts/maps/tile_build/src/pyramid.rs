@@ -3,8 +3,8 @@
 //! Turns a list of lon/lat features into a PMTiles archive:
 //!
 //! ```text
-//! per zoom, per feature: bounds -> tile range
-//! per tile:              clip -> to_tile -> simplify -> encode -> drop policy
+//! per zoom, per feature: project -> annotate -> tile range
+//! per tile:              clip -> filter -> to_tile -> encode -> drop policy
 //!                        -> gzip -> pmtiles::Builder
 //! ```
 //!
@@ -35,11 +35,14 @@
 //!   push an archive past its own `--maximum-zoom`, so an archive's advertised zoom
 //!   range stops being a fact about its contents. Here `--maxzoom` is exactly the
 //!   deepest zoom present.
-//! * **`--detect-shared-borders` is not implemented.** Adjacent admin polygons are
-//!   simplified independently, so two countries sharing a border can end up with
-//!   slightly different vertex sets along it. At low zoom that shows as a hairline
-//!   gap or a hairline overlap. Reproducing it needs a shared topology pass across
-//!   features, which is a project of its own.
+//! * **`--detect-shared-borders` is not implemented.** Two *different* admin
+//!   polygons that share a border are simplified independently, so at low zoom the
+//!   border can show as a hairline gap or a hairline overlap. Reproducing that needs
+//!   a shared topology pass across features, which is a project of its own. The
+//!   intra-feature case — a hole and the exterior it shares a clipped tile edge with
+//!   — is not affected: [`crate::simplify`] annotates each vertex once on the
+//!   unclipped source and filters per zoom, so both rings keep the same vertices
+//!   along the edge.
 
 use crate::clip::clip_geometry;
 use crate::geom::{self, Geometry, IntGeometry};
@@ -234,8 +237,11 @@ fn bucket_feature(
 ) -> Result<BucketedFeature> {
     let t0 = std::time::Instant::now();
     // Project once per feature per zoom, not once per tile: a coastline can cross
-    // thousands of tiles and the projection is the expensive part.
-    let projected = geom::project_geometry(geometry, z, opts.extent);
+    // thousands of tiles and the projection is the expensive part. Annotating here
+    // for the same reason, and because it has to see the ring UNCLIPPED -- see
+    // `simplify`'s module docs.
+    let mut projected = geom::project_geometry(geometry, z, opts.extent);
+    simplify::annotate(&mut projected);
     geom::tiles_touched(&projected, z, opts.extent, buffer, touched);
     let mut out = BucketedFeature {
         blob: Vec::new(),
@@ -244,17 +250,17 @@ fn bucket_feature(
     for &(tx, ty) in touched.iter() {
         let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
         let clipped = clip_geometry(&projected, &rect);
-        let local = geom::to_tile(&clipped, tx, ty, opts.extent);
-        let simplified = simplify::simplify(&local, tolerance);
-        if simplified.is_empty() {
+        let filtered = simplify::filter(&clipped, tolerance);
+        let local = geom::to_tile(&filtered, tx, ty, opts.extent);
+        if local.is_empty() {
             continue;
         }
         rec.clear();
         spill::encode_record(
             pmtiles::tile_id(z, tx, ty),
             seq,
-            extent_of(&simplified),
-            &simplified,
+            extent_of(&local),
+            &local,
             props,
             rec,
         )?;
@@ -301,12 +307,22 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
         let tolerance = simplify::tolerance_for(z, opts.max_zoom, opts.simplification);
 
         // Project once per zoom, not once per tile: a coastline can cross thousands
-        // of tiles and the projection is the expensive part. Per-feature pure, so it
-        // maps across the pool; `collect` into a Vec keeps it in input order.
-        let projected: Vec<Option<Geometry>> = par::install(|| {
+        // of tiles and the projection is the expensive part. Annotate here too, both
+        // for that reason and because significance has to be measured on the
+        // UNCLIPPED ring. Per-feature pure, so it maps across the pool; `collect`
+        // into a Vec keeps it in input order.
+        //
+        // Identical to `bucket_feature`'s prologue on purpose: the byte-identity
+        // tests compare the two producers, so a step added to one and not the other
+        // is a test failure rather than a silent divergence.
+        let projected: Vec<Option<Geometry<geom::SigPt>>> = par::install(|| {
             features
                 .par_iter()
-                .map(|f| Some(geom::project_geometry(&f.geometry, z, opts.extent)))
+                .map(|f| {
+                    let mut p = geom::project_geometry(&f.geometry, z, opts.extent);
+                    simplify::annotate(&mut p);
+                    Some(p)
+                })
                 .collect()
         });
 
@@ -348,7 +364,7 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
                         let indices = &by_tile[&(tx, ty)];
                         let rect = geom::tile_rect(tx, ty, opts.extent, buffer);
 
-                        // Clip, move into the tile, simplify. Anything that vanishes
+                        // Clip, thin, move into the tile. Anything that vanishes
                         // here never reached the tile in the first place, so it is not
                         // a "drop".
                         let mut placed: Vec<(usize, i64, IntGeometry)> =
@@ -356,12 +372,12 @@ pub fn build_archive(features: &[Feature], opts: &Options) -> Result<(Vec<u8>, V
                         for &i in indices {
                             let p = projected[i].as_ref().expect("filtered above");
                             let clipped = clip_geometry(p, &rect);
-                            let local = geom::to_tile(&clipped, tx, ty, opts.extent);
-                            let simplified = simplify::simplify(&local, tolerance);
-                            if simplified.is_empty() {
+                            let filtered = simplify::filter(&clipped, tolerance);
+                            let local = geom::to_tile(&filtered, tx, ty, opts.extent);
+                            if local.is_empty() {
                                 continue;
                             }
-                            placed.push((i, extent_of(&simplified), simplified));
+                            placed.push((i, extent_of(&local), local));
                         }
                         if placed.is_empty() {
                             return Ok(None);
@@ -1786,6 +1802,173 @@ mod tests {
         assert_eq!(rings[0].len(), 2, "exterior plus its hole: {rings:?}");
         assert!(mvt::signed_area(&rings[0][0]) > 0, "exterior positive");
         assert!(mvt::signed_area(&rings[0][1]) < 0, "interior negative");
+    }
+
+    /// A z6 tile spans `360/64 = 5.625` degrees of longitude, so `-123.75` is
+    /// exactly the edge between tile x 9 and tile x 10. Everything below is built
+    /// around that so a fixture can be made to straddle a real tile boundary
+    /// without having to invert the projection.
+    const Z6_TILE_EDGE_LON: f64 = -123.75;
+
+    /// A polygon whose exterior **and** hole both cross [`Z6_TILE_EDGE_LON`], with
+    /// enough sub-tolerance jitter along every edge that filtering has something to
+    /// remove on both sides of the boundary.
+    ///
+    /// One z6 extent unit is `5.625 / 4096` degrees, about `0.00137`, so the jitter
+    /// below is a third of a unit: under the 1-unit tolerance, and therefore exactly
+    /// the detail a coarse zoom is supposed to drop.
+    fn straddling_polygon() -> Feature {
+        let jitter = |i: usize| (i % 5) as f64 * 0.0005;
+        let ring = |west: f64, east: f64, south: f64, north: f64| {
+            let mut r: Vec<(f64, f64)> = Vec::new();
+            let (w, h) = (east - west, north - south);
+            for i in 0..=200 {
+                let t = i as f64 / 200.0;
+                r.push((west + w * t, south + jitter(i)));
+            }
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                r.push((east - jitter(i), south + h * t));
+            }
+            for i in 0..=200 {
+                let t = i as f64 / 200.0;
+                r.push((east - w * t, north - jitter(i)));
+            }
+            for i in 0..=20 {
+                let t = i as f64 / 20.0;
+                r.push((west + jitter(i), north - h * t));
+            }
+            r.push(r[0]);
+            r
+        };
+        let e = Z6_TILE_EDGE_LON;
+        Feature {
+            geometry: Geometry::Polygons(vec![vec![
+                ring(e - 2.25, e + 2.75, 36.0, 40.0),
+                ring(e - 1.25, e + 1.75, 37.0, 39.0),
+            ]]),
+            props: vec![("name".to_string(), Value::String("straddler".into()))],
+        }
+    }
+
+    /// Crossing-number point-in-ring, with a point on the ring counting as inside.
+    ///
+    /// Integer throughout, and `i64` for the cross products: two `i32` spans
+    /// multiply to 62 bits, so containment is decided exactly rather than nearly.
+    fn in_ring(ring: &[(i32, i32)], p: (i32, i32)) -> bool {
+        let n = ring.len();
+        let mut inside = false;
+        for i in 0..n {
+            let (ax, ay) = ring[i];
+            let (bx, by) = ring[(i + 1) % n];
+            let cross = (bx as i64 - ax as i64) * (p.1 as i64 - ay as i64)
+                - (by as i64 - ay as i64) * (p.0 as i64 - ax as i64);
+            if cross == 0
+                && p.0 >= ax.min(bx)
+                && p.0 <= ax.max(bx)
+                && p.1 >= ay.min(by)
+                && p.1 <= ay.max(by)
+            {
+                return true;
+            }
+            if (ay > p.1) != (by > p.1) {
+                let d = by as i64 - ay as i64;
+                let u = d * (p.0 as i64 - ax as i64);
+                let t = (p.1 as i64 - ay as i64) * (bx as i64 - ax as i64);
+                if (d > 0) == (u < t) {
+                    inside = !inside;
+                }
+            }
+        }
+        inside
+    }
+
+    /// The invariant the whole annotate-then-filter design exists to hold: a hole
+    /// that crossed a tile boundary is still inside its exterior once the tile has
+    /// been built.
+    ///
+    /// A hole straddling its exterior is not something earcut can express, so the
+    /// renderer has to drop it (`library/map/src/main/rust/src/tess/fill.rs`) and the
+    /// island or lake fills in solid. Simplifying each clipped ring on its own is
+    /// what used to produce them, so this asserts on the built archive rather than
+    /// on any one stage.
+    #[test]
+    fn a_hole_crossing_a_tile_boundary_stays_inside_its_exterior() {
+        // maxzoom above the zoom under test, so z6 is genuinely being thinned:
+        // `tolerance_for` spares only the deepest zoom.
+        let (bytes, _) =
+            build_archive(&[straddling_polygon()], &Options::new("land", 6, 7)).unwrap();
+        let a = Archive::parse(&bytes).unwrap();
+
+        let mut checked = 0;
+        for (id, raw) in a.iter_tiles().unwrap() {
+            let (z, _, _) = pmtiles::tile_zxy(id);
+            let tile = Tile::decode(&crate::gz::decompress(raw).unwrap()).unwrap();
+            let f = &tile.layer("land").unwrap().features[0];
+            for rings in mvt::decode_polygons(&f.geometry).expect("polygon geometry") {
+                let (exterior, holes) = rings.split_first().expect("an exterior");
+                for hole in holes {
+                    for &p in hole {
+                        assert!(
+                            in_ring(exterior, p),
+                            "z{z} tile {id}: hole vertex {p:?} escaped its exterior"
+                        );
+                    }
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0, "the fixture produced no holes to check");
+    }
+
+    /// Two tiles that overlap must agree, vertex for vertex, on the geometry inside
+    /// the overlap. They clip the same annotated source and threshold it the same
+    /// way, so the only thing that can make them disagree is thinning a clipped ring
+    /// against its own endpoints -- which is what a seam at a tile join looks like.
+    ///
+    /// The comparison is over the band strictly inside BOTH buffered rects: the
+    /// crossings each tile's own clip introduced sit exactly on the edge of that
+    /// band and belong to one tile only.
+    #[test]
+    fn two_adjacent_tiles_agree_on_the_geometry_they_share() {
+        let (bytes, _) =
+            build_archive(&[straddling_polygon()], &Options::new("land", 6, 7)).unwrap();
+        let a = Archive::parse(&bytes).unwrap();
+
+        let extent = DEFAULT_EXTENT;
+        let buffer = geom::buffer_for(extent);
+        let (edge_tile_x, _) = geom::project(Z6_TILE_EDGE_LON, 0.0, 6);
+        let edge = edge_tile_x * extent as f64;
+        let east_tx = edge_tile_x as u64;
+        // The straddling polygon covers lat 36..40, which at z6 is one tile row.
+        let ty = geom::project(0.0, 38.0, 6).1.floor() as u64;
+
+        // Every vertex of the feature, in WORLD coordinates, that lies strictly
+        // inside both tiles' buffered rects.
+        let shared = |tx: u64| -> Vec<(i64, i64)> {
+            let tile = a
+                .tile(6, tx, ty)
+                .unwrap()
+                .map(|b| Tile::decode(&b).unwrap())
+                .unwrap_or_else(|| panic!("a tile at z6/{tx}/{ty}"));
+            let f = &tile.layer("land").unwrap().features[0];
+            let ox = tx as i64 * extent as i64;
+            let mut out: Vec<(i64, i64)> = mvt::decode_polygons(&f.geometry)
+                .expect("polygon geometry")
+                .into_iter()
+                .flatten()
+                .flatten()
+                .map(|(x, y)| (x as i64 + ox, y as i64))
+                .filter(|&(x, _)| ((x as f64) - edge).abs() < buffer)
+                .collect();
+            out.sort_unstable();
+            out
+        };
+
+        let west = shared(east_tx - 1);
+        let east = shared(east_tx);
+        assert!(!west.is_empty(), "the fixture reaches neither side of the edge");
+        assert_eq!(west, east, "the two tiles disagree inside their overlap");
     }
 
     #[test]
