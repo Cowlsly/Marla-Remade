@@ -172,6 +172,7 @@ impl Reference {
                     Kind::Conv => self.conv(push),
                     Kind::ConvTranspose => self.conv_transpose(push),
                     Kind::MaxPool => self.max_pool(push),
+                    Kind::AvgPool => self.avg_pool(push),
                     Kind::Resize => self.resize(push),
                     Kind::ResizeNearest => self.resize_nearest(push),
                     Kind::GlobalAvgPool => self.global_avg_pool(push),
@@ -352,6 +353,40 @@ impl Reference {
                         }
                     }
                     self.store(p.out, nchw(p, oc, oy, ox), best)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Average pooling over an explicit window, floored and unpadded.
+    ///
+    /// The divisor is the window size rather than the number of elements actually read,
+    /// which is only correct because `Builder::avg_pool` refuses a window that overhangs.
+    fn avg_pool(&mut self, p: &Push) -> Result<(), String> {
+        let window = p.kh * p.kw;
+        if window == 0 {
+            return Err("an average pool over an empty window".into());
+        }
+        for oc in 0..p.out_c {
+            let plane = oc * p.in_h * p.in_w;
+            for oy in 0..p.out_h {
+                for ox in 0..p.out_w {
+                    let mut total = 0.0;
+                    for ky in 0..p.kh {
+                        let iy = oy * p.stride_h + ky;
+                        if iy >= p.in_h {
+                            continue;
+                        }
+                        for kx in 0..p.kw {
+                            let ix = ox * p.stride_w + kx;
+                            if ix >= p.in_w {
+                                continue;
+                            }
+                            total += self.load(p.in0, plane + iy * p.in_w + ix)?;
+                        }
+                    }
+                    self.store(p.out, nchw(p, oc, oy, ox), total / window as f32)?;
                 }
             }
         }
@@ -956,6 +991,60 @@ mod tests {
         let input: Vec<f32> = (1..=16).map(|v| v as f32).collect();
         let got = one(Shape::new(1, 4, 4), &input, &[], |b, x| b.max_pool_2x2(x));
         close(&got, &[6.0, 8.0, 14.0, 16.0]);
+    }
+
+    #[test]
+    fn average_pooling_takes_the_mean_of_each_window() {
+        // The same 4x4 as the max-pool fixture above, so the two are directly
+        // comparable: 6 against 3.5 for the first window.
+        let input: Vec<f32> = (1..=16).map(|v| v as f32).collect();
+        let got = one(Shape::new(1, 4, 4), &input, &[], |b, x| {
+            b.avg_pool(x, (2, 2), (2, 2))
+        });
+        close(&got, &[3.5, 5.5, 11.5, 13.5]);
+    }
+
+    #[test]
+    fn an_asymmetric_pool_window_is_not_transposed() {
+        // The recogniser's shape: kernel and stride both (3, 2) on a 3-row map, which
+        // collapses the height to one and halves the width. This is the step that turns
+        // a feature map into a `[d_model, 1, T]` sequence.
+        //
+        // Rows are (1,2,3,4), (5,6,7,8), (9,10,11,12), so the left window holds
+        // 1,2,5,6,9,10 and the right one 3,4,7,8,11,12. A kernel read as (2, 3) instead
+        // would pool 1,2,3,5,6,7 and answer 4 for the first column.
+        let input: Vec<f32> = (1..=12).map(|v| v as f32).collect();
+        let got = one(Shape::new(1, 3, 4), &input, &[], |b, x| {
+            b.avg_pool(x, (3, 2), (3, 2))
+        });
+        close(&got, &[33.0 / 6.0, 45.0 / 6.0]);
+    }
+
+    #[test]
+    fn average_pooling_keeps_channels_apart() {
+        // Two channels a decade apart, so a pool whose plane stride was wrong folds them
+        // together visibly rather than shifting the answer slightly.
+        let got = one(
+            Shape::new(2, 1, 4),
+            &[1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0],
+            &[],
+            |b, x| b.avg_pool(x, (1, 2), (1, 2)),
+        );
+        close(&got, &[1.5, 3.5, 15.0, 35.0]);
+    }
+
+    #[test]
+    fn a_pool_window_that_does_not_tile_its_input_is_refused() {
+        // 5 wide with a 2-wide window at stride 2 drops the last column, and the shader
+        // divides by the window size regardless — so the choice is between a silently
+        // dropped column and a silently rescaled edge. Neither is acceptable, so the
+        // build fails instead.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let x = b.input(Shape::new(1, 2, 5));
+        let pooled = b.avg_pool(x, (2, 2), (2, 2));
+        let error = b.finish(&[pooled]).expect_err("a 5-wide input");
+        assert!(error.contains("does not tile 5 along w"), "{error}");
     }
 
     #[test]

@@ -1,0 +1,56 @@
+#version 450
+//! Average pooling over an explicit window. One use, in PP-OCRv5 recognition.
+//!
+//! # What it is for
+//!
+//! The recogniser's backbone ends at `[480, 3, 80]` and its transformer wants a
+//! sequence. One pool with kernel `(3, 2)` and stride `(3, 2)` does both jobs at once:
+//! it collapses the remaining three rows to one and halves the width, giving
+//! `[480, 1, 40]` — which is `[d_model, 1, T]`, the layout everything downstream reads.
+//!
+//! So this is not a general-purpose pooling layer that happens to be used once. It is
+//! the point at which a feature map becomes a sequence, and the asymmetric kernel is why
+//! the shader takes `kh` and `kw` separately rather than one size.
+//!
+//! # No padding, and an exact divisor
+//!
+//! `nets::Builder::avg_pool` refuses a window that does not tile its input exactly, so
+//! every window is fully inside the map and the divisor is always `kh * kw`. That is
+//! what `count_include_pad = 0` means when there is no padding to count, and it is why
+//! the bounds tests below can never fire — they are here so that a plan which somehow
+//! got past the builder reads in range rather than off the end of the arena.
+//!
+//! Distinct from `gap.comp`, which reduces *all* of H and W to one value per channel and
+//! is the squeeze in a squeeze-excite. That one needs no window at all; this one is
+//! nothing but window.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+    uint plane = p.in0 + oc * p.in_h * p.in_w;
+    uint top = oy * p.stride_h;
+    uint left = ox * p.stride_w;
+
+    float total = 0.0;
+    for (uint ky = 0u; ky < p.kh; ky++) {
+        uint iy = top + ky;
+        if (iy >= p.in_h) {
+            continue;
+        }
+        uint row = plane + iy * p.in_w;
+        for (uint kx = 0u; kx < p.kw; kx++) {
+            uint ix = left + kx;
+            if (ix >= p.in_w) {
+                continue;
+            }
+            total += float(arena[row + ix]);
+        }
+    }
+    arena[p.out_at + index] = float16_t(total / float(p.kh * p.kw));
+}

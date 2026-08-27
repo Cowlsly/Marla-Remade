@@ -126,6 +126,14 @@ pub enum Kind {
     ConvTranspose,
     /// Max pooling.
     MaxPool,
+    /// Average pooling over an explicit window, floored and unpadded.
+    ///
+    /// One use: the pool that turns PP-OCRv5 recognition's `[480, 3, 80]` feature map
+    /// into the `[480, 1, 40]` sequence its transformer reads, with kernel and stride
+    /// both `(3, 2)`. The asymmetric window is the reason this carries `kh`/`kw` rather
+    /// than one size, and the reason it is not [`Kind::GlobalAvgPool`] with a flag — that
+    /// one reduces all of H and W to a single value and needs no window arithmetic.
+    AvgPool,
     /// Bilinear resize, `half_pixel` coordinates.
     Resize,
     /// Nearest-neighbour resize, `asymmetric` coordinates and `floor` rounding.
@@ -387,6 +395,12 @@ enum Node {
         transpose: bool,
     },
     MaxPool {
+        input: Id,
+        out: Id,
+        kernel: (u32, u32),
+        stride: (u32, u32),
+    },
+    AvgPool {
         input: Id,
         out: Id,
         kernel: (u32, u32),
@@ -685,6 +699,33 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Average pooling over `kernel` at `stride`, which must tile the input exactly.
+    ///
+    /// The one use is `(3, 2)` at `(3, 2)` on a `3 x 80` map, so it tiles. Refusing
+    /// anything else is deliberate: a window that overhangs makes the divisor a question
+    /// — ONNX has `count_include_pad` for it and the two answers differ — and the shader
+    /// divides by `kh * kw` unconditionally. A ragged extent would silently scale the
+    /// edge of the sequence.
+    pub fn avg_pool(&mut self, input: Id, kernel: (u32, u32), stride: (u32, u32)) -> Id {
+        let in_shape = self.shape_of(input);
+        let (kh, kw) = kernel;
+        let out_h = conv_out(in_shape.h, kh, stride.0, 1, 0);
+        let out_w = conv_out(in_shape.w, kw, stride.1, 1, 0);
+        for (axis, extent, k, s, out) in [
+            ('h', in_shape.h, kh, stride.0, out_h),
+            ('w', in_shape.w, kw, stride.1, out_w),
+        ] {
+            if out == 0 || out.saturating_sub(1) * s + k != extent {
+                self.fail(format!(
+                    "avg_pool of {k} at stride {s} does not tile {extent} along {axis}, so \
+                     the divisor would not be the window size"
+                ));
+            }
+        }
+        let out = self.tensor(Shape::new(in_shape.c, out_h, out_w));
+        self.nodes.push(Node::AvgPool { input, out, kernel, stride });
+        out
+    }
     /// Bilinear resize to `like`'s spatial size, which is how both shipping nets always
     /// use it — U^2-Net's `_upsample_like`, and the selfie net's decoder skips.
     pub fn resize_like(&mut self, input: Id, like: Id) -> Id {
@@ -1017,6 +1058,29 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::AvgPool { input, out, kernel, stride } => {
+                let (si, so) = (shape(*input), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AvgPool,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        in_c: si.c,
+                        in_h: si.h,
+                        in_w: si.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        kh: kernel.0,
+                        kw: kernel.1,
+                        stride_h: stride.0,
+                        stride_w: stride.1,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Resize { input, out, nearest } => {
                 let (si, so) = (shape(*input), shape(*out));
                 ops.push(Op::Dispatch {
@@ -1209,6 +1273,7 @@ impl Node {
         match self {
             Node::Conv { out, .. }
             | Node::MaxPool { out, .. }
+            | Node::AvgPool { out, .. }
             | Node::Resize { out, .. }
             | Node::GlobalAvgPool { out, .. }
             | Node::Binary { out, .. }
@@ -1225,6 +1290,7 @@ impl Node {
         match self {
             Node::Conv { input, .. }
             | Node::MaxPool { input, .. }
+            | Node::AvgPool { input, .. }
             | Node::Resize { input, .. }
             | Node::Affine { input, .. }
             | Node::LayerNorm { input, .. }

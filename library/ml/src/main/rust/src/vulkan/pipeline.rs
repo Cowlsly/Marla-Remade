@@ -28,6 +28,7 @@ const CONV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv.comp.spv"));
 const CONV_TRANSPOSE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_transpose.comp.spv"));
 const MAXPOOL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/maxpool.comp.spv"));
+const AVGPOOL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/avgpool.comp.spv"));
 const RESIZE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/resize.comp.spv"));
 const RESIZE_NEAREST: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/resize_nearest.comp.spv"));
@@ -41,10 +42,11 @@ const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.sp
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 13] = [
+const SPIRV: [&[u8]; 14] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
+    AVGPOOL,
     RESIZE,
     RESIZE_NEAREST,
     GAP,
@@ -81,6 +83,7 @@ pub struct Pipelines {
     conv: vk::Pipeline,
     conv_transpose: vk::Pipeline,
     maxpool: vk::Pipeline,
+    avgpool: vk::Pipeline,
     resize: vk::Pipeline,
     resize_nearest: vk::Pipeline,
     gap: vk::Pipeline,
@@ -216,6 +219,7 @@ impl Pipelines {
             conv,
             conv_transpose,
             maxpool,
+            avgpool,
             resize,
             resize_nearest,
             gap,
@@ -245,6 +249,7 @@ impl Pipelines {
             conv,
             conv_transpose,
             maxpool,
+            avgpool,
             resize,
             resize_nearest,
             gap,
@@ -264,6 +269,7 @@ impl Pipelines {
             Kind::Conv => self.conv,
             Kind::ConvTranspose => self.conv_transpose,
             Kind::MaxPool => self.maxpool,
+            Kind::AvgPool => self.avgpool,
             Kind::Resize => self.resize,
             Kind::ResizeNearest => self.resize_nearest,
             Kind::GlobalAvgPool => self.gap,
@@ -285,6 +291,7 @@ impl Pipelines {
             self.conv,
             self.conv_transpose,
             self.maxpool,
+            self.avgpool,
             self.resize,
             self.resize_nearest,
             self.gap,
