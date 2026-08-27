@@ -35,6 +35,7 @@ const GAP: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gap.comp.spv"));
 const ADD: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add.comp.spv"));
 const MUL_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul_bcast.comp.spv"));
 const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.comp.spv"));
+const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.comp.spv"));
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
 /// workgroups, and each shader bails on the over-dispatched tail.
@@ -66,6 +67,7 @@ pub struct Pipelines {
     add: vk::Pipeline,
     mul_bcast: vk::Pipeline,
     affine: vk::Pipeline,
+    layernorm: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -184,6 +186,7 @@ impl Pipelines {
             ADD,
             MUL_BCAST,
             AFFINE,
+            LAYERNORM,
         ] {
             match compute_pipeline(device, layout, spirv) {
                 Ok(pipeline) => built.push(pipeline),
@@ -195,11 +198,21 @@ impl Pipelines {
                 }
             }
         }
-        let [conv, conv_transpose, maxpool, resize, resize_nearest, gap, add, mul_bcast, affine] =
-            match built.as_slice() {
-                [a, b, c, d, e, f, g, h, i] => [*a, *b, *c, *d, *e, *f, *g, *h, *i],
-                _ => return Err("wrong pipeline count".into()),
-            };
+        let [
+            conv,
+            conv_transpose,
+            maxpool,
+            resize,
+            resize_nearest,
+            gap,
+            add,
+            mul_bcast,
+            affine,
+            layernorm,
+        ] = match built.as_slice() {
+            [a, b, c, d, e, f, g, h, i, j] => [*a, *b, *c, *d, *e, *f, *g, *h, *i, *j],
+            _ => return Err("wrong pipeline count".into()),
+        };
 
         cleanup.disarm();
         Ok(Pipelines {
@@ -216,6 +229,7 @@ impl Pipelines {
             add,
             mul_bcast,
             affine,
+            layernorm,
         })
     }
 
@@ -231,6 +245,7 @@ impl Pipelines {
             Kind::Add => self.add,
             Kind::MulBroadcast => self.mul_bcast,
             Kind::Affine => self.affine,
+            Kind::LayerNorm => self.layernorm,
         }
     }
 
@@ -248,6 +263,7 @@ impl Pipelines {
             self.add,
             self.mul_bcast,
             self.affine,
+            self.layernorm,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

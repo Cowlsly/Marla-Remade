@@ -1,0 +1,61 @@
+#version 450
+//! Layer normalisation over the **channel** axis, with a per-channel affine.
+//!
+//! Five uses, all in PP-OCRv5 recognition's two transformer blocks.
+//!
+//! # One invocation per position, reducing over channels
+//!
+//! This runtime keeps a transformer's sequence as `[d_model, 1, T]` — features in
+//! channels, the sequence along the width — because that is the layout the CNN backbone
+//! in front of it already produces, and because splitting `d_model` into attention heads
+//! is then free: `[120, 1, T]` read as `[8, 15, T]` is the same bytes in the same order.
+//! See `nets::Kind::LayerNorm` for the whole argument.
+//!
+//! The consequence here is that the reduction is strided: `d_model` loads `in_h * in_w`
+//! apart. At `d_model` 120 that is 120 loads per position, and there are `T` positions —
+//! a few thousand loads for the whole layer. A contiguous layout would make this pass
+//! faster and cost two `Permute`s per attention, which is the wrong trade.
+//!
+//! # Two passes, not Welford
+//!
+//! Mean then variance, reading the input twice. `d_model` is 120, so both passes sit in
+//! cache; a single-pass algorithm would save bandwidth that is not being spent.
+//!
+//! Accumulation is `float` like everywhere else here, and `epsilon` arrives in the push
+//! block because the recogniser uses 1e-5 for four of these and 1e-6 for the last.
+
+#include "common.glsl"
+
+void main() {
+    uint position = global_index();
+    if (position >= p.count) {
+        return;
+    }
+    // `count` is `in_h * in_w`, so `position` walks the spatial extent and the channel
+    // stride is that same extent.
+    uint stride = p.in_h * p.in_w;
+    float epsilon = uintBitsToFloat(p.param1_bits);
+
+    float total = 0.0;
+    for (uint c = 0u; c < p.in_c; c++) {
+        total += float(arena[p.in0 + c * stride + position]);
+    }
+    float mean = total / float(p.in_c);
+
+    float variance = 0.0;
+    for (uint c = 0u; c < p.in_c; c++) {
+        float centred = float(arena[p.in0 + c * stride + position]) - mean;
+        variance += centred * centred;
+    }
+    // Biased variance, dividing by N rather than N-1, which is what every framework's
+    // layer norm does at inference.
+    float inverse = 1.0 / sqrt(variance / float(p.in_c) + epsilon);
+
+    for (uint c = 0u; c < p.in_c; c++) {
+        uint at = c * stride + position;
+        float centred = float(arena[p.in0 + at]) - mean;
+        float gamma = float(weights[p.weight + c]);
+        float beta = float(weights[p.bias + c]);
+        arena[p.out_at + at] = float16_t(centred * inverse * gamma + beta);
+    }
+}

@@ -96,6 +96,11 @@ pub enum Act {
     /// runtime needs one parameterless clamp rather than an activation carrying two
     /// floats through the push block.
     Clip01,
+    /// `x / (1 + exp(-x))`, i.e. ONNX `Sigmoid` multiplied by its own input.
+    ///
+    /// Seven uses in PP-OCRv5 recognition, where the export spells it out as
+    /// `Mul(x, Sigmoid(x))`; the fold recognises that the way it recognises HardSwish.
+    Swish,
 }
 
 impl Act {
@@ -107,6 +112,7 @@ impl Act {
             Act::Sigmoid => 3,
             Act::PRelu(_) => 4,
             Act::Clip01 => 5,
+            Act::Swish => 6,
         }
     }
 }
@@ -141,8 +147,30 @@ pub enum Kind {
     /// activation, so unlike everything else constant in that export they cannot be
     /// folded into the preceding convolution's weight — and pushing them into the
     /// *following* one needs `b' += shift * sum(W)` per output row, which is only valid
-    /// when the tensor feeds nothing but convolutions. 24 uses in detection.
+    /// when the tensor feeds nothing but convolutions. 24 uses in detection, of which 23
+    /// do fold, leaving one.
     Affine,
+    /// Layer normalisation **over the channel axis**, with a per-channel affine.
+    ///
+    /// # Why over channels
+    ///
+    /// PP-OCRv5's recogniser is a CNN feeding a small transformer — `d_model` 120, 8
+    /// heads, two blocks — and this runtime keeps its sequences in the layout the CNN
+    /// already produces: `[d_model, 1, T]`, features in channels and the sequence along
+    /// the width. Two things fall out of that and neither is an accident:
+    ///
+    /// * **Every linear projection is a 1x1 convolution.** All five feed-forward `Gemm`s
+    ///   and all six attention projections are already expressible, so they need no new
+    ///   pipeline.
+    /// * **Splitting `d_model` into heads is free.** `[120, 1, T]` read as `[8, 15, T]`
+    ///   is the same bytes in the same order, so there is no `Permute` and no `Reshape`
+    ///   anywhere in the attention — the attention pipelines take the head count in
+    ///   [`Push::group`] and index accordingly.
+    ///
+    /// The cost is that the reduction here is strided rather than contiguous. At
+    /// `d_model` 120 that is 120 loads a stride apart per position, which is nothing
+    /// against what a contiguous layout would cost in permutes.
+    LayerNorm,
 }
 
 /// The push-constant block every shader declares.
@@ -203,9 +231,9 @@ pub struct Push {
     ///
     /// `f32` bits rather than an `f32` field so [`Push`] stays all-`u32` and
     /// `push_bytes` can keep treating it as a plain byte block with no padding.
-    pub scale_bits: u32,
-    /// [`Kind::Affine`]'s addend, as raw bits.
-    pub shift_bits: u32,
+    pub param0_bits: u32,
+    /// [`Kind::Affine`]'s addend, or [`Kind::LayerNorm`]'s epsilon.
+    pub param1_bits: u32,
     /// Output elements, so an over-dispatched workgroup can bail.
     pub count: u32,
 }
@@ -361,6 +389,13 @@ enum Node {
         out: Id,
         scale: f32,
         shift: f32,
+    },
+    LayerNorm {
+        input: Id,
+        out: Id,
+        gamma: u32,
+        beta: u32,
+        epsilon: f32,
     },
 }
 
@@ -691,6 +726,19 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Layer normalisation over the channel axis, with a per-channel affine.
+    ///
+    /// `weight_index` is the gamma tensor's position in the `.vkml` table; beta follows
+    /// it, the way a convolution's bias follows its weight.
+    pub fn layer_norm(&mut self, input: Id, weight_index: usize, epsilon: f32) -> Id {
+        let shape = self.shape_of(input);
+        let gamma = self.weight(weight_index, &[shape.c]);
+        let beta = self.weight(weight_index + 1, &[shape.c]);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::LayerNorm { input, out, gamma, beta, epsilon });
+        out
+    }
+
     /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
     pub fn finish(mut self, outputs: &[Id]) -> Result<Plan, String> {
         self.pinned.extend_from_slice(outputs);
@@ -951,12 +999,37 @@ impl<'a> Builder<'a> {
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
-                        scale_bits: scale.to_bits(),
-                        shift_bits: shift.to_bits(),
+                        param0_bits: scale.to_bits(),
+                        param1_bits: shift.to_bits(),
                         count: so.len(),
                         ..Push::default()
                     },
                     invocations: so.len(),
+                });
+            }
+            Node::LayerNorm { input, out, gamma, beta, epsilon } => {
+                let so = shape(*out);
+                // One invocation per position, each reducing over the channels, so the
+                // dispatch is the spatial extent rather than the element count.
+                let positions = so.h * so.w;
+                ops.push(Op::Dispatch {
+                    kind: Kind::LayerNorm,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        weight: *gamma,
+                        bias: *beta,
+                        in_c: so.c,
+                        in_h: so.h,
+                        in_w: so.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        param1_bits: epsilon.to_bits(),
+                        count: positions,
+                        ..Push::default()
+                    },
+                    invocations: positions,
                 });
             }
         }
@@ -973,6 +1046,7 @@ impl Node {
             | Node::GlobalAvgPool { out, .. }
             | Node::Binary { out, .. }
             | Node::Affine { out, .. }
+            | Node::LayerNorm { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -983,6 +1057,7 @@ impl Node {
             | Node::MaxPool { input, .. }
             | Node::Resize { input, .. }
             | Node::Affine { input, .. }
+            | Node::LayerNorm { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::Concat { parts, .. } => parts.clone(),

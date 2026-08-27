@@ -57,6 +57,8 @@ mod act {
     pub const PRELU: u32 = 4;
     /// `clamp(x, 0, 1)`, a normalised `HardSigmoid`.
     pub const CLIP01: u32 = 5;
+    /// `x * sigmoid(x)`.
+    pub const SWISH: u32 = 6;
 }
 
 /// The fused activation, mirroring `activate` in `common.glsl`.
@@ -76,6 +78,7 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
             }
         }
         act::CLIP01 => x.clamp(0.0, 1.0),
+        act::SWISH => x / (1.0 + (-x).exp()),
         _ => x,
     }
 }
@@ -175,6 +178,7 @@ impl Reference {
                     Kind::Add => self.add(push),
                     Kind::MulBroadcast => self.mul_broadcast(push),
                     Kind::Affine => self.affine(push),
+                    Kind::LayerNorm => self.layer_norm(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -418,11 +422,47 @@ impl Reference {
 
     /// `out = in * scale + shift`, both scalars carried as raw bits in the push block.
     fn affine(&mut self, p: &Push) -> Result<(), String> {
-        let scale = f32::from_bits(p.scale_bits);
-        let shift = f32::from_bits(p.shift_bits);
+        let scale = f32::from_bits(p.param0_bits);
+        let shift = f32::from_bits(p.param1_bits);
         for i in 0..p.count {
             let value = self.load(p.in0, i)?;
             self.store(p.out, i, value * scale + shift)?;
+        }
+        Ok(())
+    }
+
+    /// Layer normalisation over the channel axis, per spatial position.
+    ///
+    /// Biased variance, dividing by `C` rather than `C - 1`, which is what every
+    /// framework does at inference. `count` is the spatial extent rather than the element
+    /// count, because one invocation handles a whole column of channels.
+    fn layer_norm(&mut self, p: &Push) -> Result<(), String> {
+        if p.in_c == 0 {
+            return Err("a layer norm over zero channels".into());
+        }
+        let stride = p.in_h * p.in_w;
+        let epsilon = f32::from_bits(p.param1_bits);
+        for position in 0..p.count {
+            let mut total = 0.0;
+            for c in 0..p.in_c {
+                total += self.load(p.in0, c * stride + position)?;
+            }
+            let mean = total / p.in_c as f32;
+
+            let mut variance = 0.0;
+            for c in 0..p.in_c {
+                let centred = self.load(p.in0, c * stride + position)? - mean;
+                variance += centred * centred;
+            }
+            let inverse = 1.0 / (variance / p.in_c as f32 + epsilon).sqrt();
+
+            for c in 0..p.in_c {
+                let at = c * stride + position;
+                let centred = self.load(p.in0, at)? - mean;
+                let gamma = self.weight(p.weight, c)?;
+                let beta = self.weight(p.bias, c)?;
+                self.store(p.out, at, centred * inverse * gamma + beta)?;
+            }
         }
         Ok(())
     }
@@ -1037,6 +1077,90 @@ mod tests {
                 .collect();
             close(&got, &want);
         }
+    }
+
+    #[test]
+    fn swish_is_x_times_sigmoid_x_and_not_hard_swish() {
+        // The recogniser uses both, so the piecewise approximation must not be
+        // substituted here. They differ most around |x| = 1..3.
+        let inputs = [-3.0f32, -1.0, 0.0, 1.0, 3.0];
+        let got = one(
+            Shape::new(1, 1, 5),
+            &inputs,
+            &[(vec![1, 1, 1, 1], vec![1.0]), (vec![1], vec![0.0])],
+            |b, x| b.conv_same(x, 0, 1, 1, 1, Act::Swish),
+        );
+        let want: Vec<f32> = inputs.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+        close(&got, &want);
+        // And it really is a different function from HardSwish at x = 1.
+        let hard = 1.0 * (1.0 / 6.0 + 0.5);
+        assert!((got[3] - hard).abs() > 0.05, "swish {} vs hardswish {hard}", got[3]);
+    }
+
+    #[test]
+    fn layer_norm_standardises_a_column_of_channels() {
+        // Four channels at one position: mean 2.5, biased variance 1.25.
+        let got = one(
+            Shape::new(4, 1, 1),
+            &[1.0, 2.0, 3.0, 4.0],
+            &[(vec![4], vec![1.0; 4]), (vec![4], vec![0.0; 4])],
+            |b, x| b.layer_norm(x, 0, 1e-5),
+        );
+        let sd = 1.25f32.sqrt();
+        close(&got, &[-1.5 / sd, -0.5 / sd, 0.5 / sd, 1.5 / sd]);
+    }
+
+    #[test]
+    fn layer_norm_applies_its_affine_per_channel() {
+        // A gamma and beta that differ per channel, so a shader broadcasting one value
+        // over the column would be visible.
+        let got = one(
+            Shape::new(4, 1, 1),
+            &[1.0, 2.0, 3.0, 4.0],
+            &[
+                (vec![4], vec![1.0, 2.0, 3.0, 4.0]),
+                (vec![4], vec![10.0, 20.0, 30.0, 40.0]),
+            ],
+            |b, x| b.layer_norm(x, 0, 1e-5),
+        );
+        let sd = 1.25f32.sqrt();
+        let normalised = [-1.5 / sd, -0.5 / sd, 0.5 / sd, 1.5 / sd];
+        let want: Vec<f32> = (0..4)
+            .map(|i| normalised[i] * (i as f32 + 1.0) + (i as f32 + 1.0) * 10.0)
+            .collect();
+        close(&got, &want);
+    }
+
+    #[test]
+    fn layer_norm_treats_each_position_independently() {
+        // Two positions with very different scales. Both standardise to the same pair, so
+        // a reduction that spanned the whole tensor instead of one column would not.
+        //
+        // Layout is `[c, 1, T]` channel-major, so this is columns (1, 2) and (3, 10).
+        let got = one(
+            Shape::new(2, 1, 2),
+            &[1.0, 3.0, 2.0, 10.0],
+            &[(vec![2], vec![1.0, 1.0]), (vec![2], vec![0.0, 0.0])],
+            |b, x| b.layer_norm(x, 0, 1e-5),
+        );
+        // Two channels always standardise to -1 and +1 regardless of their spread.
+        close(&got, &[-1.0, -1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn layer_norm_epsilon_comes_from_the_push_block() {
+        // The recogniser uses 1e-5 for four of its five and 1e-6 for the last, so the
+        // value has to travel per op. A constant column makes it the only thing that
+        // stops a division by zero.
+        let got = one(
+            Shape::new(2, 1, 1),
+            &[5.0, 5.0],
+            &[(vec![2], vec![1.0, 1.0]), (vec![2], vec![0.0, 0.0])],
+            |b, x| b.layer_norm(x, 0, 1e-5),
+        );
+        // Zero variance, so both come out at beta rather than as NaN.
+        close(&got, &[0.0, 0.0]);
+        assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
     }
 
     #[test]

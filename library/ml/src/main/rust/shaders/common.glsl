@@ -66,8 +66,8 @@ layout(push_constant) uniform Push {
     uint group;
     uint act;
     uint act_weight;
-    uint scale_bits;
-    uint shift_bits;
+    uint param0_bits;
+    uint param1_bits;
     uint count;
 } p;
 
@@ -78,6 +78,7 @@ layout(push_constant) uniform Push {
 #define ACT_SIGMOID 3u
 #define ACT_PRELU 4u
 #define ACT_CLIP01 5u
+#define ACT_SWISH 6u
 
 // This invocation's output element, across a 2D grid of workgroups.
 //
@@ -123,6 +124,11 @@ float activate(float x, uint kind, uint channel) {
         // layer's weight and bias by `scripts/ml/ppocr_fold.py`, so what is left is the
         // clamp. See `nets::Act::Clip01`.
         return clamp(x, 0.0, 1.0);
+    }
+    if (kind == ACT_SWISH) {
+        // `x * sigmoid(x)`. Not HardSwish's piecewise approximation — the recogniser uses
+        // both, and substituting one for the other is a plausible-looking accuracy loss.
+        return x / (1.0 + exp(-x));
     }
     return x;
 }

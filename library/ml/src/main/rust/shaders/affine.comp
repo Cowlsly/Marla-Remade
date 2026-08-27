@@ -30,7 +30,7 @@ void main() {
     if (index >= p.count) {
         return;
     }
-    float scale = uintBitsToFloat(p.scale_bits);
-    float shift = uintBitsToFloat(p.shift_bits);
+    float scale = uintBitsToFloat(p.param0_bits);
+    float shift = uintBitsToFloat(p.param1_bits);
     arena[p.out_at + index] = float16_t(float(arena[p.in0 + index]) * scale + shift);
 }
