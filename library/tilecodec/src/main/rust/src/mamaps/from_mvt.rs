@@ -21,8 +21,8 @@
 //! conversion says how much it did not understand.
 
 use crate::mamaps::body::{
-    Body, Feature, Layer, Part, DEFAULT_EXTENT, GEOM_LINE, GEOM_POLYGON, WINDING_HOLE,
-    WINDING_OUTER,
+    Body, Feature, Layer, Part, DEFAULT_EXTENT, FLAG_DETAIL_NUMERIC, FLAG_IS_BRIDGE, FLAG_IS_LINK,
+    FLAG_IS_TUNNEL, GEOM_LINE, GEOM_POLYGON, WINDING_HOLE, WINDING_OUTER,
 };
 use crate::mamaps::dict;
 use crate::mvt::{self, GeomType, Tile, Value};
@@ -87,6 +87,25 @@ pub fn from_tile(tile: &Tile) -> Result<(Body, Stats)> {
                 .and_then(as_str)
                 .and_then(detail_id)
                 .unwrap_or(dict::NONE);
+            // The three booleans, which the upstream schema carries as properties and the MVT path
+            // used to drop on the floor. A bridge drawn as plain tarmac laid over a river is what
+            // this fixes.
+            let mut flags = 0u8;
+            if feature.get("is_tunnel").is_some_and(truthy) {
+                flags |= FLAG_IS_TUNNEL;
+            }
+            if feature.get("is_bridge").is_some_and(truthy) {
+                flags |= FLAG_IS_BRIDGE;
+            }
+            if feature.get("is_link").is_some_and(truthy) {
+                flags |= FLAG_IS_LINK;
+            }
+            // A boundary's detail is an admin level, which upstream writes as a number rather than a
+            // string. Carried as one, under the flag that says so.
+            let (detail, flags) = match numeric(feature.get("kind_detail")) {
+                Some(level) => (level, flags | FLAG_DETAIL_NUMERIC),
+                None => (detail, flags),
+            };
             match feature.geom_type {
                 GeomType::Polygon => {
                     let Some(polygons) = mvt::decode_polygons(&feature.geometry) else { continue };
@@ -94,12 +113,12 @@ pub fn from_tile(tile: &Tile) -> Result<(Body, Stats)> {
                     // parts are exactly one exterior and its holes. That is what the tessellator
                     // wants, and it makes "one outer per feature" an invariant a test can state.
                     for rings in &polygons {
-                        push_feature(&mut layer, kind, detail, GEOM_POLYGON, rings, &mut stats);
+                        push_feature(&mut layer, kind, detail, flags, GEOM_POLYGON, rings, &mut stats);
                     }
                 }
                 GeomType::LineString => {
                     let Some(lines) = mvt::decode_lines(&feature.geometry) else { continue };
-                    push_feature(&mut layer, kind, detail, GEOM_LINE, &lines, &mut stats);
+                    push_feature(&mut layer, kind, detail, flags, GEOM_LINE, &lines, &mut stats);
                 }
                 // The renderer decoded points and threw them away, so they are not carried.
                 GeomType::Point => stats.points_dropped += 1,
@@ -133,6 +152,7 @@ fn push_feature(
     layer: &mut Layer,
     kind: u16,
     kind_detail: u16,
+    flags: u8,
     geom_type: u8,
     parts: &[Vec<(i32, i32)>],
     stats: &mut Stats,
@@ -159,7 +179,32 @@ fn push_feature(
     if part_count == 0 {
         return;
     }
-    layer.features.push(Feature { kind, kind_detail, geom_type, flags: 0, parts_offset, part_count });
+    layer.features.push(Feature { kind, kind_detail, geom_type, flags, parts_offset, part_count });
+}
+
+/// A property value as a small non-negative integer, for a boundary's admin level.
+///
+/// Upstream writes it as an `SInt`, not a string, which is what makes it the one attribute in the
+/// schema that is a number rather than a name.
+fn numeric(value: Option<&Value>) -> Option<u16> {
+    match value? {
+        Value::Int(v) | Value::SInt(v) => u16::try_from(*v).ok(),
+        Value::Uint(v) => u16::try_from(*v).ok(),
+        Value::Float(v) => u16::try_from(*v as i64).ok(),
+        Value::Double(v) => u16::try_from(*v as i64).ok(),
+        _ => None,
+    }
+}
+
+/// Is a property one of the truthy spellings? Upstream writes `is_bridge` as a boolean.
+fn truthy(value: &Value) -> bool {
+    match value {
+        Value::Bool(v) => *v,
+        Value::String(s) => !matches!(s.as_str(), "" | "no" | "false" | "0"),
+        Value::Int(v) | Value::SInt(v) => *v != 0,
+        Value::Uint(v) => *v != 0,
+        _ => true,
+    }
 }
 
 /// An extent-unit coordinate as an `i16`, counting anything that would not fit.
@@ -333,6 +378,32 @@ mod tests {
 
     /// The real published z0 tile, which is the one the format has to survive: it is the ocean
     /// polygon with 105 holes, and it is where every ring pathology in the archive lives.
+    /// The three booleans and the numeric admin level, which the MVT path used to drop. A bridge
+    /// drawn as plain tarmac laid over a river is what carrying them fixes.
+    #[test]
+    fn the_flags_and_a_numeric_admin_level_survive_the_conversion() {
+        let mut road = line_feature("highway", &[(0, 0), (10, 10)]);
+        road.props.push(("is_bridge".to_string(), Value::Bool(true)));
+        road.props.push(("is_link".to_string(), Value::String("yes".to_string())));
+        // Present but false: must not set the flag.
+        road.props.push(("is_tunnel".to_string(), Value::Bool(false)));
+        let mut border = line_feature("country", &[(0, 0), (10, 10)]);
+        border.props.push(("kind_detail".to_string(), Value::SInt(2)));
+
+        let tile = tile_with(vec![
+            roads_layer(vec![road]),
+            layer_of("boundaries", vec![border]),
+        ]);
+        let (body, _) = from_tile(&tile).expect("convert");
+
+        let road = &body.layer(dict::LAYER_ROADS).expect("roads").features[0];
+        assert!(road.is_bridge() && road.is_link() && !road.is_tunnel());
+        assert_eq!(road.detail_number(), None, "a road's detail is a name");
+
+        let border = &body.layer(dict::LAYER_BOUNDARIES).expect("boundaries").features[0];
+        assert_eq!(border.detail_number(), Some(2), "a country border, as the style compares it");
+    }
+
     #[test]
     fn the_published_z0_tile_converts_and_re_encodes() {
         let raw = include_bytes!("../../tests/fixtures/v4_z0_tile.mvt");
