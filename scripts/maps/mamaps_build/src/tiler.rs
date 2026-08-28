@@ -40,6 +40,7 @@ use tilecodec::pmtiles::tile_id;
 use tilecodec::proto::{err, Result};
 
 use crate::extract::Feature;
+use crate::store::Store;
 
 /// The tile grid, matching MVT's so nothing downstream rescales.
 pub const EXTENT: u32 = 4096;
@@ -69,8 +70,13 @@ pub struct Settings {
 }
 
 /// Tile every feature and write the archive.
-pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomStats>)> {
-    let bbox = bounds_e7(features);
+/// Tile every feature in `store` into a `.mamaps` archive.
+///
+/// The store is read **once per zoom**, in order, rather than held in memory for all of them. Fifteen
+/// sequential passes over a file cost seconds on any modern disk; holding the features cost 4.9 GB of
+/// a measured 10.03 GB California peak.
+pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomStats>)> {
+    let bbox = store.bbox();
     let mut writer = StreamWriter::new(Options {
         min_zoom: settings.min_zoom,
         max_zoom: settings.max_zoom,
@@ -99,7 +105,9 @@ pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<
         let buffer = geom::buffer_for(EXTENT);
         let mut touched: Vec<(u64, u64)> = Vec::new();
 
-        for feature in features {
+        // The store speaks osm_ingest's error type and the tiler tile_build's; both wrap a string.
+        let mut reader = store.reader().map_err(|e| tile_build::proto::Error(e.to_string()))?;
+        while let Some(feature) = reader.next().map_err(|e| tile_build::proto::Error(e.to_string()))? {
             if z < feature.class.min_zoom {
                 continue;
             }
@@ -125,7 +133,7 @@ pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<
                     .or_default()
                     .entry(feature.class.layer)
                     .or_insert_with(|| BodyLayer::new(feature.class.layer));
-                let added = push(layer, feature, &local);
+                let added = push(layer, &feature, &local);
                 stats.features += added.0;
                 stats.points += added.1;
             }
@@ -281,36 +289,7 @@ fn is_empty(g: &Geometry<SigPt>) -> bool {
     }
 }
 
-/// The bounding box of everything, in degrees times 1e7, for the archive header.
-fn bounds_e7(features: &[Feature]) -> (i32, i32, i32, i32) {
-    let mut out = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
-    let mut seen = false;
-    for feature in features {
-        for (lon, lat) in coords(&feature.geometry) {
-            seen = true;
-            let (x, y) = ((lon * 1e7) as i32, (lat * 1e7) as i32);
-            out.0 = out.0.min(x);
-            out.1 = out.1.min(y);
-            out.2 = out.2.max(x);
-            out.3 = out.3.max(y);
-        }
-    }
-    if seen {
-        out
-    } else {
-        (0, 0, 0, 0)
-    }
-}
 
-fn coords(g: &Geometry) -> Vec<(f64, f64)> {
-    match g {
-        Geometry::Points(points) => points.clone(),
-        Geometry::Lines(lines) => lines.iter().flatten().copied().collect(),
-        Geometry::Polygons(polygons) => {
-            polygons.iter().flatten().flatten().copied().collect()
-        }
-    }
-}
 
 /// A build that produced nothing is a build whose schema matched nothing, which is worth failing on
 /// rather than publishing an empty archive.
@@ -324,6 +303,12 @@ pub fn check_not_empty(stats: &[ZoomStats]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The tests hold features in memory and the tiler reads them from a file, so they spill
+    /// first. Keeps a test about tiling from reading like a test about plumbing.
+    fn spilled(features: &[Feature]) -> crate::store::Store {
+        crate::store::Store::of(features).expect("spill")
+    }
     use crate::schema::Class;
     use tilecodec::mamaps::dict;
 
@@ -351,7 +336,7 @@ mod tests {
     #[test]
     fn a_lake_tiles_and_reads_back_out_of_the_archive() {
         let features = vec![lake(-120.0, 35.0, 0.5, 0)];
-        let (bytes, stats) = build(&features, &settings(0, 6)).expect("build");
+        let (bytes, stats) = build(&spilled(&features), &settings(0, 6)).expect("build");
         check_not_empty(&stats).expect("not empty");
 
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read back");
@@ -371,7 +356,7 @@ mod tests {
     #[test]
     fn a_feature_is_not_written_above_its_own_min_zoom() {
         let features = vec![lake(-120.0, 35.0, 0.01, 10)];
-        let (_, stats) = build(&features, &settings(0, 11)).expect("build");
+        let (_, stats) = build(&spilled(&features), &settings(0, 11)).expect("build");
         for s in &stats {
             if s.zoom < 10 {
                 assert_eq!(s.tiles, 0, "z{} should be empty", s.zoom);
@@ -393,8 +378,8 @@ mod tests {
                 geometry: square(-120.1, 35.1, 0.02),
             },
         ];
-        let first = build(&features, &settings(0, 8)).expect("first").0;
-        let second = build(&features, &settings(0, 8)).expect("second").0;
+        let first = build(&spilled(&features), &settings(0, 8)).expect("first").0;
+        let second = build(&spilled(&features), &settings(0, 8)).expect("second").0;
         assert_eq!(first, second, "two runs of the same input");
 
         let entries = tilecodec::mamaps::read::read_all(&first).expect("read");
@@ -417,7 +402,7 @@ mod tests {
                 geometry: square(-120.005, 35.005, 0.002),
             },
         ];
-        let (bytes, _) = build(&features, &settings(14, 14)).expect("build");
+        let (bytes, _) = build(&spilled(&features), &settings(14, 14)).expect("build");
         let entries = tilecodec::mamaps::read::read_all(&bytes).expect("read");
         let both = entries.iter().any(|(_, _, body)| {
             let body = Body::parse(body).expect("parse");
@@ -430,7 +415,7 @@ mod tests {
     fn a_build_that_matched_nothing_fails_rather_than_publishing_an_empty_archive() {
         let stats = vec![ZoomStats { zoom: 0, ..ZoomStats::default() }];
         assert!(check_not_empty(&stats).is_err());
-        assert!(build(&[], &settings(0, 2)).is_err(), "the writer refuses an empty archive");
+        assert!(build(&spilled(&[]), &settings(0, 2)).is_err(), "the writer refuses an empty archive");
     }
 
     /// Simplification is per zoom, so a shallow tile holds fewer points for the same shape. If this
@@ -445,7 +430,7 @@ mod tests {
             class: Class::line(dict::LAYER_WATER, crate::schema::kind("river"), 0),
             geometry: Geometry::Lines(vec![points]),
         }];
-        let (_, stats) = build(&features, &settings(6, 14)).expect("build");
+        let (_, stats) = build(&spilled(&features), &settings(6, 14)).expect("build");
         let at = |z: u8| stats.iter().find(|s| s.zoom == z).expect("zoom").points;
         assert!(at(6) < at(14), "z6 has {} points, z14 has {}", at(6), at(14));
     }

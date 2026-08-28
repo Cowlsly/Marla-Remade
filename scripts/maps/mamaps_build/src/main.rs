@@ -24,7 +24,9 @@ use std::process::ExitCode;
 
 mod extract;
 mod rings;
+mod shapefile;
 mod schema;
+mod store;
 mod tiler;
 
 fn main() -> ExitCode {
@@ -147,8 +149,19 @@ fn run(
     let report = run.report.as_deref();
     let started = std::time::Instant::now();
     println!("reading {}", input.display());
-    let (features, stats) =
-        extract::extract(input, layers).map_err(|e| format!("{}: {e}", input.display()))?;
+    // Features are spilled here rather than held: it was 4.9 GB of a measured 10.03 GB California
+    // peak, and nothing reads them until the tiler does.
+    let spill = out.with_extension("features.tmp");
+    if run.coastline.is_some() && !layers.earth {
+        return Err("--coastline was given but the earth layer is not selected".to_string());
+    }
+    if run.coastline.is_none() && layers.earth {
+        // Said out loud, because a map with no mainland is a striking thing to discover later. It is
+        // not an error: an island is real data and the renderer's backdrop is the water colour.
+        println!("no --coastline given, so `earth` carries islands only and there is no mainland");
+    }
+    let (store, stats) = extract::extract(input, layers, run.coastline.as_deref(), &spill)
+        .map_err(|e| format!("{}: {e}", input.display()))?;
     println!(
         "classified {} way(s) and {} relation(s) -> {} feature(s), {} node(s) resolved",
         stats.ways_classified, stats.relations_classified, stats.features, stats.nodes_needed,
@@ -159,35 +172,23 @@ fn run(
         println!("  {} classified element(s) produced no geometry", stats.geometry_failed);
     }
 
+    if stats.land_polygons > 0 {
+        println!("  including {} prepared land polygon(s)", stats.land_polygons);
+    }
+
     // The build id identifies the *data*: change the input, the zoom range, the layer set or the
     // simplification and every reader has to drop its cache. Derived rather than asked for, so a
     // forgotten `--build-id` cannot silently republish under the old one.
-    // The mainland, if a prepared polygon was given. `earth`'s islands come from the PBF like
-    // everything else; only the continents need it.
-    let mut features = features;
-    if let Some(path) = &run.coastline {
-        if !layers.earth {
-            return Err("--coastline was given but the earth layer is not selected".to_string());
-        }
-        let land = schema::earth::read_prepared(path).map_err(|e| e.to_string())?;
-        println!("read {} land polygon(s) from {}", land.len(), path.display());
-        features.extend(land);
-    } else if layers.earth {
-        // Said out loud, because a map with no mainland is a striking thing to discover later. It is
-        // not an error: an island is real data and the renderer's backdrop is the water colour.
-        println!(
-            "no --coastline given, so `earth` carries islands only and there is no mainland"
-        );
-    }
-
     let build_id = run.build_id.unwrap_or_else(|| {
         derive_build_id(input, layers, min_zoom, max_zoom, simplification, stats.features)
     });
 
     let settings = tiler::Settings { min_zoom, max_zoom, simplification, build_id };
-    let (bytes, per_zoom) = tiler::build(&features, &settings).map_err(|e| e.to_string())?;
+    let (bytes, per_zoom) = tiler::build(&store, &settings).map_err(|e| e.to_string())?;
     tiler::check_not_empty(&per_zoom).map_err(|e| e.to_string())?;
     std::fs::write(out, &bytes).map_err(|e| format!("cannot write {}: {e}", out.display()))?;
+    // The spill is scratch. Removed on success; left behind on failure, where it is evidence.
+    let _ = std::fs::remove_file(&spill);
 
     println!("\n{:<6}{:>10}{:>12}{:>12}{:>10}{:>12}", "zoom", "tiles", "features", "points", "dropped", "bytes");
     for z in &per_zoom {

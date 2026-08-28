@@ -513,7 +513,8 @@ mod tests {
             simplification: crate::tiler::DEFAULT_SIMPLIFICATION,
             build_id: 1,
         };
-        let (bytes, stats) = crate::tiler::build(&features, &settings).expect("build");
+        let store = crate::store::Store::of(&features).expect("spill");
+        let (bytes, stats) = crate::tiler::build(&store, &settings).expect("build");
 
         // The archive claims validity, so every tile in it had better be valid.
         let header = tilecodec::mamaps::Header::parse(&bytes).expect("header");

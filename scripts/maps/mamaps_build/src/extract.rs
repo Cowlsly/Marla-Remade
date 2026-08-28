@@ -16,18 +16,19 @@
 //! and peaks near 10 GB on California. A water-and-buildings build needs a few million nodes, so it
 //! pays tens of megabytes.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use osm_ingest::nodeloc::{resolve_nodes, NodeLocations};
 use osm_ingest::osm::{visit_block, Element, MEMBER_WAY};
 use osm_ingest::pbf::{self, KIND_RELATIONS, KIND_WAYS};
-use osm_ingest::proto::Result;
+use osm_ingest::proto::{err, Result};
 use osm_ingest::rings::{self, MemberWay, RingStats};
 use osm_ingest::select::Select;
 use tile_build::geom::Geometry;
 
 use crate::schema::{self, Class, Layers};
+use crate::store::{Sink, Store};
 
 /// One classified feature, in lon/lat, ready to tile.
 pub struct Feature {
@@ -45,6 +46,8 @@ pub struct Stats {
     /// relation's rings would not close.
     pub geometry_failed: u64,
     pub nodes_needed: u64,
+    /// Land polygons read from a prepared coastline product, if one was given.
+    pub land_polygons: u64,
     pub rings: RingStats,
 }
 
@@ -66,8 +69,16 @@ struct Relation {
     area: bool,
 }
 
-/// Read `input` and return every feature the schema classifies.
-pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
+/// Read `input` and spill every feature the schema classifies to `spill_path`.
+///
+/// Features go to disk rather than into a `Vec`, because holding them was 4.9 GB of a measured
+/// 10.03 GB California peak and nothing reads them until the tiler does. See [`crate::store`].
+pub fn extract(
+    input: &Path,
+    layers: Layers,
+    coastline: Option<&Path>,
+    spill_path: &Path,
+) -> Result<(Store, Stats)> {
     let blobs = pbf::scan_blobs(input)?;
     let select = Select::parse(&schema::filters(layers))?;
     let mut stats = Stats::default();
@@ -200,18 +211,36 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
     //
     // Ways in **id order**, not hash order, because the output has to be reproducible and a
     // `HashMap`'s iteration is not. The one place in this pipeline where that is a real risk.
-    let mut out = Vec::with_capacity(ways.len() + relations.len());
+    let mut sink = Sink::create(spill_path)?;
+
+
+    // Which ways a relation still needs. Everything else can have its refs freed the moment its own
+    // geometry is built, which is what keeps the refs heap from staying resident for the whole pass
+    // -- 1.4 GB of the California peak.
+    let mut needed_by_relations: HashSet<i64> = HashSet::new();
+    for relation in &relations {
+        needed_by_relations.extend(relation.members.iter().map(|(id, _)| *id));
+    }
+
     let mut ids: Vec<i64> = ways.keys().copied().collect();
     ids.sort_unstable();
     for id in ids {
         let way = &ways[&id];
         let line = table.line(&way.refs);
-        match way_geometry(&line, way.class.area) {
+        let (class, area) = (way.class, way.class.area);
+        match way_geometry(&line, area) {
             Some(geometry) => {
-                out.push(Feature { class: way.class, geometry });
+                sink.push(&class, &geometry)?;
                 stats.features += 1;
             }
             None => stats.geometry_failed += 1,
+        }
+        // Freed now rather than at the end of the pass. A way no relation refers to is finished with
+        // the moment its geometry exists.
+        if !needed_by_relations.contains(&id) {
+            if let Some(way) = ways.get_mut(&id) {
+                way.refs = Vec::new();
+            }
         }
     }
     for relation in &relations {
@@ -231,7 +260,7 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
                 stats.geometry_failed += 1;
                 continue;
             }
-            out.push(Feature { class: relation.class, geometry: Geometry::Lines(lines) });
+            sink.push(&relation.class, &Geometry::Lines(lines))?;
             stats.features += 1;
             continue;
         }
@@ -247,10 +276,29 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
             stats.geometry_failed += 1;
             continue;
         }
-        out.push(Feature { class: relation.class, geometry: Geometry::Polygons(polygons) });
+        sink.push(&relation.class, &Geometry::Polygons(polygons))?;
         stats.features += 1;
     }
-    Ok((out, stats))
+    // The mainland, last, because clipping it needs the extract's own bounding box and that is
+    // only known once every OSM feature has been through the sink. Order in the file does not
+    // matter: the tiler groups by layer id, so `earth` is the first layer of every body whenever it
+    // was written.
+    if let Some(path) = coastline {
+        match sink.bbox_degrees() {
+            Some(bbox) => {
+                println!(
+                    "reading land polygons within {:.3},{:.3} .. {:.3},{:.3}",
+                    bbox.0, bbox.1, bbox.2, bbox.3,
+                );
+                stats.land_polygons = schema::earth::stream_prepared(path, bbox, &mut sink)?;
+                stats.features += stats.land_polygons;
+            }
+            // Nothing to clip against. Land alone would be an archive of one layer, and the caller
+            // almost certainly pointed at the wrong extract.
+            None => return err("the extract produced no features to place land against".to_string()),
+        }
+    }
+    Ok((sink.finish(spill_path)?, stats))
 }
 
 /// A node's location in lon/lat, which is the order [`rings::assemble`] and GeoJSON both want.
