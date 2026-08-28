@@ -164,4 +164,12 @@
     <string name="title_edit_video">Muuda videot</string>
     <string name="people_unnamed">Ilma nimeta</string>
     <string name="semantic_search_unavailable">Tehisarupõhine fotode otsing pole selles paigalduses saadaval. Teksti- ja failinimepõhine otsing on toimib jätkuvalt.</string>
+    <string name="media_management_permission_required">Vajalikud on meediumihalduse õigused</string>
+    <string name="this_app_needs_permission_to_manage_medi">Selle rakenduse nõuetekohaseks toimimiseks on vaja luba meediumifailide haldamiseks. Palun luba seadistustes „Luba meediumi haldamine“.</string>
+    <string name="photos_indexed_for_visual_search"><xliff:g id="done" example="120">%1$d</xliff:g> / <xliff:g id="total" example="500">%2$d</xliff:g> fotot on indekseeritud visuaalseks otsinguks</string>
+    <string name="photos_indexed_for_text_search"><xliff:g id="done" example="120">%1$d</xliff:g> / <xliff:g id="total" example="500">%2$d</xliff:g> fotot on indekseeritud tekstiotsinguks</string>
+    <string name="video_crop_hint">Kadreerimiseks sikuta eelvaate nurkadest.</string>
+    <string name="drag_corners_to_distort">Moonutamiseks sikuta eelvaate nurkadest.</string>
+    <string name="combine">Kombineeri</string>
+    <string name="tap_to_add_points">Punktide lisamiseks klõpsa (<xliff:g id="mode" example="Uus">%1$s</xliff:g>)</string>
 </resources>
