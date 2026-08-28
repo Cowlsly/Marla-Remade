@@ -2,13 +2,15 @@ package com.vayunmathur.speech.util
 
 import android.content.Context
 import android.util.Log
-import com.vayunmathur.ncnn.Vits
+import com.vayunmathur.library.ml.PiperConfig
+import com.vayunmathur.library.ml.PiperSynthesizer
+import org.json.JSONObject
 import java.io.File
 
 /**
- * Wrapper around the ncnn AAR's [Vits] running offline **Piper (VITS)** voices.
+ * Wrapper around [PiperSynthesizer], which runs offline **Piper (VITS)** voices on the Vulkan
  *
- * The original implementation held a single [Vits] instance (en-US Amy medium,
+ * compute runtime in `:library:ml`. The original implementation held a single ncnn `Vits`
  * 22050 Hz) with a `loadFailed` latch. After the multilingual expansion we keep a
  * bounded LRU cache (max 2 voices, ~50-100 MB per instance on arm64-v8a) keyed by
  * [PiperVoiceDef.id] so switching languages doesn't pay a cold-load each time and
@@ -27,8 +29,8 @@ import java.io.File
  */
 class PiperEngine(private val context: Context) {
 
-    /** LRU cache: voice id -> loaded Vits, access-order for eviction. */
-    private val cache = LinkedHashMap<String, Vits>(2, 0.75f, true)
+    /** LRU cache: voice id -> loaded synthesiser, access-order for eviction. */
+    private val cache = LinkedHashMap<String, PiperSynthesizer>(2, 0.75f, true)
     private val failed = mutableMapOf<String, Boolean>()
 
     fun preload(): Boolean = ensure()
@@ -41,13 +43,13 @@ class PiperEngine(private val context: Context) {
     /** Native sample rate of the default loaded voice (Hz); 0 if not loaded. */
     fun sampleRate(): Int {
         val defId = PiperVoiceRegistry.DEFAULT.id
-        return cache[defId]?.sampleRate() ?: cache.values.firstOrNull()?.sampleRate() ?: 0
+        return cache[defId]?.sampleRate ?: cache.values.firstOrNull()?.sampleRate ?: 0
     }
 
     /** Sample rate of a specific loaded voice, 0 if not in cache. */
     fun sampleRate(voiceIdOrCode: String): Int {
         val def = resolveDef(voiceIdOrCode) ?: return 0
-        return cache[def.id]?.sampleRate() ?: 0
+        return cache[def.id]?.sampleRate ?: 0
     }
 
     @Synchronized
@@ -60,7 +62,7 @@ class PiperEngine(private val context: Context) {
         val def = resolveDef(voiceIdOrCode) ?: return false
         val engine = cache[def.id] ?: return false
         return try {
-            val samples = engine.generate(text, def.speakerId, speed)
+            val samples = engine.synthesize(text, speed)
             if (samples.isEmpty()) return true
             var offset = 0
             while (offset < samples.size) {
@@ -139,9 +141,12 @@ class PiperEngine(private val context: Context) {
                 failed[id] = true
                 return false
             }
-            val engine = Vits(dir.absolutePath)
+            val engine = open(dir) ?: run {
+                failed[id] = true
+                return false
+            }
             if (!engine.isAvailable) {
-                Log.e(TAG, "Vits could not load the voice in $dir for $id")
+                Log.e(TAG, "the runtime could not load the voice in $dir for $id")
                 try { engine.close() } catch (_: Throwable) {}
                 failed[id] = true
                 return false
@@ -161,6 +166,61 @@ class PiperEngine(private val context: Context) {
             failed[id] = true
             false
         }
+    }
+
+    /**
+     * Build a synthesiser from a voice directory.
+     *
+     * The bundle names its four networks `<voice>_{enc_p,dp,flow,dec}.maml`, so the prefix is
+     * recovered from whichever encoder is present rather than reconstructed from the registry
+     * id - the two have diverged before, which is what the `voiceDirForDef` fallbacks below
+     * exist to survive.
+     *
+     * Returns null, having logged, when the directory is not a voice.
+     */
+    private fun open(dir: File): PiperSynthesizer? {
+        val encoder = dir.listFiles()?.firstOrNull { it.name.endsWith(ENCODER_SUFFIX) }
+        if (encoder == null) {
+            Log.e(TAG, "no *$ENCODER_SUFFIX in $dir")
+            return null
+        }
+        val voice = encoder.name.removeSuffix(ENCODER_SUFFIX)
+        val config = readConfig(dir) ?: return null
+        if (config.second > 1) {
+            // A multi-speaker voice also ships an `emb_g` network, which is not converted:
+            // every voice in the registry is single-speaker. Loading one anyway would speak
+            // in whichever voice the embedding defaulted to.
+            Log.e(TAG, "$voice has ${config.second} speakers; only single-speaker voices run")
+            return null
+        }
+        return PiperSynthesizer(dir, voice, config.first)
+    }
+
+    /**
+     * The voice's sample rate, scales and speaker count from its `config.json`.
+     *
+     * The rate is not defaulted: a voice played at the wrong rate is intelligible but
+     * wrongly pitched, which is worse than refusing to load it.
+     */
+    private fun readConfig(dir: File): Pair<PiperConfig, Int>? = try {
+        val json = JSONObject(File(dir, "config.json").readText())
+        val audio = json.optJSONObject("audio")
+        val rate = audio?.optInt("sample_rate", 0) ?: 0
+        if (rate <= 0) {
+            Log.e(TAG, "config.json in $dir has no audio.sample_rate")
+            return null
+        }
+        val inference = json.optJSONObject("inference")
+        val config = PiperConfig(
+            sampleRate = rate,
+            noise = inference?.optDouble("noise_scale", 0.667)?.toFloat() ?: 0.667f,
+            length = inference?.optDouble("length_scale", 1.0)?.toFloat() ?: 1.0f,
+            durationNoise = inference?.optDouble("noise_w", 0.8)?.toFloat() ?: 0.8f,
+        )
+        config to json.optInt("num_speakers", 1)
+    } catch (t: Throwable) {
+        Log.e(TAG, "cannot read config.json in $dir", t)
+        null
     }
 
     private fun resolveDef(voiceIdOrCode: String): PiperVoiceDef? {
@@ -194,7 +254,7 @@ class PiperEngine(private val context: Context) {
                 val bcpRoot = File(vRoot, def.bcp47)
                 if (bcpRoot.isDirectory) {
                     bcpRoot.listFiles()?.firstOrNull { child ->
-                        child.isDirectory && child.listFiles()?.any { it.name.endsWith("_enc_p.ncnn.param") } == true
+                        child.isDirectory && child.listFiles()?.any { it.name.endsWith("_enc_p.maml") } == true
                     }?.let { return it }
                 }
                 // Broader search: any BCP-47 starting with code
@@ -203,7 +263,7 @@ class PiperEngine(private val context: Context) {
                     if (!bcpDir.name.equals(def.bcp47, ignoreCase = true) &&
                         !bcpDir.name.lowercase().startsWith(def.code.lowercase())) return@forEach
                     bcpDir.listFiles()?.firstOrNull { child ->
-                        child.isDirectory && child.listFiles()?.any { it.name.endsWith("_enc_p.ncnn.param") } == true
+                        child.isDirectory && child.listFiles()?.any { it.name.endsWith("_enc_p.maml") } == true
                     }?.let { return it }
                 }
             }
@@ -220,5 +280,8 @@ class PiperEngine(private val context: Context) {
     companion object {
         private const val TAG = "PiperEngine"
         private const val MAX_CACHED = 2
+
+        /** How the bundle names the text encoder, and so how the voice prefix is found. */
+        private const val ENCODER_SUFFIX = "_enc_p.maml"
     }
 }

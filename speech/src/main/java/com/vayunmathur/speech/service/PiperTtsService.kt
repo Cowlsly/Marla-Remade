@@ -14,8 +14,8 @@ import java.util.Locale
 import kotlin.math.roundToInt
 
 /**
- * System text-to-speech engine backed by offline **Piper (VITS)** running on ncnn
- * ([com.vayunmathur.ncnn.Vits]). Once selected as the device's TTS engine, any app
+ * System text-to-speech engine backed by offline **Piper (VITS)** running on the Vulkan
+ * compute runtime in `:library:ml`. Once selected as the device's TTS engine, any app
  * that uses [android.speech.tts.TextToSpeech] (Translate's read-aloud, TalkBack,
  * ebook readers, ...) synthesizes fully on-device.
  *

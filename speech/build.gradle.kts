@@ -18,15 +18,20 @@ android {
     androidResources {
         // ORT mmaps the model out of the APK; a deflated asset would have to be inflated to
         // a 40 MB heap buffer first. Storing them uncompressed costs nothing on download size
-        // either — int8 weights are already incompressible.
+        // either - int8 weights are already incompressible.
         noCompress += "onnx"
+        // Voices are downloaded rather than bundled, so no .maml sits in this APK. The entry
+        // is here for the same reason as `onnx`: if a voice is ever bundled, fp16 weights
+        // should not be deflated only to be inflated straight back.
+        noCompress += "maml"
     }
 }
-
 dependencies {
-    // Text-to-speech (Piper/VITS) runs in the ncnn AAR via com.vayunmathur.ncnn.Vits, which
-    // is filesystem-only, so voices are extracted to disk before use.
-    implementation(libs.ncnn.android)
+    // Text-to-speech is Piper (VITS) on :library:ml, our own Vulkan compute runtime. Four
+    // networks per voice: the text encoder, the flow and the HiFi-GAN vocoder are compiled
+    // plans on the GPU, and the stochastic duration predictor runs on the CPU because it is a
+    // bin search and a quadratic solve per phoneme. Voices are extracted to disk before use.
+    implementation(project(":library:ml"))
 
     // Speech-to-text is whisper-tiny int8 ONNX (bundled in assets, see WhisperOnnxEngine).
     // It is not ncnn: onnx2ncnn has no DynamicQuantizeLinear/MatMulInteger/ConvInteger

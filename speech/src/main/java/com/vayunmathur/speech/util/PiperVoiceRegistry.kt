@@ -69,7 +69,7 @@ object PiperVoiceRegistry {
     const val LEGACY_REMOTE_ARCHIVE = "voice3.zip"
     const val BASE = "https://data.vayunmathur.com/models/piper/"
 
-    private const val ENCODER_SUFFIX = "_enc_p.ncnn.param"
+    private const val ENCODER_SUFFIX = "_enc_p.maml"
     private const val CONFIG = "config.json"
     private val REQUIRED_NETS = listOf("_enc_p", "_dp", "_flow", "_dec")
 
@@ -815,8 +815,7 @@ object PiperVoiceRegistry {
         val enc = dir.listFiles()?.firstOrNull { it.name.endsWith(ENCODER_SUFFIX) } ?: return false
         val prefix = enc.name.removeSuffix(ENCODER_SUFFIX)
         val netsOk = REQUIRED_NETS.all { net ->
-            File(dir, "${prefix}${net}.ncnn.param").exists() &&
-                File(dir, "${prefix}${net}.ncnn.bin").exists()
+            File(dir, "${prefix}${net}.maml").exists()
         }
         if (!netsOk) return false
         if (!File(dir, CONFIG).exists()) return false
@@ -867,8 +866,7 @@ object PiperVoiceRegistry {
         val enc = files.firstOrNull { it.name.endsWith(ENCODER_SUFFIX) } ?: return false
         val prefix = enc.name.removeSuffix(ENCODER_SUFFIX)
         val netsOk = REQUIRED_NETS.all { net ->
-            File(dir, "${prefix}${net}.ncnn.param").exists() &&
-                File(dir, "${prefix}${net}.ncnn.bin").exists()
+            File(dir, "${prefix}${net}.maml").exists()
         }
         return netsOk && File(dir, CONFIG).exists()
     }

@@ -26,7 +26,7 @@ object PiperModel {
     const val DICT = "en-word_id.bin"
     const val CONFIG = "config.json"
 
-    private const val ENCODER_SUFFIX = "_enc_p.ncnn.param"
+    private const val ENCODER_SUFFIX = "_enc_p.maml"
     private val REQUIRED_NETS = listOf("_enc_p", "_dp", "_flow", "_dec")
     private const val BASE = PiperVoiceRegistry.BASE
     const val REMOTE_ARCHIVE = PiperVoiceRegistry.LEGACY_REMOTE_ARCHIVE
@@ -87,8 +87,7 @@ object PiperModel {
                 val enc = files.firstOrNull { it.name.endsWith(ENCODER_SUFFIX) } ?: return@let false
                 val pref = enc.name.removeSuffix(ENCODER_SUFFIX)
                 REQUIRED_NETS.all { net ->
-                    File(legacyDir, "$pref$net.ncnn.param").exists() &&
-                        File(legacyDir, "$pref$net.ncnn.bin").exists()
+                    File(legacyDir, "$pref$net.maml").exists()
                 } && dictFile.exists() && File(legacyDir, CONFIG).exists()
             } catch (_: Throwable) {
                 false
