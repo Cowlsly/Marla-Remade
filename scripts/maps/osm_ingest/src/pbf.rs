@@ -33,7 +33,24 @@ const MAX_BLOB_BYTES: usize = 128 * 1024 * 1024;
 
 /// Blobs per work chunk. Fixed (rather than derived from the core count) so the
 /// merge order — and therefore every output byte — is identical on any machine.
-const CHUNK_BLOBS: usize = 64;
+///
+/// **It also sets peak memory**, because it is the multiplier on the reorder buffer.
+/// [`run_pass_sink`] lets `2 * threads` chunk accumulators sit in [`Drain::slots`] at
+/// once, and a pass 1 accumulator holds every classified way in its chunk *with that
+/// way's node refs*. So the bytes in flight are `2 * threads * CHUNK_BLOBS` blobs' worth
+/// of ways, and only this constant is not a property of the machine.
+///
+/// **Lowered from 64.** On a 64-core box the window is 128 chunks, which at 64 blobs a
+/// chunk is 8192 blobs — more than a California extract has, so the "bound" bound nothing
+/// and the reorder buffer was the whole build's peak: 2.19 GB, a few seconds into pass 1.
+/// At 8 blobs a chunk the same window is 1024 blobs and the peak of stage A falls to
+/// 1.58 GB, which is the node-location table underneath it. It costs eight times as many
+/// `deposit` calls — one mutex acquisition each, against a chunk of work measured in
+/// milliseconds — and it was inside the noise on a California build.
+///
+/// Byte-neutral, which is what makes it safe to tune: chunks are contiguous blob ranges
+/// drained in ascending order, so regrouping them cannot reorder the ways inside them.
+const CHUNK_BLOBS: usize = 8;
 
 /// Where one `OSMData` blob lives in the file.
 #[derive(Clone, Copy)]
@@ -114,6 +131,24 @@ fn decode_blob_header(buf: &[u8]) -> Result<(&[u8], u32)> {
 /// The compressions we cannot decode without a C library (lzma/bzip2/lz4/zstd)
 /// are reported as a clear error rather than silently skipped — a skipped blob
 /// would produce a quietly incomplete graph.
+///
+/// # `out` is the caller's buffer, and it is genuinely reused
+///
+/// [`run_pass_sink`]'s workers hoist one of these out of the blob loop each, so a pass
+/// allocates one inflate buffer per thread rather than one per blob. That only holds if
+/// this function inflates *into* the buffer: the obvious
+/// `*out = decompress_to_vec_zlib_with_limit(..)?` throws the caller's allocation away on
+/// every blob, and worse, the new buffer is allocated and zero-filled before the old one
+/// is dropped, so each worker is briefly holding two.
+///
+/// It measured 1.5 GB of a 2.19 GB California peak. The peak of that whole build was one
+/// second in, during the node region of pass 1 — before a single way had been classified
+/// and long before any tile existed — and it scaled with the core count at ~24 MB a
+/// thread, which is one and a bit blob buffers apiece.
+///
+/// `raw_size` is what makes inflating in place possible: the blob states its own
+/// uncompressed length, so the buffer can be sized exactly before decompressing rather
+/// than grown by doubling.
 pub fn inflate_blob(blob: &[u8], out: &mut Vec<u8>) -> Result<()> {
     let mut r = Reader::new(blob);
     let mut raw: Option<&[u8]> = None;
@@ -134,12 +169,38 @@ pub fn inflate_blob(blob: &[u8], out: &mut Vec<u8>) -> Result<()> {
 
     out.clear();
     if let Some(z) = zlib {
-        let limit = raw_size.unwrap_or(MAX_BLOB_BYTES).min(MAX_BLOB_BYTES);
-        // `decompress_to_vec_zlib_with_limit` parses the zlib header AND verifies
-        // the Adler-32 trailer, so a mis-framed or corrupt blob fails loudly.
-        let data = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(z, limit)
-            .map_err(|e| Error(format!("inflate failed: {e:?}")))?;
-        *out = data;
+        match raw_size.filter(|want| *want <= MAX_BLOB_BYTES) {
+            Some(want) => {
+                // Reuses the caller's capacity: `clear` kept it and `resize` fills it.
+                out.resize(want, 0);
+                // `zlib_header` true and `ignore_adler32` false, so this still parses the
+                // zlib header and verifies the Adler-32 trailer — a mis-framed or corrupt
+                // blob fails just as loudly as it did through the allocating path.
+                let got = miniz_oxide::inflate::decompress_slice_iter_to_slice(
+                    out,
+                    std::iter::once(z),
+                    true,
+                    false,
+                )
+                .map_err(|e| Error(format!("inflate failed: {e:?}")))?;
+                // `out` is `want` long whatever happened, so a short inflate would slip
+                // past the raw_size check below. This is the one that catches it.
+                if got != want {
+                    return proto::err(format!(
+                        "blob inflated {got} byte(s) but raw_size says {want}"
+                    ));
+                }
+            }
+            // No `raw_size`, so there is no length to size the buffer from and the growing
+            // allocator path is all that is left. Every conforming writer emits it, so this
+            // is the odd file rather than the hot path.
+            None => {
+                let limit = raw_size.unwrap_or(MAX_BLOB_BYTES).min(MAX_BLOB_BYTES);
+                let data = miniz_oxide::inflate::decompress_to_vec_zlib_with_limit(z, limit)
+                    .map_err(|e| Error(format!("inflate failed: {e:?}")))?;
+                *out = data;
+            }
+        }
     } else if let Some(bytes) = raw {
         out.extend_from_slice(bytes);
     } else {
@@ -306,6 +367,13 @@ where
     // largest things in the build, and raising the thread count widens the window,
     // which is exactly the failure this plan is shaped to avoid. Two chunks per thread
     // leaves slack for an uneven chunk without letting the buffer grow with the file.
+    //
+    // Note what this does NOT bound. It is a count of chunks, so the bytes it admits are
+    // `window * CHUNK_BLOBS` blobs' worth of accumulator — and on a 64-core box the window
+    // is 128 chunks, which exceeds the chunk count of anything smaller than a continent.
+    // For those the window binds on nothing and the bound is really [`CHUNK_BLOBS`]; see
+    // its doc for the 2.19 GB that cost. Bounding this in bytes would mean measuring `S`,
+    // which is opaque here by design.
     let window = n_threads.saturating_mul(2).max(2);
     let progressed = Condvar::new();
 
@@ -681,6 +749,107 @@ mod tests {
         assert_eq!(blobs.len(), 1);
         let err = probe_compression(&zstd_path, &blobs).unwrap_err();
         assert!(err.0.contains("zstd"), "{}", err.0);
+    }
+
+    /// Unsigned varint, for the two length-delimited fields the helpers below write. The
+    /// crate's `proto` has the decoder but no encoder — nothing in `osm_ingest` writes
+    /// protobuf outside tests.
+    fn put_uvarint(out: &mut Vec<u8>, mut value: u64) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+
+    /// A zlib stream wrapping `data` in a single STORED deflate block.
+    ///
+    /// Hand-rolled rather than compressed, because `osm_ingest` takes miniz_oxide for its
+    /// inflate side only and a test should not pull in a compressor to make three bytes.
+    /// A stored block still exercises the whole path this cares about: the zlib header is
+    /// parsed and the Adler-32 trailer is verified exactly as it is for a real blob.
+    fn zlib_stored(data: &[u8]) -> Vec<u8> {
+        let mut out = vec![0x78, 0x01];
+        let len = data.len() as u16;
+        out.push(0x01); // BFINAL = 1, BTYPE = 00 (stored)
+        out.extend_from_slice(&len.to_le_bytes());
+        out.extend_from_slice(&(!len).to_le_bytes());
+        out.extend_from_slice(data);
+        let (mut a, mut b) = (1u32, 0u32);
+        for &byte in data {
+            a = (a + byte as u32) % 65521;
+            b = (b + a) % 65521;
+        }
+        out.extend_from_slice(&((b << 16) | a).to_be_bytes());
+        out
+    }
+
+    /// A `Blob` message carrying `zlib_data` and a `raw_size`.
+    fn zlib_blob(data: &[u8], raw_size: usize) -> Vec<u8> {
+        let stream = zlib_stored(data);
+        let mut blob = Vec::new();
+        blob.push(2 << 3 | proto::WIRE_VARINT);
+        put_uvarint(&mut blob, raw_size as u64);
+        blob.push(3 << 3 | WIRE_BYTES);
+        put_uvarint(&mut blob, stream.len() as u64);
+        blob.extend_from_slice(&stream);
+        blob
+    }
+
+    /// **The allocation bound on a parallel pass.** `run_pass_sink` gives each worker one
+    /// inflate buffer for the whole file, so `inflate_blob` must decompress *into* it.
+    ///
+    /// Assigning a fresh `Vec` over `out` instead measured 1.5 GB of a 2.19 GB California
+    /// peak — 64 workers each holding a blob buffer, briefly two, none of them reused —
+    /// and that peak was the whole build's, one second in. Nothing about the output bytes
+    /// changes either way, so only a capacity assertion can catch a regression.
+    #[test]
+    fn inflating_reuses_the_callers_buffer_rather_than_replacing_it() {
+        let big = vec![7u8; 40_000];
+        let small = b"tiny".to_vec();
+        let mut out = Vec::new();
+
+        inflate_blob(&zlib_blob(&big, big.len()), &mut out).expect("big");
+        assert_eq!(out, big, "the big blob must round trip");
+        let capacity = out.capacity();
+        assert!(capacity >= big.len(), "buffer must hold what it inflated");
+
+        inflate_blob(&zlib_blob(&small, small.len()), &mut out).expect("small");
+        assert_eq!(out, small, "the small blob must round trip");
+        assert_eq!(
+            out.capacity(),
+            capacity,
+            "a second, smaller blob must reuse the buffer rather than allocate a new one",
+        );
+    }
+
+    /// The allocating path verified the Adler-32 trailer, and the in-place one has to as
+    /// well. A corrupt blob that inflated silently would be a quietly incomplete graph.
+    #[test]
+    fn a_corrupt_adler_trailer_is_still_rejected() {
+        let data = b"the quick brown fox".to_vec();
+        let mut blob = zlib_blob(&data, data.len());
+        let last = blob.len() - 1;
+        blob[last] ^= 0xff;
+        let mut out = Vec::new();
+        let err = inflate_blob(&blob, &mut out).expect_err("a bad checksum must be refused");
+        assert!(err.0.contains("inflate failed"), "{}", err.0);
+    }
+
+    /// A `raw_size` smaller than the payload must error rather than hand back a truncated
+    /// block. The buffer is sized from `raw_size`, so `out.len()` matches it whatever
+    /// happened and the length check at the end of `inflate_blob` cannot see this.
+    #[test]
+    fn a_zlib_blob_whose_raw_size_is_too_small_is_rejected() {
+        let data = b"0123456789".to_vec();
+        let mut out = Vec::new();
+        let err = inflate_blob(&zlib_blob(&data, 4), &mut out)
+            .expect_err("a short raw_size must be refused");
+        assert!(err.0.contains("inflate"), "{}", err.0);
     }
 
     #[test]
