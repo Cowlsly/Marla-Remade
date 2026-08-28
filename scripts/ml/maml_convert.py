@@ -46,6 +46,7 @@ with the shaders about a transpose.
 
 import argparse
 import hashlib
+import math
 import struct
 import sys
 
@@ -98,6 +99,7 @@ GRAPHS = {
     "ppocr_det": 5,
     "ppocr_rec": 6,
     "vits_dec": 7,
+    "vits_enc": 8,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -110,6 +112,7 @@ EXPECTED_DIGEST = {
     "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
     "vits_dec": "ac3fa714b9c0074e7fb7fa1d5f5b65e30bf558df0817b014897cd56b6e850020",
+    "vits_enc": "93ee24f70b490334d11b383f043e81284a3e781bc263597830c50f8df14db2c1",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -128,6 +131,7 @@ EXPECTED_DIGEST = {
 # route.
 MODULES = {
     "vits_dec": "/dec/",
+    "vits_enc": "/enc_p/",
 }
 
 # `outputs` are the graph outputs the Rust forward pass corresponds to; the export may
@@ -188,6 +192,17 @@ EXPECTED_OPS = {
     # stage's residual blocks, which `nets::vits_dec` lowers to `Kind::Affine` at 1/3.
     "vits_dec": {
         "Conv": 20, "ConvTranspose": 3, "LeakyRelu": 16, "Add": 24, "Div": 3, "Tanh": 1,
+    },
+    # Counted within `/enc_p/` only. Most of these are not arithmetic: 48 Pad, 96 Reshape,
+    # 42 Slice and 130 Unsqueeze are the export building a [heads, T, 2T-1] relative score
+    # map and skewing it back, which `nets::vits_enc` does as nine taps instead. The six
+    # `Where` are the padding mask, which is bit-identically the identity for one unpadded
+    # utterance and so is not transcribed either.
+    "vits_enc": {
+        "Add": 60, "Cast": 1, "Concat": 66, "Conv": 37, "Div": 18, "Equal": 1,
+        "Gather": 61, "Less": 1, "MatMul": 24, "Mul": 72, "Pad": 48, "Pow": 12, "Range": 1,
+        "ReduceMean": 24, "Relu": 6, "Reshape": 96, "Shape": 25, "Slice": 42, "Softmax": 6,
+        "Split": 1, "Sqrt": 12, "Sub": 42, "Transpose": 73, "Unsqueeze": 130, "Where": 6,
     },
 }
 
@@ -355,6 +370,10 @@ def collect_layers(model, prefix=None):
     # Which node's output each BatchNormalization consumes, so the layer producing it
     # can absorb it.
     batch_norms = {n.input[0]: n for n in graph.node if n.op_type == "BatchNormalization"}
+    consumers = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
     folded = set()
 
     layers = []
@@ -424,6 +443,37 @@ def collect_layers(model, prefix=None):
             )
             tensors.append(weight)
             tensors.append(bias)
+        elif node.op_type == "Gather" and held(node.input[0]) and array(node.input[0]).ndim == 2:
+            # An embedding table. VITS multiplies the looked-up row by `sqrt(d_model)`, and
+            # that scale belongs here rather than in a shader: it is one op fewer and one
+            # rounding fewer, since `round(table * sqrt(d))` is closer than
+            # `round(table) * sqrt(d)`.
+            table = array(node.input[0]).astype(np.float64)
+            table = table * math.sqrt(table.shape[1])
+            key = f"Embed t={list(table.shape)} scaled=sqrt({table.shape[1]})"
+            tensors.append(table)
+        elif node.op_type == "Pad" and held(node.input[0]):
+            # A relative position table, which the export pads out to `2T-1` entries and
+            # then skews. `nets::vits_enc` reads the nine unpadded entries directly, so the
+            # leading batch axis is dropped and the padding never happens.
+            table = np.squeeze(array(node.input[0]))
+            if table.ndim != 2 or table.shape[0] % 2 == 0:
+                raise SystemExit(
+                    f"{node.output[0]}: a padded constant of {list(np.shape(table))}; a "
+                    "relative table is [2 * window + 1, head_dim]"
+                )
+            key = f"Relative t={list(table.shape)}"
+            tensors.append(table)
+        elif node.op_type == "Mul" and layer_norm_scale(node, consumers, held, array):
+            # A layer norm's gamma and the beta on the `Add` after it. The export decomposes
+            # the rest of the norm into ReduceMean/Sub/Pow/Sqrt/Div, none of which carries a
+            # weight, so this pair is all there is to collect.
+            gamma = next(array(n) for n in node.input if held(n))
+            follow = consumers[node.output[0]][0]
+            beta = next(array(n) for n in follow.input if held(n))
+            key = f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}"
+            tensors.append(gamma)
+            tensors.append(beta)
         elif node.op_type == "BatchNormalization":
             # Folded above, when the layer it follows was emitted. One that was not is a
             # batch norm somewhere in the middle of the graph, which nothing here can
@@ -447,6 +497,28 @@ def collect_layers(model, prefix=None):
             )
         )
     return layers, tensors
+
+
+def layer_norm_scale(node, consumers, held, array):
+    """Whether `node` is the `Mul(x, gamma)` of a decomposed layer norm.
+
+    Recognised by structure rather than by name: a `Mul` against a rank-1 constant whose one
+    consumer is an `Add` against a rank-1 constant of the same length. In Piper's encoder that
+    matches exactly the twelve norms and nothing else — the mask multiplies and the embedding
+    scale are against scalars or computed tensors.
+    """
+    scales = [n for n in node.input if held(n) and array(n).ndim == 1]
+    if len(scales) != 1:
+        return False
+    follow = consumers.get(node.output[0], [])
+    if len(follow) != 1 or follow[0].op_type != "Add":
+        return False
+    shifts = [
+        n
+        for n in follow[0].input
+        if held(n) and array(n).ndim == 1 and array(n).size == array(scales[0]).size
+    ]
+    return len(shifts) == 1
 
 
 def layer_table_digest(layers):

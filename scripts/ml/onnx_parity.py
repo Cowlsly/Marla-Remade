@@ -53,6 +53,9 @@ PROBE = {
     "ppocr_rec": None,
     "ppocr_det": "p2o.pd_op.hardswish.23.0",
     "vits_dec": None,
+    # The prior's mean and log-variance. `enc_p` is reachable from the graph's own inputs, so
+    # unlike the vocoder it needs no extraction — the duration predictor runs after it.
+    "vits_enc": "/enc_p/proj/Conv_output_0",
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -108,12 +111,13 @@ def final_logits(model):
     return next(iter(outputs))
 
 
-def run(model, probe, x):
+def run(model, probe, x, feed=None):
     session = onnxruntime.InferenceSession(
         model.SerializeToString(), providers=["CPUExecutionProvider"]
     )
     names = [o.name for o in session.get_outputs()]
-    outputs = session.run(None, {session.get_inputs()[0].name: x})
+    inputs = feed if feed is not None else {session.get_inputs()[0].name: x}
+    outputs = session.run(None, inputs)
     return np.squeeze(np.asarray(outputs[names.index(probe)]))
 
 
@@ -138,11 +142,23 @@ def main():
             onnx.helper.make_tensor_value_info(probe, onnx.TensorProto.FLOAT, None)
         )
 
+    feed = None
     if cut is not None:
         # Random latents, deterministic. The vocoder is not a classifier, so there is no
         # "sensible" input; what matters is that both sides see the same one.
         rng = np.random.default_rng(20240827)
         x = rng.standard_normal((1, cut["channels"], args.width)).astype(np.float32)
+    elif args.graph == "vits_enc":
+        # Phoneme ids. int64 for onnxruntime, the same values as fp32 for the runtime, which
+        # carries them in the arena — exact, since fp16 holds every integer to 2048.
+        rng = np.random.default_rng(20240827)
+        ids = rng.integers(0, 130, size=(1, args.width), dtype=np.int64)
+        feed = {
+            "input": ids,
+            "input_lengths": np.array([args.width], dtype=np.int64),
+            "scales": np.array([0.667, 1.0, 0.8], dtype=np.float32),
+        }
+        x = ids.astype(np.float32)
     else:
         height = 48 if args.graph == "ppocr_rec" else args.width
         # Deterministic and free of transcendentals, so both sides read identical bytes.
@@ -153,8 +169,8 @@ def main():
         x = ramp.reshape(1, 3, height, args.width)
     x.tofile(os.path.join(work, "input.f32"))
 
-    reference = run(model, probe, x)
-    quantised = run(rounded_to_fp16(model), probe, x)
+    reference = run(model, probe, x, feed)
+    quantised = run(rounded_to_fp16(model), probe, x, feed)
 
     environment = dict(os.environ, PARITY_DIR=work, PARITY_GRAPH=args.graph)
     environment["PARITY_WIDTH"] = str(args.width)

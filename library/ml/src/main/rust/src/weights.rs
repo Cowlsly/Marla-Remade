@@ -45,6 +45,10 @@ pub mod graph {
     /// graphs, because VITS's duration predictor samples noise and builds its alignment out
     /// of ops no plan can express. See [`crate::nets::vits_dec`].
     pub const VITS_DEC: u32 = 7;
+    /// Piper's VITS text encoder — the `enc_p` module, 130 phoneme symbols to a prior.
+    ///
+    /// See [`crate::nets::vits_enc`]. Its input is symbol ids rather than pixels or latents.
+    pub const VITS_ENC: u32 = 8;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

@@ -38,6 +38,7 @@ pub mod scrfd;
 pub mod selfie;
 pub mod u2netp;
 pub mod vits_dec;
+pub mod vits_enc;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -992,7 +993,7 @@ impl<'a> Builder<'a> {
         let (out, scale) = self.score_map(q, k, heads);
         let shape = self.shape_of(q);
         let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
-        self.check_offsets(offsets, shape.w);
+        self.check_offsets(offsets);
         let table = self.weight(table, &[offsets, head_dim]);
         self.nodes.push(Node::AttnScoresRelative { q, k, out, heads, scale, table, offsets });
         out
@@ -1010,24 +1011,22 @@ impl<'a> Builder<'a> {
         let out = self.mixed(probs, v, heads);
         let shape = self.shape_of(v);
         let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
-        self.check_offsets(offsets, shape.w);
+        self.check_offsets(offsets);
         let table = self.weight(table, &[offsets, head_dim]);
         self.nodes.push(Node::AttnApplyRelative { probs, v, out, heads, table, offsets });
         out
     }
 
     /// A relative table is `2 * window + 1` entries centred on zero displacement.
-    fn check_offsets(&mut self, offsets: u32, sequence: u32) {
+    ///
+    /// Only the parity is checked. The table's size is deliberately *not* related to the
+    /// sequence length: for a one-phoneme utterance only the centre entry is ever reachable
+    /// and the other eight go unused, which is correct rather than an error — "a" is a word.
+    fn check_offsets(&mut self, offsets: u32) {
         if offsets == 0 || offsets.is_multiple_of(2) {
             self.fail(format!(
                 "{offsets} relative offsets: the table is 2 * window + 1 entries centred on \
                  zero displacement, so an even count has no centre"
-            ));
-        }
-        if offsets > sequence * 2 {
-            self.fail(format!(
-                "{offsets} relative offsets over a sequence of {sequence}: the band is wider \
-                 than any pair of positions can be apart"
             ));
         }
     }
@@ -1733,12 +1732,19 @@ pub(crate) mod tests {
                         Kind::MulBroadcast => {
                             vec![(push.in0, written), (push.in1, push.in_c)]
                         }
-                        // Q and K are both whole sequences.
-                        Kind::AttnScores => vec![(push.in0, dense), (push.in1, dense)],
+                        // Q and K are both whole sequences. The relative variants read a
+                        // table out of the weights buffer as well, which cannot alias the
+                        // arena at all.
+                        Kind::AttnScores | Kind::AttnScoresRelative => {
+                            vec![(push.in0, dense), (push.in1, dense)]
+                        }
                         // The score map is `[heads, T, T]`; V is a sequence.
-                        Kind::AttnApply => {
+                        Kind::AttnApply | Kind::AttnApplyRelative => {
                             vec![(push.in0, push.group * push.out_w * push.out_w), (push.in1, dense)]
                         }
+                        // One id per position, so the read is `out_w` and not `dense` —
+                        // `dense` here would be the *table's* row count.
+                        Kind::Embed => vec![(push.in0, push.out_w)],
                         _ => vec![(push.in0, dense)],
                     };
                     ((push.out, written), reads)

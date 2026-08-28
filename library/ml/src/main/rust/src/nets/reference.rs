@@ -939,7 +939,8 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, Act, Builder,
+        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, Act,
+        Builder,
     };
     use super::*;
 
@@ -2106,6 +2107,17 @@ mod tests {
 
         // A voice is a runtime download rather than a bundled asset, so the vocoder's
         // `.maml` is given by path instead of being looked up in the tree.
+        if graph == "vits_enc" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_ENC)
+                .expect("the encoder asset parses");
+            let plan = vits_enc::build(&weights, width).expect("vits_enc builds");
+            let stats = run(&plan, weights.data(), &input).expect("the encoder runs");
+            write(&dir.join("reference.f32"), &stats);
+            println!("vits_enc at {width} phonemes: wrote {} values", stats.len());
+            return;
+        }
         if graph == "vits_dec" {
             let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
