@@ -352,17 +352,33 @@ class Table:
     def add(self, op, name, key, *values):
         first = len(self.tensors)
         for value in values:
-            self.tensors.append(np.ascontiguousarray(value, dtype=np.float32))
+            # int8 goes through as int8: `maml_convert.build` switches on the dtype to decide the
+            # payload, and casting a quantised kernel to fp32 here would make it fp16 in the file
+            # and silently double the size this exists to halve.
+            if getattr(value, "dtype", None) == np.int8:
+                self.tensors.append(np.ascontiguousarray(value))
+            else:
+                self.tensors.append(np.ascontiguousarray(value, dtype=np.float32))
         self.layers.append(
             maml_convert.Layer(len(self.layers), op, name, key, first, len(values))
         )
 
     def conv(self, name, out_channels, fold_scale=None, synthesise_bias=False,
-             pads=(0, 0, 0, 0), kernel=(1, 1), group=1, transpose=False, scale=None):
+             pads=(0, 0, 0, 0), kernel=(1, 1), group=1, transpose=False, scale=None,
+             int8=False):
         """One convolution's pair, lifted to the rank-4 `[out, in, 1, k]` the Rust indexes.
 
-        `transpose` is for the style path's `MatMul`s, whose weight is `[in, out]` \u2014 all eight of
+        `transpose` is for the style path's `MatMul`s, whose weight is `[in, out]` — all eight of
         them are 256x256, where a missed transpose is invisible in the shape.
+
+        `int8` emits **three** tensors rather than two — the quantised kernel, its
+        per-output-channel scale, then the bias — for `Builder::conv_int8` rather than
+        `Builder::conv`. It shifts every later tensor index by one, which is why it is opt-in per
+        call site: the Rust side has to move with it.
+
+        The caller decides, because the runtime cannot quantise everything. An int8 convolution
+        has no edge padding and refuses `Act::PRelu`, so only the ungrouped `1 x 1`s are eligible
+        — which is where 92% of the parameters are anyway.
         """
         weight = self.at(f"{name}.weight")
         if synthesise_bias:
@@ -384,12 +400,34 @@ class Table:
         note += " folded=layer_scale" if fold_scale is not None else ""
         note += " transposed" if transpose else ""
         note += f" scaled={scale:.6f}" if scale is not None else ""
+        if not int8:
+            self.add(
+                "Conv",
+                name,
+                f"Conv w={list(weight.shape)} b={list(bias.shape)} k={list(kernel)}"
+                f" p={list(pads)} g={group} pad=edge{note}",
+                weight,
+                bias,
+            )
+            return
+        # Every quantisation this script performs must be one the shaders can serve, and both
+        # int8 shaders zero-pad and index the kernel ungrouped. Refusing here rather than in the
+        # Rust means a wrong call site fails at conversion, when there is still a `.maml` to
+        # compare against, instead of at `Builder::finish` with the tensor indices already shifted.
+        if group != 1 or tuple(kernel) != (1, 1) or tuple(pads) != (0, 0, 0, 0):
+            raise SystemExit(
+                f"{name}: only an ungrouped, unpadded 1x1 can be int8 — this is "
+                f"k={list(kernel)} p={list(pads)} g={group}"
+            )
+        quantised, kernel_scale = maml_convert.quantise_per_channel(weight)
         self.add(
-            "Conv",
+            "ConvInt8",
             name,
-            f"Conv w={list(weight.shape)} b={list(bias.shape)} k={list(kernel)}"
-            f" p={list(pads)} g={group} pad=edge{note}",
-            weight,
+            f"ConvInt8 w={list(weight.shape)} scale={list(kernel_scale.shape)}"
+            f" b={list(bias.shape)} k={list(kernel)} p={list(pads)} g={group}"
+            f" zp=0 dtype=int8{note}",
+            quantised,
+            kernel_scale,
             bias,
         )
 

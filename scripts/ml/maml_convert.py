@@ -85,7 +85,7 @@ TENSOR_ENTRY_BYTES = 32
 # one file and a reader knows the stride without being told.
 DTYPE_F16 = 0
 
-# Signed 8-bit, symmetric, with a per-tensor scale in the fp16 tensor that follows it.
+# Signed 8-bit, symmetric, with a per-output-channel scale in the fp16 tensor that follows it.
 #
 # Only for a network where the weights dominate the download: SMaLL-100 is 330 million
 # parameters, 660 MB at fp16 against 330 MB here, and the ncnn build of the same model shipped
@@ -685,6 +685,58 @@ def quantised_linear(node, held, array, following_bias):
         f"zp=0 dtype=int8"
     )
     return [kernel, scale.astype(np.float32), bias], key
+
+
+def quantise_per_channel(kernel):
+    """An fp32 kernel as `(int8, scale)`, symmetric and absmax, one scale per output channel.
+
+    The counterpart of [`quantised_linear`], which only ever *validated* an export that had
+    already been quantised by onnxruntime. Supertonic's exports are fp32, so quantising them is
+    something this script has to do rather than read off.
+
+    # Symmetric, with no zero point
+
+    `conv_int8.comp` and `conv_point_int8.comp` compute `scale[o] * sum(int8_w * in)`: there is
+    nowhere for a zero point to go, and adding one would cost a second pass over the taps to
+    subtract `zp * sum(in)`. So the scale is `absmax / 127` and 0 maps to 0, which is also what
+    onnxruntime's dynamic quantiser was measured to emit for SMaLL-100 — every entry of every
+    weight zero point in that export is 0.
+
+    127 rather than 128: the range is made symmetric by giving up the one extra negative code, so
+    that `-absmax` and `+absmax` both round to a representable value. Using 128 would let a
+    weight at exactly `+absmax` quantise to 128, which does not exist in int8.
+
+    # Per output channel, not per tensor
+
+    A row of the kernel is one output channel, and the scale multiplies that row's finished
+    accumulator, so a scale per row costs nothing over a scalar — see `Builder::conv_int8`. It
+    buys a great deal: a layer whose channels differ in range by 100x loses most of its
+    resolution on the quiet ones under a single tensor-wide scale.
+
+    # An all-zero channel
+
+    Its absmax is 0, and `0 / 127` is a scale of 0, which is *correct* — every weight in the row
+    is 0, so any scale reproduces it — but it is also a division by zero when computing the
+    codes. Those rows are given a scale of 1 instead, which is exact for the same reason and is
+    finite.
+    """
+    kernel = np.ascontiguousarray(kernel, dtype=np.float32)
+    if kernel.ndim < 1:
+        raise SystemExit(f"rank {kernel.ndim} kernel; quantisation needs an output axis")
+    if not np.isfinite(kernel).all():
+        raise SystemExit("a kernel holding a non-finite value cannot be quantised")
+    rows = kernel.reshape(kernel.shape[0], -1)
+    absmax = np.abs(rows).max(axis=1)
+    scale = np.where(absmax > 0, absmax / 127.0, 1.0).astype(np.float32)
+    # Round half away from zero, as `np.round` does not: it rounds half to even, which biases a
+    # symmetric weight distribution towards the even codes.
+    codes = np.floor(np.abs(rows) / scale[:, None] + 0.5) * np.sign(rows)
+    quantised = np.clip(codes, -127, 127).astype(np.int8).reshape(kernel.shape)
+    # The scale is stored as fp16 beside the weights, so the reconstruction the shader performs
+    # uses the *rounded* scale. Rounding it here means the error reported below is the error the
+    # device will have, not an optimistic one.
+    scale = scale.astype(np.float16).astype(np.float32)
+    return quantised, scale
 
 
 def build(layers, tensors, graph_id, onnx_sha256):
