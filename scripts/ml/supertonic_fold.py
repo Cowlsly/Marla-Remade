@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Supertonic 3's vocoder ONNX to `.maml`, folding its three per-channel affines away.
+"""Supertonic 3's ONNX nets to `.maml`, folding their per-channel affines away.
 
 `nets::supertonic_vocoder` is a hardcoded forward pass of convolutions, layer norms, GELUs and
 residual adds — and nothing else. The export has three per-channel affines that are not any of
@@ -28,8 +28,26 @@ border supplies `a x_border + b`, which is what the fold assumes, so it holds ev
 * `head/layer2` has no bias in the export. A zero one is synthesised, as `maml_convert` already
   does for `vits_dec`.
 
+# The duration predictor
+
+`--graph supertonic_dp` collects `duration_predictor.onnx` instead, which needs three fixes of
+its own rather than the vocoder's three:
+
+    sentence_token [1, 64, 1]  -> appended to the embedding table as its last row
+    block gamma [1, 64, 1]     -> folds into that block's `pwconv2`
+    proj_out                   -> a zero bias is synthesised
+
+Prepending a learned token to the sequence is a `Concat` this runtime has no op for along the
+sequence axis, and needs none: the token becomes row 8322 of the table and the caller prepends
+that id. See `nets::supertonic_duration`.
+
+Unlike the vocoder this graph is **not** entirely edge-padded — twelve of its eighteen `Pad`s are
+the relative-attention skew and are `constant`. What matters is that every pad feeding a
+*convolution* replicates, which is checked separately.
+
 Usage:
     ./scripts/ml/supertonic_fold.py vocoder.onnx --graph supertonic_voc -o vocoder.maml
+    ./scripts/ml/supertonic_fold.py duration_predictor.onnx --graph supertonic_dp -o dp.maml
 """
 
 import argparse
@@ -47,6 +65,14 @@ import maml_convert  # noqa: E402  (needs the path above)
 # The vocoder's stack width, and the widening inside each block.
 CHANNELS = 512
 INNER = CHANNELS * 4
+
+# The duration predictor's, and the counts `nets::supertonic_duration` hardcodes.
+DP_CHANNELS = 64
+DP_INNER = 256
+DP_BLOCKS = 6
+DP_ATTN_LAYERS = 2
+DP_HIDDEN = 128
+DP_PREFIX = "tts.dp.sentence_encoder"
 
 
 def constants(graph):
@@ -76,6 +102,31 @@ def edge_padded(graph):
                 mode = attribute.s.decode()
         modes.add(mode)
     return modes == {"edge"}
+
+
+def convolutions_edge_padded(graph):
+    """Whether every `Pad` that feeds a convolution replicates its border.
+
+    Laxer than [`edge_padded`], and it has to be: the duration predictor's relative-attention
+    skew spends twelve `constant` pads on `Slice`s and `Reshape`s, which are not convolutions and
+    are not transcribed. The six that matter are the depthwise ones.
+    """
+    consumers = {}
+    for node in graph.node:
+        for name in node.input:
+            consumers.setdefault(name, []).append(node)
+    for node in graph.node:
+        if node.op_type != "Pad":
+            continue
+        if not any(c.op_type == "Conv" for c in consumers.get(node.output[0], [])):
+            continue
+        mode = "constant"
+        for attribute in node.attribute:
+            if attribute.name == "mode":
+                mode = attribute.s.decode()
+        if mode != "edge":
+            return False
+    return True
 
 
 def fold_into(weight, bias, scale, shift):
@@ -237,6 +288,131 @@ def collect(graph):
     return layers, tensors
 
 
+def collect_duration(graph):
+    """The duration predictor's layers and tensors, folded, in the order the Rust reads them.
+
+    Driven by the export's parameter *names* rather than by graph order. The vocoder is a plain
+    stack where walking the nodes lands each tensor in the right slot; this graph interleaves two
+    relative-position tables, four masks and a skew per attention layer, and naming each tensor is
+    both shorter and checkable against `nets::supertonic_duration` line by line.
+    """
+    held = constants(graph)
+    if not convolutions_edge_padded(graph):
+        raise SystemExit(
+            "this export does not pad every convolution with mode=edge, so the layer-scale "
+            "fold below is not valid; see the module docstring"
+        )
+
+    def held_at(name):
+        if name not in held:
+            raise SystemExit(f"{name} is not in this export")
+        return np.asarray(held[name], dtype=np.float64)
+
+    layers, tensors = [], []
+
+    def add(op, name, key, *values):
+        first = len(tensors)
+        for value in values:
+            tensors.append(np.ascontiguousarray(value, dtype=np.float32))
+        layers.append(maml_convert.Layer(len(layers), op, name, key, first, len(values)))
+
+    def conv(name, out_channels, fold_scale=None, synthesise_bias=False, pads=(0, 0, 0, 0),
+             kernel=(1, 1), group=1):
+        """One convolution's pair, lifted to the rank-4 `[out, in, 1, k]` the Rust indexes."""
+        weight = held_at(f"{name}.weight")
+        if synthesise_bias:
+            bias = np.zeros(out_channels, dtype=np.float64)
+        else:
+            bias = held_at(f"{name}.bias")
+        if fold_scale is not None:
+            weight, bias = fold_output(weight, bias, fold_scale, 0.0)
+        if weight.ndim == 2:
+            # A `Gemm`'s `[out, in]`, at `transB=1`, is already the convolution's layout.
+            weight = weight.reshape(weight.shape[0], weight.shape[1], 1, 1)
+        elif weight.ndim == 3:
+            weight = weight.reshape(weight.shape[0], weight.shape[1], 1, weight.shape[2])
+        note = " b0=synthesised" if synthesise_bias else ""
+        note += " folded=layer_scale" if fold_scale is not None else ""
+        add(
+            "Conv",
+            name,
+            f"Conv w={list(weight.shape)} b={list(bias.shape)} k={list(kernel)}"
+            f" p={list(pads)} g={group} pad=edge{note}",
+            weight,
+            bias,
+        )
+
+    def layer_norm(name):
+        gamma = held_at(f"{name}.weight")
+        beta = held_at(f"{name}.bias")
+        add(
+            "LayerNorm",
+            name,
+            f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}",
+            gamma,
+            beta,
+        )
+
+    # The embedding table, with `sentence_token` as its last row. The token is prepended to the
+    # sequence in the export and read back out of position 0 at the end; making it a row of the
+    # table is how a plan with no sequence-axis concat expresses that.
+    table = held_at(f"{DP_PREFIX}.text_embedder.char_embedder.weight")
+    token = held_at(f"{DP_PREFIX}.sentence_token").reshape(1, -1)
+    if token.shape[1] != table.shape[1]:
+        raise SystemExit(f"a {list(token.shape)} sentence token for a {list(table.shape)} table")
+    table = np.concatenate([table, token], axis=0)
+    add("Embed", "char_embedder+sentence_token", f"Embed t={list(table.shape)} token=last", table)
+
+    for block in range(DP_BLOCKS):
+        at = f"{DP_PREFIX}.convnext.convnext.{block}"
+        # Symmetric, not causal: `[0, 0, 2, 0, 0, 2]` around a 5-tap at dilation 1. The vocoder
+        # is the other way round, which is the one thing here worth stating twice.
+        conv(f"{at}.dwconv", DP_CHANNELS, pads=(0, 2, 0, 2), kernel=(1, 5), group=DP_CHANNELS)
+        layer_norm(f"{at}.norm.norm")
+        conv(f"{at}.pwconv1", DP_INNER)
+        # The block's `[1, 64, 1]` gamma rides on `pwconv2`, which is a 1x1 and so has no border.
+        conv(f"{at}.pwconv2", DP_CHANNELS, fold_scale=held_at(f"{at}.gamma").reshape(-1))
+
+    for layer in range(DP_ATTN_LAYERS):
+        at = f"{DP_PREFIX}.attn_encoder"
+        attn = f"{at}.attn_layers.{layer}"
+        for projection in ("conv_q", "conv_k", "conv_v"):
+            conv(f"{attn}.{projection}", DP_CHANNELS)
+        # `[1, 9, 32]` in the export; the Rust reads `[offsets, head_dim]`.
+        for table_name in ("emb_rel_k", "emb_rel_v"):
+            relative = held_at(f"{attn}.{table_name}").reshape(9, -1)
+            add(
+                "RelPos",
+                f"{attn}.{table_name}",
+                f"RelPos t={list(relative.shape)}",
+                relative,
+            )
+        conv(f"{attn}.conv_o", DP_CHANNELS)
+        layer_norm(f"{at}.norm_layers_1.{layer}.norm")
+        conv(f"{at}.ffn_layers.{layer}.conv_1", DP_INNER)
+        conv(f"{at}.ffn_layers.{layer}.conv_2", DP_CHANNELS)
+        layer_norm(f"{at}.norm_layers_2.{layer}.norm")
+
+    # `proj_out` has no bias in the export; the Rust reads a pair for every convolution.
+    conv(f"{DP_PREFIX}.proj_out.net", DP_CHANNELS, synthesise_bias=True)
+    conv("tts.dp.predictor.layers.0", DP_HIDDEN)
+
+    prelu = next(n for n in graph.node if n.op_type == "PRelu")
+    slope = np.asarray(held[prelu.input[1]], dtype=np.float64).reshape(-1)
+    if slope.size != 1:
+        raise SystemExit(f"{prelu.name}: a {slope.size}-element slope, expected one")
+    widened = np.full((DP_HIDDEN, 1, 1), float(slope[0]), dtype=np.float32)
+    add(
+        "PRelu",
+        prelu.name,
+        f"PRelu s={list(widened.shape)} shared={float(slope[0]):.6f}",
+        widened,
+    )
+
+    conv("tts.dp.predictor.layers.1", 1)
+    return layers, tensors
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("onnx")
@@ -249,7 +425,10 @@ def main():
     raw = open(args.onnx, "rb").read()
     onnx_sha256 = hashlib.sha256(raw).digest()
     model = onnx.load(args.onnx)
-    layers, tensors = collect(model.graph)
+    if args.graph == "supertonic_dp":
+        layers, tensors = collect_duration(model.graph)
+    else:
+        layers, tensors = collect(model.graph)
 
     if args.print_layers:
         for layer in layers:

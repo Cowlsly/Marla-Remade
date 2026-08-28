@@ -59,6 +59,10 @@ PROBE = {
     "vits_flow": None,
     "vits_dp": None,
     "supertonic_voc": None,
+    # The sentence encoder's output, before the CLS slice. The graph's own output is a single
+    # scalar, and a correlation over one value is not a number - this is where all but 25k of
+    # the parameters are, and it is `[64, T + 1]` so a structural error has nowhere to hide.
+    "supertonic_dp": "/sentence_encoder/Add_output_0",
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -88,6 +92,8 @@ SUBGRAPH = {
     # runs would not agree with each other, let alone with the runtime.
     # A whole file, not a module: no `first`, so nothing is extracted. 144 latent channels.
     "supertonic_voc": {"channels": 144},
+    # Also a whole file, but its input is character ids rather than a latent, so it is fed like
+    # `vits_enc` below rather than through `cut`.
     "vits_dp": {
         "first": "/dp/pre/Conv",
         "channels": 192,
@@ -206,6 +212,20 @@ def main():
             "scales": np.array([0.667, 1.0, 0.8], dtype=np.float32),
         }
         x = ids.astype(np.float32)
+    elif args.graph == "supertonic_dp":
+        # Character ids and a voice's style. The ids go past 2048, where fp16 stops holding
+        # every integer, so the runtime reads them as two lanes - which is the whole reason
+        # `embed_lanes` exists. The `[1, 8, 16]` style flattens row-major to 128.
+        rng = np.random.default_rng(20240827)
+        ids = rng.integers(0, 8322, size=(1, args.width), dtype=np.int64)
+        style = rng.standard_normal((1, 8, 16)).astype(np.float32)
+        feed = {
+            "text_ids": ids,
+            "style_dp": style,
+            "text_mask": np.ones((1, 1, args.width), dtype=np.float32),
+        }
+        x = ids.astype(np.float32)
+        style.tofile(os.path.join(work, "style.f32"))
     else:
         height = 48 if args.graph == "ppocr_rec" else args.width
         # Deterministic and free of transcendentals, so both sides read identical bytes.
@@ -251,7 +271,13 @@ def main():
     bound = np.ascontiguousarray(
         quantised.T if args.graph == "ppocr_rec" else quantised
     ).flatten()
-    print(f"{args.graph} at {args.width} wide, tensor {probe}:")
+    # The tensor's own scale, because "max 0.008" means nothing on its own: the bar measures
+    # fp16 *weights* against fp32 activations, and this runtime holds activations in fp16 too,
+    # so a difference of order `eps * |tensor|` is the format rather than a bug.
+    print(
+        f"{args.graph} at {args.width} wide, tensor {probe}: "
+        f"|values| max {np.abs(want).max():.4f}"
+    )
     report("fp16 weights alone (the bar)", want, bound)
     report("the runtime", want, got)
 

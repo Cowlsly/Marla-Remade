@@ -535,14 +535,18 @@ impl Reference {
         Ok(())
     }
 
-    /// `out[c][t] = table[id(t)][c]`, with the id read out of the arena as fp16.
+    /// `out[c][t] = table[id(t)][c]`, with the id read out of the arena as fp16, in one lane
+    /// or in two (`lo + 2048 * hi`) for a table past `EMBED_LANE` rows.
     fn embed(&mut self, p: &Push) -> Result<(), String> {
         let rows = p.in_w;
         if rows == 0 {
             return Err("an embedding table with no rows".into());
         }
         for position in 0..p.out_w {
-            let raw = self.load(p.in0, position)?;
+            let mut raw = self.load(p.in0, position)?;
+            if p.in_c == 2 {
+                raw += 2048.0 * self.load(p.in0, p.out_w + position)?;
+            }
             // Round rather than truncate, and clamp: an unknown symbol should mispronounce
             // a word rather than read past the table.
             let id = ((raw + 0.5).max(0.0) as u32).min(rows - 1);
@@ -1042,8 +1046,8 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act,
-        Builder,
+        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_vocoder,
+        u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -2040,6 +2044,46 @@ mod tests {
     }
 
     #[test]
+    fn a_two_lane_id_reaches_a_row_fp16_cannot_name() {
+        // Supertonic has 8,322 symbols, so ids past 2048 arrive as `lo + 2048 * hi`. Each
+        // row here carries its own index back as that same pair, both halves exact in fp16,
+        // so a lane that was dropped, swapped or scaled shows up as the wrong row.
+        let rows = 8322u32;
+        let mut table = Vec::with_capacity(rows as usize * 2);
+        for row in 0..rows {
+            table.push((row / EMBED_LANE) as f32);
+            table.push((row % EMBED_LANE) as f32);
+        }
+        let ids = [0u32, 1, 2047, 2048, 2049, 4096, 8321];
+        let got = one(
+            Shape::new(2, 1, ids.len() as u32),
+            &embed_lanes(&ids),
+            &[(vec![rows, 2], table)],
+            |b, x| b.embed(x, 0, rows, 2),
+        );
+        let want: Vec<f32> = ids
+            .iter()
+            .map(|&id| (id / EMBED_LANE) as f32)
+            .chain(ids.iter().map(|&id| (id % EMBED_LANE) as f32))
+            .collect();
+        close(&got, &want);
+    }
+
+    #[test]
+    fn a_big_table_refuses_ids_in_one_lane() {
+        // The failure this guards is silent otherwise: id 4000 in a single fp16 lane comes
+        // back as 4000 exactly, but 4001 comes back as 4000, so the net reads a plausible
+        // wrong row instead of failing.
+        let rows = EMBED_LANE + 1;
+        let source = Given::new(&[(vec![rows, 1], vec![0.0; rows as usize])]).expect("the fixture lays out");
+        let mut b = Builder::new(&source);
+        let ids = b.input(Shape::new(1, 1, 4));
+        let out = b.embed(ids, 0, rows, 1);
+        let error = b.finish(&[out]).expect_err("one lane for a big table");
+        assert!(error.contains("two lanes"), "{error}");
+    }
+
+    #[test]
     fn a_relative_score_map_adds_a_banded_term_from_its_table() {
         // Q = K = 1 everywhere over four positions, two channels, one head. The content
         // term is then `scale * head_dim` for every pair, and the relative term adds
@@ -2414,6 +2458,36 @@ mod tests {
             let samples = supertonic_vocoder::interleave(&channelled);
             write(&dir.join("reference.f32"), &samples);
             println!("supertonic_voc at {width} frames: wrote {} values", samples.len());
+            return;
+        }
+        if graph == "supertonic_dp" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights =
+                crate::weights::Weights::parse(&bytes, crate::weights::graph::SUPERTONIC_DP)
+                    .expect("the duration asset parses");
+            let plan = supertonic_duration::build(&weights, width).expect("the predictor builds");
+            let raw = std::fs::read(dir.join("style.f32")).expect("the style");
+            let style: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            // The sentence token leads the sequence, and the ids go past 2048 so they travel as
+            // two lanes. Both are the caller's job in production too.
+            let mut ids = vec![supertonic_duration::SENTENCE_TOKEN];
+            ids.extend(input.iter().map(|&v| v as u32));
+            let lanes = super::super::embed_lanes(&ids);
+            let outputs =
+                run_multi(&plan, weights.data(), &[&lanes, &style]).expect("the predictor runs");
+            let encoded = outputs.first().expect("the encoder output");
+            write(&dir.join("reference.f32"), encoded);
+            let log_seconds = outputs[1][0];
+            println!(
+                "supertonic_dp at {width} chars: wrote {} values, {:.6} seconds ({} frames)",
+                encoded.len(),
+                supertonic_duration::seconds(log_seconds),
+                supertonic_duration::latent_frames(supertonic_duration::seconds(log_seconds)),
+            );
             return;
         }
         if graph == "vits_dp" {

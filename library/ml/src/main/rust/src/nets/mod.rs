@@ -36,6 +36,7 @@ pub mod ppocr_det;
 pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
+pub mod supertonic_duration;
 pub mod supertonic_vocoder;
 pub mod u2netp;
 pub mod vits_dec;
@@ -282,6 +283,13 @@ pub enum Kind {
     /// tensor, which is exact for the 130 phoneme symbols VITS uses — fp16 holds every
     /// integer to 2048. Table at [`Push::weight`], its row count in [`Push::in_w`], and an
     /// out-of-range id clamps rather than reading past the table.
+    ///
+    /// # Vocabularies past 2048
+    ///
+    /// Above [`EMBED_LANE`] the gaps between representable fp16 integers open up, so a single
+    /// id lane would silently land on a neighbouring row — Supertonic has 8,322 symbols and
+    /// SMaLL-100 has 128,112. Those arrive **split across two lanes**, `id = lo + 2048 * hi`,
+    /// as a `[2, 1, T]` tensor; [`Push::in_c`] carries the lane count. See [`embed_lanes`].
     Embed,
     /// `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
     ///
@@ -650,6 +658,22 @@ pub struct Builder<'a> {
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
 /// boundary `.maml` aligns its tensors to.
 const ALIGN_ELEMS: u32 = 8;
+
+/// The largest integer fp16 holds exactly, and so the width of one embedding id lane.
+///
+/// Every integer below this has an exact fp16 representation; at 2049 the gaps open to 2 and
+/// keep doubling. A table with more rows than this takes its ids as two lanes — see
+/// [`Kind::Embed`] and [`embed_lanes`].
+pub const EMBED_LANE: u32 = 2048;
+
+/// Ids for [`Builder::embed`] over a table of more than [`EMBED_LANE`] rows, laid out as the
+/// `[2, 1, T]` tensor it wants: all the low lanes, then all the high ones.
+pub fn embed_lanes(ids: &[u32]) -> Vec<f32> {
+    let mut out = Vec::with_capacity(ids.len() * 2);
+    out.extend(ids.iter().map(|&id| (id % EMBED_LANE) as f32));
+    out.extend(ids.iter().map(|&id| (id / EMBED_LANE) as f32));
+    out
+}
 
 impl<'a> Builder<'a> {
     /// Start recording a pass. Declare its inputs with [`Builder::input`].
@@ -1187,16 +1211,28 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// An embedding lookup: `out[c][t] = table[id(t)][c]`, over a `[1, 1, T]` id tensor.
+    /// An embedding lookup: `out[c][t] = table[id(t)][c]`, over a `[1, 1, T]` id tensor, or a
+    /// `[2, 1, T]` one when the table has more than [`EMBED_LANE`] rows.
     ///
     /// `table` indexes a `[rows, channels]` tensor. The `sqrt(d_model)` scale VITS applies
     /// after the lookup belongs in the table, not here; see [`Kind::Embed`].
     pub fn embed(&mut self, ids: Id, table: usize, rows: u32, channels: u32) -> Id {
         let shape = self.shape_of(ids);
-        if shape.c != 1 || shape.h != 1 {
-            self.fail(format!(
-                "embedding {shape:?}: ids are one per position, so a [1, 1, T] tensor"
-            ));
+        let lanes = if rows > EMBED_LANE { 2 } else { 1 };
+        if shape.c != lanes || shape.h != 1 {
+            if lanes == 2 {
+                // Refused rather than rounded: a single lane holds ids to 2048 exactly and
+                // then starts landing on a neighbouring row, which reads as a plausible
+                // wrong word rather than as a failure.
+                self.fail(format!(
+                    "embedding {shape:?}: {rows} rows is past {EMBED_LANE}, so the ids split \
+                     across two lanes as a [2, 1, T] tensor"
+                ));
+            } else {
+                self.fail(format!(
+                    "embedding {shape:?}: ids are one per position, so a [1, 1, T] tensor"
+                ));
+            }
         }
         if rows == 0 || channels == 0 {
             self.fail(format!("an embedding table of {rows} x {channels}"));
@@ -1823,6 +1859,8 @@ impl<'a> Builder<'a> {
                         // clamps against it so an unknown symbol mispronounces a word
                         // rather than reading whatever follows the embedding.
                         in_w: *rows,
+                        // Id lanes, 1 or 2. Not the output's channel count.
+                        in_c: shape(*ids).c,
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
@@ -2136,9 +2174,9 @@ pub(crate) mod tests {
                         Kind::AttnApply | Kind::AttnApplyRelative => {
                             vec![(push.in0, push.group * push.out_w * push.out_w), (push.in1, dense)]
                         }
-                        // One id per position, so the read is `out_w` and not `dense` —
-                        // `dense` here would be the *table's* row count.
-                        Kind::Embed => vec![(push.in0, push.out_w)],
+                        // One id per position per lane, so the read is `in_c * out_w` and
+                        // not `dense` - `in_w` here is the *table's* row count.
+                        Kind::Embed => vec![(push.in0, push.in_c * push.out_w)],
                         // As `Conv`: the whole input plane, whatever the kernel touches.
                         Kind::ConvInt8 => vec![(push.in0, dense)],
                         // count is tiles here, so the read span is the input plane.

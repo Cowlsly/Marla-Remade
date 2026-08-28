@@ -13,6 +13,10 @@
 //! through the arena cannot move an id to its neighbour — 130 is nowhere near the 2048 where
 //! the gaps between representable integers open up.
 //!
+//! Supertonic's 8,322 symbols and SMaLL-100's 128,112 are past that, so those pass ids as
+//! **two lanes** — a `[2, 1, T]` tensor holding `id % 2048` then `id / 2048`, recombined
+//! here. `p.in_c` is the lane count.
+//!
 //! `p.in_w` is the table's row count. An id outside it clamps rather than reading past the
 //! table: a phonemiser that emitted an unknown symbol should mispronounce a word, not sample
 //! whatever weights follow the embedding.
@@ -36,6 +40,10 @@ void main() {
     // Round rather than truncate: an id that came back as 41.9997 is 42.
     float raw = float(arena[p.in0 + position]);
     uint id = uint(max(raw + 0.5, 0.0));
+    if (p.in_c == 2u) {
+        float high = float(arena[p.in0 + p.out_w + position]);
+        id += 2048u * uint(max(high + 0.5, 0.0));
+    }
     uint rows = p.in_w;
     if (id >= rows) {
         id = rows - 1u;
