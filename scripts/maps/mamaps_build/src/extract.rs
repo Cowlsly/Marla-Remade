@@ -3,11 +3,12 @@
 //! Three passes, because a PBF is ordered nodes-then-ways-then-relations and a way's geometry needs
 //! coordinates that arrived before its tags did:
 //!
-//! 1. **ways + relations.** Classify tags. Keep the node refs of every classified way and the member
-//!    way ids of every classified relation. Node blobs are skipped outright.
-//! 2. **ways again**, keeping the refs of the ways that turned out to be relation members. A second
-//!    pass rather than keeping every untagged way's refs from the first, because "every untagged way
-//!    in California" is 40 M node ids and the members are a few thousand.
+//! 1. **ways + relations.** Classify tags. Spill the node refs of every classified way to a
+//!    sequential file and keep the member way ids of every classified relation. Node blobs are
+//!    skipped outright.
+//! 2. **ways again**, keeping the refs of the ways some relation lists as a member. A second pass
+//!    rather than keeping every untagged way's refs from the first, because "every untagged way in
+//!    California" is 40 M node ids and the members are a few hundred thousand.
 //! 3. **nodes.** Fill coordinates for exactly the ids the first two passes asked for, at 16 bytes
 //!    per needed node.
 //!
@@ -15,8 +16,16 @@
 //! `O(needed)`; `graph_build`'s bitset costs 2.5 GB keyed by raw OSM node id whatever the extract,
 //! and peaks near 10 GB on California. A water-and-buildings build needs a few million nodes, so it
 //! pays tens of megabytes.
+//!
+//! # Nothing large is resident across the passes
+//!
+//! Neither of the two big tables this stage produces is held in memory. Features go to
+//! [`Store`]; classified ways go to [`WaySink`], exploiting the fact that pass 1 already sees them
+//! in ascending id order so no sort is needed to read them back in the order the archive wants.
+//! What stays resident is the set a sequential file cannot serve: the refs of the ways that some
+//! relation lists as a member, because a relation reaches those by id in its own order.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use osm_ingest::nodeloc::{resolve_nodes, NodeLocations};
@@ -28,7 +37,7 @@ use osm_ingest::select::Select;
 use tile_build::geom::Geometry;
 
 use crate::schema::{self, Class, Layers};
-use crate::store::{Sink, Store};
+use crate::store::{Sink, Store, WayCounts, WayReader, WaySink};
 
 /// One classified feature, in lon/lat, ready to tile.
 pub struct Feature {
@@ -51,7 +60,7 @@ pub struct Stats {
     pub rings: RingStats,
 }
 
-/// A classified way, held between passes.
+/// A classified way, held only from the blob it was decoded in until its chunk reaches [`WaySink`].
 struct Way {
     class: Class,
     refs: Vec<i64>,
@@ -72,7 +81,8 @@ struct Relation {
 /// Read `input` and spill every feature the schema classifies to `spill_path`.
 ///
 /// Features go to disk rather than into a `Vec`, because holding them was 4.9 GB of a measured
-/// 10.03 GB California peak and nothing reads them until the tiler does. See [`crate::store`].
+/// 10.03 GB California peak and nothing reads them until the tiler does. Classified ways go to a
+/// scratch file beside it for the same reason. See [`crate::store`].
 pub fn extract(
     input: &Path,
     layers: Layers,
@@ -82,12 +92,23 @@ pub fn extract(
     let blobs = pbf::scan_blobs(input)?;
     let select = Select::parse(&schema::filters(layers))?;
     let mut stats = Stats::default();
+    // Scratch for this function alone: written in pass 1, read twice below, and removed as soon as
+    // the last read is done. Beside the feature spill, so a build directed at a writable output
+    // directory needs nothing else to be writable.
+    let ways_path = spill_path.with_extension("ways.tmp");
 
     // --- pass 1: ways and relations -------------------------------------------------------
     //
+    // `run_pass_sink` rather than `run_pass`, because `run_pass`'s contract is to hand back every
+    // chunk at once and these chunks hold the node refs of every classified way — the 2.7 GB this
+    // spill exists to be rid of. Here a chunk is appended to the file and freed while its
+    // neighbours are still decoding.
+    //
     // `blob_kinds` comes back from this pass and lets the later ones skip whole blobs, which on a
     // planet extract is most of the file.
-    let (chunks, blob_kinds) = pbf::run_pass(
+    let mut ways = WaySink::create(&ways_path)?;
+    let mut relations: Vec<Relation> = Vec::new();
+    let blob_kinds = pbf::run_pass_sink(
         input,
         &blobs,
         None,
@@ -139,23 +160,32 @@ pub fn extract(
             })?;
             Ok(kinds)
         },
+        |(chunk_ways, chunk_relations)| {
+            // Chunks arrive in file order and a PBF's ways are sorted by id, so appending here
+            // leaves the file in ascending id order. `WaySink::push` refuses an id that does not
+            // advance rather than letting an unsorted file reorder the archive silently.
+            for (id, way) in chunk_ways {
+                ways.push(id, &way.class, &way.refs)?;
+            }
+            relations.extend(chunk_relations);
+            Ok(())
+        },
     )?;
-
-    let mut ways: HashMap<i64, Way> = HashMap::new();
-    let mut relations: Vec<Relation> = Vec::new();
-    for (chunk_ways, chunk_relations) in chunks {
-        ways.extend(chunk_ways);
-        relations.extend(chunk_relations);
-    }
-    stats.ways_classified = ways.len() as u64;
+    let WayCounts { ways: ways_classified, refs: way_refs } = ways.finish()?;
+    stats.ways_classified = ways_classified;
     stats.relations_classified = relations.len() as u64;
 
-    // --- pass 2: the member ways pass 1 did not keep --------------------------------------
+    // --- pass 2: the refs of every relation member way ------------------------------------
+    //
+    // **Every** member, not just the ones pass 1 did not classify. A relation reaches its members by
+    // id, in the order it lists them, which is the one random access in this stage and the one thing
+    // a sequential spill file cannot serve. So the members — and only the members — stay resident,
+    // and that is what lets the other several million classified ways go to disk. California has
+    // 63 156 relations, so this table is small next to the one it replaces.
     let wanted: Vec<i64> = {
         let mut wanted: Vec<i64> = relations
             .iter()
             .flat_map(|r| r.members.iter().map(|(id, _)| *id))
-            .filter(|id| !ways.contains_key(id))
             .collect();
         wanted.sort_unstable();
         wanted.dedup();
@@ -189,19 +219,27 @@ pub fn extract(
     }
 
     // --- pass 3: the coordinates those two asked for --------------------------------------
-    let mut needed: Vec<i64> = Vec::new();
-    for way in ways.values() {
-        needed.extend_from_slice(&way.refs);
+    //
+    // The classified ways are read off disk instead of walked in memory. Order does not matter here
+    // — `NodeLocations::new` sorts and dedups — so this is a plain streaming pass over the spill.
+    //
+    // Sized exactly rather than grown into. This is ~200 M ids on California, and a `Vec` that
+    // doubles its way there holds the old and the new allocation at once across the last realloc:
+    // 1.1 GB plus 2.1 GB, for a length both passes already know.
+    let member_refs: usize = members.values().map(|refs| refs.len()).sum();
+    let mut needed: Vec<i64> = Vec::with_capacity(way_refs as usize + member_refs);
+    {
+        let mut reader = WayReader::open(&ways_path)?;
+        let mut refs: Vec<i64> = Vec::new();
+        while reader.next(&mut refs)?.is_some() {
+            needed.extend_from_slice(&refs);
+        }
     }
+    // A member way that pass 1 also classified already contributed its refs above; `members` adds
+    // the ones — the great majority, since a multipolygon's rings usually carry no tags of their
+    // own — that nothing else asked for.
     for refs in members.values() {
         needed.extend_from_slice(refs);
-    }
-    for relation in &relations {
-        for (id, _) in &relation.members {
-            if let Some(way) = ways.get(id) {
-                needed.extend_from_slice(&way.refs);
-            }
-        }
     }
     let table = NodeLocations::new(needed);
     stats.nodes_needed = table.len() as u64;
@@ -209,42 +247,29 @@ pub fn extract(
 
     // --- materialise ----------------------------------------------------------------------
     //
-    // Ways in **id order**, not hash order, because the output has to be reproducible and a
-    // `HashMap`'s iteration is not. The one place in this pipeline where that is a real risk.
+    // Ways in **id order**, which is the order the spill file is already in. It used to be a sort of
+    // a `HashMap`'s keys, for the same reason: the output has to be reproducible and hash order is
+    // not. The one place in this pipeline where that was a real risk, and now it is a property of
+    // the file rather than a step that could be forgotten.
     let mut sink = Sink::create(spill_path)?;
-
-
-    // Which ways a relation still needs. Everything else can have its refs freed the moment its own
-    // geometry is built, which is what keeps the refs heap from staying resident for the whole pass
-    // -- 1.4 GB of the California peak.
-    let mut needed_by_relations: HashSet<i64> = HashSet::new();
-    for relation in &relations {
-        needed_by_relations.extend(relation.members.iter().map(|(id, _)| *id));
-    }
-
-    let mut ids: Vec<i64> = ways.keys().copied().collect();
-    ids.sort_unstable();
-    for id in ids {
-        let way = &ways[&id];
-        let line = table.line(&way.refs);
-        let (class, area) = (way.class, way.class.area);
-        match way_geometry(&line, area) {
+    let mut reader = WayReader::open(&ways_path)?;
+    let mut refs: Vec<i64> = Vec::new();
+    while let Some((_, class)) = reader.next(&mut refs)? {
+        let line = table.line(&refs);
+        match way_geometry(&line, class.area) {
             Some(geometry) => {
                 sink.push(&class, &geometry)?;
                 stats.features += 1;
             }
             None => stats.geometry_failed += 1,
         }
-        // Freed now rather than at the end of the pass. A way no relation refers to is finished with
-        // the moment its geometry exists.
-        if !needed_by_relations.contains(&id) {
-            if let Some(way) = ways.get_mut(&id) {
-                way.refs = Vec::new();
-            }
-        }
     }
+    // Nothing reads the ways spill after this: the relations below reach their members through
+    // `members`, which is why that table is kept at all.
+    drop(reader);
+    let _ = std::fs::remove_file(&ways_path);
+
     for relation in &relations {
-        let refs_of = |id: &i64| ways.get(id).map(|w| &w.refs).or_else(|| members.get(id));
         // A boundary relation's members are the border. Each is emitted as its own line rather than
         // stitched: the renderer strokes them, and a gap between two member ways is invisible in a
         // stroke while a failed stitch would drop the whole border.
@@ -252,7 +277,7 @@ pub fn extract(
             let lines: Vec<Vec<(f64, f64)>> = relation
                 .members
                 .iter()
-                .filter_map(|(id, _)| refs_of(id))
+                .filter_map(|(id, _)| members.get(id))
                 .map(|refs| table.line(refs))
                 .filter(|line| line.len() >= 2)
                 .collect();
@@ -268,7 +293,7 @@ pub fn extract(
             .members
             .iter()
             .filter_map(|(id, inner)| {
-                Some(MemberWay { refs: refs_of(id)?.clone(), outer: !inner })
+                Some(MemberWay { refs: members.get(id)?.clone(), outer: !inner })
             })
             .collect();
         let polygons = rings::assemble(&member_ways, |id| locate(&table, id), &mut stats.rings);

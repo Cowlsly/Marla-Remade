@@ -23,10 +23,19 @@
 //! already round-tripped, and already handles every geometry kind — and it costs one small
 //! indirection: the [`Class`] is packed into a single integer property. That is the plan's own
 //! suggestion, and it is why `spill.rs` needed no change.
+//!
+//! # The second table: classified ways
+//!
+//! [`WaySink`] and [`WayReader`] do the same for the ~2.7 GB row of that table, for the same reason
+//! and by a different route: a way's record is a handful of integers rather than a geometry, and it
+//! is read back in the order it was written, so it gets a format of its own rather than
+//! `NormalizedWriter`'s. See [`WaySink`] for why no sort is needed on the way back.
 
+use std::fs::File;
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
-use osm_ingest::proto::{err, Result};
+use osm_ingest::proto::{err, zigzag, Error, Result};
 use tile_build::geom::Geometry;
 use tile_build::mvt::Value;
 use tile_build::spill::{NormalizedReader, NormalizedWriter};
@@ -243,6 +252,228 @@ impl Reader {
     }
 }
 
+/// Classified ways on disk: the second row of the table above, and the second thing stage A no
+/// longer holds.
+///
+/// # Why a file rather than the `HashMap<i64, Way>` this replaces
+///
+/// The map cost ~2.7 GB on California, nearly all of it node refs, and every read of it was
+/// sequential in ascending id order — [`crate::extract`] sorted the keys precisely so the archive
+/// would not depend on hash order. It was a map only because a relation reaches its member ways by
+/// id, in whatever order it lists them, and that one random access is served far more cheaply by
+/// keeping *only* the relation members resident: California has 63 156 relations against several
+/// million classified ways.
+///
+/// # Why nothing has to be sorted on the way back
+///
+/// A `.osm.pbf` stores ways sorted by id, and [`osm_ingest::pbf::run_pass_sink`] hands finished
+/// chunks to its sink in file order. Appending as pass 1 goes therefore produces a file already in
+/// the order materialisation wants, and the sort disappears along with the map.
+///
+/// [`push`] **enforces** that ordering rather than trusting it. An id that does not advance would
+/// silently reorder the archive, and a byte-identical rebuild is the only evidence this pipeline has
+/// that a change to stage A preserved its meaning — so a file that is not sorted is an error here,
+/// where it is one line of output, rather than a diff in a 655 MB archive.
+///
+/// # The encoding
+///
+/// One record per way, every field a varint, nothing aligned:
+///
+/// | field | encoding |
+/// |---|---|
+/// | id | zigzag varint of the gap from the previous record's id |
+/// | class | unsigned varint of [`pack`]'s integer |
+/// | ref count | unsigned varint |
+/// | refs | zigzag varint of each ref's gap from the one before it, the first from zero |
+///
+/// Delta coding earns its keep rather than being a flourish. The refs are ~150 M ids on California
+/// and the file is read twice — once to collect the node ids pass 3 must resolve, once to build
+/// geometry — so a flat 8 bytes each would be 1.2 GB read twice. Consecutive nodes of a way were
+/// almost always created in one editing session and so have near-consecutive ids, which is exactly
+/// what a delta collapses to one or two bytes.
+///
+/// [`push`]: WaySink::push
+pub struct WaySink {
+    out: BufWriter<File>,
+    /// One record's bytes, reused. Several million records, so a `Vec` per record would be several
+    /// million allocations for a buffer that is dead a line later.
+    record: Vec<u8>,
+    last_id: i64,
+    count: u64,
+    refs: u64,
+}
+
+impl WaySink {
+    pub fn create(path: &Path) -> Result<WaySink> {
+        let file = File::create(path)
+            .map_err(|e| Error(format!("cannot create {}: {e}", path.display())))?;
+        Ok(WaySink {
+            // A megabyte, because the writes are a few dozen bytes each and there are millions.
+            out: BufWriter::with_capacity(1 << 20, file),
+            record: Vec::new(),
+            last_id: 0,
+            count: 0,
+            refs: 0,
+        })
+    }
+
+    /// Append one classified way. `id` must be greater than the previous call's.
+    pub fn push(&mut self, id: i64, class: &Class, refs: &[i64]) -> Result<()> {
+        if self.count > 0 && id <= self.last_id {
+            return err(format!(
+                "way {id} arrived after way {}, so this PBF is not sorted by way id and the \
+                 sequential ways spill cannot be used for it",
+                self.last_id,
+            ));
+        }
+        self.record.clear();
+        put_svarint(&mut self.record, id.wrapping_sub(self.last_id));
+        put_uvarint(&mut self.record, pack(class)?);
+        put_uvarint(&mut self.record, refs.len() as u64);
+        let mut previous: i64 = 0;
+        for &node in refs {
+            put_svarint(&mut self.record, node.wrapping_sub(previous));
+            previous = node;
+        }
+        self.out
+            .write_all(&self.record)
+            .map_err(|e| Error(format!("cannot write the ways spill: {e}")))?;
+        self.last_id = id;
+        self.count += 1;
+        self.refs += refs.len() as u64;
+        Ok(())
+    }
+
+    /// Flush, and report how many ways were written and how many node refs they hold between them.
+    ///
+    /// The ref count is not a statistic. [`crate::extract`] reads this file back to collect the node
+    /// ids pass 3 must resolve, and that vector is ~200 M ids on California: grown by extension it
+    /// doubles into 2.1 GB of capacity, and the realloc that gets it there holds the old and new
+    /// allocations at once. Knowing the exact length first turns that into one allocation of exactly
+    /// the right size.
+    pub fn finish(mut self) -> Result<WayCounts> {
+        self.out.flush().map_err(|e| Error(format!("cannot flush the ways spill: {e}")))?;
+        Ok(WayCounts { ways: self.count, refs: self.refs })
+    }
+}
+
+/// What a finished [`WaySink`] holds.
+pub struct WayCounts {
+    pub ways: u64,
+    /// Node refs summed over every way, duplicates included — a capacity, not a cardinality.
+    pub refs: u64,
+}
+
+/// Reads back what a [`WaySink`] wrote, in the order it was written.
+pub struct WayReader {
+    inner: BufReader<File>,
+    last_id: i64,
+    seen: u64,
+}
+
+impl WayReader {
+    pub fn open(path: &Path) -> Result<WayReader> {
+        let file = File::open(path)
+            .map_err(|e| Error(format!("cannot open {}: {e}", path.display())))?;
+        Ok(WayReader {
+            inner: BufReader::with_capacity(1 << 20, file),
+            last_id: 0,
+            seen: 0,
+        })
+    }
+
+    /// The next way's id and class, with its node refs written into `refs`.
+    ///
+    /// `refs` belongs to the caller and is cleared here, so one allocation serves the whole file.
+    /// Returning a fresh `Vec` instead would be one allocation per classified way, several million
+    /// of them, for a buffer whose contents are dead by the next call — the same reasoning as
+    /// [`WaySink::record`].
+    ///
+    /// A record that ends mid-varint or claims more refs than the file holds is a corrupt spill
+    /// rather than a way to skip: this file was written by [`WaySink`] moments ago in the same
+    /// process, so anything unreadable means it is not the file we wrote.
+    pub fn next(&mut self, refs: &mut Vec<i64>) -> Result<Option<(i64, Class)>> {
+        refs.clear();
+        let Some(delta) = self.uvarint_or_end()? else {
+            return Ok(None);
+        };
+        let id = self.last_id.wrapping_add(zigzag(delta));
+        self.last_id = id;
+        self.seen += 1;
+        let class = unpack(self.uvarint()?);
+        let count = self.uvarint()?;
+        // No `reserve` on `count`: it comes off disk, and a corrupt one would be an allocation
+        // request rather than the error this returns for every other kind of damage. The buffer is
+        // the caller's and is reused across the whole file, so after the first few records it is
+        // already as large as any way needs.
+        let mut previous: i64 = 0;
+        for _ in 0..count {
+            previous = previous.wrapping_add(zigzag(self.uvarint()?));
+            refs.push(previous);
+        }
+        Ok(Some((id, class)))
+    }
+
+    /// One varint, or `None` if the file ended cleanly on a record boundary.
+    fn uvarint_or_end(&mut self) -> Result<Option<u64>> {
+        let mut value: u64 = 0;
+        let mut shift: u32 = 0;
+        loop {
+            let buf = self
+                .inner
+                .fill_buf()
+                .map_err(|e| Error(format!("cannot read the ways spill: {e}")))?;
+            if buf.is_empty() {
+                if shift == 0 {
+                    return Ok(None);
+                }
+                return err(format!("the ways spill ends mid-varint after {} way(s)", self.seen));
+            }
+            // Consumed in one go per buffer fill rather than a byte at a time: a varint almost
+            // always lies wholly inside the buffer, and there are hundreds of millions of them.
+            let mut used = 0usize;
+            for &byte in buf {
+                used += 1;
+                if shift >= 64 {
+                    return err("a ways spill varint is longer than 64 bits".to_string());
+                }
+                value |= ((byte & 0x7f) as u64) << shift;
+                shift += 7;
+                if byte & 0x80 == 0 {
+                    self.inner.consume(used);
+                    return Ok(Some(value));
+                }
+            }
+            self.inner.consume(used);
+        }
+    }
+
+    fn uvarint(&mut self) -> Result<u64> {
+        match self.uvarint_or_end()? {
+            Some(value) => Ok(value),
+            None => err(format!("the ways spill ends mid-record after {} way(s)", self.seen)),
+        }
+    }
+}
+
+fn put_uvarint(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+/// Zigzagged, so a gap that happens to run backwards costs one bit rather than ten bytes.
+/// [`zigzag`] is the decoder, already in `osm_ingest` because the PBF itself is encoded this way.
+fn put_svarint(out: &mut Vec<u8>, value: i64) {
+    put_uvarint(out, ((value << 1) ^ (value >> 63)) as u64);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -346,6 +577,94 @@ mod tests {
         // Re-readable, because the tiler reads it once per zoom.
         let mut again = store.reader().expect("reader");
         assert_eq!(again.next().expect("read").expect("a feature").class, lake);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Ids, classes and refs all come back exactly, in the order they went in. The one thing the
+    /// ways spill has to guarantee, because the archive's feature order is this file's record order.
+    #[test]
+    fn spilled_ways_come_back_in_the_order_and_with_the_refs_they_went_in_with() {
+        let path = temp("ways_roundtrip");
+        let lake = Class::area(dict::LAYER_WATER, schema::kind("lake"), 6);
+        let road = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
+        // Refs chosen to exercise the delta coding: a large first id, a run of neighbours, a jump
+        // backwards, and a way with none at all.
+        let cases: Vec<(i64, Class, Vec<i64>)> = vec![
+            (1, lake, vec![10_000_000_001, 10_000_000_002, 10_000_000_003, 9_000_000_000]),
+            (2, road, vec![]),
+            (i64::MAX, lake, vec![-5, 0, 5, i64::MAX, i64::MIN]),
+        ];
+        let mut sink = WaySink::create(&path).expect("create");
+        for (id, class, refs) in &cases {
+            sink.push(*id, class, refs).expect("push");
+        }
+        let counts = sink.finish().expect("finish");
+        assert_eq!(counts.ways, 3, "one record per push");
+        assert_eq!(counts.refs, 9, "refs summed over every way, so `needed` can be sized once");
+
+        let mut reader = WayReader::open(&path).expect("open");
+        let mut refs: Vec<i64> = Vec::new();
+        for (id, class, expected) in &cases {
+            let (got_id, got_class) = reader.next(&mut refs).expect("read").expect("a way");
+            assert_eq!(got_id, *id);
+            assert_eq!(got_class, *class);
+            assert_eq!(&refs, expected);
+        }
+        assert!(reader.next(&mut refs).expect("read").is_none(), "and then the end");
+        assert!(refs.is_empty(), "the caller's buffer is cleared even at the end");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The spill's whole premise is that a PBF's ways arrive sorted, so materialisation can stream
+    /// the file instead of sorting a map's keys. An input that breaks the premise has to say so:
+    /// accepting it would reorder the archive, and a reordered archive is only visible as a
+    /// different hash of 655 MB.
+    #[test]
+    fn a_way_id_that_does_not_advance_is_refused_rather_than_reordering_the_archive() {
+        let path = temp("ways_unsorted");
+        let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
+        let mut sink = WaySink::create(&path).expect("create");
+        sink.push(100, &class, &[1, 2]).expect("push");
+        assert!(sink.push(99, &class, &[3]).is_err(), "an id going backwards");
+        assert!(sink.push(100, &class, &[3]).is_err(), "and the same id twice");
+        sink.push(101, &class, &[3]).expect("but forwards is fine");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A truncated spill is a corrupt file, not a short one. It was written by `WaySink` in this
+    /// same process moments earlier, so a record that will not parse means the file is not ours.
+    #[test]
+    fn a_truncated_ways_spill_is_an_error_rather_than_a_silently_short_read() {
+        let path = temp("ways_truncated");
+        let class = Class::area(dict::LAYER_WATER, schema::kind("lake"), 6);
+        let mut sink = WaySink::create(&path).expect("create");
+        sink.push(1, &class, &[7, 8, 9]).expect("push");
+        sink.push(2, &class, &[11, 12, 13]).expect("push");
+        sink.finish().expect("finish");
+
+        let whole = std::fs::read(&path).expect("read");
+        // Cut the second record short, leaving it claiming refs the file does not hold.
+        std::fs::write(&path, &whole[..whole.len() - 2]).expect("truncate");
+        let mut reader = WayReader::open(&path).expect("open");
+        let mut refs: Vec<i64> = Vec::new();
+        assert!(reader.next(&mut refs).expect("read").is_some(), "the first record survives");
+        assert!(reader.next(&mut refs).is_err(), "the cut one does not");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Delta coding is the reason the file can be read twice without the I/O mattering. Worth
+    /// pinning: a regression to fixed-width would be invisible except as a slower build.
+    #[test]
+    fn near_consecutive_refs_cost_about_a_byte_each() {
+        let path = temp("ways_size");
+        let class = Class::line(dict::LAYER_ROADS, schema::kind("highway"), 3);
+        let refs: Vec<i64> = (0..1000).map(|i| 10_000_000_000 + i).collect();
+        let mut sink = WaySink::create(&path).expect("create");
+        sink.push(1, &class, &refs).expect("push");
+        sink.finish().expect("finish");
+        let bytes = std::fs::metadata(&path).expect("metadata").len();
+        // The first ref is a full-width id; every one after it is a delta of 1, one byte.
+        assert!(bytes < 1100, "{bytes} bytes for 1000 refs, against 8000 fixed-width");
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -32,6 +32,10 @@ path = "src/main.rs"
 tilecodec = { path = "../../../library/tilecodec/src/main/rust", features = ["write"] }
 tile_build = { path = "../tile_build" }
 osm_ingest = { path = "../osm_ingest" }
+# Already in this lockfile through both `tile_build` and `osm_ingest`, so this adds
+# a name to link and not a crate to fetch. The tiler runs on `tile_build::par`'s
+# pool, which is where `--threads` and `MAPS_THREADS` are honoured.
+rayon = "1"
 
 [profile.release]
 opt-level = 3

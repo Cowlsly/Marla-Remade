@@ -73,6 +73,17 @@ impl NodeLocations {
 }
 
 /// The node pass: fill in every coordinate the earlier passes asked for.
+///
+/// Uses [`pbf::run_pass_sink`] rather than [`pbf::run_pass`], because `run_pass`'s contract is to
+/// hand every chunk's accumulator back at once and these accumulators are the largest thing this
+/// pass touches. On California they are 154 M nodes at 12 bytes -- about 1.8 GB -- and they would be
+/// alive next to the 2.5 GB table they are about to be folded into, so the two peak together. Here a
+/// chunk is folded and freed while its neighbours are still decoding, which also overlaps the merge
+/// with the I/O. `pbf.rs` names this exact hazard in `run_pass_sink`'s own doc comment.
+///
+/// The merge order is unchanged: `run_pass_sink` calls its sink in chunk order, which is the order
+/// `run_pass` returned chunks in, so two blocks reporting the same node still resolve to the same
+/// coordinate.
 pub fn resolve_nodes(
     input: &Path,
     blobs: &[pbf::BlobLoc],
@@ -83,8 +94,10 @@ pub fn resolve_nodes(
     if table.is_empty() {
         return Ok(table);
     }
+    // Moved out so the workers can search it while the sink writes to `locs`; put back below.
     let ids = std::mem::take(&mut table.ids);
-    let (chunks, _) = pbf::run_pass(
+    let locs = &mut table.locs;
+    pbf::run_pass_sink(
         input,
         blobs,
         Some(blob_kinds),
@@ -103,13 +116,14 @@ pub fn resolve_nodes(
             })?;
             Ok(kinds)
         },
+        |chunk| {
+            for (idx, lat, lon) in chunk {
+                locs[idx as usize] = (lat, lon);
+            }
+            Ok(())
+        },
     )?;
     table.ids = ids;
-    for chunk in chunks {
-        for (idx, lat, lon) in chunk {
-            table.locs[idx as usize] = (lat, lon);
-        }
-    }
     Ok(table)
 }
 

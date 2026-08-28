@@ -44,6 +44,7 @@ name = "mamaps_build"
 version = "0.1.0"
 dependencies = [
  "osm_ingest",
+ "rayon",
  "tile_build",
  "tilecodec",
 ]
