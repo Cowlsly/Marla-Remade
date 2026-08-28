@@ -185,10 +185,6 @@ impl<'a> Cur<'a> {
         Ok(i64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
     }
 
-    fn f64(&mut self) -> Result<f64> {
-        Ok(f64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
-    }
-
     /// How many bytes the decoder consumed, so the caller can check it against the
     /// length the header claimed.
     fn consumed(&self) -> usize {
@@ -297,13 +293,31 @@ fn decode_int_geometry(kind: GeomKind, b: &[u8]) -> Result<IntGeometry> {
 
 // --- lon/lat geometry codec ---------------------------------------------------
 
-/// Encode a lon/lat [`Geometry`], for the normalized file.
+/// Encode a lon/lat [`Geometry`] for the normalized file, quantised to e7.
+///
+/// **The wire format is [`encode_int_geometry`]'s**, vertex for vertex: the same nested
+/// counts and the same `(i32, i32)` pairs, so [`decode_int_ring`]'s corruption bound
+/// applies here unchanged. It is spelled out again rather than delegated because routing
+/// a read through [`IntGeometry`] would allocate the whole nested geometry a second time
+/// only to convert it, and the normalized file is decoded once per feature per zoom --
+/// fifteen times over a z0-14 build.
+///
+/// # Why quantising is lossless for the data this carries
+///
+/// `osm_ingest`'s node table stores coordinates as `(i32 lat_e7, i32 lon_e7)`, and
+/// `mamaps_build`'s `extract::locate` multiplies by `1e-7` purely to hand `f64` degrees
+/// on. [`crate::pyramid::e7`] recovers the exact integer from that product, so an
+/// OSM-only archive is byte-identical at half the spill bytes.
+///
+/// A shapefile-derived coastline is arbitrary `f64` and IS quantised, to ~1.1 cm. That is
+/// ~1/70th of a z14 tile unit, so it cannot move a pixel, but it does change such an
+/// archive's bytes and so needs its own baseline hash.
 pub fn encode_geometry(g: &Geometry, out: &mut Vec<u8>) -> Result<()> {
     let put_ring = |ring: &[Pt], out: &mut Vec<u8>| -> Result<()> {
         put_u32(out, count(ring.len())?);
         for (x, y) in ring {
-            out.extend_from_slice(&x.to_le_bytes());
-            out.extend_from_slice(&y.to_le_bytes());
+            out.extend_from_slice(&crate::pyramid::e7(*x).to_le_bytes());
+            out.extend_from_slice(&crate::pyramid::e7(*y).to_le_bytes());
         }
         Ok(())
     };
@@ -332,9 +346,9 @@ fn decode_ring(c: &mut Cur) -> Result<Vec<Pt>> {
     let n = c.u32()? as usize;
     let mut out = Vec::with_capacity(n.min(1 << 16));
     for _ in 0..n {
-        let x = c.f64()?;
-        let y = c.f64()?;
-        out.push((x, y));
+        let x = c.i32()?;
+        let y = c.i32()?;
+        out.push((x as f64 * 1e-7, y as f64 * 1e-7));
     }
     Ok(out)
 }
@@ -990,8 +1004,11 @@ impl NormalizedSummary {
 /// 8..12   u32 props_len
 /// 12..13  u8  geom_kind
 /// 13..16  reserved, zero
-/// 16..    geometry (lon/lat f64 pairs), then properties
+/// 16..    geometry (lon/lat e7 `i32` pairs), then properties
 /// ```
+///
+/// Eight bytes a vertex rather than sixteen: see [`encode_geometry`] for why that is
+/// lossless for OSM coordinates and what it costs a coastline.
 pub struct NormalizedWriter {
     out: BufWriter<File>,
     path: PathBuf,
@@ -1683,6 +1700,103 @@ mod tests {
 
     // --- the normalized file -------------------------------------------------
 
+    /// Snap a geometry to the e7 grid, which is what [`encode_geometry`] stores.
+    ///
+    /// A plain decimal literal is only NEARLY on that grid: `-122.42` and
+    /// `-1_224_200_000 as f64 * 1e-7` are different `f64`s, an ulp apart -- 1.4e-14
+    /// degrees, seven orders of magnitude below the 1.1 cm the quantisation itself costs.
+    /// So a decoded feature is compared against its snapped input rather than against the
+    /// literal it was written from. The assertion stays exact and total -- every vertex,
+    /// every count, every property -- and states the contract the codec actually has.
+    fn snapped(g: &Geometry) -> Geometry {
+        let pt = |&(x, y): &Pt| {
+            (
+                crate::pyramid::e7(x) as f64 * 1e-7,
+                crate::pyramid::e7(y) as f64 * 1e-7,
+            )
+        };
+        let ring = |r: &Vec<Pt>| r.iter().map(pt).collect::<Vec<Pt>>();
+        match g {
+            Geometry::Points(p) => Geometry::Points(ring(p)),
+            Geometry::Lines(l) => Geometry::Lines(l.iter().map(ring).collect()),
+            Geometry::Polygons(p) => {
+                Geometry::Polygons(p.iter().map(|rs| rs.iter().map(ring).collect()).collect())
+            }
+        }
+    }
+
+    fn snapped_all(features: &[NormalizedFeature]) -> Vec<NormalizedFeature> {
+        features
+            .iter()
+            .map(|f| NormalizedFeature {
+                geometry: snapped(&f.geometry),
+                props: f.props.clone(),
+            })
+            .collect()
+    }
+
+    /// **The guarantee a byte-identical archive rests on.** Every coordinate `osm_ingest`
+    /// yields is an `i32` e7 multiplied by `1e-7`, and such a value must come back as the
+    /// same `f64` it went in as -- not merely close. If it did not, halving the spill
+    /// would have moved every OSM vertex in the build.
+    ///
+    /// Spanning the whole `i32` range, because the argument is about the two
+    /// multiplications' relative error staying under half an e7 unit and that is weakest
+    /// at the largest magnitude.
+    #[test]
+    fn an_e7_grid_coordinate_survives_the_round_trip_bit_exactly() {
+        let dir = tmp("e7exact");
+        let path = dir.join("f.bin");
+        let grid: Vec<i32> = vec![
+            0,
+            1,
+            -1,
+            1_800_000_000,
+            -1_800_000_000,
+            900_000_000,
+            -900_000_000,
+            1_224_200_000,
+            -1_224_200_000,
+            377_700_000,
+            i32::MAX,
+            i32::MIN + 1,
+        ];
+        let points: Vec<Pt> = grid
+            .iter()
+            .map(|&n| (n as f64 * 1e-7, -n as f64 * 1e-7))
+            .collect();
+        let feature = NormalizedFeature {
+            geometry: Geometry::Points(points.clone()),
+            props: every_value(),
+        };
+
+        let mut w = NormalizedWriter::create(&path).unwrap();
+        w.push(&feature.geometry, &feature.props).unwrap();
+        w.finish().unwrap();
+
+        let back = NormalizedReader::open(&path)
+            .unwrap()
+            .next()
+            .unwrap()
+            .expect("a feature");
+        assert_eq!(back, feature, "an e7-grid coordinate must not move at all");
+
+        // Eight bytes a vertex, not sixteen. The whole point of the encoding.
+        let bytes = std::fs::metadata(&path).unwrap().len() as usize;
+        let props = {
+            let mut buf = Vec::new();
+            encode_props(&feature.props, &mut buf).unwrap();
+            buf.len()
+        };
+        assert_eq!(
+            bytes,
+            NORM_HEADER_BYTES + 4 + points.len() * 8 + props,
+            "a vertex must cost eight bytes"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn the_normalized_file_round_trips_and_folds_its_summary() {
         let dir = tmp("normalized");
@@ -1723,11 +1837,12 @@ mod tests {
         while let Some(f) = r.next().unwrap() {
             back.push(f);
         }
-        assert_eq!(back, features);
+        let want = snapped_all(&features);
+        assert_eq!(back, want);
 
         // Every zoom re-reads it from the front.
         r.rewind().unwrap();
-        assert_eq!(r.next().unwrap().as_ref(), Some(&features[0]));
+        assert_eq!(r.next().unwrap().as_ref(), Some(&want[0]));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1794,7 +1909,7 @@ mod tests {
             );
             back.extend(out.iter().cloned());
         }
-        assert_eq!(back, features, "the chunked read must match the input");
+        assert_eq!(back, snapped_all(&features), "the chunked read must match the input");
 
         // And the sequential reader, so neither can drift from the other.
         let mut r = NormalizedReader::open(&path).unwrap();

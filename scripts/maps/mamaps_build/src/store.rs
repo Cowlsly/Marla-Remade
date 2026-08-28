@@ -22,7 +22,12 @@
 //! holding a lon/lat geometry and a property list. Reusing it means the encoding is already tested,
 //! already round-tripped, and already handles every geometry kind — and it costs one small
 //! indirection: the [`Class`] is packed into a single integer property. That is the plan's own
-//! suggestion, and it is why `spill.rs` needed no change.
+//! suggestion, and it is why this module needed no format of its own.
+//!
+//! The one change since made to that format was made *there*, for both its consumers: the geometry
+//! is stored as `i32` e7 rather than `f64` degrees, halving the spill. Every coordinate `osm_ingest`
+//! produces is already an e7 integer, so this archive is byte-identical across that change; see
+//! [`spill::encode_geometry`].
 //!
 //! # The second table: classified ways
 //!
@@ -114,8 +119,9 @@ pub struct Sink {
     ///
     /// One byte per 64 features — 243 KB on California — and it is what lets the tiler **skip** a
     /// chunk rather than deserialise it. Every feature carries a `min_zoom` and most are deep: z14
-    /// alone holds 16.9 M against ~5 M across z0..z12. Without this the reader parses the whole 3.3 GB
-    /// spill once per zoom, which measured 55.2 s of a 180 s build, all of it on one thread.
+    /// alone holds 16.9 M against ~5 M across z0..z12. Without this the reader parses the whole
+    /// 2.0 GB spill once per zoom, which measured 55.2 s of a 180 s build back when the spill was
+    /// 3.3 GB, all of it on one thread.
     chunk_mins: Vec<u8>,
     filling: u8,
     props: Vec<(String, Value)>,

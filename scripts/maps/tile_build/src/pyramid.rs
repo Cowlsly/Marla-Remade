@@ -605,7 +605,7 @@ pub fn fold_bounds(acc: Option<geom::Rect>, g: &Geometry) -> Option<geom::Rect> 
     })
 }
 
-fn e7(deg: f64) -> i32 {
+pub(crate) fn e7(deg: f64) -> i32 {
     (deg * 1e7).round().clamp(i32::MIN as f64, i32::MAX as f64) as i32
 }
 
