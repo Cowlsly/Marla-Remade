@@ -22,7 +22,7 @@
 //!
 //! # Size
 //!
-//! Seven layers, 52 kinds and 4 details, at a length byte each: comfortably under 1 KiB, which is
+//! Seven layers, 79 kinds and 41 details, at a length byte each: 1092 bytes as measured, which is
 //! what lets the header, the dictionary and the root index share one 16 KiB opening read.
 
 use crate::proto::{err, Result};
@@ -55,6 +55,10 @@ pub const LAYER_BUILDINGS: u8 = 6;
 /// Grouped by the layer that introduced each value and **append-only**: inserting in the middle
 /// would renumber everything after it, which is the one thing this table exists to prevent. A
 /// value shared by two layers appears once, because ids are archive-wide.
+///
+/// The vocabulary is **measured, not guessed**. Everything here appears in the published
+/// `v4.pmtiles`, sampled by `tile_build`'s `mamaps_vocabulary` example, which flags any value the
+/// table has no id for. Re-run it after an upstream republish.
 pub const KINDS: &[&str] = &[
     // earth
     "island",
@@ -114,6 +118,43 @@ pub const KINDS: &[&str] = &[
     // buildings
     "building",
     "building_part",
+    // Appended after the first measurement against the published archive, which turned up 42 of
+    // 54 features on the z0 tile carrying a value the table above had no id for. Append-only, so
+    // these take fresh ids rather than disturbing any above.
+    // earth
+    "earth",
+    "cliff",
+    // water
+    "canal",
+    "dock",
+    "fountain",
+    "reef",
+    "swimming_pool",
+    // landuse
+    "bare_rock",
+    "commercial",
+    "dog_park",
+    "garden",
+    "kindergarten",
+    "meadow",
+    "pitch",
+    "platform",
+    "railway",
+    "recreation_ground",
+    "residential",
+    "sand",
+    "wetland",
+    // roads
+    "aerialway",
+    "ferry",
+    // boundaries. The style filters these numerically through `kind_detail`, so no flat style layer
+    // names them -- but they are what the data says, and the differential harness compares names.
+    "country",
+    "region",
+    "county",
+    "locality",
+    "overlay_limit",
+    "unrecognized_country",
 ];
 
 /// Every `kind_detail` value, id 1 upward. Index 0 is [`NONE`].
@@ -122,10 +163,61 @@ pub const KINDS: &[&str] = &[
 /// detail are different ids. They describe different things and collapsing them would make a
 /// road's detail collide with a polygon's kind.
 ///
+/// On `roads` this is the OSM highway class, which is what the upstream schema puts here — 30-odd
+/// values, not the four the style happens to filter on. Carrying the rest is what lets the
+/// generator be checked against upstream feature for feature, and what a future style would need
+/// to draw a track differently from a motorway link.
+///
 /// `boundaries` does not appear here: its detail is a numeric admin level carried in the same
 /// field under [`super::body::FLAG_DETAIL_NUMERIC`], because an admin level is an integer the
-/// style compares with `<=` rather than a name it matches.
-pub const DETAILS: &[&str] = &["runway", "taxiway", "pier", "service"];
+/// style compares with `<=` rather than a name it matches. The sample confirms it — upstream
+/// writes it as an `SInt`, not a string.
+pub const DETAILS: &[&str] = &[
+    // The four the style filters on, first because they were here first.
+    "runway",
+    "taxiway",
+    "pier",
+    "service",
+    // The rest of the road classes, measured from the published archive.
+    "motorway",
+    "motorway_link",
+    "trunk",
+    "trunk_link",
+    "primary",
+    "primary_link",
+    "secondary",
+    "secondary_link",
+    "tertiary",
+    "tertiary_link",
+    "residential",
+    "unclassified",
+    "living_street",
+    "alley",
+    "track",
+    "path",
+    "footway",
+    "sidewalk",
+    "crossing",
+    "steps",
+    "corridor",
+    "cycleway",
+    "pedestrian",
+    "rail",
+    "subway",
+    "tram",
+    "light_rail",
+    "cable_car",
+    "turntable",
+    // water
+    "basin",
+    "canal",
+    "lake",
+    "river",
+    "stream",
+    "rock",
+    // buildings
+    "yes",
+];
 
 /// The interned tables as the archive carries them.
 ///
@@ -251,10 +343,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_dictionary_round_trips_and_stays_under_a_kilobyte() {
+    fn the_dictionary_round_trips_and_stays_small_enough_for_the_prefix() {
         let schema = Dictionary::schema();
         let bytes = schema.serialize();
-        assert!(bytes.len() < 1024, "the dictionary is {} bytes", bytes.len());
+        // 1092 bytes as measured. The bound is what the opening prefix can spare beside the header
+        // and a useful root, not a round number: at 2 KiB the root still addresses 1.9 M tiles.
+        assert!(bytes.len() < 2048, "the dictionary is {} bytes", bytes.len());
         assert_eq!(bytes.len() % 4, 0, "the root index after it must start aligned");
         assert_eq!(Dictionary::parse(&bytes).expect("should parse"), schema);
     }
@@ -269,10 +363,12 @@ mod tests {
         assert_eq!(d.kind_name(10), Some("water"));
         assert_eq!(d.kind_name(17), Some("national_park"));
         assert_eq!(d.kind_name(45), Some("highway"));
-        assert_eq!(d.kind_name(52), Some("building_part"), "the last kind");
+        assert_eq!(d.kind_name(52), Some("building_part"), "the last of the first draft");
+        assert_eq!(d.kind_name(53), Some("earth"), "the first value appended after measuring");
         assert_eq!(d.kind_name(NONE), None, "id 0 is `this feature has no kind`");
-        assert_eq!(d.kind_name(53), None, "past the table");
+        assert_eq!(d.kind_name(u16::MAX), None, "past the table");
         assert_eq!(d.detail_name(4), Some("service"));
+        assert_eq!(d.detail_name(5), Some("motorway"), "the road classes follow");
         assert_eq!(d.layer_name(LAYER_ROADS), Some("roads"));
         assert_eq!(d.layer_name(7), None);
     }

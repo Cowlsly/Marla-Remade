@@ -8,9 +8,9 @@
 //!
 //! # The prefix budget
 //!
-//! A reader opens with one 16 KiB read. Header (128) plus dictionary (under 1 KiB) leaves about
-//! 15 KiB, which is 476 root entries; at 4096 tiles each that addresses 1.95 M tiles without a
-//! second request. California needs under 100 leaves. Past 1.95 M,
+//! A reader opens with one 16 KiB read. Header (128) plus dictionary (1092 as measured) leaves
+//! 15 164 bytes, which is 473 root entries; at 4096 tiles each that addresses 1.94 M tiles without
+//! a second request. California needs under 100 leaves. Past 1.94 M,
 //! [`Header::leaf_entry_capacity`](super::header::Header::leaf_entry_capacity) doubles rather
 //! than the root growing — the same trick `pmtiles::split_entries` uses, and for the same reason.
 //!
@@ -240,14 +240,14 @@ mod tests {
     /// **Invariant 1 of the plan's verification list.** Header plus dictionary plus root must fit
     /// the one 16 KiB read a reader opens with, at a scale well past California.
     #[test]
-    fn a_root_addressing_two_million_tiles_fits_the_opening_prefix() {
+    fn a_root_addressing_nearly_two_million_tiles_fits_the_opening_prefix() {
         let prefix = crate::stream::OPEN_PREFIX_BYTES as usize;
         let dictionary = super::super::dict::Dictionary::schema().serialize().len();
         let budget = prefix - super::super::header::HEADER_LEN - dictionary;
         let entries = budget / ROOT_ENTRY_LEN;
-        assert!(entries >= 476, "only {entries} root entries fit the prefix");
+        assert!(entries >= 470, "only {entries} root entries fit the prefix");
         assert!(
-            entries * 4096 >= 1_950_000,
+            entries * 4096 >= 1_900_000,
             "{} tiles addressable in one request",
             entries * 4096,
         );

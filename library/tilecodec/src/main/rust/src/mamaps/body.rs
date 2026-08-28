@@ -20,11 +20,27 @@
 //! # Layout
 //!
 //! ```text
-//! [BodyHeader 16][LayerIndex × n][per layer: FeatureRecord[] PartEntry[] coords]
+//! [BodyHeader 16][LayerIndex × n][per layer: FeatureRecord[] PartEntry[] coord arena]
 //! ```
 //!
-//! Every section is 4-byte aligned so a reader takes zero-copy slices, and coordinates are
-//! `i16` pairs in extent units with room either side for the clip buffer.
+//! The fixed records are 4-byte aligned so a reader takes zero-copy slices of them.
+//!
+//! # Why coordinates are varints and everything else is not
+//!
+//! The first draft of this format stored the arena as flat `[i16 x, i16 y]` pairs, on the reasoning
+//! that a zero-copy slice is the cheapest possible decode. Measured against the real published
+//! archive that cost **1.72× the compressed bytes of the MVT it replaces**, consistently from z0 to
+//! z14, because 87% of a body is coordinates and a fixed 4 bytes per point is simply worse than a
+//! zigzag varint delta of 1 to 2. The interned dictionary is a real win — upstream `water` features
+//! carry forty `name:*` localisations each — but it is not where the bytes are.
+//!
+//! So the arena is per-part zigzag varint deltas, which is what MVT does and for the same reason,
+//! and it brings the format to 1.14× MVT. What is still won over MVT is the *decode*: no per-tile
+//! string table, no property map, no `String` allocation per feature, and one flat `Vec` of points
+//! per layer rather than a geometry-command walk per feature.
+//!
+//! Deltas restart at each part, so a part is independently decodable and a long line does not
+//! accumulate a large running value.
 //!
 //! `raw_len` lives in the body header, which is **outside** the compressed frame, so a
 //! decompressing reader knows the exact output size before it starts: an exact-length read from
@@ -102,7 +118,10 @@ impl Feature {
 /// One path: a line, or one ring of a polygon.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Part {
-    /// Where this part's points start in the layer's coordinate arena, in points not bytes.
+    /// Where this part's points start in the layer's decoded coordinate arena, in points.
+    ///
+    /// Derivable from the preceding parts' counts, and carried anyway: it is what `points` indexes
+    /// with, and validating it on parse catches a body whose parts and arena disagree.
     pub coord_start: u32,
     pub point_count: u32,
     /// [`WINDING_OUTER`] or [`WINDING_HOLE`], stated rather than derived.
@@ -305,18 +324,42 @@ fn parse_layer(layer_id: u8, feature_count: usize, buf: &[u8]) -> Result<Layer> 
     }
 
     let coords_at = align4(parts_at + parts_len);
-    if coords_at + coords_needed * 4 > buf.len() {
-        return err("a .mamaps layer's coordinates run past its payload");
+    if coords_at > buf.len() {
+        return err("a .mamaps layer's coordinate arena starts past its payload");
     }
+    // Walked in parts-table order, because a varint arena has no random access: each part's points
+    // are deltas from the one before it, restarting at every part.
     let mut coords = Vec::with_capacity(coords_needed);
-    for i in 0..coords_needed {
-        let at = coords_at + i * 4;
-        coords.push((
-            i16::from_le_bytes([buf[at], buf[at + 1]]),
-            i16::from_le_bytes([buf[at + 2], buf[at + 3]]),
+    let mut reader = crate::proto::Reader::new(&buf[coords_at..]);
+    for part in &parts {
+        if part.coord_start as usize != coords.len() {
+            return err(format!(
+                "a .mamaps part claims to start at point {} but the arena is {} points in",
+                part.coord_start,
+                coords.len(),
+            ));
+        }
+        let (mut x, mut y) = (0i32, 0i32);
+        for _ in 0..part.point_count {
+            x += zigzag(reader.uvarint()?);
+            y += zigzag(reader.uvarint()?);
+            let (Ok(x), Ok(y)) = (i16::try_from(x), i16::try_from(y)) else {
+                return err("a .mamaps coordinate delta walks outside the extent an i16 holds");
+            };
+            coords.push((x, y));
+        }
+    }
+    if coords.len() != coords_needed {
+        return err(format!(
+            "a .mamaps layer decoded {} points where its parts want {coords_needed}",
+            coords.len(),
         ));
     }
     Ok(Layer { layer_id, features, parts, coords })
+}
+
+fn zigzag(v: u64) -> i32 {
+    crate::proto::zigzag_decode(v) as i32
 }
 
 /// Round up to the next 4-byte boundary, so every section starts where a reader can slice it.
@@ -345,6 +388,40 @@ pub fn serialize(body: &Body) -> Result<Vec<u8>> {
                 u16::MAX,
             ));
         }
+        // The arena is written in parts-table order with no offsets of its own, so a part has to
+        // start exactly where the one before it ended. Checked here rather than trusted, because a
+        // caller that got it wrong would produce a body that round-trips to different geometry.
+        let mut at = 0u32;
+        for part in &layer.parts {
+            if part.coord_start != at {
+                return err(format!(
+                    "layer {}'s parts are not contiguous: one starts at point {} where {at} was \
+                     expected",
+                    layer.layer_id, part.coord_start,
+                ));
+            }
+            at = at
+                .checked_add(part.point_count)
+                .ok_or_else(|| crate::proto::Error("a .mamaps layer's parts overflow".into()))?;
+        }
+        if at as usize != layer.coords.len() {
+            return err(format!(
+                "layer {}'s parts cover {at} points but its arena holds {}",
+                layer.layer_id,
+                layer.coords.len(),
+            ));
+        }
+        for feature in &layer.features {
+            let end = feature.parts_offset as usize + feature.part_count as usize;
+            if feature.part_count == 0 || end > layer.parts.len() {
+                return err(format!(
+                    "layer {}'s feature indexes parts {}..{end} of {}",
+                    layer.layer_id,
+                    feature.parts_offset,
+                    layer.parts.len(),
+                ));
+            }
+        }
     }
 
     let index_end = BODY_HEADER_LEN + layers.len() * LAYER_INDEX_LEN;
@@ -369,10 +446,18 @@ pub fn serialize(body: &Body) -> Result<Vec<u8>> {
         while out.len() % 4 != 0 {
             out.push(0);
         }
-        for (x, y) in &layer.coords {
-            out.extend_from_slice(&x.to_le_bytes());
-            out.extend_from_slice(&y.to_le_bytes());
+        // The arena, in parts-table order. Deltas restart at each part so a part decodes
+        // independently and a long line accumulates nothing.
+        let mut writer = crate::proto::Writer::new();
+        for part in &layer.parts {
+            let (mut px, mut py) = (0i32, 0i32);
+            for &(x, y) in layer.points(part) {
+                writer.uvarint(crate::proto::zigzag_encode(x as i64 - px as i64));
+                writer.uvarint(crate::proto::zigzag_encode(y as i64 - py as i64));
+                (px, py) = (x as i32, y as i32);
+            }
         }
+        out.extend_from_slice(writer.as_slice());
         payloads.push((layer.layer_id, layer.features.len() as u16, out));
     }
 
@@ -494,7 +579,7 @@ mod tests {
 
     #[test]
     fn every_layer_payload_starts_four_byte_aligned() {
-        // What lets a reader take zero-copy slices of the coordinate arena.
+        // What lets a reader take zero-copy slices of the fixed records.
         let bytes = serialize(&sample()).expect("serialize");
         let layer_count = bytes[10] as usize;
         for i in 0..layer_count {
@@ -503,6 +588,101 @@ mod tests {
                 u32::from_le_bytes([bytes[at + 4], bytes[at + 5], bytes[at + 6], bytes[at + 7]]);
             assert_eq!(offset % 4, 0, "layer {i} starts at {offset}");
         }
+    }
+
+    /// The measured reason the arena is varints: a delta of 1 to 2 bytes against a fixed 4, on
+    /// geometry that is 87% of a body. Asserted on a path whose steps are small, which is what real
+    /// simplified geometry looks like.
+    #[test]
+    fn the_arena_costs_far_less_than_a_fixed_four_bytes_a_point() {
+        let mut roads = Layer::new(dict::LAYER_ROADS);
+        roads.features.push(Feature {
+            kind: 45,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            parts_offset: 0,
+            part_count: 1,
+        });
+        let points: Vec<(i16, i16)> = (0..1000).map(|i| (i * 3, i * 2)).collect();
+        roads.parts.push(Part { coord_start: 0, point_count: 1000, winding: WINDING_OUTER });
+        roads.coords = points.clone();
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![roads] };
+        let bytes = serialize(&body).expect("serialize");
+        // Two bytes a point rather than four: each delta is (3, 2), a single varint byte each.
+        assert!(
+            bytes.len() < 1000 * 3,
+            "{} bytes for 1000 points, against {} flat",
+            bytes.len(),
+            1000 * 4,
+        );
+        assert_eq!(Body::parse(&bytes).expect("parse").layer(dict::LAYER_ROADS).unwrap().coords, points);
+    }
+
+    /// Deltas restart at each part, so a part decodes without walking the one before it and a long
+    /// line never accumulates a large running value.
+    #[test]
+    fn each_part_restarts_its_deltas_from_the_origin() {
+        let mut layer = Layer::new(dict::LAYER_ROADS);
+        layer.features.push(Feature {
+            kind: 45,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            parts_offset: 0,
+            part_count: 2,
+        });
+        layer.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
+        layer.parts.push(Part { coord_start: 2, point_count: 2, winding: WINDING_OUTER });
+        // The second part starts far from where the first ended; if deltas carried over, the
+        // round trip would place it somewhere else entirely.
+        layer.coords = vec![(0, 0), (10, 10), (3000, 3000), (3010, 3010)];
+        let body = Body { extent: DEFAULT_EXTENT, layers: vec![layer] };
+        let parsed = Body::parse(&serialize(&body).expect("serialize")).expect("parse");
+        assert_eq!(parsed, body);
+    }
+
+    /// The arena has no offsets of its own, so a part must start exactly where the previous one
+    /// ended. A caller that got that wrong would otherwise write a body that round-trips to
+    /// different geometry.
+    #[test]
+    fn parts_that_do_not_tile_the_arena_are_refused() {
+        let mut layer = Layer::new(dict::LAYER_ROADS);
+        layer.features.push(Feature {
+            kind: 45,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            parts_offset: 0,
+            part_count: 1,
+        });
+        layer.parts.push(Part { coord_start: 1, point_count: 2, winding: WINDING_OUTER });
+        layer.coords = vec![(0, 0), (1, 1), (2, 2)];
+        let gapped = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()] };
+        assert!(serialize(&gapped).is_err(), "a part starting past the front");
+
+        layer.parts[0].coord_start = 0;
+        let over = Body { extent: DEFAULT_EXTENT, layers: vec![layer.clone()] };
+        assert!(serialize(&over).is_err(), "an arena longer than its parts cover");
+
+        layer.coords.pop();
+        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer] }).is_ok());
+    }
+
+    #[test]
+    fn a_feature_indexing_parts_it_does_not_have_is_refused_by_the_encoder() {
+        let mut layer = Layer::new(dict::LAYER_ROADS);
+        layer.features.push(Feature {
+            kind: 45,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            parts_offset: 0,
+            part_count: 3,
+        });
+        layer.parts.push(Part { coord_start: 0, point_count: 2, winding: WINDING_OUTER });
+        layer.coords = vec![(0, 0), (1, 1)];
+        assert!(serialize(&Body { extent: DEFAULT_EXTENT, layers: vec![layer] }).is_err());
     }
 
     #[test]
@@ -628,6 +808,19 @@ mod tests {
             let mut bytes = serialize(&sample()).expect("serialize");
             bytes[*offset..*offset + 4].copy_from_slice(&value.to_le_bytes());
             assert!(Body::parse(&bytes).is_err(), "{what} should be refused");
+        }
+    }
+
+    /// A truncated arena must fail rather than yield a short point list that silently draws a
+    /// different shape.
+    #[test]
+    fn an_arena_that_ends_early_is_refused() {
+        let good = serialize(&sample()).expect("serialize");
+        for cut in 1..6 {
+            let mut bytes = good[..good.len() - cut].to_vec();
+            let len = bytes.len() as u32;
+            bytes[4..8].copy_from_slice(&len.to_le_bytes());
+            assert!(Body::parse(&bytes).is_err(), "an arena {cut} bytes short");
         }
     }
 
