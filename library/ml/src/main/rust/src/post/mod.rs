@@ -14,4 +14,5 @@ pub mod crop;
 pub mod ctc;
 pub mod dbnet;
 pub mod nms;
+pub mod spline;
 pub mod ocr;
