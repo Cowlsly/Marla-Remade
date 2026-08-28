@@ -4,16 +4,15 @@
 //! way geometry is the one thing every layer build does, and it is the one place
 //! where a careless data structure costs gigabytes.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::atomic;
 
 use crate::geojson::Coord;
 use crate::osm::{visit_block, Element};
 use crate::pbf::{self, KIND_NODES};
-use crate::proto::Result;
+use crate::proto::{Error, Result};
 
 /// Sentinel latitude for "this node's location was never seen".
-const NO_LOC: i32 = i32::MIN;
-
 /// Coordinates for a known set of node ids: a compressed id index plus an
 /// index-aligned coordinate array.
 ///
@@ -37,8 +36,99 @@ const NO_LOC: i32 = i32::MIN;
 /// scans at most 63 contiguous bytes, which is one or two lines.
 pub struct NodeLocations {
     ids: IdIndex,
-    locs: Vec<(i32, i32)>,
+    locs: Locs,
 }
+
+/// The coordinate array, in a memory-mapped file rather than on the heap.
+///
+/// Eight bytes per needed node is 1.23 GB on a California extract, and unlike the ids it will not
+/// compress: latitude and longitude in id order are high-entropy, so there is no structure to exploit.
+/// What there is instead is locality — materialisation walks ways in id order and a way's nodes sit
+/// close together in a PBF — so a mapped file lets the OS keep the working set and nothing else.
+///
+/// # Resolved-ness is a bitset, not a sentinel
+///
+/// A fresh mapping reads as zeroes, and `(0, 0)` is a real coordinate, so zero cannot mean
+/// "unresolved". Writing `i32::MIN` across the whole file would work and would also dirty every page
+/// of 1.23 GB before the pass that fills it, which is most of the cost this exists to avoid. A bit per
+/// node is 19 MB, stays in memory, and leaves the mapping untouched until something is actually
+/// written to it.
+struct Locs {
+    map: Option<memmap2::MmapMut>,
+    /// One bit per node, set when a coordinate has been written.
+    resolved: Vec<u64>,
+    /// Deleted on drop. Scratch, and large enough that leaving it behind would matter.
+    path: Option<PathBuf>,
+    len: usize,
+}
+
+impl Locs {
+    fn new(len: usize) -> Result<Locs> {
+        if len == 0 {
+            return Ok(Locs { map: None, resolved: Vec::new(), path: None, len: 0 });
+        }
+        let path = std::env::temp_dir().join(format!(
+            "osm_nodeloc_{}_{}.bin",
+            std::process::id(),
+            // Distinct per table, so two in one process cannot share a file.
+            NEXT_LOCS.fetch_add(1, atomic::Ordering::Relaxed),
+        ));
+        let bytes = len as u64 * 8;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|e| Error(format!("cannot create {}: {e}", path.display())))?;
+        // Sets the length without writing anything: on both platforms this leaves a sparse or
+        // zero-filled file, so the 1.23 GB is not touched until a page is used.
+        file.set_len(bytes)
+            .map_err(|e| Error(format!("cannot size {}: {e}", path.display())))?;
+        // SAFETY: this process owns `path` exclusively — it is named after the pid and a counter, was
+        // just created with `truncate`, and is deleted in `Drop`. Nothing else can resize it while the
+        // mapping is live, which is the one thing that would make the slice dangle.
+        let map = unsafe { memmap2::MmapMut::map_mut(&file) }
+            .map_err(|e| Error(format!("cannot map {}: {e}", path.display())))?;
+        Ok(Locs {
+            map: Some(map),
+            resolved: vec![0u64; len.div_ceil(64)],
+            path: Some(path),
+            len,
+        })
+    }
+
+    fn set(&mut self, index: usize, lat_e7: i32, lon_e7: i32) {
+        let Some(map) = self.map.as_mut() else { return };
+        let at = index * 8;
+        map[at..at + 4].copy_from_slice(&lat_e7.to_le_bytes());
+        map[at + 4..at + 8].copy_from_slice(&lon_e7.to_le_bytes());
+        self.resolved[index / 64] |= 1 << (index % 64);
+    }
+
+    fn get(&self, index: usize) -> Option<(i32, i32)> {
+        if index >= self.len || self.resolved[index / 64] & (1 << (index % 64)) == 0 {
+            return None;
+        }
+        let map = self.map.as_ref()?;
+        let at = index * 8;
+        let lat = i32::from_le_bytes(map[at..at + 4].try_into().expect("four bytes"));
+        let lon = i32::from_le_bytes(map[at + 4..at + 8].try_into().expect("four bytes"));
+        Some((lat, lon))
+    }
+}
+
+impl Drop for Locs {
+    fn drop(&mut self) {
+        // The mapping goes before the file, or Windows refuses the delete.
+        self.map = None;
+        if let Some(path) = self.path.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+static NEXT_LOCS: atomic::AtomicU64 = atomic::AtomicU64::new(0);
 
 /// Ids per block of [`IdIndex`].
 ///
@@ -148,16 +238,19 @@ fn get_uvarint(bytes: &[u8]) -> (u64, usize) {
 
 impl NodeLocations {
     /// `ids` need not be sorted or unique; both are done here.
-    pub fn new(mut ids: Vec<i64>) -> NodeLocations {
+    ///
+    /// Fallible because the coordinate array is a mapped file, and a temporary directory that is full
+    /// or read-only is a real thing to report rather than to panic on.
+    pub fn new(mut ids: Vec<i64>) -> Result<NodeLocations> {
         ids.sort_unstable();
         ids.dedup();
         let index = IdIndex::build(&ids);
         // The plain vector goes here rather than being kept alongside: it is 8 bytes per id against
         // the index's ~1.2, and holding both would give back the saving. Freed before the coordinate
-        // array is allocated, so the two never peak together.
+        // array is mapped, so the two never peak together.
         drop(ids);
-        let locs = vec![(NO_LOC, NO_LOC); index.len()];
-        NodeLocations { ids: index, locs }
+        let locs = Locs::new(index.len())?;
+        Ok(NodeLocations { ids: index, locs })
     }
 
     pub fn len(&self) -> usize {
@@ -173,8 +266,7 @@ impl NodeLocations {
     }
 
     pub fn get(&self, id: i64) -> Option<(i32, i32)> {
-        let (lat, lon) = self.locs[self.index_of(id)? as usize];
-        (lat != NO_LOC).then_some((lat, lon))
+        self.locs.get(self.index_of(id)? as usize)
     }
 
     /// A way's geometry in lon/lat order, with unresolved refs skipped.
@@ -213,7 +305,7 @@ pub fn resolve_nodes(
     if table.is_empty() {
         return Ok(table);
     }
-    // Moved out so the workers can search it while the sink writes to `locs`; put back below.
+    // Moved out so the workers can search it while the sink writes coordinates; put back below.
     let ids = std::mem::take(&mut table.ids);
     let locs = &mut table.locs;
     pbf::run_pass_sink(
@@ -237,7 +329,7 @@ pub fn resolve_nodes(
         },
         |chunk| {
             for (idx, lat, lon) in chunk {
-                locs[idx as usize] = (lat, lon);
+                locs.set(idx as usize, lat, lon);
             }
             Ok(())
         },
@@ -366,12 +458,12 @@ mod tests {
         // The point of the pattern: memory is O(needed), so ids can be as large as
         // OSM's real ones without allocating anything proportional to them.
         let huge = 12_345_678_901i64;
-        let mut table = NodeLocations::new(vec![huge, 5, 5, 1]);
+        let mut table = NodeLocations::new(vec![huge, 5, 5, 1]).expect("map the coordinate file");
         assert_eq!(table.len(), 3, "sorted and deduped");
         assert_eq!(table.get(5), None, "unresolved until the node pass fills it");
         // Fill by index, as the merge does.
         let idx = table.index_of(5).unwrap() as usize;
-        table.locs[idx] = (377_900_000, -1_224_200_000);
+        table.locs.set(idx, 377_900_000, -1_224_200_000);
         assert_eq!(table.get(5), Some((377_900_000, -1_224_200_000)));
         assert_eq!(table.get(huge), None);
         assert_eq!(table.get(999), None, "not in the table at all");
@@ -381,10 +473,10 @@ mod tests {
     fn an_unresolved_ref_leaves_a_gap_rather_than_dropping_the_way() {
         // An extract that cuts through a way leaves some of its nodes out of the
         // file. Keeping the rest is what osmium's complete_ways produces too.
-        let mut table = NodeLocations::new(vec![1, 2, 3]);
+        let mut table = NodeLocations::new(vec![1, 2, 3]).expect("map the coordinate file");
         for (id, lat, lon) in [(1i64, 370_000_000, -1_220_000_000), (3, 370_020_000, -1_220_020_000)] {
             let idx = table.index_of(id).unwrap() as usize;
-            table.locs[idx] = (lat, lon);
+            table.locs.set(idx, lat, lon);
         }
         let line = table.line(&[1, 2, 3]);
         assert_eq!(line.len(), 2, "the middle vertex is missing, not the way");

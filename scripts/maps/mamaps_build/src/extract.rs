@@ -241,7 +241,7 @@ pub fn extract(
     for refs in members.values() {
         needed.extend_from_slice(refs);
     }
-    let table = NodeLocations::new(needed);
+    let table = NodeLocations::new(needed)?;
     stats.nodes_needed = table.len() as u64;
     let table = resolve_nodes(input, &blobs, &blob_kinds, "Pass 3: nodes", table)?;
 

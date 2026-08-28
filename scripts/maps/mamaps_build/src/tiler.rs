@@ -167,6 +167,15 @@ pub struct ZoomStats {
     pub bytes: u64,
     /// What stage C had to correct.
     pub rings: crate::rings::Stats,
+    /// Milliseconds in each phase of this zoom: map, merge, encode, append.
+    ///
+    /// Kept because guessing which one dominates has already cost two wrong optimisations. The map
+    /// and encode phases run on the pool and the other two are serial, so the split is what says
+    /// whether more cores would help at all or whether Amdahl has already won.
+    pub map_ms: u64,
+    pub merge_ms: u64,
+    pub encode_ms: u64,
+    pub append_ms: u64,
 }
 
 pub struct Settings {
@@ -239,7 +248,9 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
         let tolerance = simplify::tolerance_for(z, settings.max_zoom, settings.simplification);
         let buffer = geom::buffer_for(EXTENT);
 
+        let mapped = std::time::Instant::now();
         let (chunks, tally) = map_zoom(store, z, tolerance, buffer)?;
+        stats.map_ms = mapped.elapsed().as_millis() as u64;
         stats.features = tally.features;
         stats.points = tally.points;
         stats.dropped = tally.dropped;
@@ -253,12 +264,21 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
             // microseconds and rayon's stealing costs more than that. Batched rather than a whole
             // zoom at once because the batch is what bounds the encoded bytes held before the
             // writer takes them.
+            //
+            // The merge is timed around `collect` because that is where it happens: `merge` returns
+            // a lazy iterator, so pulling a batch out of it is the k-way merge doing its work.
+            let merging = std::time::Instant::now();
             let batch: Vec<(u64, Vec<BodyLayer>)> =
                 merged.by_ref().take(par::batch_len()).collect();
+            stats.merge_ms += merging.elapsed().as_millis() as u64;
             if batch.is_empty() {
                 break;
             }
-            for (id, encoded, rings) in encode_batch(batch)? {
+            let encoding = std::time::Instant::now();
+            let done = encode_batch(batch)?;
+            stats.encode_ms += encoding.elapsed().as_millis() as u64;
+            let appending = std::time::Instant::now();
+            for (id, encoded, rings) in done {
                 stats.rings.add(rings);
                 let Some((stored, raw_len)) = encoded else { continue };
                 // Uncompressed, as this column has always meant.
@@ -266,6 +286,7 @@ pub fn build(store: &Store, settings: &Settings) -> Result<(Vec<u8>, Vec<ZoomSta
                 stats.tiles += 1;
                 writer.append_stored(id, &stored)?;
             }
+            stats.append_ms += appending.elapsed().as_millis() as u64;
         }
         per_zoom.push(stats);
     }

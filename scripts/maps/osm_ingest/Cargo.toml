@@ -53,6 +53,14 @@ path = "src/bin/osm_extract.rs"
 # so a decode-only crate is enough and keeps the C toolchain out of the build.
 miniz_oxide = "0.8"
 rayon = "1"
+# Pure Rust, one thin wrapper over the platform call, and no C toolchain — which is the bar every
+# other dependency here clears too.
+#
+# It backs `nodeloc`'s coordinate array with a file instead of the heap. That array is 8 bytes per
+# needed node, so 1.23 GB on a California extract, and it was half of `mamaps_build`'s whole peak.
+# Mapped, the resident cost is whatever the OS decides to keep, and the access pattern is friendly to
+# that: materialisation walks ways in id order and a way's nodes are close together in a PBF.
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3

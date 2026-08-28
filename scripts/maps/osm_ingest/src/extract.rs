@@ -333,7 +333,7 @@ fn build_maxspeed(
     }
     println!("{} way(s) with a posted limit", rows.len());
 
-    let table = NodeLocations::new(rows.iter().flat_map(|r| r.refs.iter().copied()).collect());
+    let table = NodeLocations::new(rows.iter().flat_map(|r| r.refs.iter().copied()).collect())?;
     println!("{} node location(s) needed", table.len());
     let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 2: nodes", table)?;
 
@@ -481,7 +481,7 @@ fn build_roads(
     }
     println!("{} road way(s)", rows.len());
 
-    let table = NodeLocations::new(rows.iter().flat_map(|r| r.refs.iter().copied()).collect());
+    let table = NodeLocations::new(rows.iter().flat_map(|r| r.refs.iter().copied()).collect())?;
     println!("{} node location(s) needed", table.len());
     let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 2: nodes", table)?;
 
@@ -655,7 +655,7 @@ fn build_transit_lines(
             .chain(rel_rows.iter())
             .flat_map(|r| r.parts.iter().flat_map(|p| p.iter().copied()))
             .collect(),
-    );
+    )?;
     println!("{} node location(s) needed", table.len());
     let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 3: nodes", table)?;
 
@@ -883,7 +883,7 @@ fn build_admin_city(
     // Pass 3: node coordinates.
     let table = NodeLocations::new(
         member_refs.values().flat_map(|r| r.iter().copied()).collect(),
-    );
+    )?;
     println!("{} node location(s) needed", table.len());
     let table = resolve_nodes(input, blobs, &blob_kinds, "Pass 3: nodes", table)?;
 

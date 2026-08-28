@@ -190,13 +190,41 @@ fn run(
     // The spill is scratch. Removed on success; left behind on failure, where it is evidence.
     let _ = std::fs::remove_file(&spill);
 
-    println!("\n{:<6}{:>10}{:>12}{:>12}{:>10}{:>12}", "zoom", "tiles", "features", "points", "dropped", "bytes");
+    println!(
+        "\n{:<6}{:>10}{:>12}{:>12}{:>10}{:>12}{:>8}{:>8}{:>8}{:>8}",
+        "zoom", "tiles", "features", "points", "dropped", "bytes", "map_s", "merge_s", "enc_s",
+        "app_s",
+    );
     for z in &per_zoom {
         println!(
-            "z{:<5}{:>10}{:>12}{:>12}{:>10}{:>12}",
-            z.zoom, z.tiles, z.features, z.points, z.dropped, z.bytes,
+            "z{:<5}{:>10}{:>12}{:>12}{:>10}{:>12}{:>8.1}{:>8.1}{:>8.1}{:>8.1}",
+            z.zoom,
+            z.tiles,
+            z.features,
+            z.points,
+            z.dropped,
+            z.bytes,
+            z.map_ms as f64 / 1000.0,
+            z.merge_ms as f64 / 1000.0,
+            z.encode_ms as f64 / 1000.0,
+            z.append_ms as f64 / 1000.0,
         );
     }
+    // The four phase columns summed, because which of them dominates is the only thing that says
+    // whether more cores would help: map and encode run on the pool, merge and append do not.
+    let (map, merge, encode, append) = per_zoom.iter().fold((0u64, 0u64, 0u64, 0u64), |a, z| {
+        (a.0 + z.map_ms, a.1 + z.merge_ms, a.2 + z.encode_ms, a.3 + z.append_ms)
+    });
+    let serial = (merge + append) as f64;
+    let total = (map + merge + encode + append).max(1) as f64;
+    println!(
+        "total  map {:.1}s  merge {:.1}s  encode {:.1}s  append {:.1}s   ({:.0}% of tiling is serial)",
+        map as f64 / 1000.0,
+        merge as f64 / 1000.0,
+        encode as f64 / 1000.0,
+        append as f64 / 1000.0,
+        serial / total * 100.0,
+    );
     println!(
         "\nwrote {} ({} bytes, build_id {build_id:#018x}) in {:.1}s",
         out.display(),
