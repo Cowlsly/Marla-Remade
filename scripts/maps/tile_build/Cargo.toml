@@ -55,6 +55,10 @@ path = "src/bin/pmtiles_extract.rs"
 [[bin]]
 name = "mamaps_dump"
 path = "src/bin/mamaps_dump.rs"
+
+[[bin]]
+name = "mamaps_from_pmtiles"
+path = "src/bin/mamaps_from_pmtiles.rs"
 [dependencies]
 # The PMTiles + MVT codec, shared with the Android renderer in `:library:map`.
 # A path dependency on a detached crate: `tilecodec` belongs to no workspace, so
