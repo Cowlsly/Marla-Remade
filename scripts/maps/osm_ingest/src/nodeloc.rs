@@ -32,6 +32,11 @@ impl NodeLocations {
     pub fn new(mut ids: Vec<i64>) -> NodeLocations {
         ids.sort_unstable();
         ids.dedup();
+        // `dedup` shrinks the length and leaves the capacity alone, and this vector is built by
+        // extension, so it arrives over-allocated by up to a factor of two. On a California extract
+        // that is ~150 M ids and the slack is hundreds of megabytes held for the rest of the build,
+        // next to a table of the same size. Given back before the locations are allocated.
+        ids.shrink_to_fit();
         let locs = vec![(NO_LOC, NO_LOC); ids.len()];
         NodeLocations { ids, locs }
     }
