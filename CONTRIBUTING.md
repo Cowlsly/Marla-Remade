@@ -573,20 +573,9 @@ appname: feature description in a few words (#123)
 
 Drop the issue number if there isn't one. Use the module or area as the prefix.
 
-**Other agents and people work in this tree.** Stage only the files you changed; never
-`git add -A`.
-
-### Line endings
-
-`.gitattributes` normalises everything to LF (`* text=auto eol=lf`), which exists because the
-repo previously had mixed CRLF/LF and at the worst point 1329 files differed from HEAD by line
-endings alone.
-
-Editing tools sometimes rewrite a whole file in one style, turning a three-line change into a
-whole-file diff that still builds and still passes tests, so nothing catches it except review.
-**Run `git diff --stat` before committing** and sanity-check the counts against the change you
-actually made. A file you touched two lines in reporting hundreds of deletions means the line
-endings flipped.
+`.gitattributes` normalises the whole tree to LF, so you should never see a line-ending diff. If
+`git diff --stat` reports far more changed lines than you actually touched, your editor rewrote
+the file's line endings — fix that rather than committing the churn.
 
 ---
 
