@@ -198,7 +198,10 @@ jobs:
             fi
 
             # --- Generate title.txt with MA branding (except FindFamily) ---
-            app_name=$(grep -m1 '<string name="app_name">' "$dir/src/main/res/values/strings.xml" 2>/dev/null | sed -E 's/.*<string name="app_name">(.*)<\/string>.*/\1/' | xargs)
+            # Match app_name with any following attributes: most modules declare it as
+            # <string name="app_name" translatable="false">, which a fixed '...app_name">'
+            # pattern misses, silently falling through to the module-key fallback below.
+            app_name=$(grep -m1 -E '<string name="app_name"[^>]*>' "$dir/src/main/res/values/strings.xml" 2>/dev/null | sed -E 's/.*<string name="app_name"[^>]*>(.*)<\/string>.*/\1/' | xargs)
             if [ -z "$app_name" ]; then
               # Fallback: derive from module_key
               app_name=$(echo "$module_key" | sed 's/-/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
