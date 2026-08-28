@@ -272,17 +272,26 @@ impl Reference {
                     for ic in 0..in_per_group {
                         let plane = (first_in + ic) * p.in_h * p.in_w;
                         for ky in 0..p.kh {
-                            let Some(iy) = tap(oy * p.stride_h + ky * p.dil_h, p.pad_t, p.in_h)
-                            else {
-                                continue;
+                            let positioned = oy * p.stride_h + ky * p.dil_h;
+                            let iy = if p.pad_edge != 0 {
+                                tap_edge(positioned, p.pad_t, p.in_h)
+                            } else {
+                                match tap(positioned, p.pad_t, p.in_h) {
+                                    Some(found) => found,
+                                    None => continue,
+                                }
                             };
                             let row = plane + iy * p.in_w;
                             let tap_at = kernel_at + (ic * p.kh + ky) * p.kw;
                             for kx in 0..p.kw {
-                                let Some(ix) =
-                                    tap(ox * p.stride_w + kx * p.dil_w, p.pad_l, p.in_w)
-                                else {
-                                    continue;
+                                let positioned = ox * p.stride_w + kx * p.dil_w;
+                                let ix = if p.pad_edge != 0 {
+                                    tap_edge(positioned, p.pad_l, p.in_w)
+                                } else {
+                                    match tap(positioned, p.pad_l, p.in_w) {
+                                        Some(found) => found,
+                                        None => continue,
+                                    }
                                 };
                                 acc += self.load(p.in0, row + ix)?
                                     * self.weight(tap_at, kx)?;
@@ -814,6 +823,18 @@ fn groups(p: &Push) -> Result<(u32, u32), String> {
 fn tap(positioned: u32, pad: u32, extent: u32) -> Option<u32> {
     let coordinate = positioned.checked_sub(pad)?;
     (coordinate < extent).then_some(coordinate)
+}
+
+/// As [`tap`], but replicating the border instead of falling off it.
+///
+/// Always lands, which is the point: an edge-padded convolution has no skipped taps. See
+/// [`super::Push::pad_edge`].
+fn tap_edge(positioned: u32, pad: u32, extent: u32) -> u32 {
+    let last = extent.saturating_sub(1);
+    match positioned.checked_sub(pad) {
+        Some(coordinate) => coordinate.min(last),
+        None => 0,
+    }
 }
 
 /// The input coordinate feeding a transposed convolution's output, or `None` when this
@@ -1845,6 +1866,50 @@ mod tests {
         let out = b.slice_channels(x, 3, 2);
         let error = b.finish(&[out]).expect_err("past the end");
         assert!(error.contains("channels 3..5"), "{error}");
+    }
+
+    #[test]
+    fn edge_padding_replicates_the_border_instead_of_reading_zeros() {
+        // Four positions, a 3-wide kernel of all ones padded by one each side. With zero padding
+        // the two end outputs are short a tap; with edge padding the border value is counted
+        // twice. This is the whole difference, and it only shows at the ends — which is why
+        // getting it wrong is an audible click at the start and finish of an utterance and
+        // nothing anywhere else.
+        let values = [1.0f32, 2.0, 3.0, 4.0];
+        let weights = &[(vec![1u32, 1, 1, 3], vec![1.0, 1.0, 1.0]), (vec![1], vec![0.0])];
+        let zero = one(Shape::new(1, 1, 4), &values, weights, |b, x| {
+            b.conv(x, 0, 1, (1, 3), (1, 1), (1, 1), (0, 1, 0, 1), 1, Act::None)
+        });
+        // 0+1+2, 1+2+3, 2+3+4, 3+4+0
+        close(&zero, &[3.0, 6.0, 9.0, 7.0]);
+
+        let edge = one(Shape::new(1, 1, 4), &values, weights, |b, x| {
+            b.edge_padding();
+            b.conv(x, 0, 1, (1, 3), (1, 1), (1, 1), (0, 1, 0, 1), 1, Act::None)
+        });
+        // 1+1+2, 1+2+3, 2+3+4, 3+4+4
+        close(&edge, &[4.0, 6.0, 9.0, 11.0]);
+        // And the interior is identical, which is what makes the failure mode so quiet.
+        assert_eq!(zero[1], edge[1]);
+        assert_eq!(zero[2], edge[2]);
+    }
+
+    #[test]
+    fn edge_padding_survives_a_kernel_wider_than_the_input() {
+        // The vocoder dilates a 7-tap kernel by up to 4, so a tap can be 12 positions outside a
+        // short sequence. Clamping must saturate rather than wrap.
+        let values = [5.0f32, 6.0];
+        let got = one(
+            Shape::new(1, 1, 2),
+            &values,
+            &[(vec![1u32, 1, 1, 3], vec![1.0, 1.0, 1.0]), (vec![1], vec![0.0])],
+            |b, x| {
+                b.edge_padding();
+                b.conv(x, 0, 1, (1, 3), (1, 1), (4, 4), (0, 4, 0, 4), 1, Act::None)
+            },
+        );
+        // Every tap lands 4 away, so both outputs read only the clamped ends: 5 + x + 6.
+        close(&got, &[5.0 + 5.0 + 6.0, 5.0 + 6.0 + 6.0]);
     }
 
     #[test]

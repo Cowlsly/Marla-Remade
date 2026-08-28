@@ -75,6 +75,7 @@ layout(push_constant) uniform Push {
     uint dil_w;
     uint pad_t;
     uint pad_l;
+    uint pad_edge;
     uint group;
     uint act;
     uint act_weight;

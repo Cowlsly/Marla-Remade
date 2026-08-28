@@ -346,6 +346,14 @@ pub struct Push {
     pub pad_t: u32,
     /// Padding left of column 0. ONNX's `pads[1]`.
     pub pad_l: u32,
+    /// Non-zero when the convolution replicates its border instead of reading zeros.
+    ///
+    /// ONNX spells this as a `Pad` node with `mode=edge` in front of a convolution whose own
+    /// `pads` are all zero, which is how Supertonic''s vocoder keeps its length: twelve of them,
+    /// one before every convolution. Zero padding there would corrupt up to twelve positions at
+    /// each END of an utterance and leave the middle correct - an audible click at the start and
+    /// finish of every sentence.
+    pub pad_edge: u32,
     /// Convolution groups. `group == in_c == out_c` is depthwise.
     pub group: u32,
     /// [`Act::code`].
@@ -501,6 +509,8 @@ enum Node {
         /// Resolved offset of [`Act::PRelu`]'s slope, zero otherwise.
         act_weight: u32,
         transpose: bool,
+        /// Replicate the border instead of reading zeros. See [`Push::pad_edge`].
+        pad_edge: bool,
     },
     MaxPool {
         input: Id,
@@ -632,6 +642,8 @@ pub struct Builder<'a> {
     /// One flag per tensor in the file, set when the pass reads it. See
     /// [`Builder::finish`], which insists every one was.
     read: Vec<bool>,
+    /// Whether convolutions replicate their border rather than reading zeros.
+    pad_edge: bool,
 }
 
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
@@ -649,7 +661,19 @@ impl<'a> Builder<'a> {
             pinned: Vec::new(),
             error: None,
             inputs: Vec::new(),
+            pad_edge: false,
         }
+    }
+
+    /// Make every convolution from here on replicate its border instead of reading zeros.
+    ///
+    /// A builder-level mode rather than an argument on [`Builder::conv`], because a network
+    /// either pads this way throughout or not at all: Supertonic''s vocoder puts an ONNX `Pad`
+    /// with `mode=edge` in front of all twelve of its convolutions, and threading a flag through
+    /// every call site would be noise at each one. See [`Push::pad_edge`] for what goes wrong if
+    /// this is missed.
+    pub fn edge_padding(&mut self) {
+        self.pad_edge = true;
     }
 
     /// Declare an input of `shape`.
@@ -741,6 +765,7 @@ impl<'a> Builder<'a> {
             act,
             act_weight,
             transpose: false,
+            pad_edge: self.pad_edge,
         });
         out
     }
@@ -891,6 +916,7 @@ impl<'a> Builder<'a> {
             act,
             act_weight,
             transpose: true,
+            pad_edge: false,
         });
         out
     }
@@ -1437,6 +1463,7 @@ impl<'a> Builder<'a> {
                 act,
                 act_weight,
                 transpose,
+                pad_edge,
             } => {
                 let (si, so) = (shape(*input), shape(*out));
                 // An ungrouped 1x1 goes to the tiled path. Its geometry is a matrix multiply
@@ -1498,6 +1525,7 @@ impl<'a> Builder<'a> {
                         dil_w: dilation.1,
                         pad_t: pad.0,
                         pad_l: pad.1,
+                        pad_edge: u32::from(*pad_edge),
                         group: *group,
                         act: act.code(),
                         act_weight: *act_weight,
@@ -2149,8 +2177,11 @@ pub(crate) mod tests {
     fn the_push_block_has_no_padding() {
         // The shaders read it at fixed offsets, so a gap Rust inserted would shift
         // every field after it.
-        assert_eq!(std::mem::size_of::<Push>(), 25 * 4);
+        assert_eq!(std::mem::size_of::<Push>(), 26 * 4);
         assert_eq!(std::mem::align_of::<Push>(), 4);
+        // Vulkan only guarantees 128 bytes of push constants, so this is the ceiling the
+        // block has to stay under however many modes get added to it.
+        assert!(std::mem::size_of::<Push>() <= 128, "{}", std::mem::size_of::<Push>());
     }
 
     #[test]
