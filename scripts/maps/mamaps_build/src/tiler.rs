@@ -57,6 +57,8 @@ pub struct ZoomStats {
     /// Features dropped because simplification left nothing, or the clip did.
     pub dropped: u64,
     pub bytes: u64,
+    /// What stage C had to correct.
+    pub rings: crate::rings::Stats,
 }
 
 pub struct Settings {
@@ -74,9 +76,10 @@ pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<
         max_zoom: settings.max_zoom,
         build_id: settings.build_id,
         compress: true,
-        // Not until stage C exists. Claiming it would let the renderer skip a repair pass that is
-        // still the only thing standing between a bad ring and an earcut hang.
-        rings_validated: false,
+        // Stage C runs on every tile below, so the claim is true. It is what lets the renderer
+        // skip its repair pass — and the renderer still keeps that pass, gated, because a claim is
+        // only as good as the generator making it.
+        rings_validated: true,
         min_lon_e7: bbox.0,
         min_lat_e7: bbox.1,
         max_lon_e7: bbox.2,
@@ -132,10 +135,18 @@ pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<
         // and no sort step can be forgotten. A `HashMap` here is the single easiest way to lose
         // byte-identical rebuilds.
         for (id, layers) in tiles {
-            // A layer that ended up empty \u2014 every feature in it fell below the minimum area after
-            // clipping \u2014 costs bytes in the archive and a draw call on device for nothing.
+            // **Stage C**, per tile: winding normalised, hole containment resolved, degenerate
+            // rings dropped. Once, here, in `f64` with no frame budget, instead of every frame on
+            // device in `i32` under one. This is what makes `FLAG_RINGS_VALIDATED` true.
+            let mut layers: Vec<BodyLayer> = layers.into_values().collect();
+            for layer in &mut layers {
+                stats.rings.add(crate::rings::normalise(layer));
+            }
+            // A layer that ended up empty — every feature in it fell below the minimum area after
+            // clipping, or lost its exterior to stage C — costs bytes in the archive and a draw
+            // call on device for nothing.
             let layers: Vec<BodyLayer> =
-                layers.into_values().filter(|l| !l.features.is_empty()).collect();
+                layers.into_iter().filter(|l| !l.features.is_empty()).collect();
             if layers.is_empty() {
                 continue;
             }

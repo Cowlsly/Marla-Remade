@@ -23,6 +23,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 mod extract;
+mod rings;
 mod schema;
 mod tiler;
 
@@ -350,8 +351,8 @@ mod tests {
     fn the_report_is_valid_json_shaped_output() {
         let stats = extract::Stats { features: 3, ..extract::Stats::default() };
         let zooms = vec![
-            tiler::ZoomStats { zoom: 0, tiles: 1, features: 3, points: 12, dropped: 0, bytes: 40 },
-            tiler::ZoomStats { zoom: 1, tiles: 4, features: 3, points: 20, dropped: 1, bytes: 90 },
+            tiler::ZoomStats { zoom: 0, tiles: 1, features: 3, points: 12, dropped: 0, bytes: 40, ..Default::default() },
+            tiler::ZoomStats { zoom: 1, tiles: 4, features: 3, points: 20, dropped: 1, bytes: 90, ..Default::default() },
         ];
         let report = build_report(&stats, &zooms, 42, 1024);
         assert!(report.starts_with("{\n") && report.ends_with("}\n"));
