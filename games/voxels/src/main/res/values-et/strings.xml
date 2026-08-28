@@ -35,4 +35,12 @@
     <string name="host_online_world">Jaga oma maailma võrku</string>
     <string name="connection_lost">Ühendus on katkenud - ootan selle taastumist…</string>
     <string name="players_online">Võrgus on %1$d mängijat</string>
+    <string name="achievements">Auhinnad</string>
+    <string name="achievements_earned">Selles maailmas on teenitud %1$d / %2$d</string>
+    <string name="achievements_unavailable">Auhinnad on veel laadimisel.</string>
+    <string name="select_a_world">Vali maailm</string>
+    <string name="leave_blank_for_random">Juhuslikuse jaoks jäta tühjaks</string>
+    <string name="create_play">Loo ja mängi</string>
+    <string name="villager_level">Tase %1$d / %2$d</string>
+    <string name="villager_tier">%1$d. tase</string>
 </resources>
