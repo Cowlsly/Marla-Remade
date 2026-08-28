@@ -61,6 +61,7 @@ Usage:
     ./scripts/ml/supertonic_fold.py vocoder.onnx --graph supertonic_voc -o vocoder.maml
     ./scripts/ml/supertonic_fold.py duration_predictor.onnx --graph supertonic_dp -o dp.maml
     ./scripts/ml/supertonic_fold.py text_encoder.onnx --graph supertonic_ttl -o text.maml
+    ./scripts/ml/supertonic_fold.py vector_estimator.onnx --graph supertonic_ve -o sampler.maml
 """
 
 import argparse
@@ -97,6 +98,23 @@ TE_STYLE_HEADS = 2
 TE_PREFIX = "tts.ttl.text_encoder"
 TE_STYLE_PREFIX = "tts.ttl.speech_prompted_text_encoder"
 TE_STYLE_KEY = "tts.ttl.style_encoder.style_token_layer.style_key"
+
+# The sampler's. `VE_PREFIX` is where every one of its parameters lives.
+VE_LATENT = 144
+VE_CHANNELS = 512
+VE_INNER = 2048
+VE_TEXT = 256
+VE_STYLE = 256
+VE_STYLE_TOKENS = 50
+VE_TEXT_HEADS = 8
+VE_STYLE_HEADS = 2
+VE_TIME = 64
+VE_TIME_INNER = 256
+VE_MAIN_BLOCKS = 4
+VE_LEADING = [1, 2, 4, 8]
+VE_TRAILING = 4
+VE_PREFIX = "vector_estimator.tts.ttl.vector_field"
+VE_UNCOND = "vector_estimator.tts.ttl.uncond_masker"
 
 
 def constants(graph):
@@ -569,6 +587,194 @@ def collect_text(graph):
     return table.layers, table.tensors
 
 
+def collect_sampler(graph):
+    """The sampler's layers and tensors, folded, in the order the Rust reads them.
+
+    Four main blocks of `convnext x4, timestep shift, convnext, text attention, convnext, style
+    attention`, then four trailing ConvNeXt blocks, between two unbiased projections. The
+    export flattens the four into `main_blocks.0` .. `main_blocks.23`, six entries each.
+    """
+    held = constants(graph)
+    if not convolutions_edge_padded(graph):
+        raise SystemExit(
+            "this export does not pad every convolution with mode=edge, so the layer-scale "
+            "fold below is not valid; see the module docstring"
+        )
+    table = Table(held)
+
+    def matmul(prefix, name):
+        return matmul_weights(graph, held, prefix)[name]
+
+    def linear(at, prefix, name, out_channels):
+        """One `MatMul` plus its bias, as a 1x1 convolution. The weight is `[in, out]`."""
+        weight = matmul(prefix, name).T
+        bias = table.at(f"{at}.{name}.linear.bias")
+        if weight.shape[0] != out_channels:
+            raise SystemExit(f"{at}.{name} is {list(weight.shape)}, not [{out_channels}, in]")
+        table.add(
+            "Conv",
+            f"{at}.{name}",
+            f"Conv w={[*weight.shape, 1, 1]} b={list(bias.shape)} k={[1, 1]}"
+            f" p={[0, 0, 0, 0]} g=1 pad=edge transposed",
+            weight.reshape(weight.shape[0], weight.shape[1], 1, 1),
+            bias,
+        )
+
+    def scaled_query(at, prefix, out_channels, heads):
+        """`W_query`, with the difference between the export's /16 and 1/sqrt(head_dim) folded in.
+
+        Both attentions divide by 16. `Builder::attn_scores` divides by `sqrt(head_dim)`, so the
+        query carries `sqrt(head_dim) / 16` - exact, and safe across the rotary because a
+        rotation commutes with a scalar.
+        """
+        scale = np.sqrt(out_channels / heads) / 16.0
+        weight = matmul(prefix, "W_query").T * scale
+        bias = table.at(f"{at}.W_query.linear.bias") * scale
+        table.add(
+            "Conv",
+            f"{at}.W_query",
+            f"Conv w={[*weight.shape, 1, 1]} b={list(bias.shape)} k={[1, 1]}"
+            f" p={[0, 0, 0, 0]} g=1 pad=edge transposed scaled={scale:.6f}",
+            weight.reshape(weight.shape[0], weight.shape[1], 1, 1),
+            bias,
+        )
+
+    table.conv(f"{VE_PREFIX}.proj_in.net", VE_CHANNELS, synthesise_bias=True)
+
+    for block in range(VE_MAIN_BLOCKS):
+        base = block * 6
+        for layer, dilation in enumerate(VE_LEADING):
+            table.convnext(
+                f"{VE_PREFIX}.main_blocks.{base}.convnext.{layer}",
+                VE_CHANNELS,
+                VE_INNER,
+                dilation,
+            )
+        # `main_blocks.{base + 1}` is the timestep `Linear`, evaluated on the host.
+        table.convnext(
+            f"{VE_PREFIX}.main_blocks.{base + 2}.convnext.0", VE_CHANNELS, VE_INNER, 1
+        )
+
+        at = f"{VE_PREFIX}.main_blocks.{base + 3}.attn"
+        prefix = f"/vector_estimator/vector_field/main_blocks.{base + 3}/attn/"
+        scaled_query(at, prefix, VE_CHANNELS, VE_TEXT_HEADS)
+        linear(at, prefix, "W_key", VE_CHANNELS)
+        linear(at, prefix, "W_value", VE_CHANNELS)
+        linear(at, prefix, "out_fc", VE_CHANNELS)
+        table.layer_norm(f"{VE_PREFIX}.main_blocks.{base + 3}.norm.norm")
+
+        table.convnext(
+            f"{VE_PREFIX}.main_blocks.{base + 4}.convnext.0", VE_CHANNELS, VE_INNER, 1
+        )
+
+        at = f"{VE_PREFIX}.main_blocks.{base + 5}.attention"
+        prefix = f"/vector_estimator/vector_field/main_blocks.{base + 5}/attention/"
+        scaled_query(at, prefix, VE_STYLE, VE_STYLE_HEADS)
+        linear(at, prefix, "W_value", VE_STYLE)
+        linear(at, prefix, "out_fc", VE_CHANNELS)
+        table.layer_norm(f"{VE_PREFIX}.main_blocks.{base + 5}.norm.norm")
+
+    for layer in range(VE_TRAILING):
+        table.convnext(f"{VE_PREFIX}.last_convnext.convnext.{layer}", VE_CHANNELS, VE_INNER, 1)
+
+    table.conv(f"{VE_PREFIX}.proj_out.net", VE_LATENT, synthesise_bias=True)
+
+    # Everything from here is read on the host. `nets::Builder::host_tensor` names each, so an
+    # accidentally unread weight is still an error.
+    theta = table.at(f"{VE_PREFIX}.main_blocks.3.attn.theta").reshape(-1)
+    table.add("Host", "rotary theta", f"Host t={list(theta.shape)} rotary=theta", theta)
+    frequencies = table.at(
+        "/vector_estimator/vector_field/time_encoder/sinusoidal/Constant_3_output_0"
+    ).reshape(-1)
+    table.add(
+        "Host", "time frequencies", f"Host t={list(frequencies.shape)} time=frequencies", frequencies
+    )
+
+    for which, (rows, columns) in (("mlp.0", (VE_TIME_INNER, VE_TIME)), ("mlp.2", (VE_TIME, VE_TIME_INNER))):
+        at = f"{VE_PREFIX}.time_encoder.mlp.{which.split('.')[1]}.linear"
+        weight = table.at(f"{at}.weight")
+        bias = table.at(f"{at}.bias")
+        if list(weight.shape) != [rows, columns]:
+            raise SystemExit(f"{at} is {list(weight.shape)}, not {[rows, columns]}")
+        table.add(
+            "Host",
+            at,
+            f"Host w={list(weight.shape)} b={list(bias.shape)} time={which}",
+            weight,
+            bias,
+        )
+
+    for block in range(VE_MAIN_BLOCKS):
+        base = block * 6 + 1
+        at = f"{VE_PREFIX}.main_blocks.{base}.linear.linear"
+        prefix = f"/vector_estimator/vector_field/main_blocks.{base}/linear/linear/"
+        node = next(n for n in graph.node if n.name == f"{prefix}MatMul")
+        weight = np.asarray(held[next(i for i in node.input if i in held)], dtype=np.float64).T
+        bias = table.at(f"{at}.bias")
+        table.add(
+            "Host",
+            at,
+            f"Host w={list(weight.shape)} b={list(bias.shape)} time=shift{block} transposed",
+            weight,
+            bias,
+        )
+
+    token = table.at(f"{VE_UNCOND}.text_special_token").reshape(-1)
+    table.add("Host", "text_special_token", f"Host t={list(token.shape)} uncond=text", token)
+    style = np.ascontiguousarray(
+        table.at(f"{VE_UNCOND}.style_value_special_token").reshape(-1, VE_STYLE).T
+    )
+    table.add("Host", "style_value_special_token", f"Host t={list(style.shape)} uncond=style", style)
+
+    # The two branches' style keys, `tanh(W_key . style_key + b_key)`, entirely constant. The
+    # conditional key is a nameless initializer reached through the `Tile` that broadcasts it.
+    for label, source in (("conditional", conditional_style_key(graph, held)), ("unconditional", f"{VE_UNCOND}.style_key_special_token")):
+        # One `style_key` but four `W_key`s, so four folded tensors per branch, stacked along
+        # channels for `Builder::slice_channels` to cut apart. Folding only the first left the
+        # net exact through ten sub-blocks and then wrong, which is what the bisect found.
+        stacked = []
+        for block in range(VE_MAIN_BLOCKS):
+            index = block * 6 + 5
+            keys = matmul_weights(
+                graph, held, f"/vector_estimator/vector_field/main_blocks.{index}/attention/"
+            )["W_key"]
+            bias = table.at(f"{VE_PREFIX}.main_blocks.{index}.attention.W_key.linear.bias")
+            folded = np.tanh(table.at(source).reshape(-1, VE_STYLE) @ keys + bias)
+            if folded.shape != (VE_STYLE_TOKENS, VE_STYLE):
+                raise SystemExit(f"{label} keys for block {block} folded to {list(folded.shape)}")
+            stacked.append(np.ascontiguousarray(folded.T))
+        folded = np.concatenate(stacked, axis=0)
+        table.add(
+            "Host",
+            f"style keys {label}",
+            f"Host t={list(folded.shape)} folded=tanh(W_key.style_key+b) {label}",
+            folded,
+        )
+    return table.layers, table.tensors
+
+
+def conditional_style_key(graph, held):
+    """The name of the conditional `style_key`, which the export leaves nameless.
+
+    It reaches `W_key` through a `Concat` of a `Tile` of itself and an `Expand` of the
+    unconditional token, so it is found rather than spelled.
+    """
+    producer = {o: n for n in graph.node for o in n.output}
+    node = next(
+        n
+        for n in graph.node
+        if n.name == "/vector_estimator/vector_field/main_blocks.5/attention/W_key/linear/MatMul"
+    )
+    concat = producer[node.input[0]]
+    for branch in concat.input:
+        broadcast = producer[branch]
+        for name in broadcast.input:
+            if name in held and list(np.asarray(held[name]).shape) == [1, VE_STYLE_TOKENS, VE_STYLE]:
+                if "uncond" not in name:
+                    return name
+    raise SystemExit("no conditional style_key found ahead of the style W_key")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("onnx")
@@ -585,6 +791,8 @@ def main():
         layers, tensors = collect_duration(model.graph)
     elif args.graph == "supertonic_ttl":
         layers, tensors = collect_text(model.graph)
+    elif args.graph == "supertonic_ve":
+        layers, tensors = collect_sampler(model.graph)
     else:
         layers, tensors = collect(model.graph)
 

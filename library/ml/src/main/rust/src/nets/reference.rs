@@ -1100,8 +1100,8 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_text,
-        supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
+        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
+        supertonic_text, supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -2694,6 +2694,60 @@ mod tests {
             let samples = supertonic_vocoder::interleave(&channelled);
             write(&dir.join("reference.f32"), &samples);
             println!("supertonic_voc at {width} frames: wrote {} values", samples.len());
+            return;
+        }
+        if graph == "supertonic_ve" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights =
+                crate::weights::Weights::parse(&bytes, crate::weights::graph::SUPERTONIC_VE)
+                    .expect("the sampler asset parses");
+            let chars: u32 = std::env::var("PARITY_CHARS")
+                .expect("PARITY_CHARS")
+                .parse()
+                .expect("a character count");
+            let plan = supertonic_sampler::build(&weights, width, chars).expect("the sampler builds");
+            let read = |name: &str| -> Vec<f32> {
+                let raw = std::fs::read(dir.join(name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+                raw.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect()
+            };
+            let text = read("text.f32");
+            let style = read("style.f32");
+            use crate::post::supertonic as post;
+            let (current, total) = (5u32, 16u32);
+            let shifts = post::time_shifts(&weights, current, total).expect("the timestep shifts");
+            let query_angles = post::rotary_angles(&weights, width).expect("the query angles");
+            let key_angles = post::rotary_angles(&weights, chars).expect("the key angles");
+            // The export tiles its batch to two: the real conditioning, and two learned
+            // unconditional tokens. Two runs of one plan here, combined below.
+            let conditional_keys = post::style_keys(&weights, true).expect("the conditional keys");
+            let unconditional_keys =
+                post::style_keys(&weights, false).expect("the unconditional keys");
+            let unconditional_text =
+                post::unconditional_text(&weights, chars).expect("the unconditional text");
+            let unconditional_style =
+                post::unconditional_style(&weights).expect("the unconditional style");
+            let run_branch = |text: &[f32], keys: &[f32], style: &[f32]| -> Vec<f32> {
+                let outputs = run_multi(
+                    &plan,
+                    weights.data(),
+                    &[&input, text, keys, style, &shifts, &query_angles, &key_angles],
+                )
+                .expect("the sampler runs");
+                outputs.into_iter().next().expect("the velocity")
+            };
+            let conditional = run_branch(&text, &conditional_keys, &style);
+            let unconditional =
+                run_branch(&unconditional_text, &unconditional_keys, &unconditional_style);
+            let denoised = post::step(&input, &conditional, &unconditional, total)
+                .expect("the Euler step");
+            write(&dir.join("reference.f32"), &denoised);
+            println!(
+                "supertonic_ve at {width} frames, {chars} chars: wrote {} values",
+                denoised.len()
+            );
             return;
         }
         if graph == "supertonic_ttl" {

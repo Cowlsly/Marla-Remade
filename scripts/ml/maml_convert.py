@@ -114,6 +114,7 @@ GRAPHS = {
     "supertonic_voc": 11,
     "supertonic_dp": 12,
     "supertonic_ttl": 13,
+    "supertonic_ve": 14,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -132,6 +133,7 @@ EXPECTED_DIGEST = {
     "supertonic_voc": "64e3a3437fa8f889fb679a5e08553ba7392c05a32cd844a0d2340698372a0071",
     "supertonic_dp": "a294dac3e0fa1acf03d5a483b96782190a626c6adbc517969592ec6a888e15cd",
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
+    "supertonic_ve": "d76f1fb13eaa9f5a16fed1f97a491d25f75325a36f00535fa3a11a7b16527951",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that

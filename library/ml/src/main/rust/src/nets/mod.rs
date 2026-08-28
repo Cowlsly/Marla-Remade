@@ -37,6 +37,7 @@ pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
 pub mod supertonic_duration;
+pub mod supertonic_sampler;
 pub mod supertonic_text;
 pub mod supertonic_vocoder;
 pub mod u2netp;
@@ -1245,6 +1246,20 @@ impl<'a> Builder<'a> {
         let out = self.tensor(Shape::new(count, shape.h, shape.w));
         self.nodes.push(Node::SliceChannels { input, out, start });
         out
+    }
+
+    /// Declare that a tensor is read on the **host** rather than by the plan.
+    ///
+    /// [`Builder::finish`] refuses a file with an unread tensor, because that is what a forward
+    /// pass which skipped a layer looks like from the outside. A few tensors legitimately never
+    /// reach a shader: Supertonic's sampler conditions on a timestep embedding that is a function
+    /// of two scalars, and on classifier-free-guidance tokens that differ per branch, so the host
+    /// evaluates those and passes the results in as plan inputs. Naming them here keeps the
+    /// invariant — nothing is *accidentally* unread — and puts the list in the net module beside
+    /// the code that uses it.
+    pub fn host_tensor(&mut self, weight_index: usize, dims: &[u32]) {
+        // Through `weight` so the shape is checked against the file like any other tensor.
+        self.weight(weight_index, dims);
     }
 
     /// `a + b` where `b` is `C x 1 x 1`, a per-channel shift. See [`Kind::AddBroadcast`].

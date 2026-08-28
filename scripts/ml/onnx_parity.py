@@ -65,6 +65,9 @@ PROBE = {
     "supertonic_dp": "/sentence_encoder/Add_output_0",
     # The graph's own output, which is the whole conditioning sequence.
     "supertonic_ttl": None,
+    # `denoised_latent`, the graph's own output. That is a whole Euler step over both guidance
+    # branches, so the runtime side runs the plan twice - which is the point worth checking.
+    "supertonic_ve": None,
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -164,6 +167,10 @@ def main():
     parser.add_argument("onnx")
     parser.add_argument("--width", type=int, default=64)
     parser.add_argument("--maml", help="the .maml, for a graph that is a runtime download")
+    parser.add_argument(
+        "--probe",
+        help="compare this tensor instead of the graph's usual one, for isolating a layer",
+    )
     args = parser.parse_args()
 
     onnxruntime.set_default_logger_severity(3)
@@ -176,7 +183,7 @@ def main():
     # larger one, so there is nothing to extract.
     if cut is not None and cut.get("first"):
         model = extract(args.onnx, model, cut, work)
-    probe = PROBE[args.graph] or final_logits(model)
+    probe = args.probe or PROBE[args.graph] or final_logits(model)
     if probe not in {o.name for o in model.graph.output}:
         model.graph.output.append(
             onnx.helper.make_tensor_value_info(probe, onnx.TensorProto.FLOAT, None)
@@ -233,6 +240,29 @@ def main():
         feed["text_mask"] = np.ones((1, 1, args.width), dtype=np.float32)
         x = ids.astype(np.float32)
         style.tofile(os.path.join(work, "style.f32"))
+    elif args.graph == "supertonic_ve":
+        # A latent, a text conditioning and a voice. `--width` is the latent length; the text is
+        # deliberately a different length, because the rotary angles normalise each sequence by
+        # its own and a square case would hide a swap.
+        rng = np.random.default_rng(20240827)
+        chars = max(4, args.width // 2)
+        latent = rng.standard_normal((1, 144, args.width)).astype(np.float32)
+        text = rng.standard_normal((1, 256, chars)).astype(np.float32)
+        style = rng.standard_normal((1, 50, 256)).astype(np.float32)
+        feed = {
+            "noisy_latent": latent,
+            "text_emb": text,
+            "style_ttl": style,
+            "latent_mask": np.ones((1, 1, args.width), dtype=np.float32),
+            "text_mask": np.ones((1, 1, chars), dtype=np.float32),
+            "current_step": np.array([5.0], dtype=np.float32),
+            "total_step": np.array([16.0], dtype=np.float32),
+        }
+        x = latent
+        text.tofile(os.path.join(work, "text.f32"))
+        # Channel-major, which is how the runtime holds a sequence.
+        np.ascontiguousarray(style.reshape(50, 256).T).tofile(os.path.join(work, "style.f32"))
+        os.environ["PARITY_CHARS"] = str(chars)
     else:
         height = 48 if args.graph == "ppocr_rec" else args.width
         # Deterministic and free of transcendentals, so both sides read identical bytes.
@@ -262,6 +292,12 @@ def main():
 
     # The runtime writes `[c, h, w]`; reshape the ONNX tensor to match by element count.
     want = np.ascontiguousarray(reference).flatten()
+    # Supertonic's sampler runs both classifier-free-guidance branches in one batch of two, so
+    # an *internal* probe of it has twice the runtime's element count. The conditional branch is
+    # the first half. The graph's own output is already combined, so this does not fire there.
+    if want.size == got.size * 2 and args.graph == "supertonic_ve":
+        want = want[: got.size]
+        quantised = np.ascontiguousarray(quantised).flatten()[: got.size]
     if want.size != got.size:
         raise SystemExit(f"{probe}: onnx has {want.size} values, the runtime {got.size}")
     if args.graph == "ppocr_rec":
