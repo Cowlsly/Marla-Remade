@@ -90,10 +90,6 @@
 -keep interface com.vayunmathur.stockfish.** { *; }
 -dontwarn com.vayunmathur.stockfish.**
 
-# BouncyCastle (post-quantum crypto for Office): keep providers/algorithms found via reflection.
--keep class org.bouncycastle.** { *; }
--dontwarn org.bouncycastle.**
-
 # gRPC + okhttp + protobuf-lite (:appstore Accrescent source). grpc-okhttp is the first
 # okhttp in the repo. grpc looks up its transport/name-resolver providers via reflection and
 # META-INF/services; okhttp/okio and grpc reference optional compile-time deps (Conscrypp,

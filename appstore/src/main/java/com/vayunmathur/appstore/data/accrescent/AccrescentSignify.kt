@@ -1,8 +1,6 @@
 package com.vayunmathur.appstore.data.accrescent
 
 import android.util.Base64
-import org.bouncycastle.crypto.params.Ed25519PublicKeyParameters
-import org.bouncycastle.crypto.signers.Ed25519Signer
 
 /**
  * ed25519 verification of an OpenBSD-signify signature, replicating Accrescent's
@@ -19,6 +17,8 @@ import org.bouncycastle.crypto.signers.Ed25519Signer
  *
  * This is the whole trust anchor for the Accrescent source, so it fails closed: any parsing
  * or verification problem returns `false` rather than throwing or assuming success.
+ *
+ * The framing above is parsed here; the raw ed25519 check itself is [SignifyNative].
  */
 object AccrescentSignify {
 
@@ -51,11 +51,7 @@ object AccrescentSignify {
                 ?: return false
             val sigBytes = decodeRange(sigBase64, SIG_HEADER, SIG_END) ?: return false
 
-            val publicKey = Ed25519PublicKeyParameters(pubKeyBytes, 0)
-            Ed25519Signer().apply {
-                init(false, publicKey)
-                update(message, 0, message.size)
-            }.verifySignature(sigBytes)
+            SignifyNative.nativeVerify(pubKeyBytes, message, sigBytes)
         } catch (_: Exception) {
             false
         }

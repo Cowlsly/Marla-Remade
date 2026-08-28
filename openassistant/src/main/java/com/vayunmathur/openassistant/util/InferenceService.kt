@@ -16,8 +16,6 @@ import androidx.core.content.IntentCompat
 import com.google.ai.edge.litertlm.*
 import com.vayunmathur.library.util.SecureResultReceiver
 import com.vayunmathur.library.util.DataStoreUtils
-import com.vayunmathur.library.downloadservice.downloadModels
-import com.vayunmathur.library.downloadservice.ModelUrls
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.catch
 import java.io.File
@@ -75,27 +73,11 @@ class InferenceService : Service() {
             val imagePaths: Array<String>,
             val audioPath: String?
         ) : InferenceJob()
-
-        /**
-         * A SigLIP2 embedding request from another app (photos). [mode] is
-         * "text", "image", or "info". Runs on [SiglipEmbedder], independent of
-         * the litertlm chat [Engine], so it can be served while the LLM is busy.
-         */
-        data class Embedding(
-            val mode: String,
-            val userText: String,
-            val imagePath: String?,
-            val receiver: ResultReceiver,
-        ) : InferenceJob()
     }
 
     private val serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val standardQueue = Channel<InferenceJob.Standard>(Channel.UNLIMITED)
     private val intentQueue = Channel<InferenceJob.Intent>(Channel.UNLIMITED)
-    private val embeddingQueue = Channel<InferenceJob.Embedding>(Channel.UNLIMITED)
-
-    /** Guards the on-demand SigLIP2 model download so we start it at most once. */
-    @Volatile private var downloadJob: Job? = null
 
     private var engine: Engine? = null
     private var currentConversation: com.google.ai.edge.litertlm.Conversation? = null
@@ -138,23 +120,6 @@ class InferenceService : Service() {
                 }
             }
         }
-        // Embeddings run on their own consumer so they don't wait behind the
-        // (possibly long) chat/intent LLM jobs — they use SiglipEmbedder, not the
-        // litertlm Engine.
-        serviceScope.launch {
-            for (job in embeddingQueue) {
-                try {
-                    processEmbeddingJob(job)
-                } catch (e: CancellationException) {
-                    throw e
-                } catch (e: Exception) {
-                    Log.e("InferenceService", "Error processing embedding job", e)
-                    try {
-                        job.receiver.send(-1, Bundle().apply { putString("error", e.localizedMessage ?: "Embedding failed") })
-                    } catch (_: Exception) {}
-                }
-            }
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -166,7 +131,6 @@ class InferenceService : Service() {
         val userText = intent.getStringExtra("user_text") ?: ""
         val audioPath = intent.getStringExtra("audio_path")
         val schema = intent.getStringExtra("schema")
-        val embedMode = intent.getStringExtra("embed_mode")
         val receiver = IntentCompat.getParcelableExtra(intent, "RECEIVER", ResultReceiver::class.java)
 
         val imageUris = IntentCompat.getParcelableArrayListExtra(intent, "image_uris", Uri::class.java)
@@ -179,13 +143,7 @@ class InferenceService : Service() {
 
             val imagePaths = staticImagePaths + imagePathsFromUris
 
-            if (embedMode != null && receiver != null) {
-                // Embedding request from another app (photos): text/image/info.
-                Log.i("InferenceService", "Queueing Embedding request mode=$embedMode")
-                embeddingQueue.trySend(
-                    InferenceJob.Embedding(embedMode, userText, imagePaths.firstOrNull(), receiver)
-                )
-            } else if (receiver != null && schema != null) {
+            if (receiver != null && schema != null) {
                 Log.i("InferenceService", "Queueing Intent Inference request")
                 intentQueue.trySend(InferenceJob.Intent(userText, imagePaths, schema, receiver))
             } else if (conversationId != -1L) {
@@ -262,88 +220,6 @@ class InferenceService : Service() {
         } else {
             executeIntentInference(job)
         }
-    }
-
-    // ---------- SigLIP2 embedding provider (served to the photos app) ----------
-
-    private suspend fun processEmbeddingJob(job: InferenceJob.Embedding) {
-        val context = applicationContext
-
-        // Models are downloaded on demand; until all three files are present,
-        // report "downloading" (code 2) with aggregate progress and retry later.
-        if (!SiglipEmbedder.filesPresent(context)) {
-            startModelDownloadIfNeeded()
-            job.receiver.send(2, Bundle().apply {
-                putString("status", "downloading")
-                putDouble("progress", currentDownloadProgress())
-            })
-            return
-        }
-
-        if (!SiglipEmbedder.isAvailable(context)) {
-            job.receiver.send(-1, Bundle().apply { putString("error", "Embedder failed to load") })
-            return
-        }
-
-        val dim = SiglipEmbedder.dim(context)
-        when (job.mode) {
-            "info" -> job.receiver.send(0, Bundle().apply {
-                putString("model_id", SiglipEmbedder.MODEL_ID)
-                putInt("dim", dim)
-                putString("status", "ready")
-            })
-            "text" -> {
-                val t0 = System.currentTimeMillis()
-                val emb = SiglipEmbedder.textEmbedding(context, job.userText)
-                Log.i("InferenceService", "Text embed (${emb?.size ?: 0}d) in ${System.currentTimeMillis() - t0}ms ok=${emb != null}")
-                sendEmbedding(job.receiver, emb)
-            }
-            "image" -> {
-                val path = job.imagePath
-                val t0 = System.currentTimeMillis()
-                val emb = if (path != null) SiglipEmbedder.imageEmbedding(context, File(path)) else null
-                Log.i("InferenceService", "Image embed (${emb?.size ?: 0}d) in ${System.currentTimeMillis() - t0}ms ok=${emb != null} path=$path")
-                sendEmbedding(job.receiver, emb)
-                // The temp copy from copyUriToFile is no longer needed.
-                if (path != null) runCatching { File(path).delete() }
-            }
-            else -> job.receiver.send(-1, Bundle().apply { putString("error", "Unknown embed_mode ${job.mode}") })
-        }
-    }
-
-    private fun sendEmbedding(receiver: ResultReceiver, emb: FloatArray?) {
-        if (emb == null) {
-            // Provider is up but this specific item couldn't be embedded; mark it
-            // per_item so the client skips just this one rather than pausing.
-            receiver.send(-1, Bundle().apply {
-                putString("error", "Embedding failed")
-                putBoolean("per_item", true)
-            })
-        } else {
-            receiver.send(0, Bundle().apply {
-                putByteArray("embedding", SiglipEmbedder.floatsToBytes(emb))
-                putString("model_id", SiglipEmbedder.MODEL_ID)
-                putInt("dim", emb.size)
-            })
-        }
-    }
-
-    private fun startModelDownloadIfNeeded() {
-        if (downloadJob?.isActive == true) return
-        downloadJob = serviceScope.launch {
-            try {
-                val ds = DataStoreUtils.getInstance(applicationContext)
-                downloadModels(applicationContext, ds, ModelUrls.SIGLIP)
-            } catch (e: Exception) {
-                Log.e("InferenceService", "SigLIP2 model download failed", e)
-            }
-        }
-    }
-
-    private fun currentDownloadProgress(): Double {
-        val ds = DataStoreUtils.getInstance(applicationContext)
-        val files = listOf(SiglipEmbedder.VISION_FILE, SiglipEmbedder.TEXT_FILE, SiglipEmbedder.TOKENIZER_FILE)
-        return files.sumOf { ds.getDouble("progress_$it") ?: 0.0 } / files.size
     }
 
     private suspend fun resetConversation(conversationId: Long, userText: String) {

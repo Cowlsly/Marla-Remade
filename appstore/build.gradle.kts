@@ -34,6 +34,18 @@ android {
     }
 }
 
+androidComponents {
+    onVariants { variant ->
+        variant.sources.jniLibs?.addStaticSourceDirectory(
+            layout.buildDirectory.dir("rustJniLibs").get().asFile.absolutePath
+        )
+    }
+}
+
+// ed25519 verification of Accrescent's signify-signed repodata (Rust).
+// See appstore/src/main/rust/.
+rustNativeLib("appstore_signify", "appstore-signify")
+
 dependencies {
     implementRoom(libs)
     implementation(project(":library:room"))
@@ -62,8 +74,8 @@ dependencies {
     implementation(libs.protobuf.kotlin.lite)
     // grpc-java generated stubs reference @javax.annotation.Generated, absent on Android.
     compileOnly(libs.javax.annotation.api)
-    // ed25519 verification of Accrescent's signify-signed repodata allowlist.
-    implementation(libs.bouncycastle.bcprov)
+    // ed25519 verification of Accrescent's signify-signed repodata allowlist runs in
+    // libappstore_signify.so (see rustNativeLib above), not Bouncy Castle.
 }
 
 protobuf {

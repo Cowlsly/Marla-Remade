@@ -95,6 +95,12 @@ gradlew text eol=lf
 *.jks      -text
 *.keystore -text
 
+# ---- Signed test vectors ----
+# The Accrescent repodata vectors are real signify-signed files and the ed25519
+# signature covers the raw bytes, so a single LF<->CRLF conversion would make the
+# interop test fail for a reason that looks like a crypto bug.
+appstore/src/main/rust/testvectors/** -text
+
 # ---- Vendored CAD supplied by the part vendor ----
 # LCSC's STEP/WRL models are ASCII but machine-generated and never hand-edited, so they cannot
 # cause the review churn this policy exists to prevent. Excluded so they stay byte-identical to

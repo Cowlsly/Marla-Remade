@@ -11,7 +11,6 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.vayunmathur.library.util.DataStoreUtils
 import com.vayunmathur.openassistant.data.Conversation
 import com.vayunmathur.openassistant.data.Memory
 import com.vayunmathur.openassistant.data.Message
@@ -78,7 +77,6 @@ class AssistantViewModel(
 
     init {
         cleanupLegacyModelFile()
-        cleanupStaleSiglipModels()
         // Pre-warm the inference engine so the first user prompt is responsive.
         val context = getApplication<Application>()
         context.startService(Intent(context, InferenceService::class.java))
@@ -190,7 +188,15 @@ class AssistantViewModel(
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val externalDir = context.getExternalFilesDir(null) ?: return@launch
-                val legacyModelFiles = listOf("gemma4.litertlm", "gemma4-4b.litertlm")
+                // The siglip2_* files backed the SigLIP2 embedding provider, which is
+                // gone along with ONNX Runtime; they are ~450 MB on installs that used it.
+                val legacyModelFiles = listOf(
+                    "gemma4.litertlm",
+                    "gemma4-4b.litertlm",
+                    "siglip2_vision_model_fp16.onnx",
+                    "siglip2_text_model_int8.onnx",
+                    "siglip2_tokenizer.model",
+                )
                 for (name in legacyModelFiles) {
                     if (File(externalDir, name).delete()) {
                         Log.i(TAG, "Deleted legacy model file $name")
@@ -205,39 +211,6 @@ class AssistantViewModel(
     override fun onCleared() {
         audioRecorder?.stop()
         audioRecorder = null
-    }
-
-    /**
-     * Version the on-demand SigLIP2 model files: if [SiglipEmbedder.MODEL_VERSION]
-     * changed since we last downloaded them, delete the stale files and clear the
-     * downloadservice `dlid_`/`progress_` keys so they re-download on the next
-     * embedding request. Unlike the gemma path this never touches
-     * `dbSetupComplete` — SigLIP2 is optional and fetched on demand.
-     */
-    private fun cleanupStaleSiglipModels() {
-        val context = getApplication<Application>()
-        viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val ds = DataStoreUtils.getInstance(context)
-                val stored = ds.getLong("siglip_model_version") ?: 0L
-                if (stored == SiglipEmbedder.MODEL_VERSION.toLong()) return@launch
-
-                val externalDir = context.getExternalFilesDir(null)
-                val files = listOf(
-                    SiglipEmbedder.VISION_FILE,
-                    SiglipEmbedder.TEXT_FILE,
-                    SiglipEmbedder.TOKENIZER_FILE,
-                )
-                for (name in files) {
-                    externalDir?.let { File(it, name).takeIf { f -> f.exists() }?.delete() }
-                    ds.setLong("dlid_$name", 0L)
-                    ds.setDouble("progress_$name", 0.0)
-                }
-                ds.setLong("siglip_model_version", SiglipEmbedder.MODEL_VERSION.toLong())
-            } catch (e: Exception) {
-                Log.e(TAG, "Error cleaning up stale SigLIP2 model files", e)
-            }
-        }
     }
 
     companion object {

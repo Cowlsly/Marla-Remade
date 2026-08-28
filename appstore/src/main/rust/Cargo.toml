@@ -1,0 +1,16 @@
+[package]
+name = "appstore_signify"
+version = "0.1.0"
+edition = "2021"
+description = "Raw ed25519 verification of Accrescent's signify-signed repodata for :appstore, exposed to Kotlin via JNI. Replaces Bouncy Castle, whose only remaining use in the repo was this one signature check."
+license = "GPL-2.0-only"
+[lib]
+name = "appstore_signify"
+crate-type = ["cdylib", "rlib"]
+[dependencies]
+ed25519-dalek.workspace = true
+jni.workspace = true
+[dev-dependencies]
+# Test-only: the checked-in vectors are the real signify files, so the tests do
+# the same base64 + offset extraction the Kotlin caller does.
+base64.workspace = true
