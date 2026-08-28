@@ -84,7 +84,7 @@ fn tensor(weights: &Weights, index: usize, dims: &[u32]) -> Result<Vec<f32>, Str
 /// Rust has no `erf`, and the export's GELU is the exact one rather than the tanh
 /// approximation, so approximating the *activation* would be a different function. This
 /// approximates `erf` itself instead, well below fp16's resolution.
-fn erf(x: f32) -> f32 {
+pub(crate) fn erf(x: f32) -> f32 {
     const A: [f32; 5] = [0.254_829_6, -0.284_496_74, 1.421_413_7, -1.453_152, 1.061_405_4];
     const P: f32 = 0.327_591_1;
     let sign = if x < 0.0 { -1.0 } else { 1.0 };
@@ -357,11 +357,13 @@ mod tests {
     }
 
     #[test]
-    fn gelu_is_the_exact_one_and_not_the_tanh_approximation() {
-        // They differ by about 0.003 near x = 2, which is above fp16's resolution there.
+    fn gelu_matches_the_exact_erf_form() {
+        // The tanh approximation differs by at most 4.7e-4, which is below fp16's 2.0e-3 step
+        // there — so this is about matching the export rather than about the approximation being
+        // unusable. See `nets::Act::Gelu`, which carries the same note for the shader.
         assert!((gelu(0.0) - 0.0).abs() < 1e-6);
-        assert!((gelu(1.0) - 0.8413447) < 1e-5);
-        assert!((gelu(-1.0) + 0.15865526) < 1e-5);
+        assert!((gelu(1.0) - 0.8413447).abs() < 1e-5);
+        assert!((gelu(-1.0) + 0.15865526).abs() < 1e-5);
         // Large inputs pass through, large negatives vanish.
         assert!((gelu(6.0) - 6.0).abs() < 1e-4);
         assert!(gelu(-6.0).abs() < 1e-6);

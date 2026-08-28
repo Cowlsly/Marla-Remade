@@ -1,0 +1,22 @@
+#version 450
+//! Elementwise product of two equally-shaped tensors.
+//!
+//! Distinct from `mul_channel`, which broadcasts a `[C, 1, 1]` tensor over height and width for
+//! a squeeze-excite block. This one needs both operands to be the same shape, which is what
+//! Supertonic's four nets want: 241 `Mul` nodes in its flow-matching sampler alone, gating and
+//! scaling whole activations rather than whole channels.
+//!
+//! Not fused into the producing convolution, for the same reason `add.comp` is not: both
+//! operands are read elsewhere too, so a fused form would need a second input binding and a
+//! flag on the convolution shader to save one pass over data already in cache.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    float product = float(arena[p.in0 + index]) * float(arena[p.in1 + index]);
+    arena[p.out_at + index] = float16_t(product);
+}

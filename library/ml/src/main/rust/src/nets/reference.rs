@@ -61,6 +61,8 @@ mod act {
     pub const SWISH: u32 = 6;
     /// `tanh(x)`.
     pub const TANH: u32 = 7;
+    /// The exact GELU. See `super::super::Act::Gelu`.
+    pub const GELU: u32 = 8;
 }
 
 /// The fused activation, mirroring `activate` in `common.glsl`.
@@ -82,6 +84,9 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
         act::CLIP01 => x.clamp(0.0, 1.0),
         act::SWISH => x / (1.0 + (-x).exp()),
         act::TANH => x.tanh(),
+        // The exact GELU. crate::post::duration::erf is the same A&S 7.1.26 series the
+        // shader uses, so the two agree well inside fp16.
+        act::GELU => 0.5 * x * (1.0 + crate::post::duration::erf(x * std::f32::consts::FRAC_1_SQRT_2)),
         _ => x,
     }
 }
@@ -181,6 +186,7 @@ impl Reference {
                     Kind::GlobalAvgPool => self.global_avg_pool(push),
                     Kind::Add => self.add(push),
                     Kind::MulBroadcast => self.mul_broadcast(push),
+                    Kind::Mul => self.mul(push),
                     Kind::Affine => self.affine(push),
                     Kind::LayerNorm => self.layer_norm(push),
                     Kind::AttnScores => self.attn_scores(push),
@@ -743,6 +749,15 @@ impl Reference {
                 }
                 self.store(p.out, nchw(p, channel, 0, query), total)?;
             }
+        }
+        Ok(())
+    }
+
+    /// `out = a * b`, elementwise over two equal shapes.
+    fn mul(&mut self, p: &Push) -> Result<(), String> {
+        for i in 0..p.count {
+            let product = self.load(p.in0, i)? * self.load(p.in1, i)?;
+            self.store(p.out, i, product)?;
         }
         Ok(())
     }
@@ -1830,6 +1845,62 @@ mod tests {
         let out = b.slice_channels(x, 3, 2);
         let error = b.finish(&[out]).expect_err("past the end");
         assert!(error.contains("channels 3..5"), "{error}");
+    }
+
+    #[test]
+    fn an_elementwise_product_multiplies_position_by_position() {
+        // Distinct from `mul_channel`, which broadcasts `[C, 1, 1]`. Two channels of three
+        // positions, with values chosen so a broadcast would give a different answer: if this
+        // took only channel 0 of `b` it would produce 2, 6, 12 in the second row.
+        let got = two(
+            (Shape::new(2, 1, 3), Shape::new(2, 1, 3)),
+            (&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2.0, 3.0, 4.0, 5.0, 6.0, 7.0]),
+            |b, a, c| b.mul(a, c),
+        );
+        close(&got, &[2.0, 6.0, 12.0, 20.0, 30.0, 42.0]);
+    }
+
+    #[test]
+    fn an_elementwise_product_of_mismatched_shapes_is_refused() {
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let a = b.input(Shape::new(2, 1, 3));
+        let c = b.tensor(Shape::new(2, 1, 4));
+        let out = b.mul(a, c);
+        let error = b.finish(&[out]).expect_err("mismatched shapes");
+        assert!(error.contains("mul of"), "{error}");
+    }
+
+    #[test]
+    fn gelu_matches_the_exact_erf_form() {
+        // Pinned against the exact `0.5 x (1 + erf(x / sqrt(2)))`, which is what the export
+        // computes. The tanh approximation would also pass at this tolerance - measured, the two
+        // forms differ by at most 4.7e-4 against fp16's 2.0e-3 step - so this test does not
+        // distinguish them, and the doc on `Act::Gelu` says why `erf` is used anyway. What it
+        // does pin is that the activation is a GELU at all, symmetric about the right place, and
+        // saturating to the identity and to zero at the tails.
+        let xs = [-6.0f32, -2.0, -1.0, 0.0, 0.5, 1.0, 2.0, 6.0];
+        // A 1x1 convolution with weight 1 and bias 0 is the identity, so this measures the
+        // activation alone. It also routes through `ConvPoint`, so the tiled path carries it.
+        let got = one(
+            Shape::new(1, 1, xs.len() as u32),
+            &xs,
+            &[(vec![1, 1, 1, 1], vec![1.0]), (vec![1], vec![0.0])],
+            |b, x| b.conv(x, 0, 1, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, Act::Gelu),
+        );
+        let want = [
+            -0.0000000f32,
+            -0.04550027,
+            -0.15865526,
+            0.0,
+            0.34573123,
+            0.8413447,
+            1.9544997,
+            6.0,
+        ];
+        for (i, (&g, &w)) in got.iter().zip(&want).enumerate() {
+            assert!((g - w).abs() < 2e-3, "at x={}: {g} not {w}", xs[i]);
+        }
     }
 
     #[test]

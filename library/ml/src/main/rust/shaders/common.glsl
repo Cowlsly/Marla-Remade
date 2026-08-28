@@ -92,6 +92,7 @@ layout(push_constant) uniform Push {
 #define ACT_CLIP01 5u
 #define ACT_SWISH 6u
 #define ACT_TANH 7u
+#define ACT_GELU 8u
 
 // This invocation's output element, across a 2D grid of workgroups.
 //
@@ -153,6 +154,26 @@ float activate(float x, uint kind, uint channel) {
         // `x * sigmoid(x)`. Not HardSwish's piecewise approximation — the recogniser uses
         // both, and substituting one for the other is a plausible-looking accuracy loss.
         return x / (1.0 + exp(-x));
+    }
+    if (kind == ACT_GELU) {
+        // The exact GELU, `0.5 x (1 + erf(x / sqrt(2)))`, which is what Supertonic's four nets
+        // spell as an `Erf`.
+        //
+        // The tanh approximation would also have done: the two forms differ by at most 4.7e-4,
+        // and fp16's step there is 2.0e-3. `erf` is used because it matches the export and
+        // because `post::duration::erf` is the same Abramowitz and Stegun 7.1.26 series with the
+        // same coefficients, so the host reference and this are one function rather than two
+        // that happen to agree.
+        float sign = x < 0.0 ? -1.0 : 1.0;
+        float a = abs(x) * 0.70710678;
+        float t = 1.0 / (1.0 + 0.3275911 * a);
+        float poly = t * (0.254829592
+            + t * (-0.284496736
+            + t * (1.421413741
+            + t * (-1.453152027
+            + t * 1.061405429))));
+        float erf = sign * (1.0 - poly * exp(-a * a));
+        return 0.5 * x * (1.0 + erf);
     }
     if (kind == ACT_TANH) {
         // The last thing Piper's vocoder does, which is what bounds the waveform to

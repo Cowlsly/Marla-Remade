@@ -105,6 +105,18 @@ pub enum Act {
     /// Seven uses in PP-OCRv5 recognition, where the export spells it out as
     /// `Mul(x, Sigmoid(x))`; the fold recognises that the way it recognises HardSwish.
     Swish,
+    /// The **exact** GELU, `0.5 x (1 + erf(x / sqrt(2)))`.
+    ///
+    /// 44 uses across Supertonic's four networks, where the export spells it as an `Erf`.
+    ///
+    /// The tanh approximation would also have done: measured, the two forms differ by at most
+    /// 4.7e-4 (at `x = 2.699`), and fp16's step there is 2.0e-3, so the difference is four
+    /// times finer than the arena can represent. `erf` is used anyway for two reasons that are
+    /// about agreement rather than accuracy — it is what the export computes, and
+    /// [`crate::post::duration::erf`] already implements the same Abramowitz and Stegun 7.1.26
+    /// series for the CPU duration predictor, so the host reference and the shader are the same
+    /// function by construction rather than by coincidence. The cost is comparable either way.
+    Gelu,
     /// `tanh(x)`.
     ///
     /// One use: the last thing Piper's HiFi-GAN vocoder does, which is what bounds its
@@ -124,6 +136,7 @@ impl Act {
             Act::Clip01 => 5,
             Act::Swish => 6,
             Act::Tanh => 7,
+            Act::Gelu => 8,
         }
     }
 }
@@ -160,6 +173,8 @@ pub enum Kind {
     Add,
     /// `a * b` where `b` is `C x 1 x 1`. The excite in a squeeze-excite block.
     MulBroadcast,
+    /// Elementwise `a * b` over two equal shapes.
+    Mul,
     /// `x * scale + shift`, both scalars. PP-OCRv5's "learnable affine block".
     ///
     /// One pass over the data for two multiplies. It exists because these sit *after* an
@@ -988,6 +1003,21 @@ impl<'a> Builder<'a> {
         }
         let out = self.tensor(sa);
         self.nodes.push(Node::Binary { kind: Kind::Add, a, b, out });
+        out
+    }
+
+    /// Elementwise `a * b`. Shapes must match; see [`Builder::mul_channel`] for the
+    /// broadcasting form.
+    ///
+    /// 241 uses in Supertonic's flow-matching sampler alone, gating and scaling whole
+    /// activations rather than whole channels.
+    pub fn mul(&mut self, a: Id, b: Id) -> Id {
+        let (sa, sb) = (self.shape_of(a), self.shape_of(b));
+        if sa != sb {
+            self.fail(format!("mul of {sa:?} and {sb:?}"));
+        }
+        let out = self.tensor(sa);
+        self.nodes.push(Node::Binary { kind: Kind::Mul, a, b, out });
         out
     }
 
@@ -2060,7 +2090,9 @@ pub(crate) mod tests {
                     // what they write. Every output here is dense.
                     let written = push.out_c * push.out_h * push.out_w;
                     let reads = match kind {
-                        Kind::Add => vec![(push.in0, written), (push.in1, written)],
+                        Kind::Add | Kind::Mul => {
+                            vec![(push.in0, written), (push.in1, written)]
+                        }
                         // The gate is one value per channel, broadcast over H and W.
                         Kind::MulBroadcast => {
                             vec![(push.in0, written), (push.in1, push.in_c)]
