@@ -472,6 +472,33 @@ impl Net {
         self.split_outputs()
     }
 
+    /// Run the plan over `values` directly, with no preprocessing, and return every output.
+    ///
+    /// The bitmap paths above exist because most of these networks take an image. Piper's do
+    /// not: the text encoder takes phoneme ids, the flow takes a sampled prior and the
+    /// vocoder takes a latent, all produced by the previous stage rather than by a camera. So
+    /// this is the path for a net whose input is a tensor someone else computed.
+    ///
+    /// `values` must be exactly the input shape's element count, in `[c, h, w]` order — the
+    /// same order [`crate::nets::Plan`] uses everywhere. It is rounded to fp16 on the way in,
+    /// which is the arena's precision, so a caller cannot hand over more accuracy than the
+    /// device will keep.
+    pub fn infer_raw(&mut self, values: &[f32]) -> Result<Vec<Vec<f32>>, String> {
+        let input = self.plan.input()?;
+        let wanted = input.shape.len() as usize;
+        if values.len() != wanted {
+            return Err(format!(
+                "{} values for an input of {:?}, which holds {wanted}",
+                values.len(),
+                input.shape
+            ));
+        }
+        self.input_scratch.clear();
+        self.input_scratch.extend(values.iter().map(|&v| preprocess::f32_to_f16(v)));
+        self.submit()?;
+        self.split_outputs()
+    }
+
     /// Split the concatenated readback into one vector per output binding.
     ///
     /// The recorded command buffer packs the outputs end to end from offset 0 in the
