@@ -299,10 +299,15 @@ fn an_int8_convolution_agrees_with_the_reference() {
     // scales, because a shader that read `scale[0]` for every channel — which is what this op did
     // before the export turned out to be quantised per column — still returns the right shape and
     // three wrong channels.
+    //
+    // Deliberately a `1 x 3` rather than a `1 x 1`: an ungrouped `1 x 1` now lowers to
+    // `Kind::ConvPointInt8` instead, so a pointwise fixture here would leave `conv_int8.comp`
+    // untested on the device. The spatial kernel also puts its zero padding under test, which is
+    // the one thing the tiled path has none of.
     let out_channels = 4u32;
     let in_channels = 3u32;
     let width = 5u32;
-    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+    let kernel: Vec<i8> = (0..(out_channels * in_channels * 3) as i32)
         .map(|i| ((i * 7) % 61 - 30) as i8)
         .collect();
     let scales: Vec<f32> = vec![0.25, 0.5, 0.0625, 1.0];
@@ -310,7 +315,7 @@ fn an_int8_convolution_agrees_with_the_reference() {
     let blob = write_mixed(
         graph::SUPERTONIC_VE,
         &[
-            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::I8(vec![out_channels, in_channels, 1, 3], kernel),
             Fixture::F16(vec![out_channels], scales),
             Fixture::F16(vec![out_channels], biases),
         ],
@@ -324,15 +329,170 @@ fn an_int8_convolution_agrees_with_the_reference() {
         first,
         0,
         out_channels,
+        (1, 3),
         (1, 1),
         (1, 1),
-        (1, 1),
-        (0, 0, 0, 0),
+        (0, 1, 0, 1),
         1,
         Act::Relu,
     );
     let plan = builder.finish(&[last]).expect("the int8 fixture plan builds");
     compare("an int8 convolution", plan, weights.data().to_vec(), &[&input]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_tiled_int8_convolution_agrees_with_the_reference() {
+    // `conv_point_int8.comp`, which every ungrouped 1x1 int8 convolution lowers to and which
+    // Supertonic's sampler is 92% made of by parameter count.
+    //
+    // The shape is chosen so nothing about the tiling is exercised only at its happy path: 20
+    // output channels and 21 positions are each more than one 16-wide tile and neither divides it,
+    // so the four tiles include partial ones in both axes, and 24 input channels make the
+    // accumulation loop take two staging steps of which the second is half out of range. A shader
+    // that dropped the zero-fill on an out-of-range staging slot, or that mismatched its two
+    // barriers, is wrong only on a fixture with all three of those properties.
+    let out_channels = 20u32;
+    let in_channels = 24u32;
+    let width = 21u32;
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 37) % 251 - 125) as i8)
+        .collect();
+    // Distinct per channel, as in the untiled fixture, and every one an exact multiple of a power
+    // of two so the interpreter and the device read one number rather than two roundings of one.
+    let scales: Vec<f32> = (0..out_channels).map(|c| 0.007_812_5 * (1.0 + c as f32)).collect();
+    let biases: Vec<f32> = spread(out_channels as usize, 1.9);
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+    let input = spread((in_channels * width) as usize, 0.7);
+
+    let mut builder = Builder::new(&weights);
+    let first = builder.input(Shape::new(in_channels, 1, width));
+    // Gelu because that is what follows these convolutions in the sampler, and because it is the
+    // activation whose input range the dequantisation scale decides.
+    let last = builder.conv_int8(
+        first,
+        0,
+        out_channels,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 0, 0, 0),
+        1,
+        Act::Gelu,
+    );
+    let plan = builder.finish(&[last]).expect("the tiled int8 fixture plan builds");
+    compare("a tiled int8 convolution", plan, weights.data().to_vec(), &[&input]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn report_the_tiled_int8_convolution_against_the_tiled_fp16_one() {
+    // The measurement Phase 2 of the int8 plan is gated on, printed by
+    // `cargo test -- --ignored --nocapture`. `conv_point_int8.comp` exists so that quantising
+    // Supertonic's sampler does not move 92% of its parameters onto the untiled `conv_int8.comp`,
+    // which was measured at 15.2 GFLOP/s against a device peak of order 1000. That is only worth
+    // having if the int8 tiled path is close to the fp16 tiled one, because the alternative to
+    // quantising is bundling 198 MB of fp16 rather than 105 MB of int8 — a size decision, not a
+    // speed one, so a large slowdown here means take the size.
+    //
+    // Eight chained `512 -> 512` projections over 64 positions: the sampler's shape, deep enough
+    // that the shader rather than the submit-and-read-back dominates.
+    const CHANNELS: u32 = 512;
+    const POSITIONS: u32 = 64;
+    const LAYERS: usize = 8;
+    const RUNS: usize = 20;
+
+    // The two nets compute the same numbers, not merely the same shapes: the int8 weights are
+    // exact small integers and the scale is an exact power of two, so dequantising is lossless
+    // here. That is what lets the timings be compared against each other *and* the outputs
+    // compared for equality, which is the only thing standing between a fast shader and a shader
+    // that quietly wrote nothing.
+    //
+    // The divisor is what keeps eight chained layers inside fp16. A `512`-wide dot product of
+    // weights spread over -3..3 has a gain of about `2 * sqrt(512) / DIVISOR`, so at 16 the chain
+    // grows by ~2.8 a layer and reaches infinity by the eighth; at 64 it shrinks, which fp16
+    // tolerates far better than it tolerates overflow.
+    const DIVISOR: f32 = 64.0;
+    let taps = (CHANNELS * CHANNELS) as usize;
+    let int8_kernel: Vec<i8> = (0..taps).map(|i| (i % 7) as i8 - 3).collect();
+    let fp16_kernel: Vec<f32> = int8_kernel.iter().map(|&w| f32::from(w) / DIVISOR).collect();
+    let scales = vec![1.0 / DIVISOR; CHANNELS as usize];
+    let biases = vec![0.0f32; CHANNELS as usize];
+
+    let mut fp16_tensors = Vec::new();
+    let mut int8_tensors = Vec::new();
+    for _ in 0..LAYERS {
+        let dims = vec![CHANNELS, CHANNELS, 1, 1];
+        fp16_tensors.push(Fixture::F16(dims.clone(), fp16_kernel.clone()));
+        fp16_tensors.push(Fixture::F16(vec![CHANNELS], biases.clone()));
+        int8_tensors.push(Fixture::I8(dims, int8_kernel.clone()));
+        int8_tensors.push(Fixture::F16(vec![CHANNELS], scales.clone()));
+        int8_tensors.push(Fixture::F16(vec![CHANNELS], biases.clone()));
+    }
+
+    let input = spread((CHANNELS * POSITIONS) as usize, 0.5);
+    let mut timings = Vec::new();
+    let mut outputs = Vec::new();
+    for (what, tensors, per_layer) in
+        [("fp16", fp16_tensors, 2usize), ("int8", int8_tensors, 3usize)]
+    {
+        let blob = write_mixed(graph::SUPERTONIC_VE, &tensors);
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the blob parses");
+        let mut builder = Builder::new(&weights);
+        let mut x = builder.input(Shape::new(CHANNELS, 1, POSITIONS));
+        for layer in 0..LAYERS {
+            let at = layer * per_layer;
+            x = if per_layer == 2 {
+                builder.conv(x, at, CHANNELS, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, Act::Gelu)
+            } else {
+                builder.conv_int8(
+                    x,
+                    at,
+                    CHANNELS,
+                    (1, 1),
+                    (1, 1),
+                    (1, 1),
+                    (0, 0, 0, 0),
+                    1,
+                    Act::Gelu,
+                )
+            };
+        }
+        let plan = builder.finish(&[x]).expect("the benchmark plan builds");
+        let mut net = Net::new(device(), plan, &weights, RESCALE_ONLY)
+            .expect("the plan records into a command buffer");
+        // One discarded run: the first submit pays for pipeline warm-up and for faulting the
+        // weights into device memory, neither of which a steady-state utterance pays per step.
+        let first = net.infer_raw(&input).expect("the benchmark submits and reads back");
+        let start = std::time::Instant::now();
+        for _ in 0..RUNS {
+            net.infer_raw(&input).expect("the benchmark submits and reads back");
+        }
+        let each = start.elapsed().as_secs_f64() / RUNS as f64;
+        // Two operations per multiply-accumulate, which is how the 15.2 GFLOP/s this shader
+        // exists to escape was counted.
+        let flops = 2.0 * f64::from(CHANNELS) * f64::from(CHANNELS) * f64::from(POSITIONS)
+            * LAYERS as f64;
+        println!("{what}: {:.3} ms per pass, {:.1} GFLOP/s", each * 1e3, flops / each / 1e9);
+        timings.push(each);
+        outputs.push(first);
+    }
+
+    match (timings.as_slice(), outputs.as_slice()) {
+        ([fp16, int8], [from_fp16, from_int8]) => {
+            println!("int8 / fp16 = {:.2}x", int8 / fp16);
+            matches("the two benchmark nets", from_fp16, from_int8);
+        }
+        _ => panic!("two nets were timed"),
+    }
 }
 
 #[test]

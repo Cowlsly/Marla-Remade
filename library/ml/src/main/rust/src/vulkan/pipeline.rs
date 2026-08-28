@@ -50,6 +50,8 @@ const GATED_TANH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gated_tanh.c
 const MUL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul.comp.spv"));
 const CONV_POINT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_point.comp.spv"));
 const CONV_INT8: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_int8.comp.spv"));
+const CONV_POINT_INT8: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/conv_point_int8.comp.spv"));
 const FLIP_CHANNELS: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 const CONSTANT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/constant.comp.spv"));
@@ -57,7 +59,7 @@ const ADD_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_bcast.com
 const ROTARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rotary.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 26] = [
+const SPIRV: [&[u8]; 27] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -80,6 +82,7 @@ const SPIRV: [&[u8]; 26] = [
     FLIP_CHANNELS,
     CONV_INT8,
     CONV_POINT,
+    CONV_POINT_INT8,
     MUL,
     CONSTANT,
     ADD_BCAST,
@@ -129,6 +132,7 @@ pub struct Pipelines {
     flip_channels: vk::Pipeline,
     conv_int8: vk::Pipeline,
     conv_point: vk::Pipeline,
+    conv_point_int8: vk::Pipeline,
     mul: vk::Pipeline,
     constant: vk::Pipeline,
     add_bcast: vk::Pipeline,
@@ -315,6 +319,7 @@ impl Pipelines {
             flip_channels,
             conv_int8,
             conv_point,
+            conv_point_int8,
             mul,
             constant,
             add_bcast,
@@ -357,6 +362,7 @@ impl Pipelines {
             flip_channels,
             conv_int8,
             conv_point,
+            conv_point_int8,
             mul,
             constant,
             add_bcast,
@@ -389,6 +395,7 @@ impl Pipelines {
             Kind::FlipChannels => self.flip_channels,
             Kind::ConvInt8 => self.conv_int8,
             Kind::ConvPoint => self.conv_point,
+            Kind::ConvPointInt8 => self.conv_point_int8,
             Kind::Mul => self.mul,
             Kind::Constant => self.constant,
             Kind::AddBroadcast => self.add_bcast,
@@ -423,6 +430,7 @@ impl Pipelines {
             self.flip_channels,
             self.conv_int8,
             self.conv_point,
+            self.conv_point_int8,
             self.mul,
             self.constant,
             self.add_bcast,

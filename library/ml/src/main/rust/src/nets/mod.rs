@@ -278,13 +278,23 @@ pub enum Kind {
     ///
     /// [`Push::count`] is the **tile** count for this kind, not the output element count.
     ConvPoint,
-    /// [`Kind::Conv`] with int8 weights and one per-tensor dequantisation scale.
+    /// [`Kind::Conv`] with int8 weights and one dequantisation scale per output channel.
     ///
     /// Only for a network where the weights dominate the download. The scale multiplies the
     /// finished accumulator rather than every tap, so the inner loop costs what fp16 costs;
     /// activations stay fp16, which is simpler than the export''s dynamic quantisation and
-    /// strictly more accurate. [`Push::weight`] is a **word** offset here, not an fp16 one.
+    /// strictly more accurate. [`Push::weight`] is a **word** offset here, not an fp16 one, and
+    /// [`Push::act_weight`] holds the scale tensor — which is why [`Act::PRelu`] is refused.
     ConvInt8,
+    /// [`Kind::ConvPoint`] with int8 weights: the tiled lowering of [`Kind::ConvInt8`].
+    ///
+    /// `Builder::emit` routes an int8 convolution here under exactly the conditions an fp16 one
+    /// reaches [`Kind::ConvPoint`] under — ungrouped, `1 x 1`, stride 1, unpadded. Without it,
+    /// quantising Supertonic's sampler would move 92% of its parameters onto the untiled path,
+    /// which is far slower than the size saving is worth; see `conv_point_int8.comp`.
+    ///
+    /// [`Push::count`] is the **tile** count here, as it is for [`Kind::ConvPoint`].
+    ConvPointInt8,
     /// `out[c][t] = table[id(t)][c]`, an embedding lookup.
     ///
     /// The only op here whose addresses depend on the data. Ids arrive as an ordinary fp16
@@ -710,6 +720,13 @@ pub struct Builder<'a> {
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
 /// boundary `.maml` aligns its tensors to.
 const ALIGN_ELEMS: u32 = 8;
+
+/// `TILE` in `shaders/conv_point.comp` and `shaders/conv_point_int8.comp`.
+///
+/// Both tiled shaders are dispatched one workgroup per tile, so [`Builder::emit`] has to know
+/// this to compute [`Push::count`]. Shared by the two so the fp16 and int8 lowerings cannot
+/// drift apart.
+const CONV_POINT_TILE: u32 = 16;
 
 /// `erf`, to about 1.5e-7 — Abramowitz and Stegun 7.1.26.
 ///
@@ -1628,8 +1645,23 @@ impl<'a> Builder<'a> {
                 act,
             } => {
                 let (si, so) = (shape(*input), shape(*out));
+                // The same test `Node::Conv` applies below, less the two cases that cannot arise
+                // here: there is no transposed int8 convolution, and `Builder::conv_int8` refuses
+                // `Act::PRelu` outright because the scale occupies the offset a slope would need.
+                //
+                // It matters more here than it does there: Supertonic's sampler is 92% pointwise
+                // by parameter count and runs `2 * STEPS` times an utterance, so leaving it on the
+                // untiled shader would cost far more time than int8 saves space.
+                let tiled = *group == 1
+                    && kernel == &(1, 1)
+                    && stride == &(1, 1)
+                    && pad == &(0, 0)
+                    && si.h == so.h
+                    && si.w == so.w;
+                let positions = so.h * so.w;
+                let tiles = so.c.div_ceil(CONV_POINT_TILE) * positions.div_ceil(CONV_POINT_TILE);
                 ops.push(Op::Dispatch {
-                    kind: Kind::ConvInt8,
+                    kind: if tiled { Kind::ConvPointInt8 } else { Kind::ConvInt8 },
                     push: Push {
                         in0: at(*input)?,
                         out: at(*out)?,
@@ -1646,6 +1678,10 @@ impl<'a> Builder<'a> {
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
+                        // `conv_point_int8.comp` reads none of these, unlike `Kind::ConvPoint`'s
+                        // push block, which leaves them at zero. They are filled in either way so
+                        // that `nets::reference` can serve both kinds from one `conv_int8`, whose
+                        // arithmetic is identical once the geometry above holds.
                         kh: kernel.0,
                         kw: kernel.1,
                         stride_h: stride.0,
@@ -1656,10 +1692,11 @@ impl<'a> Builder<'a> {
                         pad_l: pad.1,
                         group: *group,
                         act: act.code(),
-                        count: so.len(),
+                        // Tiles for the tiled kind, one workgroup each; output elements otherwise.
+                        count: if tiled { tiles } else { so.len() },
                         ..Push::default()
                     },
-                    invocations: so.len(),
+                    invocations: if tiled { tiles * 64 } else { so.len() },
                 });
             }
             Node::Conv {
@@ -1690,9 +1727,9 @@ impl<'a> Builder<'a> {
                     && si.w == so.w
                     && !matches!(act, Act::PRelu(_));
                 if tiled {
-                    const TILE: u32 = 16;
                     let positions = so.h * so.w;
-                    let tiles = so.c.div_ceil(TILE) * positions.div_ceil(TILE);
+                    let tiles =
+                        so.c.div_ceil(CONV_POINT_TILE) * positions.div_ceil(CONV_POINT_TILE);
                     ops.push(Op::Dispatch {
                         kind: Kind::ConvPoint,
                         push: Push {
@@ -2342,15 +2379,16 @@ pub(crate) mod tests {
         }
     }
 
-    /// A dispatch kind''s name, with `Conv`''s tiled lowering folded back into `Conv`.
+    /// A dispatch kind''s name, with `Conv`''s tiled lowerings folded back into the graph op.
     ///
     /// The op-inventory tests state what a network contains. Whether an ungrouped `1 x 1` is
     /// served by `conv.comp` or the tiled `conv_point.comp` is a lowering decision that those
     /// tests should not see, and folding it here keeps the assertions readable as counts of
-    /// convolutions rather than counts of shaders.
+    /// convolutions rather than counts of shaders. The int8 pair folds the same way.
     pub fn name_of(kind: super::Kind) -> String {
         match kind {
             super::Kind::ConvPoint => "Conv".to_string(),
+            super::Kind::ConvPointInt8 => "ConvInt8".to_string(),
             other => format!("{other:?}"),
         }
     }
@@ -2412,7 +2450,7 @@ pub(crate) mod tests {
                         // As `Conv`: the whole input plane, whatever the kernel touches.
                         Kind::ConvInt8 => vec![(push.in0, dense)],
                         // count is tiles here, so the read span is the input plane.
-                        Kind::ConvPoint => vec![(push.in0, dense)],
+                        Kind::ConvPoint | Kind::ConvPointInt8 => vec![(push.in0, dense)],
                         // Twice what it writes: the filter half and the gate half.
                         Kind::GatedTanh => vec![(push.in0, written * 2)],
                         _ => vec![(push.in0, dense)],

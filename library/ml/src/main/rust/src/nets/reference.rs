@@ -211,7 +211,10 @@ impl Reference {
                     Kind::Rotary => self.rotary(push),
                     Kind::GatedTanh => self.gated_tanh(push),
                     Kind::ConvPoint => self.conv_point(push),
-                    Kind::ConvInt8 => self.conv_int8(push),
+                    // The tiled int8 lowering computes exactly what the untiled one does, and
+                    // `Builder::emit` fills the geometry fields in for both, so there is one
+                    // implementation rather than two that have to be kept agreeing.
+                    Kind::ConvInt8 | Kind::ConvPointInt8 => self.conv_int8(push),
                     Kind::FlipChannels => self.flip_channels(push),
                 },
             };
