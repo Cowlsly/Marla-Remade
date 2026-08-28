@@ -67,7 +67,14 @@ use crate::stream::OPEN_PREFIX_BYTES;
 /// Leaf entries per leaf to start with, matching what the published PMTiles archive uses.
 pub const DEFAULT_LEAF_CAPACITY: u32 = 4096;
 
-/// DEFLATE level. Nine, as `gz.rs` uses, because a basemap is written once and read forever.
+/// DEFLATE level.
+///
+/// Nine, as `gz.rs` uses, because a basemap is written once and read forever.
+///
+/// Six was tried, on the theory that `encode`'s 43.9 s of a 135.8 s California build was mostly
+/// compression. It is not: level six measured 44.8 s — inside the noise — for 0.12% more bytes. The
+/// cost in that phase is stage C and body serialisation, not the deflate, so there is nothing here to
+/// trade and the better ratio is free. Worth recording so nobody re-runs the experiment.
 const LEVEL: u8 = 9;
 
 /// What a build declares about itself before the first tile.
