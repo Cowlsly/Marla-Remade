@@ -60,6 +60,10 @@ struct Relation {
     /// `(way id, role is inner)`, in the order the relation lists them, which is what
     /// [`rings::assemble`] stitches.
     members: Vec<(i64, bool)>,
+    /// A `type=multipolygon` relation is an area to be stitched into rings. A `type=boundary` one is
+    /// a **line**: its members are the border itself, and stitching them into a ring would produce a
+    /// shape that, if it were ever filled, would cover the whole country.
+    area: bool,
 }
 
 /// Read `input` and return every feature the schema classifies.
@@ -92,11 +96,13 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
                         }
                     }
                     Element::Relation(relation) => {
-                        // `type=multipolygon` is what makes a relation an area. A route or a
-                        // boundary relation carrying a water tag is not a lake.
-                        if relation.tags.get_str("type") != Some("multipolygon") {
-                            return Ok(());
-                        }
+                        // Two relation types are carried, and they mean different geometry.
+                        // Anything else — a route, a site, a public_transport — is not a shape.
+                        let area = match relation.tags.get_str("type") {
+                            Some("multipolygon") => true,
+                            Some("boundary") => false,
+                            _ => return Ok(()),
+                        };
                         if !select.matches(|k| relation.tags.get_str(k)) {
                             return Ok(());
                         }
@@ -107,7 +113,7 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
                                 .filter(|m| m.kind == MEMBER_WAY)
                                 .map(|m| (m.id, m.role == b"inner"))
                                 .collect();
-                            state.1.push(Relation { class, members });
+                            state.1.push(Relation { class, members, area });
                         }
                     }
                     Element::Node(_) => {}
@@ -203,12 +209,31 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
         }
     }
     for relation in &relations {
+        let refs_of = |id: &i64| ways.get(id).map(|w| &w.refs).or_else(|| members.get(id));
+        // A boundary relation's members are the border. Each is emitted as its own line rather than
+        // stitched: the renderer strokes them, and a gap between two member ways is invisible in a
+        // stroke while a failed stitch would drop the whole border.
+        if !relation.area {
+            let lines: Vec<Vec<(f64, f64)>> = relation
+                .members
+                .iter()
+                .filter_map(|(id, _)| refs_of(id))
+                .map(|refs| table.line(refs))
+                .filter(|line| line.len() >= 2)
+                .collect();
+            if lines.is_empty() {
+                stats.geometry_failed += 1;
+                continue;
+            }
+            out.push(Feature { class: relation.class, geometry: Geometry::Lines(lines) });
+            stats.features += 1;
+            continue;
+        }
         let member_ways: Vec<MemberWay> = relation
             .members
             .iter()
             .filter_map(|(id, inner)| {
-                let refs = ways.get(id).map(|w| &w.refs).or_else(|| members.get(id))?;
-                Some(MemberWay { refs: refs.clone(), outer: !inner })
+                Some(MemberWay { refs: refs_of(id)?.clone(), outer: !inner })
             })
             .collect();
         let polygons = rings::assemble(&member_ways, |id| locate(&table, id), &mut stats.rings);
@@ -216,10 +241,7 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
             stats.geometry_failed += 1;
             continue;
         }
-        out.push(Feature {
-            class: relation.class,
-            geometry: Geometry::Polygons(polygons),
-        });
+        out.push(Feature { class: relation.class, geometry: Geometry::Polygons(polygons) });
         stats.features += 1;
     }
     Ok((out, stats))

@@ -199,7 +199,14 @@ fn derive_build_id(
             }
         }
     }
-    eat(&[u8::from(layers.water), u8::from(layers.buildings), min_zoom, max_zoom]);
+    eat(&[
+        u8::from(layers.water),
+        u8::from(layers.buildings),
+        u8::from(layers.roads),
+        u8::from(layers.boundaries),
+        min_zoom,
+        max_zoom,
+    ]);
     eat(&simplification.to_le_bytes());
     eat(&features.to_le_bytes());
     // The schema table's own version, so a remapped kind invalidates every cache even when the
@@ -244,7 +251,8 @@ fn build_report(
 fn usage() {
     eprintln!(
         "usage: mamaps_build --input IN.osm.pbf --out OUT.mamaps\n\
-         \x20                   [--layers water,buildings] [--min-zoom N] [--max-zoom N]\n\
+         \x20                   [--layers water,buildings,roads,boundaries]\n\
+         \x20                   [--min-zoom N] [--max-zoom N]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]"
     );
 }
@@ -281,7 +289,7 @@ mod tests {
             derive_build_id(path, schema::Layers::all(), 0, 14, 1.0, 101),
             derive_build_id(
                 path,
-                schema::Layers { water: true, buildings: false },
+                schema::Layers { water: true, buildings: false, roads: false, boundaries: false },
                 0,
                 14,
                 1.0,

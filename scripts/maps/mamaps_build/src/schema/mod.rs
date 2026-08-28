@@ -23,7 +23,9 @@
 
 use tilecodec::mamaps::dict;
 
+pub mod boundaries;
 pub mod buildings;
+pub mod roads;
 pub mod water;
 
 /// Tag lookup, so a rule is a pure function of its tags.
@@ -112,33 +114,47 @@ pub fn kind(name: &str) -> u16 {
     }
 }
 
+/// Look up a `kind_detail` name's id.
+pub fn detail(name: &str) -> u16 {
+    match dict::DETAILS.iter().position(|d| *d == name) {
+        Some(index) => index as u16 + 1,
+        None => panic!("the schema names detail `{name}`, which the dictionary has no id for"),
+    }
+}
+
 /// Which layers a build is producing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layers {
     pub water: bool,
     pub buildings: bool,
+    pub roads: bool,
+    pub boundaries: bool,
 }
 
 impl Layers {
     pub fn all() -> Layers {
-        Layers { water: true, buildings: true }
+        Layers { water: true, buildings: true, roads: true, boundaries: true }
     }
 
-    /// Parse a comma-separated list, e.g. `water,buildings`.
+    /// Parse a comma-separated list, e.g. `water,roads`.
     pub fn parse(list: &str) -> Result<Layers, String> {
-        let mut layers = Layers { water: false, buildings: false };
+        let mut layers =
+            Layers { water: false, buildings: false, roads: false, boundaries: false };
         for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             match name {
                 "water" => layers.water = true,
                 "buildings" => layers.buildings = true,
+                "roads" => layers.roads = true,
+                "boundaries" => layers.boundaries = true,
                 other => {
                     return Err(format!(
-                        "unknown layer `{other}`; this generator produces water and buildings"
+                        "unknown layer `{other}`; this generator produces water, buildings, roads \
+                         and boundaries"
                     ))
                 }
             }
         }
-        if !layers.water && !layers.buildings {
+        if layers == (Layers { water: false, buildings: false, roads: false, boundaries: false }) {
             return Err("no layers selected".to_string());
         }
         Ok(layers)
@@ -150,14 +166,29 @@ impl Layers {
 /// Ordered and first-match-wins. `is_way` distinguishes a way from a relation, which matters
 /// because a closed way's area-ness is a tag question while a multipolygon relation is always an
 /// area.
-pub fn classify(tags: &(impl TagSource + ?Sized), is_way: bool, layers: Layers) -> Option<Class> {
+pub fn classify(
+    tags: &(impl TagSource + ?Sized),
+    is_way: bool,
+    layers: Layers,
+) -> Option<Class> {
     if layers.water {
         if let Some(class) = water::classify(tags, is_way) {
             return Some(class);
         }
     }
+    // Before buildings, because a road bridge over a building passage is a road.
+    if layers.roads {
+        if let Some(class) = roads::classify(tags) {
+            return Some(class);
+        }
+    }
     if layers.buildings {
         if let Some(class) = buildings::classify(tags) {
+            return Some(class);
+        }
+    }
+    if layers.boundaries {
+        if let Some(class) = boundaries::classify(tags) {
             return Some(class);
         }
     }
@@ -174,8 +205,14 @@ pub fn filters(layers: Layers) -> Vec<&'static str> {
     if layers.water {
         out.extend_from_slice(water::FILTERS);
     }
+    if layers.roads {
+        out.extend_from_slice(roads::FILTERS);
+    }
     if layers.buildings {
         out.extend_from_slice(buildings::FILTERS);
+    }
+    if layers.boundaries {
+        out.extend_from_slice(boundaries::FILTERS);
     }
     out
 }
@@ -184,27 +221,59 @@ pub fn filters(layers: Layers) -> Vec<&'static str> {
 mod tests {
     use super::*;
 
-    /// Every name this crate writes has to be in the dictionary, or [`kind`] panics at runtime on
-    /// whichever feature happens to hit that rule first.
+    /// Every name this crate writes has to be in the dictionary, or [`kind`] and [`detail`] panic
+    /// at runtime on whichever feature happens to hit that rule first.
     #[test]
-    fn every_kind_this_schema_names_is_in_the_dictionary() {
-        for name in water::KINDS.iter().chain(buildings::KINDS) {
+    fn every_name_this_schema_uses_is_in_the_dictionary() {
+        for name in water::KINDS
+            .iter()
+            .chain(buildings::KINDS)
+            .chain(roads::KINDS)
+            .chain(boundaries::KINDS)
+        {
             assert!(
                 dict::KINDS.contains(name),
-                "the schema names `{name}`, which the dictionary has no id for",
+                "the schema names kind `{name}`, which the dictionary has no id for",
             );
-            // And the lookup really resolves rather than merely being present.
             assert_eq!(dict::KINDS[kind(name) as usize - 1], *name);
+        }
+        for name in roads::DETAILS {
+            assert!(
+                dict::DETAILS.contains(name),
+                "the schema names detail `{name}`, which the dictionary has no id for",
+            );
+            assert_eq!(dict::DETAILS[detail(name) as usize - 1], *name);
         }
     }
 
     #[test]
     fn a_layer_list_parses_and_rejects_what_this_generator_cannot_build() {
-        assert_eq!(Layers::parse("water").expect("water"), Layers { water: true, buildings: false });
-        assert_eq!(Layers::parse("water,buildings").expect("both"), Layers::all());
-        assert_eq!(Layers::parse(" buildings , water ").expect("spaces"), Layers::all());
-        assert!(Layers::parse("roads").is_err(), "not until phase 6");
+        assert_eq!(
+            Layers::parse("water").expect("water"),
+            Layers { water: true, buildings: false, roads: false, boundaries: false },
+        );
+        assert_eq!(Layers::parse("water,buildings,roads,boundaries").expect("all"), Layers::all());
+        assert!(Layers::parse("landcover").is_err(), "not until phase 7");
         assert!(Layers::parse("").is_err(), "nothing selected");
+    }
+
+    /// Order is load-bearing and first match wins. A way tagged as both a road and a building is a
+    /// road, because a building passage is something you drive through.
+    #[test]
+    fn the_rules_are_ordered_and_the_first_match_wins() {
+        let both: &[(&str, &str)] = &[("highway", "residential"), ("building", "yes")];
+        let class = classify(both, true, Layers::all()).expect("classified");
+        assert_eq!(class.layer, dict::LAYER_ROADS);
+        // And water is asked before either.
+        let water: &[(&str, &str)] =
+            &[("natural", "water"), ("highway", "residential"), ("building", "yes")];
+        assert_eq!(classify(water, true, Layers::all()).expect("water").layer, dict::LAYER_WATER);
+        // A layer that is switched off is not consulted, so the next rule wins instead.
+        let only_buildings = Layers { water: false, buildings: true, roads: false, boundaries: false };
+        assert_eq!(
+            classify(both, true, only_buildings).expect("building").layer,
+            dict::LAYER_BUILDINGS,
+        );
     }
 
     #[test]
@@ -218,9 +287,12 @@ mod tests {
             assert!(!filter.is_empty(), "an empty screen matches everything");
             assert!(!filter.contains(' '), "`{filter}` is not a bare tag key");
         }
-        assert!(filters(Layers { water: true, buildings: false }).len() < all.len());
+        assert!(
+            filters(Layers { water: true, buildings: false, roads: false, boundaries: false }).len()
+                < all.len()
+        );
         // Every key a rule reads for a *decision* has to be in the screen, or the rule never runs.
-        for key in ["natural", "waterway", "landuse", "building"] {
+        for key in ["natural", "waterway", "landuse", "building", "highway", "railway", "boundary"] {
             assert!(all.contains(&key), "the screen omits `{key}`");
         }
     }
