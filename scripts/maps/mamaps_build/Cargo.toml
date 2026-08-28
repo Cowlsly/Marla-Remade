@@ -1,0 +1,40 @@
+# The `.mamaps` generator: one `.osm.pbf` in, one archive out.
+#
+# DETACHED from both workspaces (the empty `[workspace]` table below), like every
+# other host tool under `scripts/maps`: it is built for the host with the host
+# toolchain, while `library/map` is a cdylib cross-compiled for
+# aarch64-linux-android, and being a member of either workspace would drag that
+# workspace's toolchain, profiles and lockfile into the other's build.
+#
+# Three path dependencies, all already in the tree:
+#
+#   * `tilecodec` with `write`, for the container. The same code the renderer reads
+#     with, so the two cannot drift.
+#   * `tile_build`, for the geometry: projection, per-vertex significance,
+#     simplification, tile bisection and clipping. That is the part with years of
+#     correctness in it and none of it is re-derived here.
+#   * `osm_ingest`, for the PBF reader, the node coordinate table, ring assembly and
+#     the tag pre-screen.
+
+[package]
+name = "mamaps_build"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license = "GPL-2.0-only"
+description = "Build a .mamaps basemap archive from an OpenStreetMap PBF extract"
+
+[[bin]]
+name = "mamaps_build"
+path = "src/main.rs"
+
+[dependencies]
+tilecodec = { path = "../../../library/tilecodec/src/main/rust", features = ["write"] }
+tile_build = { path = "../tile_build" }
+osm_ingest = { path = "../osm_ingest" }
+
+[profile.release]
+opt-level = 3
+
+# Detach from both the repo-root Android workspace and the other host tools'.
+[workspace]
