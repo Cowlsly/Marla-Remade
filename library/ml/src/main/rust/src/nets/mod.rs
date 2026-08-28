@@ -306,6 +306,13 @@ pub enum Kind {
     /// Distinct from [`Act::PRelu`], which is the same function with a *learned* slope per
     /// channel read from the weights file.
     LeakyRelu,
+    /// `out[i] = weights[i]`, a learned tensor copied into the arena.
+    ///
+    /// The only op that produces a tensor from nothing but the weights file. It exists because
+    /// [`Kind::AttnScores`] contracts two *arena* tensors, and Supertonic's text encoder attends
+    /// against 50 style keys that are entirely constant — `tanh(W_key . style_key + b_key)`,
+    /// which the converter folds to one tensor. See `shaders/constant.comp`.
+    Constant,
 }
 
 /// The push-constant block every shader declares.
@@ -580,6 +587,10 @@ enum Node {
         input: Id,
         out: Id,
         alpha: f32,
+    },
+    Constant {
+        out: Id,
+        weight: u32,
     },
     Embed {
         ids: Id,
@@ -1139,12 +1150,16 @@ impl<'a> Builder<'a> {
     }
 
     /// The validation, output tensor and scale every score map shares, relative or not.
+    ///
+    /// `q` and `k` may be different lengths: the map is `[heads, queries, keys]`, which for
+    /// self-attention is the square `[heads, T, T]` and for a cross-attention is not. They must
+    /// still agree on the channel count, since that is what the dot product contracts over.
     fn score_map(&mut self, q: Id, k: Id, heads: u32) -> (Id, f32) {
         let (sq, sk) = (self.shape_of(q), self.shape_of(k));
-        if sq != sk {
+        if sq.c != sk.c {
             self.fail(format!("attention over q {sq:?} and k {sk:?}"));
         }
-        if sq.h != 1 {
+        if sq.h != 1 || sk.h != 1 {
             self.fail(format!(
                 "attention on {sq:?}: a sequence is [d_model, 1, T], so a height above \
                  one would silently reinterpret the layout"
@@ -1155,7 +1170,7 @@ impl<'a> Builder<'a> {
         }
         let head_dim = sq.c.checked_div(heads).unwrap_or(0);
         let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
-        (self.tensor(Shape::new(heads, sq.w, sq.w)), scale)
+        (self.tensor(Shape::new(heads, sq.w, sk.w)), scale)
     }
 
     /// Softmax over the last axis, which for a score map is one query's distribution.
@@ -1208,6 +1223,17 @@ impl<'a> Builder<'a> {
         }
         let out = self.tensor(Shape::new(count, shape.h, shape.w));
         self.nodes.push(Node::SliceChannels { input, out, start });
+        out
+    }
+
+    /// A learned tensor copied into the arena, so it can be an operand rather than a kernel.
+    ///
+    /// The only op that reads nothing from the arena. See [`Kind::Constant`] for why it exists
+    /// at all; `shape` is what the `.maml` tensor holds, and its element count must match.
+    pub fn constant(&mut self, weight_index: usize, shape: Shape) -> Id {
+        let weight = self.weight(weight_index, &[shape.c, shape.h, shape.w]);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Constant { out, weight });
         out
     }
 
@@ -1266,6 +1292,15 @@ impl<'a> Builder<'a> {
     ) -> Id {
         let (out, scale) = self.score_map(q, k, heads);
         let shape = self.shape_of(q);
+        // A relative offset is `key - query`, so the two sequences have to be the same one.
+        // Only the cross-attention variants take differing lengths.
+        if shape.w != self.shape_of(k).w {
+            self.fail(format!(
+                "a relative score map over q {shape:?} and k {:?}: an offset is `key - query`, \
+                 so both are positions in the same sequence",
+                self.shape_of(k)
+            ));
+        }
         let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
         self.check_offsets(offsets);
         let table = self.weight(table, &[offsets, head_dim]);
@@ -1284,6 +1319,13 @@ impl<'a> Builder<'a> {
     ) -> Id {
         let out = self.mixed(probs, v, heads);
         let shape = self.shape_of(v);
+        let probs_shape = self.shape_of(probs);
+        if probs_shape.h != probs_shape.w {
+            self.fail(format!(
+                "a relative value mix over {probs_shape:?}: an offset is `key - query`, so both \
+                 are positions in the same sequence"
+            ));
+        }
         let head_dim = shape.c.checked_div(heads.max(1)).unwrap_or(0);
         self.check_offsets(offsets);
         let table = self.weight(table, &[offsets, head_dim]);
@@ -1313,9 +1355,12 @@ impl<'a> Builder<'a> {
     }
 
     /// The validation and output tensor every weighted sum shares, relative or not.
+    ///
+    /// The output is one vector per **query**, so its width comes from the score map's height
+    /// rather than from `v`. For self-attention those are the same number.
     fn mixed(&mut self, probs: Id, v: Id, heads: u32) -> Id {
         let (sp, sv) = (self.shape_of(probs), self.shape_of(v));
-        if sp != Shape::new(heads, sv.w, sv.w) {
+        if sp.c != heads || sp.w != sv.w {
             self.fail(format!(
                 "attention weights {sp:?} do not match {heads} heads over a sequence of \
                  {} from {sv:?}",
@@ -1328,7 +1373,7 @@ impl<'a> Builder<'a> {
         if heads == 0 || !sv.c.is_multiple_of(heads) {
             self.fail(format!("{} channels do not split into {heads} heads", sv.c));
         }
-        self.tensor(sv)
+        self.tensor(Shape::new(sv.c, 1, sp.h))
     }
 
     /// Pack the arena and resolve every offset, with `outputs` as the result tensors.
@@ -1893,7 +1938,7 @@ impl<'a> Builder<'a> {
                 });
             }
             Node::AttnApply { probs, v, out, heads } => {
-                let so = shape(*out);
+                let (sv, so) = (shape(*v), shape(*out));
                 ops.push(Op::Dispatch {
                     kind: Kind::AttnApply,
                     push: Push {
@@ -1902,11 +1947,29 @@ impl<'a> Builder<'a> {
                         out: at(*out)?,
                         in_c: so.c,
                         in_h: so.h,
-                        in_w: so.w,
+                        // The **key** count, which is V's length. `out_w` is the query count,
+                        // and for a cross-attention those differ.
+                        in_w: sv.w,
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
                         group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::Constant { out, weight } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Constant,
+                    push: Push {
+                        out: at(*out)?,
+                        weight: *weight,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
                         count: so.len(),
                         ..Push::default()
                     },
@@ -1960,6 +2023,7 @@ impl Node {
             | Node::SliceChannels { out, .. }
             | Node::ConvInt8 { out, .. }
             | Node::AttnApply { out, .. }
+            | Node::Constant { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -1988,6 +2052,8 @@ impl Node {
                 vec![*a, *b]
             }
             Node::Concat { parts, .. } => parts.clone(),
+            // The only op with no arena input at all: it reads the weights file.
+            Node::Constant { .. } => Vec::new(),
         }
     }
 }
@@ -2164,15 +2230,19 @@ pub(crate) mod tests {
                         Kind::MulBroadcast => {
                             vec![(push.in0, written), (push.in1, push.in_c)]
                         }
-                        // Q and K are both whole sequences. The relative variants read a
-                        // table out of the weights buffer as well, which cannot alias the
-                        // arena at all.
+                        // Reads no arena at all - it is a copy out of the weights file.
+                        Kind::Constant => Vec::new(),
+                        // Q and K are each `in_c` channels but of their own lengths, which the
+                        // score map's height and width carry.
                         Kind::AttnScores | Kind::AttnScoresRelative => {
-                            vec![(push.in0, dense), (push.in1, dense)]
+                            vec![
+                                (push.in0, push.in_c * push.out_h),
+                                (push.in1, push.in_c * push.out_w),
+                            ]
                         }
-                        // The score map is `[heads, T, T]`; V is a sequence.
+                        // The score map is `[heads, queries, keys]`; V is a sequence of keys.
                         Kind::AttnApply | Kind::AttnApplyRelative => {
-                            vec![(push.in0, push.group * push.out_w * push.out_w), (push.in1, dense)]
+                            vec![(push.in0, push.group * push.out_w * push.in_w), (push.in1, dense)]
                         }
                         // One id per position per lane, so the read is `in_c * out_w` and
                         // not `dense` - `in_w` here is the *table's* row count.

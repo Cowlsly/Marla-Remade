@@ -1,7 +1,14 @@
 #version 450
 //! `S[h][i][j] = scale * sum_d Q[h][d][i] * K[h][d][j]`, the first half of attention.
 //!
-//! Two uses, one per transformer block in PP-OCRv5 recognition.
+//! Two uses per transformer block in PP-OCRv5 recognition, and Supertonic's text encoder
+//! attends its text over 50 style tokens with it.
+//!
+//! # Q and K may be different lengths
+//!
+//! The output is `[heads, queries, keys]`, square only for self-attention. `p.out_h` is Q's
+//! length and `p.out_w` is K's, so the two sequences are strided independently; when they are
+//! equal this is the arithmetic it always was.
 //!
 //! # The contraction is over the middle axis, and that is the whole point
 //!
@@ -19,10 +26,10 @@
 //!
 //! # One invocation per score
 //!
-//! The output is `[heads, T, T]`, so there are `heads * T * T` invocations and each
-//! reduces `head_dim` products. That is the parallel axis: `T` is around 80 for a line
+//! The output is `[heads, queries, keys]`, so there are `heads * queries * keys` invocations
+//! and each reduces `head_dim` products. That is the parallel axis: `T` is around 80 for a line
 //! of text, so this is tens of thousands of independent invocations against `head_dim`
-//! serial steps each — the opposite balance to `gap.comp`, which has only channels to
+//! serial steps each - the opposite balance to `gap.comp`, which has only channels to
 //! spread across.
 //!
 //! # Scale
@@ -42,20 +49,21 @@ void main() {
     if (index >= p.count) {
         return;
     }
-    // The output is `[heads, T, T]`, so `unpack` gives head, query and key directly.
+    // The output is `[heads, queries, keys]`, so `unpack` gives head, query and key directly.
     uint head, query, key;
     unpack(index, head, query, key);
-
-    // Q and K are `[d_model, 1, T]`: one channel every `in_h * in_w` elements, which is
-    // `T`. A head owns `head_dim` consecutive channels starting at `head * head_dim`.
+    // Q and K are `[d_model, 1, T]`: one channel every `T` elements. A head owns `head_dim`
+    // consecutive channels starting at `head * head_dim`. The two lengths are the score map's
+    // own height and width.
     uint head_dim = p.in_c / p.group;
-    uint stride = p.in_h * p.in_w;
-    uint base = head * head_dim * stride;
-
+    uint query_stride = p.out_h;
+    uint key_stride = p.out_w;
+    uint query_base = head * head_dim * query_stride;
+    uint key_base = head * head_dim * key_stride;
     float total = 0.0;
     for (uint d = 0u; d < head_dim; d++) {
-        uint channel = base + d * stride;
-        total += float(arena[p.in0 + channel + query]) * float(arena[p.in1 + channel + key]);
+        total += float(arena[p.in0 + query_base + d * query_stride + query])
+               * float(arena[p.in1 + key_base + d * key_stride + key]);
     }
     arena[p.out_at + index] = float16_t(total * uintBitsToFloat(p.param0_bits));
 }

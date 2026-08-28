@@ -1,0 +1,31 @@
+#version 450
+//! `out[i] = weights[i]`, a learned tensor copied into the activation arena.
+//!
+//! # Why an op exists for a copy
+//!
+//! Every other op reads its weights straight out of binding 1, so nothing needed this until
+//! Supertonic's text encoder: its style attention's **keys** are
+//! `tanh(W_key . style_key + b_key)`, and `style_key` is a learned `[50, 256]` table. All three
+//! are constants, so the whole expression folds to one tensor at conversion time - but
+//! `attn_scores.comp` contracts two *arena* tensors, and there was no way to get a weight
+//! there.
+//!
+//! The alternatives were worse. Keeping the fold out and running `W_key` as a convolution needs
+//! `style_key` in the arena anyway, so it would have to become a plan input - a model constant
+//! travelling with the per-voice data. And `Kind::Embed` over a ramp of ids would do this
+//! today, which is a copy dressed as a lookup.
+//!
+//! # It is not free, and that is fine
+//!
+//! One dispatch and one write per element. The tensors this is for are small (25 KB for the
+//! text encoder's) and it runs once per plan, against 9M parameters of convolution.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    arena[p.out_at + index] = weights[p.weight + index];
+}

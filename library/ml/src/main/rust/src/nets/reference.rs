@@ -196,6 +196,7 @@ impl Reference {
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
                     Kind::Embed => self.embed(push),
+                    Kind::Constant => self.constant(push),
                     Kind::GatedTanh => self.gated_tanh(push),
                     // The reference interpreter holds its weights as `f32`, so there is no
                     // byte view to unpack: an int8 plan can be built and inspected on the
@@ -558,6 +559,15 @@ impl Reference {
         Ok(())
     }
 
+    /// `out[i] = weights[i]`, a learned tensor copied into the arena. See [`Kind::Constant`].
+    fn constant(&mut self, p: &Push) -> Result<(), String> {
+        for i in 0..p.count {
+            let value = self.weight(p.weight, i)?;
+            self.store(p.out, i, value)?;
+        }
+        Ok(())
+    }
+
     /// `x < 0 ? alpha * x : x`, elementwise, with `alpha` carried as raw bits.
     fn leaky_relu(&mut self, p: &Push) -> Result<(), String> {
         let alpha = f32::from_bits(p.param0_bits);
@@ -631,17 +641,19 @@ impl Reference {
     /// no transpose anywhere in this, by construction.
     fn attn_scores(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.in_c)?;
-        let stride = p.in_h * p.in_w;
+        // Q and K carry their own lengths, which are the score map's height and width. For
+        // self-attention those are equal.
+        let (query_stride, key_stride) = (p.out_h, p.out_w);
         let scale = f32::from_bits(p.param0_bits);
         for head in 0..p.group {
-            let base = head * head_dim * stride;
+            let query_base = head * head_dim * query_stride;
+            let key_base = head * head_dim * key_stride;
             for query in 0..p.out_h {
                 for key in 0..p.out_w {
                     let mut total = 0.0;
                     for d in 0..head_dim {
-                        let channel = base + d * stride;
-                        total += self.load(p.in0, channel + query)?
-                            * self.load(p.in1, channel + key)?;
+                        total += self.load(p.in0, query_base + d * query_stride + query)?
+                            * self.load(p.in1, key_base + d * key_stride + key)?;
                     }
                     self.store(p.out, nchw(p, head, query, key), total * scale)?;
                 }
@@ -686,10 +698,11 @@ impl Reference {
     /// `c` of the output — which is why concatenating the heads afterwards is not an op.
     fn attn_apply(&mut self, p: &Push) -> Result<(), String> {
         let head_dim = heads(p, p.out_c)?;
-        let keys = p.out_w;
+        // `out_w` is the query count and `in_w` the key count; equal for self-attention.
+        let (queries, keys) = (p.out_w, p.in_w);
         for channel in 0..p.out_c {
-            let row = (channel / head_dim) * keys * keys;
-            for query in 0..keys {
+            let row = (channel / head_dim) * queries * keys;
+            for query in 0..queries {
                 let mut total = 0.0;
                 for key in 0..keys {
                     total += self.load(p.in0, row + query * keys + key)?
@@ -2081,6 +2094,87 @@ mod tests {
         let out = b.embed(ids, 0, rows, 1);
         let error = b.finish(&[out]).expect_err("one lane for a big table");
         assert!(error.contains("two lanes"), "{error}");
+    }
+
+    #[test]
+    fn a_score_map_over_two_different_lengths_is_queries_by_keys() {
+        // Three queries against five keys, one head, two channels. Cross-attention: the map is
+        // `[1, 3, 5]` and not square, and the two operands are strided by their own lengths —
+        // reading K with Q's stride is the failure this pins, and it would still produce a
+        // tensor of the right shape.
+        let queries = 3u32;
+        let keys = 5u32;
+        // Q channel 0 is 1 everywhere and channel 1 counts the query; K is the mirror, so
+        // `Q . K = 1 * 1 + query * key` and every pair is distinguishable.
+        let q: Vec<f32> = (0..queries)
+            .map(|_| 1.0)
+            .chain((0..queries).map(|i| i as f32))
+            .collect();
+        let k: Vec<f32> = (0..keys)
+            .map(|_| 1.0)
+            .chain((0..keys).map(|j| j as f32))
+            .collect();
+        let got = two(
+            (Shape::new(2, 1, queries), Shape::new(2, 1, keys)),
+            (&q, &k),
+            |b, q, k| b.attn_scores(q, k, 1),
+        );
+        // One head of two channels, so the scale is `1 / sqrt(2)`.
+        let scale = 1.0 / 2.0f32.sqrt();
+        let want: Vec<f32> = (0..queries)
+            .flat_map(|i| (0..keys).map(move |j| (1.0 + (i * j) as f32) * scale))
+            .collect();
+        close(&got, &want);
+    }
+
+    #[test]
+    fn a_value_mix_over_two_different_lengths_is_one_vector_per_query() {
+        // Two queries, four keys, two channels of values. The probabilities pick key 3 for
+        // query 0 and key 0 for query 1, so the answer is two of V's columns swapped — an
+        // output width taken from V instead of from the queries would be four wide.
+        let queries = 2u32;
+        let keys = 4u32;
+        let mut probs = vec![0.0f32; (queries * keys) as usize];
+        probs[3] = 1.0;
+        probs[keys as usize] = 1.0;
+        let v: Vec<f32> = vec![10.0, 11.0, 12.0, 13.0, 20.0, 21.0, 22.0, 23.0];
+        let got = two(
+            (Shape::new(1, queries, keys), Shape::new(2, 1, keys)),
+            (&probs, &v),
+            |b, p, v| b.attn_apply(p, v, 1),
+        );
+        // `[2, 1, 2]`: channel 0 then channel 1, each (query 0, query 1).
+        close(&got, &[13.0, 10.0, 23.0, 20.0]);
+    }
+
+    #[test]
+    fn a_relative_score_map_refuses_two_different_lengths() {
+        // A relative offset is `key - query`, so it is only meaningful within one sequence.
+        // Cross-attention with a position table would index a band that does not exist.
+        let source = Given::new(&[(vec![3, 2], vec![0.0; 6])]).expect("the fixture lays out");
+        let mut b = Builder::new(&source);
+        let q = b.input(Shape::new(2, 1, 3));
+        let k = b.input(Shape::new(2, 1, 5));
+        let out = b.attn_scores_relative(q, k, 1, 0, 3);
+        let error = b.finish(&[out]).expect_err("a relative map across two sequences");
+        assert!(error.contains("same sequence"), "{error}");
+    }
+
+    #[test]
+    fn a_constant_reaches_the_arena_from_the_weights_file() {
+        // The one op that reads no arena. Its output has to be usable as an operand, so this
+        // adds it to an input rather than reading it straight back.
+        let table: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let got = one(
+            Shape::new(2, 1, 3),
+            &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0],
+            &[(vec![2, 1, 3], table)],
+            |b, x| {
+                let loaded = b.constant(0, Shape::new(2, 1, 3));
+                b.add(x, loaded)
+            },
+        );
+        close(&got, &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0]);
     }
 
     #[test]

@@ -1,18 +1,25 @@
 #version 450
 //! `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, the second half of attention.
 //!
-//! Two uses, one per transformer block in PP-OCRv5 recognition.
+//! Two uses per transformer block in PP-OCRv5 recognition, and Supertonic's text encoder mixes
+//! 50 style tokens with it.
+//!
+//! # Queries and keys may be different counts
+//!
+//! `S` is `[heads, queries, keys]` from `softmax.comp`, `V` is `[d_model, 1, keys]` and the
+//! output is `[d_model, 1, queries]`. `p.out_w` is the query count and `p.in_w` the key count;
+//! for self-attention they are equal and this is the arithmetic it always was.
 //!
 //! # Back into the layout it started in
 //!
-//! `S` is `[heads, T, T]` from `softmax.comp`; `V` and the output are `[d_model, 1, T]`,
-//! the same layout every projection in this runtime reads and writes. So the head
+//! `S` is `[heads, queries, keys]` from `softmax.comp`; `V` and the output share `d_model`,
+//! the layout every projection in this runtime reads and writes. So the head
 //! concatenation that follows attention is not an op: output channel `c` belongs to head
 //! `c / head_dim` and is written in place, which *is* the concatenated result. No
 //! `Reshape` and no `Permute` on this side either.
 //!
-//! One invocation per output element, reducing over the `T` keys. Note that `V` needs no
-//! head arithmetic at all — channel `c` of `V` is exactly channel `c` of the output — so
+//! One invocation per output element, reducing over the keys. Note that `V` needs no
+//! head arithmetic at all - channel `c` of `V` is exactly channel `c` of the output - so
 //! the head index is used only to pick which of `S`'s planes to read.
 //!
 //! # Precision
@@ -29,14 +36,14 @@ void main() {
     if (index >= p.count) {
         return;
     }
-    // The output is `[d_model, 1, T]`, so this is (channel, 0, query).
+    // The output is `[d_model, 1, queries]`, so this is (channel, 0, query).
     uint channel, unused_row, query;
     unpack(index, channel, unused_row, query);
-
-    uint keys = p.out_w;
+    uint queries = p.out_w;
+    uint keys = p.in_w;
     uint head_dim = p.out_c / p.group;
     // `S[head][query][*]`, contiguous in the key index.
-    uint row = p.in0 + ((channel / head_dim) * keys + query) * keys;
+    uint row = p.in0 + ((channel / head_dim) * queries + query) * keys;
     // `V[channel][*]`, likewise contiguous, because `V`'s height is 1.
     uint values = p.in1 + channel * keys;
 
