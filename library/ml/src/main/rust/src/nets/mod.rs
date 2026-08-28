@@ -503,6 +503,25 @@ pub trait WeightSource {
     fn count(&self) -> usize;
 }
 
+impl WeightSource for crate::weights::Offsets {
+    fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
+        Ok(crate::weights::Offsets::shaped(self, index, dims)?.elem_offset())
+    }
+    fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
+        let found = crate::weights::Offsets::shaped(self, index, dims)?;
+        if !found.int8 {
+            return Err(format!("tensor {index} is fp16, but the pass wants int8"));
+        }
+        Ok(found.word_offset())
+    }
+
+    fn count(&self) -> usize {
+        self.len()
+    }
+}
+
+/// Delegated to [`crate::weights::Offsets`], which is the same table without the blob, so a plan
+/// built from a whole file and one rebuilt from a retained table cannot resolve differently.
 impl WeightSource for crate::weights::Weights {
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         Ok(crate::weights::Weights::shaped(self, index, dims)?.elem_offset())

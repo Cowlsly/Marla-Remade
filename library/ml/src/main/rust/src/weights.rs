@@ -115,6 +115,55 @@ impl Tensor {
     }
 }
 
+/// The tensor table on its own, without the data section.
+///
+/// [`crate::vulkan::run::Net::rebuild`] re-records a net at a new shape, and that means building a
+/// fresh [`crate::nets::Plan`] — which needs a [`WeightSource`]. It does not need the blob: a
+/// builder only ever consults offsets and shapes, and the blob is already in device memory by
+/// then. Holding a whole [`Weights`] alive to rebuild from would keep 127 MB of host RSS for the
+/// Supertonic sampler alone, beside the copy the device has, where the table is a few kilobytes.
+///
+/// So a caller that means to rebuild takes one of these first and lets the `Weights` go.
+#[derive(Clone, Debug)]
+pub struct Offsets {
+    tensors: Vec<Tensor>,
+}
+
+impl Offsets {
+    /// Tensor `index`, or an error naming the index — which is what a mismatch
+    /// between the Rust forward pass and the converter's ordering looks like.
+    pub fn tensor(&self, index: usize) -> Result<Tensor, String> {
+        self.tensors
+            .get(index)
+            .copied()
+            .ok_or_else(|| format!("tensor {index} of {}: out of range", self.tensors.len()))
+    }
+
+    /// Tensor `index`, checked against the shape the caller expects.
+    ///
+    /// The net modules use this for every weight, so a table that is the right
+    /// length but the wrong order fails on the first layer whose shape differs
+    /// rather than silently convolving with someone else's kernel.
+    pub fn shaped(&self, index: usize, dims: &[u32]) -> Result<Tensor, String> {
+        let tensor = self.tensor(index)?;
+        let got = &tensor.dims[..tensor.rank as usize];
+        if got != dims {
+            return Err(format!("tensor {index} is {got:?}, the forward pass wants {dims:?}"));
+        }
+        Ok(tensor)
+    }
+
+    /// How many tensors the table holds.
+    pub fn len(&self) -> usize {
+        self.tensors.len()
+    }
+
+    /// Whether the table is empty. Only ever true for a hand-made file.
+    pub fn is_empty(&self) -> bool {
+        self.tensors.is_empty()
+    }
+}
+
 /// A parsed `.maml` file: the tensor table, and the data section to upload.
 #[derive(Debug)]
 pub struct Weights {
@@ -122,7 +171,7 @@ pub struct Weights {
     pub graph_id: u32,
     /// SHA-256 of the ONNX it was converted from, for tracing a shipped asset.
     pub source_sha256: [u8; 32],
-    tensors: Vec<Tensor>,
+    table: Offsets,
     data: Vec<u8>,
 }
 
@@ -216,7 +265,7 @@ impl Weights {
         Ok(Weights {
             graph_id,
             source_sha256,
-            tensors,
+            table: Offsets { tensors },
             data: bytes[data_offset..].to_vec(),
         })
     }
@@ -236,26 +285,30 @@ impl Weights {
     /// [`data`]: Weights::data
     #[cfg(test)]
     pub(crate) fn from_data(data: Vec<u8>) -> Weights {
-        Weights { graph_id: 0, source_sha256: [0u8; 32], tensors: Vec::new(), data }
+        let table = Offsets { tensors: Vec::new() };
+        Weights { graph_id: 0, source_sha256: [0u8; 32], table, data }
+    }
+
+    /// The tensor table alone, for a caller that will rebuild a plan after this `Weights` is
+    /// gone. See [`Offsets`].
+    pub fn offsets(&self) -> Offsets {
+        self.table.clone()
     }
 
     /// How many tensors the table holds.
     pub fn len(&self) -> usize {
-        self.tensors.len()
+        self.table.len()
     }
 
     /// Whether the table is empty. Only ever true for a hand-made file.
     pub fn is_empty(&self) -> bool {
-        self.tensors.is_empty()
+        self.table.is_empty()
     }
 
     /// Tensor `index`, or an error naming the index — which is what a mismatch
     /// between the Rust forward pass and the converter's ordering looks like.
     pub fn tensor(&self, index: usize) -> Result<Tensor, String> {
-        self.tensors
-            .get(index)
-            .copied()
-            .ok_or_else(|| format!("tensor {index} of {}: out of range", self.tensors.len()))
+        self.table.tensor(index)
     }
 
     /// Tensor `index`, checked against the shape the caller expects.
@@ -264,12 +317,7 @@ impl Weights {
     /// length but the wrong order fails on the first layer whose shape differs
     /// rather than silently convolving with someone else's kernel.
     pub fn shaped(&self, index: usize, dims: &[u32]) -> Result<Tensor, String> {
-        let tensor = self.tensor(index)?;
-        let got = &tensor.dims[..tensor.rank as usize];
-        if got != dims {
-            return Err(format!("tensor {index} is {got:?}, the forward pass wants {dims:?}"));
-        }
-        Ok(tensor)
+        self.table.shaped(index, dims)
     }
 }
 
@@ -330,6 +378,32 @@ mod tests {
             return sign;
         }
         sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+    }
+
+    #[test]
+    fn the_table_outlives_the_blob_and_answers_identically() {
+        // What `Net::rebuild` depends on: the offsets a plan resolves against do not come from the
+        // data section, so a retained table gives the same answers after the file is gone. If it
+        // did not, a rebuilt plan would index device memory that holds something else — the right
+        // shape and the wrong tensor, which no count or digest check would notice.
+        let bytes = write(
+            graph::SUPERTONIC_TTL,
+            &[(vec![2, 1, 1, 1], vec![1.0, 2.0]), (vec![3], vec![4.0, 8.0, 16.0])],
+        );
+        let weights = Weights::parse(&bytes, graph::SUPERTONIC_TTL).expect("parses");
+        let table = weights.offsets();
+        let whole: Vec<Tensor> =
+            (0..weights.len()).map(|i| weights.tensor(i).expect("in range")).collect();
+        drop(weights);
+
+        assert_eq!(table.len(), whole.len());
+        for (index, expected) in whole.iter().enumerate() {
+            assert_eq!(&table.tensor(index).expect("in range"), expected);
+        }
+        assert_eq!(table.shaped(0, &[2, 1, 1, 1]).expect("the declared shape").elem_offset(), 0);
+        // And the shape check is still the shape check, not a length check.
+        assert!(table.shaped(1, &[4]).is_err());
+        assert!(table.tensor(2).is_err());
     }
 
     #[test]
