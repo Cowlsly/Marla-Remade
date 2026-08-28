@@ -16,7 +16,7 @@ pub mod ctc;
 pub mod dbnet;
 pub mod duration;
 pub mod nms;
-pub mod phonemes;
+pub mod sentencepiece;
 pub mod speech;
 pub mod spline;
 pub mod supertonic;
