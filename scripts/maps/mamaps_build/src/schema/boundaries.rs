@@ -45,6 +45,7 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
         // over every layer inside the country.
         area: false,
         min_zoom: min_zoom_for(level),
+        min_area_px: 0.0,
     })
 }
 

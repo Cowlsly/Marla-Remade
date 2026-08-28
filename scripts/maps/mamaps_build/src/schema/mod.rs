@@ -25,6 +25,7 @@ use tilecodec::mamaps::dict;
 
 pub mod boundaries;
 pub mod buildings;
+pub mod land;
 pub mod roads;
 pub mod water;
 
@@ -63,7 +64,7 @@ impl TagSource for [(&str, &str)] {
 }
 
 /// Where a feature goes and what it is, once classified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Class {
     /// An index into [`dict::LAYERS`].
     pub layer: u8,
@@ -86,17 +87,39 @@ pub struct Class {
     /// every pond in California. Compared against the tile's zoom, so a feature simply is not
     /// written above it.
     pub min_zoom: u8,
+    /// The smallest drawn area worth carrying, in square pixels of a 256-unit tile.
+    ///
+    /// Zero for a line and for anything a zoom gate alone separates. What it is for is the case a
+    /// zoom cannot fix: a national park and a back garden are both `leisure=park`, and only a size
+    /// tells them apart. Converted to the tile's own units by [`land::min_area_units`].
+    pub min_area_px: f64,
 }
 
 impl Class {
     /// A polygon feature with no detail and no flags.
     pub const fn area(layer: u8, kind: u16, min_zoom: u8) -> Class {
-        Class { layer, kind, kind_detail: dict::NONE, flags: 0, area: true, min_zoom }
+        Class {
+            layer,
+            kind,
+            kind_detail: dict::NONE,
+            flags: 0,
+            area: true,
+            min_zoom,
+            min_area_px: 0.0,
+        }
     }
 
     /// A line feature with no detail and no flags.
     pub const fn line(layer: u8, kind: u16, min_zoom: u8) -> Class {
-        Class { layer, kind, kind_detail: dict::NONE, flags: 0, area: false, min_zoom }
+        Class {
+            layer,
+            kind,
+            kind_detail: dict::NONE,
+            flags: 0,
+            area: false,
+            min_zoom,
+            min_area_px: 0.0,
+        }
     }
 }
 
@@ -129,35 +152,69 @@ pub struct Layers {
     pub buildings: bool,
     pub roads: bool,
     pub boundaries: bool,
+    pub landcover: bool,
+    pub landuse: bool,
 }
 
 impl Layers {
     pub fn all() -> Layers {
-        Layers { water: true, buildings: true, roads: true, boundaries: true }
+        Layers {
+            water: true,
+            buildings: true,
+            roads: true,
+            boundaries: true,
+            landcover: true,
+            landuse: true,
+        }
+    }
+
+    pub fn none() -> Layers {
+        Layers {
+            water: false,
+            buildings: false,
+            roads: false,
+            boundaries: false,
+            landcover: false,
+            landuse: false,
+        }
     }
 
     /// Parse a comma-separated list, e.g. `water,roads`.
     pub fn parse(list: &str) -> Result<Layers, String> {
-        let mut layers =
-            Layers { water: false, buildings: false, roads: false, boundaries: false };
+        let mut layers = Layers::none();
         for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             match name {
                 "water" => layers.water = true,
                 "buildings" => layers.buildings = true,
                 "roads" => layers.roads = true,
                 "boundaries" => layers.boundaries = true,
+                "landcover" => layers.landcover = true,
+                "landuse" => layers.landuse = true,
                 other => {
                     return Err(format!(
-                        "unknown layer `{other}`; this generator produces water, buildings, roads \
-                         and boundaries"
+                        "unknown layer `{other}`; this generator produces water, buildings, roads, \
+                         boundaries, landcover and landuse"
                     ))
                 }
             }
         }
-        if layers == (Layers { water: false, buildings: false, roads: false, boundaries: false }) {
+        if layers == Layers::none() {
             return Err("no layers selected".to_string());
         }
         Ok(layers)
+    }
+
+    /// Is this the layer a classifier just returned one for?
+    fn wants(&self, layer: u8) -> bool {
+        match layer {
+            dict::LAYER_WATER => self.water,
+            dict::LAYER_BUILDINGS => self.buildings,
+            dict::LAYER_ROADS => self.roads,
+            dict::LAYER_BOUNDARIES => self.boundaries,
+            dict::LAYER_LANDCOVER => self.landcover,
+            dict::LAYER_LANDUSE => self.landuse,
+            _ => false,
+        }
     }
 }
 
@@ -192,6 +249,15 @@ pub fn classify(
             return Some(class);
         }
     }
+    // Last, because it is the layer everything else is drawn on top of. One classifier produces
+    // both `landcover` and `landuse`, so which of the two was asked for is checked after the fact.
+    if layers.landcover || layers.landuse {
+        if let Some(class) = land::classify(tags) {
+            if layers.wants(class.layer) {
+                return Some(class);
+            }
+        }
+    }
     None
 }
 
@@ -214,6 +280,9 @@ pub fn filters(layers: Layers) -> Vec<&'static str> {
     if layers.boundaries {
         out.extend_from_slice(boundaries::FILTERS);
     }
+    if layers.landcover || layers.landuse {
+        out.extend_from_slice(land::FILTERS);
+    }
     out
 }
 
@@ -230,6 +299,7 @@ mod tests {
             .chain(buildings::KINDS)
             .chain(roads::KINDS)
             .chain(boundaries::KINDS)
+            .chain(land::KINDS)
         {
             assert!(
                 dict::KINDS.contains(name),
@@ -250,10 +320,13 @@ mod tests {
     fn a_layer_list_parses_and_rejects_what_this_generator_cannot_build() {
         assert_eq!(
             Layers::parse("water").expect("water"),
-            Layers { water: true, buildings: false, roads: false, boundaries: false },
+            Layers { water: true, ..Layers::none() },
         );
-        assert_eq!(Layers::parse("water,buildings,roads,boundaries").expect("all"), Layers::all());
-        assert!(Layers::parse("landcover").is_err(), "not until phase 7");
+        assert_eq!(
+            Layers::parse("water,buildings,roads,boundaries,landcover,landuse").expect("all"),
+            Layers::all(),
+        );
+        assert!(Layers::parse("earth").is_err(), "not until the coastline work");
         assert!(Layers::parse("").is_err(), "nothing selected");
     }
 
@@ -269,7 +342,7 @@ mod tests {
             &[("natural", "water"), ("highway", "residential"), ("building", "yes")];
         assert_eq!(classify(water, true, Layers::all()).expect("water").layer, dict::LAYER_WATER);
         // A layer that is switched off is not consulted, so the next rule wins instead.
-        let only_buildings = Layers { water: false, buildings: true, roads: false, boundaries: false };
+        let only_buildings = Layers { buildings: true, ..Layers::none() };
         assert_eq!(
             classify(both, true, only_buildings).expect("building").layer,
             dict::LAYER_BUILDINGS,
@@ -288,11 +361,14 @@ mod tests {
             assert!(!filter.contains(' '), "`{filter}` is not a bare tag key");
         }
         assert!(
-            filters(Layers { water: true, buildings: false, roads: false, boundaries: false }).len()
+            filters(Layers { water: true, ..Layers::none() }).len()
                 < all.len()
         );
         // Every key a rule reads for a *decision* has to be in the screen, or the rule never runs.
-        for key in ["natural", "waterway", "landuse", "building", "highway", "railway", "boundary"] {
+        for key in [
+            "natural", "waterway", "landuse", "building", "highway", "railway", "boundary",
+            "leisure", "amenity",
+        ] {
             assert!(all.contains(&key), "the screen omits `{key}`");
         }
     }

@@ -129,6 +129,7 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
             flags: flags(tags, highway),
             area: false,
             min_zoom: *min_zoom,
+            min_area_px: 0.0,
         });
     }
     if let Some(railway) = tags.get("railway") {
@@ -140,6 +141,7 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
             flags: flags(tags, railway),
             area: false,
             min_zoom: *min_zoom,
+            min_area_px: 0.0,
         });
     }
     // A runway is a line in this layer and a polygon in `landuse`. Both are drawn, because an
@@ -157,6 +159,7 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
             flags: flags(tags, aeroway),
             area: false,
             min_zoom: if aeroway == "runway" { 9 } else { 13 },
+            min_area_px: 0.0,
         });
     }
     // A pier is walkable, so it belongs with the paths rather than with the buildings.
@@ -168,6 +171,7 @@ pub fn classify(tags: &(impl TagSource + ?Sized)) -> Option<Class> {
             flags: flags(tags, "pier"),
             area: false,
             min_zoom: 13,
+            min_area_px: 0.0,
         });
     }
     // A ferry is a route, and drawing it is what stops a coastal map looking disconnected.

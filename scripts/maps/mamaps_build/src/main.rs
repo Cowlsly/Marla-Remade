@@ -204,6 +204,8 @@ fn derive_build_id(
         u8::from(layers.buildings),
         u8::from(layers.roads),
         u8::from(layers.boundaries),
+        u8::from(layers.landcover),
+        u8::from(layers.landuse),
         min_zoom,
         max_zoom,
     ]);
@@ -251,7 +253,7 @@ fn build_report(
 fn usage() {
     eprintln!(
         "usage: mamaps_build --input IN.osm.pbf --out OUT.mamaps\n\
-         \x20                   [--layers water,buildings,roads,boundaries]\n\
+         \x20                   [--layers water,buildings,roads,boundaries,landcover,landuse]\n\
          \x20                   [--min-zoom N] [--max-zoom N]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]"
     );
@@ -289,7 +291,7 @@ mod tests {
             derive_build_id(path, schema::Layers::all(), 0, 14, 1.0, 101),
             derive_build_id(
                 path,
-                schema::Layers { water: true, buildings: false, roads: false, boundaries: false },
+                schema::Layers { water: true, ..schema::Layers::none() },
                 0,
                 14,
                 1.0,

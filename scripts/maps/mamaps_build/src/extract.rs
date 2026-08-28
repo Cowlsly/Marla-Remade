@@ -60,9 +60,9 @@ struct Relation {
     /// `(way id, role is inner)`, in the order the relation lists them, which is what
     /// [`rings::assemble`] stitches.
     members: Vec<(i64, bool)>,
-    /// A `type=multipolygon` relation is an area to be stitched into rings. A `type=boundary` one is
-    /// a **line**: its members are the border itself, and stitching them into a ring would produce a
-    /// shape that, if it were ever filled, would cover the whole country.
+    /// A relation carrying a shape is stitched into rings; one carrying a border is emitted as its
+    /// member lines. Which it is comes from [`Class::area`] rather than from the relation's `type`
+    /// tag, because both an administrative border and a protected area are `type=boundary`.
     area: bool,
 }
 
@@ -96,13 +96,14 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
                         }
                     }
                     Element::Relation(relation) => {
-                        // Two relation types are carried, and they mean different geometry.
-                        // Anything else — a route, a site, a public_transport — is not a shape.
-                        let area = match relation.tags.get_str("type") {
-                            Some("multipolygon") => true,
-                            Some("boundary") => false,
-                            _ => return Ok(()),
-                        };
+                        // Two relation types carry a shape. Anything else — a route, a site, a
+                        // public_transport — does not.
+                        if !matches!(
+                            relation.tags.get_str("type"),
+                            Some("multipolygon" | "boundary")
+                        ) {
+                            return Ok(());
+                        }
                         if !select.matches(|k| relation.tags.get_str(k)) {
                             return Ok(());
                         }
@@ -113,6 +114,11 @@ pub fn extract(input: &Path, layers: Layers) -> Result<(Vec<Feature>, Stats)> {
                                 .filter(|m| m.kind == MEMBER_WAY)
                                 .map(|m| (m.id, m.role == b"inner"))
                                 .collect();
+                            // **The schema decides**, not the relation's `type` tag. Both an
+                            // administrative border and a protected area are `type=boundary`, and
+                            // one is a line while the other is a shape — which is exactly the
+                            // distinction `Class::area` exists to make.
+                            let area = class.area;
                             state.1.push(Relation { class, members, area });
                         }
                     }

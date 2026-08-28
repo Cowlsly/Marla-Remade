@@ -132,7 +132,14 @@ pub fn build(features: &[Feature], settings: &Settings) -> Result<(Vec<u8>, Vec<
         // and no sort step can be forgotten. A `HashMap` here is the single easiest way to lose
         // byte-identical rebuilds.
         for (id, layers) in tiles {
-            let body = Body { extent: EXTENT as u16, layers: layers.into_values().collect() };
+            // A layer that ended up empty \u2014 every feature in it fell below the minimum area after
+            // clipping \u2014 costs bytes in the archive and a draw call on device for nothing.
+            let layers: Vec<BodyLayer> =
+                layers.into_values().filter(|l| !l.features.is_empty()).collect();
+            if layers.is_empty() {
+                continue;
+            }
+            let body = Body { extent: EXTENT as u16, layers };
             let encoded = tilecodec::mamaps::body::serialize(&body)?;
             stats.bytes += encoded.len() as u64;
             stats.tiles += 1;
@@ -155,6 +162,11 @@ fn push(layer: &mut BodyLayer, feature: &Feature, geometry: &IntGeometry) -> (u6
     let mut added = (0u64, 0u64);
     match geometry {
         IntGeometry::Polygons(polygons) => {
+            // Below a few square pixels a polygon is a speck rather than detail, and there are
+            // millions of them. Measured **after** clipping, on the shape that would actually be
+            // drawn, so a large park clipped to a sliver of one tile is kept where it is big and
+            // dropped where it is not.
+            let floor = crate::schema::land::min_area_units(class.min_area_px, EXTENT);
             for rings in polygons {
                 // A ring needs three distinct points plus the closing one; anything less bounds no
                 // area. Filtered *before* anything is appended, because a part and its points have
@@ -166,6 +178,9 @@ fn push(layer: &mut BodyLayer, feature: &Feature, geometry: &IntGeometry) -> (u6
                 // If the exterior did not survive, what is left is a hole with nothing to be a hole
                 // in, which would paint as the inverse of the shape.
                 if !keep.first().is_some_and(|(index, _)| *index == 0) {
+                    continue;
+                }
+                if floor > 0.0 && ring_area(keep[0].1) < floor {
                     continue;
                 }
                 let parts_offset = layer.parts.len() as u32;
@@ -229,6 +244,20 @@ fn push_part(layer: &mut BodyLayer, points: &[(i32, i32)], winding: u16) -> u64 
     }
     layer.parts.push(Part { coord_start, point_count: points.len() as u32, winding });
     points.len() as u64
+}
+
+/// A ring's absolute area, by the shoelace formula.
+///
+/// `i64` throughout: a 4096-unit tile's coordinates cross-multiply to about 2^24 per term, and a
+/// long ring accumulates thousands of them, which overflows an `i32` and would silently report a
+/// huge shape as a tiny one.
+fn ring_area(ring: &[(i32, i32)]) -> f64 {
+    let mut twice = 0i64;
+    for pair in ring.windows(2) {
+        let ((x0, y0), (x1, y1)) = (pair[0], pair[1]);
+        twice += x0 as i64 * y1 as i64 - x1 as i64 * y0 as i64;
+    }
+    (twice.abs() as f64) / 2.0
 }
 
 fn is_empty(g: &Geometry<SigPt>) -> bool {
