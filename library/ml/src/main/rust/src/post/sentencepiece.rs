@@ -117,7 +117,7 @@ impl<'a> Table<'a> {
 
     /// Token ids for text that is **already NFKC-normalised**.
     ///
-    /// Does not append [`EOS`] or prepend a language token: [`crate::post::translate`] owns the
+    /// Does not append [`EOS`] or prepend a language token: the decode loop owns the
     /// sequence, because SMaLL-100 puts the *target* language token on the **source** side and
     /// that is easy to get backwards.
     pub fn encode(&self, normalised: &str) -> Vec<u32> {

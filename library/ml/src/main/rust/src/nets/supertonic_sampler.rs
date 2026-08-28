@@ -36,7 +36,7 @@
 //! So the ONNX is not a velocity field but a whole **Euler step**, guidance scale 4 baked in.
 //! This runtime has no batch axis and cannot fake one — putting the two branches side by side
 //! along the sequence would let the depthwise convolutions mix them — so the plan is one branch
-//! and [`post::supertonic`] runs it twice. That is a real doubling of the sampler's cost against
+//! and [`crate::post::supertonic`] runs it twice. That is a real doubling of the sampler's cost against
 //! any measurement taken of a single branch.
 //!
 //! Both branches are the same plan with different **inputs**: the unconditional one passes

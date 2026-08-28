@@ -79,23 +79,9 @@ fn tensor(weights: &Weights, index: usize, dims: &[u32]) -> Result<Vec<f32>, Str
     Ok(raw.chunks_exact(2).map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]]))).collect())
 }
 
-/// `erf`, to about 1.5e-7 — Abramowitz and Stegun 7.1.26.
-///
-/// Rust has no `erf`, and the export's GELU is the exact one rather than the tanh
-/// approximation, so approximating the *activation* would be a different function. This
-/// approximates `erf` itself instead, well below fp16's resolution.
-pub(crate) fn erf(x: f32) -> f32 {
-    const A: [f32; 5] = [0.254_829_6, -0.284_496_74, 1.421_413_7, -1.453_152, 1.061_405_4];
-    const P: f32 = 0.327_591_1;
-    let sign = if x < 0.0 { -1.0 } else { 1.0 };
-    let x = x.abs();
-    let t = 1.0 / (1.0 + P * x);
-    let mut poly = 0.0;
-    for coefficient in A.iter().rev() {
-        poly = (poly + coefficient) * t;
-    }
-    sign * (1.0 - poly * (-x * x).exp())
-}
+/// `erf` now lives beside [`crate::nets::Act::Gelu`], which outlives this module: it goes when
+/// Piper does, and the activation does not.
+use crate::nets::erf;
 
 /// The exact GELU, `0.5 x (1 + erf(x / sqrt(2)))`.
 fn gelu(x: f32) -> f32 {
@@ -339,22 +325,6 @@ pub fn frames(log_durations: &[f32], length_scale: f32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn erf_matches_its_known_values() {
-        // The approximation is A&S 7.1.26, good to 1.5e-7. Pinned at values with published
-        // digits, because a wrong coefficient would still look like a sigmoid.
-        for (x, want) in [
-            (0.0f32, 0.0f32),
-            (0.5, 0.5204999),
-            (1.0, 0.8427008),
-            (2.0, 0.9953223),
-            (-1.0, -0.8427008),
-            (3.0, 0.9999779),
-        ] {
-            assert!((erf(x) - want).abs() < 2e-6, "erf({x}) = {} not {want}", erf(x));
-        }
-    }
 
     #[test]
     fn gelu_matches_the_exact_erf_form() {

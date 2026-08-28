@@ -117,9 +117,9 @@ pub enum Act {
     /// 4.7e-4 (at `x = 2.699`), and fp16's step there is 2.0e-3, so the difference is four
     /// times finer than the arena can represent. `erf` is used anyway for two reasons that are
     /// about agreement rather than accuracy — it is what the export computes, and
-    /// [`crate::post::duration::erf`] already implements the same Abramowitz and Stegun 7.1.26
-    /// series for the CPU duration predictor, so the host reference and the shader are the same
-    /// function by construction rather than by coincidence. The cost is comparable either way.
+    /// [`crate::nets::erf`] implements the same Abramowitz and Stegun 7.1.26 series for the host
+    /// interpreter, so the reference and the shader are the same function by construction rather
+    /// than by coincidence. The cost is comparable either way.
     Gelu,
     /// `tanh(x)`.
     ///
@@ -691,6 +691,28 @@ pub struct Builder<'a> {
 /// Arena allocations are aligned to this many fp16 elements, i.e. 16 bytes — the same
 /// boundary `.maml` aligns its tensors to.
 const ALIGN_ELEMS: u32 = 8;
+
+/// `erf`, to about 1.5e-7 — Abramowitz and Stegun 7.1.26.
+///
+/// Rust has no `erf`, and [`Act::Gelu`] is the exact form rather than the tanh approximation, so
+/// approximating the *activation* would be a different function. This approximates `erf` itself
+/// instead, well below fp16's resolution.
+///
+/// It lives beside `Act` rather than in `nets::reference` because that module is `#[cfg(test)]`,
+/// and it began in `post::duration` for VITS's separable stacks — which is why it is here and not
+/// there: `post::duration` goes when Piper does, and `Act::Gelu` does not.
+pub(crate) fn erf(x: f32) -> f32 {
+    const A: [f32; 5] = [0.254_829_6, -0.284_496_74, 1.421_413_7, -1.453_152, 1.061_405_4];
+    const P: f32 = 0.327_591_1;
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let x = x.abs();
+    let t = 1.0 / (1.0 + P * x);
+    let mut poly = 0.0;
+    for coefficient in A.iter().rev() {
+        poly = (poly + coefficient) * t;
+    }
+    sign * (1.0 - poly * (-x * x).exp())
+}
 
 /// The largest integer fp16 holds exactly, and so the width of one embedding id lane.
 ///

@@ -84,9 +84,9 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
         act::CLIP01 => x.clamp(0.0, 1.0),
         act::SWISH => x / (1.0 + (-x).exp()),
         act::TANH => x.tanh(),
-        // The exact GELU. crate::post::duration::erf is the same A&S 7.1.26 series the
-        // shader uses, so the two agree well inside fp16.
-        act::GELU => 0.5 * x * (1.0 + crate::post::duration::erf(x * std::f32::consts::FRAC_1_SQRT_2)),
+        // The exact GELU, not the tanh approximation: [`super::erf`] is the same A&S 7.1.26
+        // series the shader uses, so the two agree well inside fp16.
+        act::GELU => 0.5 * x * (1.0 + super::erf(x * std::f32::consts::FRAC_1_SQRT_2)),
         _ => x,
     }
 }
@@ -1178,6 +1178,25 @@ mod tests {
             // and halves, so the tolerance only has to absorb the store.
             let tolerance = w.abs() * 1e-3 + 1e-3;
             assert!((g - w).abs() <= tolerance, "element {i}: {got:?} vs {want:?}");
+        }
+    }
+
+    #[test]
+    fn erf_matches_its_known_values() {
+        // A&S 7.1.26, good to 1.5e-7, pinned at values with published digits — a wrong
+        // coefficient would still look like a sigmoid. `Act::Gelu` is the exact erf form rather
+        // than the tanh approximation, and `shaders/conv.comp` carries the same series, so this
+        // is what keeps the interpreter and the device agreeing.
+        for (x, want) in [
+            (0.0f32, 0.0f32),
+            (0.5, 0.5204999),
+            (1.0, 0.8427008),
+            (2.0, 0.9953223),
+            (-1.0, -0.8427008),
+            (3.0, 0.9999779),
+        ] {
+            let got = super::super::erf(x);
+            assert!((got - want).abs() < 2e-6, "erf({x}) = {got} not {want}");
         }
     }
 
