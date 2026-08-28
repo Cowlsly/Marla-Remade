@@ -112,4 +112,6 @@
     <string name="store_rule_precheck_title">Verificato prima che Android lo veda</string>
     <string name="store_rule_precheck_detail">Tutto viene verificato prima che il download raggiunga il programma di installazione di sistema. I file rifiutati vengono eliminati.</string>
     <string name="store_rule_fail_blocks_title">Una verifica fallita blocca, una mancante avvisa</string>
+    <string name="source_chip_grapheneos">GrapheneOS</string>
+    <string name="source_chip_accrescent">Accrescent</string>
 </resources>
