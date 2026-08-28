@@ -90,4 +90,8 @@
     <string name="delete_note_type_message">Kaskustutad sähvikupaki „%1$s“ ja tema %2$d märget?</string>
     <string name="review_counts">%1$d uut · %2$d õppimisel · %3$d kordamisel</string>
     <string name="insert_image">Lisa pilt</string>
+    <string name="type_answer">Sisesta vastus</string>
+    <string name="check">Kontrolli</string>
+    <string name="setting_auto_play">Esita heli automaatselt</string>
+    <string name="setting_auto_play_hint">Loe sähviku esikülje tekst valjult ette</string>
 </resources>
