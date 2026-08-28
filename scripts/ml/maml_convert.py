@@ -637,9 +637,13 @@ def quantised_linear(node, held, array, following_bias):
 
     Read from `casawolice/small100-onnx` rather than assumed:
 
-    * The weight zero point is a **scalar 0**, so the quantisation is symmetric and a value is
-      `int8 * scale`. A non-zero one is refused rather than ignored.
-    * The weight scale is a **scalar**, so it multiplies the accumulator once.
+    * The weight zero point is a **per-column vector and every entry is 0**, so the quantisation
+      is symmetric and a value is `int8 * scale`. A non-zero one is refused rather than ignored.
+    * The weight scale is **per output column** - a `[1024, 4096]` weight carries a `[4096]`
+      scale. It still multiplies the finished accumulator rather than every tap, so
+      `conv_int8.comp` costs the same as the fp16 path; it just indexes the scale by output
+      channel. A scalar is accepted too, broadcast to one per column, so a per-tensor quantiser
+      also converts.
     * The *activation* scale and zero point come from a `DynamicQuantizeLinear` at runtime.
       Both are dropped: activations stay fp16 here, which is simpler than reproducing dynamic
       quantisation and strictly more accurate, and costs nothing because the weights are what
@@ -654,27 +658,30 @@ def quantised_linear(node, held, array, following_bias):
     if weight.dtype != np.int8 or weight.ndim != 2:
         return None
     zero = np.array(array(zero_name)).flatten()
-    if zero.size != 1 or int(zero[0]) != 0:
+    if np.any(zero != 0):
         raise SystemExit(
-            f"{node.output[0]}: weight zero point {zero.tolist()} is not 0, so the "
-            "quantisation is not symmetric and `conv_int8.comp` would be wrong"
+            f"{node.output[0]}: weight zero point {zero[zero != 0][:4].tolist()} is not 0, so "
+            "the quantisation is not symmetric and `conv_int8.comp` would be wrong"
         )
     scale_name = weight_name.removesuffix("_quantized") + "_scale"
     if not held(scale_name):
         raise SystemExit(f"{node.output[0]}: no {scale_name} beside its weight")
     scale = np.array(array(scale_name)).flatten()
-    if scale.size != 1:
-        raise SystemExit(
-            f"{node.output[0]}: a {scale.size}-element scale; `conv_int8.comp` applies one "
-            "number to the whole accumulator, so a per-channel scale needs a shader change"
-        )
-
     inputs, outputs = weight.shape
+    if scale.size == 1:
+        # A per-tensor quantiser. Broadcast rather than special-case it, so the `.maml` layout is
+        # the same either way and the shader has one path.
+        scale = np.repeat(scale, outputs)
+    if scale.size != outputs:
+        raise SystemExit(
+            f"{node.output[0]}: a {scale.size}-element scale for {outputs} output columns; "
+            "`conv_int8.comp` reads one per output channel"
+        )
     # `[in, out]` to `[out, in, 1, 1]`.
     kernel = np.ascontiguousarray(weight.T).reshape(outputs, inputs, 1, 1)
     bias = following_bias(node, outputs)
     key = (
-        f"MatMulInteger w={list(kernel.shape)} scale=1 b={[outputs]} "
+        f"MatMulInteger w={list(kernel.shape)} scale={[outputs]} b={[outputs]} "
         f"zp=0 dtype=int8"
     )
     return [kernel, scale.astype(np.float32), bias], key

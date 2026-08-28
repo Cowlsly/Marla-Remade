@@ -132,6 +132,13 @@ pub struct Reference {
     /// The weights blob, decoded once. Decoding per multiply-accumulate would be
     /// exact too, and slow enough to make a whole-net run untestable.
     weights: Vec<f32>,
+    /// The same blob undecoded, for the one op whose weights are not fp16.
+    ///
+    /// [`Kind::ConvInt8`] reads its kernel a byte at a time through what the shader sees as a
+    /// `uint` view of the weights buffer. Keeping the bytes as well as the decoded floats costs a
+    /// third more memory in a test-only interpreter and is what lets an int8 net be checked on the
+    /// host at all — without it the only oracle for 605 MB of quantised weights would be a phone.
+    bytes: Vec<u8>,
 }
 
 impl Reference {
@@ -154,8 +161,11 @@ impl Reference {
             })
             .collect::<Result<Vec<f32>, String>>()?;
 
-        let mut reference =
-            Reference { arena: vec![0.0; plan.arena_elems as usize], weights: decoded };
+        let mut reference = Reference {
+            arena: vec![0.0; plan.arena_elems as usize],
+            weights: decoded,
+            bytes: weights.to_vec(),
+        };
         for (binding, values) in plan.inputs.iter().zip(inputs) {
             if values.len() != binding.shape.len() as usize {
                 return Err(format!(
@@ -200,11 +210,8 @@ impl Reference {
                     Kind::AddBroadcast => self.add_broadcast(push),
                     Kind::Rotary => self.rotary(push),
                     Kind::GatedTanh => self.gated_tanh(push),
-                    // The reference interpreter holds its weights as `f32`, so there is no
-                    // byte view to unpack: an int8 plan can be built and inspected on the
-                    // host but not run. `scripts/ml/onnx_parity.py` checks it on a device.
                     Kind::ConvPoint => self.conv_point(push),
-                    Kind::ConvInt8 => Err("int8 convolution has no host reference".into()),
+                    Kind::ConvInt8 => self.conv_int8(push),
                     Kind::FlipChannels => self.flip_channels(push),
                 },
             };
@@ -306,6 +313,69 @@ impl Reference {
             }
         }
         Ok(())
+    }
+
+    /// [`Reference::conv`] with int8 weights and a per-output-channel scale.
+    ///
+    /// Deliberately a separate function rather than a flag on `conv`: the accumulation is over
+    /// integers scaled once at the end, and the padding is zero rather than edge — `Node::ConvInt8`
+    /// carries no `pad_edge`, so there is nothing to branch on. Keeping them apart means the fp16
+    /// path, which five shipping nets run on, is not touched by anything int8 needs.
+    fn conv_int8(&mut self, p: &Push) -> Result<(), String> {
+        let (in_per_group, out_per_group) = groups(p)?;
+        for oc in 0..p.out_c {
+            let first_in = (oc / out_per_group) * in_per_group;
+            let kernel_at = oc * in_per_group * p.kh * p.kw;
+            // One per output column, unlike the fp16 path's single `act_weight` slot.
+            let scale = self.weight(p.act_weight, oc)?;
+            for oy in 0..p.out_h {
+                for ox in 0..p.out_w {
+                    let mut acc = 0.0f32;
+                    for ic in 0..in_per_group {
+                        let plane = (first_in + ic) * p.in_h * p.in_w;
+                        for ky in 0..p.kh {
+                            let positioned = oy * p.stride_h + ky * p.dil_h;
+                            let iy = match tap(positioned, p.pad_t, p.in_h) {
+                                Some(found) => found,
+                                None => continue,
+                            };
+                            let row = plane + iy * p.in_w;
+                            let tap_at = kernel_at + (ic * p.kh + ky) * p.kw;
+                            for kx in 0..p.kw {
+                                let positioned = ox * p.stride_w + kx * p.dil_w;
+                                let ix = match tap(positioned, p.pad_l, p.in_w) {
+                                    Some(found) => found,
+                                    None => continue,
+                                };
+                                acc += self.load(p.in0, row + ix)?
+                                    * f32::from(self.int8(p.weight, tap_at + kx)?);
+                            }
+                        }
+                    }
+                    let biased = acc * scale + self.weight(p.bias, oc)?;
+                    // PRelu is refused at build time for int8, so the slope is never read.
+                    self.store(p.out, nchw(p, oc, oy, ox), activate(biased, p.act, 0.0))?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Element `index` of the int8 tensor whose **32-bit word** offset is `word`.
+    ///
+    /// The shader reads these through a `uint` alias of the weights buffer and unpacks four bytes
+    /// at a time, because a byte view would need `VK_KHR_8bit_storage` on top of the fp16
+    /// extension this runtime already requires. Here the same address arithmetic is done on the
+    /// undecoded blob, so the two agree by construction rather than by coincidence.
+    fn int8(&self, word: u32, index: u32) -> Result<i8, String> {
+        let at = (word as usize)
+            .checked_mul(4)
+            .and_then(|base| base.checked_add(index as usize))
+            .ok_or("an int8 weight offset overflowed")?;
+        self.bytes
+            .get(at)
+            .map(|&byte| byte as i8)
+            .ok_or_else(|| format!("int8 weight byte {at} of {}", self.bytes.len()))
     }
 
     /// The PReLU slope for output channel `c`, or zero when the activation is not PReLU.
@@ -1122,6 +1192,60 @@ mod tests {
         let last = record(&mut builder, first);
         let plan = builder.finish(&[last]).expect("the fixture plan builds");
         run(&plan, given.data(), input).expect("the fixture plan runs")
+    }
+
+    #[test]
+    fn an_int8_convolution_dequantises_per_output_channel() {
+        // Two output channels over three input channels, 1x1 — the shape every SMaLL-100 linear
+        // reduces to. The two channels get *different* scales, which is the whole point: a
+        // per-tensor scale would give channel 1 four times its correct magnitude here and still
+        // produce a plausible-looking tensor of the right shape.
+        //
+        // Values chosen to be exact in fp16 so the expectation can be written out longhand and any
+        // disagreement is arithmetic rather than rounding.
+        let kernel: Vec<i8> = vec![1, 2, 3, 4, -5, 6];
+        let scales = vec![0.25f32, 1.0];
+        let biases = vec![1.0f32, -1.0];
+        let blob = crate::weights::write_mixed(
+            crate::weights::graph::SUPERTONIC_VE,
+            &[
+                crate::weights::Fixture::I8(vec![2, 3, 1, 1], kernel.clone()),
+                crate::weights::Fixture::F16(vec![2], scales.clone()),
+                crate::weights::Fixture::F16(vec![2], biases.clone()),
+            ],
+        );
+        let weights = crate::weights::Weights::parse(&blob, crate::weights::graph::SUPERTONIC_VE)
+            .expect("the fixture blob parses");
+
+        // Three channels, two positions: [c0: 1, 2] [c1: 4, 8] [c2: 0.5, -1]
+        let input = vec![1.0f32, 2.0, 4.0, 8.0, 0.5, -1.0];
+        let mut builder = Builder::new(&weights);
+        let first = builder.input(Shape::new(3, 1, 2));
+        let last = builder.conv_int8(
+            first,
+            0,
+            2,
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            (0, 0, 0, 0),
+            1,
+            Act::None,
+        );
+        let plan = builder.finish(&[last]).expect("the int8 fixture plan builds");
+        let got = run(&plan, weights.data(), &input).expect("the int8 fixture plan runs");
+
+        let mut want = Vec::new();
+        for oc in 0..2usize {
+            for x in 0..2usize {
+                let mut acc = 0.0f32;
+                for ic in 0..3usize {
+                    acc += f32::from(kernel[oc * 3 + ic]) * input[ic * 2 + x];
+                }
+                want.push(acc * scales[oc] + biases[oc]);
+            }
+        }
+        assert_eq!(got, want, "int8 conv: got {got:?}, want {want:?}");
     }
 
     /// [`one`], for the ops whose two operands are different shapes.

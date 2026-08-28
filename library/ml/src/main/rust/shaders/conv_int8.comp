@@ -1,7 +1,7 @@
 #version 450
-//! A convolution whose weights are int8, dequantised by one per-tensor scale.
+//! A convolution whose weights are int8, dequantised by one scale per output channel.
 //!
-//! `out[o][y][x] = act(scale * sum(int8_w * in) + bias)`
+//! `out[o][y][x] = act(scale[o] * sum(int8_w * in) + bias[o])`
 //!
 //! # Why int8 at all
 //!
@@ -18,19 +18,21 @@
 //! fp16 in the arena, so the only error introduced is the weights'. It costs nothing, because
 //! the weights are what take the space.
 //!
-//! Read from the export rather than assumed: the weight zero point is a scalar **0**, so the
-//! quantisation is symmetric and a value is just `int8 * scale`.
+//! Read from the export rather than assumed: the weight zero points are per-column vectors and
+//! every entry of every one of them is **0**, so the quantisation is symmetric and a value is
+//! just `int8 * scale`.
 //!
 //! # The scale multiplies once
 //!
-//! Because the scale is one number for the whole tensor, it applies to the finished
-//! accumulator rather than to every tap — so the inner loop is an integer-to-float convert and
-//! a multiply-add, exactly as many operations as the fp16 version. A per-channel scale would
-//! also work this way; a per-tap one would not, which is why the rank was checked.
+//! One scale per output column, which is what onnxruntime's dynamic quantiser emits — not the
+//! per-tensor scalar this was first written for. Either way it applies to the finished
+//! accumulator rather than to every tap, so the inner loop is an integer-to-float convert and a
+//! multiply-add, exactly as many operations as the fp16 version. A per-tap scale would not work
+//! this way, which is why the rank is checked.
 //!
-//! `p.act_weight` holds the scale's own offset in the weights buffer, as an fp16 element index.
-//! `p.weight` holds the int8 tensor's offset as a **32-bit word** index, because that is the
-//! view it is unpacked through.
+//! `p.act_weight` holds the scale tensor's offset in the weights buffer, as an fp16 element index;
+//! output channel `oc` reads its own entry. `p.weight` holds the int8 tensor's offset as a
+//! **32-bit word** index, because that is the view it is unpacked through.
 
 #include "common.glsl"
 
@@ -67,7 +69,7 @@ void main() {
         }
     }
 
-    float scale = float(weights[p.act_weight]);
+    float scale = float(weights[p.act_weight + oc]);
     float biased = total * scale + float(weights[p.bias + oc]);
     arena[p.out_at + index] = float16_t(activate(biased, p.act, oc));
 }

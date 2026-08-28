@@ -869,12 +869,25 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// [`Builder::conv`] with int8 weights and a per-tensor dequantisation scale.
+    /// [`Builder::conv`] with int8 weights and a per-output-channel dequantisation scale.
     ///
-    /// Three tensors rather than two: the int8 kernel at `weight_index`, a one-element fp16
-    /// scale after it, and the fp16 bias after that. The scale is its own tensor because a
-    /// `.maml` table entry is already full at 32 bytes, and a companion tensor needs no
-    /// format version bump.
+    /// Three tensors rather than two: the int8 kernel at `weight_index`, an `[m]` fp16 scale
+    /// after it, and the fp16 bias after that. The scale is its own tensor because a `.maml`
+    /// table entry is already full at 32 bytes, and a companion tensor needs no format version
+    /// bump.
+    ///
+    /// # Per channel, not per tensor
+    ///
+    /// Read off `encoder_model_quantized.onnx` rather than assumed, and the opposite of what this
+    /// was first written for: onnxruntime's dynamic quantiser emits **one scale per output
+    /// column**, so a `[1024, 4096]` `MatMul` carries a `[4096]` scale. All 72 weight
+    /// `MatMulInteger`s in the SMaLL-100 encoder are that shape. The zero points are per-column
+    /// vectors too, but every one of them is zero, so the quantisation is symmetric and a value
+    /// is still just `int8 * scale`.
+    ///
+    /// It costs nothing over a scalar: the scale multiplies the finished accumulator either way,
+    /// so the inner loop is the same integer-to-float convert and multiply-add the fp16 path does.
+    /// A per-*tap* scale would not work this way, which is why the rank is checked.
     ///
     /// `Act::PRelu` is refused: it would need a second weights offset and the push block has
     /// one spare, which the scale is using.
@@ -921,7 +934,7 @@ impl<'a> Builder<'a> {
                 0
             }
         };
-        let scale = self.weight(weight_index + 1, &[1]);
+        let scale = self.weight(weight_index + 1, &[m]);
         let bias = self.weight(weight_index + 2, &[m]);
 
         let (pad_t, pad_l, pad_b, pad_r) = pads;

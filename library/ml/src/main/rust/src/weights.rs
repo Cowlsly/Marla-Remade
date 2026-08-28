@@ -321,6 +321,83 @@ impl Weights {
     }
 }
 
+/// One tensor for [`write_mixed`]: fp16 values, or the int8 payload of a quantised kernel.
+#[cfg(test)]
+pub(crate) enum Fixture {
+    /// fp16, the format every tensor but a quantised kernel is in.
+    F16(Vec<u32>, Vec<f32>),
+    /// int8, addressed by the shaders as a 32-bit word offset. See [`Tensor::word_offset`].
+    I8(Vec<u32>, Vec<i8>),
+}
+
+/// Build a `.maml` blob from a mix of fp16 and int8 tensors, for the fixtures.
+///
+/// The `write` helper in this module's tests emits fp16 only, and an int8 convolution needs a table
+/// where one tensor is int8 and the two after it — its per-channel scale and its bias — are not.
+/// Shared rather than hand-rolled per test because the 16-byte alignment and the resulting word
+/// offsets are precisely what a second copy would get subtly wrong, and a wrong offset here reads a
+/// neighbouring tensor at the right shape.
+#[cfg(test)]
+pub(crate) fn write_mixed(graph_id: u32, tensors: &[Fixture]) -> Vec<u8> {
+    fn f32_to_f16(v: f32) -> u16 {
+        let bits = v.to_bits();
+        let sign = ((bits >> 16) & 0x8000) as u16;
+        let exponent = ((bits >> 23) & 0xFF) as i32 - 127 + 15;
+        let mantissa = bits & 0x007F_FFFF;
+        if exponent >= 0x1F {
+            return sign | 0x7C00;
+        }
+        if exponent <= 0 {
+            return sign;
+        }
+        sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+    }
+
+    let mut table = Vec::new();
+    let mut data: Vec<u8> = Vec::new();
+    for tensor in tensors {
+        let (dims, dtype, len, bytes) = match tensor {
+            Fixture::F16(dims, values) => (
+                dims,
+                DTYPE_F16,
+                values.len() as u32,
+                values.iter().flat_map(|&v| f32_to_f16(v).to_le_bytes()).collect::<Vec<u8>>(),
+            ),
+            Fixture::I8(dims, values) => (
+                dims,
+                DTYPE_I8,
+                values.len() as u32,
+                values.iter().map(|&v| v as u8).collect::<Vec<u8>>(),
+            ),
+        };
+        while !data.len().is_multiple_of(ALIGNMENT as usize) {
+            data.push(0);
+        }
+        let offset = data.len() as u32;
+        data.extend_from_slice(&bytes);
+        table.extend_from_slice(&(dims.len() as u32).to_le_bytes());
+        for slot in 0..4 {
+            table.extend_from_slice(&dims.get(slot).copied().unwrap_or(0).to_le_bytes());
+        }
+        table.extend_from_slice(&dtype.to_le_bytes());
+        table.extend_from_slice(&offset.to_le_bytes());
+        table.extend_from_slice(&len.to_le_bytes());
+    }
+
+    let mut blob = Vec::new();
+    blob.extend_from_slice(&MAGIC);
+    blob.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+    blob.extend_from_slice(&graph_id.to_le_bytes());
+    blob.extend_from_slice(&(tensors.len() as u32).to_le_bytes());
+    blob.extend_from_slice(&[0u8; 32]);
+    blob.extend_from_slice(&((HEADER_BYTES + table.len()) as u32).to_le_bytes());
+    blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    blob.extend_from_slice(&[0u8; 8]);
+    blob.extend_from_slice(&table);
+    blob.extend_from_slice(&data);
+    blob
+}
+
 fn u32(bytes: &[u8], at: usize) -> u32 {
     u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
 }

@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 use crate::nets::reference::{run_multi, Given, Invented};
 use crate::nets::{embed_lanes, Act, Builder, Id, Plan, Shape, WeightSource};
 use crate::preprocess::RESCALE_ONLY;
-use crate::weights::Weights;
+use crate::weights::{graph, write_mixed, Fixture, Weights};
 
 use super::context::{self, Context};
 use super::run::Net;
@@ -288,6 +288,51 @@ fn a_two_lane_embedding_agrees_with_the_reference() {
         &[(vec![rows, channels], table)],
         |b, ids| b.embed(ids[0], 0, rows, channels),
     );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn an_int8_convolution_agrees_with_the_reference() {
+    // The only op whose weights are not fp16, so the only one where the shader and the interpreter
+    // address the weights buffer differently: 32-bit words unpacked to bytes on one side, a byte
+    // index into the undecoded blob on the other. Four output channels with four *different*
+    // scales, because a shader that read `scale[0]` for every channel — which is what this op did
+    // before the export turned out to be quantised per column — still returns the right shape and
+    // three wrong channels.
+    let out_channels = 4u32;
+    let in_channels = 3u32;
+    let width = 5u32;
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 7) % 61 - 30) as i8)
+        .collect();
+    let scales: Vec<f32> = vec![0.25, 0.5, 0.0625, 1.0];
+    let biases: Vec<f32> = vec![0.5, -0.25, 1.0, 0.0];
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+    let input = spread((in_channels * width) as usize, 0.3);
+
+    let mut builder = Builder::new(&weights);
+    let first = builder.input(Shape::new(in_channels, 1, width));
+    let last = builder.conv_int8(
+        first,
+        0,
+        out_channels,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 0, 0, 0),
+        1,
+        Act::Relu,
+    );
+    let plan = builder.finish(&[last]).expect("the int8 fixture plan builds");
+    compare("an int8 convolution", plan, weights.data().to_vec(), &[&input]);
 }
 
 #[test]
