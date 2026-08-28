@@ -45,9 +45,22 @@ Unlike the vocoder this graph is **not** entirely edge-padded — twelve of its 
 the relative-attention skew and are `constant`. What matters is that every pad feeding a
 *convolution* replicates, which is checked separately.
 
+# The text encoder
+
+`--graph supertonic_ttl` is the same shape again, four times wider, with two additions:
+
+    block gamma [1, 256, 1]     -> folds into that block's `pwconv2`, as above
+    tanh(W_key . style_key + b) -> folded to one `[256, 50]` tensor per style attention
+    W_query                     -> scaled by sqrt(128)/16, since the export's own scale is
+                                   sqrt(256) and `Builder::attn_scores` uses sqrt(head_dim)
+
+Every projection in its style path is a `MatMul` whose weight is `[in, out]`, so all eight are
+**transposed** here. They are all 256x256, where a missed transpose is invisible in the shape.
+
 Usage:
     ./scripts/ml/supertonic_fold.py vocoder.onnx --graph supertonic_voc -o vocoder.maml
     ./scripts/ml/supertonic_fold.py duration_predictor.onnx --graph supertonic_dp -o dp.maml
+    ./scripts/ml/supertonic_fold.py text_encoder.onnx --graph supertonic_ttl -o text.maml
 """
 
 import argparse
@@ -73,6 +86,17 @@ DP_BLOCKS = 6
 DP_ATTN_LAYERS = 2
 DP_HIDDEN = 128
 DP_PREFIX = "tts.dp.sentence_encoder"
+
+# The text encoder's, likewise.
+TE_CHANNELS = 256
+TE_INNER = 1024
+TE_BLOCKS = 6
+TE_ATTN_LAYERS = 4
+TE_STYLE_TOKENS = 50
+TE_STYLE_HEADS = 2
+TE_PREFIX = "tts.ttl.text_encoder"
+TE_STYLE_PREFIX = "tts.ttl.speech_prompted_text_encoder"
+TE_STYLE_KEY = "tts.ttl.style_encoder.style_token_layer.style_key"
 
 
 def constants(graph):
@@ -288,44 +312,51 @@ def collect(graph):
     return layers, tensors
 
 
-def collect_duration(graph):
-    """The duration predictor's layers and tensors, folded, in the order the Rust reads them.
+class Table:
+    """The `.maml` layer table under construction, for a graph collected by parameter name.
 
-    Driven by the export's parameter *names* rather than by graph order. The vocoder is a plain
-    stack where walking the nodes lands each tensor in the right slot; this graph interleaves two
-    relative-position tables, four masks and a skew per attention layer, and naming each tensor is
-    both shorter and checkable against `nets::supertonic_duration` line by line.
+    The vocoder is a plain stack where walking the ONNX nodes lands each tensor in the right
+    slot. The duration predictor and the text encoder are not: each attention layer interleaves
+    two relative-position tables, several mask multiplies and a twenty-node skew, so naming each
+    tensor is both shorter and checkable against the Rust line by line.
     """
-    held = constants(graph)
-    if not convolutions_edge_padded(graph):
-        raise SystemExit(
-            "this export does not pad every convolution with mode=edge, so the layer-scale "
-            "fold below is not valid; see the module docstring"
+
+    def __init__(self, held):
+        self.held = held
+        self.layers = []
+        self.tensors = []
+
+    def at(self, name):
+        if name not in self.held:
+            raise SystemExit(f"{name} is not in this export")
+        return np.asarray(self.held[name], dtype=np.float64)
+
+    def add(self, op, name, key, *values):
+        first = len(self.tensors)
+        for value in values:
+            self.tensors.append(np.ascontiguousarray(value, dtype=np.float32))
+        self.layers.append(
+            maml_convert.Layer(len(self.layers), op, name, key, first, len(values))
         )
 
-    def held_at(name):
-        if name not in held:
-            raise SystemExit(f"{name} is not in this export")
-        return np.asarray(held[name], dtype=np.float64)
+    def conv(self, name, out_channels, fold_scale=None, synthesise_bias=False,
+             pads=(0, 0, 0, 0), kernel=(1, 1), group=1, transpose=False, scale=None):
+        """One convolution's pair, lifted to the rank-4 `[out, in, 1, k]` the Rust indexes.
 
-    layers, tensors = [], []
-
-    def add(op, name, key, *values):
-        first = len(tensors)
-        for value in values:
-            tensors.append(np.ascontiguousarray(value, dtype=np.float32))
-        layers.append(maml_convert.Layer(len(layers), op, name, key, first, len(values)))
-
-    def conv(name, out_channels, fold_scale=None, synthesise_bias=False, pads=(0, 0, 0, 0),
-             kernel=(1, 1), group=1):
-        """One convolution's pair, lifted to the rank-4 `[out, in, 1, k]` the Rust indexes."""
-        weight = held_at(f"{name}.weight")
+        `transpose` is for the style path's `MatMul`s, whose weight is `[in, out]` \u2014 all eight of
+        them are 256x256, where a missed transpose is invisible in the shape.
+        """
+        weight = self.at(f"{name}.weight")
         if synthesise_bias:
             bias = np.zeros(out_channels, dtype=np.float64)
         else:
-            bias = held_at(f"{name}.bias")
+            bias = self.at(f"{name}.bias")
+        if transpose:
+            weight = weight.T
         if fold_scale is not None:
             weight, bias = fold_output(weight, bias, fold_scale, 0.0)
+        if scale is not None:
+            weight, bias = weight * scale, bias * scale
         if weight.ndim == 2:
             # A `Gemm`'s `[out, in]`, at `transB=1`, is already the convolution's layout.
             weight = weight.reshape(weight.shape[0], weight.shape[1], 1, 1)
@@ -333,7 +364,9 @@ def collect_duration(graph):
             weight = weight.reshape(weight.shape[0], weight.shape[1], 1, weight.shape[2])
         note = " b0=synthesised" if synthesise_bias else ""
         note += " folded=layer_scale" if fold_scale is not None else ""
-        add(
+        note += " transposed" if transpose else ""
+        note += f" scaled={scale:.6f}" if scale is not None else ""
+        self.add(
             "Conv",
             name,
             f"Conv w={list(weight.shape)} b={list(bias.shape)} k={list(kernel)}"
@@ -342,10 +375,10 @@ def collect_duration(graph):
             bias,
         )
 
-    def layer_norm(name):
-        gamma = held_at(f"{name}.weight")
-        beta = held_at(f"{name}.bias")
-        add(
+    def layer_norm(self, name):
+        gamma = self.at(f"{name}.weight")
+        beta = self.at(f"{name}.bias")
+        self.add(
             "LayerNorm",
             name,
             f"LayerNorm g={list(gamma.shape)} b={list(beta.shape)}",
@@ -353,64 +386,187 @@ def collect_duration(graph):
             beta,
         )
 
+    def convnext(self, at, channels, inner, dilation):
+        """One ConvNeXt block: depthwise, norm, widening 1x1, narrowing 1x1 with the gamma.
+
+        Symmetric padding, `2 * dilation` each side. The vocoder's is causal instead, and that
+        difference cost real debugging time once already.
+        """
+        each = dilation * 4 // 2
+        self.conv(
+            f"{at}.dwconv",
+            channels,
+            pads=(0, each, 0, each),
+            kernel=(1, 5),
+            group=channels,
+        )
+        self.layer_norm(f"{at}.norm.norm")
+        self.conv(f"{at}.pwconv1", inner)
+        # The block's gamma rides on `pwconv2`, which is a 1x1 and so has no border.
+        self.conv(f"{at}.pwconv2", channels, fold_scale=self.at(f"{at}.gamma").reshape(-1))
+
+    def relative_attention(self, at, layer, channels, inner, head_dim):
+        """One post-norm relative-attention layer, in the order the export declares it."""
+        attn = f"{at}.attn_layers.{layer}"
+        for projection in ("conv_q", "conv_k", "conv_v"):
+            self.conv(f"{attn}.{projection}", channels)
+        # `[1, 9, head_dim]` in the export; the Rust reads `[offsets, head_dim]`.
+        for table_name in ("emb_rel_k", "emb_rel_v"):
+            relative = self.at(f"{attn}.{table_name}").reshape(9, -1)
+            if relative.shape[1] != head_dim:
+                raise SystemExit(f"{attn}.{table_name} is {list(relative.shape)}, not [9, {head_dim}]")
+            self.add("RelPos", f"{attn}.{table_name}", f"RelPos t={list(relative.shape)}", relative)
+        self.conv(f"{attn}.conv_o", channels)
+        self.layer_norm(f"{at}.norm_layers_1.{layer}.norm")
+        self.conv(f"{at}.ffn_layers.{layer}.conv_1", inner)
+        self.conv(f"{at}.ffn_layers.{layer}.conv_2", channels)
+        self.layer_norm(f"{at}.norm_layers_2.{layer}.norm")
+
+
+def collect_duration(graph):
+    """The duration predictor's layers and tensors, folded, in the order the Rust reads them."""
+    held = constants(graph)
+    if not convolutions_edge_padded(graph):
+        raise SystemExit(
+            "this export does not pad every convolution with mode=edge, so the layer-scale "
+            "fold below is not valid; see the module docstring"
+        )
+    table = Table(held)
+
     # The embedding table, with `sentence_token` as its last row. The token is prepended to the
     # sequence in the export and read back out of position 0 at the end; making it a row of the
     # table is how a plan with no sequence-axis concat expresses that.
-    table = held_at(f"{DP_PREFIX}.text_embedder.char_embedder.weight")
-    token = held_at(f"{DP_PREFIX}.sentence_token").reshape(1, -1)
-    if token.shape[1] != table.shape[1]:
-        raise SystemExit(f"a {list(token.shape)} sentence token for a {list(table.shape)} table")
-    table = np.concatenate([table, token], axis=0)
-    add("Embed", "char_embedder+sentence_token", f"Embed t={list(table.shape)} token=last", table)
+    rows = table.at(f"{DP_PREFIX}.text_embedder.char_embedder.weight")
+    token = table.at(f"{DP_PREFIX}.sentence_token").reshape(1, -1)
+    if token.shape[1] != rows.shape[1]:
+        raise SystemExit(f"a {list(token.shape)} sentence token for a {list(rows.shape)} table")
+    rows = np.concatenate([rows, token], axis=0)
+    table.add(
+        "Embed", "char_embedder+sentence_token", f"Embed t={list(rows.shape)} token=last", rows
+    )
 
     for block in range(DP_BLOCKS):
-        at = f"{DP_PREFIX}.convnext.convnext.{block}"
-        # Symmetric, not causal: `[0, 0, 2, 0, 0, 2]` around a 5-tap at dilation 1. The vocoder
-        # is the other way round, which is the one thing here worth stating twice.
-        conv(f"{at}.dwconv", DP_CHANNELS, pads=(0, 2, 0, 2), kernel=(1, 5), group=DP_CHANNELS)
-        layer_norm(f"{at}.norm.norm")
-        conv(f"{at}.pwconv1", DP_INNER)
-        # The block's `[1, 64, 1]` gamma rides on `pwconv2`, which is a 1x1 and so has no border.
-        conv(f"{at}.pwconv2", DP_CHANNELS, fold_scale=held_at(f"{at}.gamma").reshape(-1))
-
+        table.convnext(f"{DP_PREFIX}.convnext.convnext.{block}", DP_CHANNELS, DP_INNER, 1)
     for layer in range(DP_ATTN_LAYERS):
-        at = f"{DP_PREFIX}.attn_encoder"
-        attn = f"{at}.attn_layers.{layer}"
-        for projection in ("conv_q", "conv_k", "conv_v"):
-            conv(f"{attn}.{projection}", DP_CHANNELS)
-        # `[1, 9, 32]` in the export; the Rust reads `[offsets, head_dim]`.
-        for table_name in ("emb_rel_k", "emb_rel_v"):
-            relative = held_at(f"{attn}.{table_name}").reshape(9, -1)
-            add(
-                "RelPos",
-                f"{attn}.{table_name}",
-                f"RelPos t={list(relative.shape)}",
-                relative,
-            )
-        conv(f"{attn}.conv_o", DP_CHANNELS)
-        layer_norm(f"{at}.norm_layers_1.{layer}.norm")
-        conv(f"{at}.ffn_layers.{layer}.conv_1", DP_INNER)
-        conv(f"{at}.ffn_layers.{layer}.conv_2", DP_CHANNELS)
-        layer_norm(f"{at}.norm_layers_2.{layer}.norm")
+        table.relative_attention(f"{DP_PREFIX}.attn_encoder", layer, DP_CHANNELS, DP_INNER, 32)
 
     # `proj_out` has no bias in the export; the Rust reads a pair for every convolution.
-    conv(f"{DP_PREFIX}.proj_out.net", DP_CHANNELS, synthesise_bias=True)
-    conv("tts.dp.predictor.layers.0", DP_HIDDEN)
+    table.conv(f"{DP_PREFIX}.proj_out.net", DP_CHANNELS, synthesise_bias=True)
+    table.conv("tts.dp.predictor.layers.0", DP_HIDDEN)
 
     prelu = next(n for n in graph.node if n.op_type == "PRelu")
     slope = np.asarray(held[prelu.input[1]], dtype=np.float64).reshape(-1)
     if slope.size != 1:
         raise SystemExit(f"{prelu.name}: a {slope.size}-element slope, expected one")
     widened = np.full((DP_HIDDEN, 1, 1), float(slope[0]), dtype=np.float32)
-    add(
+    table.add(
         "PRelu",
         prelu.name,
         f"PRelu s={list(widened.shape)} shared={float(slope[0]):.6f}",
         widened,
     )
 
-    conv("tts.dp.predictor.layers.1", 1)
-    return layers, tensors
+    table.conv("tts.dp.predictor.layers.1", 1)
+    return table.layers, table.tensors
+
+
+def style_attention(table, graph, which):
+    """One of the text encoder's two cross-attentions over the 50 style tokens.
+
+    Four entries: `W_query` (scaled), the folded constant keys, `W_value` and `out_fc`.
+    """
+    at = f"{TE_STYLE_PREFIX}.attention{which}"
+    linears = matmul_weights(
+        graph, table.held, f"/speech_prompted_text_encoder/attention{which}/"
+    )
+    head_dim = TE_CHANNELS // TE_STYLE_HEADS
+    # The export divides the scores by 16 = sqrt(256), not by sqrt(head_dim) = sqrt(128), so
+    # `Builder::attn_scores`'s own scale is sqrt(2) too large. Folding the difference into the
+    # query projection is exact and costs no op.
+    scale = np.sqrt(head_dim) / 16.0
+    square = [TE_CHANNELS, TE_CHANNELS, 1, 1]
+    table.add(
+        "Conv",
+        f"{at}.W_query",
+        f"Conv w={square} b={[TE_CHANNELS]} k={[1, 1]} p={[0, 0, 0, 0]} g=1 pad=edge"
+        f" transposed scaled={scale:.6f}",
+        (linears["W_query"].T * scale).reshape(*square),
+        table.at(f"{at}.W_query.linear.bias") * scale,
+    )
+
+    # `tanh(W_key . style_key + b_key)` is entirely constant, so it folds to one tensor. Stored
+    # channel-major as `[256, 1, 50]`, which is what `Kind::Constant` loads and
+    # `Kind::AttnScores` contracts.
+    style_key = table.at(TE_STYLE_KEY).reshape(-1, TE_CHANNELS)
+    keys = np.tanh(style_key @ linears["W_key"] + table.at(f"{at}.W_key.linear.bias"))
+    if keys.shape != (TE_STYLE_TOKENS, TE_CHANNELS):
+        raise SystemExit(f"{at}: folded keys are {list(keys.shape)}")
+    keys = np.ascontiguousarray(keys.T).reshape(TE_CHANNELS, 1, TE_STYLE_TOKENS)
+    table.add(
+        "Constant",
+        f"{at}.keys",
+        f"Constant t={list(keys.shape)} folded=tanh(W_key.style_key+b_key)",
+        keys,
+    )
+
+    for name in ("W_value", "out_fc"):
+        table.add(
+            "Conv",
+            f"{at}.{name}",
+            f"Conv w={square} b={[TE_CHANNELS]} k={[1, 1]} p={[0, 0, 0, 0]} g=1 pad=edge"
+            " transposed",
+            linears[name].T.reshape(*square),
+            table.at(f"{at}.{name}.linear.bias"),
+        )
+
+
+def matmul_weights(graph, held, prefix):
+    """The four `MatMul` weights under the node-name `prefix`, by the linear they belong to.
+
+    They are `onnx::MatMul_3680` and friends rather than named parameters, so each is found
+    through the node that consumes it.
+    """
+    wanted = ("W_query", "W_key", "W_value", "out_fc")
+    found = {}
+    for node in graph.node:
+        if node.op_type != "MatMul" or not node.name.startswith(prefix):
+            continue
+        for name in wanted:
+            if f"/{name}/" not in node.name:
+                continue
+            weights = [i for i in node.input if i in held]
+            if len(weights) != 1:
+                raise SystemExit(f"{node.name} has {len(weights)} held inputs, expected one")
+            found[name] = np.asarray(held[weights[0]], dtype=np.float64)
+    missing = set(wanted) - set(found)
+    if missing:
+        raise SystemExit(f"{prefix}: no MatMul found for {sorted(missing)}")
+    return found
+
+
+def collect_text(graph):
+    """The text encoder's layers and tensors, folded, in the order the Rust reads them."""
+    held = constants(graph)
+    if not convolutions_edge_padded(graph):
+        raise SystemExit(
+            "this export does not pad every convolution with mode=edge, so the layer-scale "
+            "fold below is not valid; see the module docstring"
+        )
+    table = Table(held)
+
+    rows = table.at(f"{TE_PREFIX}.text_embedder.char_embedder.weight")
+    table.add("Embed", "char_embedder", f"Embed t={list(rows.shape)}", rows)
+
+    # 1, 1, 2, 2, 4, 4 - pairs, and the pad follows the dilation.
+    for block, dilation in enumerate([1, 1, 2, 2, 4, 4]):
+        table.convnext(f"{TE_PREFIX}.convnext.convnext.{block}", TE_CHANNELS, TE_INNER, dilation)
+    for layer in range(TE_ATTN_LAYERS):
+        table.relative_attention(f"{TE_PREFIX}.attn_encoder", layer, TE_CHANNELS, TE_INNER, 64)
+
+    for which in (1, 2):
+        style_attention(table, graph, which)
+    table.layer_norm(f"{TE_STYLE_PREFIX}.norm.norm")
+    return table.layers, table.tensors
 
 
 def main():
@@ -427,6 +583,8 @@ def main():
     model = onnx.load(args.onnx)
     if args.graph == "supertonic_dp":
         layers, tensors = collect_duration(model.graph)
+    elif args.graph == "supertonic_ttl":
+        layers, tensors = collect_text(model.graph)
     else:
         layers, tensors = collect(model.graph)
 

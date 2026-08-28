@@ -1059,8 +1059,8 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_vocoder,
-        u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
+        embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_text,
+        supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -2552,6 +2552,27 @@ mod tests {
             let samples = supertonic_vocoder::interleave(&channelled);
             write(&dir.join("reference.f32"), &samples);
             println!("supertonic_voc at {width} frames: wrote {} values", samples.len());
+            return;
+        }
+        if graph == "supertonic_ttl" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights =
+                crate::weights::Weights::parse(&bytes, crate::weights::graph::SUPERTONIC_TTL)
+                    .expect("the text encoder asset parses");
+            let plan = supertonic_text::build(&weights, width).expect("the text encoder builds");
+            let raw = std::fs::read(dir.join("style.f32")).expect("the style");
+            let style: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let ids: Vec<u32> = input.iter().map(|&v| v as u32).collect();
+            let lanes = super::super::embed_lanes(&ids);
+            let outputs = run_multi(&plan, weights.data(), &[&lanes, &style])
+                .expect("the text encoder runs");
+            let emb = outputs.first().expect("the conditioning output");
+            write(&dir.join("reference.f32"), emb);
+            println!("supertonic_ttl at {width} chars: wrote {} values", emb.len());
             return;
         }
         if graph == "supertonic_dp" {

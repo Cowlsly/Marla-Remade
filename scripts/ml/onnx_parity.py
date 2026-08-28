@@ -63,6 +63,8 @@ PROBE = {
     # scalar, and a correlation over one value is not a number - this is where all but 25k of
     # the parameters are, and it is `[64, T + 1]` so a structural error has nowhere to hide.
     "supertonic_dp": "/sentence_encoder/Add_output_0",
+    # The graph's own output, which is the whole conditioning sequence.
+    "supertonic_ttl": None,
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -212,18 +214,23 @@ def main():
             "scales": np.array([0.667, 1.0, 0.8], dtype=np.float32),
         }
         x = ids.astype(np.float32)
-    elif args.graph == "supertonic_dp":
+    elif args.graph in ("supertonic_dp", "supertonic_ttl"):
         # Character ids and a voice's style. The ids go past 2048, where fp16 stops holding
         # every integer, so the runtime reads them as two lanes - which is the whole reason
-        # `embed_lanes` exists. The `[1, 8, 16]` style flattens row-major to 128.
+        # `embed_lanes` exists.
         rng = np.random.default_rng(20240827)
         ids = rng.integers(0, 8322, size=(1, args.width), dtype=np.int64)
-        style = rng.standard_normal((1, 8, 16)).astype(np.float32)
-        feed = {
-            "text_ids": ids,
-            "style_dp": style,
-            "text_mask": np.ones((1, 1, args.width), dtype=np.float32),
-        }
+        if args.graph == "supertonic_dp":
+            # `[1, 8, 16]`, which flattens row-major to 128.
+            style = rng.standard_normal((1, 8, 16)).astype(np.float32)
+            feed = {"text_ids": ids, "style_dp": style}
+        else:
+            # `[1, 50, 256]` position-major, which the runtime reads transposed. Writing the
+            # transpose here is what the voice bundle will hold.
+            style = rng.standard_normal((1, 50, 256)).astype(np.float32)
+            feed = {"text_ids": ids, "style_ttl": style}
+            style = np.ascontiguousarray(style.reshape(50, 256).T)
+        feed["text_mask"] = np.ones((1, 1, args.width), dtype=np.float32)
         x = ids.astype(np.float32)
         style.tofile(os.path.join(work, "style.f32"))
     else:

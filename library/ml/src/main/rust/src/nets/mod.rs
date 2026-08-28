@@ -37,6 +37,7 @@ pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
 pub mod supertonic_duration;
+pub mod supertonic_text;
 pub mod supertonic_vocoder;
 pub mod u2netp;
 pub mod vits_dec;

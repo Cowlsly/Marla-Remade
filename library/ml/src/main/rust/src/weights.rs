@@ -77,6 +77,8 @@ pub mod graph {
     pub const SUPERTONIC_VOC: u32 = 11;
     /// Supertonic 3's duration predictor. See [`crate::nets::supertonic_duration`].
     pub const SUPERTONIC_DP: u32 = 12;
+    /// Supertonic 3's text encoder. See [`crate::nets::supertonic_text`].
+    pub const SUPERTONIC_TTL: u32 = 13;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
