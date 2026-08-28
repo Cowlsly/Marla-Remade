@@ -30,25 +30,10 @@ use crate::nets::embed_lanes;
 use crate::nets::supertonic_duration as duration_net;
 use crate::nets::supertonic_sampler as net;
 use crate::preprocess::f16_to_f32;
-use crate::weights::Weights;
+use crate::weights::Reader;
 
 /// The frequency multiplier the export applies before the sinusoids: `t * 1000 * frequency`.
 const TIME_SCALE: f32 = 1000.0;
-
-/// One tensor of the `.maml` as `f32`, in the file's order.
-fn tensor(weights: &Weights, index: usize, dims: &[u32]) -> Result<Vec<f32>, String> {
-    let found = weights.shaped(index, dims)?;
-    let bytes = weights.data();
-    let start = found.offset as usize;
-    let end = start + (found.len as usize) * 2;
-    let raw = bytes
-        .get(start..end)
-        .ok_or_else(|| format!("tensor {index} runs past the file"))?;
-    Ok(raw
-        .chunks_exact(2)
-        .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
-        .collect())
-}
 
 /// `out[o] = sum_i weight[o][i] * x[i] + bias[o]`, over a row-major `[out, in]` weight.
 fn linear(weight: &[f32], bias: &[f32], x: &[f32]) -> Vec<f32> {
@@ -75,11 +60,11 @@ fn mish(x: f32) -> f32 {
 ///
 /// The plan reads them as one `[2048, 1, 1]` input and [`crate::nets::Builder::slice_channels`]
 /// hands each main block its own 512.
-pub fn time_shifts(weights: &Weights, current: u32, total: u32) -> Result<Vec<f32>, String> {
+pub fn time_shifts(weights: Reader, current: u32, total: u32) -> Result<Vec<f32>, String> {
     if total == 0 {
         return Err("a sampler step out of no steps".into());
     }
-    let frequencies = tensor(weights, net::HOST_FREQUENCIES, &[net::FREQUENCIES])?;
+    let frequencies = weights.fp16(net::HOST_FREQUENCIES, &[net::FREQUENCIES])?;
     let progress = current as f32 / total as f32;
 
     // Sines then cosines, which is the order of the export's `Concat`.
@@ -90,19 +75,19 @@ pub fn time_shifts(weights: &Weights, current: u32, total: u32) -> Result<Vec<f3
         .chain(angles.iter().map(|a| a.cos()))
         .collect();
 
-    let in_weight = tensor(weights, net::HOST_MLP_IN, &[net::TIME_INNER, net::TIME])?;
-    let in_bias = tensor(weights, net::HOST_MLP_IN + 1, &[net::TIME_INNER])?;
+    let in_weight = weights.fp16(net::HOST_MLP_IN, &[net::TIME_INNER, net::TIME])?;
+    let in_bias = weights.fp16(net::HOST_MLP_IN + 1, &[net::TIME_INNER])?;
     let hidden: Vec<f32> = linear(&in_weight, &in_bias, &embedding).into_iter().map(mish).collect();
 
-    let out_weight = tensor(weights, net::HOST_MLP_OUT, &[net::TIME, net::TIME_INNER])?;
-    let out_bias = tensor(weights, net::HOST_MLP_OUT + 1, &[net::TIME])?;
+    let out_weight = weights.fp16(net::HOST_MLP_OUT, &[net::TIME, net::TIME_INNER])?;
+    let out_bias = weights.fp16(net::HOST_MLP_OUT + 1, &[net::TIME])?;
     let time = linear(&out_weight, &out_bias, &hidden);
 
     let mut shifts = Vec::with_capacity(net::MAIN_BLOCKS * net::CHANNELS as usize);
     for block in 0..net::MAIN_BLOCKS {
         let index = net::HOST_TIME_LINEARS + block * 2;
-        let weight = tensor(weights, index, &[net::CHANNELS, net::TIME])?;
-        let bias = tensor(weights, index + 1, &[net::CHANNELS])?;
+        let weight = weights.fp16(index, &[net::CHANNELS, net::TIME])?;
+        let bias = weights.fp16(index + 1, &[net::CHANNELS])?;
         shifts.extend(linear(&weight, &bias, &time));
     }
     Ok(shifts)
@@ -150,8 +135,8 @@ pub fn unconditional_text(token: &[f32], chars: u32) -> Result<Vec<f32>, String>
 }
 
 /// The unconditional branch's style values, `[256, 1, 50]` and already transposed in the file.
-pub fn unconditional_style(weights: &Weights) -> Result<Vec<f32>, String> {
-    tensor(weights, net::HOST_STYLE_TOKEN, &[net::STYLE, net::STYLE_TOKENS])
+pub fn unconditional_style(weights: Reader) -> Result<Vec<f32>, String> {
+    weights.fp16(net::HOST_STYLE_TOKEN, &[net::STYLE, net::STYLE_TOKENS])
 }
 
 /// The folded style keys for one guidance branch, `[4 * 256, 1, 50]`.
@@ -161,17 +146,13 @@ pub fn unconditional_style(weights: &Weights) -> Result<Vec<f32>, String> {
 /// blocks stacked; the plan slices its own out. The two branches have different `style_key`s,
 /// which is the only structural difference between them — everything else is an input, so one
 /// plan serves both.
-pub fn style_keys(weights: &Weights, conditional: bool) -> Result<Vec<f32>, String> {
+pub fn style_keys(weights: Reader, conditional: bool) -> Result<Vec<f32>, String> {
     let index = if conditional {
         net::HOST_KEYS_CONDITIONAL
     } else {
         net::HOST_KEYS_UNCONDITIONAL
     };
-    tensor(
-        weights,
-        index,
-        &[net::STYLE * net::MAIN_BLOCKS as u32, net::STYLE_TOKENS],
-    )
+    weights.fp16(index, &[net::STYLE * net::MAIN_BLOCKS as u32, net::STYLE_TOKENS])
 }
 
 /// Entries in the codepoint table: every code unit of the Basic Multilingual Plane.
@@ -261,7 +242,7 @@ pub trait Stages {
 
 /// Everything the sampler needs from the weights file that a shader never sees, read once.
 ///
-/// [`synthesise`] takes this rather than a [`Weights`] so the sequencing can be tested against
+/// [`synthesise`] takes this rather than a [`Reader`] so the sequencing can be tested against
 /// stubs, and so the file is walked once per voice instead of once per step.
 pub struct Conditioning {
     /// The rotary `theta`, `[32]`.
@@ -280,15 +261,15 @@ pub struct Conditioning {
 
 impl Conditioning {
     /// Read all of it, for a sampler run of [`STEPS`] steps.
-    pub fn read(weights: &Weights) -> Result<Conditioning, String> {
+    pub fn read(weights: Reader) -> Result<Conditioning, String> {
         Ok(Conditioning {
-            theta: tensor(weights, net::HOST_THETA, &[net::FREQUENCIES])?,
+            theta: weights.fp16(net::HOST_THETA, &[net::FREQUENCIES])?,
             shifts: (0..STEPS)
                 .map(|step| time_shifts(weights, step, STEPS))
                 .collect::<Result<_, _>>()?,
             conditional_keys: style_keys(weights, true)?,
             unconditional_keys: style_keys(weights, false)?,
-            text_token: tensor(weights, net::HOST_TEXT_TOKEN, &[net::TEXT])?,
+            text_token: weights.fp16(net::HOST_TEXT_TOKEN, &[net::TEXT])?,
             unconditional_style: unconditional_style(weights)?,
         })
     }

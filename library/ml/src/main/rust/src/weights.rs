@@ -15,6 +15,10 @@
 //!   in the file and its offset in device memory. That is the reason the format is
 //!   one contiguous blob.
 
+use std::fs::File;
+
+use crate::preprocess::f16_to_f32;
+
 /// `b"MAML"`, little-endian, at offset 0.
 const MAGIC: [u8; 4] = *b"MAML";
 /// Bumped when the layout below changes incompatibly.
@@ -28,9 +32,9 @@ const DTYPE_F16: u32 = 0;
 /// Used only where the weights dominate the download and fp16 would double it: SMaLL-100 is
 /// 330 million parameters, which is 660 MB at fp16 and 330 MB here.
 ///
-/// The quantisation is symmetric — zero point 0 — and the scale is per tensor, both read from
-/// the export rather than assumed. So a value is `int8 * scale`, and because the scale is one
-/// number for the whole tensor it multiplies the *accumulator* once rather than every tap. The
+/// The quantisation is symmetric — zero point 0 — and the scale is per output channel, both read
+/// from the export rather than assumed. So a value is `int8 * scale`, and because the scale
+/// applies to a whole output row it multiplies the *accumulator* once rather than every tap. The
 /// scale lives in its own fp16 tensor because a table entry is already 32 bytes with no room
 /// for it, and a companion tensor needs no format version bump.
 ///
@@ -115,6 +119,135 @@ impl Tensor {
     }
 }
 
+/// A `.maml`'s data section, readable a piece at a time.
+///
+/// [`crate::vulkan::run::Net::new`] needs the data section and nothing else: the [`Plan`] it is
+/// handed already carries every resolved offset. It does *not* need the section in one host
+/// allocation, and for a bundled Supertonic it must not — the current path allocates the model
+/// three times over, as a Java `byte[]`, as the `Vec<u8>` JNI hands Rust, and as [`Weights`]'s own
+/// copy. At the ~105 MB an int8 bundle comes to, that is ~300 MB of transient heap and an
+/// out-of-memory kill on a low-RAM device.
+///
+/// So the upload asks for ranges instead, and two implementations answer: [`Weights`], which has
+/// the bytes already, and [`Streamed`], which leaves them in the APK and reads them positionally.
+/// Neither is faster than the other in device time — both end up doing the same
+/// `cmd_copy_buffer`s — and the second has a peak host cost of one chunk.
+///
+/// [`Plan`]: crate::nets::Plan
+pub trait Blob {
+    /// Bytes in the data section.
+    fn data_len(&self) -> u64;
+
+    /// Fill `into` from `offset` bytes into the data section.
+    ///
+    /// A short read is an error rather than a partial fill: every caller here knows exactly how
+    /// many bytes it wants, and silently uploading a half-read chunk would leave one tensor of a
+    /// net holding whatever the buffer was allocated with.
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String>;
+}
+
+/// A `.maml` header and tensor table, without the data section.
+///
+/// Parsed by [`parse_header`] from the first `HEADER_BYTES + count * 32` bytes of a file, which is
+/// a few kilobytes for even the largest net here. Both [`Weights::parse`] and [`Streamed::open`]
+/// go through it, so there is one implementation of the format's bounds checks rather than two
+/// that have to agree.
+struct Header {
+    graph_id: u32,
+    source_sha256: [u8; 32],
+    tensors: Vec<Tensor>,
+    data_offset: usize,
+    data_len: usize,
+}
+
+/// Parse the header and tensor table out of `bytes`, which must reach at least the table's end.
+///
+/// Every offset and length in the table is bounds-checked here rather than at use, so a truncated
+/// or hand-edited asset fails at load with a message instead of dispatching a shader that reads
+/// past the end of a device buffer — where the symptom would be a driver reset, not an error.
+///
+/// The one thing this does *not* check is that the file ends where the data section does: a
+/// [`Streamed`] read only has the prefix in hand, and an asset inside an APK is followed by the
+/// next asset. [`Weights::parse`] checks it separately, because there the whole file is the slice
+/// and a length mismatch means a truncated download.
+fn parse_header(bytes: &[u8], expect_graph: u32) -> Result<Header, String> {
+    if bytes.len() < HEADER_BYTES {
+        return Err(format!("{} bytes is shorter than a .maml header", bytes.len()));
+    }
+    if bytes[0..4] != MAGIC {
+        return Err("not a .maml file (bad magic)".into());
+    }
+    let version = u32(bytes, 4);
+    if version != FORMAT_VERSION {
+        return Err(format!("format version {version}, expected {FORMAT_VERSION}"));
+    }
+    let graph_id = u32(bytes, 8);
+    if graph_id != expect_graph {
+        return Err(format!(
+            "this file is for graph {graph_id}, but graph {expect_graph} asked for it"
+        ));
+    }
+    let count = u32(bytes, 12) as usize;
+    let mut source_sha256 = [0u8; 32];
+    source_sha256.copy_from_slice(&bytes[16..48]);
+    let data_offset = u32(bytes, 48) as usize;
+    let data_len = u32(bytes, 52) as usize;
+
+    let table_bytes = count
+        .checked_mul(TENSOR_ENTRY_BYTES)
+        .ok_or_else(|| format!("{count} tensors overflows the table size"))?;
+    if data_offset != HEADER_BYTES + table_bytes {
+        return Err(format!(
+            "data starts at {data_offset}, but {count} tensors put it at {}",
+            HEADER_BYTES + table_bytes
+        ));
+    }
+    data_offset
+        .checked_add(data_len)
+        .ok_or_else(|| "data section overflows".to_string())?;
+    if bytes.len() < data_offset {
+        return Err(format!(
+            "{} bytes does not reach the end of a {count}-tensor table at {data_offset}",
+            bytes.len()
+        ));
+    }
+
+    let mut tensors = Vec::with_capacity(count);
+    for i in 0..count {
+        let at = HEADER_BYTES + i * TENSOR_ENTRY_BYTES;
+        let rank = u32(bytes, at);
+        if rank == 0 || rank > 4 {
+            return Err(format!("tensor {i} has rank {rank}"));
+        }
+        let dims =
+            [u32(bytes, at + 4), u32(bytes, at + 8), u32(bytes, at + 12), u32(bytes, at + 16)];
+        let dtype = u32(bytes, at + 20);
+        let stride = match dtype {
+            DTYPE_F16 => 2u64,
+            DTYPE_I8 => 1,
+            other => return Err(format!("tensor {i} has dtype {other}, expected fp16 or int8")),
+        };
+        let offset = u32(bytes, at + 24);
+        let len = u32(bytes, at + 28);
+
+        let expected: u64 = dims[..rank as usize].iter().map(|&d| d as u64).product();
+        if expected != len as u64 {
+            return Err(format!("tensor {i} has dims {dims:?} but len {len}"));
+        }
+        if !offset.is_multiple_of(ALIGNMENT) {
+            return Err(format!("tensor {i} is at {offset}, not {ALIGNMENT}-aligned"));
+        }
+        let end = (offset as u64) + (len as u64) * stride;
+        if end > data_len as u64 {
+            return Err(format!(
+                "tensor {i} spans {offset}..{end} of a {data_len}-byte data section"
+            ));
+        }
+        tensors.push(Tensor { rank, dims, offset, len, int8: dtype == DTYPE_I8 });
+    }
+    Ok(Header { graph_id, source_sha256, tensors, data_offset, data_len })
+}
+
 /// The tensor table on its own, without the data section.
 ///
 /// [`crate::vulkan::run::Net::rebuild`] re-records a net at a new shape, and that means building a
@@ -178,95 +311,24 @@ pub struct Weights {
 impl Weights {
     /// Parse `bytes`, rejecting anything not built for `expect_graph`.
     ///
-    /// Every offset and length in the table is bounds-checked here rather than at
-    /// use, so a truncated or hand-edited asset fails at load with a message instead
-    /// of dispatching a shader that reads past the end of a device buffer — where
-    /// the symptom would be a driver reset, not an error.
+    /// The header and table go through `parse_header`, which does every bounds check; the one
+    /// thing added here is that the file must end exactly where its data section does, since with
+    /// the whole slice in hand a mismatch means a truncated or padded download.
     pub fn parse(bytes: &[u8], expect_graph: u32) -> Result<Weights, String> {
-        if bytes.len() < HEADER_BYTES {
-            return Err(format!("{} bytes is shorter than a .maml header", bytes.len()));
-        }
-        if bytes[0..4] != MAGIC {
-            return Err("not a .maml file (bad magic)".into());
-        }
-        let version = u32(bytes, 4);
-        if version != FORMAT_VERSION {
-            return Err(format!("format version {version}, expected {FORMAT_VERSION}"));
-        }
-        let graph_id = u32(bytes, 8);
-        if graph_id != expect_graph {
-            return Err(format!(
-                "this file is for graph {graph_id}, but graph {expect_graph} asked for it"
-            ));
-        }
-        let count = u32(bytes, 12) as usize;
-        let mut source_sha256 = [0u8; 32];
-        source_sha256.copy_from_slice(&bytes[16..48]);
-        let data_offset = u32(bytes, 48) as usize;
-        let data_len = u32(bytes, 52) as usize;
-
-        let table_bytes = count
-            .checked_mul(TENSOR_ENTRY_BYTES)
-            .ok_or_else(|| format!("{count} tensors overflows the table size"))?;
-        if data_offset != HEADER_BYTES + table_bytes {
-            return Err(format!(
-                "data starts at {data_offset}, but {count} tensors put it at {}",
-                HEADER_BYTES + table_bytes
-            ));
-        }
-        let data_end = data_offset
-            .checked_add(data_len)
-            .ok_or_else(|| "data section overflows".to_string())?;
+        let header = parse_header(bytes, expect_graph)?;
+        let data_end = header.data_offset + header.data_len;
         if data_end != bytes.len() {
             return Err(format!(
                 "data section ends at {data_end} but the file is {} bytes",
                 bytes.len()
             ));
         }
-
-        let mut tensors = Vec::with_capacity(count);
-        for i in 0..count {
-            let at = HEADER_BYTES + i * TENSOR_ENTRY_BYTES;
-            let rank = u32(bytes, at);
-            if rank == 0 || rank > 4 {
-                return Err(format!("tensor {i} has rank {rank}"));
-            }
-            let dims = [
-                u32(bytes, at + 4),
-                u32(bytes, at + 8),
-                u32(bytes, at + 12),
-                u32(bytes, at + 16),
-            ];
-            let dtype = u32(bytes, at + 20);
-            let stride = match dtype {
-                DTYPE_F16 => 2u64,
-                DTYPE_I8 => 1,
-                other => return Err(format!("tensor {i} has dtype {other}, expected fp16 or int8")),
-            };
-            let offset = u32(bytes, at + 24);
-            let len = u32(bytes, at + 28);
-
-            let expected: u64 = dims[..rank as usize].iter().map(|&d| d as u64).product();
-            if expected != len as u64 {
-                return Err(format!("tensor {i} has dims {dims:?} but len {len}"));
-            }
-            if !offset.is_multiple_of(ALIGNMENT) {
-                return Err(format!("tensor {i} is at {offset}, not {ALIGNMENT}-aligned"));
-            }
-            let end = (offset as u64) + (len as u64) * stride;
-            if end > data_len as u64 {
-                return Err(format!(
-                    "tensor {i} spans {offset}..{end} of a {data_len}-byte data section"
-                ));
-            }
-            tensors.push(Tensor { rank, dims, offset, len, int8: dtype == DTYPE_I8 });
-        }
-
+        let data = bytes.get(header.data_offset..).unwrap_or(&[]).to_vec();
         Ok(Weights {
-            graph_id,
-            source_sha256,
-            table: Offsets { tensors },
-            data: bytes[data_offset..].to_vec(),
+            graph_id: header.graph_id,
+            source_sha256: header.source_sha256,
+            table: Offsets { tensors: header.tensors },
+            data,
         })
     }
 
@@ -295,6 +357,11 @@ impl Weights {
         self.table.clone()
     }
 
+    /// This file's table and bytes, for the tensors the host reads itself. See [`Reader`].
+    pub fn reader(&self) -> Reader<'_> {
+        Reader::new(&self.table, self)
+    }
+
     /// How many tensors the table holds.
     pub fn len(&self) -> usize {
         self.table.len()
@@ -319,6 +386,210 @@ impl Weights {
     pub fn shaped(&self, index: usize, dims: &[u32]) -> Result<Tensor, String> {
         self.table.shaped(index, dims)
     }
+}
+
+impl Blob for Weights {
+    fn data_len(&self) -> u64 {
+        self.data.len() as u64
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String> {
+        let start = usize::try_from(offset).map_err(|_| "a data offset overflowed usize")?;
+        let end = start
+            .checked_add(into.len())
+            .ok_or("a data range overflowed")?;
+        let from = self
+            .data
+            .get(start..end)
+            .ok_or_else(|| format!("{start}..{end} of a {}-byte data section", self.data.len()))?;
+        into.copy_from_slice(from);
+        Ok(())
+    }
+}
+
+/// A `.maml` whose table is in memory and whose data section is still in a file.
+///
+/// The counterpart of [`Weights`], and the whole of what bundling Supertonic needs: its table is a
+/// few kilobytes, and its data section is the ~105 MB that must not be resident three times over.
+/// See [`Blob`] for why that mattered enough to add a second implementation.
+///
+/// # Not `mmap`
+///
+/// `memmap2` was deliberately removed from this repo, and nothing here needs it back. A mapping
+/// would let the upload read the data as a slice, but the upload does not want a slice: it wants
+/// to hand fixed-size pieces to a staging buffer, and a positional read does that with no
+/// unsafety, no dependency, and no page-fault behaviour to reason about on an unknown filesystem.
+///
+/// # The offset, and why it is not always zero
+///
+/// An asset inside an APK is a *range* of the APK, so `AssetManager.openFd` returns a descriptor
+/// alongside a `startOffset` and a `length` rather than a file of its own. This holds that range
+/// and adds it to every read, so a bundled asset and a downloaded file are one code path. It also
+/// means `openFd` must succeed, which is what `noCompress += "maml"` in the app's Gradle
+/// configuration is load-bearing for: `openFd` throws for a deflated asset.
+pub struct Streamed {
+    /// Which network this file is for. See [`graph`].
+    pub graph_id: u32,
+    /// SHA-256 of the ONNX it was converted from, for tracing a shipped asset.
+    pub source_sha256: [u8; 32],
+    table: Offsets,
+    file: File,
+    /// Byte offset of the **data section** within `file`, i.e. the asset's own start plus the
+    /// header and table. Every [`Blob::read_at`] adds it, so callers index the data section.
+    data_at: u64,
+    data_len: u64,
+}
+
+impl Streamed {
+    /// Read the header and table of the `.maml` occupying `at..at + len` of `file`.
+    ///
+    /// Only the prefix is read — the header plus the tensor table, a few kilobytes — so this costs
+    /// nothing whatever the size of the net. `file` is retained; the data section is read later, by
+    /// the upload.
+    ///
+    /// `len` is what the caller was told the asset is, and is checked against the header rather
+    /// than trusted: a `.maml` claiming a data section past the end of its own range would
+    /// otherwise be caught only by the first read that ran off the end, or not at all if a
+    /// neighbouring asset happened to follow it.
+    pub fn open(file: File, at: u64, len: u64, expect_graph: u32) -> Result<Streamed, String> {
+        // A generous prefix read: one page covers the header and a 128-tensor table, and the
+        // largest net here has 605. Reading `min(len, PREFIX)` rather than exactly the table means
+        // one syscall instead of two, since the table's size is in the header being read.
+        const PREFIX: u64 = 64 * 1024;
+        let want = usize::try_from(len.min(PREFIX)).map_err(|_| "a .maml prefix overflowed")?;
+        let mut prefix = vec![0u8; want];
+        read_exact_at(&file, &mut prefix, at)
+            .map_err(|e| format!("reading a .maml header at {at}: {e}"))?;
+        let header = parse_header(&prefix, expect_graph)?;
+        let data_at = header.data_offset as u64;
+        let end = data_at
+            .checked_add(header.data_len as u64)
+            .ok_or("data section overflows")?;
+        if end > len {
+            return Err(format!(
+                "the data section ends at {end} but this .maml is only {len} bytes"
+            ));
+        }
+        Ok(Streamed {
+            graph_id: header.graph_id,
+            source_sha256: header.source_sha256,
+            table: Offsets { tensors: header.tensors },
+            file,
+            data_at: at + data_at,
+            data_len: header.data_len as u64,
+        })
+    }
+
+    /// The tensor table alone, for building and rebuilding plans. See [`Offsets`].
+    pub fn offsets(&self) -> Offsets {
+        self.table.clone()
+    }
+
+    /// This file's table and bytes, for the tensors the host reads itself. See [`Reader`].
+    ///
+    /// Each read is a positional read of a few kilobytes out of the APK, which is what makes this
+    /// affordable: the sampler's host block is 0.44% of its 127 MB.
+    pub fn reader(&self) -> Reader<'_> {
+        Reader::new(&self.table, self)
+    }
+
+    /// How many tensors the table holds.
+    pub fn len(&self) -> usize {
+        self.table.len()
+    }
+
+    /// Whether the table is empty. Only ever true for a hand-made file.
+    pub fn is_empty(&self) -> bool {
+        self.table.is_empty()
+    }
+}
+
+impl Blob for Streamed {
+    fn data_len(&self) -> u64 {
+        self.data_len
+    }
+
+    fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String> {
+        let end = offset
+            .checked_add(into.len() as u64)
+            .ok_or("a data range overflowed")?;
+        if end > self.data_len {
+            return Err(format!(
+                "{offset}..{end} of a {}-byte data section",
+                self.data_len
+            ));
+        }
+        read_exact_at(&self.file, into, self.data_at + offset)
+            .map_err(|e| format!("reading {} bytes at {offset}: {e}", into.len()))
+    }
+}
+
+/// A tensor table and the bytes it indexes, for the reads the host does itself.
+///
+/// A handful of Supertonic's tensors never reach a shader: the sampler's timestep MLP depends on
+/// the step number, its rotary `theta` on the sequence length, and its folded style keys are
+/// inputs to other nets. `post::supertonic` reads those on the host, and needed a [`Weights`] to
+/// do it — which is exactly the 105 MB allocation the bundled path exists to avoid.
+///
+/// So it takes one of these instead. Both halves come from the same file either way; keeping them
+/// as one argument rather than two means a caller cannot pair one net's table with another's bytes.
+#[derive(Clone, Copy)]
+pub struct Reader<'a> {
+    table: &'a Offsets,
+    data: &'a dyn Blob,
+}
+
+impl<'a> Reader<'a> {
+    /// A reader over `table` and `data`, which must describe the same file.
+    pub fn new(table: &'a Offsets, data: &'a dyn Blob) -> Reader<'a> {
+        Reader { table, data }
+    }
+
+    /// Tensor `index` as `f32`, in the file's order, checked against `dims`.
+    ///
+    /// fp16 only: every tensor the host reads is fp16, and an int8 one would need its companion
+    /// scale, which is a caller's decision rather than something to guess at here.
+    pub fn fp16(&self, index: usize, dims: &[u32]) -> Result<Vec<f32>, String> {
+        let found = self.table.shaped(index, dims)?;
+        if found.int8 {
+            return Err(format!("tensor {index} is int8, and the host reads fp16"));
+        }
+        let mut bytes = vec![0u8; (found.len as usize) * 2];
+        self.data
+            .read_at(found.offset as u64, &mut bytes)
+            .map_err(|e| format!("tensor {index}: {e}"))?;
+        Ok(bytes
+            .chunks_exact(2)
+            .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .collect())
+    }
+}
+
+/// Fill `buf` from `offset` without moving the file's cursor.
+///
+/// The same helper as `library/tilecodec`'s `pmtiles::read_exact_at`, and copied rather than shared
+/// because these two crates have no dependency between them and this is six lines. Both platforms
+/// expose a positional read; neither is guaranteed to return everything at once, hence the loop.
+///
+/// Positional rather than seek-then-read because the cursor is shared with whatever else holds this
+/// descriptor — on Android the descriptor came out of `AssetManager`, and moving its cursor is not
+/// this module's business.
+fn read_exact_at(file: &File, mut buf: &mut [u8], mut offset: u64) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        #[cfg(windows)]
+        let n = std::os::windows::fs::FileExt::seek_read(file, buf, offset)?;
+        #[cfg(unix)]
+        let n = std::os::unix::fs::FileExt::read_at(file, buf, offset)?;
+        if n == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "the file ended mid-tensor",
+            ));
+        }
+        buf = buf.get_mut(n..).unwrap_or(&mut []);
+        offset += n as u64;
+    }
+    Ok(())
 }
 
 /// One tensor for [`write_mixed`]: fp16 values, or the int8 payload of a quantised kernel.
@@ -455,6 +726,99 @@ mod tests {
             return sign;
         }
         sign | ((exponent as u16) << 10) | ((mantissa >> 13) as u16)
+    }
+
+    /// Write `bytes` into a temp file after `pad` bytes of filler, and return the file.
+    ///
+    /// The padding is the point: a `.maml` bundled as an asset is a *range* of the APK, not a file,
+    /// so [`Streamed`] adds a base offset to every read. A fixture at offset 0 passes whether or not
+    /// that offset is applied, which is the one thing worth checking here.
+    fn on_disk(name: &str, pad: usize, bytes: &[u8]) -> (File, u64, u64) {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!("modelrunner-{name}.maml"));
+        let mut file = std::fs::File::create(&path).expect("a temp file");
+        file.write_all(&vec![0xABu8; pad]).expect("the padding writes");
+        file.write_all(bytes).expect("the blob writes");
+        // Trailing filler as well, so the file does not end where the data section does: an asset
+        // is followed by the next asset, and `Streamed` must not require otherwise.
+        file.write_all(&[0xCDu8; 7]).expect("the trailer writes");
+        drop(file);
+        let opened = std::fs::File::open(&path).expect("the temp file reopens");
+        (opened, pad as u64, bytes.len() as u64)
+    }
+
+    #[test]
+    fn a_streamed_file_answers_exactly_as_a_parsed_one() {
+        // The bundled path: the table is read from the file's prefix and the data section stays on
+        // disk. Both halves must match what `Weights::parse` produces from the same bytes, because
+        // `Net::new` uploads one and the plan was resolved against the other.
+        let bytes = write(
+            graph::SUPERTONIC_VE,
+            &[(vec![2, 3], vec![1.0, 2.0, 4.0, 8.0, 16.0, 32.0]), (vec![2], vec![0.5, 0.25])],
+        );
+        let parsed = Weights::parse(&bytes, graph::SUPERTONIC_VE).expect("parses");
+        let (file, at, len) = on_disk("streamed", 4096, &bytes);
+        let streamed =
+            Streamed::open(file, at, len, graph::SUPERTONIC_VE).expect("the file streams");
+
+        assert_eq!(streamed.graph_id, parsed.graph_id);
+        assert_eq!(streamed.len(), parsed.len());
+        assert_eq!(streamed.data_len(), parsed.data_len());
+        for index in 0..parsed.len() {
+            assert_eq!(
+                streamed.offsets().tensor(index).expect("in range"),
+                parsed.tensor(index).expect("in range")
+            );
+        }
+        // Byte for byte, and read in pieces rather than whole: the upload asks for chunks, so a
+        // base offset applied once at open rather than per read would pass a single-read fixture.
+        let mut got = vec![0u8; parsed.data_len() as usize];
+        for (chunk, into) in got.chunks_mut(7).enumerate() {
+            streamed.read_at((chunk * 7) as u64, into).expect("the chunk reads");
+        }
+        let mut want = vec![0u8; parsed.data_len() as usize];
+        parsed.read_at(0, &mut want).expect("the whole section reads");
+        assert_eq!(got, want);
+
+        // And the host-side reads go through the same table and the same bytes.
+        assert_eq!(
+            streamed.reader().fp16(0, &[2, 3]).expect("the streamed tensor"),
+            parsed.reader().fp16(0, &[2, 3]).expect("the parsed tensor")
+        );
+    }
+
+    #[test]
+    fn a_streamed_read_past_the_data_section_is_refused() {
+        let bytes = write(graph::SUPERTONIC_DP, &[(vec![4], vec![1.0, 2.0, 3.0, 4.0])]);
+        let (file, at, len) = on_disk("streamed-bounds", 16, &bytes);
+        let streamed = Streamed::open(file, at, len, graph::SUPERTONIC_DP).expect("streams");
+
+        let mut into = [0u8; 8];
+        assert!(streamed.read_at(streamed.data_len() - 4, &mut into).is_err());
+        assert!(streamed.read_at(u64::MAX, &mut into).is_err());
+        // The trailing filler `on_disk` wrote is past the data section and must stay unreachable,
+        // or a truncated `.maml` would upload whatever followed it in the APK.
+        assert!(streamed.read_at(streamed.data_len(), &mut into[..1]).is_err());
+    }
+
+    #[test]
+    fn a_streamed_file_shorter_than_its_own_header_says_is_refused() {
+        // A length the caller was told, against a header that claims more. `AssetManager` reports
+        // the range it will serve, so a disagreement means the asset was truncated at build time —
+        // and the reads that ran off the end would land in the next asset rather than failing.
+        let bytes = write(graph::SUPERTONIC_VOC, &[(vec![8], vec![1.0; 8])]);
+        let (file, at, len) = on_disk("streamed-short", 0, &bytes);
+        assert!(Streamed::open(file, at, len - 8, graph::SUPERTONIC_VOC).is_err());
+    }
+
+    #[test]
+    fn a_streamed_file_for_another_graph_is_refused() {
+        // The same check `Weights::parse` makes, and it has to happen here too: the four Supertonic
+        // plans arrive as four descriptors in a fixed order, so a caller that swapped two would
+        // otherwise upload the vocoder's weights into the text encoder's buffer.
+        let bytes = write(graph::SUPERTONIC_TTL, &[(vec![2], vec![1.0, 2.0])]);
+        let (file, at, len) = on_disk("streamed-wrong-graph", 32, &bytes);
+        assert!(Streamed::open(file, at, len, graph::SUPERTONIC_VE).is_err());
     }
 
     #[test]

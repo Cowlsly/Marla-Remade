@@ -31,7 +31,7 @@ use std::sync::{Arc, OnceLock};
 use crate::nets::reference::{run_multi, Given, Invented};
 use crate::nets::{embed_lanes, Act, Builder, Id, Plan, Shape, WeightSource};
 use crate::preprocess::RESCALE_ONLY;
-use crate::weights::{graph, write_mixed, Fixture, Weights};
+use crate::weights::{graph, write_mixed, Fixture, Streamed, Weights};
 
 use super::context::{self, Context};
 use super::run::Net;
@@ -493,6 +493,66 @@ fn report_the_tiled_int8_convolution_against_the_tiled_fp16_one() {
         }
         _ => panic!("two nets were timed"),
     }
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_net_uploaded_from_a_file_agrees_with_one_uploaded_from_memory() {
+    // The bundled path end to end: the same plan, the same weights, uploaded once from a `Vec<u8>`
+    // and once by streaming a file in chunks. The two must produce identical output, because a
+    // wrong `dst_offset` on any chunk but the first gives a net whose early layers are right and
+    // whose later ones read whatever the buffer was allocated with — plausible-looking audio, not
+    // an error.
+    //
+    // The blob is deliberately larger than the chunk size the upload uses, so more than one copy is
+    // issued. A single-chunk fixture exercises none of the arithmetic that can be wrong.
+    const CHANNELS: u32 = 1024;
+    const LAYERS: usize = 6;
+    let taps = (CHANNELS * CHANNELS) as usize;
+    let kernel: Vec<f32> = (0..taps).map(|i| ((i % 11) as f32 - 5.0) / 1024.0).collect();
+    let bias = vec![0.0f32; CHANNELS as usize];
+    let mut tensors = Vec::new();
+    for _ in 0..LAYERS {
+        tensors.push(Fixture::F16(vec![CHANNELS, CHANNELS, 1, 1], kernel.clone()));
+        tensors.push(Fixture::F16(vec![CHANNELS], bias.clone()));
+    }
+    let blob = write_mixed(graph::SUPERTONIC_VE, &tensors);
+    assert!(
+        blob.len() as u64 > Net::CHUNK_BYTES,
+        "{} bytes fits in one {}-byte chunk, so nothing is being tested",
+        blob.len(),
+        Net::CHUNK_BYTES,
+    );
+
+    let input = spread((CHANNELS * 8) as usize, 0.25);
+    let plan_for = |source: &dyn WeightSource| -> Plan {
+        let mut builder = Builder::new(source);
+        let mut x = builder.input(Shape::new(CHANNELS, 1, 8));
+        for layer in 0..LAYERS {
+            x = builder.conv_same(x, layer * 2, CHANNELS, 1, 1, Act::Relu);
+        }
+        builder.finish(&[x]).expect("the upload fixture plan builds")
+    };
+
+    let parsed = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+    let mut from_memory = Net::new(device(), plan_for(&parsed), &parsed, RESCALE_ONLY)
+        .expect("the in-memory plan records");
+    let want = from_memory.infer_raw(&input).expect("the in-memory net runs");
+
+    // A leading pad, so the file's data section does not start where the file does — which is what
+    // an asset inside an APK looks like, and the one thing an offset-free reader gets wrong.
+    let path = std::env::temp_dir().join("modelrunner-upload-parity.maml");
+    let mut staged = vec![0x5Au8; 8192];
+    staged.extend_from_slice(&blob);
+    std::fs::write(&path, &staged).expect("the fixture file writes");
+    let file = std::fs::File::open(&path).expect("the fixture file reopens");
+    let streamed = Streamed::open(file, 8192, blob.len() as u64, graph::SUPERTONIC_VE)
+        .expect("the fixture file streams");
+    let mut from_file = Net::new(device(), plan_for(&parsed), &streamed, RESCALE_ONLY)
+        .expect("the streamed plan records");
+    let got = from_file.infer_raw(&input).expect("the streamed net runs");
+
+    matches("a net uploaded from a file", &want, &got);
 }
 
 #[test]

@@ -26,7 +26,10 @@
 //! and every entry point tolerates it, so a device without fp16 compute degrades to "no
 //! bokeh" rather than to a crash.
 
-use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray, JString};
+use std::fs::File;
+use std::os::fd::FromRawFd;
+
+use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray, JLongArray, JString};
 use jni::sys::{jfloat, jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 
@@ -44,7 +47,7 @@ use crate::preprocess::{
 use crate::vulkan::context;
 use crate::vulkan::reshape::Reshaped;
 use crate::vulkan::run::Net;
-use crate::weights::{graph, Offsets, Weights};
+use crate::weights::{graph, Offsets, Streamed, Weights};
 
 /// One segmenter. Handed to Kotlin as an opaque `jlong`.
 struct Handle {
@@ -974,28 +977,48 @@ impl supertonic::Stages for SupertonicNets<'_> {
 
 /// `SupertonicSynthesizer`'s constructor. Returns 0 on failure, having logged why.
 ///
-/// Six assets: the four `.maml` plans, the codepoint table and one voice's style file. The voice
-/// is separate from the plans and swappable through
+/// Six assets, in two kinds. The four `.maml` plans arrive as **file descriptors** with a byte
+/// range each; the codepoint table and one voice's style file arrive as byte arrays, because they
+/// are 128 KB and 25 KB and nothing is saved by streaming them.
+///
+/// The voice is separate from the plans and swappable through
 /// [`Java_com_vayunmathur_library_ml_MlNative_setSupertonicVoice`], because it is 25 KB against
-/// the plans' 198 MB and re-uploading those to change voice would be absurd.
+/// the plans' ~105 MB and re-uploading those to change voice would be absurd.
+///
+/// # Why the plans are descriptors and not arrays
+///
+/// A `ByteArray` path allocates the model **three times**: the Java `byte[]`, the `Vec<u8>`
+/// [`JNIEnv::convert_byte_array`] hands back, and [`Weights::parse`]'s own copy of the data
+/// section. At the size a bundled Supertonic comes to that is ~300 MB of transient heap for a
+/// ~105 MB model, which is an out-of-memory kill on a low-RAM device rather than a slow load.
+///
+/// [`Streamed`] reads the header and table only — a few kilobytes — and the upload then pulls the
+/// data section through a fixed-size staging buffer, so the peak is one chunk.
+///
+/// `fds`, `offsets` and `lengths` are parallel, in the order the four graphs are listed below:
+/// duration predictor, text encoder, sampler, vocoder. An `AssetFileDescriptor` carries all three
+/// because an asset is a *range of the APK* rather than a file of its own.
+///
+/// # Ownership
+///
+/// Each descriptor must be **detached** by the caller: this takes ownership and closes it, on the
+/// failure paths as much as the successful one. `AssetManager.openFd` also requires the asset to be
+/// stored uncompressed, which is what `noCompress += "maml"` is for.
 ///
 /// # Safety
 ///
-/// Called only by the JVM, with a valid `env` and arrays it owns.
+/// Called only by the JVM, with a valid `env`, arrays it owns, and descriptors nothing else holds.
 #[no_mangle]
-#[allow(clippy::too_many_arguments)]
 pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createSupertonic<'l>(
     mut env: JNIEnv<'l>,
     _class: JClass<'l>,
-    duration: JByteArray<'l>,
-    text: JByteArray<'l>,
-    sampler: JByteArray<'l>,
-    vocoder: JByteArray<'l>,
+    fds: JIntArray<'l>,
+    offsets: JLongArray<'l>,
+    lengths: JLongArray<'l>,
     indexer: JByteArray<'l>,
     style: JByteArray<'l>,
 ) -> jlong {
-    let assets = [duration, text, sampler, vocoder, indexer, style];
-    match build_supertonic(&mut env, assets) {
+    match build_supertonic(&mut env, &fds, &offsets, &lengths, &indexer, &style) {
         Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
         Err(e) => {
             log(&format!("supertonic is unavailable: {e}"));
@@ -1004,44 +1027,126 @@ pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createSupertonic
     }
 }
 
+/// The four `.maml` graphs, in the order `createSupertonic`'s parallel arrays list them.
+const SUPERTONIC_GRAPHS: [u32; 4] =
+    [graph::SUPERTONIC_DP, graph::SUPERTONIC_TTL, graph::SUPERTONIC_VE, graph::SUPERTONIC_VOC];
+
 fn build_supertonic<'l>(
     env: &mut JNIEnv<'l>,
-    assets: [JByteArray<'l>; 6],
+    fds: &JIntArray<'l>,
+    offsets: &JLongArray<'l>,
+    lengths: &JLongArray<'l>,
+    indexer: &JByteArray<'l>,
+    style: &JByteArray<'l>,
 ) -> Result<SupertonicHandle, String> {
-    let mut bytes = Vec::with_capacity(assets.len());
-    for asset in &assets {
-        bytes.push(
-            env.convert_byte_array(asset).map_err(|e| format!("cannot read an asset: {e}"))?,
-        );
+    let count = SUPERTONIC_GRAPHS.len();
+    // The descriptors first, and adopted into owning `File`s before anything else may fail. The
+    // caller detached them, so a path that returns without wrapping one leaks it for the life of
+    // the process — and one of the four is a descriptor onto the APK itself. Every check below the
+    // adoption loop is therefore free to fail; nothing above it is.
+    let opened = env
+        .get_array_length(fds)
+        .map_err(|e| format!("cannot size the descriptors: {e}"))? as usize;
+    let mut raw = vec![0i32; opened];
+    env.get_int_array_region(fds, 0, &mut raw)
+        .map_err(|e| format!("cannot read the descriptors: {e}"))?;
+    let mut files = Vec::with_capacity(opened);
+    let mut unopened = None;
+    for &fd in &raw {
+        if fd < 0 {
+            // Recorded rather than returned on, so the descriptors after it are still adopted.
+            unopened = unopened.or(Some(fd));
+            continue;
+        }
+        // SAFETY: the caller detached each descriptor, so nothing else owns it, and `File` closes
+        // it on drop.
+        files.push(unsafe { File::from_raw_fd(fd) });
     }
-    let duration_weights = Weights::parse(&bytes[0], graph::SUPERTONIC_DP)?;
-    let text_weights = Weights::parse(&bytes[1], graph::SUPERTONIC_TTL)?;
-    let sampler_weights = Weights::parse(&bytes[2], graph::SUPERTONIC_VE)?;
-    let vocoder_weights = Weights::parse(&bytes[3], graph::SUPERTONIC_VOC)?;
-    if bytes[4].len() != supertonic::INDEXER_ENTRIES * 2 {
-        return Err(format!("a codepoint table of {} bytes", bytes[4].len()));
+    if let Some(fd) = unopened {
+        return Err(format!("descriptor {fd} is not open"));
     }
-    let voice = supertonic::Voice::read(&bytes[5])?;
-    // Read before the weights are dropped: the sampler's timestep shifts, rotary frequencies and
-    // folded style keys are all tensors in its file that no shader ever reads.
-    let conditioning = supertonic::Conditioning::read(&sampler_weights)?;
+    if opened != count {
+        return Err(format!("{opened} descriptors for {count} graphs"));
+    }
+
+    let mut at = vec![0i64; count];
+    let mut len = vec![0i64; count];
+    for (what, length) in [
+        ("asset offsets", env.get_array_length(offsets)),
+        ("asset lengths", env.get_array_length(lengths)),
+    ] {
+        let length = length.map_err(|e| format!("cannot size the {what}: {e}"))?;
+        if length as usize != count {
+            return Err(format!("{length} {what} for {count} graphs"));
+        }
+    }
+    env.get_long_array_region(offsets, 0, &mut at)
+        .map_err(|e| format!("cannot read the asset offsets: {e}"))?;
+    env.get_long_array_region(lengths, 0, &mut len)
+        .map_err(|e| format!("cannot read the asset lengths: {e}"))?;
+
+    let mut streams = Vec::with_capacity(count);
+    for (i, (file, graph_id)) in files.into_iter().zip(SUPERTONIC_GRAPHS).enumerate() {
+        let (at, len) = (at.get(i).copied().unwrap_or(0), len.get(i).copied().unwrap_or(0));
+        let (at, len) = match (u64::try_from(at), u64::try_from(len)) {
+            (Ok(at), Ok(len)) => (at, len),
+            _ => return Err(format!("graph {graph_id} spans {at}+{len}")),
+        };
+        streams.push(Streamed::open(file, at, len, graph_id)?);
+    }
+    let [duration_weights, text_weights, sampler_weights, vocoder_weights] =
+        <[Streamed; 4]>::try_from(streams).map_err(|_| "four graphs were opened".to_string())?;
+
+    let indexer = env
+        .convert_byte_array(indexer)
+        .map_err(|e| format!("cannot read the codepoint table: {e}"))?;
+    if indexer.len() != supertonic::INDEXER_ENTRIES * 2 {
+        return Err(format!("a codepoint table of {} bytes", indexer.len()));
+    }
+    let style =
+        env.convert_byte_array(style).map_err(|e| format!("cannot read the style: {e}"))?;
+    let voice = supertonic::Voice::read(&style)?;
+    // The sampler's timestep shifts, rotary frequencies and folded style keys are all tensors in
+    // its file that no shader ever reads, so they are read here rather than uploaded.
+    let conditioning = supertonic::Conditioning::read(sampler_weights.reader())?;
 
     let shared = context::shared()?;
     let handle = SupertonicHandle {
-        duration: Reshaped::new(shared.clone(), &duration_weights, SMALLEST, duration_plan)?,
-        text: Reshaped::new(shared.clone(), &text_weights, SMALLEST, text_plan)?,
-        sampler: Reshaped::new(
+        duration: Reshaped::streamed(
             shared.clone(),
+            duration_weights.offsets(),
+            &duration_weights,
+            SMALLEST,
+            duration_plan,
+        )?,
+        text: Reshaped::streamed(
+            shared.clone(),
+            text_weights.offsets(),
+            &text_weights,
+            SMALLEST,
+            text_plan,
+        )?,
+        sampler: Reshaped::streamed(
+            shared.clone(),
+            sampler_weights.offsets(),
             &sampler_weights,
             (SMALLEST, SMALLEST),
             sampler_plan,
         )?,
-        vocoder: Reshaped::new(shared, &vocoder_weights, SMALLEST, vocoder_plan)?,
+        vocoder: Reshaped::streamed(
+            shared,
+            vocoder_weights.offsets(),
+            &vocoder_weights,
+            SMALLEST,
+            vocoder_plan,
+        )?,
         conditioning,
-        indexer: std::mem::take(&mut bytes[4]),
+        indexer,
         voice,
         rng: SplitMix { state: seed() },
     };
+    // The four `Streamed` drop here, closing their descriptors: every byte they held is either in
+    // device memory or in `conditioning`.
     Ok(handle)
 }
 

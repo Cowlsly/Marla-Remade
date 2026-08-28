@@ -34,7 +34,7 @@ use ash::vk;
 
 use crate::nets::{Op, Plan};
 use crate::preprocess::{self, Normalise};
-use crate::weights::Weights;
+use crate::weights::Blob;
 
 use super::buffers::Buffer;
 use super::context::Context;
@@ -79,13 +79,17 @@ pub struct Net {
 impl Net {
     /// Allocate, upload the weights and record the plan.
     ///
-    /// `weights` is consumed for its data but not retained: once the blob is in
+    /// `weights` is read for its data section but not retained: once the blob is in
     /// device-local memory the host copy is dropped, which for U^2-Netp gives back 2.1 MB
     /// of heap.
+    ///
+    /// A [`Blob`] rather than a [`crate::weights::Weights`] so that a bundled net can stream
+    /// straight out of the APK. Nothing here reads the tensor table — the [`Plan`] already carries
+    /// every resolved offset — which is what makes the two interchangeable.
     pub fn new(
         context: Arc<Context>,
         plan: Plan,
-        weights: &Weights,
+        weights: &dyn Blob,
         normalise: Normalise,
     ) -> Result<Net, String> {
         let arena_bytes = (plan.arena_elems as vk::DeviceSize) * 2;
@@ -93,7 +97,7 @@ impl Net {
         // the weights binding whether or not any shader reads it. A plan can legitimately read
         // no weights at all — a purely elementwise one does — so this floors the allocation
         // rather than refusing the plan.
-        let weights_bytes = (weights.data().len() as vk::DeviceSize).max(2);
+        let weights_bytes = (weights.data_len() as vk::DeviceSize).max(2);
         let input_elems = binding_elems(&plan.inputs);
         let output_elems = binding_elems(&plan.outputs);
         // One staging buffer for both directions: the inputs and the outputs are never in
@@ -138,7 +142,7 @@ impl Net {
             output_scratch: vec![0u16; output_elems],
         };
 
-        net.upload_weights(weights.data())?;
+        net.upload_weights(weights)?;
         net.command_buffer = net.allocate_command_buffer()?;
         net.fence = net.create_fence()?;
         net.record()?;
@@ -219,46 +223,93 @@ impl Net {
         Ok(())
     }
 
-    /// Copy the weights blob to device-local memory through the staging buffer.
+    /// Staging bytes per copy. Large enough that the per-chunk round trip is noise against the
+    /// transfer, small enough to be an unremarkable allocation on a low-RAM device.
     ///
-    /// Its own one-shot command buffer and its own staging allocation, because the
-    /// permanent staging buffer is sized for one input and the weights are ten times
-    /// that. Both are freed before returning; this happens once per net.
-    fn upload_weights(&self, data: &[u8]) -> Result<(), String> {
-        if data.is_empty() {
+    /// `pub(crate)` only so the parity fixture can assert its blob is bigger than one chunk. A
+    /// fixture that fits in a single copy exercises none of the `dst_offset` arithmetic.
+    pub(crate) const CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+    /// Copy the weights blob to device-local memory through the staging buffer, in chunks.
+    ///
+    /// Its own staging allocation and its own one-shot command buffer, because the permanent
+    /// staging buffer is sized for one input and the weights are ten times that. Both are freed
+    /// before returning; this happens once per net.
+    ///
+    /// # Why chunked, and why this small
+    ///
+    /// A single copy needs a staging buffer the size of the whole blob. For Supertonic's 127 MB
+    /// sampler that is 127 MB of `HOST_VISIBLE` memory on top of the 127 MB device-local
+    /// destination, at the moment of load — and it defeats the point of streaming the data section
+    /// out of the APK, since the peak would be the whole file again just in a different allocation.
+    ///
+    /// [`Net::CHUNK_BYTES`] instead, one `cmd_copy_buffer` per chunk at the right `dst_offset`.
+    /// Each is submitted and waited on before the next is written, because the staging buffer is
+    /// reused and overwriting it while a copy is still reading it is a race. That costs one round
+    /// trip per chunk — 16 for that sampler — against a transfer that is bandwidth-bound anyway,
+    /// and it happens once per net rather than once per inference.
+    fn upload_weights(&self, weights: &dyn Blob) -> Result<(), String> {
+        let total = weights.data_len();
+        if total == 0 {
             return Ok(());
         }
-        let staging = Buffer::staging(&self.context, data.len() as vk::DeviceSize)?;
-        staging.write(data)?;
+        let chunk = total.min(Self::CHUNK_BYTES);
+        let staging = Buffer::staging(&self.context, chunk as vk::DeviceSize)?;
+        let mut buffer = vec![0u8; usize::try_from(chunk).map_err(|_| "a chunk overflowed")?];
         let command_buffer = self.allocate_command_buffer()?;
         // SAFETY: the command buffer was just allocated from this device's pool and is
-        // freed on every path below; the copy is bounds-checked by construction, since both
-        // buffers are exactly `data.len()` bytes.
+        // freed on every path below; each copy is bounds-checked by the loop, which never asks
+        // for more than `chunk` bytes of staging or writes past `total` of the destination.
         unsafe {
             let device = &self.context.device;
-            let record = || -> Result<(), String> {
-                device
-                    .begin_command_buffer(
+            let mut written = 0u64;
+            let outcome = loop {
+                if written >= total {
+                    break Ok(());
+                }
+                let size = chunk.min(total - written);
+                let piece = match buffer.get_mut(..size as usize) {
+                    Some(piece) => piece,
+                    None => break Err("a chunk is larger than its buffer".to_string()),
+                };
+                if let Err(e) = weights.read_at(written, piece) {
+                    break Err(e);
+                }
+                if let Err(e) = staging.write(piece) {
+                    break Err(e);
+                }
+                let copy = || -> Result<(), String> {
+                    device
+                        .begin_command_buffer(
+                            command_buffer,
+                            &vk::CommandBufferBeginInfo::default()
+                                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                        )
+                        .map_err(|e| format!("begin_command_buffer {e:?}"))?;
+                    let region = vk::BufferCopy::default()
+                        .dst_offset(written as vk::DeviceSize)
+                        .size(size as vk::DeviceSize);
+                    device.cmd_copy_buffer(
                         command_buffer,
-                        &vk::CommandBufferBeginInfo::default()
-                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                    )
-                    .map_err(|e| format!("begin_command_buffer {e:?}"))?;
-                let region = vk::BufferCopy::default().size(data.len() as vk::DeviceSize);
-                device.cmd_copy_buffer(
-                    command_buffer,
-                    staging.buffer,
-                    self.weights.buffer,
-                    std::slice::from_ref(&region),
-                );
-                device
-                    .end_command_buffer(command_buffer)
-                    .map_err(|e| format!("end_command_buffer {e:?}"))?;
-                self.submit_and_wait(command_buffer)
+                        staging.buffer,
+                        self.weights.buffer,
+                        std::slice::from_ref(&region),
+                    );
+                    device
+                        .end_command_buffer(command_buffer)
+                        .map_err(|e| format!("end_command_buffer {e:?}"))?;
+                    // Waited on before the next chunk overwrites the staging buffer. The pool was
+                    // created with `RESET_COMMAND_BUFFER`, so re-beginning the same buffer is
+                    // legal once its submission has completed.
+                    self.submit_and_wait(command_buffer)
+                };
+                if let Err(e) = copy() {
+                    break Err(e);
+                }
+                written += size;
             };
-            let outcome = record();
             device.free_command_buffers(self.command_pool, &[command_buffer]);
-            // `staging` drops here, after the fence has been waited on.
+            // `staging` drops here, after the last fence has been waited on.
             outcome
         }
     }

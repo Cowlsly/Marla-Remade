@@ -128,21 +128,35 @@ internal object MlNative {
      * Bring up Supertonic 3 from its four `.maml` files, the codepoint table and one voice.
      * Returns 0 on failure.
      *
-     * Six assets, and no shape arguments: unlike [createPiper], every Supertonic plan is
-     * utterance-shaped, so each net is re-recorded per sentence rather than compiled once at a
-     * padded width. There is also no phoneme dictionary - the front end is [indexer], a flat
-     * 65,536-entry codepoint table, which is why [synthesizeSupertonic] insists on NFD.
+     * No shape arguments: unlike [createPiper], every Supertonic plan is utterance-shaped, so each
+     * net is re-recorded per sentence rather than compiled once at a padded width. There is also no
+     * phoneme dictionary - the front end is [indexer], a flat 65,536-entry codepoint table, which is
+     * why [synthesizeSupertonic] insists on NFD.
      *
-     * [style] is one voice's `style_<name>.bin`. It is separate from the plans and swappable
-     * through [setSupertonicVoice], because a voice is 25 KB against the plans' 198 MB.
+     * The four plans arrive as **file descriptors** rather than byte arrays. A `ByteArray` would
+     * allocate the model three times over - the Java array, the `Vec<u8>` JNI hands Rust, and the
+     * reader's own copy of the data section - which for a ~105 MB bundle is ~300 MB of transient
+     * heap and an out-of-memory kill rather than a slow load. Native reads the header and tensor
+     * table only, then streams the weights into the GPU through a fixed-size staging buffer.
+     *
+     * [fds], [offsets] and [lengths] are parallel and in a fixed order: duration predictor, text
+     * encoder, sampler, vocoder. All three are needed because an `AssetFileDescriptor` describes a
+     * *range of the APK* rather than a file of its own; for a file on disk the offset is 0 and the
+     * length is the file's size.
+     *
+     * **Each descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one, so a caller must not close them itself. An asset also has
+     * to be stored uncompressed for `openFd` to work at all - `noCompress += "maml"`.
+     *
+     * [indexer] and [style] stay byte arrays: 128 KB and 25 KB, where streaming saves nothing.
+     * [style] is separate from the plans and swappable through [setSupertonicVoice].
      *
      * Freed by [destroySupertonic], not [destroy], [destroyOcr] or [destroyPiper].
      */
     external fun createSupertonic(
-        duration: ByteArray,
-        text: ByteArray,
-        sampler: ByteArray,
-        vocoder: ByteArray,
+        fds: IntArray,
+        offsets: LongArray,
+        lengths: LongArray,
         indexer: ByteArray,
         style: ByteArray,
     ): Long

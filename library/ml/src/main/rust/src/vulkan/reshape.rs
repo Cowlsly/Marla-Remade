@@ -15,7 +15,7 @@ use std::sync::Arc;
 
 use crate::nets::Plan;
 use crate::preprocess::RESCALE_ONLY;
-use crate::weights::{Offsets, Weights};
+use crate::weights::{Blob, Offsets, Weights};
 
 use super::context::Context;
 use super::run::Net;
@@ -40,18 +40,32 @@ impl<S: Copy + PartialEq> Reshaped<S> {
     /// and [`Weights::offsets`] keeps the few kilobytes a rebuild actually reads, so the caller can
     /// drop 127 MB of host allocation the moment this returns. That is the whole reason rebuilding
     /// beats constructing a second net per utterance.
-    ///
-    /// [`RESCALE_ONLY`] because no bitmap ever reaches these nets — every input is a tensor a
-    /// previous stage computed, handed over by [`Net::infer_raw_many`], so the preprocessing the
-    /// vision nets need has nothing to do here.
     pub fn new(
         context: Arc<Context>,
         weights: &Weights,
         shape: S,
         plan: fn(&Offsets, S) -> Result<Plan, String>,
     ) -> Result<Reshaped<S>, String> {
-        let offsets = weights.offsets();
-        let net = Net::new(context, plan(&offsets, shape)?, weights, RESCALE_ONLY)?;
+        Self::streamed(context, weights.offsets(), weights, shape, plan)
+    }
+
+    /// [`Reshaped::new`] against a table and a data section that need not be the same object.
+    ///
+    /// The bundled path: a [`crate::weights::Streamed`] hands over its table and streams its data
+    /// section out of the APK, so the 105 MB is never resident at all. The `Weights` path above is
+    /// this with both halves coming from the same in-memory parse.
+    ///
+    /// [`RESCALE_ONLY`] because no bitmap ever reaches these nets — every input is a tensor a
+    /// previous stage computed, handed over by [`Net::infer_raw_many`], so the preprocessing the
+    /// vision nets need has nothing to do here.
+    pub fn streamed(
+        context: Arc<Context>,
+        offsets: Offsets,
+        data: &dyn Blob,
+        shape: S,
+        plan: fn(&Offsets, S) -> Result<Plan, String>,
+    ) -> Result<Reshaped<S>, String> {
+        let net = Net::new(context, plan(&offsets, shape)?, data, RESCALE_ONLY)?;
         Ok(Reshaped { net, offsets, at: shape, plan })
     }
 

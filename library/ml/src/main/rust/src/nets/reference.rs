@@ -2863,8 +2863,10 @@ mod tests {
             let style = read("style.f32");
             use crate::post::supertonic as post;
             let (current, total) = (5u32, 16u32);
-            let conditioning = post::Conditioning::read(&weights).expect("the conditioning");
-            let shifts = post::time_shifts(&weights, current, total).expect("the timestep shifts");
+            let conditioning =
+                post::Conditioning::read(weights.reader()).expect("the conditioning");
+            let shifts =
+                post::time_shifts(weights.reader(), current, total).expect("the timestep shifts");
             let query_angles =
                 post::rotary_angles(&conditioning.theta, width).expect("the query angles");
             let key_angles =
