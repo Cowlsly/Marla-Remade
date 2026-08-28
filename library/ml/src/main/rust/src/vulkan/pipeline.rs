@@ -53,9 +53,11 @@ const CONV_INT8: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_int8.com
 const FLIP_CHANNELS: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 const CONSTANT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/constant.comp.spv"));
+const ADD_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_bcast.comp.spv"));
+const ROTARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rotary.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 24] = [
+const SPIRV: [&[u8]; 26] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -80,6 +82,8 @@ const SPIRV: [&[u8]; 24] = [
     CONV_POINT,
     MUL,
     CONSTANT,
+    ADD_BCAST,
+    ROTARY,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -127,6 +131,8 @@ pub struct Pipelines {
     conv_point: vk::Pipeline,
     mul: vk::Pipeline,
     constant: vk::Pipeline,
+    add_bcast: vk::Pipeline,
+    rotary: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -287,6 +293,8 @@ impl Pipelines {
             conv_point,
             mul,
             constant,
+            add_bcast,
+            rotary,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -327,6 +335,8 @@ impl Pipelines {
             conv_point,
             mul,
             constant,
+            add_bcast,
+            rotary,
         })
     }
 
@@ -357,6 +367,8 @@ impl Pipelines {
             Kind::ConvPoint => self.conv_point,
             Kind::Mul => self.mul,
             Kind::Constant => self.constant,
+            Kind::AddBroadcast => self.add_bcast,
+            Kind::Rotary => self.rotary,
         }
     }
 
@@ -389,6 +401,8 @@ impl Pipelines {
             self.conv_point,
             self.mul,
             self.constant,
+            self.add_bcast,
+            self.rotary,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

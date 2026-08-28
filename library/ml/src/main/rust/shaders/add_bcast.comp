@@ -1,0 +1,32 @@
+#version 450
+//! `out[c][y][x] = a[c][y][x] + b[c]`, a per-channel shift.
+//!
+//! Four uses, one per main block of Supertonic's flow-matching sampler. Each block is
+//! conditioned on the timestep by a `Linear` from the 64-dimensional time embedding to 512
+//! numbers, added to every position: `x = x + W t + b`.
+//!
+//! # Why the timestep side is not in the plan at all
+//!
+//! `W t + b` depends only on `current_step` and `total_step`, two scalars, so the host computes
+//! all four 512-vectors and passes them in as one `[2048, 1, 1]` tensor that
+//! `nets::Builder::slice_channels` cuts up. A sinusoidal embedding and a two-layer MLP for
+//! 2,048 numbers is not worth a dispatch, let alone the `Sin` and `Cos` shaders it would need.
+//!
+//! # The mirror of `mul_bcast.comp`
+//!
+//! Same indexing, and for the same reason the two operands are separate push constants: the
+//! shift is a tensor in its own right rather than a slice of the one being shifted.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+    float value = float(arena[p.in0 + index]);
+    float shift = float(arena[p.in1 + oc]);
+    arena[p.out_at + index] = float16_t(value + shift);
+}

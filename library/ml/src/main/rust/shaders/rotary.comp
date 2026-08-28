@@ -1,0 +1,60 @@
+#version 450
+//! Rotary position embedding, the half-split form: `out = x * cos + rotate_half(x) * sin`.
+//!
+//! Eight uses, on the query and the key of each of the four text cross-attentions in
+//! Supertonic's flow-matching sampler.
+//!
+//! # The split is halves, not pairs
+//!
+//! There are two conventions and they are not interchangeable. This one splits a head's
+//! `head_dim` channels down the middle and pairs channel `j` with channel `j + half`:
+//!
+//!     out[j]        = x[j] * cos[j] - x[j + half] * sin[j]
+//!     out[j + half] = x[j + half] * cos[j] + x[j] * sin[j]
+//!
+//! The other convention pairs adjacent channels `(2j, 2j + 1)`. Both rotate the same 2-planes
+//! by the same angles, so both produce output of exactly the right shape and magnitude, and
+//! attention scores computed with one and weights trained for the other are simply wrong. The
+//! export's `Slice`s are `[0, 32)` and `[32, 64)` of a 64-wide head, so it is halves.
+//!
+//! # The angles come from the host
+//!
+//! `p.in1` is a `[2 * half, 1, W]` table: `cos` in the first `half` channels and `sin` in the
+//! rest. It is a function of the position and the frequency alone, so there is nothing to train
+//! and nothing to keep in the weights file — and in this export it is not even a function of the
+//! absolute position. The angle is `(position / length) * theta[j]`, so a query at the middle of
+//! a 60-frame latent and a key at the middle of a 20-character text get the *same* angle. That
+//! is what lets an 8-head cross-attention align two sequences of different lengths, and it means
+//! the table has to be rebuilt whenever either length changes. See `post::supertonic`.
+//!
+//! One table serves every head: `p.in_c` is `head_dim` and the frequency index is
+//! `(c % head_dim) % half`.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The tensor is `[C, 1, W]`, so this is (channel, 0, position).
+    uint channel, unused_row, position;
+    unpack(index, channel, unused_row, position);
+
+    uint head_dim = p.in_c;
+    uint half_dim = head_dim / 2u;
+    uint within = channel % head_dim;
+    uint frequency = within % half_dim;
+    // The partner channel is `half_dim` away, in whichever direction stays inside the head.
+    bool lower = within < half_dim;
+    uint partner = lower ? channel + half_dim : channel - half_dim;
+
+    float angle_cos = float(arena[p.in1 + frequency * p.out_w + position]);
+    float angle_sin = float(arena[p.in1 + (half_dim + frequency) * p.out_w + position]);
+    float self = float(arena[p.in0 + channel * p.out_w + position]);
+    float other = float(arena[p.in0 + partner * p.out_w + position]);
+
+    // The lower half subtracts its partner's sine term; the upper half adds its own.
+    float rotated = lower ? -other * angle_sin : other * angle_sin;
+    arena[p.out_at + index] = float16_t(self * angle_cos + rotated);
+}

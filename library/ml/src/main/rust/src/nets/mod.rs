@@ -176,6 +176,12 @@ pub enum Kind {
     Add,
     /// `a * b` where `b` is `C x 1 x 1`. The excite in a squeeze-excite block.
     MulBroadcast,
+    /// `a + b` where `b` is `C x 1 x 1`. A per-channel shift.
+    ///
+    /// The mirror of [`Kind::MulBroadcast`], and used for one thing: the four timestep
+    /// conditioning layers of Supertonic's sampler, whose `Linear` from the time embedding the
+    /// host evaluates because it depends on two scalars. See `shaders/add_bcast.comp`.
+    AddBroadcast,
     /// Elementwise `a * b` over two equal shapes.
     Mul,
     /// `x * scale + shift`, both scalars. PP-OCRv5's "learnable affine block".
@@ -314,6 +320,14 @@ pub enum Kind {
     /// against 50 style keys that are entirely constant — `tanh(W_key . style_key + b_key)`,
     /// which the converter folds to one tensor. See `shaders/constant.comp`.
     Constant,
+    /// Rotary position embedding over a `[C, 1, W]` sequence, the **half**-split convention.
+    ///
+    /// `out[j] = x[j] cos - x[j + half] sin` and `out[j + half] = x[j + half] cos + x[j] sin`,
+    /// within each head. The angle table is the second operand rather than a weight: in this
+    /// export the angle is `(position / length) * theta`, so it depends on the sequence length
+    /// and the host rebuilds it per call. See `shaders/rotary.comp` for why the pairing
+    /// convention matters more than it looks.
+    Rotary,
 }
 
 /// The push-constant block every shader declares.
@@ -592,6 +606,12 @@ enum Node {
     Constant {
         out: Id,
         weight: u32,
+    },
+    Rotary {
+        input: Id,
+        angles: Id,
+        out: Id,
+        heads: u32,
     },
     Embed {
         ids: Id,
@@ -1224,6 +1244,46 @@ impl<'a> Builder<'a> {
         }
         let out = self.tensor(Shape::new(count, shape.h, shape.w));
         self.nodes.push(Node::SliceChannels { input, out, start });
+        out
+    }
+
+    /// `a + b` where `b` is `C x 1 x 1`, a per-channel shift. See [`Kind::AddBroadcast`].
+    pub fn add_channel(&mut self, a: Id, b: Id) -> Id {
+        let (sa, sb) = (self.shape_of(a), self.shape_of(b));
+        if sb.c != sa.c || sb.h != 1 || sb.w != 1 {
+            self.fail(format!("add_channel of {sa:?} by {sb:?}, which is not Cx1x1"));
+        }
+        let out = self.tensor(sa);
+        self.nodes.push(Node::Binary { kind: Kind::AddBroadcast, a, b, out });
+        out
+    }
+
+    /// Rotary position embedding over a `[C, 1, W]` sequence. See [`Kind::Rotary`].
+    ///
+    /// `angles` is `[head_dim, 1, W]`: the cosines in its first `head_dim / 2` channels and the
+    /// sines in the rest, one column per position.
+    pub fn rotary(&mut self, input: Id, angles: Id, heads: u32) -> Id {
+        let (sx, sa) = (self.shape_of(input), self.shape_of(angles));
+        if sx.h != 1 || sa.h != 1 {
+            self.fail(format!("rotary on {sx:?}: a sequence is [d_model, 1, T]"));
+        }
+        if heads == 0 || !sx.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sx.c));
+        }
+        let head_dim = sx.c.checked_div(heads.max(1)).unwrap_or(0);
+        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+            self.fail(format!(
+                "rotary over a head of {head_dim}: it rotates 2-planes, so the head must be even"
+            ));
+        }
+        if sa.c != head_dim || sa.w != sx.w {
+            self.fail(format!(
+                "rotary angles {sa:?} for {sx:?} in {heads} heads: the table is \
+                 [head_dim, 1, T], cosines then sines"
+            ));
+        }
+        let out = self.tensor(sx);
+        self.nodes.push(Node::Rotary { input, angles, out, heads });
         out
     }
 
@@ -1961,6 +2021,27 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::Rotary { input, angles, out, heads } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::Rotary,
+                    push: Push {
+                        in0: at(*input)?,
+                        in1: at(*angles)?,
+                        out: at(*out)?,
+                        // The head width, which is what the frequency index wraps on. Not the
+                        // channel count.
+                        in_c: so.c / heads.max(&1),
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Constant { out, weight } => {
                 let so = shape(*out);
                 ops.push(Op::Dispatch {
@@ -2025,6 +2106,7 @@ impl Node {
             | Node::ConvInt8 { out, .. }
             | Node::AttnApply { out, .. }
             | Node::Constant { out, .. }
+            | Node::Rotary { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -2046,6 +2128,7 @@ impl Node {
             | Node::ConvInt8 { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
+            Node::Rotary { input, angles, .. } => vec![*input, *angles],
             Node::AttnScores { q: a, k: b, .. }
             | Node::AttnApply { probs: a, v: b, .. }
             | Node::AttnScoresRelative { q: a, k: b, .. }
@@ -2227,9 +2310,18 @@ pub(crate) mod tests {
                         Kind::Add | Kind::Mul => {
                             vec![(push.in0, written), (push.in1, written)]
                         }
+                        // Rotary reads a partner channel half a head away, so the whole plane,
+                        // and the angle table is `head_dim` channels of the same length.
+                        Kind::Rotary => {
+                            vec![(push.in0, written), (push.in1, push.in_c * push.out_w)]
+                        }
                         // The gate is one value per channel, broadcast over H and W.
                         Kind::MulBroadcast => {
                             vec![(push.in0, written), (push.in1, push.in_c)]
+                        }
+                        // As `MulBroadcast`: one shift per channel.
+                        Kind::AddBroadcast => {
+                            vec![(push.in0, written), (push.in1, push.out_c)]
                         }
                         // Reads no arena at all - it is a copy out of the weights file.
                         Kind::Constant => Vec::new(),

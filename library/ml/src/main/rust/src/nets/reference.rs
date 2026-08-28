@@ -197,6 +197,8 @@ impl Reference {
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
                     Kind::Embed => self.embed(push),
                     Kind::Constant => self.constant(push),
+                    Kind::AddBroadcast => self.add_broadcast(push),
+                    Kind::Rotary => self.rotary(push),
                     Kind::GatedTanh => self.gated_tanh(push),
                     // The reference interpreter holds its weights as `f32`, so there is no
                     // byte view to unpack: an int8 plan can be built and inspected on the
@@ -564,6 +566,45 @@ impl Reference {
         for i in 0..p.count {
             let value = self.weight(p.weight, i)?;
             self.store(p.out, i, value)?;
+        }
+        Ok(())
+    }
+
+    /// `out[c][y][x] = a[c][y][x] + b[c]`, a per-channel shift.
+    fn add_broadcast(&mut self, p: &Push) -> Result<(), String> {
+        for oc in 0..p.out_c {
+            let shift = self.load(p.in1, oc)?;
+            for oy in 0..p.out_h {
+                for ox in 0..p.out_w {
+                    let at = nchw(p, oc, oy, ox);
+                    let value = self.load(p.in0, at)?;
+                    self.store(p.out, at, value + shift)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Rotary position embedding, the half-split convention. See [`Kind::Rotary`].
+    fn rotary(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = p.in_c;
+        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+            return Err(format!("a rotary head of {head_dim} channels"));
+        }
+        let half = head_dim / 2;
+        for channel in 0..p.out_c {
+            let within = channel % head_dim;
+            let frequency = within % half;
+            let lower = within < half;
+            let partner = if lower { channel + half } else { channel - half };
+            for position in 0..p.out_w {
+                let angle_cos = self.load(p.in1, frequency * p.out_w + position)?;
+                let angle_sin = self.load(p.in1, (half + frequency) * p.out_w + position)?;
+                let self_value = self.load(p.in0, channel * p.out_w + position)?;
+                let other = self.load(p.in0, partner * p.out_w + position)?;
+                let rotated = if lower { -other } else { other } * angle_sin;
+                self.store(p.out, channel * p.out_w + position, self_value * angle_cos + rotated)?;
+            }
         }
         Ok(())
     }
@@ -2175,6 +2216,107 @@ mod tests {
             },
         );
         close(&got, &[11.0, 22.0, 33.0, 44.0, 55.0, 66.0]);
+    }
+
+    #[test]
+    fn a_per_channel_shift_broadcasts_over_the_plane() {
+        // Two channels of three positions, shifted by 10 and -1. The mirror of the excite
+        // multiply, and used for the sampler's timestep conditioning.
+        let got = two(
+            (Shape::new(2, 1, 3), Shape::new(2, 1, 1)),
+            (&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[10.0, -1.0]),
+            |b, x, shift| b.add_channel(x, shift),
+        );
+        close(&got, &[11.0, 12.0, 13.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn a_per_channel_shift_refuses_a_full_sequence() {
+        // A `[2, 1, 3]` second operand would be a plain `Add`. Taking it here would read only
+        // its first column and silently drop the rest.
+        let source = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&source);
+        let x = b.input(Shape::new(2, 1, 3));
+        let shift = b.input(Shape::new(2, 1, 3));
+        let out = b.add_channel(x, shift);
+        let error = b.finish(&[out]).expect_err("a per-position shift");
+        assert!(error.contains("not Cx1x1"), "{error}");
+    }
+
+    #[test]
+    fn rotary_rotates_the_halves_of_each_head() {
+        // One head of four channels over two positions, so `half` is 2. At position 0 the angle
+        // is 0 and the rotation is the identity; at position 1 it is 90 degrees on both
+        // frequencies, which sends `(a, b)` to `(-b, a)` and is unmistakable.
+        let quarter = std::f32::consts::FRAC_PI_2;
+        let x: Vec<f32> = vec![
+            1.0, 5.0, // channel 0
+            2.0, 6.0, // channel 1
+            3.0, 7.0, // channel 2, the partner of 0
+            4.0, 8.0, // channel 3, the partner of 1
+        ];
+        // `[head_dim, 1, W]`: two cosines then two sines.
+        let angles: Vec<f32> = vec![
+            1.0, quarter.cos(), //
+            1.0, quarter.cos(), //
+            0.0, quarter.sin(), //
+            0.0, quarter.sin(),
+        ];
+        let got = two(
+            (Shape::new(4, 1, 2), Shape::new(4, 1, 2)),
+            (&x, &angles),
+            |b, x, a| b.rotary(x, a, 1),
+        );
+        close(
+            &got,
+            &[
+                1.0, -7.0, // 1*1 - 3*0 ; 5*0 - 7*1
+                2.0, -8.0, //
+                3.0, 5.0, // 3*1 + 1*0 ; 7*0 + 5*1
+                4.0, 6.0,
+            ],
+        );
+    }
+
+    #[test]
+    fn rotary_uses_one_angle_table_for_every_head() {
+        // Two heads of two channels, one position, a 90-degree turn. Both heads must rotate,
+        // and each must pair with its own partner rather than with the next head's channel —
+        // a `half` computed on the channel count instead of the head width would pair channel
+        // 0 with channel 2, which is head 1.
+        let got = two(
+            (Shape::new(4, 1, 1), Shape::new(2, 1, 1)),
+            (&[1.0, 2.0, 3.0, 4.0], &[0.0, 1.0]),
+            |b, x, a| b.rotary(x, a, 2),
+        );
+        // Head 0 is (1, 2) -> (-2, 1); head 1 is (3, 4) -> (-4, 3).
+        close(&got, &[-2.0, 1.0, -4.0, 3.0]);
+    }
+
+    #[test]
+    fn rotary_refuses_an_odd_head() {
+        // It rotates 2-planes, so a head with no middle cannot be split.
+        let source = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&source);
+        let x = b.input(Shape::new(3, 1, 2));
+        let angles = b.input(Shape::new(3, 1, 2));
+        let out = b.rotary(x, angles, 1);
+        let error = b.finish(&[out]).expect_err("an odd head");
+        assert!(error.contains("2-planes"), "{error}");
+    }
+
+    #[test]
+    fn rotary_refuses_an_angle_table_of_the_wrong_width() {
+        // The table is `[head_dim, 1, T]`, cosines then sines. A `[head_dim / 2, 1, T]` one —
+        // the natural mistake, since there are only `head_dim / 2` frequencies — would read
+        // sines out of the tensor that follows it.
+        let source = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&source);
+        let x = b.input(Shape::new(4, 1, 2));
+        let angles = b.input(Shape::new(2, 1, 2));
+        let out = b.rotary(x, angles, 1);
+        let error = b.finish(&[out]).expect_err("half a table");
+        assert!(error.contains("cosines then sines"), "{error}");
     }
 
     #[test]
