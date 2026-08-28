@@ -14,17 +14,136 @@ use crate::proto::Result;
 /// Sentinel latitude for "this node's location was never seen".
 const NO_LOC: i32 = i32::MIN;
 
-/// Coordinates for a known set of node ids: a sorted id table plus an
-/// index-aligned coordinate array, looked up by `binary_search`.
+/// Coordinates for a known set of node ids: a compressed id index plus an
+/// index-aligned coordinate array.
 ///
 /// **This, and not [`crate::graph_build`]'s bitset.** That module allocates
 /// `BITSET_SIZE = 20e9` bits -- 2.5 GB keyed by raw OSM node id, whatever the
-/// extract -- and peaks around 10 GB on California. This form costs 16 bytes per
-/// *needed* node, so a layer that wants a few hundred thousand nodes pays a few
-/// megabytes. Same pattern as [`crate::poi_build`], which worked it out first.
+/// extract -- and peaks around 10 GB on California. This form costs per *needed*
+/// node, so a layer that wants a few hundred thousand nodes pays megabytes. Same
+/// pattern as [`crate::poi_build`], which worked it out first.
+///
+/// # Why the ids are compressed
+///
+/// A sorted `Vec<i64>` is the obvious id table and it was the first one here. On a California
+/// extract it is 154 M ids, so 1.23 GB -- and next to an equally large coordinate array it made this
+/// structure about 73% of the whole generator's peak. The ids are sorted and dense enough that the
+/// gaps between them are tiny: they are a *subset* of a PBF's node ids, but a large one, so the
+/// average gap is a couple of units and encodes in a single byte. [`IdIndex`] stores one full id per
+/// block of [`BLOCK`] and varint gaps for the rest, which is about 1.2 bytes per id instead of 8.
+///
+/// Lookup did not get slower for it, and probably got faster. A binary search over 1.23 GB touches
+/// ~27 scattered cache lines and misses on most of them; this searches a 19 MB base array and then
+/// scans at most 63 contiguous bytes, which is one or two lines.
 pub struct NodeLocations {
-    ids: Vec<i64>,
+    ids: IdIndex,
     locs: Vec<(i32, i32)>,
+}
+
+/// Ids per block of [`IdIndex`].
+///
+/// The trade is the usual one: a larger block amortises its 12 bytes of base and offset over more
+/// ids, and lengthens the scan that follows the binary search. 64 puts the overhead at 0.19 bytes per
+/// id and keeps the worst-case scan inside a couple of cache lines.
+const BLOCK: usize = 64;
+
+/// A sorted, unique id set as block bases plus varint gaps.
+///
+/// Searchable through `&self` alone, because [`resolve_nodes`] hands it to every worker in a PBF pass
+/// while the sink writes coordinates.
+#[derive(Default)]
+struct IdIndex {
+    /// The first id of each block, ascending. What the binary search runs over.
+    bases: Vec<i64>,
+    /// Where each block's gaps start in `deltas`, with a sentinel so `offsets[b + 1]` is always the
+    /// end of block `b`.
+    offsets: Vec<u32>,
+    /// `BLOCK - 1` varint gaps per block, each the difference from the previous id.
+    deltas: Vec<u8>,
+    len: usize,
+}
+
+impl IdIndex {
+    /// Build from ids that are already sorted and unique.
+    fn build(ids: &[i64]) -> IdIndex {
+        let blocks = ids.len().div_ceil(BLOCK);
+        let mut index = IdIndex {
+            bases: Vec::with_capacity(blocks),
+            offsets: Vec::with_capacity(blocks + 1),
+            // One byte per gap is the common case, so this is the right first guess.
+            deltas: Vec::with_capacity(ids.len()),
+            len: ids.len(),
+        };
+        for block in ids.chunks(BLOCK) {
+            index.bases.push(block[0]);
+            index.offsets.push(index.deltas.len() as u32);
+            let mut previous = block[0];
+            for &id in &block[1..] {
+                // Non-negative because the input is sorted and unique, so the gap is at least one.
+                put_uvarint((id - previous) as u64, &mut index.deltas);
+                previous = id;
+            }
+        }
+        index.offsets.push(index.deltas.len() as u32);
+        index.deltas.shrink_to_fit();
+        index
+    }
+
+    fn len(&self) -> usize {
+        self.len
+    }
+
+    /// The position of `id`, or `None` if it is not in the set.
+    fn find(&self, id: i64) -> Option<u32> {
+        let block = match self.bases.binary_search(&id) {
+            // A base is an id, so this is a hit on the first of a block.
+            Ok(block) => return Some((block * BLOCK) as u32),
+            // Before the first id in the set.
+            Err(0) => return None,
+            Err(next) => next - 1,
+        };
+        let mut current = self.bases[block];
+        let mut at = self.offsets[block] as usize;
+        let end = self.offsets[block + 1] as usize;
+        let mut position = 0usize;
+        while at < end {
+            let (gap, used) = get_uvarint(&self.deltas[at..]);
+            at += used;
+            current += gap as i64;
+            position += 1;
+            if current == id {
+                return Some((block * BLOCK + position) as u32);
+            }
+            // The block is ascending, so once it is past `id` the id is absent.
+            if current > id {
+                return None;
+            }
+        }
+        None
+    }
+}
+
+/// LEB128, as the rest of this crate spells varints.
+fn put_uvarint(mut value: u64, out: &mut Vec<u8>) {
+    while value >= 0x80 {
+        out.push((value as u8) | 0x80);
+        value >>= 7;
+    }
+    out.push(value as u8);
+}
+
+/// Returns `(value, bytes consumed)`.
+fn get_uvarint(bytes: &[u8]) -> (u64, usize) {
+    let mut value = 0u64;
+    let mut shift = 0u32;
+    for (i, &b) in bytes.iter().enumerate() {
+        value |= ((b & 0x7f) as u64) << shift;
+        if b < 0x80 {
+            return (value, i + 1);
+        }
+        shift += 7;
+    }
+    (value, bytes.len())
 }
 
 impl NodeLocations {
@@ -32,13 +151,13 @@ impl NodeLocations {
     pub fn new(mut ids: Vec<i64>) -> NodeLocations {
         ids.sort_unstable();
         ids.dedup();
-        // `dedup` shrinks the length and leaves the capacity alone, and this vector is built by
-        // extension, so it arrives over-allocated by up to a factor of two. On a California extract
-        // that is ~150 M ids and the slack is hundreds of megabytes held for the rest of the build,
-        // next to a table of the same size. Given back before the locations are allocated.
-        ids.shrink_to_fit();
-        let locs = vec![(NO_LOC, NO_LOC); ids.len()];
-        NodeLocations { ids, locs }
+        let index = IdIndex::build(&ids);
+        // The plain vector goes here rather than being kept alongside: it is 8 bytes per id against
+        // the index's ~1.2, and holding both would give back the saving. Freed before the coordinate
+        // array is allocated, so the two never peak together.
+        drop(ids);
+        let locs = vec![(NO_LOC, NO_LOC); index.len()];
+        NodeLocations { ids: index, locs }
     }
 
     pub fn len(&self) -> usize {
@@ -46,11 +165,11 @@ impl NodeLocations {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.ids.is_empty()
+        self.ids.len() == 0
     }
 
     fn index_of(&self, id: i64) -> Option<u32> {
-        self.ids.binary_search(&id).ok().map(|i| i as u32)
+        self.ids.find(id)
     }
 
     pub fn get(&self, id: i64) -> Option<(i32, i32)> {
@@ -108,8 +227,8 @@ pub fn resolve_nodes(
             let mut kinds = 0u8;
             visit_block(block, KIND_NODES, &mut kinds, &mut |el: Element| {
                 if let Element::Node(n) = el {
-                    if let Ok(idx) = ids.binary_search(&n.id) {
-                        state.push((idx as u32, n.lat_e7, n.lon_e7));
+                    if let Some(idx) = ids.find(n.id) {
+                        state.push((idx, n.lat_e7, n.lon_e7));
                     }
                 }
                 Ok(())
@@ -129,6 +248,117 @@ pub fn resolve_nodes(
 
 #[cfg(test)]
 mod tests {
+    /// **The test the compressed index lives or dies by.** It has to answer exactly what a plain
+    /// `binary_search` over the same ids would, for ids that are present and ids that are not, and it
+    /// has to hold at block boundaries and across gaps too large for a one-byte varint.
+    ///
+    /// Driven by a deterministic LCG rather than a fixed list so it covers thousands of cases and
+    /// still fails identically every run.
+    #[test]
+    fn the_compressed_index_answers_exactly_what_a_binary_search_would() {
+        let mut state = 0x2545_F491_4F6C_DD1Du64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+
+        // Gaps drawn so most are tiny (the real distribution) and some are enormous, which is what
+        // forces multi-byte varints.
+        let mut ids: Vec<i64> = Vec::new();
+        let mut id: i64 = 1;
+        for _ in 0..5_000 {
+            let r = next();
+            let gap = match r % 100 {
+                0 => (r >> 8) % 5_000_000 + 1,
+                1..=9 => (r >> 8) % 1_000 + 1,
+                _ => (r >> 8) % 4 + 1,
+            };
+            id += gap as i64;
+            ids.push(id);
+        }
+        let index = IdIndex::build(&ids);
+        assert_eq!(index.len(), ids.len());
+
+        // Every id present resolves to its own position.
+        for (position, &id) in ids.iter().enumerate() {
+            assert_eq!(index.find(id), Some(position as u32), "id {id} at {position}");
+        }
+        // And nothing else resolves at all. Probing every id +/- 1 covers the interesting misses:
+        // just below a hit, just above one, and inside a gap.
+        for &id in &ids {
+            for probe in [id - 1, id + 1] {
+                let expected = ids.binary_search(&probe).ok().map(|i| i as u32);
+                assert_eq!(index.find(probe), expected, "probe {probe}");
+            }
+        }
+        // Outside the set entirely, at both ends.
+        assert_eq!(index.find(0), None);
+        assert_eq!(index.find(i64::MIN), None);
+        assert_eq!(index.find(ids[ids.len() - 1] + 1), None);
+        assert_eq!(index.find(i64::MAX), None);
+    }
+
+    /// A block boundary is the one place an off-by-one would hide, so it is checked directly rather
+    /// than left to the random case.
+    #[test]
+    fn a_block_boundary_resolves_on_both_sides() {
+        // Three full blocks and a partial one, with a gap of exactly one so positions and ids differ
+        // by a constant and an off-by-one is unmissable.
+        let ids: Vec<i64> = (0..BLOCK as i64 * 3 + 7).map(|i| 1_000 + i).collect();
+        let index = IdIndex::build(&ids);
+        for (position, &id) in ids.iter().enumerate() {
+            assert_eq!(index.find(id), Some(position as u32));
+        }
+        // The first id of each block is a base, which is the branch that returns without scanning.
+        for block in 0..4 {
+            let position = block * BLOCK;
+            if position < ids.len() {
+                assert_eq!(index.find(ids[position]), Some(position as u32));
+            }
+        }
+        assert_eq!(index.find(999), None, "below the set");
+        assert_eq!(index.find(1_000 + ids.len() as i64), None, "above the set");
+    }
+
+    #[test]
+    fn an_empty_or_single_id_set_is_not_a_special_case_that_panics() {
+        let empty = IdIndex::build(&[]);
+        assert_eq!(empty.len(), 0);
+        assert_eq!(empty.find(1), None);
+
+        let one = IdIndex::build(&[42]);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one.find(42), Some(0));
+        assert_eq!(one.find(41), None);
+        assert_eq!(one.find(43), None);
+    }
+
+    /// The saving this was done for. A plain `Vec<i64>` is 8 bytes an id; this has to be a small
+    /// fraction of that or it is not worth the scan.
+    #[test]
+    fn the_index_costs_about_one_byte_per_id() {
+        // Gaps of one to four, which is roughly what a real needed-node set looks like.
+        let ids: Vec<i64> = (0..100_000i64).map(|i| 5 + i * 3).collect();
+        let index = IdIndex::build(&ids);
+        let bytes = index.bases.len() * 8 + index.offsets.len() * 4 + index.deltas.len();
+        let plain = ids.len() * 8;
+        assert!(
+            bytes * 4 < plain,
+            "the index is {bytes} bytes against {plain} for a plain vector, which is not worth it",
+        );
+    }
+
+    #[test]
+    fn a_varint_round_trips_at_every_width() {
+        for value in [0u64, 1, 0x7f, 0x80, 0x3fff, 0x4000, u32::MAX as u64, u64::MAX] {
+            let mut bytes = Vec::new();
+            put_uvarint(value, &mut bytes);
+            let (read, used) = get_uvarint(&bytes);
+            assert_eq!((read, used), (value, bytes.len()), "value {value}");
+        }
+    }
     use super::*;
 
     #[test]
