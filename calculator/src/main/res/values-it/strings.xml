@@ -10,4 +10,25 @@
     <string name="feature_minimum">minimo</string>
     <string name="feature_maximum">massimo</string>
     <string name="feature_intersection">intersezione</string>
+    <string name="units">Unità</string>
+    <string name="insert_unit">Inserisci unità</string>
+    <string name="convert_to">Converti in</string>
+    <string name="converter_value">Valore</string>
+    <string name="converter_from">Da</string>
+    <string name="converter_to">A</string>
+    <string name="converter_result">Risultato</string>
+    <string name="converter_swap">Inverti unità</string>
+    <string name="key_date">Data</string>
+    <string name="key_time">Ora</string>
+    <string name="key_datetime">Data e ora</string>
+    <string name="select_time">Seleziona orario</string>
+    <string name="ok">OK</string>
+    <string name="currency_loading">Recupero dei tassi di cambio…</string>
+    <string name="currency_unavailable">I tassi di cambio non sono disponibili</string>
+    <string name="currency_retry">Riprova</string>
+    <string name="calculator_widget_label">Calcolatrice</string>
+    <string name="calculator_widget_description">Una tastiera funzionante sulla schermata iniziale - tocca lo schermo per aprire Calcolatrice</string>
+    <string name="units_widget_label">Convertitore unità</string>
+    <string name="units_widget_description">Converti le unità in un attimo - tocca per aprire il convertitore</string>
+    <string name="units_widget_choose_category">Scegli una categoria di unità</string>
 </resources>
