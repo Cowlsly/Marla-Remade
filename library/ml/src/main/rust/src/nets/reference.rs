@@ -194,6 +194,7 @@ impl Reference {
                     // The reference interpreter holds its weights as `f32`, so there is no
                     // byte view to unpack: an int8 plan can be built and inspected on the
                     // host but not run. `scripts/ml/onnx_parity.py` checks it on a device.
+                    Kind::ConvPoint => self.conv_point(push),
                     Kind::ConvInt8 => Err("int8 convolution has no host reference".into()),
                     Kind::FlipChannels => self.flip_channels(push),
                 },
@@ -467,6 +468,30 @@ impl Reference {
                 total += self.load(p.in0, plane + i)?;
             }
             self.store(p.out, channel, total / elements as f32)?;
+        }
+        Ok(())
+    }
+
+    /// `out[o][p] = act(sum_i W[o][i] * in[i][p] + bias[o])`, a `1 x 1` convolution.
+    ///
+    /// The same arithmetic as [`Self::conv`] at kernel `1 x 1`, written separately because the
+    /// device shader tiles it and carries a **tile** count in `push.count` rather than an
+    /// element count. Every `1 x 1` in every net module now routes here, so the existing
+    /// fixtures cover it.
+    fn conv_point(&mut self, p: &Push) -> Result<(), String> {
+        let positions = p.out_h * p.out_w;
+        for channel in 0..p.out_c {
+            let bias = self.weight(p.bias, channel)?;
+            for position in 0..positions {
+                let mut total = 0.0f32;
+                for input in 0..p.in_c {
+                    total += self.weight(p.weight, channel * p.in_c + input)?
+                        * self.load(p.in0, input * positions + position)?;
+                }
+                // `Builder::conv` refuses to route a PRelu here, so the slope is never read.
+                let value = activate(total + bias, p.act, 0.0);
+                self.store(p.out, channel * positions + position, value)?;
+            }
         }
         Ok(())
     }
@@ -2267,8 +2292,11 @@ mod tests {
             let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_ENC)
                 .expect("the encoder asset parses");
             let plan = vits_enc::build(&weights, width).expect("vits_enc builds");
-            let stats = run(&plan, weights.data(), &input).expect("the encoder runs");
-            write(&dir.join("reference.f32"), &stats);
+            // Two outputs since the duration predictor needed the pre-projection hidden state;
+            // the probe is the first, the prior''s statistics.
+            let outputs = run_multi(&plan, weights.data(), &[&input]).expect("the encoder runs");
+            let stats = outputs.first().expect("the statistics output");
+            write(&dir.join("reference.f32"), stats);
             println!("vits_enc at {width} phonemes: wrote {} values", stats.len());
             return;
         }

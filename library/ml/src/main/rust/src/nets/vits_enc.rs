@@ -224,7 +224,7 @@ mod tests {
         let mut counts = std::collections::BTreeMap::new();
         for op in &plan.ops {
             if let Op::Dispatch { kind, .. } = op {
-                *counts.entry(format!("{kind:?}")).or_insert(0) += 1;
+                *counts.entry(super::super::tests::name_of(*kind)).or_insert(0) += 1;
             }
         }
         // Four projections and two feed-forward convolutions per layer, plus the output

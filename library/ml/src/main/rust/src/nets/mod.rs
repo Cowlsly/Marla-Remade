@@ -243,6 +243,16 @@ pub enum Kind {
     GatedTanh,
     /// `out[c] = in[C - 1 - c]`, a channel reversal. VITS''s `Flip` between coupling layers.
     FlipChannels,
+    /// A `1 x 1` convolution as a tiled matrix multiply, staging weights through shared memory.
+    ///
+    /// [`Kind::Conv`] reads each output element''s weights from global memory with no reuse, which
+    /// costs nothing for a spatial kernel and everything for a wide `1 x 1` over a short
+    /// sequence - measured at 15.2 GFLOP/s on a Tensor G4 against a device peak of order 1000.
+    /// This stages a tile of weights once per workgroup instead. `Builder::conv` routes here
+    /// automatically for an ungrouped `1 x 1`; see `conv_point.comp`.
+    ///
+    /// [`Push::count`] is the **tile** count for this kind, not the output element count.
+    ConvPoint,
     /// [`Kind::Conv`] with int8 weights and one per-tensor dequantisation scale.
     ///
     /// Only for a network where the weights dominate the download. The scale multiplies the
@@ -1399,6 +1409,44 @@ impl<'a> Builder<'a> {
                 transpose,
             } => {
                 let (si, so) = (shape(*input), shape(*out));
+                // An ungrouped 1x1 goes to the tiled path. Its geometry is a matrix multiply
+                // over `out_h * out_w` positions, so stride, dilation and padding are all
+                // trivially identity and nothing else in the push block changes meaning.
+                let tiled = !*transpose
+                    && *group == 1
+                    && kernel == &(1, 1)
+                    && stride == &(1, 1)
+                    && pad == &(0, 0)
+                    && si.h == so.h
+                    && si.w == so.w
+                    && !matches!(act, Act::PRelu(_));
+                if tiled {
+                    const TILE: u32 = 16;
+                    let positions = so.h * so.w;
+                    let tiles = so.c.div_ceil(TILE) * positions.div_ceil(TILE);
+                    ops.push(Op::Dispatch {
+                        kind: Kind::ConvPoint,
+                        push: Push {
+                            in0: at(*input)?,
+                            out: at(*out)?,
+                            weight: *weight,
+                            bias: *bias,
+                            in_c: si.c,
+                            in_h: si.h,
+                            in_w: si.w,
+                            out_c: so.c,
+                            out_h: so.h,
+                            out_w: so.w,
+                            act: act.code(),
+                            // Tiles, not elements: one workgroup per tile.
+                            count: tiles,
+                            ..Push::default()
+                        },
+                        // 64 invocations a workgroup, so this asks for exactly `tiles` of them.
+                        invocations: tiles * 64,
+                    });
+                    return Ok(());
+                }
                 ops.push(Op::Dispatch {
                     kind: if *transpose { Kind::ConvTranspose } else { Kind::Conv },
                     push: Push {
@@ -1978,6 +2026,19 @@ pub(crate) mod tests {
         }
     }
 
+    /// A dispatch kind''s name, with `Conv`''s tiled lowering folded back into `Conv`.
+    ///
+    /// The op-inventory tests state what a network contains. Whether an ungrouped `1 x 1` is
+    /// served by `conv.comp` or the tiled `conv_point.comp` is a lowering decision that those
+    /// tests should not see, and folding it here keeps the assertions readable as counts of
+    /// convolutions rather than counts of shaders.
+    pub fn name_of(kind: super::Kind) -> String {
+        match kind {
+            super::Kind::ConvPoint => "Conv".to_string(),
+            other => format!("{other:?}"),
+        }
+    }
+
     /// Assert that no op reads a region of the arena that it also writes.
     ///
     /// Every op reads and writes the same `VkBuffer`, and a convolution invocation reads
@@ -2019,6 +2080,8 @@ pub(crate) mod tests {
                         Kind::Embed => vec![(push.in0, push.out_w)],
                         // As `Conv`: the whole input plane, whatever the kernel touches.
                         Kind::ConvInt8 => vec![(push.in0, dense)],
+                        // count is tiles here, so the read span is the input plane.
+                        Kind::ConvPoint => vec![(push.in0, dense)],
                         // Twice what it writes: the filter half and the gate half.
                         Kind::GatedTanh => vec![(push.in0, written * 2)],
                         _ => vec![(push.in0, dense)],

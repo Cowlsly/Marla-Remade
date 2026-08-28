@@ -47,12 +47,13 @@ const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
 const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
 const GATED_TANH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gated_tanh.comp.spv"));
+const CONV_POINT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_point.comp.spv"));
 const CONV_INT8: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_int8.comp.spv"));
 const FLIP_CHANNELS: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 21] = [
+const SPIRV: [&[u8]; 22] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -74,6 +75,7 @@ const SPIRV: [&[u8]; 21] = [
     GATED_TANH,
     FLIP_CHANNELS,
     CONV_INT8,
+    CONV_POINT,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -118,6 +120,7 @@ pub struct Pipelines {
     gated_tanh: vk::Pipeline,
     flip_channels: vk::Pipeline,
     conv_int8: vk::Pipeline,
+    conv_point: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -275,6 +278,7 @@ impl Pipelines {
             gated_tanh,
             flip_channels,
             conv_int8,
+            conv_point,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -312,6 +316,7 @@ impl Pipelines {
             gated_tanh,
             flip_channels,
             conv_int8,
+            conv_point,
         })
     }
 
@@ -339,6 +344,7 @@ impl Pipelines {
             Kind::GatedTanh => self.gated_tanh,
             Kind::FlipChannels => self.flip_channels,
             Kind::ConvInt8 => self.conv_int8,
+            Kind::ConvPoint => self.conv_point,
         }
     }
 
@@ -368,6 +374,7 @@ impl Pipelines {
             self.gated_tanh,
             self.flip_channels,
             self.conv_int8,
+            self.conv_point,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

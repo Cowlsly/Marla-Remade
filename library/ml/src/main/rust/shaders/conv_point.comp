@@ -1,0 +1,116 @@
+#version 450
+//! A `1 x 1` convolution as a tiled matrix multiply, staging weights through shared memory.
+//!
+//! `out[o][p] = act(sum_i W[o][i] * in[i][p] + bias[o])`, where `p` runs over positions.
+//!
+//! # Why this exists
+//!
+//! `conv.comp` gives every output element its own invocation and reads that element's weights
+//! straight from global memory, with no reuse between invocations. For a spatial kernel that is
+//! survivable: a 3x3 is small and the cache serves it to the many pixels that share it.
+//!
+//! It is not survivable for a **wide** `1 x 1` over a **short** sequence, which is what every
+//! projection in a transformer is. Measured on a Tensor G4: the runtime achieved 15.2 GFLOP/s
+//! against a device peak of order 1000, because a 1024-to-1024 projection over 54 positions was
+//! moving about 113 MB of weights to do 113 MFLOP of work — every one of the 55,296 output
+//! elements re-reading a whole 1024-wide row.
+//!
+//! # The tiling
+//!
+//! One workgroup owns a [`TILE`] x [`TILE`] block of the output. It walks the input channels in
+//! steps of [`TILE`], staging the weight block and the activation block into shared memory once
+//! per step, and every invocation then reads those from shared memory instead of global. A weight
+//! element is fetched once per workgroup rather than once per position, so traffic falls by up to
+//! `TILE`.
+//!
+//! There are 64 invocations and `TILE * TILE` outputs in a tile, so each invocation owns a 2 x 2
+//! block. That register blocking is what lets a 16-wide tile run in a 64-invocation workgroup, and
+//! `local_size_x` is fixed at 64 in `common.glsl` for every shader.
+//!
+//! # Where it is not used
+//!
+//! Grouped convolutions, and anything whose kernel is not `1 x 1`. `Builder::conv` routes to this
+//! only when both hold; everything else keeps `conv.comp`. The two want opposite memory layouts
+//! and one shader serving both would be worse at each.
+
+#include "common.glsl"
+
+/// Output channels and positions per workgroup, and input channels per staging step.
+#define TILE 16u
+
+/// The staged blocks. `TILE * TILE` each, so 2 KB of shared memory at fp32.
+shared float weight_tile[TILE][TILE];
+shared float input_tile[TILE][TILE];
+
+void main() {
+    // The tile this workgroup owns. Uniform across the workgroup, so returning early cannot
+    // strand a barrier — every invocation takes the same branch.
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= p.count) {
+        return;
+    }
+    uint positions = p.out_h * p.out_w;
+    uint tiles_across = (positions + TILE - 1u) / TILE;
+    uint channel_base = (tile / tiles_across) * TILE;
+    uint position_base = (tile % tiles_across) * TILE;
+
+    // This invocation's 2 x 2 corner of the tile.
+    uint lid = gl_LocalInvocationID.x;
+    uint local_row = (lid >> 3u) * 2u;
+    uint local_col = (lid & 7u) * 2u;
+
+    float acc[2][2] = { { 0.0, 0.0 }, { 0.0, 0.0 } };
+
+    for (uint k0 = 0u; k0 < p.in_c; k0 += TILE) {
+        // Stage both blocks. 256 elements each, 64 invocations, so four apiece. Out-of-range
+        // entries are zeroed rather than skipped, which lets the inner loop run unguarded.
+        for (uint n = 0u; n < 4u; n++) {
+            uint slot = lid + n * 64u;
+            uint r = slot >> 4u;
+            uint c = slot & 15u;
+
+            uint channel = channel_base + r;
+            uint k_weight = k0 + c;
+            weight_tile[r][c] = (channel < p.out_c && k_weight < p.in_c)
+                ? float(weights[p.weight + channel * p.in_c + k_weight])
+                : 0.0;
+
+            uint k_input = k0 + r;
+            uint position = position_base + c;
+            input_tile[r][c] = (k_input < p.in_c && position < positions)
+                ? float(arena[p.in0 + k_input * positions + position])
+                : 0.0;
+        }
+        barrier();
+
+        for (uint k = 0u; k < TILE; k++) {
+            float a0 = weight_tile[local_row][k];
+            float a1 = weight_tile[local_row + 1u][k];
+            float b0 = input_tile[k][local_col];
+            float b1 = input_tile[k][local_col + 1u];
+            acc[0][0] += a0 * b0;
+            acc[0][1] += a0 * b1;
+            acc[1][0] += a1 * b0;
+            acc[1][1] += a1 * b1;
+        }
+        // Both barriers are needed: the second stops the next step's staging from overwriting
+        // tiles an invocation is still reading.
+        barrier();
+    }
+
+    for (uint i = 0u; i < 2u; i++) {
+        uint channel = channel_base + local_row + i;
+        if (channel >= p.out_c) {
+            continue;
+        }
+        float offset = float(weights[p.bias + channel]);
+        for (uint j = 0u; j < 2u; j++) {
+            uint position = position_base + local_col + j;
+            if (position >= positions) {
+                continue;
+            }
+            float value = activate(acc[i][j] + offset, p.act, channel);
+            arena[p.out_at + channel * positions + position] = float16_t(value);
+        }
+    }
+}

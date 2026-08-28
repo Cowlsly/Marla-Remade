@@ -391,7 +391,7 @@ mod tests {
         let mut copies = 0;
         for op in &plan.ops {
             match op {
-                Op::Dispatch { kind, .. } => *counts.entry(format!("{kind:?}")).or_insert(0) += 1,
+                Op::Dispatch { kind, .. } => *counts.entry(super::super::tests::name_of(*kind)).or_insert(0) += 1,
                 Op::Copy { .. } => copies += 1,
             }
         }

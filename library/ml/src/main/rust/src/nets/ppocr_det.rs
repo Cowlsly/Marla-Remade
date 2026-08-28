@@ -338,10 +338,19 @@ mod tests {
         build(&source, 960, 960).expect("ppocr_det builds at 960x960")
     }
 
+    /// Whether two kinds are the same graph operation, folding `Conv`''s tiled lowering in.
+    fn same_op(found: Kind, wanted: Kind) -> bool {
+        let fold = |k: Kind| if matches!(k, Kind::ConvPoint) { Kind::Conv } else { k };
+        fold(found) == fold(wanted)
+    }
+
     fn dispatches(plan: &Plan, kind: Kind) -> usize {
         plan.ops
             .iter()
-            .filter(|op| matches!(op, Op::Dispatch { kind: k, .. } if *k == kind))
+            // `ConvPoint` is a lowering of `Conv`, not a different graph op: an ungrouped 1x1
+            // goes to the tiled shader. These tests are about what the network contains, so the
+            // two are counted as one.
+            .filter(|op| matches!(op, Op::Dispatch { kind: k, .. } if same_op(*k, kind)))
             .count()
     }
 
