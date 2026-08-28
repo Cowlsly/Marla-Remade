@@ -36,6 +36,7 @@ fn main() -> ExitCode {
     let mut max_zoom = 14u8;
     let mut simplification = tiler::DEFAULT_SIMPLIFICATION;
     let mut build_id: Option<u64> = None;
+    let mut coastline: Option<PathBuf> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -53,6 +54,10 @@ fn main() -> ExitCode {
             }),
             "--report" => value("--report").map(|v| {
                 report = Some(PathBuf::from(v));
+                2
+            }),
+            "--coastline" => value("--coastline").map(|v| {
+                coastline = Some(PathBuf::from(v));
                 2
             }),
             "--layers" => value("--layers").and_then(|v| {
@@ -101,7 +106,16 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    match run(&input, &out, report.as_deref(), layers, min_zoom, max_zoom, simplification, build_id) {
+    let settings = RunSettings {
+        report,
+        coastline,
+        layers,
+        min_zoom,
+        max_zoom,
+        simplification,
+        build_id,
+    };
+    match run(&input, &out, &settings) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mamaps_build: {e}");
@@ -110,17 +124,26 @@ fn main() -> ExitCode {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn run(
-    input: &std::path::Path,
-    out: &std::path::Path,
-    report: Option<&std::path::Path>,
+/// Everything a run needs beyond its input and output paths.
+struct RunSettings {
+    report: Option<PathBuf>,
+    /// A prepared land polygon for `earth`'s mainland. Without it the layer carries islands only.
+    coastline: Option<PathBuf>,
     layers: schema::Layers,
     min_zoom: u8,
     max_zoom: u8,
     simplification: f64,
     build_id: Option<u64>,
+}
+
+fn run(
+    input: &std::path::Path,
+    out: &std::path::Path,
+    run: &RunSettings,
 ) -> Result<(), String> {
+    let (layers, min_zoom, max_zoom, simplification) =
+        (run.layers, run.min_zoom, run.max_zoom, run.simplification);
+    let report = run.report.as_deref();
     let started = std::time::Instant::now();
     println!("reading {}", input.display());
     let (features, stats) =
@@ -138,7 +161,25 @@ fn run(
     // The build id identifies the *data*: change the input, the zoom range, the layer set or the
     // simplification and every reader has to drop its cache. Derived rather than asked for, so a
     // forgotten `--build-id` cannot silently republish under the old one.
-    let build_id = build_id.unwrap_or_else(|| {
+    // The mainland, if a prepared polygon was given. `earth`'s islands come from the PBF like
+    // everything else; only the continents need it.
+    let mut features = features;
+    if let Some(path) = &run.coastline {
+        if !layers.earth {
+            return Err("--coastline was given but the earth layer is not selected".to_string());
+        }
+        let land = schema::earth::read_prepared(path).map_err(|e| e.to_string())?;
+        println!("read {} land polygon(s) from {}", land.len(), path.display());
+        features.extend(land);
+    } else if layers.earth {
+        // Said out loud, because a map with no mainland is a striking thing to discover later. It is
+        // not an error: an island is real data and the renderer's backdrop is the water colour.
+        println!(
+            "no --coastline given, so `earth` carries islands only and there is no mainland"
+        );
+    }
+
+    let build_id = run.build_id.unwrap_or_else(|| {
         derive_build_id(input, layers, min_zoom, max_zoom, simplification, stats.features)
     });
 
@@ -200,6 +241,7 @@ fn derive_build_id(
         }
     }
     eat(&[
+        u8::from(layers.earth),
         u8::from(layers.water),
         u8::from(layers.buildings),
         u8::from(layers.roads),
@@ -253,8 +295,9 @@ fn build_report(
 fn usage() {
     eprintln!(
         "usage: mamaps_build --input IN.osm.pbf --out OUT.mamaps\n\
-         \x20                   [--layers water,buildings,roads,boundaries,landcover,landuse]\n\
+         \x20                   [--layers earth,water,buildings,roads,boundaries,landcover,landuse]\n\
          \x20                   [--min-zoom N] [--max-zoom N]\n\
+         \x20                   [--coastline LAND.geojsonseq]\n\
          \x20                   [--simplification F] [--build-id N] [--report FILE]"
     );
 }

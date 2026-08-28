@@ -25,6 +25,7 @@ use tilecodec::mamaps::dict;
 
 pub mod boundaries;
 pub mod buildings;
+pub mod earth;
 pub mod land;
 pub mod roads;
 pub mod water;
@@ -148,6 +149,7 @@ pub fn detail(name: &str) -> u16 {
 /// Which layers a build is producing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Layers {
+    pub earth: bool,
     pub water: bool,
     pub buildings: bool,
     pub roads: bool,
@@ -159,6 +161,7 @@ pub struct Layers {
 impl Layers {
     pub fn all() -> Layers {
         Layers {
+            earth: true,
             water: true,
             buildings: true,
             roads: true,
@@ -170,6 +173,7 @@ impl Layers {
 
     pub fn none() -> Layers {
         Layers {
+            earth: false,
             water: false,
             buildings: false,
             roads: false,
@@ -184,6 +188,7 @@ impl Layers {
         let mut layers = Layers::none();
         for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             match name {
+                "earth" => layers.earth = true,
                 "water" => layers.water = true,
                 "buildings" => layers.buildings = true,
                 "roads" => layers.roads = true,
@@ -192,8 +197,8 @@ impl Layers {
                 "landuse" => layers.landuse = true,
                 other => {
                     return Err(format!(
-                        "unknown layer `{other}`; this generator produces water, buildings, roads, \
-                         boundaries, landcover and landuse"
+                        "unknown layer `{other}`; this generator produces earth, water, buildings, \
+                         roads, boundaries, landcover and landuse"
                     ))
                 }
             }
@@ -207,6 +212,7 @@ impl Layers {
     /// Is this the layer a classifier just returned one for?
     fn wants(&self, layer: u8) -> bool {
         match layer {
+            dict::LAYER_EARTH => self.earth,
             dict::LAYER_WATER => self.water,
             dict::LAYER_BUILDINGS => self.buildings,
             dict::LAYER_ROADS => self.roads,
@@ -228,6 +234,11 @@ pub fn classify(
     is_way: bool,
     layers: Layers,
 ) -> Option<Class> {
+    if layers.earth {
+        if let Some(class) = earth::classify(tags) {
+            return Some(class);
+        }
+    }
     if layers.water {
         if let Some(class) = water::classify(tags, is_way) {
             return Some(class);
@@ -268,6 +279,9 @@ pub fn classify(
 /// that rejects something is a bug.
 pub fn filters(layers: Layers) -> Vec<&'static str> {
     let mut out = Vec::new();
+    if layers.earth {
+        out.extend_from_slice(earth::FILTERS);
+    }
     if layers.water {
         out.extend_from_slice(water::FILTERS);
     }
@@ -300,6 +314,7 @@ mod tests {
             .chain(roads::KINDS)
             .chain(boundaries::KINDS)
             .chain(land::KINDS)
+            .chain(earth::KINDS)
         {
             assert!(
                 dict::KINDS.contains(name),
@@ -323,10 +338,10 @@ mod tests {
             Layers { water: true, ..Layers::none() },
         );
         assert_eq!(
-            Layers::parse("water,buildings,roads,boundaries,landcover,landuse").expect("all"),
+            Layers::parse("earth,water,buildings,roads,boundaries,landcover,landuse").expect("all"),
             Layers::all(),
         );
-        assert!(Layers::parse("earth").is_err(), "not until the coastline work");
+        assert!(Layers::parse("places").is_err(), "this generator draws no labels");
         assert!(Layers::parse("").is_err(), "nothing selected");
     }
 
