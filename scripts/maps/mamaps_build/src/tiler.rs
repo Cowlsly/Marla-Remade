@@ -405,7 +405,10 @@ fn read_chunks(
     send: std::sync::mpsc::SyncSender<(usize, Vec<Feature>)>,
 ) -> Result<()> {
     // The store speaks osm_ingest's error type and the tiler tile_build's; both wrap a string.
-    let mut reader = store.reader().map_err(|e| tile_build::proto::Error(e.to_string()))?;
+    // Zoom-filtered: a chunk holding only features deeper than `z` is seeked past rather than
+    // parsed. At the shallow zooms that is nearly the whole spill.
+    let mut reader =
+        store.reader_for_zoom(z).map_err(|e| tile_build::proto::Error(e.to_string()))?;
     let want = chunk_vertices();
     let mut chunk: Vec<Feature> = Vec::new();
     let mut vertices = 0usize;

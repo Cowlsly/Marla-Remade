@@ -38,7 +38,9 @@ use std::path::{Path, PathBuf};
 use osm_ingest::proto::{err, zigzag, Error, Result};
 use tile_build::geom::Geometry;
 use tile_build::mvt::Value;
-use tile_build::spill::{NormalizedReader, NormalizedWriter};
+use tile_build::spill::{
+    NormalizedChunks, NormalizedReader, NormalizedWriter, NORM_CHUNK_FEATURES,
+};
 
 use crate::extract::Feature;
 use crate::schema::Class;
@@ -108,6 +110,14 @@ fn unpack(bits: u64) -> Class {
 /// sixteenth read of a four-gigabyte file to learn four numbers.
 pub struct Sink {
     writer: NormalizedWriter,
+    /// The shallowest `min_zoom` in each spill chunk, and the running one for the chunk being filled.
+    ///
+    /// One byte per 64 features — 243 KB on California — and it is what lets the tiler **skip** a
+    /// chunk rather than deserialise it. Every feature carries a `min_zoom` and most are deep: z14
+    /// alone holds 16.9 M against ~5 M across z0..z12. Without this the reader parses the whole 3.3 GB
+    /// spill once per zoom, which measured 55.2 s of a 180 s build, all of it on one thread.
+    chunk_mins: Vec<u8>,
+    filling: u8,
     props: Vec<(String, Value)>,
     count: u64,
     bbox: Option<(i32, i32, i32, i32)>,
@@ -119,6 +129,8 @@ impl Sink {
             writer: NormalizedWriter::create(path.as_ref().to_path_buf())
                 .map_err(|e| osm_ingest::proto::Error(e.to_string()))?,
             props: vec![(CLASS_KEY.to_string(), Value::Uint(0))],
+            chunk_mins: Vec::new(),
+            filling: u8::MAX,
             count: 0,
             bbox: None,
         })
@@ -129,7 +141,14 @@ impl Sink {
         self.writer
             .push(geometry, &self.props)
             .map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
+        self.filling = self.filling.min(class.min_zoom);
         self.count += 1;
+        // Closed on the same boundary `NormalizedWriter` closes its own chunks on, so entry `i` here
+        // describes chunk `i` there. Off by one and the tiler skips the wrong features.
+        if self.count % NORM_CHUNK_FEATURES == 0 {
+            self.chunk_mins.push(self.filling);
+            self.filling = u8::MAX;
+        }
         self.grow(geometry);
         Ok(())
     }
@@ -157,10 +176,32 @@ impl Sink {
         }
     }
 
-    pub fn finish(self, path: impl Into<PathBuf>) -> Result<Store> {
+    pub fn finish(mut self, path: impl Into<PathBuf>) -> Result<Store> {
         let (count, bbox) = (self.count, self.bbox);
-        self.writer.finish().map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
-        Ok(Store { path: path.into(), count, bbox: bbox.unwrap_or((0, 0, 0, 0)) })
+        // The last chunk is usually partial and still needs an entry.
+        if self.filling != u8::MAX {
+            self.chunk_mins.push(self.filling);
+        }
+        let chunk_mins = std::mem::take(&mut self.chunk_mins);
+        let summary = self.writer.finish().map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
+        let chunks = summary.chunks;
+        // The two indexes must describe the same chunks, or skipping silently drops real features.
+        // Cheap to assert and near-impossible to diagnose from the symptom, which would be missing
+        // geometry in a handful of tiles at one zoom.
+        let expected = chunks.len().saturating_sub(1);
+        if chunk_mins.len() != expected {
+            return err(format!(
+                "the spill has {expected} chunk(s) but {} zoom entr(ies)",
+                chunk_mins.len(),
+            ));
+        }
+        Ok(Store {
+            path: path.into(),
+            count,
+            bbox: bbox.unwrap_or((0, 0, 0, 0)),
+            chunks,
+            chunk_mins,
+        })
     }
 
     /// The bounding box of everything pushed so far, in degrees.
@@ -181,6 +222,11 @@ impl Sink {
 /// Features on disk, re-readable in order as many times as the tiler needs.
 pub struct Store {
     path: PathBuf,
+    /// Byte offset of every 64th record, plus a sentinel holding the file length, so chunk `i` spans
+    /// `chunks[i]..chunks[i + 1]` and reads with no knowledge of any other chunk.
+    chunks: Vec<u64>,
+    /// The shallowest `min_zoom` in each chunk.
+    chunk_mins: Vec<u8>,
     count: u64,
     bbox: (i32, i32, i32, i32),
 }
@@ -197,7 +243,33 @@ impl Store {
         self.bbox
     }
 
+    /// Read every feature a zoom could want, in the order they were written.
+    ///
+    /// A chunk whose shallowest `min_zoom` is deeper than `z` holds nothing this zoom draws, so it is
+    /// skipped outright — not read, not parsed. Order is unchanged, because the chunks that survive
+    /// are still visited in file order, and that is what keeps the archive byte-identical.
+    pub fn reader_for_zoom(&self, z: u8) -> Result<ZoomReader> {
+        Ok(ZoomReader {
+            inner: NormalizedChunks::open(self.path.clone(), self.chunks.clone())
+                .map_err(|e| osm_ingest::proto::Error(e.to_string()))?,
+            wanted: self
+                .chunk_mins
+                .iter()
+                .enumerate()
+                .filter(|(_, min)| **min <= z)
+                .map(|(i, _)| i)
+                .collect(),
+            at: 0,
+            scratch: Vec::new(),
+            records: Vec::new(),
+        })
+    }
+
     /// Read every feature, in the order they were written.
+    ///
+    /// Kept as the reference [`Self::reader_for_zoom`] is checked against: a test that reads a store
+    /// both ways and compares is the cheapest possible guard on the chunk index being right.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn reader(&self) -> Result<Reader> {
         Ok(Reader {
             inner: NormalizedReader::open(self.path.clone())
@@ -228,6 +300,48 @@ impl Store {
     }
 }
 
+/// A spilled record as a [`Feature`].
+///
+/// A record whose class property is missing or is not an integer is a corrupt file rather than a
+/// feature to skip: everything in here was written by [`Sink::push`] one run ago, so anything else
+/// means the file is not the one we wrote.
+fn feature_of(record: tile_build::spill::NormalizedFeature) -> Result<Feature> {
+    let bits = match record.props.iter().find(|(key, _)| key == CLASS_KEY) {
+        Some((_, Value::Uint(bits))) => *bits,
+        _ => return err("a spilled feature carries no packed class".to_string()),
+    };
+    Ok(Feature { class: unpack(bits), geometry: record.geometry })
+}
+
+/// Reads the chunks one zoom needs and seeks past the rest.
+pub struct ZoomReader {
+    inner: NormalizedChunks,
+    /// Indices of the chunks this zoom wants, ascending.
+    wanted: Vec<usize>,
+    at: usize,
+    scratch: Vec<u8>,
+    records: Vec<tile_build::spill::NormalizedFeature>,
+}
+
+impl ZoomReader {
+    /// The next feature, or `None` once this zoom's chunks are exhausted.
+    pub fn next(&mut self) -> Result<Option<Feature>> {
+        loop {
+            if let Some(record) = self.records.pop() {
+                return Ok(Some(feature_of(record)?));
+            }
+            let Some(&chunk) = self.wanted.get(self.at) else { return Ok(None) };
+            self.at += 1;
+            self.inner
+                .read_into(chunk, &mut self.scratch, &mut self.records)
+                .map_err(|e| osm_ingest::proto::Error(e.to_string()))?;
+            // Taken from the back, so reversing here is what preserves file order.
+            self.records.reverse();
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Reader {
     inner: NormalizedReader,
 }
@@ -238,17 +352,14 @@ impl Reader {
     /// A record whose class property is missing or is not an integer is a corrupt file rather than a
     /// feature to skip: everything in here was written by [`Sink::push`] one run ago, so anything
     /// else means the file is not the one we wrote.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn next(&mut self) -> Result<Option<Feature>> {
         let Some(record) =
             self.inner.next().map_err(|e| osm_ingest::proto::Error(e.to_string()))?
         else {
             return Ok(None);
         };
-        let bits = match record.props.iter().find(|(key, _)| key == CLASS_KEY) {
-            Some((_, Value::Uint(bits))) => *bits,
-            _ => return err("a spilled feature carries no packed class".to_string()),
-        };
-        Ok(Some(Feature { class: unpack(bits), geometry: record.geometry }))
+        Ok(Some(feature_of(record)?))
     }
 }
 
@@ -476,6 +587,55 @@ fn put_svarint(out: &mut Vec<u8>, value: i64) {
 
 #[cfg(test)]
 mod tests {
+    /// **The guard on chunk skipping.** A zoom-filtered read must yield exactly what a full read
+    /// yields after the same filter, in the same order. Otherwise skipping drops real geometry, and
+    /// the symptom would be a few tiles quietly missing features at one zoom -- no error, no crash.
+    #[test]
+    fn skipping_chunks_yields_exactly_what_a_full_read_would() {
+        let path = temp("zoomfilter");
+        let mut sink = Sink::create(&path).expect("create");
+        // Several chunks' worth, with min_zoom varying so chunks genuinely differ in what they hold.
+        let mut expected_by_zoom: Vec<Vec<u16>> = vec![Vec::new(); 15];
+        for i in 0..500u16 {
+            let min_zoom = (i % 15) as u8;
+            let kind = i.max(1);
+            let class = Class::line(dict::LAYER_ROADS, kind, min_zoom);
+            let line = vec![(-120.0 + i as f64 * 0.001, 35.0), (-119.9, 35.1)];
+            sink.push(&class, &Geometry::Lines(vec![line])).expect("push");
+            for z in min_zoom as usize..15 {
+                expected_by_zoom[z].push(kind);
+            }
+        }
+        let store = sink.finish(&path).expect("finish");
+
+        for z in 0..15u8 {
+            let mut got = Vec::new();
+            let mut reader = store.reader_for_zoom(z).expect("reader");
+            while let Some(feature) = reader.next().expect("read") {
+                // The filter is per chunk, so a kept chunk still carries features too deep for this
+                // zoom. The tiler drops those itself; what matters is that nothing wanted is lost.
+                if feature.class.min_zoom <= z {
+                    got.push(feature.class.kind);
+                }
+            }
+            assert_eq!(got, expected_by_zoom[z as usize], "z{z}");
+        }
+
+        // The deepest zoom keeps every chunk, so it must match the sequential reader exactly.
+        let mut full = Vec::new();
+        let mut reader = store.reader().expect("reader");
+        while let Some(feature) = reader.next().expect("read") {
+            full.push(feature.class.kind);
+        }
+        let mut deep = Vec::new();
+        let mut reader = store.reader_for_zoom(14).expect("reader");
+        while let Some(feature) = reader.next().expect("read") {
+            deep.push(feature.class.kind);
+        }
+        assert_eq!(deep, full, "at the deepest zoom nothing is skipped");
+        let _ = std::fs::remove_file(&path);
+    }
+
     use super::*;
     use crate::schema;
     use tilecodec::mamaps::dict;
