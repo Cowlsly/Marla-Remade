@@ -335,7 +335,12 @@ pub fn extract(
             None => return err("the extract produced no features to place land against".to_string()),
         }
     }
-    Ok((sink.finish(spill_path)?, stats))
+    let store = sink.finish(spill_path)?;
+    // The one phase that had no mark after it, and it turned out to be the largest single item in the
+    // build outside tiling: ~25 s of a 136 s California run. It is 170 M coordinate lookups through
+    // the mapped node table plus 3.3 GB of spill written, all on one thread.
+    mark("materialised and spilled");
+    Ok((store, stats))
 }
 
 /// A node's location in lon/lat, which is the order [`rings::assemble`] and GeoJSON both want.
