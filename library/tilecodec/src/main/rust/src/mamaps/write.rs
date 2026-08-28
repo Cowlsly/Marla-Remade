@@ -67,15 +67,7 @@ use crate::stream::OPEN_PREFIX_BYTES;
 /// Leaf entries per leaf to start with, matching what the published PMTiles archive uses.
 pub const DEFAULT_LEAF_CAPACITY: u32 = 4096;
 
-/// DEFLATE level.
-///
-/// Nine, as `gz.rs` uses, because a basemap is written once and read forever.
-///
-/// Six was tried, on the theory that `encode`'s 43.9 s of a 135.8 s California build was mostly
-/// compression. It is not: level six measured 44.8 s — inside the noise — for 0.12% more bytes. The
-/// cost in that phase is stage C and body serialisation, not the deflate, so there is nothing here to
-/// trade and the better ratio is free. Worth recording so nobody re-runs the experiment.
-const LEVEL: u8 = 9;
+/// Raw DEFLATE over everything but the body header.
 
 /// What a build declares about itself before the first tile.
 pub struct Options {
@@ -708,10 +700,28 @@ fn scratch_error(path: &Path, doing: &str, e: std::io::Error) -> crate::proto::E
 /// The 16-byte body header is left uncompressed ahead of the frame so a reader can read `raw_len`
 /// out of it and allocate the output exactly once, before inflating a single byte.
 pub fn compress_body(encoded: &[u8]) -> Vec<u8> {
+    compress_body_with(&mut crate::gz::Compressor::new(), encoded)
+}
+
+/// [`compress_body`], reusing a DEFLATE state the caller owns.
+///
+/// **This is the one a generator should call.** `miniz_oxide::deflate::compress_to_vec` builds
+/// a fresh `CompressorOxide` per call — 65,712 bytes of inline arrays, much of it zeroed on
+/// construction — and a tiler calls it once per tile across every core it has. At that point
+/// the construction *is* the encode pass: a us-west z13 build compressed 237,040 tiles, so
+/// 15.6 GB of allocate-and-zero on 64 threads, and encode measured 226 s against 34 s for the
+/// zoom below it at 1.6x the output. Every thread was busy and none of them was compressing.
+///
+/// [`crate::gz::Compressor`] carries the same story from the gzip side, where it was measured
+/// going *backwards* past four threads. This is that fix applied to `.mamaps`.
+///
+/// Byte-identical to [`compress_body`], because `reset` keeps the parameters and DEFLATE
+/// output is a function of the input and the parameters alone.
+pub fn compress_body_with(deflate: &mut crate::gz::Compressor, encoded: &[u8]) -> Vec<u8> {
     let header_len = body::BODY_HEADER_LEN;
     let mut out = Vec::with_capacity(encoded.len());
     out.extend_from_slice(&encoded[..header_len]);
-    out.extend_from_slice(&miniz_oxide::deflate::compress_to_vec(&encoded[header_len..], LEVEL));
+    out.extend_from_slice(deflate.deflate(&encoded[header_len..]));
     out
 }
 

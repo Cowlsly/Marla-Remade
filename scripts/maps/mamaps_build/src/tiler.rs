@@ -650,7 +650,11 @@ fn encode_batch(
         batch
             .into_par_iter()
             .with_min_len(min_len)
-            .map(|(id, mut layers)| {
+            // One DEFLATE state per worker, not one per tile. `compress_to_vec` builds a
+            // 65,712-byte `CompressorOxide` every call, and at a tile each across 64 cores that
+            // construction swamps the compression it exists to do -- see
+            // `mamaps::write::compress_body_with`.
+            .map_init(tilecodec::gz::Compressor::new, |deflate, (id, mut layers)| {
                 // **Stage C**, per tile: winding normalised, hole containment resolved, degenerate
                 // rings dropped. Once, here, in `f64` with no frame budget, instead of every frame
                 // on device in `i32` under one. This is what makes `FLAG_RINGS_VALIDATED` true.
@@ -668,7 +672,7 @@ fn encode_batch(
                 let body = Body { extent: EXTENT as u16, layers };
                 let encoded = tilecodec::mamaps::body::serialize(&body)?;
                 let raw_len = encoded.len();
-                let stored = tilecodec::mamaps::write::compress_body(&encoded);
+                let stored = tilecodec::mamaps::write::compress_body_with(deflate, &encoded);
                 Ok((id, Some((stored, raw_len)), rings))
             })
             .collect()

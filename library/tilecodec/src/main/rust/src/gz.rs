@@ -17,6 +17,12 @@ const FCOMMENT: u8 = 1 << 4;
 
 /// DEFLATE level. 9 is the usual archive setting: tiles are written once and
 /// streamed by range request many times, so bytes matter more than build time.
+///
+/// Six was tried, on the theory that `encode`'s 43.9 s of a 135.8 s California build was
+/// mostly compression. It is not: level six measured 44.8 s — inside the noise — for 0.12%
+/// more bytes. The cost in that phase is stage C, body serialisation and *building the
+/// compressor* ([`Compressor`]), not the deflate itself, so there is nothing here to trade
+/// and the better ratio is free. Worth recording so nobody re-runs the experiment.
 const LEVEL: u8 = 9;
 
 /// Wrap `data` in a gzip stream.
@@ -81,6 +87,19 @@ impl Compressor {
 
     /// Wrap `data` in a gzip stream, reusing this compressor's state.
     pub fn compress(&mut self, data: &[u8]) -> Vec<u8> {
+        // Length first, so the mutable borrow ends before `frame` reads `scratch`.
+        let n = self.deflate(data).len();
+        frame(data, &self.scratch[..n])
+    }
+
+    /// Raw DEFLATE of `data`, reusing this compressor's state.
+    ///
+    /// Exactly the bytes `miniz_oxide::deflate::compress_to_vec(data, LEVEL)` returns, minus
+    /// the 65,712-byte state it would build to return them. Split out of [`Self::compress`]
+    /// because `.mamaps` bodies are raw DEFLATE behind an uncompressed header rather than a
+    /// gzip frame, and that path needs the reuse just as badly — see
+    /// [`crate::mamaps::write::compress_body_with`].
+    pub fn deflate(&mut self, data: &[u8]) -> &[u8] {
         use miniz_oxide::deflate::core::{compress, TDEFLFlush, TDEFLStatus};
 
         if self.used {
@@ -115,7 +134,7 @@ impl Compressor {
                 other => panic!("deflate failed unexpectedly: {other:?}"),
             }
         }
-        frame(data, &self.scratch[..at])
+        &self.scratch[..at]
     }
 }
 
@@ -240,6 +259,40 @@ mod tests {
     /// behind would still produce a VALID gzip stream, just a different one, and only
     /// comparing the bytes of the second and later calls catches it. So the corpus is
     /// run through a single compressor in sequence, and each result is checked against
+    /// [`Compressor::deflate`] is what `.mamaps` bodies go through, so it has to match the
+    /// one-shot call just as [`Compressor::compress`] does — and it must keep matching across a
+    /// run of bodies, because a generator reuses one state for a whole zoom.
+    ///
+    /// The sizes below are the shape a tiler actually produces: one large body, then hundreds of
+    /// small ones. A `reset` that dropped the dictionary would still pass on the first body.
+    #[test]
+    fn the_reusable_deflate_matches_the_one_shot_one() {
+        let mut corpus: Vec<Vec<u8>> = vec![
+            Vec::new(),
+            b"x".to_vec(),
+            REAL_RAW.to_vec(),
+            vec![7u8; 250_000],
+        ];
+        for i in 0..200u32 {
+            corpus.push(
+                format!("body {i}: a tile layer with repeated repeated repeated keys")
+                    .into_bytes(),
+            );
+        }
+        let mut reusable = Compressor::new();
+        for (i, data) in corpus.iter().enumerate() {
+            let want = miniz_oxide::deflate::compress_to_vec(data, LEVEL);
+            let got = reusable.deflate(data).to_vec();
+            assert!(
+                got == want,
+                "corpus[{i}] ({} byte(s)): reused {} byte(s), one-shot {}",
+                data.len(),
+                got.len(),
+                want.len(),
+            );
+        }
+    }
+
     /// a fresh one-shot call.
     #[test]
     fn the_reusable_compressor_matches_the_one_shot_one() {
