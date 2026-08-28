@@ -20,29 +20,26 @@ android {
         // a 40 MB heap buffer first. Storing them uncompressed costs nothing on download size
         // either - int8 weights are already incompressible.
         noCompress += "onnx"
-        // Voices are downloaded rather than bundled, so no .maml sits in this APK. The entry
-        // is here for the same reason as `onnx`: if a voice is ever bundled, fp16 weights
-        // should not be deflated only to be inflated straight back.
+        // Load-bearing, not an optimisation. `AssetManager.openFd` throws for a deflated entry,
+        // and the fd is how Supertonic's ~105 MB of weights reach the GPU without being copied
+        // through the Java heap three times - see SupertonicSynthesizer.inAssets.
         noCompress += "maml"
     }
 }
 dependencies {
-    // Text-to-speech is Piper (VITS) on :library:ml, our own Vulkan compute runtime. Four
-    // networks per voice: the text encoder, the flow and the HiFi-GAN vocoder are compiled
-    // plans on the GPU, and the stochastic duration predictor runs on the CPU because it is a
-    // bin search and a quadratic solve per phoneme. Voices are extracted to disk before use.
+    // Text-to-speech is Supertonic 3 on :library:ml, our own Vulkan compute runtime. Four networks
+    // for all 31 languages, every one of them on the GPU: the duration predictor, the text encoder,
+    // a flow-matching sampler and a ConvNeXt vocoder. The bundle ships in `assets/supertonic/` and
+    // is streamed from a file descriptor, which is what `noCompress += "maml"` above is for.
     implementation(project(":library:ml"))
-
     // Speech-to-text is whisper-base int8 ONNX (bundled in assets, see WhisperOnnxEngine).
     // It is not ncnn: onnx2ncnn has no DynamicQuantizeLinear/MatMulInteger/ConvInteger
     // support, and the AAR's Whisper expects a six-net decomposition HF does not export.
     //
     // Reduced ORT build (10 MB native, vs 28 MB for the full one). Its operator set is
     // generated from the two bundled .onnx files, so if they are ever re-exported with
-    // different ops the session will fail to create — regenerate the AAR, don't work around it.
+    // different ops the session will fail to create - regenerate the AAR, don't work around it.
     implementation(libs.onnxruntime.reduced)
-
-    // Runtime model download (mirror-hosted, SHA-256 pinned) — non-English TTS voices only.
-    implementation(project(":library:downloadservice"))
-    implementation(libs.androidx.datastore.preferences)
+    // No `:library:downloadservice` and no DataStore: both models ship in the APK, so this app
+    // downloads nothing and stores no preferences. They went when Piper's 1,834 MB of voices did.
 }

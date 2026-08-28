@@ -4,85 +4,46 @@ import android.app.Activity
 import android.content.Intent
 import android.os.Bundle
 import android.speech.tts.TextToSpeech
-import com.vayunmathur.speech.util.PiperModel
-import com.vayunmathur.speech.util.PiperVoiceRegistry
+import com.vayunmathur.speech.domain.SupertonicVoices
+import com.vayunmathur.speech.platform.SupertonicBundle
 
 /**
- * Answers the framework's `CHECK_TTS_DATA` probe: the system TTS settings run this
- * before letting the user pick our engine, to learn which voices are installed.
+ * Answers the framework's `CHECK_TTS_DATA` probe: the system TTS settings run this before letting
+ * the user pick our engine, to learn which voices are installed.
  *
- * Must keep ISO3 format (e.g. `eng-USA`, `deu-DEU`) in EXTRA_AVAILABLE_VOICES.
- * The Play button in Settings is enabled only if CHECK returns PASS and
- * PiperTtsService.onGetVoices() contains voices matching BCP-47 and ISO3 variants,
- * and onGetDefaultVoiceNameFor(null,null,null) returns a non-empty installed voice
- * name. If any of those disagree, Play silently does nothing — this was the bug
- * after registry renamed to generic IDs (en_US-high) while old dirs still existed
- * as en_US-lessac-low.
+ * The answer must be in the ISO-3 form — `eng-USA`, `deu-DEU` — and it must agree with
+ * `SupertonicTtsService.onGetVoices`, which publishes the same pairs. If the two disagree, Settings'
+ * Play button silently does nothing, with no error visible anywhere. That is why both sides build
+ * the strings from [SupertonicVoices] rather than each spelling them out.
+ *
+ * # Why this is now a fixed answer
+ *
+ * With Piper this activity had real work to do: it migrated legacy voice directories, listed which
+ * of 42 languages were extracted, and reported the rest as unavailable so Settings could offer them
+ * as downloads. All 31 languages ship in the APK now, so either the bundle is there and every
+ * language is available, or it is not and none is.
  */
 class CheckVoiceDataActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val available = ArrayList<String>()
-        val unavailable = ArrayList<String>()
-
-        try {
-            // Ensure old low/medium -> high migration + removal of dup archives
-            PiperVoiceRegistry.migrateLegacyIfNeeded(this)
-            // Also allow old speaker-specific dirs to count as installed (via fallback
-            // findAnyValidDirForBcp47) so Settings Play works on upgraded installs.
-            val installed = PiperVoiceRegistry.installedDefs(this)
-            if (installed.isNotEmpty()) {
-                for (def in installed) {
-                    val iso = "${def.iso3}-${def.iso3Country}"
-                    if (!available.contains(iso)) {
-                        available.add(iso)
-                    }
-                }
-                // Report everything else as unavailable, de-duped.
-                for (def in PiperVoiceRegistry.ALL) {
-                    val iso = "${def.iso3}-${def.iso3Country}"
-                    if (iso !in available && iso !in unavailable) {
-                        // Only report as unavailable if not extracted
-                        if (!PiperVoiceRegistry.isExtracted(this, def)) {
-                            unavailable.add(iso)
-                        }
-                    }
-                }
-            } else {
-                if (PiperModel.isExtracted(this)) {
-                    available.add(VOICE)
-                } else {
-                    unavailable.add(VOICE)
-                    for (def in PiperVoiceRegistry.ALL) {
-                        val iso = "${def.iso3}-${def.iso3Country}"
-                        if (def.code != "en" && iso !in unavailable && iso !in available) {
-                            unavailable.add(iso)
-                        }
-                    }
-                }
-            }
-        } catch (_: Throwable) {
-            if (PiperModel.isExtracted(this)) {
-                available.add(VOICE)
-            } else {
-                unavailable.add(VOICE)
-            }
-        }
-
+        val all = ArrayList(SupertonicVoices.ALL.map { "${it.iso3}-${it.iso3Country}" })
+        val present = SupertonicBundle.isPresent(this)
         val data = Intent().apply {
-            putStringArrayListExtra(TextToSpeech.Engine.EXTRA_AVAILABLE_VOICES, available)
-            putStringArrayListExtra(TextToSpeech.Engine.EXTRA_UNAVAILABLE_VOICES, unavailable)
+            putStringArrayListExtra(
+                TextToSpeech.Engine.EXTRA_AVAILABLE_VOICES,
+                if (present) all else ArrayList(),
+            )
+            putStringArrayListExtra(
+                TextToSpeech.Engine.EXTRA_UNAVAILABLE_VOICES,
+                if (present) ArrayList() else all,
+            )
         }
         setResult(
-            if (available.isNotEmpty()) TextToSpeech.Engine.CHECK_VOICE_DATA_PASS
+            if (present) TextToSpeech.Engine.CHECK_VOICE_DATA_PASS
             else TextToSpeech.Engine.CHECK_VOICE_DATA_FAIL,
             data,
         )
         finish()
-    }
-
-    private companion object {
-        const val VOICE = "eng-USA"
     }
 }

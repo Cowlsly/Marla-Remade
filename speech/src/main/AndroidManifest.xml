@@ -37,7 +37,7 @@
         </service>
 
         <service
-            android:name=".service.PiperTtsService"
+            android:name=".service.SupertonicTtsService"
             android:label="@string/tts_engine_label"
             android:exported="true">
             <intent-filter>

@@ -7,7 +7,6 @@ import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
-import android.os.StatFs
 import android.provider.Settings
 import android.speech.RecognitionListener
 import android.speech.RecognizerIntent
@@ -32,13 +31,10 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -58,18 +54,13 @@ import com.vayunmathur.library.ui.Scaffold
 import com.vayunmathur.library.ui.Text
 import com.vayunmathur.library.ui.DynamicTheme
 import com.vayunmathur.library.ui.rememberPermissionRequest
-import com.vayunmathur.library.util.DataStoreUtils
+import com.vayunmathur.speech.domain.SupertonicVoices
+import com.vayunmathur.speech.platform.SupertonicBundle
 import com.vayunmathur.speech.service.WhisperRecognitionService
-import com.vayunmathur.speech.util.PiperModel
-import com.vayunmathur.speech.util.PiperVoiceRegistry
 import com.vayunmathur.speech.util.SpeechSetupActions
 import com.vayunmathur.speech.util.SpeechSetupUiState
 import com.vayunmathur.speech.util.TtsVoiceUiState
 import com.vayunmathur.speech.util.WhisperModel
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import java.util.Locale
 
 class MainActivity : ComponentActivity() {
@@ -101,52 +92,22 @@ private fun SetupScreen() {
         ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) ==
             PackageManager.PERMISSION_GRANTED
     }
-    val ds = remember { DataStoreUtils.getInstance(context) }
-
     // Whisper
     val modelReady = remember(refresh) { WhisperModel.isReady(context) }
 
-    // Voices — migrate legacy if needed then compute installed list and per-voice states
-    val installedCodes = remember(refresh) {
-        try {
-            PiperVoiceRegistry.migrateLegacyIfNeeded(context)
-            PiperVoiceRegistry.installedCodes(context).let { codes ->
-                if (codes.isEmpty() && PiperModel.isReady(context)) listOf("en") else codes
-            }
-        } catch (_: Throwable) {
-            if (PiperModel.isReady(context)) listOf("en") else emptyList()
+    // Every language the bundle covers. Not a per-install fact any more: the four networks and the
+    // ten voices ship in the APK, so this list is the same on every device that has the asset.
+    val ttsVoices = remember {
+        SupertonicVoices.ALL.map { language ->
+            TtsVoiceUiState(
+                code = language.code,
+                bcp47 = language.bcp47,
+                nativeName = language.nativeName,
+                englishName = language.englishName,
+            )
         }
     }
-    val ttsVoices = remember(refresh, installedCodes) {
-        try {
-            PiperVoiceRegistry.ALL.map { def ->
-                TtsVoiceUiState(
-                    code = def.code,
-                    bcp47 = def.bcp47,
-                    iso3 = def.iso3,
-                    nativeName = def.nativeName,
-                    englishName = def.englishName,
-                    isInstalled = def.code in installedCodes,
-                    progress = 0f, // real progress from DataStore in the card itself
-                    sizeEstimateMb = def.sizeEstimateMb,
-                    quality = def.quality,
-                    sampleRate = def.sampleRate,
-                )
-            }
-        } catch (_: Throwable) {
-            emptyList()
-        }
-    }
-    val installedBytes = remember(refresh) {
-        try {
-            PiperVoiceRegistry.installedBytes(context)
-        } catch (_: Throwable) {
-            0L
-        }
-    }
-    val ttsModelReady = remember(refresh, installedCodes) {
-        installedCodes.isNotEmpty() || PiperModel.isReady(context)
-    }
+    val ttsModelReady = remember(refresh) { SupertonicBundle.isPresent(context) }
     val isTtsDefault = remember(refresh) {
         Settings.Secure.getString(context.contentResolver, "tts_default_synth") == context.packageName
     }
@@ -163,8 +124,7 @@ private fun SetupScreen() {
             ttsModelReady = ttsModelReady,
             isTtsDefault = isTtsDefault,
             ttsVoices = ttsVoices,
-            installedBytes = installedBytes,
-            currentTestLang = if (installedCodes.isNotEmpty()) installedCodes.first() else "en",
+            currentTestLang = SupertonicVoices.DEFAULT.code,
         ),
         actions = object : SpeechSetupActions {
             override fun requestMicPermission() = launchMicRequest()
@@ -201,46 +161,6 @@ private fun SetupScreen() {
             }
 
             override fun refresh() { refresh++ }
-
-            // Legacy single-voice
-            override fun voiceProgress() = PiperVoiceRegistry.overallProgress(ds)
-            override suspend fun downloadVoice() {
-                PiperVoiceRegistry.download(context, ds, listOf("en"))
-                withContext(Dispatchers.IO) {
-                    PiperVoiceRegistry.installIfNeeded(context, PiperVoiceRegistry.DEFAULT)
-                }
-            }
-
-            // Per-voice
-            override fun voiceProgress(code: String): Float {
-                val def = PiperVoiceRegistry.byCode(code) ?: return 0f
-                return PiperVoiceRegistry.progress(ds, def)
-            }
-
-            override suspend fun downloadVoice(code: String) {
-                val def = PiperVoiceRegistry.byCode(code) ?: return
-                PiperVoiceRegistry.download(context, ds, listOf(code))
-                withContext(Dispatchers.IO) {
-                    PiperVoiceRegistry.installIfNeeded(context, def)
-                }
-            }
-
-            override fun deleteVoice(code: String) {
-                val def = PiperVoiceRegistry.byCode(code) ?: return
-                // Immediate file deletion + async DataStore cleanup
-                PiperVoiceRegistry.deleteFiles(context, def)
-                // Fire-and-forget DataStore reset (suspend) in IO scope
-                kotlinx.coroutines.CoroutineScope(Dispatchers.IO).launch {
-                    try {
-                        ds.setDouble("progress_${PiperVoiceRegistry.VOICES_ROOT}/${def.remoteArchive}", 0.0)
-                        ds.setLong("dlid_${PiperVoiceRegistry.VOICES_ROOT}/${def.remoteArchive}", 0L)
-                        ds.setDouble("speed_${PiperVoiceRegistry.VOICES_ROOT}/${def.remoteArchive}", 0.0)
-                    } catch (_: Throwable) {}
-                }
-                refresh++
-            }
-
-            override fun installedCodes(): List<String> = installedCodes
         },
     )
 }
@@ -308,41 +228,29 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
 
         StepCard(
             index = 4,
-            title = "Text-to-speech voices (${state.ttsVoices.count { it.isInstalled }}/${state.ttsVoices.size})",
+            title = "Text-to-speech voices",
             done = state.ttsModelReady,
         ) {
-            // Storage summary
-            if (state.installedBytes > 0) {
-                val mb = state.installedBytes / (1024 * 1024)
+            if (state.ttsModelReady) {
                 Text(
-                    text = "Installed: ${mb} MB • ${state.ttsVoices.count { it.isInstalled }} voices",
+                    text = "${state.ttsVoices.size} languages and " +
+                        "${SupertonicVoices.VOICES.size} voices, bundled with the app. " +
+                        "Nothing to download.",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Spacer(Modifier.height(4.dp))
-            }
-
-            // WiFi warning — high quality 22kHz ~80-90 MB each
-            if (state.ttsVoices.any { !it.isInstalled }) {
                 Text(
-                    text = "High-quality voices (22kHz) download ~80-90 MB each on Wi-Fi. Total ~1.6 GB if all 20 installed.",
-                    style = MaterialTheme.typography.bodySmall,
+                    text = state.ttsVoices.joinToString(" · ") { it.nativeName },
+                    style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
-                Spacer(Modifier.height(8.dp))
-            }
-
-            // Per-voice rows
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                for (voice in state.ttsVoices) {
-                    VoiceRow(
-                        voice = voice,
-                        progressOf = { actions.voiceProgress(voice.code) },
-                        onDownload = { actions.downloadVoice(voice.code) },
-                        onDelete = { actions.deleteVoice(voice.code) },
-                        onDone = actions::refresh,
-                    )
-                }
+            } else {
+                Text(
+                    text = "The bundled voices could not be read. Reinstalling the app should fix it.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                )
             }
         }
 
@@ -358,7 +266,7 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
 
         TtsTestSection(
             enabled = state.ttsModelReady,
-            installedVoices = state.ttsVoices.filter { it.isInstalled },
+            languages = state.ttsVoices,
             currentLang = state.currentTestLang,
         )
         }
@@ -380,120 +288,6 @@ private fun StepCard(
                 color = if (done) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
             )
             action()
-        }
-    }
-}
-
-/**
- * A per-voice download row with progress bar, size badge, quality/sample-rate note, and delete.
- */
-@Composable
-private fun VoiceRow(
-    voice: TtsVoiceUiState,
-    progressOf: () -> Float,
-    onDownload: suspend () -> Unit,
-    onDelete: () -> Unit,
-    onDone: () -> Unit,
-) {
-    val scope = rememberCoroutineScope()
-    var busy by remember { mutableStateOf(false) }
-    var pct by remember { mutableIntStateOf(0) }
-
-    LaunchedEffect(busy) {
-        while (busy) {
-            pct = (progressOf() * 100f).toInt().coerceIn(0, 100)
-            delay(500)
-        }
-    }
-
-    // Poll progress even when not busy so the bar shows download manager progress
-    LaunchedEffect(voice.code, voice.isInstalled) {
-        if (!voice.isInstalled) {
-            // Light polling while download may be in progress in background
-            while (!voice.isInstalled) {
-                pct = (progressOf() * 100f).toInt().coerceIn(0, 100)
-                delay(1000)
-            }
-        }
-    }
-
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Column(
-            Modifier
-                .fillMaxWidth()
-                .padding(12.dp),
-            verticalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "${voice.nativeName} (${voice.englishName})",
-                            fontWeight = FontWeight.SemiBold,
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                        if (voice.isInstalled) {
-                            Spacer(Modifier.width(6.dp))
-                            Text(
-                                text = "✓",
-                                color = MaterialTheme.colorScheme.primary,
-                                style = MaterialTheme.typography.bodySmall,
-                            )
-                        }
-                    }
-                    Spacer(Modifier.height(2.dp))
-                    Text(
-                        text = "${voice.code.uppercase()} • ${voice.bcp47} • ${voice.quality} • ${voice.sampleRate} Hz • ~${voice.sizeEstimateMb} MB",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-            }
-
-            if (!voice.isInstalled) {
-                if (pct in 1..99 || busy) {
-                    LinearProgressIndicator(
-                        progress = { pct / 100f },
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    Text(
-                        text = "Downloading… $pct%",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
-                Button(
-                    enabled = !busy,
-                    onClick = {
-                        busy = true
-                        scope.launch {
-                            runCatching { onDownload() }
-                            busy = false
-                            onDone()
-                        }
-                    },
-                ) {
-                    Text(if (busy) "Downloading… $pct%" else "Download ${voice.nativeName} (~${voice.sizeEstimateMb} MB)")
-                }
-            } else {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Text(
-                        text = "Installed",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                    OutlinedButton(onClick = { onDelete() }) {
-                        Text("Delete")
-                    }
-                }
-            }
         }
     }
 }
@@ -549,15 +343,15 @@ private fun TestSection(enabled: Boolean) {
 @Composable
 private fun TtsTestSection(
     enabled: Boolean,
-    installedVoices: List<TtsVoiceUiState>,
+    languages: List<TtsVoiceUiState>,
     currentLang: String,
 ) {
     val context = LocalContext.current
     var status by remember { mutableStateOf("") }
-    var selectedCode by remember(currentLang, installedVoices) {
+    var selectedCode by remember(currentLang, languages) {
         mutableStateOf(
-            if (installedVoices.any { it.code == currentLang }) currentLang
-            else installedVoices.firstOrNull()?.code ?: "en"
+            if (languages.any { it.code == currentLang }) currentLang
+            else languages.firstOrNull()?.code ?: "en"
         )
     }
     var dropdownExpanded by remember { mutableStateOf(false) }
@@ -568,29 +362,42 @@ private fun TtsTestSection(
         onDispose { engine.value?.shutdown(); engine.value = null }
     }
 
-    // Sample utterances per language (keep short, same length rough).
+    // One sample sentence per language the bundle covers, and the reason each is written out rather
+    // than translated at runtime is that the model reads *characters*: a sentence has to exercise
+    // the script, not just the language, or a missing codepoint in the table goes unnoticed.
     val samples = remember {
         mapOf(
-            "en" to "Hello, this is the offline Piper voice.",
-            "es" to "Hola, esta es la voz sin conexión de Piper.",
-            "fr" to "Bonjour, ceci est la voix hors ligne Piper.",
-            "de" to "Hallo, das ist die Offline-Piper-Stimme.",
-            "it" to "Ciao, questa è la voce offline di Piper.",
-            "pt" to "Olá, esta é a voz offline do Piper.",
-            "nl" to "Hallo, dit is de offline Piper-stem.",
-            "ru" to "Привет, это автономный голос Пайпер.",
-            "pl" to "Cześć, to jest głos offline Piper.",
-            "tr" to "Merhaba, bu çevrimdışı Piper sesi.",
-            "ar" to "مرحبا، هذا هو صوت بايبر دون اتصال.",
-            "hi" to "नमस्ते, यह ऑफ़लाइन पाइपर आवाज़ है।",
-            "zh" to "你好，这是离线 Piper 语音。",
-            "ja" to "こんにちは、これはオフラインのPiper音声です。",
-            "ko" to "안녕하세요, 오프라인 Piper 음성입니다.",
-            "vi" to "Xin chào, đây là giọng nói ngoại tuyến của Piper.",
-            "th" to "สวัสดี นี่คือเสียงออฟไลน์ของ Piper",
-            "id" to "Halo, ini adalah suara Piper offline.",
-            "uk" to "Привіт, це автономний голос Пайпер.",
-            "sv" to "Hej, det här är Pipers offlineröst.",
+            "en" to "Hello, this voice runs entirely on this device.",
+            "ar" to "مرحبا، هذا الصوت يعمل بالكامل على هذا الجهاز.",
+            "bg" to "Здравейте, този глас работи изцяло на това устройство.",
+            "cs" to "Dobrý den, tento hlas běží celý na tomto zařízení.",
+            "da" to "Hej, denne stemme kører helt på denne enhed.",
+            "de" to "Hallo, diese Stimme läuft vollständig auf diesem Gerät.",
+            "el" to "Γεια σας, αυτή η φωνή λειτουργεί εξ ολοκλήρου σε αυτή τη συσκευή.",
+            "es" to "Hola, esta voz funciona por completo en este dispositivo.",
+            "et" to "Tere, see hääl töötab täielikult selles seadmes.",
+            "fi" to "Hei, tämä ääni toimii kokonaan tässä laitteessa.",
+            "fr" to "Bonjour, cette voix fonctionne entièrement sur cet appareil.",
+            "hi" to "नमस्ते, यह आवाज़ पूरी तरह इस उपकरण पर चलती है।",
+            "hr" to "Zdravo, ovaj glas radi u cijelosti na ovom uređaju.",
+            "hu" to "Üdvözlöm, ez a hang teljesen ezen a készüléken fut.",
+            "id" to "Halo, suara ini berjalan sepenuhnya di perangkat ini.",
+            "it" to "Ciao, questa voce funziona interamente su questo dispositivo.",
+            "ja" to "こんにちは。この音声はすべてこの端末で動いています。",
+            "ko" to "안녕하세요. 이 음성은 전부 이 기기에서 동작합니다.",
+            "lt" to "Sveiki, šis balsas veikia visiškai šiame įrenginyje.",
+            "lv" to "Sveiki, šī balss darbojas pilnībā šajā ierīcē.",
+            "nl" to "Hallo, deze stem werkt volledig op dit apparaat.",
+            "pl" to "Cześć, ten głos działa całkowicie na tym urządzeniu.",
+            "pt" to "Olá, esta voz funciona inteiramente neste dispositivo.",
+            "ro" to "Bună, această voce rulează complet pe acest dispozitiv.",
+            "ru" to "Здравствуйте, этот голос работает полностью на этом устройстве.",
+            "sk" to "Dobrý deň, tento hlas beží celý na tomto zariadení.",
+            "sl" to "Zdravo, ta glas deluje popolnoma na tej napravi.",
+            "sv" to "Hej, den här rösten körs helt på den här enheten.",
+            "tr" to "Merhaba, bu ses tamamen bu cihazda çalışıyor.",
+            "uk" to "Вітаю, цей голос працює повністю на цьому пристрої.",
+            "vi" to "Xin chào, giọng nói này chạy hoàn toàn trên thiết bị này.",
         )
     }
 
@@ -598,14 +405,14 @@ private fun TtsTestSection(
         Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text(stringResource(R.string.try_the_voice), fontWeight = FontWeight.Bold)
 
-            if (installedVoices.isNotEmpty()) {
+            if (languages.isNotEmpty()) {
                 // Language picker for TTS test — using simple ExposedDropdown
                 ExposedDropdownMenuBox(
                     expanded = dropdownExpanded,
                     onExpandedChange = { dropdownExpanded = !dropdownExpanded },
                 ) {
                     OutlinedTextField(
-                        value = installedVoices.firstOrNull { it.code == selectedCode }
+                        value = languages.firstOrNull { it.code == selectedCode }
                             ?.let { "${it.nativeName} (${it.englishName})" } ?: selectedCode,
                         onValueChange = {},
                         readOnly = true,
@@ -620,7 +427,7 @@ private fun TtsTestSection(
                         expanded = dropdownExpanded,
                         onDismissRequest = { dropdownExpanded = false },
                     ) {
-                        installedVoices.forEach { voice ->
+                        languages.forEach { voice ->
                             DropdownMenuItem(
                                 text = { Text("${voice.nativeName} · ${voice.englishName} (${voice.code})") },
                                 onClick = {
@@ -636,12 +443,12 @@ private fun TtsTestSection(
             Button(
                 enabled = enabled,
                 onClick = {
-                    if (installedVoices.isEmpty()) {
-                        status = "No voice installed yet."
+                    if (languages.isEmpty()) {
+                        status = "The bundled voices could not be read."
                         return@Button
                     }
-                    val chosen = installedVoices.firstOrNull { it.code == selectedCode }
-                        ?: installedVoices.first()
+                    val chosen = languages.firstOrNull { it.code == selectedCode }
+                        ?: languages.first()
                     val bcp47 = chosen.bcp47
                     val sample = samples[chosen.code] ?: samples["en"]!!
 
