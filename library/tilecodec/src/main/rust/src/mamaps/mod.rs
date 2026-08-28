@@ -63,6 +63,7 @@ mod tests {
     use crate::proto::Result;
     use crate::stream::{RangeReader, OPEN_PREFIX_BYTES};
     use std::cell::RefCell;
+    use std::path::PathBuf;
 
     /// A [`RangeReader`] over bytes in memory that logs every range asked for, so a test can assert
     /// on the **number of round trips** as well as on the bytes. The same shape `stream.rs` uses.
@@ -113,6 +114,72 @@ mod tests {
 
     fn open(bytes: Vec<u8>) -> MamapsArchive<Counting> {
         MamapsArchive::open(Counting { bytes, requests: RefCell::new(Vec::new()) }).expect("open")
+    }
+
+    /// A directory of its own, removed on drop, so a test can point a writer's body scratch file at
+    /// it and then assert on what is — or is not — left behind.
+    struct Scratch {
+        dir: PathBuf,
+    }
+
+    impl Scratch {
+        fn new(name: &str) -> Scratch {
+            let dir =
+                std::env::temp_dir().join(format!("mamaps_write_{name}_{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("temp dir");
+            Scratch { dir }
+        }
+
+        fn path(&self, name: &str) -> PathBuf {
+            self.dir.join(name)
+        }
+
+        fn options(&self) -> Options {
+            Options { spill_dir: Some(self.dir.clone()), ..Options::default() }
+        }
+
+        /// What the directory holds, so a test can say "nothing".
+        fn files(&self) -> Vec<String> {
+            std::fs::read_dir(&self.dir)
+                .expect("read_dir")
+                .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+                .collect()
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// A body big enough, and random enough, that a few hundred of them cannot fit in the writer's
+    /// scratch-file buffer.
+    ///
+    /// The coordinates come from a seeded LCG rather than from a pattern on purpose: a body that
+    /// deflated down to a few hundred bytes would let a whole test archive sit in the buffer, and
+    /// then a test about reading bodies back off disk would pass without ever reading one.
+    fn wide_body_for(seed: i16) -> Body {
+        const POINTS: u32 = 2048;
+        let mut roads = Layer::new(dict::LAYER_ROADS);
+        roads.features.push(Feature {
+            kind: 45,
+            kind_detail: dict::NONE,
+            geom_type: GEOM_LINE,
+            flags: 0,
+            parts_offset: 0,
+            part_count: 1,
+        });
+        roads.parts.push(Part { coord_start: 0, point_count: POINTS, winding: WINDING_OUTER });
+        let mut state = seed as u64 ^ 0xA5A5_A5A5_A5A5_A5A5;
+        roads.coords = (0..POINTS)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((state >> 33) as i16, (state >> 17) as i16)
+            })
+            .collect();
+        Body { extent: DEFAULT_EXTENT, layers: vec![roads] }
     }
 
     #[test]
@@ -258,6 +325,113 @@ mod tests {
             let tile = a.tile(*z, *x as u32, *y as u32).expect("read").expect("present");
             assert_eq!(tile, body_for(*seed), "z{z}/{x}/{y}");
         }
+    }
+
+    /// **The one thing spilling the data section could have broken.** A content-dedup hit is a fact
+    /// because every byte of the candidate is compared, and once the bodies are in a file that
+    /// compare has to read them back. This feeds enough distinct bodies to push the earliest ones
+    /// well past the writer's in-memory buffer and then repeats every one of them, so the
+    /// confirmations really do come off disk rather than out of the buffer.
+    #[test]
+    fn content_dedup_confirms_a_candidate_that_has_already_reached_the_scratch_file() {
+        let scratch = Scratch::new("dedup_off_disk");
+        // 200 incompressible 8 KiB bodies is a data section of about 1.6 MB, against a buffer of 1.
+        const DISTINCT: i16 = 200;
+        let base = tile_id(9, 0, 0);
+        let mut rows: Vec<(u64, i16)> = (0..DISTINCT).map(|i| (base + i as u64, i)).collect();
+        // Then the same bodies again at later ids, in the same order. Every repeat is non-adjacent,
+        // so no run can form and each one has to go through the content bucket.
+        rows.extend((0..DISTINCT).map(|i| (base + DISTINCT as u64 + i as u64, i)));
+
+        let options = Options { max_zoom: 9, ..scratch.options() };
+        let mut writer = StreamWriter::new(options).expect("options");
+        for (id, seed) in &rows {
+            writer.append(*id, &wide_body_for(*seed)).expect("append");
+        }
+        let bytes = writer.finish().expect("finish");
+
+        let header = Header::parse(&bytes).expect("header");
+        assert!(
+            header.data_len > 1 << 20,
+            "the data section must outgrow the writer's buffer or this test proves nothing, it is \
+             {} bytes",
+            header.data_len,
+        );
+        assert_eq!(header.tiles_addressed, rows.len() as u64);
+        assert_eq!(header.bodies_written, DISTINCT as u64, "the second pass stored nothing new");
+        // And every tile still reads back as itself, which is what confirming against the wrong
+        // bytes would silently break.
+        let mut a = open(bytes);
+        for (id, seed) in &rows {
+            let (z, x, y) = crate::pmtiles::tile_zxy(*id);
+            let tile = a.tile(z, x as u32, y as u32).expect("read").expect("present");
+            assert_eq!(tile, wide_body_for(*seed), "tile {id}");
+        }
+    }
+
+    /// `finish_to_path` and `finish` are two ways of emitting one archive, not two archives.
+    ///
+    /// Worth asserting because they are not the same code path — one copies the data section out of
+    /// a file and the other into a `Vec` — and because the streaming one is what a real build uses.
+    /// If it could differ by a byte then every test above would be testing something nothing ships.
+    #[test]
+    fn a_streamed_archive_is_byte_identical_to_one_finished_in_memory() {
+        let scratch = Scratch::new("streamed");
+        // Repeats and runs in the same archive, so dedup and the run-length flag are both live on
+        // the way to both outputs.
+        let tiles: Vec<(u8, u64, u64, i16)> = (0..8u64)
+            .flat_map(|x| {
+                (0..8u64).map(move |y| (3u8, x, y, if (x + y) % 3 == 0 { 4 } else { (x * 8 + y) as i16 }))
+            })
+            .collect();
+        let options = || Options { leaf_entry_capacity: 8, ..scratch.options() };
+        let in_memory = archive(&tiles, options());
+
+        let mut rows: Vec<(u64, i16)> =
+            tiles.iter().map(|(z, x, y, seed)| (tile_id(*z, *x, *y), *seed)).collect();
+        rows.sort_by_key(|(id, _)| *id);
+        let mut writer = StreamWriter::new(options()).expect("options");
+        for (id, seed) in rows {
+            writer.append(id, &body_for(seed)).expect("append");
+        }
+        let out = scratch.path("streamed.mamaps");
+        writer.finish_to_path(&out).expect("finish_to_path");
+
+        let streamed = std::fs::read(&out).expect("read back");
+        assert_eq!(streamed.len(), in_memory.len(), "the same length");
+        assert_eq!(streamed, in_memory, "the same bytes");
+        // And it opens and reads, which is all a reader will ever ask of it.
+        assert_eq!(open(streamed).tile(3, 7, 7).expect("read").expect("present"), body_for(63));
+    }
+
+    /// A build that dies must not strand a copy of its data section — 652 MB for California, tens of
+    /// gigabytes for a planet. However the writer ends, its scratch file goes with it.
+    #[test]
+    fn the_body_scratch_file_is_removed_however_the_build_ends() {
+        let scratch = Scratch::new("spill_cleanup");
+        // A separate directory for the archives, so `scratch.files()` can assert on emptiness.
+        let output = Scratch::new("spill_cleanup_out");
+
+        // Dropped without ever being finished, which is what a failure upstream of the writer looks
+        // like.
+        {
+            let mut writer = StreamWriter::new(scratch.options()).expect("options");
+            writer.append(tile_id(0, 0, 0), &body_for(1)).expect("append");
+            assert_eq!(scratch.files().len(), 1, "a writer holding bodies has a scratch file");
+        }
+        assert!(scratch.files().is_empty(), "dropping the writer took its scratch with it");
+
+        let mut writer = StreamWriter::new(scratch.options()).expect("options");
+        writer.append(tile_id(0, 0, 0), &body_for(2)).expect("append");
+        writer.finish_to_path(&output.path("a.mamaps")).expect("finish_to_path");
+        assert!(scratch.files().is_empty(), "and so did finishing");
+
+        // And a build refused for having no tiles, which fails only after the scratch file exists.
+        let writer = StreamWriter::new(scratch.options()).expect("options");
+        let refused = output.path("b.mamaps");
+        assert!(writer.finish_to_path(&refused).is_err(), "an archive with no tiles");
+        assert!(scratch.files().is_empty());
+        assert!(!refused.exists(), "and the destination was never touched");
     }
 
     /// **Invariant 5.** Byte-identical output for identical input, twice over. Nothing in the emit
