@@ -104,4 +104,26 @@
         <item quantity="one">%1$d uuendus on paigaldamisel…</item>
         <item quantity="other">%1$d uuendust on paigaldamisel…</item>
     </plurals>
+    <string name="sync_done">Kataloog on uuendatud - %1$d rakendust</string>
+    <string name="sync_failed_all">Kummastki allikast sünkroonimine ei toiminud. Sinu olemasolev kataloog pole muutunud.</string>
+    <string name="sync_failed_fdroid">F-Droidist sünkroonimine ei toiminud. Tema olemasolevad rakendused pole muutunud.</string>
+    <string name="sync_failed_modern_apps">Moodsatest Rakendustest sünkroonimine ei toiminud. Tema olemasolevad rakendused pole muutunud.</string>
+    <plurals name="updates_confirm_count">
+        <item quantity="one">%1$d uuendus ootab sinu kinnitust</item>
+        <item quantity="other">%1$d uuendust ootavad sinu kinnitust</item>
+    </plurals>
+    <string name="install_failure_incompatible">pakett pole kompileeritud sinu seadme jaoks</string>
+    <string name="install_failed_reason">„%1$s“ rakenduse paigaldamine ei õnnestunud: %2$s</string>
+    <string name="install_failure_storage">pole piisavalt andmeruumi</string>
+    <string name="install_failure_conflict">pakett on vastuolus juba paigaldatud versiooniga</string>
+    <string name="install_failure_unknown">süsteem keeldus paigaldusest</string>
+    <string name="uninstaller_unavailable">Pakettide eemaldaja avamine ei õnnestunud</string>
+    <string name="store_rule_split_key_title">Mitmeosalised rakendused jagavad sama võtit</string>
+    <string name="store_rule_split_key_detail">Mõned saavad allalaaditud mitme failina. Nad kõik peavad olema allkirjastatud sama võtmega ja välistab võimaluse, et valesid faile ei saaks vahele kiiluda.</string>
+    <string name="source_modern_apps_pin">Kinnitatud kasutama selle rakenduse oma allkirjastamisvõtit</string>
+    <string name="source_fdroid_pin">Kinnitatud kasutama F-Droidi rakendusekohast allkirjastamisvõtit</string>
+    <string name="source_play">Play Store (anonüümne)</string>
+    <string name="source_play_pin">Mitte midagi ei saa kinnitada: allkirjastamisvõtmed on alati Google\'i käes</string>
+    <string name="source_accrescent">Accrescent</string>
+    <string name="source_accrescent_pin">Kinnitatud kasutama Accrescenti tarkvarahoidla allkirjastamisvõtit (ed25519)</string>
 </resources>
