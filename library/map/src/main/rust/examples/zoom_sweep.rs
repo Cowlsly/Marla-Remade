@@ -187,7 +187,7 @@ fn main() {
                         for rings in &polygons {
                             let mut v = Vec::new();
                             let mut idx = Vec::new();
-                            fill::tessellate(rings, source.extent, &mut v, &mut idx);
+                            fill::tessellate(rings, source.extent, false, &mut v, &mut idx);
                             rasterise(&v, &idx, mask);
                         }
                     }

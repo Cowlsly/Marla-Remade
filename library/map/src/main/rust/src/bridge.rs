@@ -258,6 +258,8 @@ fn spawn_worker(
             // silently gets nothing back.
             zoom_range.set(archive.header.min_zoom, archive.header.max_zoom);
             let layers = style::layers();
+            // Read once from the header rather than per tile: it is a property of the archive.
+            let rings_validated = archive.header.rings_validated();
 
             loop {
                 // Hold the queue lock only long enough to take one tile, never across the
@@ -276,6 +278,7 @@ fn spawn_worker(
                         tile.z,
                         tile.x,
                         tile.y,
+                        rings_validated,
                     )),
                     Ok(None) => TileResult::Absent,
                     Err(e) => {

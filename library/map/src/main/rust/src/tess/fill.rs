@@ -42,10 +42,20 @@ pub const FLOATS_PER_VERTEX: usize = 2;
 const MIN_RING_COORDS: usize = 6;
 
 /// Tessellate one polygon: the exterior ring first, then holes, each flat and
-/// **closed** as `decode_polygons` returns them.
+/// **closed** as the decoder returns them.
+///
+/// `validated` says the producer already normalised the rings — exactly one exterior, wound
+/// consistently, holes strictly inside it and not overlapping each other. A `.mamaps` archive says
+/// so in its header; anything else does not.
+///
+/// **The repair pass is kept either way.** Deleting it would turn a generator bug into an on-device
+/// artifact, or an earcut hang, with no diagnostic — and in a debug build it runs regardless and
+/// asserts it found nothing to fix, so the claim is continuously verified on the device rather than
+/// taken on trust.
 pub fn tessellate(
     rings: &[Vec<(i32, i32)>],
     extent: u32,
+    validated: bool,
     vertices: &mut Vec<f32>,
     indices: &mut Vec<u32>,
 ) {
@@ -72,7 +82,20 @@ pub fn tessellate(
     // unreferenced vertices behind — the z0 ocean drops enough of them to matter. `offsets`
     // maps a ring to where its vertices land, so a group's triangles can be mapped back
     // after being renumbered for its own earcut call.
-    let groups = polygons(&open);
+    let groups = if validated {
+        // One group: the exterior and every hole, in the order the producer stated them. Which is
+        // what `polygons` would work out anyway, at the cost of an O(holes x outers) containment
+        // scan per feature per frame.
+        let trusted = vec![(0..open.len()).collect::<Vec<usize>>()];
+        debug_assert_eq!(
+            polygons(&open),
+            trusted,
+            "an archive claimed validated rings and the repair pass disagreed",
+        );
+        trusted
+    } else {
+        polygons(&open)
+    };
     let mut offsets = vec![usize::MAX; open.len()];
     let mut emitted: Vec<usize> = Vec::with_capacity(open.len());
     let mut vertex_count = 0usize;
@@ -345,7 +368,7 @@ mod tests {
     fn a_closed_ring_loses_its_repeated_vertex() {
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&[square(4096)], 4096, &mut v, &mut idx);
+        tessellate(&[square(4096)], 4096, false, &mut v, &mut idx);
         assert_eq!(v.len() / FLOATS_PER_VERTEX, 4, "the closing vertex is not a vertex");
         assert_eq!(idx.len(), 6);
         // The whole tile, so area 1 in tile-normalised units.
@@ -355,7 +378,7 @@ mod tests {
     #[test]
     fn positions_are_tile_normalised() {
         let mut v = Vec::new();
-        tessellate(&[square(4096)], 4096, &mut v, &mut Vec::new());
+        tessellate(&[square(4096)], 4096, false, &mut v, &mut Vec::new());
         for f in &v {
             assert!(*f >= 0.0 && *f <= 1.0, "{f} is not tile-normalised");
         }
@@ -496,7 +519,7 @@ mod tests {
                 checked += 1;
                 let mut v = Vec::new();
                 let mut idx = Vec::new();
-                tessellate(rings, water.extent, &mut v, &mut idx);
+                tessellate(rings, water.extent, false, &mut v, &mut idx);
                 let want = expected_area(rings, water.extent);
                 let got = covered_area(&v, &idx);
 
@@ -545,7 +568,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&rings, SIZE as u32, &mut v, &mut idx);
+        tessellate(&rings, SIZE as u32, false, &mut v, &mut idx);
 
         let want = expected_area(&rings, SIZE as u32);
         let got = covered_area(&v, &idx);
@@ -569,7 +592,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&rings, 1000, &mut v, &mut idx);
+        tessellate(&rings, 1000, false, &mut v, &mut idx);
 
         // The tile minus the continent, plus the lake back: 1 - 0.36 + 0.04.
         let want = expected_area(&rings, 1000);
@@ -593,7 +616,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&vec![outer, a, b], 1000, &mut v, &mut idx);
+        tessellate(&vec![outer, a, b], 1000, false, &mut v, &mut idx);
 
         // One 400x400 hole of a 1000x1000 tile cut out, and only one.
         assert!(
@@ -620,7 +643,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&rings, 1000, &mut v, &mut idx);
+        tessellate(&rings, 1000, false, &mut v, &mut idx);
 
         let want = expected_area(&rings, 1000);
         assert!((want - 0.8).abs() < 1e-6, "the even-odd region is {want}");
@@ -650,7 +673,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&vec![outer, crossing], 1000, &mut v, &mut idx);
+        tessellate(&vec![outer, crossing], 1000, false, &mut v, &mut idx);
 
         // Dropped, so the fill is exactly the exterior. Keeping it covers 0.8965 instead.
         assert!(
@@ -671,7 +694,7 @@ mod tests {
         for (name, extent, rings) in &polygons {
             let mut v = Vec::new();
             let mut idx = Vec::new();
-            tessellate(rings, *extent, &mut v, &mut idx);
+            tessellate(rings, *extent, false, &mut v, &mut idx);
             let want = expected_area(rings, *extent);
             let got = covered_area(&v, &idx);
             // Generous: exact only up to f32 vertex precision.
@@ -705,7 +728,7 @@ mod tests {
 
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&rings, 4096, &mut v, &mut idx);
+        tessellate(&rings, 4096, false, &mut v, &mut idx);
         let want = expected_area(&rings, 4096);
         let got = covered_area(&v, &idx);
         assert!(
@@ -720,7 +743,7 @@ mod tests {
         let hole = vec![(40, 40), (40, 60), (60, 60), (60, 40), (40, 40)];
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&[outer, hole], 100, &mut v, &mut idx);
+        tessellate(&[outer, hole], 100, false, &mut v, &mut idx);
         // 100x100 minus 20x20, over an extent of 100. Vertices are `f32`, so 0.4 and
         // 0.6 are not exact and the tolerance is set by that rather than by the maths.
         assert!(
@@ -739,6 +762,7 @@ mod tests {
         tessellate(
             &[vec![(0, 0), (5, 0), (0, 0)], vec![(40, 40), (40, 60), (60, 60), (60, 40), (40, 40)]],
             100,
+            false,
             &mut v,
             &mut idx,
         );
@@ -750,7 +774,7 @@ mod tests {
     fn a_degenerate_hole_leaves_the_exterior() {
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&[square(100), vec![(5, 5), (6, 5)]], 100, &mut v, &mut idx);
+        tessellate(&[square(100), vec![(5, 5), (6, 5)]], 100, false, &mut v, &mut idx);
         assert!((covered_area(&v, &idx) - 1.0).abs() < 1e-6, "the exterior still fills");
     }
 
@@ -758,7 +782,7 @@ mod tests {
     fn empty_input_emits_nothing() {
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&[], 4096, &mut v, &mut idx);
+        tessellate(&[], 4096, false, &mut v, &mut idx);
         assert!(v.is_empty() && idx.is_empty());
     }
 
@@ -766,10 +790,35 @@ mod tests {
     fn a_second_polygon_indices_are_based_at_its_own_vertices() {
         let mut v = Vec::new();
         let mut idx = Vec::new();
-        tessellate(&[square(100)], 100, &mut v, &mut idx);
+        tessellate(&[square(100)], 100, false, &mut v, &mut idx);
         let first = idx.len();
-        tessellate(&[square(100)], 100, &mut v, &mut idx);
+        tessellate(&[square(100)], 100, false, &mut v, &mut idx);
         assert!(idx[first..].iter().all(|&i| i >= 4), "the second polygon rebases: {:?}", &idx[first..]);
         assert_eq!(v.len() / FLOATS_PER_VERTEX, 8);
+    }
+    /// **The gate, and the reason the repair pass is kept.** On a polygon that is already valid the
+    /// two paths have to agree exactly: trusting the producer is only a saving if it is not also a
+    /// change. Anything else means the gate is a behaviour switch rather than an optimisation.
+    #[test]
+    fn trusting_a_validated_polygon_matches_repairing_it() {
+        // Valid: one exterior, one hole wound the other way, strictly inside it.
+        let valid = vec![
+            vec![(0, 0), (400, 0), (400, 400), (0, 400), (0, 0)],
+            vec![(100, 100), (100, 200), (200, 200), (200, 100), (100, 100)],
+        ];
+        let mut trusted = (Vec::new(), Vec::new());
+        let mut repaired = (Vec::new(), Vec::new());
+        tessellate(&valid, 4096, true, &mut trusted.0, &mut trusted.1);
+        tessellate(&valid, 4096, false, &mut repaired.0, &mut repaired.1);
+        assert_eq!(trusted, repaired, "the gate changed the output on a valid polygon");
+        assert!(!trusted.1.is_empty(), "and it drew something");
+
+        // And the hole is really cut out, rather than both paths agreeing on a solid square.
+        let mut whole = (Vec::new(), Vec::new());
+        tessellate(&[valid[0].clone()], 4096, true, &mut whole.0, &mut whole.1);
+        assert!(
+            covered_area(&trusted.0, &trusted.1) < covered_area(&whole.0, &whole.1),
+            "the hole was not cut out",
+        );
     }
 }

@@ -45,7 +45,14 @@ pub struct TileMesh {
 /// So the gate here is the *widest* it could need to be, and the renderer decides what is
 /// actually visible against the camera's own zoom every frame. Layers outside the window
 /// are still skipped, which keeps this bounded: a z5 tile does not tessellate buildings.
-pub fn build(tile: &Body, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
+pub fn build(
+    tile: &Body,
+    layers: &[Layer],
+    z: u8,
+    x: u32,
+    y: u32,
+    rings_validated: bool,
+) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
     let extent = tile.extent as u32;
@@ -76,7 +83,7 @@ pub fn build(tile: &Body, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
                     // ring group rather than making every consumer regroup them.
                     let rings: Vec<Vec<(i32, i32)>> =
                         parts.iter().map(|part| widen(source.points(part))).collect();
-                    fill::tessellate(&rings, extent, &mut vertices, &mut indices);
+                    fill::tessellate(&rings, extent, rings_validated, &mut vertices, &mut indices);
                 }
                 LayerKind::Line => {
                     // Polygons contribute their outlines too: a lake's shoreline and an
@@ -146,7 +153,7 @@ mod tests {
         // The published tile carries one `earth` polygon, one `roads` LineString of
         // kind = major_road, and two `water` polygons.
         let layers = style::layers();
-        let mesh = build(&real(), &layers, 11, 339, 770);
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
 
         assert!(mesh_for(&mesh, &layers, "earth").is_some(), "the earth polygon tessellates");
         assert!(mesh_for(&mesh, &layers, "water").is_some(), "both water polygons tessellate");
@@ -178,7 +185,7 @@ mod tests {
 
         // z6 is within reach of z9 (6 + 4 = 10), so the road is tessellated ready for the
         // camera to descend onto it. The old tile-zoom gate dropped it here.
-        let reaching = build(&real(), &layers, 6, 339, 770);
+        let reaching = build(&real(), &layers, 6, 339, 770, false);
         assert!(
             mesh_for(&reaching, &layers, "roads-major").is_some(),
             "a z6 ancestor must carry the roads it will stand in for at z9",
@@ -186,7 +193,7 @@ mod tests {
 
         // z4 is not (4 + 4 = 8 < 9), so the window stays bounded and this is not simply
         // tessellating everything at every zoom.
-        let out_of_reach = build(&real(), &layers, 4, 339, 770);
+        let out_of_reach = build(&real(), &layers, 4, 339, 770, false);
         assert!(
             mesh_for(&out_of_reach, &layers, "roads-major").is_none(),
             "the window must stay bounded, or every tile pays for every layer",
@@ -196,7 +203,7 @@ mod tests {
     #[test]
     fn every_mesh_is_well_formed() {
         let layers = style::layers();
-        let mesh = build(&real(), &layers, 11, 339, 770);
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
         assert!(!mesh.meshes.is_empty());
         for m in &mesh.meshes {
             let id = &layers[m.layer_index].id;
@@ -226,7 +233,7 @@ mod tests {
         // pixels for the dash pattern. A violation of any of those renders a recognisable
         // map that is badly wrong, which is exactly the failure this pins down.
         let layers = style::layers();
-        let mesh = build(&real(), &layers, 11, 339, 770);
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
         assert!(!mesh.meshes.is_empty());
 
         let mut worst_pos = 0.0f32;
@@ -280,7 +287,7 @@ mod tests {
         // The clip transform assumes 0..1 within the tile. Clipped geometry overspills
         // the edges a little, which is why the bound is generous rather than exact.
         let layers = style::layers();
-        let mesh = build(&real(), &layers, 11, 339, 770);
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
         for m in &mesh.meshes {
             let stride = match m.kind {
                 LayerKind::Fill => fill::FLOATS_PER_VERTEX,
@@ -296,7 +303,7 @@ mod tests {
     #[test]
     fn a_layer_outside_its_zoom_range_is_skipped() {
         let layers = style::layers();
-        let low = build(&real(), &layers, 11, 339, 770);
+        let low = build(&real(), &layers, 11, 339, 770, false);
         // buildings is min_zoom 14, and roads-minor is 13; the tile's road is a
         // major_road anyway.
         assert!(mesh_for(&low, &layers, "roads-minor").is_none());
@@ -306,7 +313,7 @@ mod tests {
     #[test]
     fn a_casing_produces_twice_the_vertices_of_a_plain_stroke() {
         let layers = style::layers();
-        let mesh = build(&real(), &layers, 11, 339, 770);
+        let mesh = build(&real(), &layers, 11, 339, 770, false);
         let plain = mesh_for(&mesh, &layers, "roads-major").expect("plain");
         let casing = mesh_for(&mesh, &layers, "roads-major-casing").expect("casing");
         assert_eq!(
@@ -320,7 +327,7 @@ mod tests {
     #[test]
     fn an_empty_tile_produces_no_meshes() {
         let layers = style::layers();
-        let mesh = build(&Body::new(4096), &layers, 11, 0, 0);
+        let mesh = build(&Body::new(4096), &layers, 11, 0, 0, false);
         assert!(mesh.meshes.is_empty());
     }
 
@@ -344,7 +351,7 @@ mod tests {
             max_zoom: 22,
             authored: "water".to_string(),
         }];
-        let mesh = build(&real(), &outline, 11, 339, 770);
+        let mesh = build(&real(), &outline, 11, 339, 770, false);
         assert_eq!(mesh.meshes.len(), 1, "the water polygons' outlines stroke");
         assert!(!mesh.meshes[0].indices.is_empty());
     }
@@ -385,7 +392,7 @@ mod tests {
 
         let layers = style::layers();
         let body = archive.tile(11, 339, 770).expect("read").expect("present");
-        let mesh = build(&body, layers, 11, 339, 770);
+        let mesh = build(&body, layers, 11, 339, 770, archive.header.rings_validated());
         // The same layers the fixture produces when tessellated directly, so nothing was lost
         // between the encoder and the reader.
         for id in ["earth", "water", "roads-major", "roads-major-casing"] {

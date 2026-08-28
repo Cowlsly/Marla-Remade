@@ -36,7 +36,7 @@ use map_renderer::tess::fill;
 fn production_area(rings: &[Vec<(i32, i32)>], extent: u32) -> f64 {
     let mut v = Vec::new();
     let mut idx = Vec::new();
-    fill::tessellate(rings, extent, &mut v, &mut idx);
+    fill::tessellate(rings, extent, false, &mut v, &mut idx);
     let mut total = 0.0f64;
     for tri in idx.chunks_exact(3) {
         let p = |i: u32| {
