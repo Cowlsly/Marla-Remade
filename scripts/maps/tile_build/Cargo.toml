@@ -51,11 +51,18 @@ path = "src/bin/pmtiles_dump.rs"
 [[bin]]
 name = "pmtiles_extract"
 path = "src/bin/pmtiles_extract.rs"
+
+[[bin]]
+name = "mamaps_dump"
+path = "src/bin/mamaps_dump.rs"
 [dependencies]
 # The PMTiles + MVT codec, shared with the Android renderer in `:library:map`.
 # A path dependency on a detached crate: `tilecodec` belongs to no workspace, so
 # depending on it from here pulls in neither the app workspace nor its toolchain.
-tilecodec = { path = "../../../library/tilecodec/src/main/rust" }
+# `write` for the `.mamaps` builder, which is off by default so the Android cdylib
+# does not pull it. Every consumer here is a host tool that either writes archives
+# or dumps them.
+tilecodec = { path = "../../../library/tilecodec/src/main/rust", features = ["write"] }
 miniz_oxide = "0.8"
 rayon = "1"
 [profile.release]

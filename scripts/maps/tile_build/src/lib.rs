@@ -72,4 +72,4 @@ pub mod tiling;
 // every `crate::mvt` / `crate::pmtiles` / `crate::gz` / `crate::proto` path in
 // `pyramid`, `tiling`, `spill` and `geom` keeps resolving unchanged. The extraction
 // is meant to be invisible to the tiler.
-pub use tilecodec::{gz, mvt, pmtiles, proto};
+pub use tilecodec::{gz, mamaps, mvt, pmtiles, proto};
