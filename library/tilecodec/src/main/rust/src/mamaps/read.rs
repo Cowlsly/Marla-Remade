@@ -44,6 +44,13 @@ pub struct MamapsArchive<R: RangeReader> {
 }
 
 impl<R: RangeReader> MamapsArchive<R> {
+    /// The reader this archive was opened on.
+    ///
+    /// So a caller can act on something it only learns from the header — the `build_id`, which
+    /// decides whether the reader's disk cache is still addressing this build.
+    pub fn reader(&self) -> &R {
+        &self.reader
+    }
     /// One range request: the header, the dictionary and the root index all live in the prefix.
     ///
     /// A file whose prefix does not hold all three is refused rather than fetched again. The
