@@ -21,4 +21,5 @@ pub mod sentencepiece;
 pub mod speech;
 pub mod spline;
 pub mod supertonic;
+pub mod translate;
 pub mod ocr;
