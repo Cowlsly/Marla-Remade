@@ -505,6 +505,37 @@ impl Net {
         self.split_outputs()
     }
 
+    /// [`Net::infer_raw`] for a plan with more than one input, one slice per binding.
+    ///
+    /// The recorded command buffer packs the inputs end to end from offset 0 in declaration
+    /// order, so this is the mirror of `split_outputs`. Supertonic's sampler takes seven — a
+    /// latent, two conditionings, the timestep shifts and two rotary angle tables — and getting
+    /// them out of order would be a wrong answer at the right shape, so each is checked against
+    /// its own binding rather than the total.
+    pub fn infer_raw_many(&mut self, inputs: &[&[f32]]) -> Result<Vec<Vec<f32>>, String> {
+        if inputs.len() != self.plan.inputs.len() {
+            return Err(format!(
+                "{} inputs for a plan that declares {}",
+                inputs.len(),
+                self.plan.inputs.len()
+            ));
+        }
+        self.input_scratch.clear();
+        for (binding, values) in self.plan.inputs.iter().zip(inputs) {
+            let wanted = binding.shape.len() as usize;
+            if values.len() != wanted {
+                return Err(format!(
+                    "{} values for an input of {:?}, which holds {wanted}",
+                    values.len(),
+                    binding.shape
+                ));
+            }
+            self.input_scratch.extend(values.iter().map(|&v| preprocess::f32_to_f16(v)));
+        }
+        self.submit()?;
+        self.split_outputs()
+    }
+
     /// Split the concatenated readback into one vector per output binding.
     ///
     /// The recorded command buffer packs the outputs end to end from offset 0 in the
