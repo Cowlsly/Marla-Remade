@@ -226,6 +226,19 @@ impl Weights {
         &self.data
     }
 
+    /// A [`Weights`] that is nothing but a data section, for the device-parity fixtures.
+    ///
+    /// [`crate::vulkan::run::Net::new`] reads no part of a [`Weights`] except [`data`], because
+    /// the [`crate::nets::Plan`] it is handed already carries every resolved offset. So a
+    /// fixture that built its plan against a test [`WeightSource`] can give the device the same
+    /// blob without assembling a header and a tensor table that nothing would ever read.
+    ///
+    /// [`data`]: Weights::data
+    #[cfg(test)]
+    pub(crate) fn from_data(data: Vec<u8>) -> Weights {
+        Weights { graph_id: 0, source_sha256: [0u8; 32], tensors: Vec::new(), data }
+    }
+
     /// How many tensors the table holds.
     pub fn len(&self) -> usize {
         self.tensors.len()
