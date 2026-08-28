@@ -1042,7 +1042,7 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, vits_flow, Act,
+        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act,
         Builder,
     };
     use super::*;
@@ -2394,6 +2394,28 @@ mod tests {
 
         // A voice is a runtime download rather than a bundled asset, so the vocoder's
         // `.maml` is given by path instead of being looked up in the tree.
+        if graph == "supertonic_voc" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights =
+                crate::weights::Weights::parse(&bytes, crate::weights::graph::SUPERTONIC_VOC)
+                    .expect("the vocoder asset parses");
+            let plan = supertonic_vocoder::build(&weights, width).expect("the vocoder builds");
+            // The latent arrives `[144, L]` and the plan wants `[24, 6L]`, and that is NOT a flat
+            // reinterpretation: the export reshapes to `[24, 6, L]`, transposes the last two axes
+            // and flattens, so position `p` of channel `c` is `latent[c * 6 + p % 6][p / 6]`.
+            // Assuming a plain reshape here produced audio that correlated with the reference at
+            // 0.009 — structurally wrong rather than merely imprecise.
+            let unpacked = supertonic_vocoder::unpack_latent(&input, width as usize)
+                .expect("the latent unpacks");
+            let channelled = run(&plan, weights.data(), &unpacked).expect("the vocoder runs");
+            // And the plan emits `[512, 1, T]` while the waveform is time-major. Both marshalling
+            // steps are the host's job in production; it is copying into an audio buffer anyway.
+            let samples = supertonic_vocoder::interleave(&channelled);
+            write(&dir.join("reference.f32"), &samples);
+            println!("supertonic_voc at {width} frames: wrote {} values", samples.len());
+            return;
+        }
         if graph == "vits_dp" {
             let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));

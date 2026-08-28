@@ -58,6 +58,7 @@ PROBE = {
     "vits_enc": "/enc_p/proj/Conv_output_0",
     "vits_flow": None,
     "vits_dp": None,
+    "supertonic_voc": None,
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -85,6 +86,8 @@ SUBGRAPH = {
     # state, the padding mask as ones, and the already-scaled noise. Cutting the noise out is
     # what makes the comparison possible at all — left in, the export draws its own and two
     # runs would not agree with each other, let alone with the runtime.
+    # A whole file, not a module: no `first`, so nothing is extracted. 144 latent channels.
+    "supertonic_voc": {"channels": 144},
     "vits_dp": {
         "first": "/dp/pre/Conv",
         "channels": 192,
@@ -160,7 +163,10 @@ def main():
     work = tempfile.mkdtemp(prefix="maml_parity_")
 
     cut = SUBGRAPH.get(args.graph)
-    if cut is not None:
+    # A cut without a `first` is a whole-graph model that merely needs a non-image input
+    # shape - Supertonic ships its vocoder as its own file rather than as a module of a
+    # larger one, so there is nothing to extract.
+    if cut is not None and cut.get("first"):
         model = extract(args.onnx, model, cut, work)
     probe = PROBE[args.graph] or final_logits(model)
     if probe not in {o.name for o in model.graph.output}:

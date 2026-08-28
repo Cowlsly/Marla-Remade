@@ -73,6 +73,8 @@ pub mod graph {
     ///
     /// Read on the host rather than compiled into a plan: see [`crate::post::duration`].
     pub const VITS_DP: u32 = 10;
+    /// Supertonic 3's ConvNeXt vocoder. See [`crate::nets::supertonic_vocoder`].
+    pub const SUPERTONIC_VOC: u32 = 11;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

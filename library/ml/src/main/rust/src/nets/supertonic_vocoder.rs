@@ -10,14 +10,17 @@
 //! # The two reinterpretations, both free
 //!
 //! **In.** The latent arrives as `[144, L]` and the first convolution wants 24 channels. 144 is
-//! `24 * 6`, the `chunk_compress_factor`, and `[144, L]` to `[24, 6L]` is a plain reshape of the
-//! same flat buffer — so the plan simply declares its input as `[24, 1, 6L]` and the caller
-//! passes the same bytes. No copy, no shader.
+//! `24 * 6`, the `chunk_compress_factor`, but the unpacking is an **interleave and not a plain
+//! reshape**: the export reshapes to `[24, 6, L]`, transposes the last two axes and flattens
+//! again, so position `p` of channel `c` comes from `latent[c * 6 + p % 6][p / 6]`. See
+//! [`unpack_latent`]. Treating it as a flat reinterpretation produced audio that correlated with
+//! the reference at 0.009 — structurally wrong rather than merely imprecise, and the sort of
+//! mistake that sounds like noise rather than like a bug.
 //!
 //! **Out.** The last convolution emits `[512, 1, T]` and the waveform is
-//! `sample[t * 512 + s] = out[s][t]`. That transpose happens on the host, which is copying into
-//! an audio buffer regardless. Measured: 3072 output samples per input latent frame, at
-//! `L = 54`, `55` and `108`.
+//! `sample[t * 512 + s] = out[s][t]`. See [`interleave`]. That transpose happens on the host,
+//! which is copying into an audio buffer regardless. Measured: 3072 output samples per input
+//! latent frame, at `L = 54`, `55` and `108`.
 //!
 //! # Edge padding, and the three folds it permits
 //!
@@ -103,6 +106,45 @@ impl Layers {
     }
 }
 
+/// Unpack a `[144, frames]` latent into the `[24, 6 * frames]` the plan reads.
+///
+/// **Not** a flat reinterpretation. The export reshapes `[144, L]` to `[24, 6, L]`, transposes
+/// the last two axes and flattens, so position `p` of channel `c` comes from
+/// `latent[c * 6 + p % 6][p / 6]`. Assuming a plain reshape correlated with the reference at
+/// 0.009 rather than 0.99, so this is worth a fixture of its own.
+pub fn unpack_latent(latent: &[f32], frames: usize) -> Result<Vec<f32>, String> {
+    let packed = PACKED as usize;
+    let compress = COMPRESS as usize;
+    if latent.len() != packed * frames {
+        return Err(format!(
+            "{} latent values for {packed} channels over {frames} frames",
+            latent.len()
+        ));
+    }
+    let positions = frames * compress;
+    let mut out = vec![0.0f32; LATENT as usize * positions];
+    for channel in 0..LATENT as usize {
+        for position in 0..positions {
+            let source = (channel * compress + position % compress) * frames + position / compress;
+            out[channel * positions + position] = latent[source];
+        }
+    }
+    Ok(out)
+}
+
+/// Read the plan's `[512, 1, T]` output as a waveform: `sample[t * 512 + s] = out[s][t]`.
+pub fn interleave(channelled: &[f32]) -> Vec<f32> {
+    let channels = SAMPLES_PER_POSITION as usize;
+    let positions = channelled.len() / channels.max(1);
+    let mut out = vec![0.0f32; channelled.len()];
+    for channel in 0..channels {
+        for position in 0..positions {
+            out[position * channels + channel] = channelled[channel * positions + position];
+        }
+    }
+    out
+}
+
 /// Build the vocoder for a latent of `frames` frames.
 ///
 /// The input is `[24, 1, 6 * frames]` — the caller's `[144, frames]` latent, reinterpreted. The
@@ -171,7 +213,14 @@ pub fn build(weights: &dyn WeightSource, frames: u32) -> Result<Plan, String> {
 
 /// A convolution along the sequence, padded so the length is unchanged.
 ///
-/// The pad is `dilation * (kernel - 1) / 2` each side, which for the odd kernels here is exact.
+/// The padding is **causal**: the whole `dilation * (kernel - 1)` goes on the left and none on
+/// the right, which is what the export's `Pad` nodes carry — `[0, 0, 6, 0, 0, 0]` for a 7-tap at
+/// dilation 1, growing to 12 and 24 at dilations 2 and 4. So each output position sees only
+/// itself and its past, which is what lets a vocoder stream.
+///
+/// Implementing this symmetrically instead shifts the signal a little further at every one of
+/// the eleven padded convolutions. The output stays the right length and the right magnitude and
+/// correlates with the reference at 0.02, which sounds like noise rather than like a bug.
 struct Along {
     /// Output channels.
     out: u32,
@@ -186,7 +235,7 @@ struct Along {
 
 fn along(b: &mut Builder, l: &mut Layers, x: Id, shape: Along) -> Id {
     let Along { out, kernel, dilation, group, act } = shape;
-    let pad = dilation * (kernel - 1) / 2;
+    let past = dilation * (kernel - 1);
     b.conv(
         x,
         l.take(),
@@ -194,7 +243,8 @@ fn along(b: &mut Builder, l: &mut Layers, x: Id, shape: Along) -> Id {
         (1, kernel),
         (1, 1),
         (1, dilation),
-        (0, pad, 0, pad),
+        // (top, left, bottom, right): everything on the left.
+        (0, past, 0, 0),
         group,
         act,
     )
@@ -218,6 +268,49 @@ mod tests {
         let source = Shapes::new(TENSORS);
         let plan = build(&source, frames).expect("the vocoder builds");
         (source, plan)
+    }
+
+    #[test]
+    fn unpacking_the_latent_interleaves_rather_than_reshaping() {
+        // Two frames of the 144 packed channels, each value encoding its own (channel, frame) so
+        // the mapping is readable. A plain reshape would give a different answer for every
+        // position except those where `p % 6 == 0`, which is why it correlated at 0.009 rather
+        // than failing outright.
+        let frames = 2usize;
+        let packed = PACKED as usize;
+        let latent: Vec<f32> =
+            (0..packed * frames).map(|i| (i / frames) as f32 * 100.0 + (i % frames) as f32).collect();
+        let got = unpack_latent(&latent, frames).expect("unpacks");
+        let positions = frames * COMPRESS as usize;
+        assert_eq!(got.len(), LATENT as usize * positions);
+        // Channel 0, position 0..12: source channel `p % 6`, source frame `p / 6`.
+        let want: Vec<f32> = (0..positions)
+            .map(|p| (p % 6) as f32 * 100.0 + (p / 6) as f32)
+            .collect();
+        assert_eq!(&got[0..positions], &want[..]);
+        // Channel 3 starts at packed channel 18, so its first position is 1800.
+        assert_eq!(got[3 * positions], 1800.0);
+        // And a plain reshape would have put packed channel 3 frame 0 there instead.
+        assert_ne!(got[3 * positions], 300.0);
+    }
+
+    #[test]
+    fn unpacking_refuses_a_latent_of_the_wrong_length() {
+        let error = unpack_latent(&[0.0; 10], 2).expect_err("wrong length");
+        assert!(error.contains("10 latent values"), "{error}");
+    }
+
+    #[test]
+    fn interleaving_reads_the_output_plane_as_a_waveform() {
+        // Two positions of the 512 channels. Sample `t * 512 + s` is channel `s` at position `t`.
+        let channels = SAMPLES_PER_POSITION as usize;
+        let plane: Vec<f32> = (0..channels * 2).map(|i| i as f32).collect();
+        let got = interleave(&plane);
+        // Channel 0 position 0, then channel 1 position 0, ...
+        assert_eq!(got[0], 0.0);
+        assert_eq!(got[1], 2.0);
+        assert_eq!(got[channels], 1.0);
+        assert_eq!(got.len(), plane.len());
     }
 
     #[test]

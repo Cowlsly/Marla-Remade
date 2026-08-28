@@ -111,6 +111,7 @@ GRAPHS = {
     "vits_enc": 8,
     "vits_flow": 9,
     "vits_dp": 10,
+    "supertonic_voc": 11,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -126,6 +127,7 @@ EXPECTED_DIGEST = {
     "vits_enc": "93ee24f70b490334d11b383f043e81284a3e781bc263597830c50f8df14db2c1",
     "vits_flow": "38cecda81bcfd4eb98782395905ddbe4637aa7f55fecb2de996d09fc530e2e6d",
     "vits_dp": "d02a6e28700823af95cbeeeb2b40d77e531f90086599deb3f840ce9a2a57a494",
+    "supertonic_voc": "64e3a3437fa8f889fb679a5e08553ba7392c05a32cd844a0d2340698372a0071",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
