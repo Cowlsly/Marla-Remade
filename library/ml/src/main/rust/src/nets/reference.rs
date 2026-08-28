@@ -2717,18 +2717,16 @@ mod tests {
             let style = read("style.f32");
             use crate::post::supertonic as post;
             let (current, total) = (5u32, 16u32);
+            let conditioning = post::Conditioning::read(&weights).expect("the conditioning");
             let shifts = post::time_shifts(&weights, current, total).expect("the timestep shifts");
-            let query_angles = post::rotary_angles(&weights, width).expect("the query angles");
-            let key_angles = post::rotary_angles(&weights, chars).expect("the key angles");
+            let query_angles =
+                post::rotary_angles(&conditioning.theta, width).expect("the query angles");
+            let key_angles =
+                post::rotary_angles(&conditioning.theta, chars).expect("the key angles");
             // The export tiles its batch to two: the real conditioning, and two learned
             // unconditional tokens. Two runs of one plan here, combined below.
-            let conditional_keys = post::style_keys(&weights, true).expect("the conditional keys");
-            let unconditional_keys =
-                post::style_keys(&weights, false).expect("the unconditional keys");
-            let unconditional_text =
-                post::unconditional_text(&weights, chars).expect("the unconditional text");
-            let unconditional_style =
-                post::unconditional_style(&weights).expect("the unconditional style");
+            let unconditional_text = post::unconditional_text(&conditioning.text_token, chars)
+                .expect("the unconditional text");
             let run_branch = |text: &[f32], keys: &[f32], style: &[f32]| -> Vec<f32> {
                 let outputs = run_multi(
                     &plan,
@@ -2738,9 +2736,12 @@ mod tests {
                 .expect("the sampler runs");
                 outputs.into_iter().next().expect("the velocity")
             };
-            let conditional = run_branch(&text, &conditional_keys, &style);
-            let unconditional =
-                run_branch(&unconditional_text, &unconditional_keys, &unconditional_style);
+            let conditional = run_branch(&text, &conditioning.conditional_keys, &style);
+            let unconditional = run_branch(
+                &unconditional_text,
+                &conditioning.unconditional_keys,
+                &conditioning.unconditional_style,
+            );
             let denoised = post::step(&input, &conditional, &unconditional, total)
                 .expect("the Euler step");
             write(&dir.join("reference.f32"), &denoised);

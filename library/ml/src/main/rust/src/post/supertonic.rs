@@ -26,6 +26,8 @@
 //! `4 * conditional - 3 * unconditional`. This runtime has no batch axis, so [`step`] takes the
 //! two velocities the caller already ran. That is a genuine doubling of the sampler's cost.
 
+use crate::nets::embed_lanes;
+use crate::nets::supertonic_duration as duration_net;
 use crate::nets::supertonic_sampler as net;
 use crate::preprocess::f16_to_f32;
 use crate::weights::Weights;
@@ -113,11 +115,13 @@ pub fn time_shifts(weights: &Weights, current: u32, total: u32) -> Result<Vec<f3
 /// which is what lets a latent frame and a text character at the same fraction of the way through
 /// meet at the same angle. It also means the query table and the key table are different tensors
 /// even though they share `theta`.
-pub fn rotary_angles(weights: &Weights, positions: u32) -> Result<Vec<f32>, String> {
+pub fn rotary_angles(theta: &[f32], positions: u32) -> Result<Vec<f32>, String> {
     if positions == 0 {
         return Err("a rotary table over no positions".into());
     }
-    let theta = tensor(weights, net::HOST_THETA, &[net::FREQUENCIES])?;
+    if theta.len() != net::FREQUENCIES as usize {
+        return Err(format!("{} rotary frequencies, not {}", theta.len(), net::FREQUENCIES));
+    }
     let width = positions as usize;
     let mut table = vec![0.0f32; 2 * net::FREQUENCIES as usize * width];
     for (frequency, &turn) in theta.iter().enumerate() {
@@ -131,13 +135,15 @@ pub fn rotary_angles(weights: &Weights, positions: u32) -> Result<Vec<f32>, Stri
 }
 
 /// The unconditional branch's text input: `text_special_token` at every one of `chars` positions.
-pub fn unconditional_text(weights: &Weights, chars: u32) -> Result<Vec<f32>, String> {
+pub fn unconditional_text(token: &[f32], chars: u32) -> Result<Vec<f32>, String> {
     if chars == 0 {
         return Err("an unconditional text of no characters".into());
     }
-    let token = tensor(weights, net::HOST_TEXT_TOKEN, &[net::TEXT])?;
+    if token.len() != net::TEXT as usize {
+        return Err(format!("an unconditional token of {}, not {}", token.len(), net::TEXT));
+    }
     let mut out = Vec::with_capacity(token.len() * chars as usize);
-    for value in token {
+    for &value in token {
         out.extend(std::iter::repeat_n(value, chars as usize));
     }
     Ok(out)
@@ -166,6 +172,206 @@ pub fn style_keys(weights: &Weights, conditional: bool) -> Result<Vec<f32>, Stri
         index,
         &[net::STYLE * net::MAIN_BLOCKS as u32, net::STYLE_TOKENS],
     )
+}
+
+/// Entries in the codepoint table: every code unit of the Basic Multilingual Plane.
+pub const INDEXER_ENTRIES: usize = 65_536;
+
+/// Character ids for text that is **already NFD-decomposed**, dropping what the model has no
+/// token for.
+///
+/// `indexer` is the voice bundle's `unicode_indexer.bin`: [`INDEXER_ENTRIES`] little-endian
+/// `int16`, one per BMP codepoint, `-1` where there is no token. 8,321 of them are mapped.
+///
+/// # NFD is the caller's job, and it is not optional
+///
+/// The model has no precomposed accents: `U+00E9` is unmapped while `e` and `U+0301` are both
+/// first-class tokens, and Hangul syllables map only through the Jamo block. So `café`, `über`,
+/// `niño`, `안녕` and `привет` index completely under NFD and partially or not at all otherwise.
+/// The Kotlin side calls `java.text.Normalizer.normalize(text, Form.NFD)`, which is a platform
+/// API and free; doing it here would mean carrying Unicode decomposition tables in the APK.
+///
+/// # Unmapped codepoints are dropped, not substituted
+///
+/// There is no unknown token to substitute. Dropping loses a character; mapping to something
+/// else would mispronounce it, and mapping past the table would read the sentence token — see
+/// [`crate::nets::supertonic_duration`].
+pub fn to_ids(indexer: &[u8], text: &str) -> Result<Vec<u32>, String> {
+    if indexer.len() != INDEXER_ENTRIES * 2 {
+        return Err(format!(
+            "a codepoint table of {} bytes, not {}",
+            indexer.len(),
+            INDEXER_ENTRIES * 2
+        ));
+    }
+    let mut ids = Vec::new();
+    for codepoint in text.chars() {
+        let index = codepoint as usize;
+        // Astral-plane characters — emoji, most CJK extensions — are outside the table
+        // entirely rather than mapped to -1.
+        if index >= INDEXER_ENTRIES {
+            continue;
+        }
+        let at = index * 2;
+        let token = i16::from_le_bytes([indexer[at], indexer[at + 1]]);
+        if token >= 0 {
+            ids.push(token as u32);
+        }
+    }
+    Ok(ids)
+}
+
+/// Sampler steps per utterance.
+///
+/// Measured, not chosen: at four or fewer the waveform's peak goes above 1.0, sixteen is the floor
+/// for a stable level, and audio at 16 correlates with audio at 32 at only 0.883. There is no
+/// cheap-steps escape hatch here, which with two guidance branches per step means 32 passes of
+/// [`crate::nets::supertonic_sampler`] for one sentence.
+pub const STEPS: u32 = 16;
+
+/// The GPU stages, as a trait, so the sequencing below is host-testable against stubs.
+///
+/// The same shape `post::ocr` and `post::speech` use, and for the same reason: the order of the
+/// four nets, the length arithmetic between them and the sampler loop are where the mistakes are,
+/// and none of them needs a device to check.
+pub trait Stages {
+    /// The duration predictor over `chars + 1` id lanes and a `[128]` style, returning the one
+    /// value [`crate::nets::supertonic_duration::seconds`] exponentiates.
+    fn duration(&mut self, lanes: &[f32], style: &[f32]) -> Result<f32, String>;
+
+    /// The text encoder, returning `[256, chars]`.
+    fn text(&mut self, lanes: &[f32], style: &[f32]) -> Result<Vec<f32>, String>;
+
+    /// One guidance branch of the sampler, returning `[144, frames]`.
+    #[allow(clippy::too_many_arguments)]
+    fn sampler(
+        &mut self,
+        latent: &[f32],
+        text: &[f32],
+        keys: &[f32],
+        style: &[f32],
+        shifts: &[f32],
+        query_angles: &[f32],
+        key_angles: &[f32],
+    ) -> Result<Vec<f32>, String>;
+
+    /// The vocoder over a `[144, frames]` latent, returning `frames * SAMPLES_PER_FRAME` samples.
+    fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String>;
+}
+
+/// Everything the sampler needs from the weights file that a shader never sees, read once.
+///
+/// [`synthesise`] takes this rather than a [`Weights`] so the sequencing can be tested against
+/// stubs, and so the file is walked once per voice instead of once per step.
+pub struct Conditioning {
+    /// The rotary `theta`, `[32]`.
+    pub theta: Vec<f32>,
+    /// The per-block timestep shifts, one `[4 * 512]` per step.
+    pub shifts: Vec<Vec<f32>>,
+    /// The folded conditional style keys, `[4 * 256, 50]`.
+    pub conditional_keys: Vec<f32>,
+    /// The folded unconditional style keys, `[4 * 256, 50]`.
+    pub unconditional_keys: Vec<f32>,
+    /// `text_special_token`, `[256]`, to broadcast over the text positions.
+    pub text_token: Vec<f32>,
+    /// `style_value_special_token`, `[256, 50]`.
+    pub unconditional_style: Vec<f32>,
+}
+
+impl Conditioning {
+    /// Read all of it, for a sampler run of [`STEPS`] steps.
+    pub fn read(weights: &Weights) -> Result<Conditioning, String> {
+        Ok(Conditioning {
+            theta: tensor(weights, net::HOST_THETA, &[net::FREQUENCIES])?,
+            shifts: (0..STEPS)
+                .map(|step| time_shifts(weights, step, STEPS))
+                .collect::<Result<_, _>>()?,
+            conditional_keys: style_keys(weights, true)?,
+            unconditional_keys: style_keys(weights, false)?,
+            text_token: tensor(weights, net::HOST_TEXT_TOKEN, &[net::TEXT])?,
+            unconditional_style: unconditional_style(weights)?,
+        })
+    }
+}
+
+/// A voice: the two style tensors the nets take as inputs, already in this runtime's layout.
+pub struct Voice {
+    /// `style_dp` flattened to 128, for the duration predictor.
+    pub duration: Vec<f32>,
+    /// `style_ttl` transposed to `[256, 50]`, for the text encoder and the sampler.
+    pub text: Vec<f32>,
+}
+
+/// Synthesise one utterance.
+///
+/// `text` must already be NFD; see [`to_ids`]. `noise` supplies the flow's starting latent, one
+/// standard normal per value — flow matching is meant to vary between calls, so the caller seeds
+/// it from the clock.
+///
+/// ```text
+/// text -> ids                    to_ids, over the bundle's codepoint table
+/// ids + style_dp -> seconds      the duration predictor, then exp
+/// seconds -> frames              round(seconds * 44100 / 3072)
+/// ids + style_ttl -> text_emb    the text encoder
+/// noise + text_emb -> latent     the sampler, 16 steps of two guidance branches
+/// latent -> waveform             the vocoder
+/// ```
+pub fn synthesise(
+    stages: &mut dyn Stages,
+    conditioning: &Conditioning,
+    indexer: &[u8],
+    voice: &Voice,
+    text: &str,
+    noise: &dyn Fn(usize) -> Vec<f32>,
+) -> Result<Vec<f32>, String> {
+    let ids = to_ids(indexer, text)?;
+    if ids.is_empty() {
+        return Err("nothing in this text is in the model's vocabulary".into());
+    }
+    let chars = ids.len() as u32;
+
+    // The duration predictor's sequence leads with the sentence token; the text encoder's does
+    // not. Two id tensors, not one.
+    let mut with_token = Vec::with_capacity(ids.len() + 1);
+    with_token.push(duration_net::SENTENCE_TOKEN);
+    with_token.extend_from_slice(&ids);
+    let log_seconds = stages.duration(&embed_lanes(&with_token), &voice.duration)?;
+    let frames = duration_net::latent_frames(duration_net::seconds(log_seconds));
+
+    let conditioning_text = stages.text(&embed_lanes(&ids), &voice.text)?;
+
+    let query_angles = rotary_angles(&conditioning.theta, frames)?;
+    let key_angles = rotary_angles(&conditioning.theta, chars)?;
+    let unconditional_text = unconditional_text(&conditioning.text_token, chars)?;
+
+    let mut latent = noise(net::LATENT as usize * frames as usize);
+    for step in 0..STEPS as usize {
+        let shifts = conditioning
+            .shifts
+            .get(step)
+            .ok_or("the conditioning holds fewer shifts than there are steps")?;
+        let conditional = stages.sampler(
+            &latent,
+            &conditioning_text,
+            &conditioning.conditional_keys,
+            &voice.text,
+            shifts,
+            &query_angles,
+            &key_angles,
+        )?;
+        let unconditional = stages.sampler(
+            &latent,
+            &unconditional_text,
+            &conditioning.unconditional_keys,
+            &conditioning.unconditional_style,
+            shifts,
+            &query_angles,
+            &key_angles,
+        )?;
+        latent = self::step(&latent, &conditional, &unconditional, STEPS)?;
+    }
+
+    stages.vocoder(&latent, frames)
 }
 
 /// One Euler step: combine the two guidance branches and advance the latent.
@@ -204,6 +410,193 @@ pub fn step(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_indexer_drops_what_it_cannot_map() {
+        // A table where only 'a' (0x61) and the combining acute (0x301) are mapped. 'z' and an
+        // emoji outside the BMP both disappear rather than becoming some other character.
+        let mut table = vec![0u8; INDEXER_ENTRIES * 2];
+        for (codepoint, token) in [(0x61usize, 60i16), (0x301, 146)] {
+            table[codepoint * 2..codepoint * 2 + 2].copy_from_slice(&token.to_le_bytes());
+        }
+        for entry in 0..INDEXER_ENTRIES {
+            if entry != 0x61 && entry != 0x301 {
+                table[entry * 2..entry * 2 + 2].copy_from_slice(&(-1i16).to_le_bytes());
+            }
+        }
+        let got = to_ids(&table, "a\u{301}z\u{1F600}a").expect("indexes");
+        assert_eq!(got, vec![60, 146, 60]);
+    }
+
+    #[test]
+    fn the_indexer_refuses_a_table_of_the_wrong_size() {
+        let error = to_ids(&[0u8; 16], "a").expect_err("a short table");
+        assert!(error.contains("codepoint table"), "{error}");
+    }
+
+    /// Records what the pipeline asked of each stage, and answers with fixed shapes.
+    struct Recording {
+        seconds: f32,
+        chars: u32,
+        frames: u32,
+        sampler_calls: usize,
+        latents: Vec<Vec<f32>>,
+        vocoded_frames: Vec<u32>,
+    }
+
+    impl Stages for Recording {
+        fn duration(&mut self, lanes: &[f32], style: &[f32]) -> Result<f32, String> {
+            // Two lanes over `chars + 1` positions, the sentence token first.
+            assert_eq!(lanes.len() % 2, 0);
+            let positions = lanes.len() / 2;
+            assert_eq!(positions as u32, self.chars + 1);
+            assert_eq!(
+                lanes[0],
+                (duration_net::SENTENCE_TOKEN % super::super::super::nets::EMBED_LANE) as f32
+            );
+            assert_eq!(style.len(), 128);
+            Ok(self.seconds.ln())
+        }
+
+        fn text(&mut self, lanes: &[f32], style: &[f32]) -> Result<Vec<f32>, String> {
+            // No sentence token on this side.
+            assert_eq!(lanes.len() / 2, self.chars as usize);
+            assert_eq!(style.len(), 256 * 50);
+            Ok(vec![0.25; 256 * self.chars as usize])
+        }
+
+        fn sampler(
+            &mut self,
+            latent: &[f32],
+            text: &[f32],
+            keys: &[f32],
+            style: &[f32],
+            shifts: &[f32],
+            query_angles: &[f32],
+            key_angles: &[f32],
+        ) -> Result<Vec<f32>, String> {
+            assert_eq!(latent.len(), net::LATENT as usize * self.frames as usize);
+            assert_eq!(text.len(), net::TEXT as usize * self.chars as usize);
+            assert_eq!(keys.len(), net::STYLE as usize * net::MAIN_BLOCKS * 50);
+            assert_eq!(style.len(), net::STYLE as usize * 50);
+            assert_eq!(shifts.len(), net::CHANNELS as usize * net::MAIN_BLOCKS);
+            assert_eq!(query_angles.len(), 64 * self.frames as usize);
+            assert_eq!(key_angles.len(), 64 * self.chars as usize);
+            self.sampler_calls += 1;
+            self.latents.push(latent.to_vec());
+            // A velocity of zero, so the latent must come back unchanged and any accidental
+            // scaling of it in `step` shows up.
+            Ok(vec![0.0; latent.len()])
+        }
+
+        fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String> {
+            assert_eq!(latent.len(), net::LATENT as usize * frames as usize);
+            self.vocoded_frames.push(frames);
+            Ok(vec![0.5; frames as usize * 3072])
+        }
+    }
+
+    /// A codepoint table mapping the ASCII letters to themselves and nothing else.
+    fn letters() -> Vec<u8> {
+        let mut table = vec![0u8; INDEXER_ENTRIES * 2];
+        for entry in 0..INDEXER_ENTRIES {
+            let token = if (b'a' as usize..=b'z' as usize).contains(&entry) {
+                (entry - b'a' as usize + 1) as i16
+            } else {
+                -1
+            };
+            table[entry * 2..entry * 2 + 2].copy_from_slice(&token.to_le_bytes());
+        }
+        table
+    }
+
+    fn conditioning() -> Conditioning {
+        Conditioning {
+            theta: vec![1.0; net::FREQUENCIES as usize],
+            shifts: vec![vec![0.0; net::CHANNELS as usize * net::MAIN_BLOCKS]; STEPS as usize],
+            conditional_keys: vec![0.0; net::STYLE as usize * net::MAIN_BLOCKS * 50],
+            unconditional_keys: vec![0.0; net::STYLE as usize * net::MAIN_BLOCKS * 50],
+            text_token: vec![0.0; net::TEXT as usize],
+            unconditional_style: vec![0.0; net::STYLE as usize * 50],
+        }
+    }
+
+    #[test]
+    fn the_pipeline_runs_the_four_nets_in_order_at_the_predicted_length() {
+        // "hello" is five mapped letters. At one second the duration predictor's answer becomes
+        // round(44100 / 3072) = 14 frames, and the vocoder emits 3072 samples a frame.
+        let mut stages =
+            Recording { seconds: 1.0, chars: 5, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
+        let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
+        let samples = synthesise(
+            &mut stages,
+            &conditioning(),
+            &letters(),
+            &voice,
+            "hello",
+            &|count| vec![0.0; count],
+        )
+        .expect("synthesises");
+        assert_eq!(samples.len(), 14 * 3072);
+        assert_eq!(stages.vocoded_frames, vec![14]);
+        // Two guidance branches every step, which is the sampler's real cost.
+        assert_eq!(stages.sampler_calls, STEPS as usize * 2);
+    }
+
+    #[test]
+    fn a_zero_velocity_leaves_the_latent_where_the_noise_put_it() {
+        // The stub returns a velocity of zero, so every step is the identity and all 16 must see
+        // the same latent. A `step` that scaled or reordered would show here rather than as
+        // quiet noise on a device.
+        let mut stages =
+            Recording { seconds: 1.0, chars: 5, frames: 14, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
+        let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
+        synthesise(
+            &mut stages,
+            &conditioning(),
+            &letters(),
+            &voice,
+            "hello",
+            &|count| (0..count).map(|i| i as f32 * 0.001).collect(),
+        )
+        .expect("synthesises");
+        let first = stages.latents.first().expect("a latent").clone();
+        for (i, latent) in stages.latents.iter().enumerate() {
+            assert_eq!(latent, &first, "step {i} moved the latent");
+        }
+    }
+
+    #[test]
+    fn text_with_nothing_in_the_vocabulary_is_refused() {
+        // Rather than synthesising silence, or a plan over zero characters that the nets refuse
+        // with a message about frames.
+        let mut stages =
+            Recording { seconds: 1.0, chars: 0, frames: 1, sampler_calls: 0, latents: Vec::new(), vocoded_frames: Vec::new() };
+        let voice = Voice { duration: vec![0.1; 128], text: vec![0.2; 256 * 50] };
+        let error = synthesise(
+            &mut stages,
+            &conditioning(),
+            &letters(),
+            &voice,
+            "12345",
+            &|count| vec![0.0; count],
+        )
+        .expect_err("no vocabulary");
+        assert!(error.contains("vocabulary"), "{error}");
+    }
+
+    #[test]
+    fn the_rotary_table_is_normalised_by_its_own_length() {
+        // Two positions and one frequency of 1: position 0 is angle 0 and position 1 is angle
+        // 0.5, because the divisor is the length rather than a constant. Cosines first.
+        let table = rotary_angles(&vec![1.0; net::FREQUENCIES as usize], 2).expect("angles");
+        assert_eq!(table.len(), 64 * 2);
+        assert!((table[0] - 1.0).abs() < 1e-6);
+        assert!((table[1] - 0.5f32.cos()).abs() < 1e-6);
+        // Sines start at channel 32.
+        assert!((table[32 * 2]).abs() < 1e-6);
+        assert!((table[32 * 2 + 1] - 0.5f32.sin()).abs() < 1e-6);
+    }
 
     #[test]
     fn mish_matches_its_definition_and_survives_a_large_input() {
