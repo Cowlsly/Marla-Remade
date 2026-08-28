@@ -49,6 +49,14 @@ pub struct Net {
     arena: Buffer,
     staging: Buffer,
     pipelines: Pipelines,
+    /// This net's own command pool, not the context's.
+    ///
+    /// A `VkCommandPool` is externally synchronised across *recording* as well as across
+    /// allocation — every `vkBeginCommandBuffer` and `vkCmd*` counts — so a pool shared between
+    /// nets would have to be locked for the whole of [`Net::record`]. One pool each removes the
+    /// question: `infer` takes `&mut self`, so a net is already exclusive to one thread at a
+    /// time, and nothing else can reach this pool.
+    command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
     /// Set when a submission was left pending, after which this net is unusable.
@@ -79,7 +87,11 @@ impl Net {
         normalise: Normalise,
     ) -> Result<Net, String> {
         let arena_bytes = (plan.arena_elems as vk::DeviceSize) * 2;
-        let weights_bytes = weights.data().len() as vk::DeviceSize;
+        // Vulkan forbids a zero-sized buffer, and the descriptor set needs a real one bound to
+        // the weights binding whether or not any shader reads it. A plan can legitimately read
+        // no weights at all — a purely elementwise one does — so this floors the allocation
+        // rather than refusing the plan.
+        let weights_bytes = (weights.data().len() as vk::DeviceSize).max(2);
         let input_elems = binding_elems(&plan.inputs);
         let output_elems = binding_elems(&plan.outputs);
         // One staging buffer for both directions: the inputs and the outputs are never in
@@ -99,6 +111,15 @@ impl Net {
             weights_bytes,
         )?;
 
+        // `RESET_COMMAND_BUFFER`, so a net can re-record without reallocating.
+        let pool_info = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(context.queue_family_index)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        // SAFETY: a plain object creation on a device this net holds an `Arc` to. It is stored in
+        // the struct below before anything fallible runs, so `Drop` destroys it on every path.
+        let command_pool = unsafe { context.device.create_command_pool(&pool_info, None) }
+            .map_err(|e| format!("create_command_pool {e:?}"))?;
+
         let mut net = Net {
             context,
             plan,
@@ -107,6 +128,7 @@ impl Net {
             arena,
             staging,
             pipelines,
+            command_pool,
             command_buffer: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
             poisoned: false,
@@ -127,6 +149,9 @@ impl Net {
     /// permanent staging buffer is sized for one input and the weights are ten times
     /// that. Both are freed before returning; this happens once per net.
     fn upload_weights(&self, data: &[u8]) -> Result<(), String> {
+        if data.is_empty() {
+            return Ok(());
+        }
         let staging = Buffer::staging(&self.context, data.len() as vk::DeviceSize)?;
         staging.write(data)?;
         let command_buffer = self.allocate_command_buffer()?;
@@ -156,7 +181,7 @@ impl Net {
                 self.submit_and_wait(command_buffer)
             };
             let outcome = record();
-            device.free_command_buffers(self.context.command_pool, &[command_buffer]);
+            device.free_command_buffers(self.command_pool, &[command_buffer]);
             // `staging` drops here, after the fence has been waited on.
             outcome
         }
@@ -164,16 +189,12 @@ impl Net {
 
     fn allocate_command_buffer(&self) -> Result<vk::CommandBuffer, String> {
         let info = vk::CommandBufferAllocateInfo::default()
-            .command_pool(self.context.command_pool)
+            .command_pool(self.command_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
-        // SAFETY: an allocation from a pool this context owns, under the lock the pool
-        // requires — `:camera` allocates the still renderer's command buffer while the
-        // preview is submitting from another thread.
-        let guard = self.context.lock_queue();
+        // SAFETY: an allocation from this net's own pool, which no other thread can reach.
         let buffers = unsafe { self.context.device.allocate_command_buffers(&info) }
             .map_err(|e| format!("allocate_command_buffers {e:?}"))?;
-        drop(guard);
         buffers
             .first()
             .copied()
@@ -652,16 +673,16 @@ impl Drop for Net {
         // every handle instead would be worse.
         //
         // The lock is held across the wait because `vkDeviceWaitIdle` needs every queue on
-        // the device to itself, and across `free_command_buffers` because the pool is
-        // shared process-wide. The three `Buffer` fields free themselves afterwards through
-        // their own Drop, which runs after this body.
+        // the device to itself. Destroying the pool frees the command buffer with it, and needs
+        // no lock because the pool is this net's alone. The three `Buffer` fields free
+        // themselves afterwards through their own Drop, which runs after this body.
         unsafe {
             let device = &self.context.device;
             let guard = self.context.lock_queue();
             let _ = device.device_wait_idle();
-            device.destroy_fence(self.fence, None);
-            device.free_command_buffers(self.context.command_pool, &[self.command_buffer]);
             drop(guard);
+            device.destroy_fence(self.fence, None);
+            device.destroy_command_pool(self.command_pool, None);
             self.pipelines.destroy(device);
         }
     }

@@ -56,22 +56,25 @@ pub struct Context {
     pub queue: vk::Queue,
     /// The family [`Context::queue`] came from.
     pub queue_family_index: u32,
-    /// `RESET_COMMAND_BUFFER`, so a net can re-record if it ever needs to.
-    pub command_pool: vk::CommandPool,
-    /// Guards the two externally-synchronised objects above.
+    /// Guards the queue above.
     ///
-    /// `VkQueue` and `VkCommandPool` are both *externally synchronised* in the Vulkan
-    /// sense: the application must not call `vkQueueSubmit` on one queue from two threads
-    /// at once, nor allocate and free from one pool concurrently, and `vkDeviceWaitIdle`
-    /// needs every queue on the device to itself.
+    /// `VkQueue` is *externally synchronised* in the Vulkan sense: the application must not
+    /// call `vkQueueSubmit` on one queue from two threads at once, and `vkDeviceWaitIdle` needs
+    /// every queue on the device to itself.
     ///
-    /// Both are shared process-wide, so per-network locking is not enough, and `:camera`
+    /// The queue is shared process-wide, so per-network locking is not enough, and `:camera`
     /// really does break it: `BokehAnalyzer` submits from `bokehExecutor` at ~15 fps while
-    /// `StillBokehRenderer` — a deliberately separate segmenter, per `PortraitBokeh.kt` —
+    /// `StillBokehRenderer` - a deliberately separate segmenter, per `PortraitBokeh.kt` -
     /// submits from `Dispatchers.IO` when the shutter is pressed, and pressing the shutter
     /// does not stop the analysis stream. The locks in `BokehAnalyzer` and
     /// `StillBokehRenderer` each serialise their *own* segmenter and cannot see each
     /// other.
+    ///
+    /// `VkCommandPool` is externally synchronised too, and is deliberately **not** here: each
+    /// [`crate::vulkan::run::Net`] owns its own pool. A pool is synchronised across recording
+    /// as well as across allocation - every `vkCmd*` and `vkBeginCommandBuffer` counts - so one
+    /// shared pool would have to be locked for the whole of a net's `record`, and a lock held
+    /// that long by a net being built would stall a net that is merely submitting.
     queue_lock: Mutex<()>,
 }
 
@@ -142,19 +145,6 @@ impl Context {
             }
         };
         let queue = device.get_device_queue(queue_family_index, 0);
-
-        let pool_info = vk::CommandPoolCreateInfo::default()
-            .queue_family_index(queue_family_index)
-            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-        let command_pool = match device.create_command_pool(&pool_info, None) {
-            Ok(p) => p,
-            Err(e) => {
-                device.destroy_device(None);
-                instance.destroy_instance(None);
-                return Err(format!("create_command_pool {e:?}"));
-            }
-        };
-
         Ok(Context {
             entry,
             instance,
@@ -162,7 +152,6 @@ impl Context {
             device,
             queue,
             queue_family_index,
-            command_pool,
             queue_lock: Mutex::new(()),
         })
     }
@@ -232,13 +221,12 @@ impl Context {
             .unwrap_or(false)
     }
 
-    /// Take the lock that makes [`Context::queue`] and [`Context::command_pool`] safe to
-    /// touch. See [`Context::queue_lock`].
+    /// Take the lock that makes [`Context::queue`] safe to touch.
+    /// See [`Context::queue_lock`].
     ///
-    /// Hold it across `vkQueueSubmit`, across `vkDeviceWaitIdle`, and across any
-    /// allocate/free on the command pool — but **not** across `vkWaitForFences`, which
-    /// needs no external synchronisation and would otherwise let one network's five-second
-    /// timeout stall another's.
+    /// Hold it across `vkQueueSubmit` and across `vkDeviceWaitIdle` - but **not** across
+    /// `vkWaitForFences`, which needs no external synchronisation and would otherwise let one
+    /// network's five-second timeout stall another's.
     ///
     /// A poisoned lock is recovered rather than propagated: it guards no invariant of its
     /// own, only the sequencing of the calls under it, and refusing to segment for the rest
@@ -271,7 +259,6 @@ impl Drop for Context {
             let guard = self.lock_queue();
             let _ = self.device.device_wait_idle();
             drop(guard);
-            self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
             self.instance.destroy_instance(None);
         }
