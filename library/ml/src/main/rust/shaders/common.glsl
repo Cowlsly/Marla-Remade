@@ -92,7 +92,6 @@ layout(push_constant) uniform Push {
 #define ACT_PRELU 4u
 #define ACT_CLIP01 5u
 #define ACT_SWISH 6u
-#define ACT_TANH 7u
 #define ACT_GELU 8u
 
 // This invocation's output element, across a 2D grid of workgroups.
@@ -175,12 +174,6 @@ float activate(float x, uint kind, uint channel) {
             + t * 1.061405429))));
         float erf = sign * (1.0 - poly * exp(-a * a));
         return 0.5 * x * (1.0 + erf);
-    }
-    if (kind == ACT_TANH) {
-        // The last thing Piper's vocoder does, which is what bounds the waveform to
-        // -1..1. GLSL's `tanh` is a built-in; writing it as two exponentials would
-        // overflow fp32 for the large inputs a badly-conditioned voice can produce.
-        return tanh(x);
     }
     return x;
 }

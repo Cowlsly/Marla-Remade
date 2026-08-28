@@ -1,11 +1,11 @@
 #version 450
-//! Attention scores with VITS's relative-position term, in one pass.
+//! Attention scores with a relative-position term, in one pass.
 //!
 //! `scores[h][i][j] = scale * (Q[h,.,i] . K[h,.,j] + Q[h,.,i] . emb[j - i + window])`
 //!
 //! # Why the relative term is nine taps and not a skew
 //!
-//! VITS learns a table of `2 * window + 1` offsets per attention layer and adds
+//! The export learns a table of `2 * window + 1` offsets per attention layer and adds
 //! `Q . emb[j - i]` to every score. Its ONNX export computes that as a full
 //! `[heads, T, 2T-1]` product and then *skews* it into `[heads, T, T]` with a pad, a reshape
 //! and a slice — 48 `Pad`s, 96 `Reshape`s and 42 `Slice`s across the encoder, none of which
@@ -20,7 +20,7 @@
 //! # Layout
 //!
 //! `p.weight` points at the table as `[2 * window + 1, head_dim]`, shared across heads —
-//! which is VITS's `heads_share` default, and was verified by reconstructing both heads from
+//! which is the export's `heads_share` default, and was verified by reconstructing both heads from
 //! the one table. `p.kw` is the number of offsets, so the window is `(p.kw - 1) / 2`; a
 //! nine-wide kernel over the sequence is exactly what this is.
 //!

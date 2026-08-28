@@ -41,9 +41,6 @@ pub mod supertonic_sampler;
 pub mod supertonic_text;
 pub mod supertonic_vocoder;
 pub mod u2netp;
-pub mod vits_dec;
-pub mod vits_enc;
-pub mod vits_flow;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -117,16 +114,10 @@ pub enum Act {
     /// 4.7e-4 (at `x = 2.699`), and fp16's step there is 2.0e-3, so the difference is four
     /// times finer than the arena can represent. `erf` is used anyway for two reasons that are
     /// about agreement rather than accuracy — it is what the export computes, and
-    /// [`crate::nets::erf`] implements the same Abramowitz and Stegun 7.1.26 series for the host
+    /// `nets::erf` implements the same Abramowitz and Stegun 7.1.26 series for the host
     /// interpreter, so the reference and the shader are the same function by construction rather
     /// than by coincidence. The cost is comparable either way.
     Gelu,
-    /// `tanh(x)`.
-    ///
-    /// One use: the last thing Piper's HiFi-GAN vocoder does, which is what bounds its
-    /// output to a waveform. It follows `conv_post` directly, so unlike that net's
-    /// LeakyReLUs it does fuse — see [`Kind::LeakyRelu`].
-    Tanh,
 }
 
 impl Act {
@@ -139,7 +130,6 @@ impl Act {
             Act::PRelu(_) => 4,
             Act::Clip01 => 5,
             Act::Swish => 6,
-            Act::Tanh => 7,
             Act::Gelu => 8,
         }
     }
@@ -254,20 +244,16 @@ pub enum Kind {
     /// attention is not an op: output channel `c` belongs to head `c / head_dim` and
     /// lands where the concatenated result wants it. Head count in [`Push::group`].
     AttnApply,
-    /// [`Kind::AttnScores`] plus VITS's relative-position term, which is nine taps rather
-    /// than the `[heads, T, 2T-1]` product and skew its export spells out. Table at
-    /// [`Push::weight`] as `[2 * window + 1, head_dim]`, offset count in [`Push::kw`].
+    /// [`Kind::AttnScores`] plus a relative-position term, which is nine taps rather than the
+    /// `[heads, T, 2T-1]` product and skew the export spells out. Table at [`Push::weight`] as
+    /// `[2 * window + 1, head_dim]`, offset count in [`Push::kw`].
+    ///
+    /// Both of Supertonic's encoders use it: `supertonic_text` has four such layers and
+    /// `supertonic_duration` two, all at `window_size` 4, so `OFFSETS` is 9 in each.
     AttnScoresRelative,
     /// [`Kind::AttnApply`] plus the value-side relative term. See
     /// [`Kind::AttnScoresRelative`].
     AttnApplyRelative,
-    /// WaveNet's gated activation, `tanh(in[c]) * sigmoid(in[c + C])`.
-    ///
-    /// The input has twice the output''s channels, because one convolution produces the
-    /// filter and the gate together. 16 uses in Piper''s flow.
-    GatedTanh,
-    /// `out[c] = in[C - 1 - c]`, a channel reversal. VITS''s `Flip` between coupling layers.
-    FlipChannels,
     /// A `1 x 1` convolution as a tiled matrix multiply, staging weights through shared memory.
     ///
     /// [`Kind::Conv`] reads each output element''s weights from global memory with no reuse, which
@@ -298,9 +284,9 @@ pub enum Kind {
     /// `out[c][t] = table[id(t)][c]`, an embedding lookup.
     ///
     /// The only op here whose addresses depend on the data. Ids arrive as an ordinary fp16
-    /// tensor, which is exact for the 130 phoneme symbols VITS uses — fp16 holds every
-    /// integer to 2048. Table at [`Push::weight`], its row count in [`Push::in_w`], and an
-    /// out-of-range id clamps rather than reading past the table.
+    /// tensor, which is exact for a small vocabulary — fp16 holds every integer to 2048. Table at
+    /// [`Push::weight`], its row count in [`Push::in_w`], and an out-of-range id clamps rather
+    /// than reading past the table.
     ///
     /// # Vocabularies past 2048
     ///
@@ -309,21 +295,6 @@ pub enum Kind {
     /// SMaLL-100 has 128,112. Those arrive **split across two lanes**, `id = lo + 2048 * hi`,
     /// as a `[2, 1, T]` tensor; [`Push::in_c`] carries the lane count. See [`embed_lanes`].
     Embed,
-    /// `x < 0 ? alpha * x : x`, as a standalone pass. 16 uses in Piper's HiFi-GAN vocoder.
-    ///
-    /// The only activation here that is **not** fused into the layer before it, because in
-    /// a HiFi-GAN ResBlock it is not behind a layer at all: the block is
-    /// `h = h + conv(lrelu(h))`, so it sits in front of its convolution, and the tensor it
-    /// reads is also the residual's other operand — folding it backwards would consume the
-    /// skip connection.
-    ///
-    /// `alpha` arrives in [`Push::param0_bits`] rather than being hardcoded, because the
-    /// export uses two slopes: 0.1 for the fifteen inside the upsampling stages and 0.01
-    /// for the one in front of `conv_post`.
-    ///
-    /// Distinct from [`Act::PRelu`], which is the same function with a *learned* slope per
-    /// channel read from the weights file.
-    LeakyRelu,
     /// `out[i] = weights[i]`, a learned tensor copied into the arena.
     ///
     /// The only op that produces a tensor from nothing but the weights file. It exists because
@@ -465,8 +436,8 @@ pub struct Plan {
     /// Where the preprocessed inputs go, in the order they were declared.
     ///
     /// A `Vec` rather than one binding because the models this runtime is growing into
-    /// are not single-input: VITS's duration predictor takes three tensors and the
-    /// SMaLL-100 decoder four. Both shipping nets declare exactly one.
+    /// are not single-input: Supertonic's sampler takes seven tensors and the SMaLL-100
+    /// decoder four. Every vision net declares exactly one.
     pub inputs: Vec<Binding>,
     /// Where the results come back from, in the order [`Builder::finish`] was given.
     ///
@@ -628,11 +599,6 @@ enum Node {
         input: Id,
         out: Id,
     },
-    LeakyRelu {
-        input: Id,
-        out: Id,
-        alpha: f32,
-    },
     Constant {
         out: Id,
         weight: u32,
@@ -648,14 +614,6 @@ enum Node {
         out: Id,
         table: u32,
         rows: u32,
-    },
-    GatedTanh {
-        input: Id,
-        out: Id,
-    },
-    FlipChannels {
-        input: Id,
-        out: Id,
     },
     SliceChannels {
         input: Id,
@@ -734,9 +692,13 @@ const CONV_POINT_TILE: u32 = 16;
 /// approximating the *activation* would be a different function. This approximates `erf` itself
 /// instead, well below fp16's resolution.
 ///
-/// It lives beside `Act` rather than in `nets::reference` because that module is `#[cfg(test)]`,
-/// and it began in `post::duration` for VITS's separable stacks — which is why it is here and not
-/// there: `post::duration` goes when Piper does, and `Act::Gelu` does not.
+/// Test-only now. It began in `post::duration` for VITS's separable stacks and was moved here so
+/// that deleting Piper would not take it with it; with Piper gone its only remaining caller is
+/// `nets::reference`, which is `#[cfg(test)]`. It stays beside [`Act::Gelu`] rather than moving
+/// into that module because the two have to agree with `activate` in `common.glsl`, which is where
+/// the *shipped* GELU is computed — the series here and the one there are the same coefficients,
+/// and keeping them one scroll apart is what makes that checkable.
+#[cfg(test)]
 pub(crate) fn erf(x: f32) -> f32 {
     const A: [f32; 5] = [0.254_829_6, -0.284_496_74, 1.421_413_7, -1.453_152, 1.061_405_4];
     const P: f32 = 0.327_591_1;
@@ -1277,29 +1239,6 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// WaveNet's gated activation: `tanh(x[c]) * sigmoid(x[c + C])` over an input of `2C`
-    /// channels, writing `C`.
-    pub fn gated_tanh(&mut self, input: Id) -> Id {
-        let shape = self.shape_of(input);
-        if shape.c == 0 || !shape.c.is_multiple_of(2) {
-            self.fail(format!(
-                "a gated activation over {shape:?}: the filter and the gate are halves of \
-                 the same tensor, so the channel count must be even"
-            ));
-        }
-        let out = self.tensor(Shape::new(shape.c / 2, shape.h, shape.w));
-        self.nodes.push(Node::GatedTanh { input, out });
-        out
-    }
-
-    /// `out[c] = in[C - 1 - c]`, VITS's `Flip` between coupling layers.
-    pub fn flip_channels(&mut self, input: Id) -> Id {
-        let shape = self.shape_of(input);
-        let out = self.tensor(shape);
-        self.nodes.push(Node::FlipChannels { input, out });
-        out
-    }
-
     /// Channels `start .. start + count` of `input`, as a tensor of its own.
     ///
     /// One copy and no shader: a channel range of a `[C, H, W]` tensor is contiguous, so this
@@ -1387,8 +1326,8 @@ impl<'a> Builder<'a> {
     /// An embedding lookup: `out[c][t] = table[id(t)][c]`, over a `[1, 1, T]` id tensor, or a
     /// `[2, 1, T]` one when the table has more than [`EMBED_LANE`] rows.
     ///
-    /// `table` indexes a `[rows, channels]` tensor. The `sqrt(d_model)` scale VITS applies
-    /// after the lookup belongs in the table, not here; see [`Kind::Embed`].
+    /// `table` indexes a `[rows, channels]` tensor. A `sqrt(d_model)` scale applied after the
+    /// lookup belongs in the table, folded by the converter, not here; see [`Kind::Embed`].
     pub fn embed(&mut self, ids: Id, table: usize, rows: u32, channels: u32) -> Id {
         let shape = self.shape_of(ids);
         let lanes = if rows > EMBED_LANE { 2 } else { 1 };
@@ -1416,16 +1355,7 @@ impl<'a> Builder<'a> {
         out
     }
 
-    /// `x < 0 ? alpha * x : x`, as its own pass. See [`Kind::LeakyRelu`] for why it is not
-    /// fused into the layer before it.
-    pub fn leaky_relu(&mut self, input: Id, alpha: f32) -> Id {
-        let shape = self.shape_of(input);
-        let out = self.tensor(shape);
-        self.nodes.push(Node::LeakyRelu { input, out, alpha });
-        out
-    }
-
-    /// [`Builder::attn_scores`] plus VITS's relative-position term.
+    /// [`Builder::attn_scores`] plus a relative-position term.
     ///
     /// `table` is a `[offsets, head_dim]` tensor of learned offsets, shared across heads.
     /// `offsets` must be odd: it is `2 * window + 1`, centred on zero displacement.
@@ -2018,38 +1948,6 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::GatedTanh { input, out } => {
-                let so = shape(*out);
-                ops.push(Op::Dispatch {
-                    kind: Kind::GatedTanh,
-                    push: Push {
-                        in0: at(*input)?,
-                        out: at(*out)?,
-                        out_c: so.c,
-                        out_h: so.h,
-                        out_w: so.w,
-                        count: so.len(),
-                        ..Push::default()
-                    },
-                    invocations: so.len(),
-                });
-            }
-            Node::FlipChannels { input, out } => {
-                let so = shape(*out);
-                ops.push(Op::Dispatch {
-                    kind: Kind::FlipChannels,
-                    push: Push {
-                        in0: at(*input)?,
-                        out: at(*out)?,
-                        out_c: so.c,
-                        out_h: so.h,
-                        out_w: so.w,
-                        count: so.len(),
-                        ..Push::default()
-                    },
-                    invocations: so.len(),
-                });
-            }
             Node::SliceChannels { input, out, start } => {
                 let so = shape(*out);
                 // A channel range is contiguous, so this is one element-range move.
@@ -2164,26 +2062,6 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::LeakyRelu { input, out, alpha } => {
-                let so = shape(*out);
-                ops.push(Op::Dispatch {
-                    kind: Kind::LeakyRelu,
-                    push: Push {
-                        in0: at(*input)?,
-                        out: at(*out)?,
-                        in_c: so.c,
-                        in_h: so.h,
-                        in_w: so.w,
-                        out_c: so.c,
-                        out_h: so.h,
-                        out_w: so.w,
-                        param0_bits: alpha.to_bits(),
-                        count: so.len(),
-                        ..Push::default()
-                    },
-                    invocations: so.len(),
-                });
-            }
         }
         Ok(())
     }
@@ -2204,10 +2082,7 @@ impl Node {
             | Node::AttnScoresRelative { out, .. }
             | Node::AttnApplyRelative { out, .. }
             | Node::Softmax { out, .. }
-            | Node::LeakyRelu { out, .. }
             | Node::Embed { out, .. }
-            | Node::GatedTanh { out, .. }
-            | Node::FlipChannels { out, .. }
             | Node::SliceChannels { out, .. }
             | Node::ConvInt8 { out, .. }
             | Node::AttnApply { out, .. }
@@ -2226,10 +2101,7 @@ impl Node {
             | Node::Affine { input, .. }
             | Node::LayerNorm { input, .. }
             | Node::Softmax { input, .. }
-            | Node::LeakyRelu { input, .. }
             | Node::Embed { ids: input, .. }
-            | Node::GatedTanh { input, .. }
-            | Node::FlipChannels { input, .. }
             | Node::SliceChannels { input, .. }
             | Node::ConvInt8 { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
@@ -2451,8 +2323,6 @@ pub(crate) mod tests {
                         Kind::ConvInt8 => vec![(push.in0, dense)],
                         // count is tiles here, so the read span is the input plane.
                         Kind::ConvPoint | Kind::ConvPointInt8 => vec![(push.in0, dense)],
-                        // Twice what it writes: the filter half and the gate half.
-                        Kind::GatedTanh => vec![(push.in0, written * 2)],
                         _ => vec![(push.in0, dense)],
                     };
                     ((push.out, written), reads)

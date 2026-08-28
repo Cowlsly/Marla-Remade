@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.vayunmathur.library.ml.SupertonicSynthesizer
 import com.vayunmathur.speech.domain.SupertonicVoices
+import java.io.File
 
 /**
  * The one Supertonic handle the TTS service speaks through.
@@ -161,6 +162,28 @@ object SupertonicBundle {
         }
         present = found
         return found
+    }
+
+    /**
+     * Delete the `piper/` tree an upgraded install still has under `getExternalFilesDir`.
+     *
+     * Up to **1.8 GB** of voices that nothing reads any more: Piper downloaded and unzipped one
+     * model per language there, and removing the code that managed them does not remove them. An
+     * upgrade would otherwise keep that space allocated until the user found it themselves.
+     *
+     * Best effort and silent. It runs off the main thread from the TTS service's `onCreate`, once
+     * per process, and a failure means the files stay — there is nothing useful to tell the user
+     * about a directory they did not know existed.
+     */
+    fun deleteOrphanedPiperVoices(context: Context) {
+        val root = File(context.getExternalFilesDir(null), "piper")
+        if (!root.isDirectory) return
+        val freed = runCatching {
+            val bytes = root.walkBottomUp().filter { it.isFile }.sumOf { it.length() }
+            root.deleteRecursively()
+            bytes
+        }.getOrNull() ?: return
+        Log.i(TAG, "removed ${freed / (1024 * 1024)} MB of Piper voices that nothing reads")
     }
 
     private const val TAG = "SupertonicBundle"

@@ -34,7 +34,7 @@
 //!
 //! **The mask is not needed.** 58 `Mul` nodes multiply by the padding mask, which for one
 //! utterance is all ones — including the leading one the token's position gets. The same
-//! argument as [`super::vits_enc`], and it is why `text_mask` is not an input here.
+//! argument as [`super::supertonic_text`], and it is why `text_mask` is not an input here.
 //!
 //! # The whole net is one plan
 //!
@@ -76,7 +76,7 @@ pub const INNER: u32 = 256;
 pub const HEADS: u32 = 2;
 
 /// Entries in each attention layer's relative position table: `2 * window + 1` at
-/// `window_size` 4, as in [`super::vits_enc`].
+/// `window_size` 4, as in [`super::supertonic_text`].
 pub const OFFSETS: u32 = 9;
 
 /// ConvNeXt blocks.
@@ -209,11 +209,11 @@ pub fn build(weights: &dyn WeightSource, chars: u32) -> Result<Plan, String> {
         let probs = b.softmax(scores);
         let mixed = b.attn_apply_relative(probs, v, HEADS, l.take_one(), OFFSETS);
         let attended = point(b, l, mixed, D_MODEL, Act::None);
-        // Post-norm, as in `vits_enc`: the residual is added first and normalised after.
+        // Post-norm: the residual is added first and normalised after.
         let residual = b.add(x, attended);
         x = b.layer_norm(residual, l.take(), EPSILON);
 
-        // Both feed-forward convolutions are 1x1 here, unlike VITS's three-wide pair.
+        // Both feed-forward convolutions are 1x1 here, so neither has a border.
         let inner = point(b, l, x, INNER, Act::Relu);
         let projected = point(b, l, inner, D_MODEL, Act::None);
         let residual = b.add(x, projected);

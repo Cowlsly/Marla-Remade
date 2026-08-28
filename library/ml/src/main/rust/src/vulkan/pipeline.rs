@@ -40,26 +40,22 @@ const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.com
 const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores.comp.spv"));
 const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
-const LEAKY_RELU: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/leaky_relu.comp.spv"));
 const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
 const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
 const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
-const GATED_TANH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gated_tanh.comp.spv"));
 const MUL: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/mul.comp.spv"));
 const CONV_POINT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_point.comp.spv"));
 const CONV_INT8: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_int8.comp.spv"));
 const CONV_POINT_INT8: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_point_int8.comp.spv"));
-const FLIP_CHANNELS: &[u8] =
-    include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 const CONSTANT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/constant.comp.spv"));
 const ADD_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_bcast.comp.spv"));
 const ROTARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rotary.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 27] = [
+const SPIRV: [&[u8]; 24] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -74,12 +70,9 @@ const SPIRV: [&[u8]; 27] = [
     ATTN_SCORES,
     SOFTMAX,
     ATTN_APPLY,
-    LEAKY_RELU,
     ATTN_SCORES_RELATIVE,
     ATTN_APPLY_RELATIVE,
     EMBED,
-    GATED_TANH,
-    FLIP_CHANNELS,
     CONV_INT8,
     CONV_POINT,
     CONV_POINT_INT8,
@@ -124,12 +117,9 @@ pub struct Pipelines {
     attn_scores: vk::Pipeline,
     softmax: vk::Pipeline,
     attn_apply: vk::Pipeline,
-    leaky_relu: vk::Pipeline,
     attn_scores_relative: vk::Pipeline,
     attn_apply_relative: vk::Pipeline,
     embed: vk::Pipeline,
-    gated_tanh: vk::Pipeline,
-    flip_channels: vk::Pipeline,
     conv_int8: vk::Pipeline,
     conv_point: vk::Pipeline,
     conv_point_int8: vk::Pipeline,
@@ -311,12 +301,9 @@ impl Pipelines {
             attn_scores,
             softmax,
             attn_apply,
-            leaky_relu,
             attn_scores_relative,
             attn_apply_relative,
             embed,
-            gated_tanh,
-            flip_channels,
             conv_int8,
             conv_point,
             conv_point_int8,
@@ -354,12 +341,9 @@ impl Pipelines {
             attn_scores,
             softmax,
             attn_apply,
-            leaky_relu,
             attn_scores_relative,
             attn_apply_relative,
             embed,
-            gated_tanh,
-            flip_channels,
             conv_int8,
             conv_point,
             conv_point_int8,
@@ -387,12 +371,9 @@ impl Pipelines {
             Kind::AttnScores => self.attn_scores,
             Kind::Softmax => self.softmax,
             Kind::AttnApply => self.attn_apply,
-            Kind::LeakyRelu => self.leaky_relu,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
             Kind::Embed => self.embed,
-            Kind::GatedTanh => self.gated_tanh,
-            Kind::FlipChannels => self.flip_channels,
             Kind::ConvInt8 => self.conv_int8,
             Kind::ConvPoint => self.conv_point,
             Kind::ConvPointInt8 => self.conv_point_int8,
@@ -422,12 +403,9 @@ impl Pipelines {
             self.attn_scores,
             self.softmax,
             self.attn_apply,
-            self.leaky_relu,
             self.attn_scores_relative,
             self.attn_apply_relative,
             self.embed,
-            self.gated_tanh,
-            self.flip_channels,
             self.conv_int8,
             self.conv_point,
             self.conv_point_int8,

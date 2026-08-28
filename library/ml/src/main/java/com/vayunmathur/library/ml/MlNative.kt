@@ -80,56 +80,13 @@ internal object MlNative {
         width: Int,
         height: Int,
     ): String?
-    /**
-     * Bring up Piper (VITS) from its four `.maml` files plus a phoneme dictionary. Returns 0
-     * on failure.
-     *
-     * Five assets because the model is four networks and a lookup table: the text encoder,
-     * the normalising flow and the HiFi-GAN vocoder run on the GPU, and the stochastic
-     * duration predictor runs on the CPU because it is a bin search and a quadratic solve per
-     * phoneme. [dictionary] is the voice's `<lang>-word_id.bin`, built from espeak-ng on the
-     * build machine so nothing on-device needs it.
-     *
-     * [phonemesWide] and [frames] fix the two compiled shapes: a plan records its command
-     * buffer once, so the encoder is built for the longest utterance a request may hold and
-     * the flow and vocoder for one chunk. The three scales come from the voice's
-     * `config.json`.
-     *
-     * Freed by [destroyPiper], not [destroy] or [destroyOcr].
-     */
-    external fun createPiper(
-        encoder: ByteArray,
-        flow: ByteArray,
-        vocoder: ByteArray,
-        durations: ByteArray,
-        dictionary: ByteArray,
-        phonemesWide: Int,
-        frames: Int,
-        sampleRate: Int,
-        noise: Float,
-        length: Float,
-        durationNoise: Float,
-    ): Long
-    /**
-     * Synthesise [text] and return mono samples in `-1..1`, or null on failure.
-     *
-     * One call per utterance: the phoneme lookup, the encoder, the duration predictor, the
-     * alignment, the flow and the chunked vocoder all happen natively.
-     *
-     * [speed] above one is faster. An empty array means nothing pronounceable, which is not a
-     * failure - a string of emoji should say nothing.
-     *
-     * Two calls with the same text differ. VITS samples both its durations and its prior, and
-     * that is what stops it sounding mechanical.
-     */
-    external fun synthesize(handle: Long, text: String, speed: Float): FloatArray?
 
     /**
      * Bring up Supertonic 3 from its four `.maml` files, the codepoint table and one voice.
      * Returns 0 on failure.
      *
-     * No shape arguments: unlike [createPiper], every Supertonic plan is utterance-shaped, so each
-     * net is re-recorded per sentence rather than compiled once at a padded width. There is also no
+     * No shape arguments: every Supertonic plan is utterance-shaped, so each net is re-recorded per
+     * sentence rather than compiled once at a padded width. There is also no phoneme dictionary -
      * phoneme dictionary - the front end is [indexer], a flat 65,536-entry codepoint table, which is
      * why [synthesizeSupertonic] insists on NFD.
      *
@@ -151,7 +108,7 @@ internal object MlNative {
      * [indexer] and [style] stay byte arrays: 128 KB and 25 KB, where streaming saves nothing.
      * [style] is separate from the plans and swappable through [setSupertonicVoice].
      *
-     * Freed by [destroySupertonic], not [destroy], [destroyOcr] or [destroyPiper].
+     * Freed by [destroySupertonic], not [destroy] or [destroyOcr].
      */
     external fun createSupertonic(
         fds: IntArray,
@@ -232,21 +189,13 @@ internal object MlNative {
      * guesses.
      */
     external fun destroyOcr(handle: Long)
-    /**
-     * Free Piper's three networks, its duration weights and its dictionary. Exactly once per
-     * non-zero handle from [createPiper].
-     *
-     * A third destroy function rather than one that guesses: the three handle types own
-     * different things, and passing one to the wrong destroy is undefined.
-     */
-    external fun destroyPiper(handle: Long)
 
     /**
      * Free Supertonic's four networks, its conditioning, its codepoint table and its voice.
      * Exactly once per non-zero handle from [createSupertonic].
      *
-     * A fourth destroy function, for the same reason there is a third: the handle types own
-     * different things and passing one to the wrong destroy is undefined.
+     * A third destroy function rather than one that guesses: the handle types own different things
+     * and passing one to the wrong destroy is undefined.
      */
     external fun destroySupertonic(handle: Long)
 }

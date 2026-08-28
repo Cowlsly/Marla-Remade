@@ -52,12 +52,6 @@ from onnx import numpy_helper
 PROBE = {
     "ppocr_rec": None,
     "ppocr_det": "p2o.pd_op.hardswish.23.0",
-    "vits_dec": None,
-    # The prior's mean and log-variance. `enc_p` is reachable from the graph's own inputs, so
-    # unlike the vocoder it needs no extraction — the duration predictor runs after it.
-    "vits_enc": "/enc_p/proj/Conv_output_0",
-    "vits_flow": None,
-    "vits_dp": None,
     "supertonic_voc": None,
     # The sentence encoder's output, before the CLS slice. The graph's own output is a single
     # scalar, and a correlation over one value is not a number - this is where all but 25k of
@@ -70,43 +64,13 @@ PROBE = {
     "supertonic_ve": None,
 }
 
-# Graphs that are one module of a larger export, and have to be cut out of it before they can
-# be run at all.
-#
-# The vocoder's input is the flow's output, so there is no way to reach it from the graph's
-# own input without also running the duration predictor — which samples noise, so two runs
-# would not even agree with each other. `onnx.utils.extract_model` cuts the subgraph at the
-# vocoder's first convolution instead, and the input is random latents.
+# Graphs whose input is a latent rather than an image, and how wide it is. One that is a
+# module of a larger export also names its `first` node, and `onnx.utils.extract_model` cuts
+# the subgraph there so it can be run at all; the cut promotes that node's input to a graph
+# input, which is then fed random latents.
 SUBGRAPH = {
-    "vits_dec": {"first": "/dec/conv_pre/Conv", "channels": 192, "prefix": "/dec/"},
-    # The flow's first node is the leading flip, whose data input is the sampled prior. It
-    # also needs the padding mask cut out and fed as ones: the mask is derived from
-    # `input_lengths` and `scales`, so leaving it in drags the whole graph before the flow in
-    # with it. `nets::vits_flow` omits the mask for the same reason `nets::vits_enc` does —
-    # for one unpadded utterance it is the identity, which was verified bit-identically on the
-    # encoder's copy of the same tensor.
-    "vits_flow": {
-        "first": "/flow/flows.7/Slice",
-        "channels": 192,
-        "prefix": "/flow/",
-        "ones": "/Cast_2_output_0",
-    },
-    # The duration predictor. Three inputs, because it is *sampled*: the encoder's hidden
-    # state, the padding mask as ones, and the already-scaled noise. Cutting the noise out is
-    # what makes the comparison possible at all — left in, the export draws its own and two
-    # runs would not agree with each other, let alone with the runtime.
     # A whole file, not a module: no `first`, so nothing is extracted. 144 latent channels.
     "supertonic_voc": {"channels": 144},
-    # Also a whole file, but its input is character ids rather than a latent, so it is fed like
-    # `vits_enc` below rather than through `cut`.
-    "vits_dp": {
-        "first": "/dp/pre/Conv",
-        "channels": 192,
-        "prefix": "/dp/",
-        "ones": "/enc_p/Cast_1_output_0",
-        "noise": "/dp/Mul_1_output_0",
-        "output": "/dp/Split_output_0",
-    },
 }
 
 
@@ -210,17 +174,6 @@ def main():
             draw = rng.standard_normal((1, 2, args.width)).astype(np.float32) * 0.8
             feed[cut["noise"]] = draw
             draw.tofile(os.path.join(work, "noise.f32"))
-    elif args.graph == "vits_enc":
-        # Phoneme ids. int64 for onnxruntime, the same values as fp32 for the runtime, which
-        # carries them in the arena — exact, since fp16 holds every integer to 2048.
-        rng = np.random.default_rng(20240827)
-        ids = rng.integers(0, 130, size=(1, args.width), dtype=np.int64)
-        feed = {
-            "input": ids,
-            "input_lengths": np.array([args.width], dtype=np.int64),
-            "scales": np.array([0.667, 1.0, 0.8], dtype=np.float32),
-        }
-        x = ids.astype(np.float32)
     elif args.graph in ("supertonic_dp", "supertonic_ttl"):
         # Character ids and a voice's style. The ids go past 2048, where fp16 stops holding
         # every integer, so the runtime reads them as two lanes - which is the whole reason

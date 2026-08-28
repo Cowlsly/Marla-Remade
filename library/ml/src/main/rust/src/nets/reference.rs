@@ -59,8 +59,6 @@ mod act {
     pub const CLIP01: u32 = 5;
     /// `x * sigmoid(x)`.
     pub const SWISH: u32 = 6;
-    /// `tanh(x)`.
-    pub const TANH: u32 = 7;
     /// The exact GELU. See `super::super::Act::Gelu`.
     pub const GELU: u32 = 8;
 }
@@ -83,7 +81,6 @@ fn activate(x: f32, kind: u32, slope: f32) -> f32 {
         }
         act::CLIP01 => x.clamp(0.0, 1.0),
         act::SWISH => x / (1.0 + (-x).exp()),
-        act::TANH => x.tanh(),
         // The exact GELU, not the tanh approximation: [`super::erf`] is the same A&S 7.1.26
         // series the shader uses, so the two agree well inside fp16.
         act::GELU => 0.5 * x * (1.0 + super::erf(x * std::f32::consts::FRAC_1_SQRT_2)),
@@ -202,20 +199,17 @@ impl Reference {
                     Kind::AttnScores => self.attn_scores(push),
                     Kind::Softmax => self.softmax(push),
                     Kind::AttnApply => self.attn_apply(push),
-                    Kind::LeakyRelu => self.leaky_relu(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
                     Kind::Embed => self.embed(push),
                     Kind::Constant => self.constant(push),
                     Kind::AddBroadcast => self.add_broadcast(push),
                     Kind::Rotary => self.rotary(push),
-                    Kind::GatedTanh => self.gated_tanh(push),
                     Kind::ConvPoint => self.conv_point(push),
                     // The tiled int8 lowering computes exactly what the untiled one does, and
                     // `Builder::emit` fills the geometry fields in for both, so there is one
                     // implementation rather than two that have to be kept agreeing.
                     Kind::ConvInt8 | Kind::ConvPointInt8 => self.conv_int8(push),
-                    Kind::FlipChannels => self.flip_channels(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -587,30 +581,6 @@ impl Reference {
         Ok(())
     }
 
-    /// `out[c] = tanh(in[c]) * sigmoid(in[c + C])`, WaveNet''s gated activation.
-    fn gated_tanh(&mut self, p: &Push) -> Result<(), String> {
-        let gate_at = p.out_c * p.out_h * p.out_w;
-        for i in 0..p.count {
-            let filtered = self.load(p.in0, i)?;
-            let gate = self.load(p.in0, gate_at + i)?;
-            self.store(p.out, i, filtered.tanh() / (1.0 + (-gate).exp()))?;
-        }
-        Ok(())
-    }
-
-    /// `out[c] = in[C - 1 - c]`, a channel reversal.
-    fn flip_channels(&mut self, p: &Push) -> Result<(), String> {
-        let plane = p.out_h * p.out_w;
-        for channel in 0..p.out_c {
-            let mirrored = p.out_c - 1 - channel;
-            for i in 0..plane {
-                let value = self.load(p.in0, mirrored * plane + i)?;
-                self.store(p.out, channel * plane + i, value)?;
-            }
-        }
-        Ok(())
-    }
-
     /// `out[c][t] = table[id(t)][c]`, with the id read out of the arena as fp16, in one lane
     /// or in two (`lo + 2048 * hi`) for a table past `EMBED_LANE` rows.
     fn embed(&mut self, p: &Push) -> Result<(), String> {
@@ -678,16 +648,6 @@ impl Reference {
                 let rotated = if lower { -other } else { other } * angle_sin;
                 self.store(p.out, channel * p.out_w + position, self_value * angle_cos + rotated)?;
             }
-        }
-        Ok(())
-    }
-
-    /// `x < 0 ? alpha * x : x`, elementwise, with `alpha` carried as raw bits.
-    fn leaky_relu(&mut self, p: &Push) -> Result<(), String> {
-        let alpha = f32::from_bits(p.param0_bits);
-        for i in 0..p.count {
-            let value = self.load(p.in0, i)?;
-            self.store(p.out, i, if value < 0.0 { value * alpha } else { value })?;
         }
         Ok(())
     }
@@ -828,7 +788,7 @@ impl Reference {
         Ok(())
     }
 
-    /// [`Self::attn_scores`] plus VITS's relative-position term: nine taps of a learned
+    /// [`Self::attn_scores`] plus a relative-position term: nine taps of a learned
     /// table indexed by `key - query`, in place of the export's product-and-skew.
     ///
     /// The scale multiplies both terms, because the export divides the query by
@@ -1174,7 +1134,7 @@ fn uniform(state: &mut u32) -> f32 {
 mod tests {
     use super::super::{
         embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-        supertonic_text, supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Act, Builder, EMBED_LANE,
+        supertonic_text, supertonic_vocoder, u2netp, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -1558,7 +1518,7 @@ mod tests {
         assert_eq!(Act::PRelu(0).code(), act::PRELU);
         assert_eq!(Act::Clip01.code(), act::CLIP01);
         assert_eq!(Act::Swish.code(), act::SWISH);
-        assert_eq!(Act::Tanh.code(), act::TANH);
+        assert_eq!(Act::Gelu.code(), act::GELU);
     }
 
     #[test]
@@ -1633,7 +1593,7 @@ mod tests {
 
     #[test]
     fn a_plan_can_declare_more_than_one_input_and_output() {
-        // SCRFD needs nine outputs and the VITS duration predictor three inputs, so the
+        // SCRFD needs nine outputs and Supertonic's sampler seven inputs, so the
         // plan's bindings are lists. This checks both ends: two inputs land at distinct
         // arena offsets, and two outputs come back in the order `finish` was given.
         let given = Given::new(&[]).expect("no tensors");
@@ -1986,64 +1946,6 @@ mod tests {
         let scores = b.attn_scores(q, q, 2);
         let error = b.finish(&[scores]).expect_err("a two-row sequence");
         assert!(error.contains("height above"), "{error}");
-    }
-
-    #[test]
-    fn a_gated_activation_multiplies_a_tanh_by_a_sigmoid_of_the_other_half() {
-        // Four channels in, two out: channels 0 and 1 are the filter and 2 and 3 the gate.
-        // Distinct values in each half, so swapping filter for gate would be visible —
-        // tanh and sigmoid disagree about the sign of a negative input.
-        let got = one(
-            Shape::new(4, 1, 2),
-            &[0.0, 1.0, -1.0, 2.0, 0.0, 2.0, 3.0, -2.0],
-            &[],
-            |b, x| b.gated_tanh(x),
-        );
-        let gate = |x: f32| 1.0 / (1.0 + (-x).exp());
-        close(
-            &got,
-            &[
-                0.0f32.tanh() * gate(0.0),
-                1.0f32.tanh() * gate(2.0),
-                (-1.0f32).tanh() * gate(3.0),
-                2.0f32.tanh() * gate(-2.0),
-            ],
-        );
-    }
-
-    #[test]
-    fn a_gated_activation_over_an_odd_channel_count_is_refused() {
-        // The filter and the gate are halves of one tensor, so an odd count has no split.
-        let given = Given::new(&[]).expect("no tensors");
-        let mut b = Builder::new(&given);
-        let x = b.input(Shape::new(3, 1, 2));
-        let out = b.gated_tanh(x);
-        let error = b.finish(&[out]).expect_err("three channels");
-        assert!(error.contains("must be even"), "{error}");
-    }
-
-    #[test]
-    fn flipping_channels_reverses_them_and_leaves_each_plane_alone() {
-        // Three channels of two positions. The reversal is over channels only: getting the
-        // plane indexing wrong would also reverse each channel's own values, which at one
-        // row would look almost right.
-        let got = one(
-            Shape::new(3, 1, 2),
-            &[1.0, 2.0, 10.0, 20.0, 100.0, 200.0],
-            &[],
-            |b, x| b.flip_channels(x),
-        );
-        close(&got, &[100.0, 200.0, 10.0, 20.0, 1.0, 2.0]);
-    }
-
-    #[test]
-    fn flipping_twice_is_the_identity() {
-        let values: Vec<f32> = (0..12).map(|i| i as f32).collect();
-        let got = one(Shape::new(4, 1, 3), &values, &[], |b, x| {
-            let once = b.flip_channels(x);
-            b.flip_channels(once)
-        });
-        close(&got, &values);
     }
 
     #[test]
@@ -2503,7 +2405,7 @@ mod tests {
     fn a_relative_score_map_leaves_the_band_alone_outside_the_window() {
         // The whole reason this is nine taps and not a `[heads, T, 2T-1]` product and skew:
         // beyond the window the export's skewed tensor is exactly zero. Verified against
-        // onnxruntime on Piper's encoder, and pinned here.
+        // onnxruntime on a relative-attention encoder, and pinned here.
         let table: Vec<f32> = vec![7.0, 7.0, 0.0, 0.0, 7.0, 7.0];
         let got = two_weighted(
             (Shape::new(2, 1, 5), Shape::new(2, 1, 5)),
@@ -2560,46 +2462,6 @@ mod tests {
         let out = b.attn_scores_relative(q, k, 1, 0, 4);
         let error = b.finish(&[out]).expect_err("an even offset count");
         assert!(error.contains("no centre"), "{error}");
-    }
-
-    #[test]
-    fn a_leaky_relu_scales_only_the_negative_side() {
-        // HiFi-GAN's slope. A standalone pass rather than a fused activation, because in a
-        // ResBlock it sits in front of its convolution; see `Kind::LeakyRelu`.
-        let got = one(Shape::new(1, 1, 5), &[-4.0, -1.0, 0.0, 1.0, 4.0], &[], |b, x| {
-            b.leaky_relu(x, 0.1)
-        });
-        close(&got, &[-0.4, -0.1, 0.0, 1.0, 4.0]);
-    }
-
-    #[test]
-    fn a_leaky_relu_carries_its_own_slope() {
-        // The vocoder uses 0.1 for fifteen of its sixteen and 0.01 for the one in front of
-        // `conv_post`, so a hardcoded slope would be wrong for the last layer before the
-        // waveform — quieter and duller, and caught by nothing else.
-        let steep = one(Shape::new(1, 1, 2), &[-2.0, 2.0], &[], |b, x| b.leaky_relu(x, 0.1));
-        let shallow = one(Shape::new(1, 1, 2), &[-2.0, 2.0], &[], |b, x| b.leaky_relu(x, 0.01));
-        close(&steep, &[-0.2, 2.0]);
-        close(&shallow, &[-0.02, 2.0]);
-        // At slope zero it is a ReLU, and at one the identity.
-        close(&one(Shape::new(1, 1, 2), &[-3.0, 3.0], &[], |b, x| b.leaky_relu(x, 0.0)), &[0.0, 3.0]);
-        close(&one(Shape::new(1, 1, 2), &[-3.0, 3.0], &[], |b, x| b.leaky_relu(x, 1.0)), &[-3.0, 3.0]);
-    }
-
-    #[test]
-    fn tanh_bounds_its_output_to_the_unit_interval() {
-        // What makes the vocaster's last layer a waveform. Saturates rather than clipping,
-        // so the ends are not exactly +/-1.
-        let inputs = [-8.0f32, -1.0, 0.0, 1.0, 8.0];
-        let got = one(
-            Shape::new(1, 1, 5),
-            &inputs,
-            &[(vec![1, 1, 1, 1], vec![1.0]), (vec![1], vec![0.0])],
-            |b, x| b.conv_same(x, 0, 1, 1, 1, Act::Tanh),
-        );
-        let want: Vec<f32> = inputs.iter().map(|&x| x.tanh()).collect();
-        close(&got, &want);
-        assert!(got.iter().all(|v| (-1.0..=1.0).contains(v)), "{got:?}");
     }
 
     #[test]
@@ -2948,59 +2810,6 @@ mod tests {
                 supertonic_duration::seconds(log_seconds),
                 supertonic_duration::latent_frames(supertonic_duration::seconds(log_seconds)),
             );
-            return;
-        }
-        if graph == "vits_dp" {
-            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_DP)
-                .expect("the duration asset parses");
-            let raw = std::fs::read(dir.join("noise.f32")).expect("the noise");
-            let noise: Vec<f32> = raw
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect();
-            let logw =
-                crate::post::duration::log_durations(&weights, &input, width as usize, &noise)
-                    .expect("the duration predictor runs");
-            write(&dir.join("reference.f32"), &logw);
-            println!("vits_dp at {width} phonemes: wrote {} log-durations", logw.len());
-            return;
-        }
-        if graph == "vits_flow" {
-            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_FLOW)
-                .expect("the flow asset parses");
-            let plan = vits_flow::build(&weights, width).expect("vits_flow builds");
-            let latent = run(&plan, weights.data(), &input).expect("the flow runs");
-            write(&dir.join("reference.f32"), &latent);
-            println!("vits_flow at {width} frames: wrote {} values", latent.len());
-            return;
-        }
-        if graph == "vits_enc" {
-            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_ENC)
-                .expect("the encoder asset parses");
-            let plan = vits_enc::build(&weights, width).expect("vits_enc builds");
-            // Two outputs since the duration predictor needed the pre-projection hidden state;
-            // the probe is the first, the prior''s statistics.
-            let outputs = run_multi(&plan, weights.data(), &[&input]).expect("the encoder runs");
-            let stats = outputs.first().expect("the statistics output");
-            write(&dir.join("reference.f32"), stats);
-            println!("vits_enc at {width} phonemes: wrote {} values", stats.len());
-            return;
-        }
-        if graph == "vits_dec" {
-            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
-            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
-            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_DEC)
-                .expect("the vocoder asset parses");
-            let plan = vits_dec::build(&weights, width).expect("vits_dec builds");
-            let audio = run(&plan, weights.data(), &input).expect("the vocoder runs");
-            write(&dir.join("reference.f32"), &audio);
-            println!("vits_dec at {width} frames: wrote {} samples", audio.len());
             return;
         }
 

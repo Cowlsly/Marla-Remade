@@ -25,8 +25,8 @@ border supplies `a x_border + b`, which is what the fold assumes, so it holds ev
 
 * `head/act` is a `PRelu` with a single shared slope. The runtime's `Act::PRelu` reads one slope
   per channel, so the scalar is widened to 2048 copies. 4 KB, and it keeps the shader branchless.
-* `head/layer2` has no bias in the export. A zero one is synthesised, as `maml_convert` already
-  does for `vits_dec`.
+* `head/layer2` has no bias in the export. A zero one is synthesised, as `maml_convert`
+  already does for a biasless convolution.
 
 # The duration predictor
 

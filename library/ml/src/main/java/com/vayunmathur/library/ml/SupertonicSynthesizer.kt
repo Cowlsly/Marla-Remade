@@ -10,9 +10,9 @@ import java.text.Normalizer
 /**
  * On-device text-to-speech: Supertonic 3 on the Vulkan compute runtime.
  *
- * Replaces [PiperSynthesizer]. One bundle covers 30 languages and 10 voices, where Piper needed a
- * separate model and phoneme dictionary per language. Four networks, all on the GPU and all checked
- * numerically against onnxruntime — see `library/ml/src/main/rust/src/nets/supertonic_*.rs`:
+ * One bundle covers 31 languages and 10 voices, and every one of the four networks runs on the GPU.
+ * All four are checked numerically against onnxruntime — see
+ * `library/ml/src/main/rust/src/nets/supertonic_*.rs`:
  *
  * - **Duration predictor** returns one number, the utterance's length in seconds, which fixes
  *   every later shape.
@@ -44,7 +44,7 @@ import java.text.Normalizer
  * # Voices
  *
  * A voice is two small style tensors, not a model, so [voice] switches without re-uploading
- * anything. That is why a voice change is a method here and was a new object in Piper.
+ * anything: all ten come to ~250 KB together.
  *
  * # Availability
  *

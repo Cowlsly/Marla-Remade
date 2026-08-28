@@ -1,5 +1,5 @@
 #version 450
-//! Attention's weighted sum with VITS's relative-position term, in one pass.
+//! Attention's weighted sum with a relative-position term, in one pass.
 //!
 //! `out[h][d][i] = sum_j P[h][i][j] * V[h][d][j] + sum_o P[h][i][i+o] * emb[o + window][d]`
 //!

@@ -182,8 +182,8 @@ impl Letterbox {
     /// `scrfd.cpp` pads only the short side, to the next multiple of 32, which makes the
     /// net's input shape a function of the photo's aspect ratio. Supporting that properly
     /// means compiling a plan and re-recording a command buffer per shape, which is real
-    /// machinery the runtime does not have yet (and which PP-OCR and VITS will need for
-    /// their own reasons).
+    /// machinery `Net::rebuild` now provides for Supertonic, whose every plan is
+    /// utterance-shaped.
     ///
     /// A square costs up to 2x the arithmetic on a panorama and nothing on a square
     /// photo. Detection runs once per photo during indexing rather than per frame, and

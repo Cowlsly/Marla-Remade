@@ -628,10 +628,11 @@ impl Net {
 
     /// Run the plan over `values` directly, with no preprocessing, and return every output.
     ///
-    /// The bitmap paths above exist because most of these networks take an image. Piper's do
-    /// not: the text encoder takes phoneme ids, the flow takes a sampled prior and the
-    /// vocoder takes a latent, all produced by the previous stage rather than by a camera. So
-    /// this is the path for a net whose input is a tensor someone else computed.
+    /// The bitmap paths above exist because most of these networks take an image. Supertonic's
+    /// do not: the text encoder takes character ids, the sampler takes a latent and a
+    /// conditioning and the vocoder takes the sampler's output, each produced by the previous
+    /// stage rather than by a camera. So this is the path for a net whose input is a tensor
+    /// someone else computed.
     ///
     /// `values` must be exactly the input shape's element count, in `[c, h, w]` order — the
     /// same order [`crate::nets::Plan`] uses everywhere. It is rounded to fp16 on the way in,

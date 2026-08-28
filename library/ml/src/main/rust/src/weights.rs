@@ -59,24 +59,9 @@ pub mod graph {
     pub const PPOCR_DET: u32 = 5;
     /// PP-OCRv5 mobile text recognition, 48 tall.
     pub const PPOCR_REC: u32 = 6;
-    /// Piper's VITS vocoder — the `dec` module, 192 latent channels to a 16 kHz waveform.
-    ///
-    /// Only the vocoder: the text encoder, the flow and the duration predictor are separate
-    /// graphs, because VITS's duration predictor samples noise and builds its alignment out
-    /// of ops no plan can express. See [`crate::nets::vits_dec`].
-    pub const VITS_DEC: u32 = 7;
-    /// Piper's VITS text encoder — the `enc_p` module, 130 phoneme symbols to a prior.
-    ///
-    /// See [`crate::nets::vits_enc`]. Its input is symbol ids rather than pixels or latents.
-    pub const VITS_ENC: u32 = 8;
-    /// Piper's VITS normalising flow \u2014 the `flow` module, run in reverse.
-    ///
-    /// See [`crate::nets::vits_flow`].
-    pub const VITS_FLOW: u32 = 9;
-    /// Piper's VITS stochastic duration predictor \u2014 the `dp` module.
-    ///
-    /// Read on the host rather than compiled into a plan: see [`crate::post::duration`].
-    pub const VITS_DP: u32 = 10;
+    // 7..10 were Piper's four VITS graphs, deleted when Supertonic replaced it. The numbers are
+    // **not** reused: an id identifies a forward pass, and a `.maml` built for the old vocoder
+    // must be rejected rather than loaded as whatever took its slot.
     /// Supertonic 3's ConvNeXt vocoder. See [`crate::nets::supertonic_vocoder`].
     pub const SUPERTONIC_VOC: u32 = 11;
     /// Supertonic 3's duration predictor. See [`crate::nets::supertonic_duration`].
@@ -900,7 +885,7 @@ mod tests {
         let mut blob = Vec::new();
         blob.extend_from_slice(&MAGIC);
         blob.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
-        blob.extend_from_slice(&graph::VITS_ENC.to_le_bytes());
+        blob.extend_from_slice(&graph::SUPERTONIC_VE.to_le_bytes());
         blob.extend_from_slice(&2u32.to_le_bytes());
         blob.extend_from_slice(&[0u8; 32]);
         blob.extend_from_slice(&((HEADER_BYTES + table.len()) as u32).to_le_bytes());
@@ -909,7 +894,7 @@ mod tests {
         blob.extend_from_slice(&table);
         blob.extend_from_slice(&data);
 
-        let weights = Weights::parse(&blob, graph::VITS_ENC).expect("parses");
+        let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("parses");
         let quantised = weights.tensor(0).expect("the int8 tensor");
         assert!(quantised.int8);
         assert_eq!(quantised.len, 5);

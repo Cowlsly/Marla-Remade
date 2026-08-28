@@ -107,10 +107,10 @@ GRAPHS = {
     # Folded ahead of time by `scripts/ml/ppocr_fold.py`, not by this script.
     "ppocr_det": 5,
     "ppocr_rec": 6,
-    "vits_dec": 7,
-    "vits_enc": 8,
-    "vits_flow": 9,
-    "vits_dp": 10,
+    # 7..10 were Piper's four graphs — vocoder, encoder, flow and duration predictor —
+    # deleted when Supertonic replaced them. The numbers are **not** reused: an id identifies
+    # a forward pass, and a `.maml` built for the old vocoder must be rejected rather than
+    # loaded as whatever took its slot.
     "supertonic_voc": 11,
     "supertonic_dp": 12,
     "supertonic_ttl": 13,
@@ -126,10 +126,6 @@ EXPECTED_DIGEST = {
     "mobilefacenet": "40987839aec03378958581deba29ce9fd9dd1ae9aa88d0c7ad04a885a2e2122c",
     "ppocr_det": "51b0c9ed871526fa270b4bfa53b393c056db21c58193849fb83d44768f69ef9b",
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
-    "vits_dec": "ac3fa714b9c0074e7fb7fa1d5f5b65e30bf558df0817b014897cd56b6e850020",
-    "vits_enc": "93ee24f70b490334d11b383f043e81284a3e781bc263597830c50f8df14db2c1",
-    "vits_flow": "38cecda81bcfd4eb98782395905ddbe4637aa7f55fecb2de996d09fc530e2e6d",
-    "vits_dp": "d02a6e28700823af95cbeeeb2b40d77e531f90086599deb3f840ce9a2a57a494",
     "supertonic_voc": "64e3a3437fa8f889fb679a5e08553ba7392c05a32cd844a0d2340698372a0071",
     "supertonic_dp": "a294dac3e0fa1acf03d5a483b96782190a626c6adbc517969592ec6a888e15cd",
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
@@ -139,23 +135,16 @@ EXPECTED_DIGEST = {
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
 # selects it.
 #
-# Piper's VITS is a single 2755-node ONNX and it cannot be one plan: its duration predictor
-# samples noise and builds a monotonic alignment out of `NonZero`, `ScatterND` and
-# `GatherND`, and the length of everything after it depends on the durations it predicted.
-# But the export keeps its Torch module paths, so the graph partitions along exactly the
-# lines the model was written in - `enc_p`, `dp`, `flow`, `dec` - and the three static ones
-# convert independently. See `nets::vits_dec`.
+# Empty at present: every graph here is exported as its own file. The mechanism stays because
+# an export that packs several forward passes into one graph is not convertible as one plan,
+# and a Torch export keeps its module paths - so it partitions along the lines the model was
+# written in, and each static module converts independently.
 #
 # A module-scoped graph has no GEOMETRY entry: its input is another module's output rather
 # than a graph input, so there is nothing at the boundary to check a shape against. What is
 # checked instead is the op inventory within the module, which is the same guard by another
 # route.
-MODULES = {
-    "vits_dec": "/dec/",
-    "vits_enc": "/enc_p/",
-    "vits_flow": "/flow/",
-    "vits_dp": "/dp/",
-}
+MODULES = {}
 
 # `outputs` are the graph outputs the Rust forward pass corresponds to; the export may
 # declare more (U^2-Netp declares all seven of its side outputs and we read one).
@@ -211,45 +200,6 @@ EXPECTED_OPS = {
         "Conv": 49, "PRelu": 34, "Add": 12, "BatchNormalization": 1, "Flatten": 1,
         "Gemm": 1,
     },
-    # Counted within `/dec/` only; see `MODULES`. The `Div`s are the three that average each
-    # stage's residual blocks, which `nets::vits_dec` lowers to `Kind::Affine` at 1/3.
-    "vits_dec": {
-        "Conv": 20, "ConvTranspose": 3, "LeakyRelu": 16, "Add": 24, "Div": 3, "Tanh": 1,
-    },
-    # Counted within `/enc_p/` only. Most of these are not arithmetic: 48 Pad, 96 Reshape,
-    # 42 Slice and 130 Unsqueeze are the export building a [heads, T, 2T-1] relative score
-    # map and skewing it back, which `nets::vits_enc` does as nine taps instead. The six
-    # `Where` are the padding mask, which is bit-identically the identity for one unpadded
-    # utterance and so is not transcribed either.
-    "vits_enc": {
-        "Add": 60, "Cast": 1, "Concat": 66, "Conv": 37, "Div": 18, "Equal": 1,
-        "Gather": 61, "Less": 1, "MatMul": 24, "Mul": 72, "Pad": 48, "Pow": 12, "Range": 1,
-        "ReduceMean": 24, "Relu": 6, "Reshape": 96, "Shape": 25, "Slice": 42, "Softmax": 6,
-        "Split": 1, "Sqrt": 12, "Sub": 42, "Transpose": 73, "Unsqueeze": 130, "Where": 6,
-    },
-    # Counted within `/flow/` only. The 16 gated activations are NOT here: their Tanh and
-    # Sigmoid nodes carry auto-generated names with no module path, so a prefix cannot see
-    # them. `ConstantOfShape`/`Neg`/`Exp` are the mean-only coupling''s absent log-scale,
-    # which is `exp(-0)`; the 32 `Mul`s are the padding mask and the identity multiply by it.
-    "vits_flow": {
-        "Add": 28, "Concat": 4, "ConstantOfShape": 24, "Conv": 40, "Exp": 4, "Mul": 32,
-        "Neg": 4, "Shape": 24, "Slice": 28, "Split": 4, "Sub": 4,
-    },
-    # Counted within `/dp/` only. This module is never compiled into a plan — `post::duration`
-    # reads its 112 tensors on the host — so the inventory is here purely as a guard that the
-    # export has not changed shape under us. The interesting entries are Softmax 6, CumSum 6,
-    # GatherElements 21 and Sqrt 27: the bin search and quadratic solve of three rational
-    # quadratic spline couplings, and Erf 24 for the exact GELU in four separable stacks.
-    "vits_dp": {
-        "Add": 141, "And": 3, "Cast": 6, "Concat": 55, "ConstantOfShape": 22, "Conv": 32,
-        "CumSum": 6, "Div": 60, "Equal": 24, "Erf": 24, "Expand": 90, "Gather": 101,
-        "GatherElements": 21, "GatherND": 15, "GreaterOrEqual": 6, "LessOrEqual": 3,
-        "Mul": 140, "Neg": 6, "NonZero": 12, "Not": 3, "Pad": 9, "Pow": 27,
-        "RandomNormalLike": 1, "Range": 36, "ReduceMean": 48, "ReduceSum": 3,
-        "Reshape": 66, "ScatterND": 30, "Shape": 94, "Slice": 70, "Softmax": 6,
-        "Softplus": 3, "Split": 4, "Sqrt": 27, "Squeeze": 12, "Sub": 67, "Transpose": 63,
-        "Unsqueeze": 95, "Where": 24,
-    },
 }
 
 
@@ -277,10 +227,10 @@ def lift_to_2d(weight, node):
     """A 1-D convolution's rank-3 weight as the rank-4 one this runtime indexes.
 
     A tensor here is `[c, h, w]` with no rank-3 case, so a 1-D convolution is a 2-D one
-    whose kernel is `1 x k` — which is exactly what `nets::vits_dec` transcribes. Inserting
-    the height axis is a reshape of the same bytes in the same order, and doing it here means
-    the Rust reads `[out, in, 1, k]` like every other kernel rather than carrying a special
-    case for audio.
+    whose kernel is `1 x k` — which is what every convolution in `nets::supertonic_vocoder`
+    reads. Inserting the height axis is a reshape of the same bytes in the same order, and
+    doing it here means the Rust reads `[out, in, 1, k]` like every other kernel rather than
+    carrying a special case for audio.
 
     Returns `(weight, spatial)`, where `spatial` is the kernel/dilation/pad/stride form the
     digest key should record: also lifted to two dimensions, so a reader comparing the key
@@ -490,18 +440,19 @@ def collect_layers(model, prefix=None):
             tensors.append(weight)
             tensors.append(bias)
         elif node.op_type == "Gather" and held(node.input[0]) and array(node.input[0]).ndim == 2:
-            # An embedding table. VITS multiplies the looked-up row by `sqrt(d_model)`, and
-            # that scale belongs here rather than in a shader: it is one op fewer and one
-            # rounding fewer, since `round(table * sqrt(d))` is closer than
-            # `round(table) * sqrt(d)`.
+            # An embedding table. An export that multiplies the looked-up row by
+            # `sqrt(d_model)` has that scale folded in here rather than left to a shader: it
+            # is one op fewer and one rounding fewer, since `round(table * sqrt(d))` is
+            # closer than `round(table) * sqrt(d)`.
             table = array(node.input[0]).astype(np.float64)
             table = table * math.sqrt(table.shape[1])
             key = f"Embed t={list(table.shape)} scaled=sqrt({table.shape[1]})"
             tensors.append(table)
         elif node.op_type == "Pad" and held(node.input[0]):
             # A relative position table, which the export pads out to `2T-1` entries and
-            # then skews. `nets::vits_enc` reads the nine unpadded entries directly, so the
-            # leading batch axis is dropped and the padding never happens.
+            # then skews. `nets::supertonic_text` and `nets::supertonic_duration` read the
+            # nine unpadded entries directly, so the leading batch axis is dropped and the
+            # padding never happens.
             table = np.squeeze(array(node.input[0]))
             if table.ndim != 2 or table.shape[0] % 2 == 0:
                 raise SystemExit(

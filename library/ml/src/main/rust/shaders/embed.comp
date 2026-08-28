@@ -1,7 +1,7 @@
 #version 450
 //! An embedding lookup: `out[c][t] = table[id(t)][c]`.
 //!
-//! VITS's text encoder starts by looking up one row of a `[symbols, d_model]` table per
+//! A text encoder starts by looking up one row of a `[symbols, d_model]` table per
 //! phoneme. That is the only op in this runtime whose *addresses* depend on the data rather
 //! than on the plan.
 //!
@@ -23,7 +23,7 @@
 //!
 //! # The scale is in the table
 //!
-//! VITS multiplies the embedding by `sqrt(d_model)`. The converter folds that into the table
+//! An export that multiplies the embedding by `sqrt(d_model)` has that folded into the table
 //! itself, which is both one op fewer and one rounding fewer — `round(table * sqrt(d))` is
 //! closer than `round(table) * sqrt(d)`.
 

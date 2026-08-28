@@ -49,8 +49,12 @@ class SupertonicTtsService : TextToSpeechService() {
     override fun onCreate() {
         super.onCreate()
         // ~105 MB of weights to stream into GPU memory and four command buffers to record, so the
-        // first utterance would otherwise stall for seconds.
-        Thread { engine.preload() }.start()
+        // first utterance would otherwise stall for seconds. The same thread reclaims whatever
+        // Piper left behind, which on an upgraded install is up to 1.8 GB of dead voices.
+        Thread {
+            SupertonicBundle.deleteOrphanedPiperVoices(applicationContext)
+            engine.preload()
+        }.start()
     }
 
     override fun onDestroy() {
