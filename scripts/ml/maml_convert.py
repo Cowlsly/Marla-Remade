@@ -101,6 +101,7 @@ GRAPHS = {
     "vits_dec": 7,
     "vits_enc": 8,
     "vits_flow": 9,
+    "vits_dp": 10,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -115,6 +116,7 @@ EXPECTED_DIGEST = {
     "vits_dec": "ac3fa714b9c0074e7fb7fa1d5f5b65e30bf558df0817b014897cd56b6e850020",
     "vits_enc": "93ee24f70b490334d11b383f043e81284a3e781bc263597830c50f8df14db2c1",
     "vits_flow": "38cecda81bcfd4eb98782395905ddbe4637aa7f55fecb2de996d09fc530e2e6d",
+    "vits_dp": "d02a6e28700823af95cbeeeb2b40d77e531f90086599deb3f840ce9a2a57a494",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -135,6 +137,7 @@ MODULES = {
     "vits_dec": "/dec/",
     "vits_enc": "/enc_p/",
     "vits_flow": "/flow/",
+    "vits_dp": "/dp/",
 }
 
 # `outputs` are the graph outputs the Rust forward pass corresponds to; the export may
@@ -214,6 +217,21 @@ EXPECTED_OPS = {
     "vits_flow": {
         "Add": 28, "Concat": 4, "ConstantOfShape": 24, "Conv": 40, "Exp": 4, "Mul": 32,
         "Neg": 4, "Shape": 24, "Slice": 28, "Split": 4, "Sub": 4,
+    },
+    # Counted within `/dp/` only. This module is never compiled into a plan — `post::duration`
+    # reads its 112 tensors on the host — so the inventory is here purely as a guard that the
+    # export has not changed shape under us. The interesting entries are Softmax 6, CumSum 6,
+    # GatherElements 21 and Sqrt 27: the bin search and quadratic solve of three rational
+    # quadratic spline couplings, and Erf 24 for the exact GELU in four separable stacks.
+    "vits_dp": {
+        "Add": 141, "And": 3, "Cast": 6, "Concat": 55, "ConstantOfShape": 22, "Conv": 32,
+        "CumSum": 6, "Div": 60, "Equal": 24, "Erf": 24, "Expand": 90, "Gather": 101,
+        "GatherElements": 21, "GatherND": 15, "GreaterOrEqual": 6, "LessOrEqual": 3,
+        "Mul": 140, "Neg": 6, "NonZero": 12, "Not": 3, "Pad": 9, "Pow": 27,
+        "RandomNormalLike": 1, "Range": 36, "ReduceMean": 48, "ReduceSum": 3,
+        "Reshape": 66, "ScatterND": 30, "Shape": 94, "Slice": 70, "Softmax": 6,
+        "Softplus": 3, "Split": 4, "Sqrt": 27, "Squeeze": 12, "Sub": 67, "Transpose": 63,
+        "Unsqueeze": 95, "Where": 24,
     },
 }
 

@@ -141,7 +141,10 @@ pub fn build(weights: &dyn WeightSource, phonemes: u32) -> Result<Plan, String> 
     if l.next != TENSORS {
         return Err(format!("the forward pass claims {} tensors, not {TENSORS}", l.next));
     }
-    builder.finish(&[stats])
+    // Two outputs. The stats are the prior the flow samples; `x` is the hidden state *before*
+    // the projection, which is what the duration predictor conditions on — VITS's
+    // `TextEncoder` returns both for exactly that reason.
+    builder.finish(&[stats, x])
 }
 
 #[cfg(test)]
@@ -186,11 +189,16 @@ mod tests {
     }
 
     #[test]
-    fn the_output_is_a_mean_and_a_log_variance_per_phoneme() {
+    fn the_outputs_are_the_prior_and_the_hidden_state() {
+        // Two bindings, in that order: the 384-channel stats the flow samples, and the
+        // 192-channel hidden state the duration predictor conditions on. `post::duration`
+        // reads the second, so swapping them would feed it the wrong tensor at the right
+        // shape for half of it.
         let (_, plan) = plan(PHONEMES);
+        let shapes: Vec<Shape> = plan.outputs.iter().map(|b| b.shape).collect();
         assert_eq!(
-            plan.output().expect("one output").shape,
-            Shape::new(STATS, 1, PHONEMES)
+            shapes,
+            vec![Shape::new(STATS, 1, PHONEMES), Shape::new(D_MODEL, 1, PHONEMES)]
         );
         // Ids, one per phoneme, not one per channel.
         assert_eq!(plan.input().expect("one input").shape, Shape::new(1, 1, PHONEMES));
@@ -259,7 +267,7 @@ mod tests {
         // A one-phoneme utterance is legal — "a" is a word. The band is then entirely
         // outside the sequence, which the taps skip rather than clamping.
         let (_, plan) = plan(1);
-        assert_eq!(plan.output().expect("one output").shape.w, 1);
+        assert_eq!(plan.outputs[0].shape.w, 1);
     }
 
     #[test]

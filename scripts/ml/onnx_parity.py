@@ -57,6 +57,7 @@ PROBE = {
     # unlike the vocoder it needs no extraction — the duration predictor runs after it.
     "vits_enc": "/enc_p/proj/Conv_output_0",
     "vits_flow": None,
+    "vits_dp": None,
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -79,6 +80,18 @@ SUBGRAPH = {
         "channels": 192,
         "prefix": "/flow/",
         "ones": "/Cast_2_output_0",
+    },
+    # The duration predictor. Three inputs, because it is *sampled*: the encoder's hidden
+    # state, the padding mask as ones, and the already-scaled noise. Cutting the noise out is
+    # what makes the comparison possible at all — left in, the export draws its own and two
+    # runs would not agree with each other, let alone with the runtime.
+    "vits_dp": {
+        "first": "/dp/pre/Conv",
+        "channels": 192,
+        "prefix": "/dp/",
+        "ones": "/enc_p/Cast_1_output_0",
+        "noise": "/dp/Mul_1_output_0",
+        "output": "/dp/Split_output_0",
     },
 }
 
@@ -170,6 +183,12 @@ def main():
                 model.graph.input[0].name: x,
                 cut["ones"]: np.ones(shape, dtype=np.float32),
             }
+        if cut.get("noise"):
+            # Two channels of already-scaled noise, written out for the runtime to read after
+            # the conditioning input.
+            draw = rng.standard_normal((1, 2, args.width)).astype(np.float32) * 0.8
+            feed[cut["noise"]] = draw
+            draw.tofile(os.path.join(work, "noise.f32"))
     elif args.graph == "vits_enc":
         # Phoneme ids. int64 for onnxruntime, the same values as fp32 for the runtime, which
         # carries them in the arena — exact, since fp16 holds every integer to 2048.
@@ -275,9 +294,11 @@ def extract(path, model, cut, work):
     onnx.save(inline_constants(onnx.load(path)), flattened)
     target = os.path.join(work, "subgraph.onnx")
     inputs = [first.input[0]]
-    if cut.get("ones"):
-        inputs.append(cut["ones"])
-    onnx.utils.extract_model(flattened, target, inputs, [outputs[-1]])
+    for extra in ("ones", "noise"):
+        if cut.get(extra):
+            inputs.append(cut[extra])
+    wanted = [cut.get("output") or outputs[-1]]
+    onnx.utils.extract_model(flattened, target, inputs, wanted)
     return onnx.load(target)
 
 

@@ -2217,6 +2217,23 @@ mod tests {
 
         // A voice is a runtime download rather than a bundled asset, so the vocoder's
         // `.maml` is given by path instead of being looked up in the tree.
+        if graph == "vits_dp" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_DP)
+                .expect("the duration asset parses");
+            let raw = std::fs::read(dir.join("noise.f32")).expect("the noise");
+            let noise: Vec<f32> = raw
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
+            let logw =
+                crate::post::duration::log_durations(&weights, &input, width as usize, &noise)
+                    .expect("the duration predictor runs");
+            write(&dir.join("reference.f32"), &logw);
+            println!("vits_dp at {width} phonemes: wrote {} log-durations", logw.len());
+            return;
+        }
         if graph == "vits_flow" {
             let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));

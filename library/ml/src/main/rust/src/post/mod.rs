@@ -13,6 +13,7 @@
 pub mod crop;
 pub mod ctc;
 pub mod dbnet;
+pub mod duration;
 pub mod nms;
 pub mod spline;
 pub mod ocr;

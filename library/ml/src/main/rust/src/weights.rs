@@ -53,6 +53,10 @@ pub mod graph {
     ///
     /// See [`crate::nets::vits_flow`].
     pub const VITS_FLOW: u32 = 9;
+    /// Piper's VITS stochastic duration predictor \u2014 the `dp` module.
+    ///
+    /// Read on the host rather than compiled into a plan: see [`crate::post::duration`].
+    pub const VITS_DP: u32 = 10;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.
