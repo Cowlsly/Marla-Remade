@@ -89,6 +89,14 @@ pub fn extract(
     coastline: Option<&Path>,
     spill_path: &Path,
 ) -> Result<(Store, Stats)> {
+    // Stage A's boundaries are printed with their elapsed time so an external RSS sampler can say
+    // which of them the peak belongs to. Three candidates sit within seconds of each other -- the ref
+    // vector, the id index built beside it, and the node pass's per-chunk accumulators -- and
+    // guessing between them has already cost more than printing them does.
+    let started = std::time::Instant::now();
+    let mark = |what: &str| {
+        println!("  [stage A] {what} at {:.1}s", started.elapsed().as_secs_f64());
+    };
     let blobs = pbf::scan_blobs(input)?;
     let select = Select::parse(&schema::filters(layers))?;
     let mut stats = Stats::default();
@@ -241,9 +249,12 @@ pub fn extract(
     for refs in members.values() {
         needed.extend_from_slice(refs);
     }
+    mark("refs collected");
     let table = NodeLocations::new(needed)?;
+    mark("id index built, refs freed");
     stats.nodes_needed = table.len() as u64;
     let table = resolve_nodes(input, &blobs, &blob_kinds, "Pass 3: nodes", table)?;
+    mark("coordinates resolved");
 
     // --- materialise ----------------------------------------------------------------------
     //
@@ -251,6 +262,7 @@ pub fn extract(
     // a `HashMap`'s keys, for the same reason: the output has to be reproducible and hash order is
     // not. The one place in this pipeline where that was a real risk, and now it is a property of
     // the file rather than a step that could be forgotten.
+    mark("materialising");
     let mut sink = Sink::create(spill_path)?;
     let mut reader = WayReader::open(&ways_path)?;
     let mut refs: Vec<i64> = Vec::new();

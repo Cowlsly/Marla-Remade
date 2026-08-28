@@ -104,9 +104,19 @@ pub const DEFAULT_SIMPLIFICATION: f64 = 1.0;
 /// The size trades two costs against each other. Smaller chunks balance the pool better and give the
 /// reader less to get through before a worker can start; larger chunks duplicate fewer `BodyLayer`
 /// headers across chunks that touch the same tile, which is the whole of this design's memory
-/// overhead. 64 Ki vertices is about a megabyte of `f64` pairs per chunk in flight and leaves a few
-/// hundred chunks at California z14 — several tasks per core on a 64-core box.
-const CHUNK_VERTICES: usize = 64 * 1024;
+/// overhead.
+///
+/// **Raised from 64 Ki after tracing where the cost actually is.** An RSS trace of a California build
+/// put stage A at 15 s under 1.6 GB and the real peak at t+256 s — 2.45 GB, deep in z13/z14 and
+/// plateaued across the whole of it. That plateau is this duplication. Raising the chunk to 512 Ki
+/// took the build from 325 s to 181 s and the peak from 2.45 GB to 2.19 GB: at 64 Ki there were ~3 300
+/// chunks per zoom, and the allocation and merging of that many per-chunk maps dominated both `map`
+/// and `encode`. 512 Ki still leaves hundreds of chunks at California z14, which is several per core
+/// on a 64-core box, so the pool stays fed.
+///
+/// 2 Mi was measured too and was not better — 182 s and 2.21 GB, inside the noise — so this is close
+/// to the floor of what the constant alone can buy.
+const CHUNK_VERTICES: usize = 512 * 1024;
 
 /// Worker stack, matching [`par`]'s pool and what the toolchain gives `main` on Windows.
 ///
