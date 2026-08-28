@@ -1,3 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <string name="app_name">Lommeregner</string>
+    <string name="history">Historik</string>
+    <string name="no_calculations_yet">Ingen beregninger endnu.</string>
 </resources>
