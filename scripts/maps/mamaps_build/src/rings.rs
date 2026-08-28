@@ -53,6 +53,7 @@ impl Stats {
     }
 
     /// Did anything have to be corrected?
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn clean(&self) -> bool {
         self.rewound == 0 && self.zero_area == 0 && self.holes_dropped == 0
     }
@@ -243,6 +244,7 @@ fn point_in_ring((x, y): (i16, i16), ring: &[(i16, i16)]) -> bool {
 ///
 /// Returned as a list of complaints rather than a bool, so a failing build says which polygon and
 /// why. Used by the generator's own tests over every tile of a real build.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn check(layer: &Layer) -> Vec<String> {
     let mut problems = Vec::new();
     for (index, feature) in layer.features.iter().enumerate() {

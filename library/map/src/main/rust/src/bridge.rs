@@ -230,13 +230,9 @@ fn spawn_worker(
     let started = std::thread::Builder::new()
         .name(format!("map-tiles-{index}"))
         .spawn(move || {
-            let cache = RangeCache::open(
-                cache_dir,
-                // No `build_id` yet: it is in the header, and the header is read through this
-                // cache. Re-checked below, once it is known.
-                &basemap_origin(BASEMAP_ARCHIVE_URL, None),
-                DEFAULT_MAX_BYTES,
-            );
+            // Unchecked: the origin marker includes the archive's `build_id`, which is in the
+            // header, which is read through this cache. Checked below, once, when it is known.
+            let cache = RangeCache::open_unchecked(cache_dir, DEFAULT_MAX_BYTES);
             let reader = CachingRangeReader::new(BASEMAP_ARCHIVE_URL, cache, JniRangeFetcher);
             reader.set_online(online.get());
 
@@ -252,7 +248,7 @@ fn spawn_worker(
             // the build before.
             archive
                 .reader()
-                .reset_origin(&basemap_origin(BASEMAP_ARCHIVE_URL, Some(archive.header.build_id)));
+                .reset_origin(&basemap_origin(BASEMAP_ARCHIVE_URL, archive.header.build_id));
             // Publish the real range. Until this lands the renderer works from a guess, and
             // a guess that is too high asks for a zoom the archive does not contain and
             // silently gets nothing back.

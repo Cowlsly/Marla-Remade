@@ -60,6 +60,20 @@ impl RangeCache {
         Self::with_clock(dir, origin, max_bytes, Box::new(now_ms))
     }
 
+    /// Open the cache **without** checking its origin marker, leaving that to a later
+    /// [`reset_if_origin_changed`](Self::reset_if_origin_changed).
+    ///
+    /// For the one caller that cannot know its own origin yet: the archive's `build_id` belongs in
+    /// the marker and lives in a header read *through* this cache. Checking a partial origin first
+    /// and the full one after would wipe the cache on every single start, because the two markers
+    /// never match each other — which is a bug this exists to make impossible rather than to
+    /// document.
+    pub fn open_unchecked(dir: impl Into<PathBuf>, max_bytes: u64) -> RangeCache {
+        let dir = dir.into();
+        let _ = fs::create_dir_all(&dir);
+        RangeCache { dir, max_bytes, clock: Box::new(now_ms) }
+    }
+
     pub fn with_clock(
         dir: impl Into<PathBuf>,
         origin: &str,

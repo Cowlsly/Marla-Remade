@@ -3,6 +3,17 @@ set -euo pipefail
 
 # publish_r2.sh — upload built PMTiles (e.g. v5.pmtiles) to Cloudflare R2.
 #
+# Also uploads `.mamaps` archives, which the Vulkan renderer in `:library:map` reads.
+# It is the same object copy either way, and the archive carries its own `build_id` in
+# its header — so republishing under a stable `immutable` name is safe: every reader
+# compares that id against its disk cache's origin marker on open and drops the cache
+# when it differs. See `basemap_origin` in
+# `library/map/src/main/rust/src/tile/source.rs`.
+#
+# Run `harden_mamaps.sh` first. It checks that the id really does change when the data
+# does, which is the single thing standing between a republish and every user pinned to
+# the previous build's byte offsets forever.
+#
 # SECURITY: this script reads ALL credentials/config from ENVIRONMENT VARIABLES.
 # No secrets are stored in the repo. Never paste keys on the command line (they
 # leak into shell history) — `export` them instead, ideally from a secret store.

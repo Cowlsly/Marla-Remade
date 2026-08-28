@@ -52,23 +52,24 @@ pub const CACHE_FORMAT: &str = "v1";
 
 /// The cache's origin marker: the layout version, the URL, and the archive's own `build_id`.
 ///
-/// `build_id` is what makes republishing under a stable name safe. The URL alone is not enough —
-/// it is deliberately the *same* URL every build, so a cached leaf index would otherwise keep
-/// addressing byte offsets from the build it came from, and a user would sit on a stale map
-/// forever with no way to notice.
+/// `build_id` is what makes republishing under a stable name safe. The URL alone is not enough — it
+/// is deliberately the *same* URL every build, so a cached leaf index would otherwise keep
+/// addressing byte offsets from the build it came from, and a user would sit on a stale map forever
+/// with no way to notice.
 ///
-/// It arrives in two steps because of an ordering problem with no way around it: the `build_id`
-/// lives in the archive header, and the header is read *through* this cache. So the cache opens on
-/// `None`, the archive opens, and then [`CachingRangeReader::reset_origin`] is called with the id
-/// that came back. A prefix served from a stale cache entry reports the stale id, which is
-/// correct-but-late: the entry is refetched within the refresh interval, and the wipe happens then.
-/// Costs no extra request either way, because the header is already in the prefix a reader has to
-/// fetch to open the archive at all.
-pub fn basemap_origin(url: &str, build_id: Option<u64>) -> String {
-    match build_id {
-        None => format!("{CACHE_FORMAT}|{url}"),
-        Some(id) => format!("{CACHE_FORMAT}|{url}|{id:#018x}"),
-    }
+/// # Why it is checked after the archive opens rather than before
+///
+/// The id lives in the archive header, and the header is read *through* this cache. So the cache is
+/// opened with [`RangeCache::open_unchecked`], the archive opens, and *then* this marker is compared
+/// once — see [`CachingRangeReader::reset_origin`]. Checking a partial marker first and this one
+/// after would wipe the cache on every start, because the two can never match.
+///
+/// A prefix served from a stale cache entry reports the stale id, which is correct-but-late: that
+/// entry is refetched within the refresh interval and the wipe happens then. Either way it costs no
+/// extra request, because the header is already in the prefix a reader must fetch to open the
+/// archive at all.
+pub fn basemap_origin(url: &str, build_id: u64) -> String {
+    format!("{CACHE_FORMAT}|{url}|{build_id:#018x}")
 }
 
 /// What a range fetch returned.
@@ -375,5 +376,58 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "data"))
             .count();
         assert_eq!(cached, 0, "a short partial may not be cached");
+    }
+    /// **The whole point of carrying a `build_id`.** The archive is republished under the *same* URL
+    /// every build, so the URL alone cannot invalidate anything: a cached leaf index keeps addressing
+    /// byte offsets from the build it came from, and a user sits on a stale map with no way to
+    /// notice. The id is what changes.
+    #[test]
+    fn republishing_under_the_same_url_wipes_the_cache_when_the_build_id_changes() {
+        let dir = std::env::temp_dir().join(format!("mamaps_origin_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let url = "https://example.invalid/basemap.mamaps";
+
+        // First run against a brand-new cache. The prefix was fetched before the id was known, so
+        // recording the id drops it: one wasted request, once, on a fresh install. Cheaper than any
+        // scheme that avoids it.
+        let cache = RangeCache::open_unchecked(&dir, 1 << 20);
+        cache.write(&RangeCache::key(url, "bytes=0-15"), b"the first build");
+        cache.reset_if_origin_changed(&basemap_origin(url, 1));
+
+        // Everything cached from here on belongs to build 1 and survives.
+        cache.write(&RangeCache::key(url, "bytes=0-15"), b"the first build");
+        cache.write(&RangeCache::key(url, "bytes=64-79"), b"a leaf of one  ");
+
+        // Second run, same build. **The regression this test exists for**: a marker scheme that
+        // wiped here would clear the whole cache on every single start, and the map would refetch
+        // the world every time the app opened.
+        let cache = RangeCache::open_unchecked(&dir, 1 << 20);
+        cache.reset_if_origin_changed(&basemap_origin(url, 1));
+        assert!(
+            cache.read(&RangeCache::key(url, "bytes=0-15")).is_some(),
+            "restarting against the same build wiped the cache",
+        );
+        assert!(cache.read(&RangeCache::key(url, "bytes=64-79")).is_some());
+
+        // A republish, same URL. Every entry goes, because every offset in it belongs to build 1.
+        cache.reset_if_origin_changed(&basemap_origin(url, 2));
+        for range in ["bytes=0-15", "bytes=64-79"] {
+            assert!(
+                cache.read(&RangeCache::key(url, range)).is_none(),
+                "a republish under the same name left build 1's {range} in the cache",
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_origin_marker_names_the_layout_the_url_and_the_build() {
+        let url = "https://example.invalid/basemap.mamaps";
+        assert!(basemap_origin(url, 1).starts_with(&format!("{CACHE_FORMAT}|{url}|")));
+        assert_eq!(basemap_origin(url, 1), basemap_origin(url, 1), "stable");
+        assert_ne!(basemap_origin(url, 1), basemap_origin(url, 2), "a republish");
+        // A different archive at a different URL is a different origin even at the same id, which is
+        // what keeps a debug build pointed at a local file from poisoning the real cache.
+        assert_ne!(basemap_origin(url, 1), basemap_origin("https://other.invalid/x", 1));
     }
 }
