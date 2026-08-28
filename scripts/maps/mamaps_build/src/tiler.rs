@@ -375,6 +375,20 @@ fn map_zoom(store: &Store, z: u8, tolerance: f64, buffer: f64) -> Result<(Vec<Ch
 ///
 /// A feature below the zoom's own floor is dropped here rather than sent. It costs nothing to
 /// recognise, and at z0 shipping them would be shipping the whole store.
+/// Nanoseconds spent deserialising the spill, summed across every zoom.
+///
+/// Measured because `map_ms` covers the whole of [`map_zoom`], reader included, so it reports the
+/// single-threaded reader as though it were parallel work. This is the number that says how much of
+/// the map phase cannot be spread over the pool: time inside `reader.next()` alone, excluding any
+/// blocking on the bounded channel, which is the workers being slow rather than the reader being the
+/// bottleneck.
+static READ_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Take the accumulated reader time and reset it.
+pub fn read_seconds() -> f64 {
+    READ_NANOS.swap(0, Ordering::Relaxed) as f64 / 1e9
+}
+
 fn read_chunks(
     store: &Store,
     z: u8,
@@ -386,7 +400,14 @@ fn read_chunks(
     let mut chunk: Vec<Feature> = Vec::new();
     let mut vertices = 0usize;
     let mut index = 0usize;
-    while let Some(feature) = reader.next().map_err(|e| tile_build::proto::Error(e.to_string()))? {
+    let mut read_nanos = 0u64;
+    loop {
+        // Timed around the deserialise alone. The send below can block on a full channel, and that is
+        // the workers being busy rather than the reader being the bottleneck.
+        let at = std::time::Instant::now();
+        let next = reader.next().map_err(|e| tile_build::proto::Error(e.to_string()))?;
+        read_nanos += at.elapsed().as_nanos() as u64;
+        let Some(feature) = next else { break };
         if z < feature.class.min_zoom {
             continue;
         }
@@ -396,6 +417,7 @@ fn read_chunks(
             // A closed receiver means every worker is already gone, which only happens on a panic
             // that is being reported anyway. Stopping quietly beats a second, vaguer error.
             if send.send((index, std::mem::take(&mut chunk))).is_err() {
+                READ_NANOS.fetch_add(read_nanos, Ordering::Relaxed);
                 return Ok(());
             }
             index += 1;
@@ -405,6 +427,7 @@ fn read_chunks(
     if !chunk.is_empty() {
         let _ = send.send((index, chunk));
     }
+    READ_NANOS.fetch_add(read_nanos, Ordering::Relaxed);
     Ok(())
 }
 

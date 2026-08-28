@@ -218,8 +218,9 @@ fn run(
     let serial = (merge + append) as f64;
     let total = (map + merge + encode + append).max(1) as f64;
     println!(
-        "total  map {:.1}s  merge {:.1}s  encode {:.1}s  append {:.1}s   ({:.0}% of tiling is serial)",
+        "total  map {:.1}s (of which {:.1}s deserialising the spill, on one thread)  merge {:.1}s  encode {:.1}s  append {:.1}s   ({:.0}% of tiling is serial)",
         map as f64 / 1000.0,
+        tiler::read_seconds(),
         merge as f64 / 1000.0,
         encode as f64 / 1000.0,
         append as f64 / 1000.0,
