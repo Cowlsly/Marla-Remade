@@ -59,7 +59,8 @@ pub struct Net {
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     fence: vk::Fence,
-    /// Set when a submission was left pending, after which this net is unusable.
+    /// Set when a submission was left pending, or a recording left part-written, after which
+    /// this net is unusable.
     ///
     /// A `wait_for_fences` timeout returns an error while the submission is **still in
     /// flight**. Nothing can cancel it, so resetting the fence, resubmitting the command
@@ -67,7 +68,8 @@ pub struct Net {
     /// five-second timeout exists precisely so a hung GPU does not block forever, this is
     /// an anticipated path rather than a theoretical one. Once poisoned, every later
     /// `infer` fails immediately without touching Vulkan, and only `Drop` — which waits
-    /// for the device to go idle first — cleans up.
+    /// for the device to go idle first — cleans up. [`Net::rebuild`] sets it for the other
+    /// reason: a command buffer it failed to finish recording must never be submitted.
     poisoned: bool,
     /// Scratch for the fp16 input and the fp16 output, so an inference allocates nothing.
     input_scratch: Vec<u16>,
@@ -141,6 +143,80 @@ impl Net {
         net.fence = net.create_fence()?;
         net.record()?;
         Ok(net)
+    }
+
+    /// Re-record this net at `plan`'s shapes, keeping the weights already uploaded.
+    ///
+    /// Supertonic's nets are shaped by the utterance — the text encoder runs at the character
+    /// count, the sampler and the vocoder at the latent length — and a [`Plan`] is one command
+    /// buffer recorded at fixed shapes, so a new length needs a new recording. It does not need a
+    /// new upload: the weights are the expensive part (198 MB for Supertonic, 605 MB for
+    /// SMaLL-100) and they do not depend on the length. So this keeps the weights buffer and
+    /// re-uses the arena and the staging buffer too, growing them only when the new shapes need
+    /// more than the old ones did — which for a sequence of utterances means the allocation
+    /// happens a handful of times rather than once per sentence.
+    ///
+    /// `plan` must have been built against the same weights as this net's. Nothing here checks
+    /// that, because [`crate::nets::Builder::finish`] already refuses a plan that does not read
+    /// every tensor in its file, so a plan for a different `.maml` cannot reach here.
+    pub fn rebuild(&mut self, plan: Plan) -> Result<(), String> {
+        if self.poisoned {
+            return Err("this network is unusable after an earlier failure".into());
+        }
+        let arena_bytes = (plan.arena_elems as vk::DeviceSize) * 2;
+        let input_elems = binding_elems(&plan.inputs);
+        let output_elems = binding_elems(&plan.outputs);
+        let staging_bytes = (input_elems.max(output_elems) as vk::DeviceSize) * 2;
+
+        // Allocate before touching any state. A failure part-way through must leave the net
+        // running at its old plan: a descriptor pointing at a new arena while the recorded
+        // command buffer still copies the inputs into the old one would be a wrong answer at the
+        // right shape, which is far worse than an error.
+        let grown_arena = if arena_bytes > self.arena.size {
+            Some(Buffer::device_local(&self.context, arena_bytes)?)
+        } else {
+            None
+        };
+        let grown_staging = if staging_bytes > self.staging.size {
+            Some(Buffer::staging(&self.context, staging_bytes)?)
+        } else {
+            None
+        };
+
+        // SAFETY: a descriptor set may not be rewritten, and a bound buffer may not be freed,
+        // while a command buffer using either is pending. `submit` waits on its fence before
+        // returning and the check above rejects the one case where it did not, so nothing is in
+        // fact pending — but this costs one round trip per length change, not per inference, and
+        // it makes that reasoning unnecessary rather than load-bearing.
+        unsafe {
+            let guard = self.context.lock_queue();
+            let idle = self.context.device.device_wait_idle();
+            drop(guard);
+            idle.map_err(|e| format!("device_wait_idle {e:?}"))?;
+        }
+
+        // Past here nothing fails until `record`, so the net cannot be left describing one shape
+        // and recording another. Each old `Buffer` frees itself as it is replaced, after the wait
+        // above.
+        if let Some(arena) = grown_arena {
+            self.pipelines.rebind_arena(&self.context.device, arena.buffer, arena.size);
+            self.arena = arena;
+        }
+        if let Some(staging) = grown_staging {
+            self.staging = staging;
+        }
+        self.input_scratch.resize(input_elems, 0);
+        self.output_scratch.resize(output_elems, 0);
+        self.plan = plan;
+
+        // A `record` that fails leaves the command buffer part-written, and submitting that is
+        // not something a later caller may be allowed to do. There is no way back — both of its
+        // failure modes are device loss or host OOM — so the net is retired instead.
+        if let Err(e) = self.record() {
+            self.poisoned = true;
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Copy the weights blob to device-local memory through the staging buffer.
@@ -584,7 +660,7 @@ impl Net {
     /// here once rather than twice.
     fn submit(&mut self) -> Result<(), String> {
         if self.poisoned {
-            return Err("a previous submission timed out; this network is unusable".into());
+            return Err("this network is unusable after an earlier failure".into());
         }
         // SAFETY: the scratch buffer is exactly the fp16 elements the recorded copy
         // regions move, and `u16` has no padding or invalid bit patterns.

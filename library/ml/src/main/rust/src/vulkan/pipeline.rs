@@ -136,6 +136,30 @@ pub struct Pipelines {
 }
 
 impl Pipelines {
+    /// Point binding 0 at a different arena buffer, for [`super::run::Net::rebuild`].
+    ///
+    /// Only the arena moves: the weights are uploaded once and outlive any reshape, which is the
+    /// whole reason rebuilding beats constructing a second net. The caller must have waited for
+    /// the device to go idle first — a descriptor set may not be written while a command buffer
+    /// that uses it is pending.
+    pub fn rebind_arena(
+        &self,
+        device: &ash::Device,
+        arena: vk::Buffer,
+        arena_size: vk::DeviceSize,
+    ) {
+        let arena_info =
+            vk::DescriptorBufferInfo::default().buffer(arena).offset(0).range(arena_size);
+        let write = vk::WriteDescriptorSet::default()
+            .dst_set(self.descriptor_set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(std::slice::from_ref(&arena_info));
+        // SAFETY: a descriptor write to a set this struct owns, against a buffer the caller
+        // keeps alive. Nothing using the set is pending, per the contract above.
+        unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
+    }
+
     /// Build all of them and point the descriptor set at `arena` and `weights`.
     pub fn new(
         context: &Context,

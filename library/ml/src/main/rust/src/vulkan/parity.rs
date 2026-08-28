@@ -111,8 +111,13 @@ fn build(
 fn compare(what: &str, plan: Plan, data: Vec<u8>, inputs: &[&[f32]]) {
     let host = run_multi(&plan, &data, inputs).expect("the interpreter runs the plan");
     let got = on_device(plan, data, inputs);
+    matches(what, &host, &got);
+}
+
+/// Require the interpreter's outputs and the device's to agree, one binding at a time.
+fn matches(what: &str, host: &[Vec<f32>], got: &[Vec<f32>]) {
     assert_eq!(got.len(), host.len(), "{what}: output count");
-    for (index, (host, got)) in host.iter().zip(&got).enumerate() {
+    for (index, (host, got)) in host.iter().zip(got).enumerate() {
         assert_eq!(got.len(), host.len(), "{what}: output {index} length");
         // Scale from the interpreter's output, not from the pair, so a device result that came
         // back as zeros cannot shrink the threshold until it passes.
@@ -283,4 +288,41 @@ fn a_two_lane_embedding_agrees_with_the_reference() {
         &[(vec![rows, channels], table)],
         |b, ids| b.embed(ids[0], 0, rows, channels),
     );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_rebuilt_net_agrees_with_the_reference_at_each_shape() {
+    // Supertonic runs one set of weights at whatever length the utterance turns out to be, so
+    // `Net::rebuild` re-records a net instead of building a second one and uploading 198 MB
+    // again. The widths go up and then back down on purpose: growing reallocates the arena and
+    // rewrites the descriptor, while shrinking keeps the buffer it already has, and it is the
+    // second visit to a narrow shape that would catch a descriptor left pointing at the arena
+    // that was freed under it.
+    let gamma = spread(8, 1.1);
+    let beta = spread(8, 2.3);
+    let given = Given::new(&[(vec![8], gamma), (vec![8], beta)])
+        .expect("the fixture tensors are consistent");
+    let data = given.data().to_vec();
+    // Two ops, so the second reads out of the arena what the first wrote into it. A one-op plan
+    // would pass on a rebind that had gone to the wrong buffer, since its only read is the input
+    // copy the command buffer performs by handle rather than through the descriptor set.
+    let at = |width: u32| {
+        build(&given, &[Shape::new(8, 1, width)], |b, ids| {
+            let normed = b.layer_norm(ids[0], 0, 1e-5);
+            b.add(normed, ids[0])
+        })
+    };
+
+    let weights = Weights::from_data(data.clone());
+    let mut net = Net::new(device(), at(3), &weights, RESCALE_ONLY)
+        .expect("the plan records into a command buffer");
+    for width in [9u32, 4] {
+        let plan = at(width);
+        let input = spread(8 * width as usize, width as f32);
+        let host = run_multi(&plan, &data, &[&input]).expect("the interpreter runs the plan");
+        net.rebuild(plan).expect("the net re-records at the new shape");
+        let got = net.infer_raw(&input).expect("the rebuilt buffer submits and reads back");
+        matches(&format!("a net rebuilt at {width}"), &host, &got);
+    }
 }
