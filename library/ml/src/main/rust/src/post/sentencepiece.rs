@@ -152,7 +152,7 @@ impl<'a> Table<'a> {
             .iter()
             .map(|&(from, to)| {
                 self.by_piece
-                    .get(prepared[from..to].as_bytes())
+                    .get(&prepared.as_bytes()[from..to])
                     .map_or(UNK, |&(id, _)| id)
             })
             .collect()
