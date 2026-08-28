@@ -472,6 +472,12 @@ impl Net {
         self.split_outputs()
     }
 
+    /// The plan's input shape, so a caller can size the tensor it hands to
+    /// [`Net::infer_raw`] without holding the plan itself.
+    pub fn input_shape(&self) -> Result<crate::nets::Shape, String> {
+        Ok(self.plan.input()?.shape)
+    }
+
     /// Run the plan over `values` directly, with no preprocessing, and return every output.
     ///
     /// The bitmap paths above exist because most of these networks take an image. Piper's do

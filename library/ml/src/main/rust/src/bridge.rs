@@ -27,13 +27,16 @@
 //! bokeh" rather than to a crash.
 
 use jni::objects::{JByteArray, JClass, JFloatArray, JIntArray, JString};
-use jni::sys::{jfloatArray, jint, jlong, jstring};
+use jni::sys::{jfloat, jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 
-use crate::nets::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp};
+use crate::nets::{
+    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, vits_flow,
+};
 use crate::post::ctc::Dictionary;
 use crate::post::nms::{self, Face, Maps};
 use crate::post::ocr::{self, Line};
+use crate::post::{phonemes, speech};
 use crate::preprocess::{
     Letterbox, FACE_EMBED, IMAGENET, PPOCR_DET, PPOCR_REC, RESCALE_ONLY, SCRFD,
 };
@@ -508,6 +511,331 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyOc
     // SAFETY: the caller guarantees this came from `createPpocr` and has not been
     // destroyed. Each `Net`'s Drop waits for the device to go idle.
     drop(unsafe { Box::from_raw(handle as *mut OcrHandle) });
+}
+
+/// Piper's three networks, its duration weights, its dictionary and its scales.
+///
+/// A fourth handle type, and separately destroyed, for the same reason [`OcrHandle`] is: it
+/// owns a different set of things, and one `destroy` guessing between them would be type
+/// confusion waiting for a caller to mix them up.
+struct SpeechHandle {
+    encoder: Net,
+    flow: Net,
+    vocoder: Net,
+    /// Read on the host: the duration predictor is a loop, not a plan.
+    durations: Weights,
+    dictionary: phonemes::Dictionary,
+    scales: speech::Scales,
+    sample_rate: u32,
+    /// Filled per request so a long utterance does not reallocate every chunk.
+    rng: SplitMix,
+}
+
+/// A small deterministic-per-seed generator, seeded from the clock per utterance.
+///
+/// Speech is *meant* to vary: VITS samples its durations and its prior, so two readings of
+/// the same sentence differ. That is the model's design, not a defect. SplitMix64 is used
+/// rather than a cryptographic source because nothing here is a secret and the sequence only
+/// has to be well-distributed.
+struct SplitMix {
+    state: u64,
+}
+
+impl SplitMix {
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+}
+
+impl speech::Noise for SplitMix {
+    /// Box-Muller over two uniforms, which is exact rather than an approximation of normal.
+    fn normal(&mut self, count: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(count);
+        while out.len() < count {
+            // `next_u64 >> 11` gives 53 significant bits, and the `+ 1` keeps the log finite.
+            let first = ((self.next_u64() >> 11) as f64 + 1.0) / 9_007_199_254_740_993.0;
+            let second = ((self.next_u64() >> 11) as f64) / 9_007_199_254_740_992.0;
+            let radius = (-2.0 * first.ln()).sqrt();
+            let angle = std::f64::consts::TAU * second;
+            out.push((radius * angle.cos()) as f32);
+            if out.len() < count {
+                out.push((radius * angle.sin()) as f32);
+            }
+        }
+        out
+    }
+}
+
+/// The three plans, as `post::speech` wants them.
+struct SpeechNets<'a> {
+    encoder: &'a mut Net,
+    flow: &'a mut Net,
+    vocoder: &'a mut Net,
+}
+
+impl speech::Networks for SpeechNets<'_> {
+    fn encode(&mut self, ids: &[f32]) -> Result<(Vec<f32>, Vec<f32>), String> {
+        let outputs = self.encoder.infer_raw(ids)?;
+        match <[Vec<f32>; 2]>::try_from(outputs) {
+            Ok([stats, hidden]) => Ok((stats, hidden)),
+            Err(other) => Err(format!("the encoder returned {} outputs, not two", other.len())),
+        }
+    }
+
+    fn flow(&mut self, prior: &[f32], _frames: usize) -> Result<Vec<f32>, String> {
+        one_output(self.flow.infer_raw(prior)?)
+    }
+
+    fn vocode(&mut self, latent: &[f32], _frames: usize) -> Result<Vec<f32>, String> {
+        one_output(self.vocoder.infer_raw(latent)?)
+    }
+}
+
+/// The single output of a plan that has exactly one.
+fn one_output(outputs: Vec<Vec<f32>>) -> Result<Vec<f32>, String> {
+    match <[Vec<f32>; 1]>::try_from(outputs) {
+        Ok([only]) => Ok(only),
+        Err(other) => Err(format!("{} outputs, expected one", other.len())),
+    }
+}
+
+/// `PiperSynthesizer`'s constructor. Returns 0 on failure, having logged why.
+///
+/// Five assets: the three `.maml` plans, the duration predictor's weights, and the voice's
+/// grapheme-to-phoneme dictionary. The three scales come from the voice's `config.json`,
+/// which the Kotlin side has already parsed.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env` and arrays it owns.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createPiper<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    encoder: JByteArray<'l>,
+    flow: JByteArray<'l>,
+    vocoder: JByteArray<'l>,
+    durations: JByteArray<'l>,
+    dictionary: JByteArray<'l>,
+    phonemes_wide: jint,
+    frames: jint,
+    sample_rate: jint,
+    noise: jfloat,
+    length: jfloat,
+    duration_noise: jfloat,
+) -> jlong {
+    let assets = [encoder, flow, vocoder, durations, dictionary];
+    let shapes = (phonemes_wide, frames, sample_rate);
+    let scales = speech::Scales {
+        noise,
+        length,
+        duration_noise,
+    };
+    match build_piper(&mut env, assets, shapes, scales) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("piper is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_piper<'l>(
+    env: &mut JNIEnv<'l>,
+    assets: [JByteArray<'l>; 5],
+    shapes: (jint, jint, jint),
+    scales: speech::Scales,
+) -> Result<SpeechHandle, String> {
+    let (phonemes_wide, frames, sample_rate) = shapes;
+    if phonemes_wide <= 0 || frames <= 0 || sample_rate <= 0 {
+        return Err(format!("a voice at {phonemes_wide} phonemes, {frames} frames"));
+    }
+    let mut bytes = Vec::with_capacity(assets.len());
+    for asset in &assets {
+        bytes.push(
+            env.convert_byte_array(asset)
+                .map_err(|e| format!("cannot read an asset: {e}"))?,
+        );
+    }
+    let dictionary = phonemes::Dictionary::parse(&bytes[4])?;
+    let encoder_weights = Weights::parse(&bytes[0], graph::VITS_ENC)?;
+    let flow_weights = Weights::parse(&bytes[1], graph::VITS_FLOW)?;
+    let vocoder_weights = Weights::parse(&bytes[2], graph::VITS_DEC)?;
+    let durations = Weights::parse(&bytes[3], graph::VITS_DP)?;
+
+    let shared = context::shared()?;
+    // Each plan is one fixed shape. The encoder is compiled at the longest phoneme count a
+    // request may hold and the flow and vocoder at the chunk size, so nothing is recompiled
+    // per utterance — see `post::speech` for why the vocoder is chunked at all.
+    let encoder_plan = vits_enc::build(&encoder_weights, phonemes_wide as u32)?;
+    let context_frames = speech::RECEPTIVE_FRAMES as u32 * 2;
+    let flow_plan = vits_flow::build(&flow_weights, frames as u32)?;
+    let vocoder_plan = vits_dec::build(&vocoder_weights, frames as u32 + context_frames)?;
+
+    Ok(SpeechHandle {
+        encoder: Net::new(shared.clone(), encoder_plan, &encoder_weights, RESCALE_ONLY)?,
+        flow: Net::new(shared.clone(), flow_plan, &flow_weights, RESCALE_ONLY)?,
+        vocoder: Net::new(shared, vocoder_plan, &vocoder_weights, RESCALE_ONLY)?,
+        durations,
+        dictionary,
+        scales,
+        sample_rate: sample_rate as u32,
+        rng: SplitMix { state: seed() },
+    })
+}
+
+/// A seed from the clock, so two readings of a sentence differ as VITS intends.
+fn seed() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0x1234_5678_9ABC_DEF0)
+        | 1
+}
+
+/// Free the three networks and everything beside them.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a value from
+/// [`Java_com_vayunmathur_library_ml_MlNative_createPiper`], and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyPiper<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this came from `createPiper` and has not been destroyed.
+    drop(unsafe { Box::from_raw(handle as *mut SpeechHandle) });
+}
+
+/// Synthesise `text` and return the waveform, or null on failure.
+///
+/// One call per utterance: the phoneme lookup, the encoder, the duration predictor, the
+/// alignment, the flow and the chunked vocoder all happen here, so the boundary is crossed
+/// once rather than once per stage. An empty result means nothing pronounceable, which is not
+/// a failure — a string of emoji should say nothing.
+///
+/// The samples are mono `-1..1` at the voice's rate. Two calls with the same text differ:
+/// VITS samples both its durations and its prior, which is what stops it sounding
+/// mechanical.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a live value from
+/// [`Java_com_vayunmathur_library_ml_MlNative_createPiper`].
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_synthesize<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    text: JString<'l>,
+    speed: jfloat,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: as `segment` — the caller guarantees the handle is live and serialises this
+    // against `destroyPiper`.
+    let state = unsafe { &mut *(handle as *mut SpeechHandle) };
+    let words: String = match env.get_string(&text) {
+        Ok(found) => found.into(),
+        Err(e) => {
+            log(&format!("cannot read the text: {e}"));
+            return null;
+        }
+    };
+    match speak(state, &words, speed) {
+        Ok(samples) => match new_float_array(&mut env, &samples) {
+            Ok(array) => array,
+            Err(e) => {
+                log(&e);
+                null
+            }
+        },
+        Err(e) => {
+            log(&format!("synthesis failed: {e}"));
+            null
+        }
+    }
+}
+
+/// The whole pipeline for one utterance.
+fn speak(state: &mut SpeechHandle, text: &str, speed: jfloat) -> Result<Vec<f32>, String> {
+    let ids = phonemes::to_ids(text, &state.dictionary);
+    // `[BOS, EOS]` is nothing to say.
+    if ids.len() <= 2 {
+        return Ok(Vec::new());
+    }
+    let wide = state.encoder.input_shape()?.w as usize;
+    if ids.len() > wide {
+        return Err(format!(
+            "{} phonemes exceeds the {wide} this voice was compiled for; the caller should \
+             split the text into sentences",
+            ids.len()
+        ));
+    }
+    // The plan is one fixed width, so a short utterance is padded. The pad id is `PAD`, which
+    // is a phoneme the model knows rather than an out-of-range index.
+    let mut widened = vec![f32::from(phonemes::PAD); wide];
+    for (slot, &id) in widened.iter_mut().zip(&ids) {
+        *slot = f32::from(id);
+    }
+
+    let outputs = state.encoder.infer_raw(&widened)?;
+    let [stats, hidden] = <[Vec<f32>; 2]>::try_from(outputs)
+        .map_err(|other| format!("the encoder returned {} outputs, not two", other.len()))?;
+
+    // Only the real phonemes take part; the padding's statistics are discarded.
+    let phoneme_count = ids.len();
+    let trimmed_hidden = trim(&hidden, vits_enc::D_MODEL as usize, wide, phoneme_count);
+    let trimmed_stats = trim(&stats, vits_enc::STATS as usize, wide, phoneme_count);
+
+    let noise = {
+        let rng = &mut state.rng;
+        speech::Noise::normal(rng, 2 * phoneme_count)
+    };
+    let scaled: Vec<f32> =
+        noise.iter().map(|&n| n * state.scales.duration_noise).collect();
+    let log_durations = crate::post::duration::log_durations(
+        &state.durations,
+        &trimmed_hidden,
+        phoneme_count,
+        &scaled,
+    )?;
+    // `speed` above one should sound faster, and `length_scale` above one is slower, so the
+    // caller's rate divides rather than multiplies.
+    let rate = if speed > 0.0 { state.scales.length / speed } else { state.scales.length };
+    let frames = crate::post::duration::frames(&log_durations, rate);
+
+    let request = speech::Request {
+        ids: &ids,
+        scales: &state.scales,
+        sample_rate: state.sample_rate,
+    };
+    let SpeechHandle { encoder, flow, vocoder, rng, .. } = state;
+    let mut nets = SpeechNets { encoder, flow, vocoder };
+    let spoken = speech::synthesise(&request, &frames, &trimmed_stats, &mut nets, rng)?;
+    Ok(spoken.samples)
+}
+
+/// Keep the first `keep` positions of a `[channels, wide]` plane.
+fn trim(values: &[f32], channels: usize, wide: usize, keep: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(channels * keep);
+    for channel in 0..channels {
+        let from = channel * wide;
+        out.extend_from_slice(&values[from..from + keep]);
+    }
+    out
 }
 
 /// Copy a Java `int[]` of ARGB pixels into `into`, checking it against `width` x `height`.
