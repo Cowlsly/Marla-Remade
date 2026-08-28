@@ -25,6 +25,12 @@
 //!     for both its directories and its tiles.
 //!   * [`pmtiles`] — the v3 container, read and write, including Hilbert tile ids
 //!     and the root/leaf directory split.
+//!   * [`mamaps`] — the container the Vulkan renderer reads: geometry only,
+//!     pre-clipped, attributes interned to integers, flat little-endian structs.
+//!     PMTiles and MVT are what the `maps` app still needs, because it renders
+//!     through MapLibre; this is what everything else is moving to, and the two
+//!     live side by side for the transition. Its writer is behind the `write`
+//!     feature, so Android links only the read half.
 //!
 //! Nothing here allocates a thread, opens a socket or touches a GPU. The reader the
 //! app uses over HTTP range requests is [`stream`], which is built on top of
@@ -32,6 +38,7 @@
 //! to supply.
 
 pub mod gz;
+pub mod mamaps;
 pub mod mvt;
 pub mod pmtiles;
 pub mod proto;

@@ -1,4 +1,4 @@
-# The PMTiles v3 and MVT 2.1 codec, shared by the offline tiler and the app.
+# The PMTiles v3, MVT 2.1 and `.mamaps` codecs, shared by the offline tiler and the app.
 #
 # Extracted from `scripts/maps/tile_build`, which is still its older consumer.
 # The Android vector renderer in `:library:map` needs to read exactly the archives
@@ -14,6 +14,12 @@
 # host and cross-compiles for Android with no C toolchain and nothing to configure.
 # PMTiles gzips both its directories and its tiles, so the DEFLATE side is needed
 # as well as INFLATE.
+#
+# That single-pure-Rust-dependency rule is also what settled `.mamaps` compression.
+# The obvious choice on paper is zstd, but its encoder is C, so adding it would end
+# the property this whole file exists to preserve. `.mamaps` bodies are therefore raw
+# DEFLATE through the same `miniz_oxide`, and the format's `compression` header byte
+# keeps a swap open if a pure-Rust zstd encoder ever becomes worth the dependency.
 
 [package]
 name = "tilecodec"
@@ -21,7 +27,14 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 license = "GPL-2.0-only"
-description = "PMTiles v3 + Mapbox Vector Tile 2.1 codec shared by the Maps tiler and the Android renderer"
+description = "PMTiles v3, Mapbox Vector Tile 2.1 and .mamaps codecs shared by the Maps tiler and the Android renderer"
+
+[features]
+# The `.mamaps` writer. Off by default: Android reads archives and never writes one,
+# so gating it keeps the interner out of the cdylib and, more usefully, makes it a
+# compile error rather than a review comment if the read path ever grows a dependency
+# on the write path. `scripts/maps` enables it.
+write = []
 
 [lib]
 name = "tilecodec"
