@@ -500,9 +500,9 @@ def layer_norm_scale(node, consumers, held, array):
     """Whether `node` is the `Mul(x, gamma)` of a decomposed layer norm.
 
     Recognised by structure rather than by name: a `Mul` against a rank-1 constant whose one
-    consumer is an `Add` against a rank-1 constant of the same length. In Piper's encoder that
-    matches exactly the twelve norms and nothing else — the mask multiplies and the embedding
-    scale are against scalars or computed tensors.
+    consumer is an `Add` against a rank-1 constant of the same length. In the exports this reads
+    that matches the layer norms and nothing else - mask multiplies and embedding scales are
+    against scalars or computed tensors.
     """
     scales = [n for n in node.input if held(n) and array(n).ndim == 1]
     if len(scales) != 1:

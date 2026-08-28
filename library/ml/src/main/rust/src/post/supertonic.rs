@@ -212,7 +212,7 @@ pub const STEPS: u32 = 16;
 
 /// The GPU stages, as a trait, so the sequencing below is host-testable against stubs.
 ///
-/// The same shape `post::ocr` and `post::speech` use, and for the same reason: the order of the
+/// The same shape `post::ocr` uses, and for the same reason: the order of the
 /// four nets, the length arithmetic between them and the sampler loop are where the mistakes are,
 /// and none of them needs a device to check.
 pub trait Stages {

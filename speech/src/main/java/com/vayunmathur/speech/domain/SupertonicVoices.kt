@@ -126,6 +126,9 @@ object SupertonicVoices {
     fun voiceName(language: SupertonicLanguage, voice: String): String =
         "${language.bcp47}$VOICE_MARK$voice"
 
+    /** Whether `voiceName` carries a `-x-` style at all, whether or not it is one we have. */
+    fun namesAStyle(voiceName: String?): Boolean = voiceName?.contains(VOICE_MARK) == true
+
     /**
      * The voice style named in `voiceName`, or null if it names none or names one we do not have.
      *

@@ -25,8 +25,9 @@ import java.io.File
 class SupertonicEngine(private val context: Context) {
     private val lock = Any()
     private var synthesizer: SupertonicSynthesizer? = null
-    private var loaded: SupertonicSynthesizer? = null
     private var voice: String = SupertonicVoices.DEFAULT_VOICE
+    private var attempts = 0
+    private var closed = false
 
     /** Supertonic's output rate, fixed by the vocoder rather than by the voice. */
     val sampleRate: Int get() = SupertonicSynthesizer.SAMPLE_RATE
@@ -49,8 +50,8 @@ class SupertonicEngine(private val context: Context) {
      */
     fun voice(style: String): Boolean = synchronized(lock) {
         if (style !in SupertonicVoices.VOICES) return false
-        if (style == voice) return ensure() != null
         val engine = ensure() ?: return false
+        if (style == voice) return true
         if (!engine.voice(style)) return false
         voice = style
         true
@@ -65,6 +66,10 @@ class SupertonicEngine(private val context: Context) {
      * chunk is delivered — Supertonic's sampler is one pass over the entire sequence, so there is no
      * streaming to be had inside it — so this splits the finished waveform rather than pipelining.
      *
+     * The lock covers the synthesis and **not** the delivery. `onChunk` writes into the framework's
+     * audio track and blocks while it plays, so holding the handle across it would make [close] —
+     * which arrives on the main thread from `onDestroy` — wait out a whole utterance.
+     *
      * There is no `speed`: [SupertonicSynthesizer.synthesize] takes none, and the only ways to fake
      * one on the host are to resample the PCM, which shifts the pitch, or to time-stretch it, which
      * is a signal-processing feature rather than part of a port. Rate control therefore does not
@@ -72,13 +77,15 @@ class SupertonicEngine(private val context: Context) {
      * scaling the duration predictor's frame count natively, which is where Piper's `length_scale`
      * did it too.
      */
-    fun synthesize(text: String, onChunk: (FloatArray) -> Boolean): Boolean = synchronized(lock) {
-        val engine = ensure() ?: return false
-        val samples = try {
-            engine.synthesize(text)
-        } catch (e: Throwable) {
-            Log.e(TAG, "synthesis failed", e)
-            return false
+    fun synthesize(text: String, onChunk: (FloatArray) -> Boolean): Boolean {
+        val samples = synchronized(lock) {
+            val engine = ensure() ?: return false
+            try {
+                engine.synthesize(text)
+            } catch (e: Throwable) {
+                Log.e(TAG, "synthesis failed", e)
+                return false
+            }
         }
         if (samples.isEmpty()) return false
         var offset = 0
@@ -87,39 +94,57 @@ class SupertonicEngine(private val context: Context) {
             if (!onChunk(samples.copyOfRange(offset, offset + n))) return false
             offset += n
         }
-        true
+        return true
     }
 
-    /** Free the four networks. Idempotent. */
+    /**
+     * Free the four networks. Idempotent, and **terminal**.
+     *
+     * Terminal because `onCreate` warms the engine on a detached thread while `onDestroy` calls
+     * this on the main one: without the flag, a `preload` that lost the race to the lock would
+     * rebuild ~105 MB of GPU state immediately after it was freed, with nothing left to free it
+     * again.
+     */
     fun close() = synchronized(lock) {
+        closed = true
         synthesizer?.close()
         synthesizer = null
-        loaded = null
     }
 
     /**
      * The handle, built on first use.
      *
-     * A failure is not retried: `SupertonicSynthesizer`'s constructor never throws, and the reasons
-     * it can come up unavailable — no `libmodelrunner.so` for this ABI, no Vulkan device with fp16
-     * compute, a missing asset — are all properties of the install rather than transient. Retrying
-     * would re-read the bundle on every utterance to fail the same way.
+     * # Why the attempt is counted
+     *
+     * `SupertonicSynthesizer`'s constructor never throws; it comes up unavailable instead. Most of
+     * the reasons are properties of the install and will never change — no `libmodelrunner.so` for
+     * this ABI, no Vulkan device with fp16 compute, a missing asset — and retrying those re-reads
+     * the bundle to fail identically. But not all of them are: a lost device or a failed allocation
+     * under memory pressure is transient, and latching on the first one would leave the engine
+     * advertising 31 languages and erroring on every utterance until the process died.
+     *
+     * So it retries, and a small bound is what stops a permanently broken device paying for a
+     * ~105 MB load attempt on every sentence.
      */
     private fun ensure(): SupertonicSynthesizer? {
-        loaded?.let { return it }
-        if (synthesizer != null) return null
+        synthesizer?.let { return it }
+        if (closed || attempts >= MAX_ATTEMPTS) return null
+        attempts++
         val built = SupertonicSynthesizer.inAssets(context.assets, voice = voice)
-        synthesizer = built
         if (!built.isAvailable) {
-            Log.e(TAG, "the Supertonic bundle is not usable on this device")
+            Log.e(TAG, "the Supertonic bundle is not usable on this device (attempt $attempts)")
+            built.close()
             return null
         }
-        loaded = built
+        synthesizer = built
         return built
     }
 
     private companion object {
         const val TAG = "SupertonicEngine"
+
+        /** Loads to try before giving up for the life of the process. See [ensure]. */
+        const val MAX_ATTEMPTS = 2
 
         /**
          * Samples per chunk handed to the callback.
@@ -153,13 +178,16 @@ object SupertonicBundle {
 
     fun isPresent(context: Context): Boolean {
         present?.let { return it }
-        val found = try {
-            val entries = context.assets.list(SupertonicSynthesizer.ASSET_PATH)?.toSet().orEmpty()
-            REQUIRED.all { it in entries }
+        val entries = try {
+            context.assets.list(SupertonicSynthesizer.ASSET_PATH)?.toSet().orEmpty()
         } catch (e: Throwable) {
+            // Deliberately not cached. A throw here is a failure to *read* the assets rather than
+            // an answer about them, and pinning `false` on it would unadvertise the engine for the
+            // life of the process over something that may not recur.
             Log.e(TAG, "cannot list the Supertonic assets", e)
-            false
+            return false
         }
+        val found = REQUIRED.all { it in entries }
         present = found
         return found
     }

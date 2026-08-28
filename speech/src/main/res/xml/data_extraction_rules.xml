@@ -2,18 +2,20 @@
 <!-- Overrides the permissive default in the shared :library module.
 
      Storage audited:
-       external/piper/voices/**  Piper TTS voice archives and unpacked ncnn models
-                              (PiperVoiceRegistry). Hundreds of MB, re-downloadable.
-       external/<whisper dir>  Whisper recognition model files (WhisperModel). Same.
-       file/datastore_default.preferences_pb  download bookkeeping keyed per model
-                              (progress_*, dlid_*, speed_*), plus any app settings.
-       (no Room database, and no learned or adaptation data was found - neither the
+       external/piper/**    dead. Piper's voice archives and unpacked models used to live
+                            here; the TTS service deletes the tree on first run now (see
+                            SupertonicBundle.deleteOrphanedPiperVoices). An upgraded install
+                            can still hold up to 1.8 GB of it until that runs, and none of it
+                            is worth backing up.
+       (no models of any kind under external/ on a fresh install: both the Whisper recogniser
+        and the Supertonic voices ship inside the APK, so there is nothing downloaded to
+        preserve and nothing to re-download after a restore.)
+       (no DataStore, no Room database, and no learned or adaptation data - neither the
         recognition service nor the TTS service persists user speech or per-user models.)
 
-     Everything large here is a re-downloadable model, so nothing goes to cloud backup.
-     The DataStore is excluded from cloud backup too: it is download state with no restore
-     value, and its full key set could not be enumerated with certainty, so it defaults to
-     private. Device transfer carries it so any settings survive the move. -->
+     So there is nothing here worth carrying anywhere: everything the app needs is in the APK
+     and everything under external/ is a leftover. Both backup and device transfer are empty
+     rather than selective, which is a statement rather than an omission. -->
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="root" path="." />
@@ -23,6 +25,10 @@
         <exclude domain="external" path="." />
     </cloud-backup>
     <device-transfer>
-        <include domain="file" path="datastore_default.preferences_pb" />
+        <exclude domain="root" path="." />
+        <exclude domain="file" path="." />
+        <exclude domain="database" path="." />
+        <exclude domain="sharedpref" path="." />
+        <exclude domain="external" path="." />
     </device-transfer>
 </data-extraction-rules>

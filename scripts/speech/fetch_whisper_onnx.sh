@@ -2,9 +2,9 @@
 #
 # Refresh the bundled Whisper-base int8 ONNX assets in speech/src/main/assets/whisper-base/.
 #
-# Unlike the Piper voices, these are NOT downloaded at runtime — they ship inside the APK and
-# are read straight out of the asset manager by WhisperOnnxEngine, so this script is a
-# build-host tool for updating a vendored dependency, not a mirror-staging step.
+# These are NOT downloaded at runtime - they ship inside the APK and are read straight out of
+# the asset manager by WhisperOnnxEngine, so this script is a build-host tool for updating a
+# vendored dependency, not a mirror-staging step.
 #
 # Upstream is HuggingFace onnx-community/whisper-base, which is an ONNX Runtime *dynamic*
 # int8 quantization of openai/whisper-base. We consume it as-is: onnx2ncnn cannot read
@@ -26,8 +26,8 @@
 set -euo pipefail
 
 REPO="onnx-community/whisper-base"
-# Pinned, as the PP-OCR and Piper fetchers are: `main` moving under us would change the
-# weights without changing this script.
+# Pinned, as `scripts/ml/fetch_and_convert.sh` pins its models: `main` moving under us would
+# change the weights without changing this script.
 REVISION="1846881b6b3a3024392c1eea3ad983695bc23925"
 BASE="https://huggingface.co/${REPO}/resolve/${REVISION}"
 DEST="speech/src/main/assets/whisper-base"

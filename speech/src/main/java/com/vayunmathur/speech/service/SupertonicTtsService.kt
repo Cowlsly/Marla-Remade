@@ -107,14 +107,24 @@ class SupertonicTtsService : TextToSpeechService() {
         return SupertonicVoices.voiceName(found, SupertonicVoices.DEFAULT_VOICE)
     }
 
+    /**
+     * Whether `voiceName` is one this engine published.
+     *
+     * The style half is checked as well as the language, because [onGetVoices] publishes an explicit
+     * name per style: accepting `en-US-x-BOGUS` here would be a success for a voice the caller will
+     * never hear, since [onLoadVoice] would then leave whatever style was already selected.
+     */
     override fun onIsValidVoiceName(voiceName: String?): Int {
         if (voiceName == null || !usable()) return TextToSpeech.ERROR
-        val known = SupertonicVoices.resolve(voiceName = voiceName) != null
-        return if (known) TextToSpeech.SUCCESS else TextToSpeech.ERROR
+        if (SupertonicVoices.resolve(voiceName = voiceName) == null) return TextToSpeech.ERROR
+        if (SupertonicVoices.namesAStyle(voiceName) && SupertonicVoices.styleIn(voiceName) == null) {
+            return TextToSpeech.ERROR
+        }
+        return TextToSpeech.SUCCESS
     }
 
     override fun onLoadVoice(voiceName: String?): Int {
-        if (voiceName == null || !usable()) return TextToSpeech.ERROR
+        if (onIsValidVoiceName(voiceName) != TextToSpeech.SUCCESS) return TextToSpeech.ERROR
         val found = SupertonicVoices.resolve(voiceName = voiceName) ?: return TextToSpeech.ERROR
         language = found
         SupertonicVoices.styleIn(voiceName)?.let { voice = it }
@@ -206,11 +216,14 @@ class SupertonicTtsService : TextToSpeechService() {
         emptySet(),
     )
 
-    private fun localeFor(found: SupertonicLanguage): Locale = try {
+    /**
+     * The locale for a language, from its tag.
+     *
+     * `forLanguageTag` never throws — a tag it cannot parse gives `Locale.ROOT` — and all 31 tags in
+     * [SupertonicVoices.ALL] are well-formed, so there is nothing to fall back to.
+     */
+    private fun localeFor(found: SupertonicLanguage): Locale =
         Locale.forLanguageTag(found.bcp47)
-    } catch (_: Throwable) {
-        Locale(found.code)
-    }
 
     /** Supertonic's float samples in `-1..1` as little-endian 16-bit PCM. */
     private fun floatsToPcm16(samples: FloatArray): ByteArray {
