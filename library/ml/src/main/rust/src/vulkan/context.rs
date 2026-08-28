@@ -84,7 +84,7 @@ impl Context {
     }
 
     unsafe fn create() -> Result<Context, String> {
-        let entry = Entry::load().map_err(|e| format!("no libvulkan.so: {e:?}"))?;
+        let entry = Entry::load().map_err(|e| format!("no Vulkan loader: {e:?}"))?;
 
         let app_name = CString::new("modelrunner").map_err(|e| format!("{e}"))?;
         let app_info = vk::ApplicationInfo::default()

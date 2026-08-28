@@ -11,8 +11,10 @@
 # only the ~11 shaders these two nets need.
 #
 # Why `ash` and not `androidx.webgpu`: the same reasoning as `library/map` — read the
-# header comment there. `features = ["loaded"]` dlopens `libvulkan.so` and links
-# nothing, so the only native code shipped is our own.
+# header comment there. `features = ["loaded"]` dlopens the platform's Vulkan loader and
+# links nothing, so the only native code shipped is our own — and so the same code runs
+# on a development host, which is where the shaders get exercised before a phone sees
+# them.
 #
 # There is no graph interpreter: each net's forward pass is hardcoded Rust in `nets/`,
 # so a `.maml` file carries ordered tensors and no topology. See `src/weights.rs`.
@@ -36,6 +38,6 @@ jni.workspace = true
 
 # `default-features = false` drops the `linked` feature, so nothing links against
 # libvulkan at build time; `loaded` dlopens it, which is what an Android app must do
-# anyway.
-[target.'cfg(target_os = "android")'.dependencies]
+# anyway. It is not android-gated: `loaded` finds the platform loader on the host too,
+# which is the only way the shaders ever get executed before they reach a phone.
 ash = { version = "0.38", default-features = false, features = ["loaded"] }

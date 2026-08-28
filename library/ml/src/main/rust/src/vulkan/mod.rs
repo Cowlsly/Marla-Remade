@@ -1,4 +1,8 @@
-//! The Vulkan compute layer. Android only.
+//! The Vulkan compute layer.
+//!
+//! Built on every target, not just Android: `ash`'s `loaded` feature dlopens whatever
+//! Vulkan loader the platform provides, so the shaders can be executed on a development
+//! host instead of only on a phone.
 //!
 //! * [`context`] — instance, device, compute queue, and the fp16 feature chaining that
 //!   Vulkan 1.1 makes necessary.

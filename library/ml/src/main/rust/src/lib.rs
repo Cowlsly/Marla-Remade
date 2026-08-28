@@ -11,7 +11,7 @@
 //! * [`nets`] — the two hardcoded forward passes, and the small compiler that packs
 //!   their activations into one arena and resolves every offset.
 //! * [`preprocess`] — bitmap to fp16 NCHW, and the fp16 conversions.
-//! * `vulkan` — device, pipelines, the recorded command buffer. Android only.
+//! * [`vulkan`] — device, pipelines, the recorded command buffer.
 //!
 //! # GPU only, by decision
 //!
@@ -31,16 +31,21 @@
 //!
 //! # Host builds
 //!
-//! Everything except the Vulkan and JNI layers compiles and tests on the host, so
-//! `cargo test` builds **both** networks in full, checks the `.maml` round trip, the
-//! arena arithmetic and the preprocessing, with no device and no asset.
+//! Everything except the JNI layer compiles and tests on the host, so `cargo test`
+//! builds **both** networks in full, checks the `.maml` round trip, the arena arithmetic
+//! and the preprocessing, with no device and no asset.
+//!
+//! [`vulkan`] builds on the host too — `ash`'s `loaded` feature finds whatever Vulkan
+//! loader the platform has — which is the only way the shaders get executed anywhere but
+//! a phone. Any device-backed test must therefore be `#[ignore]`d, so a host with no
+//! Vulkan still passes `cargo test`. On an `x86_64-pc-windows-gnu` host, `libloading`
+//! needs a `dlltool` on `PATH` to build; the NDK's `llvm-dlltool` works under that name.
 
 pub mod nets;
 pub mod post;
 pub mod preprocess;
 pub mod weights;
 
-#[cfg(target_os = "android")]
 pub mod vulkan;
 
 #[cfg(target_os = "android")]
