@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
 #
-# Refresh the bundled Whisper-tiny int8 ONNX assets in speech/src/main/assets/whisper-tiny/.
+# Refresh the bundled Whisper-base int8 ONNX assets in speech/src/main/assets/whisper-base/.
 #
 # Unlike the Piper voices, these are NOT downloaded at runtime — they ship inside the APK and
 # are read straight out of the asset manager by WhisperOnnxEngine, so this script is a
 # build-host tool for updating a vendored dependency, not a mirror-staging step.
 #
-# Upstream is HuggingFace onnx-community/whisper-tiny, which is an ONNX Runtime *dynamic*
-# int8 quantization of openai/whisper-tiny. We consume it as-is: onnx2ncnn cannot read
+# Upstream is HuggingFace onnx-community/whisper-base, which is an ONNX Runtime *dynamic*
+# int8 quantization of openai/whisper-base. We consume it as-is: onnx2ncnn cannot read
 # DynamicQuantizeLinear/MatMulInteger/ConvInteger, so there is no ncnn conversion path.
 #
 # The four files below are the whole runtime surface:
-#   encoder_model_int8.onnx         audio -> 1500x384 hidden states
+#   encoder_model_int8.onnx         audio -> 1500x512 hidden states
 #   decoder_model_merged_int8.onnx  KV-cached greedy decode (use_cache_branch switches)
 #   vocab.json                      id -> token, for byte-level decode (no merges: decode only)
 #   generation_config.json          lang_to_id, suppress_tokens, special ids
@@ -25,15 +25,17 @@
 #
 set -euo pipefail
 
-REPO="onnx-community/whisper-tiny"
-REVISION="main"
+REPO="onnx-community/whisper-base"
+# Pinned, as the PP-OCR and Piper fetchers are: `main` moving under us would change the
+# weights without changing this script.
+REVISION="1846881b6b3a3024392c1eea3ad983695bc23925"
 BASE="https://huggingface.co/${REPO}/resolve/${REVISION}"
-DEST="speech/src/main/assets/whisper-tiny"
+DEST="speech/src/main/assets/whisper-base"
 
 # path-at-upstream  sha256
 FILES=(
-  "onnx/encoder_model_int8.onnx        03ff3c99ce804f79a42afd6212c9492eb75e55625926de66f8fc192e9567d336"
-  "onnx/decoder_model_merged_int8.onnx 25e807a962b6349356d0ea5d0dfe530b7e5bf0e2a484aeca0359d03143faddd3"
+  "onnx/encoder_model_int8.onnx        ca6177401f86a2c6b4dc5f7fc02fbca680678906bd0c22f6d89f0b80f124253f"
+  "onnx/decoder_model_merged_int8.onnx fa3ef9902734ce5ae6f9ef2bdb2ba9a6c4b5785b09f4f420ce036573dc9d090b"
   "vocab.json                          50d6a919f0a0601d56a04eb583c780d18553aa388254ba3158eb6a00f13e2c1a"
   "generation_config.json              f5c67e5a4f7102f8cb4d058bc95da276bbc19eeec997267c3bb0f25ef68facd1"
 )

@@ -3,7 +3,7 @@ package com.vayunmathur.speech.util
 import android.content.Context
 
 /**
- * Asset location of the offline **Whisper-tiny** (multilingual, ~99 languages) recogniser.
+ * Asset location of the offline **Whisper-base** (multilingual, ~99 languages) recogniser.
  *
  * These files used to be a 117 MB runtime download of the ncnn conversion. They are now the int8
  * ONNX export bundled in the APK under `assets/`[DIR] and read by [WhisperOnnxEngine], so there
@@ -11,7 +11,7 @@ import android.content.Context
  * `scripts/speech/fetch_whisper_onnx.sh` for how the vendored copies are refreshed.
  */
 object WhisperModel {
-    const val DIR = "whisper-tiny"
+    const val DIR = "whisper-base"
 
     /**
      * True if the bundled models are readable. Barring a corrupt install this is always true;

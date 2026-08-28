@@ -33,7 +33,7 @@ dependencies {
     // bin search and a quadratic solve per phoneme. Voices are extracted to disk before use.
     implementation(project(":library:ml"))
 
-    // Speech-to-text is whisper-tiny int8 ONNX (bundled in assets, see WhisperOnnxEngine).
+    // Speech-to-text is whisper-base int8 ONNX (bundled in assets, see WhisperOnnxEngine).
     // It is not ncnn: onnx2ncnn has no DynamicQuantizeLinear/MatMulInteger/ConvInteger
     // support, and the AAR's Whisper expects a six-net decomposition HF does not export.
     //

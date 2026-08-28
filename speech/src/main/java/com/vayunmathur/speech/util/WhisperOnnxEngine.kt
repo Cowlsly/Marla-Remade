@@ -10,8 +10,8 @@ import java.nio.LongBuffer
 import org.json.JSONObject
 
 /**
- * Offline **whisper-tiny** speech recognition on ONNX Runtime, reading the int8 models straight
- * out of the APK's assets (see `speech/src/main/assets/whisper-tiny/`, refreshed by
+ * Offline **whisper-base** speech recognition on ONNX Runtime, reading the int8 models straight
+ * out of the APK's assets (see `speech/src/main/assets/whisper-base/`, refreshed by
  * `scripts/speech/fetch_whisper_onnx.sh`).
  *
  * Replaces the old ncnn `Whisper` AAR path, which needed a 117 MB runtime download. `onnx2ncnn`
@@ -76,7 +76,7 @@ class WhisperOnnxEngine(private val context: Context) {
         if (loadFailed) return false
         return try {
             val opts = OrtSession.SessionOptions().apply {
-                // Whisper-tiny is small; two threads is a reasonable latency/battery balance.
+                // Whisper-base is still small; two threads is a reasonable latency/battery balance.
                 setIntraOpNumThreads(2)
                 setInterOpNumThreads(1)
             }
@@ -327,14 +327,18 @@ class WhisperOnnxEngine(private val context: Context) {
     private companion object {
         const val TAG = "WhisperOnnxEngine"
 
-        const val DIR = "whisper-tiny"
+        const val DIR = "whisper-base"
         const val ENCODER = "encoder_model_int8.onnx"
         const val DECODER = "decoder_model_merged_int8.onnx"
         const val VOCAB = "vocab.json"
         const val GEN_CONFIG = "generation_config.json"
 
-        const val N_LAYERS = 4
-        const val N_HEADS = 6L
+        // whisper-base: 6 encoder and 6 decoder layers, 8 heads of 64. These size the KV cache
+        // buffers below, so a stale value does not fail cleanly - it feeds the session a
+        // wrong-shaped past and the decode wanders. Read from the export''s config.json:
+        // d_model 512, encoder_layers 6, decoder_layers 6, attention heads 8.
+        const val N_LAYERS = 6
+        const val N_HEADS = 8L
         const val HEAD_DIM = 64L
 
         /** One 30 s window cannot say more than this; guards against a runaway loop. */
