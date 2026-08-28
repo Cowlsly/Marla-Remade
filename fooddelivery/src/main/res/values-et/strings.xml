@@ -73,4 +73,13 @@
     <string name="no_orders_yet">Tellimusi veel pole</string>
     <string name="your_order_history_will_appear_here">Sinu tellimus saadab olema nähtav siin</string>
     <string name="notif_status_eta">%1$s · %2$d min</string>
+    <string name="search_menu">Otsi menüüst</string>
+    <string name="no_menu_items_match">Ükski menüükirje ei vasta otsingule „%1$s“</string>
+    <string name="rewards">Boonused</string>
+    <string name="rewards_available">Siin on saadaval boonus summas %1$s</string>
+    <string name="no_rewards_here_yet">Siin restoranis pole veel boonuseid saadaval</string>
+    <string name="mark_picked_up">Märgi kaasavõetuks</string>
+    <string name="promo_code_optional">Reklaamkood (kui on saadaval)</string>
+    <string name="calculating_tax_fees">Arvutan makse ja teenustasusid…</string>
+    <string name="estimated_tax">Hinnangulised maksud</string>
 </resources>
