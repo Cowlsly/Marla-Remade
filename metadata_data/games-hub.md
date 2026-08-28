@@ -1,3 +1,10 @@
 A hub for all the MA games
 
-Central hub for viewing your achievements and progress in all the games you play. Level up your MA GameHub profile by playing games and earning achievements!
+Features:
+- See your achievements and progress across every MA game you play
+- Level up a GameHub profile by playing games and earning achievements
+- Daily streaks and an activity feed
+- Per-game detail and a player profile
+- Games report in over local IPC, so nothing leaves your device
+
+100% offline

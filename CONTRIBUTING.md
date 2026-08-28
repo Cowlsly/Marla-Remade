@@ -19,3 +19,20 @@ Genral Policies
 Styling rules
 - All icons should have a function declared for them in Icons.kt
   - Do not use Icon() or painterResource anywhere
+
+Store metadata
+- Every app module needs a `metadata_data/<module-key>.md`, where the module key is the Gradle
+  path with `/` replaced by `-` (so `games/voxels` is `games-voxels.md`)
+- The format is strict, and `./gradlew checkMetadata` enforces it:
+  - Line 1 is the short description, at most 80 characters - Play and F-Droid cap it there
+  - Line 2 is blank
+  - Line 3 is exactly `Features:`
+  - Then one or more `- ` bullets, and nothing else
+  - Then a blank line, then a single line saying what the app needs the network for, exactly
+    one of `100% offline`, `Requires internet`,
+    `Internet required only for initial asset downloads`, or
+    `Internet only used for: <feature(s)>`
+- Use `Internet only used for:` only when the app still mostly works without a connection
+- Claims here must match the code - the connectivity line in particular is checked against the
+  INTERNET permission and the hosts the app actually contacts, including ones merged in from
+  library modules

@@ -5,5 +5,7 @@ Features:
 - Live hydration total against a daily goal
 - Per-sip history as readings arrive from the bottle
 - Scan, pair and disconnect from the app
-- No account, no cloud sync — readings stay on your phone
+- No account, no cloud sync - readings stay on your phone
 - Material You design with dynamic theming
+
+100% offline

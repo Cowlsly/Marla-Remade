@@ -1,9 +1,10 @@
 A fully offline speech-to-text and text-to-speech app
 
 Features:
-- Offline speech recognition using Whisper (tiny model)
+- Offline speech recognition using Whisper, bundled in the app
 - Offline TTS using Piper (VITS voices)
-- Runs entirely on-device with no network calls after model download
-- Works as system SpeechRecognizer and TTS service
+- Works as the system SpeechRecognizer and TTS service
+- Around 29 languages of TTS voices, fetched on demand and SHA-256 pinned
+- Runs entirely on device with no network calls once a voice is installed
 
-Models are downloaded at runtime from a transparent mirror and are SHA-256 pinned.
+Internet required only for initial asset downloads

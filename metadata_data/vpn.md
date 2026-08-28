@@ -1,8 +1,10 @@
 A simple, open-source VPN client with WireGuard support
 
 Features:
-- WireGuard protocol via native Rust library
+- WireGuard protocol via a native Rust library
+- Import your own WireGuard config manually
 - Per-app VPN bypass list
-- Manual WireGuard config import
 - Connection logging
 - Material You design with dynamic theming
+
+Requires internet

@@ -1,17 +1,12 @@
 A search engine for music that can download what you find
 
-Browse the MusicBrainz catalogue - the open music encyclopedia - and download anything
-you do not already own.
-
 Features:
-- Search albums, artists and songs
-- Browse an artist's full discography, every edition of an album, and its tracklist
-- See at a glance which songs you already have on your device
+- Search albums, artists and songs in the MusicBrainz catalogue
+- Browse an artist's discography, every edition of an album, and its tracklist
+- See at a glance which songs you own, worked out from your own files' tags
 - Download single songs or a whole album at once
-- Audio comes from YouTube, or from Tidal if you sign in to your account for better sources
-- Songs are saved as Opus, tagged with title, artist, album, track number, cover art and lyrics
-- Files are saved into a folder you choose, so any music player can see them
+- Audio from YouTube, or from Tidal if you sign in for better sources
+- Saved as Opus and tagged with title, artist, album, track, cover art and lyrics
+- Files saved into a folder you choose, so any music player can see them
 
-Which songs you already own is worked out by reading the tags on the files in your music
-folder, not by tracking what this app downloaded. Music you ripped, bought or got
-anywhere else counts too.
+Requires internet

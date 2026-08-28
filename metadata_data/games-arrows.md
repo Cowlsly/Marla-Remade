@@ -1,6 +1,11 @@
 A tidy-up puzzle about the order you clear things in
 
-Every arrow flies off the board in the direction it points, but only if nothing is
-in its way. Work out which one can go first. One level is open at a time, plus a
-fresh daily board, and later levels add redirectors that bend an arrow's path.
-Every board is built so that it can be cleared.
+Features:
+- Every arrow flies off the board, but only if nothing is in its way
+- One level open at a time, with boards growing from 5x6 up to 9x12
+- Redirectors from level 11 that bend an arrow's path
+- A fresh daily board, generated on device from the date
+- Three hearts per board, plus an optional escape-route overlay
+- Every board is built so that it can be cleared
+
+100% offline

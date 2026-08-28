@@ -6,3 +6,5 @@ Features:
 - View the EID and eUICC information
 - Manage pending eUICC notifications
 - SGP.22 protocol core implemented natively in Rust
+
+Internet only used for: downloading new eSIM profiles from your carrier

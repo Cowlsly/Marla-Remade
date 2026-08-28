@@ -4,5 +4,7 @@ Features:
 - Follows system light/dark theme and Material You dynamic colors
 - Adjustable key height
 - Emoji support
-- No network access, fully offline
 - Minimal, distraction-free typing
+- No network permission at all
+
+100% offline

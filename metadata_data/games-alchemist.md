@@ -1,5 +1,9 @@
-Start with the four basic elements and create anything!
+Start with the four basic elements and create anything
 
-Inspired by other games from the alchemy genre, but this one is open source.
+Features:
+- Combine elements to discover new ones, inspired by the alchemy genre
+- The whole element and combination tree is bundled in the app
+- Achievements, with progress reported to MA GameHub
+- Assets sourced from Little Alchemy 2
 
-Assets sourced from little alchemy 2
+100% offline

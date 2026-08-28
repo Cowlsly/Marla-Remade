@@ -3,5 +3,8 @@ A simple, open-source PDF viewing app
 Features:
 - Search for text
 - Print (through the share menu)
+- Native Rust PDF engine
+- Several documents open as separate entries in Recents
+- No network permission at all
 
-PDF editing coming soon
+100% offline

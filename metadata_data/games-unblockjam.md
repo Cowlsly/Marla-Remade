@@ -1,3 +1,9 @@
-A private and open source version of the classic board game "Rush Hour"
+A private and open source version of the classic board game Rush Hour
 
-250 levels for you to play through increasing in difficulty. Try and find the optimal solution for each of them!
+Features:
+- 250 levels to play through, increasing in difficulty
+- Each level records its optimal move count, so you can try to match it
+- A daily generated level, checked by an on-device solver
+- Translated into 19 languages
+
+100% offline

@@ -3,8 +3,8 @@ A fully offline translation app with camera OCR
 Features:
 - Offline neural translation using SMaLL-100 (ncnn)
 - Camera translation with on-device OCR
-- Text translation from any app via the selection menu
+- Translate text from any app via the selection menu
 - Supports dozens of languages entirely offline
-- No network calls after model download
+- Model files (~1.2 GB) fetched once and SHA-256 verified
 
-Model files (~1.2 GB) are downloaded once from a transparent mirror and are SHA-256 verified.
+Internet required only for initial asset downloads

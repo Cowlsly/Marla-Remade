@@ -65,6 +65,12 @@ jobs:
           } >> ~/.gradle/gradle.properties
           echo "CI gradle overrides:" && cat ~/.gradle/gradle.properties
 
+      # First thing the release actually checks. The store listings under metadata_data/ are
+      # consumed by "Prepare F-Droid Metadata" below, and a malformed one only shows up as a
+      # rejected listing at publish time, so fail here instead - before anything is built.
+      - name: Check Store Metadata
+        run: ./gradlew checkMetadata --console=plain
+
       - name: Read and Inject Version
         id: version_info
         run: |

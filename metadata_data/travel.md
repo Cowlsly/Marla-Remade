@@ -6,4 +6,6 @@ Features:
 - Seat map selection
 - Ancillaries and offers
 - Order management and trip tracking
-- Offline Room-backed trip storage
+- Trips stored on device, so booked plans stay readable
+
+Requires internet

@@ -1,3 +1,11 @@
 Mirror your screen to your TV, with no internet needed
-Mirror your phone's screen to an Android TV or Google TV over your Wi-Fi, from the app or from a Quick Settings tile. Install the MA Cast receiver on the TV, type the six-digit code it shows once, and it connects silently from then on.
-Both halves of the protocol are here, which is what makes the rest possible: the TV reports what its decoder can actually take, so the phone sends its own screen shape at full resolution and the TV letterboxes it rather than the phone wasting most of the frame on black bars. The session is encrypted, the pairing code is bound to the handshake so it cannot be relayed by a device in the middle, and nothing contacts a server - neither device needs internet access at all.
+
+Features:
+- Mirror your phone to an Android TV or Google TV over your own Wi-Fi
+- Start and stop from the app or from a Quick Settings tile
+- Audio captured and streamed alongside the video
+- The TV reports what its decoder accepts, so the phone sends full resolution
+- Encrypted session, with the pairing code bound to the handshake
+- Other apps can hand media off to the TV through it
+
+100% offline

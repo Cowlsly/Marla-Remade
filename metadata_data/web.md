@@ -1,10 +1,12 @@
 A privacy-focused open-source web browser with PWA support
 
 Features:
-- DuckDuckGo search by default (locked for privacy)
-- Ad-tracker blocking (doubleclick, googletagmanager, analytics)
-- PWA installation with standalone activity (no browser chrome)
+- Shields with a bundled filter list, so ad and tracker blocking works at once
+- Fingerprint randomisation and per-site shield controls
+- Pick your search engine, defaulting to DuckDuckGo
+- PWA installation with a standalone activity (no browser chrome)
 - Bookmarks, history, and downloads management
 - Per-site permission and storage controls
-- Private tabs with no persistence
-- Desktop mode toggle
+- Private tabs with no persistence, and a desktop mode toggle
+
+Requires internet

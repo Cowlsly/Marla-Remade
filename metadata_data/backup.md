@@ -6,4 +6,6 @@ Features:
 - Back up to a WebDAV / Nextcloud remote
 - Encrypted photo, video, and audio backup on a schedule
 - System app-data backup transport (on a compatible platform-signed install)
-- Restore from your recovery code alone — no account required
+- Restore from your recovery code alone - no account required
+
+Internet only used for: backing up to a WebDAV / Nextcloud remote
