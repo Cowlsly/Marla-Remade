@@ -1,0 +1,73 @@
+#version 450
+//! A convolution whose weights are int8, dequantised by one per-tensor scale.
+//!
+//! `out[o][y][x] = act(scale * sum(int8_w * in) + bias)`
+//!
+//! # Why int8 at all
+//!
+//! Only where the weights dominate a download. SMaLL-100 is 330 million parameters: 660 MB at
+//! fp16 and 330 MB here, against the 1.14 GB the ncnn build of the same model shipped. Every
+//! other network in this runtime is small enough that fp16 costs nothing worth reclaiming, and
+//! they keep using `conv.comp`.
+//!
+//! # What is quantised and what is not
+//!
+//! Weights only. The export quantises its activations too, dynamically, per tensor — a
+//! `DynamicQuantizeLinear` before every `MatMulInteger`, with a zero point to carry the
+//! asymmetry. This does not, and that is both simpler and *more* accurate: activations stay
+//! fp16 in the arena, so the only error introduced is the weights'. It costs nothing, because
+//! the weights are what take the space.
+//!
+//! Read from the export rather than assumed: the weight zero point is a scalar **0**, so the
+//! quantisation is symmetric and a value is just `int8 * scale`.
+//!
+//! # The scale multiplies once
+//!
+//! Because the scale is one number for the whole tensor, it applies to the finished
+//! accumulator rather than to every tap — so the inner loop is an integer-to-float convert and
+//! a multiply-add, exactly as many operations as the fp16 version. A per-channel scale would
+//! also work this way; a per-tap one would not, which is why the rank was checked.
+//!
+//! `p.act_weight` holds the scale's own offset in the weights buffer, as an fp16 element index.
+//! `p.weight` holds the int8 tensor's offset as a **32-bit word** index, because that is the
+//! view it is unpacked through.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint oc, oy, ox;
+    unpack(index, oc, oy, ox);
+
+    uint per_group = p.in_c / p.group;
+    uint group = oc / (p.out_c / p.group);
+    uint base = group * per_group;
+
+    float total = 0.0;
+    for (uint ic = 0u; ic < per_group; ic++) {
+        uint channel = base + ic;
+        for (uint ky = 0u; ky < p.kh; ky++) {
+            int iy = int(oy * p.stride_h + ky * p.dil_h) - int(p.pad_t);
+            if (iy < 0 || iy >= int(p.in_h)) {
+                continue;
+            }
+            for (uint kx = 0u; kx < p.kw; kx++) {
+                int ix = int(ox * p.stride_w + kx * p.dil_w) - int(p.pad_l);
+                if (ix < 0 || ix >= int(p.in_w)) {
+                    continue;
+                }
+                uint at = ((oc * per_group + ic) * p.kh + ky) * p.kw + kx;
+                float value =
+                    float(arena[p.in0 + (channel * p.in_h + uint(iy)) * p.in_w + uint(ix)]);
+                total += float(int8_at(p.weight, at)) * value;
+            }
+        }
+    }
+
+    float scale = float(weights[p.act_weight]);
+    float biased = total * scale + float(weights[p.bias + oc]);
+    arena[p.out_at + index] = float16_t(activate(biased, p.act, oc));
+}

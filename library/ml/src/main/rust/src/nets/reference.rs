@@ -191,6 +191,10 @@ impl Reference {
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
                     Kind::Embed => self.embed(push),
                     Kind::GatedTanh => self.gated_tanh(push),
+                    // The reference interpreter holds its weights as `f32`, so there is no
+                    // byte view to unpack: an int8 plan can be built and inspected on the
+                    // host but not run. `scripts/ml/onnx_parity.py` checks it on a device.
+                    Kind::ConvInt8 => Err("int8 convolution has no host reference".into()),
                     Kind::FlipChannels => self.flip_channels(push),
                 },
             };
@@ -853,6 +857,13 @@ impl Given {
 }
 
 impl WeightSource for Given {
+    /// Int8 is not exercised by the host fixtures: the reference interpreter reads its
+    /// weights as `f32`, so there is nothing for a byte view to be a view *of*. The int8
+    /// path is checked against the export by `scripts/ml/onnx_parity.py` instead.
+    fn shaped_words(&self, index: usize, _dims: &[u32]) -> Result<u32, String> {
+        Err(format!("tensor {index}: this fixture holds no int8"))
+    }
+
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         let declared: u64 = dims.iter().map(|&d| d as u64).product();
         let length = *self
@@ -914,6 +925,11 @@ impl Invented {
 }
 
 impl WeightSource for Invented {
+    /// As [`Given`]: int8 has nothing to mean here, since this fixture invents `f32`.
+    fn shaped_words(&self, index: usize, _dims: &[u32]) -> Result<u32, String> {
+        Err(format!("tensor {index}: this fixture invents fp32, not int8"))
+    }
+
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         let mut state = self.state.borrow_mut();
         if let Some(Some(offset)) = state.offsets.get(index).copied() {

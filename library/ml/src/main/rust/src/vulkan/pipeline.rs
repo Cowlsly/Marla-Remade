@@ -47,11 +47,12 @@ const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
 const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
 const GATED_TANH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gated_tanh.comp.spv"));
+const CONV_INT8: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv_int8.comp.spv"));
 const FLIP_CHANNELS: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 20] = [
+const SPIRV: [&[u8]; 21] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -72,6 +73,7 @@ const SPIRV: [&[u8]; 20] = [
     EMBED,
     GATED_TANH,
     FLIP_CHANNELS,
+    CONV_INT8,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -115,6 +117,7 @@ pub struct Pipelines {
     embed: vk::Pipeline,
     gated_tanh: vk::Pipeline,
     flip_channels: vk::Pipeline,
+    conv_int8: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -151,6 +154,13 @@ impl Pipelines {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            // The weights again, viewed as 32-bit words so int8 tensors can be unpacked
+            // without `VK_KHR_8bit_storage`. Same buffer as binding 1; see `common.glsl`.
+            vk::DescriptorSetLayoutBinding::default()
+                .binding(2)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::COMPUTE),
         ];
         let descriptor_layout = device
             .create_descriptor_set_layout(
@@ -164,7 +174,7 @@ impl Pipelines {
 
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(2)];
+            .descriptor_count(3)];
         let descriptor_pool = device
             .create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
@@ -203,6 +213,13 @@ impl Pipelines {
             vk::WriteDescriptorSet::default()
                 .dst_set(descriptor_set)
                 .dst_binding(1)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(std::slice::from_ref(&weights_info)),
+            // Binding 2 is the same buffer as binding 1, viewed as 32-bit words so that int8
+            // tensors can be unpacked. Both are read-only, so aliasing them is safe.
+            vk::WriteDescriptorSet::default()
+                .dst_set(descriptor_set)
+                .dst_binding(2)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(std::slice::from_ref(&weights_info)),
         ];
@@ -257,6 +274,7 @@ impl Pipelines {
             embed,
             gated_tanh,
             flip_channels,
+            conv_int8,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -293,6 +311,7 @@ impl Pipelines {
             embed,
             gated_tanh,
             flip_channels,
+            conv_int8,
         })
     }
 
@@ -319,6 +338,7 @@ impl Pipelines {
             Kind::Embed => self.embed,
             Kind::GatedTanh => self.gated_tanh,
             Kind::FlipChannels => self.flip_channels,
+            Kind::ConvInt8 => self.conv_int8,
         }
     }
 
@@ -347,6 +367,7 @@ impl Pipelines {
             self.embed,
             self.gated_tanh,
             self.flip_channels,
+            self.conv_int8,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

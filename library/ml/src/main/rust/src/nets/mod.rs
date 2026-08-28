@@ -243,6 +243,13 @@ pub enum Kind {
     GatedTanh,
     /// `out[c] = in[C - 1 - c]`, a channel reversal. VITS''s `Flip` between coupling layers.
     FlipChannels,
+    /// [`Kind::Conv`] with int8 weights and one per-tensor dequantisation scale.
+    ///
+    /// Only for a network where the weights dominate the download. The scale multiplies the
+    /// finished accumulator rather than every tap, so the inner loop costs what fp16 costs;
+    /// activations stay fp16, which is simpler than the export''s dynamic quantisation and
+    /// strictly more accurate. [`Push::weight`] is a **word** offset here, not an fp16 one.
+    ConvInt8,
     /// `out[c][t] = table[id(t)][c]`, an embedding lookup.
     ///
     /// The only op here whose addresses depend on the data. Ids arrive as an ordinary fp16
@@ -420,6 +427,12 @@ impl Plan {
 pub trait WeightSource {
     /// The fp16 element offset of tensor `index`, which must have shape `dims`.
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String>;
+    /// The **32-bit word** offset of tensor `index`, for an int8 tensor.
+    ///
+    /// Int8 weights are read through a `uint` view of the same buffer, four bytes at a time,
+    /// so their offsets are word indices rather than fp16 element indices. See
+    /// [`crate::weights::Tensor::word_offset`].
+    fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String>;
 
     /// How many tensors there are, so a builder can insist it consumed all of them.
     fn count(&self) -> usize;
@@ -428,6 +441,13 @@ pub trait WeightSource {
 impl WeightSource for crate::weights::Weights {
     fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
         Ok(crate::weights::Weights::shaped(self, index, dims)?.elem_offset())
+    }
+    fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
+        let found = crate::weights::Weights::shaped(self, index, dims)?;
+        if !found.int8 {
+            return Err(format!("tensor {index} is fp16, but the pass wants int8"));
+        }
+        Ok(found.word_offset())
     }
 
     fn count(&self) -> usize {
@@ -535,6 +555,19 @@ enum Node {
         input: Id,
         out: Id,
         start: u32,
+    },
+    ConvInt8 {
+        input: Id,
+        out: Id,
+        weight: u32,
+        scale: u32,
+        bias: u32,
+        kernel: (u32, u32),
+        stride: (u32, u32),
+        dilation: (u32, u32),
+        pad: (u32, u32),
+        group: u32,
+        act: Act,
     },
     AttnApply {
         probs: Id,
@@ -683,6 +716,81 @@ impl<'a> Builder<'a> {
             act,
             act_weight,
             transpose: false,
+        });
+        out
+    }
+
+    /// [`Builder::conv`] with int8 weights and a per-tensor dequantisation scale.
+    ///
+    /// Three tensors rather than two: the int8 kernel at `weight_index`, a one-element fp16
+    /// scale after it, and the fp16 bias after that. The scale is its own tensor because a
+    /// `.maml` table entry is already full at 32 bytes, and a companion tensor needs no
+    /// format version bump.
+    ///
+    /// `Act::PRelu` is refused: it would need a second weights offset and the push block has
+    /// one spare, which the scale is using.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conv_int8(
+        &mut self,
+        input: Id,
+        weight_index: usize,
+        m: u32,
+        kernel: (u32, u32),
+        stride: (u32, u32),
+        dilation: (u32, u32),
+        pads: (u32, u32, u32, u32),
+        group: u32,
+        act: Act,
+    ) -> Id {
+        let in_shape = self.shape_of(input);
+        let (kh, kw) = kernel;
+        let splits =
+            group != 0 && in_shape.c.is_multiple_of(group) && m.is_multiple_of(group);
+        if !splits {
+            self.fail(format!(
+                "tensor {weight_index}: {} in / {m} out channels do not split into \
+                 {group} groups",
+                in_shape.c
+            ));
+        }
+        if let Act::PRelu(_) = act {
+            self.fail(format!(
+                "tensor {weight_index}: an int8 convolution cannot carry a PRelu, whose \
+                 per-channel slope would need the offset the scale occupies"
+            ));
+        }
+        let per_group = in_shape.c.checked_div(group).unwrap_or(0);
+        let weight = match self.weights.shaped_words(weight_index, &[m, per_group, kh, kw]) {
+            Ok(offset) => {
+                if let Some(slot) = self.read.get_mut(weight_index) {
+                    *slot = true;
+                }
+                offset
+            }
+            Err(e) => {
+                self.fail(e);
+                0
+            }
+        };
+        let scale = self.weight(weight_index + 1, &[1]);
+        let bias = self.weight(weight_index + 2, &[m]);
+
+        let (pad_t, pad_l, pad_b, pad_r) = pads;
+        let out_h = conv_out(in_shape.h, kh, stride.0, dilation.0, pad_t + pad_b);
+        let out_w = conv_out(in_shape.w, kw, stride.1, dilation.1, pad_l + pad_r);
+        let out = self.tensor(Shape::new(m, out_h, out_w));
+        self.nodes.push(Node::ConvInt8 {
+            input,
+            out,
+            weight,
+            scale,
+            bias,
+            kernel,
+            stride,
+            dilation,
+            pad: (pad_t, pad_l),
+            group,
+            act,
         });
         out
     }
@@ -1228,6 +1336,54 @@ impl<'a> Builder<'a> {
         ops: &mut Vec<Op>,
     ) -> Result<(), String> {
         match node {
+            Node::ConvInt8 {
+                input,
+                out,
+                weight,
+                scale,
+                bias,
+                kernel,
+                stride,
+                dilation,
+                pad,
+                group,
+                act,
+            } => {
+                let (si, so) = (shape(*input), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::ConvInt8,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        // A word offset, not an fp16 one: int8 is unpacked through the
+                        // 32-bit view of the weights buffer.
+                        weight: *weight,
+                        bias: *bias,
+                        // The dequantisation scale rides in the field `PRelu` would use,
+                        // which is why the two cannot be combined.
+                        act_weight: *scale,
+                        in_c: si.c,
+                        in_h: si.h,
+                        in_w: si.w,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        kh: kernel.0,
+                        kw: kernel.1,
+                        stride_h: stride.0,
+                        stride_w: stride.1,
+                        dil_h: dilation.0,
+                        dil_w: dilation.1,
+                        pad_t: pad.0,
+                        pad_l: pad.1,
+                        group: *group,
+                        act: act.code(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::Conv {
                 input,
                 out,
@@ -1657,6 +1813,7 @@ impl Node {
             | Node::GatedTanh { out, .. }
             | Node::FlipChannels { out, .. }
             | Node::SliceChannels { out, .. }
+            | Node::ConvInt8 { out, .. }
             | Node::AttnApply { out, .. }
             | Node::Concat { out, .. } => *out,
         }
@@ -1676,6 +1833,7 @@ impl Node {
             | Node::GatedTanh { input, .. }
             | Node::FlipChannels { input, .. }
             | Node::SliceChannels { input, .. }
+            | Node::ConvInt8 { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::AttnScores { q: a, k: b, .. }
@@ -1810,6 +1968,10 @@ pub(crate) mod tests {
             self.asked.borrow_mut().push((index, dims.to_vec()));
             Ok(index as u32)
         }
+        fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
+            self.asked.borrow_mut().push((index, dims.to_vec()));
+            Ok(index as u32)
+        }
 
         fn count(&self) -> usize {
             self.count
@@ -1855,6 +2017,8 @@ pub(crate) mod tests {
                         // One id per position, so the read is `out_w` and not `dense` —
                         // `dense` here would be the *table's* row count.
                         Kind::Embed => vec![(push.in0, push.out_w)],
+                        // As `Conv`: the whole input plane, whatever the kernel touches.
+                        Kind::ConvInt8 => vec![(push.in0, dense)],
                         // Twice what it writes: the filter half and the gate half.
                         Kind::GatedTanh => vec![(push.in0, written * 2)],
                         _ => vec![(push.in0, dense)],
@@ -1956,6 +2120,9 @@ pub(crate) mod tests {
         struct Wrong;
         impl WeightSource for Wrong {
             fn shaped(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
+                Err(format!("tensor {index} is not {dims:?}"))
+            }
+            fn shaped_words(&self, index: usize, dims: &[u32]) -> Result<u32, String> {
                 Err(format!("tensor {index} is not {dims:?}"))
             }
             fn count(&self) -> usize {

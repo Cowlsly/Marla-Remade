@@ -42,6 +42,18 @@ layout(std430, binding = 0) buffer Arena {
 layout(std430, binding = 1) readonly buffer Weights {
     float16_t weights[];
 };
+// The same buffer as binding 1, viewed as 32-bit words.
+//
+// Int8 weights are unpacked from here four at a time. A byte view would be tidier but needs
+// `VK_KHR_8bit_storage`, an extension on top of the fp16 one this runtime already requires,
+// and every extra requirement narrows the devices that can run at all. 32-bit storage is
+// universal.
+//
+// Aliasing one buffer through two descriptors is allowed, and both are read-only, so there is
+// no write hazard between the views.
+layout(std430, binding = 2) readonly buffer Weights32 {
+    uint weights32[];
+};
 
 layout(push_constant) uniform Push {
     uint in0;
@@ -103,6 +115,17 @@ uint global_index() {
 // `channel` is the output channel, needed only by PReLU, whose slope is one value per
 // channel at `p.act_weight` in the weights buffer. Passing it unconditionally costs a
 // register and keeps one signature.
+/// One signed byte of an int8 tensor, by element index.
+///
+/// `base` is the tensor's start as a 32-bit word index; `index` is the element within it.
+/// `bitfieldExtract` on a *signed* integer sign-extends, which is what turns the byte back into
+/// -128..127 rather than 0..255 — reading it unsigned would make every negative weight large
+/// and positive, which trains-looking output would not reveal.
+int int8_at(uint base, uint index) {
+    uint word = weights32[base + (index >> 2u)];
+    return bitfieldExtract(int(word), int((index & 3u) << 3u), 8);
+}
+
 float activate(float x, uint kind, uint channel) {
     if (kind == ACT_RELU) {
         return max(x, 0.0);

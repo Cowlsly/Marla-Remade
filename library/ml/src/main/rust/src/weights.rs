@@ -22,6 +22,22 @@ const FORMAT_VERSION: u32 = 1;
 const HEADER_BYTES: usize = 64;
 const TENSOR_ENTRY_BYTES: usize = 32;
 const DTYPE_F16: u32 = 0;
+
+/// Signed 8-bit, with a **separate** scale tensor beside it.
+///
+/// Used only where the weights dominate the download and fp16 would double it: SMaLL-100 is
+/// 330 million parameters, which is 660 MB at fp16 and 330 MB here.
+///
+/// The quantisation is symmetric — zero point 0 — and the scale is per tensor, both read from
+/// the export rather than assumed. So a value is `int8 * scale`, and because the scale is one
+/// number for the whole tensor it multiplies the *accumulator* once rather than every tap. The
+/// scale lives in its own fp16 tensor because a table entry is already 32 bytes with no room
+/// for it, and a companion tensor needs no format version bump.
+///
+/// Activations stay fp16. The export quantises them too, dynamically, per tensor; not doing
+/// that is both simpler and strictly more accurate, and it saves nothing to copy since the
+/// weights are what take the space.
+const DTYPE_I8: u32 = 1;
 /// Every tensor starts on this boundary, so an offset is a valid fp16 index too.
 const ALIGNMENT: u32 = 16;
 
@@ -70,12 +86,24 @@ pub struct Tensor {
     pub offset: u32,
     /// Elements, not bytes.
     pub len: u32,
+    /// True when the payload is [`DTYPE_I8`] rather than fp16, so one byte per element.
+    pub int8: bool,
 }
 
 impl Tensor {
     /// The offset as an fp16 **element** index, which is how the shaders address it.
     pub fn elem_offset(&self) -> u32 {
         self.offset / 2
+    }
+
+    /// The offset as a 32-bit **word** index, which is how an int8 tensor is addressed.
+    ///
+    /// Int8 weights are read through a `uint` view of the same buffer and unpacked four at a
+    /// time, because a byte view would need `VK_KHR_8bit_storage` — an extension on top of the
+    /// fp16 one this runtime already requires, and every extra requirement narrows the fleet.
+    /// `ALIGNMENT` is 16, so a tensor always starts on a word boundary.
+    pub fn word_offset(&self) -> u32 {
+        self.offset / 4
     }
 }
 
@@ -153,9 +181,11 @@ impl Weights {
                 u32(bytes, at + 16),
             ];
             let dtype = u32(bytes, at + 20);
-            if dtype != DTYPE_F16 {
-                return Err(format!("tensor {i} has dtype {dtype}, only fp16 is read"));
-            }
+            let stride = match dtype {
+                DTYPE_F16 => 2u64,
+                DTYPE_I8 => 1,
+                other => return Err(format!("tensor {i} has dtype {other}, expected fp16 or int8")),
+            };
             let offset = u32(bytes, at + 24);
             let len = u32(bytes, at + 28);
 
@@ -166,13 +196,13 @@ impl Weights {
             if !offset.is_multiple_of(ALIGNMENT) {
                 return Err(format!("tensor {i} is at {offset}, not {ALIGNMENT}-aligned"));
             }
-            let end = (offset as u64) + (len as u64) * 2;
+            let end = (offset as u64) + (len as u64) * stride;
             if end > data_len as u64 {
                 return Err(format!(
                     "tensor {i} spans {offset}..{end} of a {data_len}-byte data section"
                 ));
             }
-            tensors.push(Tensor { rank, dims, offset, len });
+            tensors.push(Tensor { rank, dims, offset, len, int8: dtype == DTYPE_I8 });
         }
 
         Ok(Weights {
@@ -294,16 +324,94 @@ mod tests {
         assert_eq!(weights.len(), 2);
         assert_eq!(
             weights.tensor(0).expect("first"),
-            Tensor { rank: 4, dims: [2, 1, 1, 1], offset: 0, len: 2 }
+            Tensor { rank: 4, dims: [2, 1, 1, 1], offset: 0, len: 2, int8: false }
         );
         // Tensor 0 is 4 bytes but the next starts at 16: the alignment the shaders
         // rely on, and the arithmetic most likely to be got wrong.
         assert_eq!(
             weights.tensor(1).expect("second"),
-            Tensor { rank: 1, dims: [3, 0, 0, 0], offset: 16, len: 3 }
+            Tensor { rank: 1, dims: [3, 0, 0, 0], offset: 16, len: 3, int8: false }
         );
         assert_eq!(weights.tensor(1).expect("second").elem_offset(), 8);
         assert_eq!(weights.data().len(), 16 + 6);
+    }
+
+    #[test]
+    fn an_int8_tensor_reads_back_with_a_byte_stride_and_a_word_offset() {
+        // Hand-built, because `write` above only emits fp16. One int8 tensor of five bytes,
+        // then an fp16 scale after it — the layout `Builder::conv_int8` expects.
+        let mut table = Vec::new();
+        let mut data: Vec<u8> = Vec::new();
+        // int8 [5], at offset 0.
+        let payload: [i8; 5] = [-128, -1, 0, 1, 127];
+        for (dtype, dims, len, bytes) in [
+            (DTYPE_I8, [5u32, 0, 0, 0], 5u32, payload.iter().map(|&b| b as u8).collect::<Vec<u8>>()),
+            (DTYPE_F16, [1u32, 0, 0, 0], 1u32, f32_to_f16(0.25).to_le_bytes().to_vec()),
+        ] {
+            while !data.len().is_multiple_of(ALIGNMENT as usize) {
+                data.push(0);
+            }
+            let offset = data.len() as u32;
+            data.extend_from_slice(&bytes);
+            table.extend_from_slice(&1u32.to_le_bytes());
+            for d in dims {
+                table.extend_from_slice(&d.to_le_bytes());
+            }
+            table.extend_from_slice(&dtype.to_le_bytes());
+            table.extend_from_slice(&offset.to_le_bytes());
+            table.extend_from_slice(&len.to_le_bytes());
+        }
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&MAGIC);
+        blob.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        blob.extend_from_slice(&graph::VITS_ENC.to_le_bytes());
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 32]);
+        blob.extend_from_slice(&((HEADER_BYTES + table.len()) as u32).to_le_bytes());
+        blob.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]);
+        blob.extend_from_slice(&table);
+        blob.extend_from_slice(&data);
+
+        let weights = Weights::parse(&blob, graph::VITS_ENC).expect("parses");
+        let quantised = weights.tensor(0).expect("the int8 tensor");
+        assert!(quantised.int8);
+        assert_eq!(quantised.len, 5);
+        // Five elements at one byte each, so the *scale* still lands at 16: the alignment is
+        // in bytes, not elements, and an int8 tensor must not be read with an fp16 stride.
+        let scale = weights.tensor(1).expect("the scale");
+        assert!(!scale.int8);
+        assert_eq!(scale.offset, ALIGNMENT);
+        // The shader addresses int8 through the 32-bit view, so offset 0 is word 0.
+        assert_eq!(quantised.word_offset(), 0);
+        assert_eq!(scale.elem_offset(), ALIGNMENT / 2);
+        // And the payload survived: a five-byte tensor is not padded to an even length.
+        assert_eq!(&weights.data()[0..5], &[0x80, 0xFF, 0x00, 0x01, 0x7F]);
+    }
+
+    #[test]
+    fn an_unknown_dtype_is_refused() {
+        let mut blob = Vec::new();
+        blob.extend_from_slice(&MAGIC);
+        blob.extend_from_slice(&FORMAT_VERSION.to_le_bytes());
+        blob.extend_from_slice(&graph::SELFIE.to_le_bytes());
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 32]);
+        blob.extend_from_slice(&((HEADER_BYTES + TENSOR_ENTRY_BYTES) as u32).to_le_bytes());
+        blob.extend_from_slice(&2u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 8]);
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        for d in [1u32, 0, 0, 0] {
+            blob.extend_from_slice(&d.to_le_bytes());
+        }
+        // A dtype nothing implements. Refusing beats reading it as whichever stride is
+        // nearest and returning plausible rubbish.
+        blob.extend_from_slice(&7u32.to_le_bytes());
+        blob.extend_from_slice(&0u32.to_le_bytes());
+        blob.extend_from_slice(&1u32.to_le_bytes());
+        blob.extend_from_slice(&[0u8; 2]);
+        let error = Weights::parse(&blob, graph::SELFIE).expect_err("dtype 7");
+        assert!(error.contains("dtype 7"), "{error}");
     }
 
     #[test]

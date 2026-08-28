@@ -81,7 +81,16 @@ MAGIC = b"MAML"
 FORMAT_VERSION = 1
 HEADER_BYTES = 64
 TENSOR_ENTRY_BYTES = 32
+# Tensor payload types. The container carries the type per tensor, so fp16 and int8 can sit in
+# one file and a reader knows the stride without being told.
 DTYPE_F16 = 0
+
+# Signed 8-bit, symmetric, with a per-tensor scale in the fp16 tensor that follows it.
+#
+# Only for a network where the weights dominate the download: SMaLL-100 is 330 million
+# parameters, 660 MB at fp16 against 330 MB here, and the ncnn build of the same model shipped
+# 1.14 GB. Everything else stays fp16, where the saving would not pay for the loss.
+DTYPE_I8 = 1
 # 16 bytes is the largest scalar/vector alignment the shaders index with, and a
 # multiple of 2, so an aligned tensor offset is also an aligned fp16 index.
 ALIGNMENT = 16
@@ -602,8 +611,74 @@ def check_graph(model, graph_id_name):
         raise SystemExit(f"op counts differ: got {only_got}, expected {only_want}")
 
 
+def quantised_linear(node, held, array, following_bias):
+    """An int8 `MatMulInteger` as a `1 x 1` convolution, plus its scale and bias.
+
+    Returns `(tensors, key)` or `None` if this is not one of the shapes we lower.
+
+    # The transpose that would otherwise be silent
+
+    ONNX `MatMul` computes `x @ W`, so its weight is **`[in, out]`**. This runtime indexes a
+    kernel as `[out, in, kh, kw]`. SMaLL-100's attention projections are all 1024 x 1024, so a
+    missed transpose would produce a tensor of exactly the right shape holding exactly the
+    wrong numbers, and the parameter-count check every other net leans on would pass. `fc1` is
+    `[1024, 4096]`, which is the one that would fail loudly - so the transpose is asserted
+    against a non-square layer in the tests rather than trusted here.
+
+    # What the export carries, and what is dropped
+
+    Read from `casawolice/small100-onnx` rather than assumed:
+
+    * The weight zero point is a **scalar 0**, so the quantisation is symmetric and a value is
+      `int8 * scale`. A non-zero one is refused rather than ignored.
+    * The weight scale is a **scalar**, so it multiplies the accumulator once.
+    * The *activation* scale and zero point come from a `DynamicQuantizeLinear` at runtime.
+      Both are dropped: activations stay fp16 here, which is simpler than reproducing dynamic
+      quantisation and strictly more accurate, and costs nothing because the weights are what
+      take the space.
+    """
+    if node.op_type != "MatMulInteger" or len(node.input) < 4:
+        return None
+    weight_name, zero_name = node.input[1], node.input[3]
+    if not held(weight_name) or not held(zero_name):
+        return None
+    weight = array(weight_name)
+    if weight.dtype != np.int8 or weight.ndim != 2:
+        return None
+    zero = np.array(array(zero_name)).flatten()
+    if zero.size != 1 or int(zero[0]) != 0:
+        raise SystemExit(
+            f"{node.output[0]}: weight zero point {zero.tolist()} is not 0, so the "
+            "quantisation is not symmetric and `conv_int8.comp` would be wrong"
+        )
+    scale_name = weight_name.removesuffix("_quantized") + "_scale"
+    if not held(scale_name):
+        raise SystemExit(f"{node.output[0]}: no {scale_name} beside its weight")
+    scale = np.array(array(scale_name)).flatten()
+    if scale.size != 1:
+        raise SystemExit(
+            f"{node.output[0]}: a {scale.size}-element scale; `conv_int8.comp` applies one "
+            "number to the whole accumulator, so a per-channel scale needs a shader change"
+        )
+
+    inputs, outputs = weight.shape
+    # `[in, out]` to `[out, in, 1, 1]`.
+    kernel = np.ascontiguousarray(weight.T).reshape(outputs, inputs, 1, 1)
+    bias = following_bias(node, outputs)
+    key = (
+        f"MatMulInteger w={list(kernel.shape)} scale=1 b={[outputs]} "
+        f"zp=0 dtype=int8"
+    )
+    return [kernel, scale.astype(np.float32), bias], key
+
+
 def build(layers, tensors, graph_id, onnx_sha256):
-    """Serialise the tensor table and the fp16 data section."""
+    """Serialise the tensor table and the data section.
+
+    A tensor is fp16 unless it arrives as `int8`, in which case its bytes go through
+    unchanged and the entry records [`DTYPE_I8`]. Its scale is a separate fp16 tensor that the
+    caller has already placed after it.
+    """
     table = bytearray()
     data = bytearray()
     for tensor in tensors:
@@ -612,17 +687,23 @@ def build(layers, tensors, graph_id, onnx_sha256):
         while len(data) % ALIGNMENT:
             data.append(0)
         offset = len(data)
-        half = np.ascontiguousarray(tensor, dtype=np.float32).astype(np.float16)
-        if not np.isfinite(half).all():
-            raise SystemExit(
-                f"a weight of shape {list(tensor.shape)} overflows fp16. "
-                "Storing this net at half precision needs per-tensor scaling."
-            )
-        data.extend(half.tobytes())
+        if tensor.dtype == np.int8:
+            # Already quantised, so nothing to round: the bytes are the payload.
+            dtype = DTYPE_I8
+            data.extend(tensor.tobytes())
+        else:
+            dtype = DTYPE_F16
+            half = np.ascontiguousarray(tensor, dtype=np.float32).astype(np.float16)
+            if not np.isfinite(half).all():
+                raise SystemExit(
+                    f"a weight of shape {list(tensor.shape)} overflows fp16. "
+                    "Storing this net at half precision needs per-tensor scaling."
+                )
+            data.extend(half.tobytes())
         dims = list(tensor.shape) + [0] * (4 - tensor.ndim)
         table.extend(struct.pack("<I", tensor.ndim))
         table.extend(struct.pack("<4I", *dims))
-        table.extend(struct.pack("<III", DTYPE_F16, offset, tensor.size))
+        table.extend(struct.pack("<III", dtype, offset, tensor.size))
     assert len(table) == len(tensors) * TENSOR_ENTRY_BYTES
 
     data_offset = HEADER_BYTES + len(table)
