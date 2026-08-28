@@ -301,7 +301,11 @@ fn main() {
             }
         }
         let names: Vec<&str> = decoded.layers.iter().map(|l| l.name.as_str()).collect();
-        let mesh = geometry::build(&decoded, &layers, tile.z, tile.x, tile.y);
+        // Converted rather than read: this probe reads the published `v4.pmtiles`, and the
+        // renderer now takes a `.mamaps` body. The MVT analysis above stays MVT, because it is
+        // about the upstream archive's own ring structure.
+        let (converted, _) = tilecodec::mamaps::from_mvt::from_tile(&decoded).expect("converts");
+        let mesh = geometry::build(&converted, &layers, tile.z, tile.x, tile.y);
         let triangles: usize = mesh.meshes.iter().map(|m| m.indices.len() / 3).sum();
 
         // Per-layer detail, plus how much of the tile each fill actually covers. A layer

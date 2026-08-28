@@ -19,7 +19,9 @@ use crate::style::{self, Layer, Palette};
 use crate::tile::cache::{RangeCache, DEFAULT_MAX_BYTES};
 use crate::tile::geometry::{self, TileMesh};
 use crate::tile::select::{self, TileId};
-use crate::tile::source::{CachingRangeReader, JniRangeFetcher, BASEMAP_PMTILES_URL, CACHE_FORMAT};
+use crate::tile::source::{
+    basemap_origin, CachingRangeReader, JniRangeFetcher, BASEMAP_ARCHIVE_URL,
+};
 use crate::vulkan::context::{ANativeWindow_acquire, ANativeWindow_fromSurface};
 use crate::vulkan::renderer::Renderer;
 use jni::objects::{JClass, JObject, JString};
@@ -29,8 +31,7 @@ use std::collections::HashSet;
 use std::os::raw::c_void;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
-use tilecodec::mvt::Tile;
-use tilecodec::stream::StreamArchive;
+use tilecodec::mamaps::MamapsArchive;
 
 /// The archive's zoom range, shared with the worker that reads it out of the header.
 ///
@@ -213,7 +214,7 @@ pub extern "system" fn Java_com_vayunmathur_library_map_MapNative_create<'l>(
 /// A worker: opens its own view of the archive, then serves tile requests until the queue
 /// closes.
 ///
-/// Each worker holds its **own** [`StreamArchive`], so its leaf-directory cache and range
+/// Each worker holds its **own** [`MamapsArchive`], so its leaf-index cache and range
 /// reads need no lock. The cost is one 16 KB header fetch per worker at startup and a
 /// duplicated leaf cache; the alternative — one archive behind a mutex — would serialise
 /// exactly the round trips this is meant to overlap. The on-disk range cache is shared, and
@@ -231,19 +232,27 @@ fn spawn_worker(
         .spawn(move || {
             let cache = RangeCache::open(
                 cache_dir,
-                &format!("{CACHE_FORMAT}|{BASEMAP_PMTILES_URL}"),
+                // No `build_id` yet: it is in the header, and the header is read through this
+                // cache. Re-checked below, once it is known.
+                &basemap_origin(BASEMAP_ARCHIVE_URL, None),
                 DEFAULT_MAX_BYTES,
             );
-            let reader = CachingRangeReader::new(BASEMAP_PMTILES_URL, cache, JniRangeFetcher);
+            let reader = CachingRangeReader::new(BASEMAP_ARCHIVE_URL, cache, JniRangeFetcher);
             reader.set_online(online.get());
 
-            let mut archive = match StreamArchive::open(reader) {
+            let mut archive = match MamapsArchive::open(reader) {
                 Ok(a) => a,
                 Err(e) => {
-                    log(&format!("worker {index} cannot open the pmtiles archive: {e}"));
+                    log(&format!("worker {index} cannot open the mamaps archive: {e}"));
                     return;
                 }
             };
+            // Now the `build_id` is known, so the cache can be told which build it holds. A
+            // republish under the same name wipes it here rather than serving byte offsets from
+            // the build before.
+            archive
+                .reader()
+                .reset_origin(&basemap_origin(BASEMAP_ARCHIVE_URL, Some(archive.header.build_id)));
             // Publish the real range. Until this lands the renderer works from a guess, and
             // a guess that is too high asks for a zoom the archive does not contain and
             // silently gets nothing back.
@@ -261,18 +270,13 @@ fn spawn_worker(
                 let key = tile.key();
 
                 let result = match archive.tile(tile.z, tile.x, tile.y) {
-                    Ok(Some(body)) => match Tile::decode(&body) {
-                        Ok(decoded) => TileResult::Ready(geometry::build(
-                            &decoded, &layers, tile.z, tile.x, tile.y,
-                        )),
-                        Err(e) => {
-                            log(&format!(
-                                "tile {}/{}/{} did not decode: {e}",
-                                tile.z, tile.x, tile.y
-                            ));
-                            TileResult::Failed
-                        }
-                    },
+                    Ok(Some(body)) => TileResult::Ready(geometry::build(
+                        &body,
+                        layers,
+                        tile.z,
+                        tile.x,
+                        tile.y,
+                    )),
                     Ok(None) => TileResult::Absent,
                     Err(e) => {
                         log(&format!("tile {}/{}/{} failed: {e}", tile.z, tile.x, tile.y));

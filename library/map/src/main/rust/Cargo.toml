@@ -50,3 +50,10 @@ jni_http = { path = "../../../../jni-http/src/main/rust" }
 # do anyway.
 [target.'cfg(target_os = "android")'.dependencies]
 ash = { version = "0.38", default-features = false, features = ["loaded"] }
+
+# The same codec with its writer, for tests and the host probes only. They read the
+# published `v4.pmtiles` and convert each MVT tile to a `.mamaps` body through
+# `mamaps::from_mvt`, which is behind the `write` feature -- so the device build links
+# the read half and nothing else. There is no published `.mamaps` archive yet.
+[dev-dependencies]
+tilecodec = { path = "../../../../tilecodec/src/main/rust", features = ["write"] }

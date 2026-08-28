@@ -33,11 +33,43 @@ use tilecodec::stream::RangeReader;
 /// without the `pmtiles://` scheme prefix MapLibre needs to route it.
 pub const BASEMAP_PMTILES_URL: &str = "https://data.vayunmathur.com/v4.pmtiles";
 
+/// Where this renderer reads its tiles from.
+///
+/// **Not published yet.** This renderer now reads `.mamaps`, and no `.mamaps` archive has been
+/// built and uploaded — that is the last phase of the plan. Until then the constant names where the
+/// archive will live and the device path has nothing to open; the host probes convert `v4.pmtiles`
+/// tile by tile through `mamaps::from_mvt` instead, which is what validated everything below it.
+///
+/// Left pointing at the PMTiles URL rather than a guessed filename, so nothing fetches a 404 and
+/// the substitution is one deliberate edit when the archive exists.
+pub const BASEMAP_ARCHIVE_URL: &str = BASEMAP_PMTILES_URL;
+
 /// Bumped when the on-disk cache layout changes, so old entries are dropped rather than
 /// misread. The URL is in the marker too, because the archive is republished under the
 /// same name and a cached directory chunk addresses the byte offsets of the build it came
 /// from.
 pub const CACHE_FORMAT: &str = "v1";
+
+/// The cache's origin marker: the layout version, the URL, and the archive's own `build_id`.
+///
+/// `build_id` is what makes republishing under a stable name safe. The URL alone is not enough —
+/// it is deliberately the *same* URL every build, so a cached leaf index would otherwise keep
+/// addressing byte offsets from the build it came from, and a user would sit on a stale map
+/// forever with no way to notice.
+///
+/// It arrives in two steps because of an ordering problem with no way around it: the `build_id`
+/// lives in the archive header, and the header is read *through* this cache. So the cache opens on
+/// `None`, the archive opens, and then [`CachingRangeReader::reset_origin`] is called with the id
+/// that came back. A prefix served from a stale cache entry reports the stale id, which is
+/// correct-but-late: the entry is refetched within the refresh interval, and the wipe happens then.
+/// Costs no extra request either way, because the header is already in the prefix a reader has to
+/// fetch to open the archive at all.
+pub fn basemap_origin(url: &str, build_id: Option<u64>) -> String {
+    match build_id {
+        None => format!("{CACHE_FORMAT}|{url}"),
+        Some(id) => format!("{CACHE_FORMAT}|{url}|{id:#018x}"),
+    }
+}
 
 /// What a range fetch returned.
 pub struct RangeResponse {
@@ -72,6 +104,13 @@ impl<F: RangeFetcher> CachingRangeReader<F> {
 
     pub fn set_online(&self, online: bool) {
         self.online.store(online, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Re-check the cache's origin marker, now that the archive's `build_id` is known.
+    ///
+    /// See [`basemap_origin`] for why this is a second step rather than part of opening the cache.
+    pub fn reset_origin(&self, origin: &str) {
+        self.cache.reset_if_origin_changed(origin);
     }
 
     fn is_online(&self) -> bool {

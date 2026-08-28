@@ -201,6 +201,16 @@ impl RangeCache {
         }
     }
 
+    /// Wipe the cache if `origin` differs from its marker.
+    ///
+    /// Idempotent and cheap, so it can be called again once something is known that was not known
+    /// when the cache was opened. That is exactly the `build_id` case: it lives in the archive
+    /// header, which is read *through* this cache, so the marker cannot include it until after the
+    /// first read.
+    pub fn reset_if_origin_changed(&self, origin: &str) {
+        self.invalidate_on_origin_change(origin);
+    }
+
     fn invalidate_on_origin_change(&self, origin: &str) {
         let marker = self.dir.join(ORIGIN_FILE);
         if fs::read_to_string(&marker).map(|s| s.trim() == origin).unwrap_or(false) {

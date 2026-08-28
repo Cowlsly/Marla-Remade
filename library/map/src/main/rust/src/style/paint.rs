@@ -49,6 +49,7 @@
 use super::{Layer, LayerKind};
 use serde_json::Value as Json;
 use std::sync::OnceLock;
+use tilecodec::mamaps::dict;
 
 /// The flat style, vendored beside the sources.
 ///
@@ -280,22 +281,46 @@ fn layer(json: &Json) -> Result<Layer, String> {
         },
         Some(_) => return Err(format!("`{id}`'s dash must be `[on, off]`")),
     };
+    let kinds: Vec<String> = match json.get("kinds") {
+        None => Vec::new(),
+        Some(Json::Array(kinds)) => kinds
+            .iter()
+            .map(|kind| {
+                kind.as_str()
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("`{id}`'s kinds must be strings"))
+            })
+            .collect::<Result<_, _>>()?,
+        Some(_) => return Err(format!("`{id}`'s kinds must be an array")),
+    };
+    // Both halves of the schema closure the plan asks for: a `source` or a `kind` the archive
+    // cannot carry is a build failure, not a layer that quietly draws nothing on device.
+    let source = string("source")?;
+    let source_layer_id = dict::LAYERS
+        .iter()
+        .position(|name| *name == source)
+        .ok_or_else(|| {
+            format!("`{id}` reads source layer `{source}`, which no .mamaps archive carries")
+        })? as u8;
+    let mut kind_ids = kinds
+        .iter()
+        .map(|name| {
+            super::kind_id(name).ok_or_else(|| {
+                format!("`{id}` filters on kind `{name}`, which the schema cannot emit")
+            })
+        })
+        .collect::<Result<Vec<u16>, _>>()?;
+    // Sorted so the render path's membership test is a binary search over a `u16` slice.
+    kind_ids.sort_unstable();
+    kind_ids.dedup();
+
     Ok(Layer {
-        source_layer: string("source")?,
+        source_layer: source,
+        source_layer_id,
         authored: string("authored")?,
         kind,
-        kinds: match json.get("kinds") {
-            None => Vec::new(),
-            Some(Json::Array(kinds)) => kinds
-                .iter()
-                .map(|kind| {
-                    kind.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| format!("`{id}`'s kinds must be strings"))
-                })
-                .collect::<Result<_, _>>()?,
-            Some(_) => return Err(format!("`{id}`'s kinds must be an array")),
-        },
+        kinds,
+        kind_ids,
         light: color(json.get("light"), &id)?,
         dark: color(json.get("dark"), &id)?,
         opacity: Ramp::parse(json.get("opacity"), &id, "opacity", 1.0)?,

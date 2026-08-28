@@ -3,11 +3,17 @@
 //! Pure CPU and a pure function: no Vulkan types, no JNI, so the expensive half of a
 //! frame is testable on the host and can run on any thread. This is the step the plan
 //! expects to be the actual bottleneck — a vector map is slow on the CPU, not the GPU.
+//!
+//! Reads a `.mamaps` body rather than an MVT tile, and that is most of why the format exists: a
+//! feature's `kind` is a `u16` tested against a sorted slice instead of a property-map lookup
+//! yielding a `String`, and a part's points are a slice of an already-decoded arena instead of a
+//! geometry-command walk. Nothing downstream of here changed — fills are still 2 floats a vertex,
+//! strokes 7, and the shaders never saw any of it.
 
 use crate::style::{Layer, LayerKind};
 use crate::tess::{fill, stroke};
 use crate::tile::select::ANCESTOR_DEPTH;
-use tilecodec::mvt::{self, GeomType, Tile, Value};
+use tilecodec::mamaps::body::{Body, GEOM_LINE, GEOM_POLYGON};
 
 /// Tessellated geometry for one layer of one tile.
 pub struct LayerMesh {
@@ -39,54 +45,48 @@ pub struct TileMesh {
 /// So the gate here is the *widest* it could need to be, and the renderer decides what is
 /// actually visible against the camera's own zoom every frame. Layers outside the window
 /// are still skipped, which keeps this bounded: a z5 tile does not tessellate buildings.
-pub fn build(tile: &Tile, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
+pub fn build(tile: &Body, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
     let mut meshes = Vec::with_capacity(layers.len());
     let deepest = z.saturating_add(ANCESTOR_DEPTH);
+    let extent = tile.extent as u32;
 
     for (index, layer) in layers.iter().enumerate() {
         if layer.min_zoom > deepest || layer.max_zoom < z {
             continue;
         }
-        let source = match tile.layer(&layer.source_layer) {
-            Some(l) => l,
-            None => continue,
-        };
+        let Some(source) = tile.layer(layer.source_layer_id) else { continue };
 
         let mut vertices: Vec<f32> = Vec::new();
         let mut indices: Vec<u32> = Vec::new();
-        let extent = source.extent;
 
         for feature in &source.features {
-            let kind = feature.get("kind").and_then(as_str);
-            if !layer.matches(kind) {
+            // Two `u16` compares against a sorted slice. This used to be a `String` allocation and
+            // a property-map lookup per feature per tile.
+            if !layer.matches_id(feature.kind) {
                 continue;
             }
+            let parts = source.parts_of(feature);
             match layer.kind {
                 LayerKind::Fill => {
-                    if feature.geom_type != GeomType::Polygon {
+                    if feature.geom_type != GEOM_POLYGON {
                         continue;
                     }
-                    if let Some(polygons) = mvt::decode_polygons(&feature.geometry) {
-                        for rings in &polygons {
-                            fill::tessellate(rings, extent, &mut vertices, &mut indices);
-                        }
-                    }
+                    // A feature's parts are exactly one exterior and its holes, which is what the
+                    // tessellator takes: the encoder splits a multipolygon into one feature per
+                    // ring group rather than making every consumer regroup them.
+                    let rings: Vec<Vec<(i32, i32)>> =
+                        parts.iter().map(|part| widen(source.points(part))).collect();
+                    fill::tessellate(&rings, extent, &mut vertices, &mut indices);
                 }
                 LayerKind::Line => {
                     // Polygons contribute their outlines too: a lake's shoreline and an
                     // administrative boundary are both lines drawn over an area feature.
-                    let parts: Vec<Vec<(i32, i32)>> = match feature.geom_type {
-                        GeomType::LineString => mvt::decode_lines(&feature.geometry).unwrap_or_default(),
-                        GeomType::Polygon => mvt::decode_polygons(&feature.geometry)
-                            .unwrap_or_default()
-                            .into_iter()
-                            .flatten()
-                            .collect(),
-                        _ => continue,
-                    };
+                    if !matches!(feature.geom_type, GEOM_LINE | GEOM_POLYGON) {
+                        continue;
+                    }
                     let gapped = layer.gapped();
-                    for part in &parts {
-                        let flat = flatten(part);
+                    for part in parts {
+                        let flat = flatten(source.points(part));
                         stroke::stroke(&flat, extent, gapped, &mut vertices, &mut indices);
                     }
                 }
@@ -102,23 +102,19 @@ pub fn build(tile: &Tile, layers: &[Layer], z: u8, x: u32, y: u32) -> TileMesh {
     TileMesh { z, x, y, meshes }
 }
 
-/// `[(x, y)]` to the flat `[x, y, ...]` the tessellators take.
-fn flatten(points: &[(i32, i32)]) -> Vec<i32> {
-    let mut out = Vec::with_capacity(points.len() * 2);
-    for &(x, y) in points {
-        out.push(x);
-        out.push(y);
-    }
-    out
+/// `[(i16, i16)]` to the `[(i32, i32)]` the fill tessellator takes.
+fn widen(points: &[(i16, i16)]) -> Vec<(i32, i32)> {
+    points.iter().map(|&(x, y)| (x as i32, y as i32)).collect()
 }
 
-/// The `kind` property, the Protomaps schema's own classification. Every layer of the
-/// style keys off it.
-fn as_str(value: &Value) -> Option<&str> {
-    match value {
-        Value::String(s) => Some(s.as_str()),
-        _ => None,
+/// `[(i16, i16)]` to the flat `[x, y, ...]` the stroke tessellator takes.
+fn flatten(points: &[(i16, i16)]) -> Vec<i32> {
+    let mut out = Vec::with_capacity(points.len() * 2);
+    for &(x, y) in points {
+        out.push(x as i32);
+        out.push(y as i32);
     }
+    out
 }
 
 #[cfg(test)]
@@ -129,8 +125,16 @@ mod tests {
 
     const REAL_TILE: &[u8] = include_bytes!("../../tests/fixtures/v5ca_z11_tile.mvt");
 
-    fn real() -> Tile {
-        Tile::decode(REAL_TILE).expect("the published tile decodes")
+    /// The published tile, converted to a `.mamaps` body.
+    ///
+    /// The fixture is still MVT because it was lifted out of the published archive with a ranged
+    /// GET, and there is no published `.mamaps` archive yet. Going through `from_mvt` is what
+    /// Phase 4 of the plan is: the container and this module are validated on data the tiler
+    /// already produced and the app already drew, before any tag→kind schema work exists to be
+    /// wrong.
+    fn real() -> Body {
+        let tile = tilecodec::mvt::Tile::decode(REAL_TILE).expect("the published tile decodes");
+        tilecodec::mamaps::from_mvt::from_tile(&tile).expect("converts").0
     }
 
     fn mesh_for<'a>(mesh: &'a TileMesh, layers: &[Layer], id: &str) -> Option<&'a LayerMesh> {
@@ -316,7 +320,7 @@ mod tests {
     #[test]
     fn an_empty_tile_produces_no_meshes() {
         let layers = style::layers();
-        let mesh = build(&Tile::new(), &layers, 11, 0, 0);
+        let mesh = build(&Body::new(4096), &layers, 11, 0, 0);
         assert!(mesh.meshes.is_empty());
     }
 
@@ -326,8 +330,10 @@ mod tests {
         let outline = vec![Layer {
             id: "water-edge".to_string(),
             source_layer: "water".to_string(),
+            source_layer_id: tilecodec::mamaps::dict::LAYER_WATER,
             kind: LayerKind::Line,
             kinds: Vec::new(),
+            kind_ids: Vec::new(),
             light: 0xFF000000,
             dark: 0xFF000000,
             opacity: Ramp::constant(1.0),
@@ -341,5 +347,50 @@ mod tests {
         let mesh = build(&real(), &outline, 11, 339, 770);
         assert_eq!(mesh.meshes.len(), 1, "the water polygons' outlines stroke");
         assert!(!mesh.meshes[0].indices.is_empty());
+    }
+    /// **The Phase 4 milestone, end to end inside this crate.** A `.mamaps` archive is built,
+    /// opened through a `RangeReader`, and tessellated -- so the container, the reader, the style's
+    /// interned ids and this module are proven together, on data the tiler already produced.
+    #[test]
+    fn a_tile_read_out_of_a_mamaps_archive_tessellates() {
+        use std::cell::RefCell;
+        use tilecodec::mamaps::write::{Options, StreamWriter};
+        use tilecodec::mamaps::MamapsArchive;
+        use tilecodec::stream::RangeReader;
+
+        struct Memory {
+            bytes: Vec<u8>,
+            requests: RefCell<usize>,
+        }
+        impl RangeReader for Memory {
+            fn read(&self, offset: u64, length: u32) -> tilecodec::proto::Result<Vec<u8>> {
+                *self.requests.borrow_mut() += 1;
+                if offset >= self.bytes.len() as u64 {
+                    return Ok(Vec::new());
+                }
+                let end = (offset + length as u64).min(self.bytes.len() as u64);
+                Ok(self.bytes[offset as usize..end as usize].to_vec())
+            }
+        }
+
+        let id = tilecodec::pmtiles::tile_id(11, 339, 770);
+        let options = Options { min_zoom: 0, max_zoom: 14, ..Options::default() };
+        let mut writer = StreamWriter::new(options).expect("options");
+        writer.append(id, &real()).expect("append");
+        let bytes = writer.finish().expect("finish");
+
+        let mut archive =
+            MamapsArchive::open(Memory { bytes, requests: RefCell::new(0) }).expect("open");
+        assert_eq!(*archive.reader().requests.borrow(), 1, "a cold open is one request");
+
+        let layers = style::layers();
+        let body = archive.tile(11, 339, 770).expect("read").expect("present");
+        let mesh = build(&body, layers, 11, 339, 770);
+        // The same layers the fixture produces when tessellated directly, so nothing was lost
+        // between the encoder and the reader.
+        for id in ["earth", "water", "roads-major", "roads-major-casing"] {
+            assert!(mesh_for(&mesh, layers, id).is_some(), "{id} should draw");
+        }
+        assert!(mesh_for(&mesh, layers, "buildings").is_none(), "the tile has no buildings");
     }
 }

@@ -42,6 +42,7 @@
 pub mod paint;
 
 use paint::{Ramp, Stroke};
+use tilecodec::mamaps::dict;
 
 /// What pipeline a layer draws with.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -107,9 +108,20 @@ pub struct Layer {
     pub id: String,
     /// The tile layer to read, e.g. `roads`.
     pub source_layer: String,
+    /// The same layer, as the id a `.mamaps` body carries.
+    ///
+    /// Resolved once at load through [`tilecodec::mamaps::dict::LAYERS`], so the render path never
+    /// compares a string. A `source` the schema has no id for fails the load.
+    pub source_layer_id: u8,
     pub kind: LayerKind,
     /// Feature `kind` values to draw, or empty for every feature in the layer.
     pub kinds: Vec<String>,
+    /// The same whitelist as interned ids, sorted.
+    ///
+    /// The hot path: `tile::geometry` tests every feature of every layer of every tile against
+    /// this, and reading a `kind` used to mean a `String` allocation per feature per tile. A name
+    /// the schema cannot emit fails the load rather than silently drawing nothing.
+    pub kind_ids: Vec<u16>,
     /// ARGB in light mode.
     pub light: u32,
     /// ARGB in dark mode.
@@ -142,9 +154,26 @@ pub struct Layer {
 }
 
 impl Layer {
-    /// Does this layer draw a feature whose `kind` is `kind`?
+    /// Does this layer draw a feature whose interned `kind` is `kind`?
+    ///
+    /// The whole of the attribute filtering the renderer does, and all the style asks for.
+    pub fn matches_id(&self, kind: u16) -> bool {
+        self.kind_ids.is_empty() || self.kind_ids.binary_search(&kind).is_ok()
+    }
+
+    /// Does this layer draw a feature whose `kind` is named `kind`?
+    ///
+    /// Delegates to [`matches_id`](Self::matches_id) rather than comparing strings, so the two can
+    /// never disagree. For tests and diagnostics; nothing on the render path takes a name.
     pub fn matches(&self, kind: Option<&str>) -> bool {
-        self.kinds.is_empty() || kind.is_some_and(|k| self.kinds.iter().any(|own| own == k))
+        match kind {
+            None => self.matches_id(dict::NONE),
+            Some(name) => match kind_id(name) {
+                Some(id) => self.matches_id(id),
+                // A name the schema cannot emit. Not drawn, because no feature can carry it.
+                None => false,
+            },
+        }
     }
 
     /// Is this layer worth asking the archive for at `zoom`?
@@ -203,6 +232,11 @@ impl Layer {
     fn is_base(&self) -> bool {
         matches!(self.source_layer.as_str(), "earth" | "water")
     }
+}
+
+/// A `kind` name's interned id, or `None` when the schema has no counterpart.
+fn kind_id(name: &str) -> Option<u16> {
+    dict::KINDS.iter().position(|k| *k == name).map(|i| i as u16 + 1)
 }
 
 /// Behind everything, before any tile has loaded.
@@ -407,8 +441,34 @@ mod tests {
         assert!(!highway.matches(None), "a feature with no kind is not a highway");
 
         let earth = find("earth");
-        assert!(earth.matches(None), "an unfiltered layer draws everything");
-        assert!(earth.matches(Some("anything")));
+        assert!(earth.matches(None), "an unfiltered layer draws a feature with no kind");
+        assert!(earth.matches(Some("island")), "and every kind the schema can emit");
+        assert!(earth.matches(Some("ocean")));
+        // A name the schema has no id for cannot be on a feature at all, so nothing draws it.
+        // Interning the whitelist is what turns that from a silent miss into an impossibility.
+        assert!(!earth.matches(Some("not_a_kind")));
+    }
+
+    /// The interned whitelist and the authored names must agree, or the render path filters on
+    /// something other than what the style says.
+    #[test]
+    fn the_interned_whitelist_is_the_authored_one() {
+        for l in layers() {
+            assert_eq!(
+                l.kind_ids.len(),
+                l.kinds.len(),
+                "`{}` lost a kind when its whitelist was interned",
+                l.id,
+            );
+            for name in &l.kinds {
+                assert!(l.matches(Some(name)), "`{}` should draw `{name}`", l.id);
+            }
+            assert!(l.kind_ids.windows(2).all(|p| p[0] < p[1]), "`{}` is not sorted", l.id);
+        }
+        // And every layer reads a source the archive actually carries.
+        let roads = find("roads-highway");
+        assert_eq!(roads.source_layer_id, dict::LAYER_ROADS);
+        assert_eq!(find("earth").source_layer_id, dict::LAYER_EARTH);
     }
 
     #[test]
