@@ -302,6 +302,34 @@ pub struct Voice {
     pub text: Vec<f32>,
 }
 
+impl Voice {
+    /// Read one `style_<name>.bin` from the voice bundle.
+    ///
+    /// `style_ttl` transposed to `[256, 50]` first, then `style_dp` flattened to 128, both as
+    /// little-endian fp16 and nothing else — no header, because the two shapes are fixed by the
+    /// architecture and a length check is therefore as strong as a table would be.
+    ///
+    /// Not a `.maml`: these are **inputs**, one pair per voice, handed to
+    /// [`crate::vulkan::run::Net::infer_raw_many`] per utterance rather than living in a plan's
+    /// weights buffer. `scripts/ml/supertonic_bundle.py` writes them, and does the transpose
+    /// there because the export stores `style_ttl` position-major and this runtime is
+    /// channel-major.
+    pub fn read(bytes: &[u8]) -> Result<Voice, String> {
+        let text_values = (net::STYLE * net::STYLE_TOKENS) as usize;
+        let duration_values = duration_net::STYLE as usize;
+        let wanted = (text_values + duration_values) * 2;
+        if bytes.len() != wanted {
+            return Err(format!("a voice file of {} bytes, not {wanted}", bytes.len()));
+        }
+        let values: Vec<f32> = bytes
+            .chunks_exact(2)
+            .map(|pair| f16_to_f32(u16::from_le_bytes([pair[0], pair[1]])))
+            .collect();
+        let (text, duration) = values.split_at(text_values);
+        Ok(Voice { duration: duration.to_vec(), text: text.to_vec() })
+    }
+}
+
 /// Synthesise one utterance.
 ///
 /// `text` must already be NFD; see [`to_ids`]. `noise` supplies the flow's starting latent, one
@@ -432,6 +460,33 @@ mod tests {
     fn the_indexer_refuses_a_table_of_the_wrong_size() {
         let error = to_ids(&[0u8; 16], "a").expect_err("a short table");
         assert!(error.contains("codepoint table"), "{error}");
+    }
+
+    #[test]
+    fn a_voice_file_splits_into_the_two_style_tensors() {
+        // The order is style_ttl then style_dp, and the two are 12,800 and 128 values, so a file
+        // read in the wrong order is exactly the right length. Only the values catch it — hence a
+        // fixture where each tensor holds a constant of its own.
+        let text_values = (net::STYLE * net::STYLE_TOKENS) as usize;
+        let duration_values = duration_net::STYLE as usize;
+        let mut bytes = Vec::new();
+        for _ in 0..text_values {
+            bytes.extend_from_slice(&crate::preprocess::f32_to_f16(0.25).to_le_bytes());
+        }
+        for _ in 0..duration_values {
+            bytes.extend_from_slice(&crate::preprocess::f32_to_f16(-0.5).to_le_bytes());
+        }
+
+        let voice = Voice::read(&bytes).expect("the declared length");
+        assert_eq!(voice.text.len(), text_values);
+        assert_eq!(voice.duration.len(), duration_values);
+        assert!(voice.text.iter().all(|&v| v == 0.25), "style_ttl comes first");
+        assert!(voice.duration.iter().all(|&v| v == -0.5), "style_dp comes second");
+
+        // A truncated or padded file is refused rather than read short: the shapes are fixed by
+        // the architecture, so a length that disagrees means the wrong file, not a shorter voice.
+        assert!(Voice::read(&bytes[..bytes.len() - 2]).is_err());
+        assert!(Voice::read(&[]).is_err());
     }
 
     /// Records what the pipeline asked of each stage, and answers with fixed shapes.

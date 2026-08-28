@@ -125,6 +125,50 @@ internal object MlNative {
     external fun synthesize(handle: Long, text: String, speed: Float): FloatArray?
 
     /**
+     * Bring up Supertonic 3 from its four `.maml` files, the codepoint table and one voice.
+     * Returns 0 on failure.
+     *
+     * Six assets, and no shape arguments: unlike [createPiper], every Supertonic plan is
+     * utterance-shaped, so each net is re-recorded per sentence rather than compiled once at a
+     * padded width. There is also no phoneme dictionary - the front end is [indexer], a flat
+     * 65,536-entry codepoint table, which is why [synthesizeSupertonic] insists on NFD.
+     *
+     * [style] is one voice's `style_<name>.bin`. It is separate from the plans and swappable
+     * through [setSupertonicVoice], because a voice is 25 KB against the plans' 198 MB.
+     *
+     * Freed by [destroySupertonic], not [destroy], [destroyOcr] or [destroyPiper].
+     */
+    external fun createSupertonic(
+        duration: ByteArray,
+        text: ByteArray,
+        sampler: ByteArray,
+        vocoder: ByteArray,
+        indexer: ByteArray,
+        style: ByteArray,
+    ): Long
+
+    /**
+     * Point a live handle at another voice, returning false on failure.
+     *
+     * Cheap, and the reason a voice change does not mean a new handle: the four networks stay
+     * uploaded and only the two style tensors are replaced.
+     */
+    external fun setSupertonicVoice(handle: Long, style: ByteArray): Boolean
+
+    /**
+     * Synthesise [text] and return mono samples in `-1..1` at 44,100 Hz, or null on failure.
+     *
+     * [text] **must already be NFD**-decomposed - use `java.text.Normalizer.normalize(text,
+     * Form.NFD)`. The model has no precomposed accents: `é` is unmapped while `e` and the
+     * combining acute are both first-class tokens, so precomposed text silently loses
+     * characters. Doing the decomposition natively would mean carrying Unicode tables in the
+     * APK when the platform already has them.
+     *
+     * Two calls with the same text differ, as flow matching starts from a sampled latent.
+     */
+    external fun synthesizeSupertonic(handle: Long, text: String): FloatArray?
+
+    /**
      * Detect faces in [pixels] and return them flattened, nine floats per face.
      *
      * The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,
@@ -182,4 +226,13 @@ internal object MlNative {
      * different things, and passing one to the wrong destroy is undefined.
      */
     external fun destroyPiper(handle: Long)
+
+    /**
+     * Free Supertonic's four networks, its conditioning, its codepoint table and its voice.
+     * Exactly once per non-zero handle from [createSupertonic].
+     *
+     * A fourth destroy function, for the same reason there is a third: the handle types own
+     * different things and passing one to the wrong destroy is undefined.
+     */
+    external fun destroySupertonic(handle: Long)
 }

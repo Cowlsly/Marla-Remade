@@ -118,9 +118,9 @@ impl Tensor {
 /// The tensor table on its own, without the data section.
 ///
 /// [`crate::vulkan::run::Net::rebuild`] re-records a net at a new shape, and that means building a
-/// fresh [`crate::nets::Plan`] — which needs a [`WeightSource`]. It does not need the blob: a
-/// builder only ever consults offsets and shapes, and the blob is already in device memory by
-/// then. Holding a whole [`Weights`] alive to rebuild from would keep 127 MB of host RSS for the
+/// fresh [`crate::nets::Plan`] — which needs a [`crate::nets::WeightSource`]. It does not need the
+/// blob: a builder only ever consults offsets and shapes, and the blob is already in device memory
+/// by then. Holding a whole [`Weights`] alive to rebuild from would keep 127 MB of host RSS for the
 /// Supertonic sampler alone, beside the copy the device has, where the table is a few kilobytes.
 ///
 /// So a caller that means to rebuild takes one of these first and lets the `Weights` go.

@@ -31,18 +31,20 @@ use jni::sys::{jfloat, jfloatArray, jint, jlong, jstring};
 use jni::JNIEnv;
 
 use crate::nets::{
-    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, vits_flow,
+    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
+    supertonic_text, supertonic_vocoder, u2netp, vits_dec, vits_enc, vits_flow, Plan,
 };
 use crate::post::ctc::Dictionary;
 use crate::post::nms::{self, Face, Maps};
 use crate::post::ocr::{self, Line};
-use crate::post::{phonemes, speech};
+use crate::post::{phonemes, speech, supertonic};
 use crate::preprocess::{
     Letterbox, FACE_EMBED, IMAGENET, PPOCR_DET, PPOCR_REC, RESCALE_ONLY, SCRFD,
 };
 use crate::vulkan::context;
+use crate::vulkan::reshape::Reshaped;
 use crate::vulkan::run::Net;
-use crate::weights::{graph, Weights};
+use crate::weights::{graph, Offsets, Weights};
 
 /// One segmenter. Handed to Kotlin as an opaque `jlong`.
 struct Handle {
@@ -549,10 +551,12 @@ impl SplitMix {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
-}
 
-impl speech::Noise for SplitMix {
     /// Box-Muller over two uniforms, which is exact rather than an approximation of normal.
+    ///
+    /// Inherent rather than only a [`speech::Noise`] method because Supertonic needs the same
+    /// generator and does not go through that trait — its flow matching samples one starting
+    /// latent per utterance, where VITS samples a prior and its durations.
     fn normal(&mut self, count: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(count);
         while out.len() < count {
@@ -567,6 +571,12 @@ impl speech::Noise for SplitMix {
             }
         }
         out
+    }
+}
+
+impl speech::Noise for SplitMix {
+    fn normal(&mut self, count: usize) -> Vec<f32> {
+        SplitMix::normal(self, count)
     }
 }
 
@@ -836,6 +846,328 @@ fn trim(values: &[f32], channels: usize, wide: usize, keep: usize) -> Vec<f32> {
         out.extend_from_slice(&values[from..from + keep]);
     }
     out
+}
+
+/// Supertonic's four nets, the conditioning read once, and the voice bundle.
+///
+/// Its own handle type for the same reason [`OcrHandle`] and [`SpeechHandle`] are: it owns a
+/// different set of things, and one `destroy` guessing between them would be type confusion
+/// waiting for a caller to mix them up.
+///
+/// Each net is a [`Reshaped`] rather than a [`Net`], because every Supertonic plan is
+/// utterance-shaped and there is no width to compile once and pad to — unlike Piper, whose
+/// encoder is built at the longest phoneme count a voice allows.
+struct SupertonicHandle {
+    duration: Reshaped<u32>,
+    text: Reshaped<u32>,
+    /// Frames and characters, which vary independently.
+    sampler: Reshaped<(u32, u32)>,
+    vocoder: Reshaped<u32>,
+    /// What the sampler needs from its weights file that no shader sees, walked once per handle.
+    conditioning: supertonic::Conditioning,
+    /// The 65,536-entry codepoint table, read as bytes with no parsing.
+    indexer: Vec<u8>,
+    voice: supertonic::Voice,
+    rng: SplitMix,
+}
+
+/// The smallest legal shape, for the plan recorded at construction and immediately replaced.
+///
+/// [`Net::new`] needs a plan, and the real one is not known until an utterance arrives. Recording
+/// the smallest is cheapest, and [`Net::rebuild`] only ever grows the arena, so nothing is wasted
+/// by starting here.
+const SMALLEST: u32 = 1;
+
+fn duration_plan(offsets: &Offsets, chars: u32) -> Result<Plan, String> {
+    supertonic_duration::build(offsets, chars)
+}
+
+fn text_plan(offsets: &Offsets, chars: u32) -> Result<Plan, String> {
+    supertonic_text::build(offsets, chars)
+}
+
+fn sampler_plan(offsets: &Offsets, shape: (u32, u32)) -> Result<Plan, String> {
+    supertonic_sampler::build(offsets, shape.0, shape.1)
+}
+
+fn vocoder_plan(offsets: &Offsets, frames: u32) -> Result<Plan, String> {
+    supertonic_vocoder::build(offsets, frames)
+}
+
+/// The four nets, as `post::supertonic` wants them.
+struct SupertonicNets<'a> {
+    duration: &'a mut Reshaped<u32>,
+    text: &'a mut Reshaped<u32>,
+    sampler: &'a mut Reshaped<(u32, u32)>,
+    vocoder: &'a mut Reshaped<u32>,
+}
+
+/// Positions per id tensor: `crate::nets::embed_lanes` writes two lanes, `lo + 2048 * hi`.
+const LANES: usize = 2;
+
+/// `values / stride`, refusing a remainder.
+///
+/// Every shape below is recovered from an input's length rather than passed alongside it, so the
+/// net is always recorded at what the data actually is and cannot drift from what `synthesise`
+/// computed. A remainder means the caller and the forward pass disagree about a channel count,
+/// which is worth an error rather than a truncating division.
+fn positions(what: &str, values: usize, stride: usize) -> Result<u32, String> {
+    if stride == 0 || values == 0 || !values.is_multiple_of(stride) {
+        return Err(format!("{what}: {values} values is not a whole number of {stride}"));
+    }
+    Ok((values / stride) as u32)
+}
+
+impl supertonic::Stages for SupertonicNets<'_> {
+    fn duration(&mut self, lanes: &[f32], style: &[f32]) -> Result<f32, String> {
+        // This sequence leads with the sentence token, which `build` adds itself, so it is given
+        // the character count without it.
+        let sequence = positions("duration ids", lanes.len(), LANES)?;
+        let chars = sequence.checked_sub(1).ok_or("a duration pass over only a sentence token")?;
+        let net = self.duration.at(chars)?;
+        let out = one_output(net.infer_raw_many(&[lanes, style])?)?;
+        match out.as_slice() {
+            [only] => Ok(*only),
+            other => {
+                Err(format!("the duration predictor returned {} values, not one", other.len()))
+            }
+        }
+    }
+
+    fn text(&mut self, lanes: &[f32], style: &[f32]) -> Result<Vec<f32>, String> {
+        let chars = positions("text ids", lanes.len(), LANES)?;
+        let net = self.text.at(chars)?;
+        one_output(net.infer_raw_many(&[lanes, style])?)
+    }
+
+    fn sampler(
+        &mut self,
+        latent: &[f32],
+        text: &[f32],
+        keys: &[f32],
+        style: &[f32],
+        shifts: &[f32],
+        query_angles: &[f32],
+        key_angles: &[f32],
+    ) -> Result<Vec<f32>, String> {
+        let frames = positions("a latent", latent.len(), supertonic_sampler::LATENT as usize)?;
+        let chars = positions("a conditioning", text.len(), supertonic_sampler::TEXT as usize)?;
+        let net = self.sampler.at((frames, chars))?;
+        // Declaration order, which `infer_raw_many` checks each of against its own binding — the
+        // seven are all fp16 planes and a swapped pair would be the right size.
+        one_output(net.infer_raw_many(&[
+            latent,
+            text,
+            keys,
+            style,
+            shifts,
+            query_angles,
+            key_angles,
+        ])?)
+    }
+
+    fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String> {
+        let net = self.vocoder.at(frames)?;
+        one_output(net.infer_raw(latent)?)
+    }
+}
+
+/// `SupertonicSynthesizer`'s constructor. Returns 0 on failure, having logged why.
+///
+/// Six assets: the four `.maml` plans, the codepoint table and one voice's style file. The voice
+/// is separate from the plans and swappable through
+/// [`Java_com_vayunmathur_library_ml_MlNative_setSupertonicVoice`], because it is 25 KB against
+/// the plans' 198 MB and re-uploading those to change voice would be absurd.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a valid `env` and arrays it owns.
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createSupertonic<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    duration: JByteArray<'l>,
+    text: JByteArray<'l>,
+    sampler: JByteArray<'l>,
+    vocoder: JByteArray<'l>,
+    indexer: JByteArray<'l>,
+    style: JByteArray<'l>,
+) -> jlong {
+    let assets = [duration, text, sampler, vocoder, indexer, style];
+    match build_supertonic(&mut env, assets) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("supertonic is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_supertonic<'l>(
+    env: &mut JNIEnv<'l>,
+    assets: [JByteArray<'l>; 6],
+) -> Result<SupertonicHandle, String> {
+    let mut bytes = Vec::with_capacity(assets.len());
+    for asset in &assets {
+        bytes.push(
+            env.convert_byte_array(asset).map_err(|e| format!("cannot read an asset: {e}"))?,
+        );
+    }
+    let duration_weights = Weights::parse(&bytes[0], graph::SUPERTONIC_DP)?;
+    let text_weights = Weights::parse(&bytes[1], graph::SUPERTONIC_TTL)?;
+    let sampler_weights = Weights::parse(&bytes[2], graph::SUPERTONIC_VE)?;
+    let vocoder_weights = Weights::parse(&bytes[3], graph::SUPERTONIC_VOC)?;
+    if bytes[4].len() != supertonic::INDEXER_ENTRIES * 2 {
+        return Err(format!("a codepoint table of {} bytes", bytes[4].len()));
+    }
+    let voice = supertonic::Voice::read(&bytes[5])?;
+    // Read before the weights are dropped: the sampler's timestep shifts, rotary frequencies and
+    // folded style keys are all tensors in its file that no shader ever reads.
+    let conditioning = supertonic::Conditioning::read(&sampler_weights)?;
+
+    let shared = context::shared()?;
+    let handle = SupertonicHandle {
+        duration: Reshaped::new(shared.clone(), &duration_weights, SMALLEST, duration_plan)?,
+        text: Reshaped::new(shared.clone(), &text_weights, SMALLEST, text_plan)?,
+        sampler: Reshaped::new(
+            shared.clone(),
+            &sampler_weights,
+            (SMALLEST, SMALLEST),
+            sampler_plan,
+        )?,
+        vocoder: Reshaped::new(shared, &vocoder_weights, SMALLEST, vocoder_plan)?,
+        conditioning,
+        indexer: std::mem::take(&mut bytes[4]),
+        voice,
+        rng: SplitMix { state: seed() },
+    };
+    Ok(handle)
+}
+
+/// Point an existing handle at another voice. Returns false on failure, having logged why.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a live value from
+/// [`Java_com_vayunmathur_library_ml_MlNative_createSupertonic`].
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_setSupertonicVoice<'l>(
+    env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    style: JByteArray<'l>,
+) -> jni::sys::jboolean {
+    if handle == 0 {
+        return 0;
+    }
+    // SAFETY: as `synthesizeSupertonic` — the caller guarantees the handle is live and serialises
+    // this against `destroySupertonic`.
+    let state = unsafe { &mut *(handle as *mut SupertonicHandle) };
+    let read = env
+        .convert_byte_array(&style)
+        .map_err(|e| format!("cannot read the voice: {e}"))
+        .and_then(|bytes| supertonic::Voice::read(&bytes));
+    match read {
+        Ok(voice) => {
+            state.voice = voice;
+            1
+        }
+        Err(e) => {
+            log(&format!("cannot change voice: {e}"));
+            0
+        }
+    }
+}
+
+/// Free the four networks and everything beside them.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a value from
+/// [`Java_com_vayunmathur_library_ml_MlNative_createSupertonic`], and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroySupertonic<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this came from `createSupertonic` and has not been destroyed.
+    drop(unsafe { Box::from_raw(handle as *mut SupertonicHandle) });
+}
+
+/// Synthesise `text` and return the waveform, or null on failure.
+///
+/// `text` must already be **NFD**-decomposed. That is the Kotlin side's job, through
+/// `java.text.Normalizer`, because the model has no precomposed accents and doing the
+/// decomposition here would mean carrying Unicode tables in the APK — see
+/// [`supertonic::to_ids`].
+///
+/// The samples are mono `-1..1` at 44,100 Hz. Two calls with the same text differ: flow matching
+/// starts from a sampled latent, which it is meant to.
+///
+/// # Safety
+///
+/// `handle` must be `0` or a live value from
+/// [`Java_com_vayunmathur_library_ml_MlNative_createSupertonic`].
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_synthesizeSupertonic<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    text: JString<'l>,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: as `segment` — the caller guarantees the handle is live and serialises this against
+    // `destroySupertonic`.
+    let state = unsafe { &mut *(handle as *mut SupertonicHandle) };
+    let words: String = match env.get_string(&text) {
+        Ok(found) => found.into(),
+        Err(e) => {
+            log(&format!("cannot read the text: {e}"));
+            return null;
+        }
+    };
+    match speak_supertonic(state, &words) {
+        Ok(samples) => match new_float_array(&mut env, &samples) {
+            Ok(array) => array,
+            Err(e) => {
+                log(&e);
+                null
+            }
+        },
+        Err(e) => {
+            log(&format!("synthesis failed: {e}"));
+            null
+        }
+    }
+}
+
+/// The whole pipeline for one utterance.
+fn speak_supertonic(state: &mut SupertonicHandle, text: &str) -> Result<Vec<f32>, String> {
+    let SupertonicHandle {
+        duration,
+        text: encoder,
+        sampler,
+        vocoder,
+        conditioning,
+        indexer,
+        voice,
+        rng,
+    } = state;
+    // `synthesise` draws the starting latent once, after the duration predictor has settled the
+    // frame count, so the generator has to be reachable from a `Fn` rather than pre-drawn.
+    let noise = std::cell::RefCell::new(rng);
+    let mut nets = SupertonicNets { duration, text: encoder, sampler, vocoder };
+    supertonic::synthesise(&mut nets, conditioning, indexer, voice, text, &|count| {
+        noise.borrow_mut().normal(count)
+    })
 }
 
 /// Copy a Java `int[]` of ARGB pixels into `into`, checking it against `width` x `height`.

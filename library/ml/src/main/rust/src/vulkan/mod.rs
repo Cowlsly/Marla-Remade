@@ -18,6 +18,7 @@
 pub mod buffers;
 pub mod context;
 pub mod pipeline;
+pub mod reshape;
 pub mod run;
 
 #[cfg(test)]
