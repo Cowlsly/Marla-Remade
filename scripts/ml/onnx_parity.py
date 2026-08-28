@@ -56,6 +56,7 @@ PROBE = {
     # The prior's mean and log-variance. `enc_p` is reachable from the graph's own inputs, so
     # unlike the vocoder it needs no extraction — the duration predictor runs after it.
     "vits_enc": "/enc_p/proj/Conv_output_0",
+    "vits_flow": None,
 }
 
 # Graphs that are one module of a larger export, and have to be cut out of it before they can
@@ -66,7 +67,19 @@ PROBE = {
 # would not even agree with each other. `onnx.utils.extract_model` cuts the subgraph at the
 # vocoder's first convolution instead, and the input is random latents.
 SUBGRAPH = {
-    "vits_dec": {"first": "/dec/conv_pre/Conv", "channels": 192},
+    "vits_dec": {"first": "/dec/conv_pre/Conv", "channels": 192, "prefix": "/dec/"},
+    # The flow's first node is the leading flip, whose data input is the sampled prior. It
+    # also needs the padding mask cut out and fed as ones: the mask is derived from
+    # `input_lengths` and `scales`, so leaving it in drags the whole graph before the flow in
+    # with it. `nets::vits_flow` omits the mask for the same reason `nets::vits_enc` does —
+    # for one unpadded utterance it is the identity, which was verified bit-identically on the
+    # encoder's copy of the same tensor.
+    "vits_flow": {
+        "first": "/flow/flows.7/Slice",
+        "channels": 192,
+        "prefix": "/flow/",
+        "ones": "/Cast_2_output_0",
+    },
 }
 
 
@@ -144,10 +157,19 @@ def main():
 
     feed = None
     if cut is not None:
-        # Random latents, deterministic. The vocoder is not a classifier, so there is no
+        # Random latents, deterministic. These nets are not classifiers, so there is no
         # "sensible" input; what matters is that both sides see the same one.
         rng = np.random.default_rng(20240827)
         x = rng.standard_normal((1, cut["channels"], args.width)).astype(np.float32)
+        if cut.get("ones"):
+            session_inputs = {i.name: i for i in model.graph.input}
+            mask = session_inputs[cut["ones"]]
+            rank = len(mask.type.tensor_type.shape.dim)
+            shape = [1] * (rank - 1) + [args.width]
+            feed = {
+                model.graph.input[0].name: x,
+                cut["ones"]: np.ones(shape, dtype=np.float32),
+            }
     elif args.graph == "vits_enc":
         # Phoneme ids. int64 for onnxruntime, the same values as fp32 for the runtime, which
         # carries them in the arena — exact, since fp16 holds every integer to 2048.
@@ -209,6 +231,34 @@ def main():
     report("the runtime", want, got)
 
 
+def inline_constants(model):
+    """Turn every `Constant` node into an initializer, in place.
+
+    Cutting a module out of a larger export breaks whenever a node inside it reads a
+    `Constant` produced outside it — the flow's four channel reversals each read three
+    constants that belong to the encoder, so extracting the flow alone leaves them dangling.
+    An initializer travels with any subgraph that references it, so inlining first makes the
+    cut work wherever it is placed.
+    """
+    keep = []
+    for node in model.graph.node:
+        if node.op_type == "Constant":
+            for attribute in node.attribute:
+                if attribute.name == "value":
+                    tensor = onnx.TensorProto()
+                    tensor.CopyFrom(attribute.t)
+                    tensor.name = node.output[0]
+                    model.graph.initializer.append(tensor)
+                    break
+            else:
+                keep.append(node)
+        else:
+            keep.append(node)
+    del model.graph.node[:]
+    model.graph.node.extend(keep)
+    return model
+
+
 def extract(path, model, cut, work):
     """Cut one module out of a larger export, so it can be run on its own.
 
@@ -218,11 +268,16 @@ def extract(path, model, cut, work):
     first = next((n for n in model.graph.node if n.name == cut["first"]), None)
     if first is None:
         raise SystemExit(f"{cut['first']} is not in this export")
-    outputs = [
-        o for o in (n.output[0] for n in model.graph.node if n.name.startswith("/dec/"))
-    ]
+    prefix = cut["prefix"]
+    outputs = [n.output[0] for n in model.graph.node if n.name.startswith(prefix)]
+    # Inline first, then write the whole model back out: `extract_model` reads from a path.
+    flattened = os.path.join(work, "flattened.onnx")
+    onnx.save(inline_constants(onnx.load(path)), flattened)
     target = os.path.join(work, "subgraph.onnx")
-    onnx.utils.extract_model(path, target, [first.input[0]], [outputs[-1]])
+    inputs = [first.input[0]]
+    if cut.get("ones"):
+        inputs.append(cut["ones"])
+    onnx.utils.extract_model(flattened, target, inputs, [outputs[-1]])
     return onnx.load(target)
 
 

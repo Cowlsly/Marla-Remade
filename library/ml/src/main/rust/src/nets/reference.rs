@@ -190,6 +190,8 @@ impl Reference {
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
                     Kind::Embed => self.embed(push),
+                    Kind::GatedTanh => self.gated_tanh(push),
+                    Kind::FlipChannels => self.flip_channels(push),
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;
@@ -461,6 +463,30 @@ impl Reference {
                 total += self.load(p.in0, plane + i)?;
             }
             self.store(p.out, channel, total / elements as f32)?;
+        }
+        Ok(())
+    }
+
+    /// `out[c] = tanh(in[c]) * sigmoid(in[c + C])`, WaveNet''s gated activation.
+    fn gated_tanh(&mut self, p: &Push) -> Result<(), String> {
+        let gate_at = p.out_c * p.out_h * p.out_w;
+        for i in 0..p.count {
+            let filtered = self.load(p.in0, i)?;
+            let gate = self.load(p.in0, gate_at + i)?;
+            self.store(p.out, i, filtered.tanh() / (1.0 + (-gate).exp()))?;
+        }
+        Ok(())
+    }
+
+    /// `out[c] = in[C - 1 - c]`, a channel reversal.
+    fn flip_channels(&mut self, p: &Push) -> Result<(), String> {
+        let plane = p.out_h * p.out_w;
+        for channel in 0..p.out_c {
+            let mirrored = p.out_c - 1 - channel;
+            for i in 0..plane {
+                let value = self.load(p.in0, mirrored * plane + i)?;
+                self.store(p.out, channel * plane + i, value)?;
+            }
         }
         Ok(())
     }
@@ -939,7 +965,7 @@ fn uniform(state: &mut u32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, Act,
+        mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp, vits_dec, vits_enc, vits_flow, Act,
         Builder,
     };
     use super::*;
@@ -1682,6 +1708,90 @@ mod tests {
     }
 
     #[test]
+    fn a_gated_activation_multiplies_a_tanh_by_a_sigmoid_of_the_other_half() {
+        // Four channels in, two out: channels 0 and 1 are the filter and 2 and 3 the gate.
+        // Distinct values in each half, so swapping filter for gate would be visible —
+        // tanh and sigmoid disagree about the sign of a negative input.
+        let got = one(
+            Shape::new(4, 1, 2),
+            &[0.0, 1.0, -1.0, 2.0, 0.0, 2.0, 3.0, -2.0],
+            &[],
+            |b, x| b.gated_tanh(x),
+        );
+        let gate = |x: f32| 1.0 / (1.0 + (-x).exp());
+        close(
+            &got,
+            &[
+                0.0f32.tanh() * gate(0.0),
+                1.0f32.tanh() * gate(2.0),
+                (-1.0f32).tanh() * gate(3.0),
+                2.0f32.tanh() * gate(-2.0),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_gated_activation_over_an_odd_channel_count_is_refused() {
+        // The filter and the gate are halves of one tensor, so an odd count has no split.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let x = b.input(Shape::new(3, 1, 2));
+        let out = b.gated_tanh(x);
+        let error = b.finish(&[out]).expect_err("three channels");
+        assert!(error.contains("must be even"), "{error}");
+    }
+
+    #[test]
+    fn flipping_channels_reverses_them_and_leaves_each_plane_alone() {
+        // Three channels of two positions. The reversal is over channels only: getting the
+        // plane indexing wrong would also reverse each channel's own values, which at one
+        // row would look almost right.
+        let got = one(
+            Shape::new(3, 1, 2),
+            &[1.0, 2.0, 10.0, 20.0, 100.0, 200.0],
+            &[],
+            |b, x| b.flip_channels(x),
+        );
+        close(&got, &[100.0, 200.0, 10.0, 20.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn flipping_twice_is_the_identity() {
+        let values: Vec<f32> = (0..12).map(|i| i as f32).collect();
+        let got = one(Shape::new(4, 1, 3), &values, &[], |b, x| {
+            let once = b.flip_channels(x);
+            b.flip_channels(once)
+        });
+        close(&got, &values);
+    }
+
+    #[test]
+    fn slicing_channels_takes_a_contiguous_range_and_nothing_else() {
+        // Channels 1 and 2 of four. A slice that got the element stride wrong would return
+        // the right *count* of values from the wrong place.
+        let values: Vec<f32> = vec![
+            1.0, 2.0, 3.0, //
+            10.0, 20.0, 30.0, //
+            100.0, 200.0, 300.0, //
+            1000.0, 2000.0, 3000.0,
+        ];
+        let got = one(Shape::new(4, 1, 3), &values, &[], |b, x| {
+            b.slice_channels(x, 1, 2)
+        });
+        close(&got, &[10.0, 20.0, 30.0, 100.0, 200.0, 300.0]);
+    }
+
+    #[test]
+    fn slicing_past_the_end_is_refused() {
+        let given = Given::new(&[]).expect("no tensors");
+        let mut b = Builder::new(&given);
+        let x = b.input(Shape::new(4, 1, 3));
+        let out = b.slice_channels(x, 3, 2);
+        let error = b.finish(&[out]).expect_err("past the end");
+        assert!(error.contains("channels 3..5"), "{error}");
+    }
+
+    #[test]
     fn an_embedding_gathers_the_row_each_id_names() {
         // Four symbols of three channels, looked up in an order that is neither ascending
         // nor a permutation — 2, 0, 3, 0 — so a lookup that ignored the ids and copied the
@@ -2107,6 +2217,17 @@ mod tests {
 
         // A voice is a runtime download rather than a bundled asset, so the vocoder's
         // `.maml` is given by path instead of being looked up in the tree.
+        if graph == "vits_flow" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights = crate::weights::Weights::parse(&bytes, crate::weights::graph::VITS_FLOW)
+                .expect("the flow asset parses");
+            let plan = vits_flow::build(&weights, width).expect("vits_flow builds");
+            let latent = run(&plan, weights.data(), &input).expect("the flow runs");
+            write(&dir.join("reference.f32"), &latent);
+            println!("vits_flow at {width} frames: wrote {} values", latent.len());
+            return;
+        }
         if graph == "vits_enc" {
             let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
             let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));

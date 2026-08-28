@@ -100,6 +100,7 @@ GRAPHS = {
     "ppocr_rec": 6,
     "vits_dec": 7,
     "vits_enc": 8,
+    "vits_flow": 9,
 }
 
 # SHA-256 over the ordered layer table (see `layer_table_digest`). Regenerate with
@@ -113,6 +114,7 @@ EXPECTED_DIGEST = {
     "ppocr_rec": "8c16a8702aa7a1e7b4d94787d089616ca4bc3d8aaeebb0b0159eabc56af3ba08",
     "vits_dec": "ac3fa714b9c0074e7fb7fa1d5f5b65e30bf558df0817b014897cd56b6e850020",
     "vits_enc": "93ee24f70b490334d11b383f043e81284a3e781bc263597830c50f8df14db2c1",
+    "vits_flow": "38cecda81bcfd4eb98782395905ddbe4637aa7f55fecb2de996d09fc530e2e6d",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that
@@ -132,6 +134,7 @@ EXPECTED_DIGEST = {
 MODULES = {
     "vits_dec": "/dec/",
     "vits_enc": "/enc_p/",
+    "vits_flow": "/flow/",
 }
 
 # `outputs` are the graph outputs the Rust forward pass corresponds to; the export may
@@ -203,6 +206,14 @@ EXPECTED_OPS = {
         "Gather": 61, "Less": 1, "MatMul": 24, "Mul": 72, "Pad": 48, "Pow": 12, "Range": 1,
         "ReduceMean": 24, "Relu": 6, "Reshape": 96, "Shape": 25, "Slice": 42, "Softmax": 6,
         "Split": 1, "Sqrt": 12, "Sub": 42, "Transpose": 73, "Unsqueeze": 130, "Where": 6,
+    },
+    # Counted within `/flow/` only. The 16 gated activations are NOT here: their Tanh and
+    # Sigmoid nodes carry auto-generated names with no module path, so a prefix cannot see
+    # them. `ConstantOfShape`/`Neg`/`Exp` are the mean-only coupling''s absent log-scale,
+    # which is `exp(-0)`; the 32 `Mul`s are the padding mask and the identity multiply by it.
+    "vits_flow": {
+        "Add": 28, "Concat": 4, "ConstantOfShape": 24, "Conv": 40, "Exp": 4, "Mul": 32,
+        "Neg": 4, "Shape": 24, "Slice": 28, "Split": 4, "Sub": 4,
     },
 }
 

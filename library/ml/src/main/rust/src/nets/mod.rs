@@ -39,6 +39,7 @@ pub mod selfie;
 pub mod u2netp;
 pub mod vits_dec;
 pub mod vits_enc;
+pub mod vits_flow;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +236,13 @@ pub enum Kind {
     /// [`Kind::AttnApply`] plus the value-side relative term. See
     /// [`Kind::AttnScoresRelative`].
     AttnApplyRelative,
+    /// WaveNet's gated activation, `tanh(in[c]) * sigmoid(in[c + C])`.
+    ///
+    /// The input has twice the output''s channels, because one convolution produces the
+    /// filter and the gate together. 16 uses in Piper''s flow.
+    GatedTanh,
+    /// `out[c] = in[C - 1 - c]`, a channel reversal. VITS''s `Flip` between coupling layers.
+    FlipChannels,
     /// `out[c][t] = table[id(t)][c]`, an embedding lookup.
     ///
     /// The only op here whose addresses depend on the data. Ids arrive as an ordinary fp16
@@ -514,6 +522,19 @@ enum Node {
         out: Id,
         table: u32,
         rows: u32,
+    },
+    GatedTanh {
+        input: Id,
+        out: Id,
+    },
+    FlipChannels {
+        input: Id,
+        out: Id,
+    },
+    SliceChannels {
+        input: Id,
+        out: Id,
+        start: u32,
     },
     AttnApply {
         probs: Id,
@@ -946,6 +967,48 @@ impl<'a> Builder<'a> {
         }
         let out = self.tensor(shape);
         self.nodes.push(Node::Softmax { input, out });
+        out
+    }
+
+    /// WaveNet's gated activation: `tanh(x[c]) * sigmoid(x[c + C])` over an input of `2C`
+    /// channels, writing `C`.
+    pub fn gated_tanh(&mut self, input: Id) -> Id {
+        let shape = self.shape_of(input);
+        if shape.c == 0 || !shape.c.is_multiple_of(2) {
+            self.fail(format!(
+                "a gated activation over {shape:?}: the filter and the gate are halves of \
+                 the same tensor, so the channel count must be even"
+            ));
+        }
+        let out = self.tensor(Shape::new(shape.c / 2, shape.h, shape.w));
+        self.nodes.push(Node::GatedTanh { input, out });
+        out
+    }
+
+    /// `out[c] = in[C - 1 - c]`, VITS's `Flip` between coupling layers.
+    pub fn flip_channels(&mut self, input: Id) -> Id {
+        let shape = self.shape_of(input);
+        let out = self.tensor(shape);
+        self.nodes.push(Node::FlipChannels { input, out });
+        out
+    }
+
+    /// Channels `start .. start + count` of `input`, as a tensor of its own.
+    ///
+    /// One copy and no shader: a channel range of a `[C, H, W]` tensor is contiguous, so this
+    /// is a element-range move like the one [`Builder::concat`] already uses. It is a copy
+    /// rather than a view because a view would have to survive the arena's last-use
+    /// bookkeeping, and the ranges here are a few hundred kilobytes.
+    pub fn slice_channels(&mut self, input: Id, start: u32, count: u32) -> Id {
+        let shape = self.shape_of(input);
+        if count == 0 || start.saturating_add(count) > shape.c {
+            self.fail(format!(
+                "channels {start}..{} of {shape:?}",
+                start.saturating_add(count)
+            ));
+        }
+        let out = self.tensor(Shape::new(count, shape.h, shape.w));
+        self.nodes.push(Node::SliceChannels { input, out, start });
         out
     }
 
@@ -1444,6 +1507,47 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::GatedTanh { input, out } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::GatedTanh,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::FlipChannels { input, out } => {
+                let so = shape(*out);
+                ops.push(Op::Dispatch {
+                    kind: Kind::FlipChannels,
+                    push: Push {
+                        in0: at(*input)?,
+                        out: at(*out)?,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::SliceChannels { input, out, start } => {
+                let so = shape(*out);
+                // A channel range is contiguous, so this is one element-range move.
+                ops.push(Op::Copy {
+                    src: at(*input)? + start * so.h * so.w,
+                    dst: at(*out)?,
+                    elems: so.len(),
+                });
+            }
             Node::Embed { ids, out, table, rows } => {
                 let so = shape(*out);
                 ops.push(Op::Dispatch {
@@ -1550,6 +1654,9 @@ impl Node {
             | Node::Softmax { out, .. }
             | Node::LeakyRelu { out, .. }
             | Node::Embed { out, .. }
+            | Node::GatedTanh { out, .. }
+            | Node::FlipChannels { out, .. }
+            | Node::SliceChannels { out, .. }
             | Node::AttnApply { out, .. }
             | Node::Concat { out, .. } => *out,
         }
@@ -1566,6 +1673,9 @@ impl Node {
             | Node::Softmax { input, .. }
             | Node::LeakyRelu { input, .. }
             | Node::Embed { ids: input, .. }
+            | Node::GatedTanh { input, .. }
+            | Node::FlipChannels { input, .. }
+            | Node::SliceChannels { input, .. }
             | Node::GlobalAvgPool { input, .. } => vec![*input],
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::AttnScores { q: a, k: b, .. }
@@ -1745,6 +1855,8 @@ pub(crate) mod tests {
                         // One id per position, so the read is `out_w` and not `dense` —
                         // `dense` here would be the *table's* row count.
                         Kind::Embed => vec![(push.in0, push.out_w)],
+                        // Twice what it writes: the filter half and the gate half.
+                        Kind::GatedTanh => vec![(push.in0, written * 2)],
                         _ => vec![(push.in0, dense)],
                     };
                     ((push.out, written), reads)

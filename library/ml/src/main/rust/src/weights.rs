@@ -49,6 +49,10 @@ pub mod graph {
     ///
     /// See [`crate::nets::vits_enc`]. Its input is symbol ids rather than pixels or latents.
     pub const VITS_ENC: u32 = 8;
+    /// Piper's VITS normalising flow \u2014 the `flow` module, run in reverse.
+    ///
+    /// See [`crate::nets::vits_flow`].
+    pub const VITS_FLOW: u32 = 9;
 }
 
 /// One tensor's entry in the table: where it is and what shape it is.

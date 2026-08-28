@@ -1,0 +1,33 @@
+#version 450
+//! Reverse the channel order: `out[c] = in[C - 1 - c]`.
+//!
+//! VITS interleaves its four coupling layers with four `Flip`s, each of which is
+//! `torch.flip(x, [1])` and exports as a single `Slice` with a negative step. Four uses in
+//! Piper's flow.
+//!
+//! # Why a pass and not a fold
+//!
+//! A fixed channel permutation can in principle be folded into the convolutions either side
+//! of it — permuting a weight's input channels before, or its output channels after. That
+//! would make this free. It is a pass instead because the fold has to thread through a split
+//! and a concatenation to reach those convolutions, and the arithmetic saved is one read and
+//! one write of `[192, 1, T]`: at 400 phonemes that is 76,800 elements, against the tens of
+//! millions the coupling layer around it costs. The fold would trade a real risk of getting
+//! a permutation backwards for nothing measurable.
+//!
+//! Without the flips a coupling layer would only ever transform the same half of the
+//! channels, and the other half would pass through all four unchanged.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    uint channel, row, column;
+    unpack(index, channel, row, column);
+    uint mirrored = p.out_c - 1u - channel;
+    uint plane = p.out_h * p.out_w;
+    arena[p.out_at + index] = arena[p.in0 + mirrored * plane + row * p.out_w + column];
+}

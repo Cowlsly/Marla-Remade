@@ -46,9 +46,12 @@ const ATTN_SCORES_RELATIVE: &[u8] =
 const ATTN_APPLY_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_relative.comp.spv"));
 const EMBED: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/embed.comp.spv"));
+const GATED_TANH: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/gated_tanh.comp.spv"));
+const FLIP_CHANNELS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/flip_channels.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 18] = [
+const SPIRV: [&[u8]; 20] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -67,6 +70,8 @@ const SPIRV: [&[u8]; 18] = [
     ATTN_SCORES_RELATIVE,
     ATTN_APPLY_RELATIVE,
     EMBED,
+    GATED_TANH,
+    FLIP_CHANNELS,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -108,6 +113,8 @@ pub struct Pipelines {
     attn_scores_relative: vk::Pipeline,
     attn_apply_relative: vk::Pipeline,
     embed: vk::Pipeline,
+    gated_tanh: vk::Pipeline,
+    flip_channels: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -248,6 +255,8 @@ impl Pipelines {
             attn_scores_relative,
             attn_apply_relative,
             embed,
+            gated_tanh,
+            flip_channels,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -282,6 +291,8 @@ impl Pipelines {
             attn_scores_relative,
             attn_apply_relative,
             embed,
+            gated_tanh,
+            flip_channels,
         })
     }
 
@@ -306,6 +317,8 @@ impl Pipelines {
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
             Kind::Embed => self.embed,
+            Kind::GatedTanh => self.gated_tanh,
+            Kind::FlipChannels => self.flip_channels,
         }
     }
 
@@ -332,6 +345,8 @@ impl Pipelines {
             self.attn_scores_relative,
             self.attn_apply_relative,
             self.embed,
+            self.gated_tanh,
+            self.flip_channels,
         ] {
             device.destroy_pipeline(pipeline, None);
         }
