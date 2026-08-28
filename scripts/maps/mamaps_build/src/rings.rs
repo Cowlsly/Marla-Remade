@@ -112,7 +112,10 @@ pub fn normalise(layer: &mut Layer) -> Stats {
         let mut count = 0u32;
         // An exterior is counter-clockwise. Reversed rather than re-labelled, because the winding
         // field states a fact about the coordinates and the two must agree.
-        let mut kept: Vec<Vec<(i16, i16)>> = Vec::with_capacity(group.len());
+        // `(ring, box)`, because every containment test below needs the box and computing it per
+        // comparison would put back the quadratic cost the boxes exist to remove.
+        let mut kept: Vec<(Vec<(i16, i16)>, (i16, i16, i16, i16))> =
+            Vec::with_capacity(group.len());
         let mut exterior_ring = exterior.to_vec();
         if exterior_area < 0.0 {
             exterior_ring.reverse();
@@ -120,7 +123,8 @@ pub fn normalise(layer: &mut Layer) -> Stats {
         }
         push_ring(&mut parts, &mut coords, &exterior_ring, WINDING_OUTER);
         count += 1;
-        kept.push(exterior_ring.clone());
+        let exterior_box = bounds(&exterior_ring);
+        kept.push((exterior_ring, exterior_box));
 
         for (_, hole) in group.iter().skip(1) {
             let area = signed_area(hole);
@@ -128,15 +132,20 @@ pub fn normalise(layer: &mut Layer) -> Stats {
                 stats.zero_area += 1;
                 continue;
             }
+            let hole_box = bounds(hole);
             // Strictly inside its exterior. A straddling or outside hole is dropped rather than
             // clipped: a dropped hole paints a lake as land, which is visible and explicable, and a
             // botched clip paints a wedge across a continent, which is neither.
-            if !strictly_inside(hole, &exterior_ring) {
+            if !strictly_inside(hole, hole_box, &kept[0].0, exterior_box) {
                 stats.holes_dropped += 1;
                 continue;
             }
             // And not overlapping a hole already kept. Same reasoning: no boolean operations.
-            if kept.iter().skip(1).any(|other| rings_overlap(hole, other)) {
+            if kept
+                .iter()
+                .skip(1)
+                .any(|(other, other_box)| rings_overlap(hole, hole_box, other, *other_box))
+            {
                 stats.holes_dropped += 1;
                 continue;
             }
@@ -148,7 +157,8 @@ pub fn normalise(layer: &mut Layer) -> Stats {
             }
             push_ring(&mut parts, &mut coords, &ring, WINDING_HOLE);
             count += 1;
-            kept.push(ring);
+            // Reversing a ring does not move it, so the box is still the one just computed.
+            kept.push((ring, hole_box));
         }
         feature.parts_offset = start;
         feature.part_count = count;
@@ -207,8 +217,56 @@ pub fn signed_area(ring: &[(i16, i16)]) -> f64 {
 /// that matter — wholly inside, wholly outside, straddling — and it cannot be fooled by anything a
 /// clipped tile actually contains, because a hole that crosses its exterior has vertices on both
 /// sides by construction.
-fn strictly_inside(inner: &[(i16, i16)], outer: &[(i16, i16)]) -> bool {
-    inner.iter().all(|&point| point_in_ring(point, outer))
+/// A ring's bounding box as `(min_x, min_y, max_x, max_y)`.
+///
+/// Computed once per ring and threaded into the containment tests, because those are the whole cost
+/// of stage C. Measured on a California build with a coastline, `encode` — which is stage C plus
+/// serialise plus DEFLATE — was 432.7 s against 94.7 s without one. `earth` lands in ~529 k
+/// tile-layers and its polygons carry many holes, and both tests below are quadratic without a cheap
+/// way to say "these two are nowhere near each other".
+///
+/// Every use is **conservative**: a box test only ever rejects a case the exact test would also have
+/// rejected, so the answers are unchanged and the archive stays byte-identical.
+fn bounds(ring: &[(i16, i16)]) -> (i16, i16, i16, i16) {
+    let mut b = (i16::MAX, i16::MAX, i16::MIN, i16::MIN);
+    for &(x, y) in ring {
+        b.0 = b.0.min(x);
+        b.1 = b.1.min(y);
+        b.2 = b.2.max(x);
+        b.3 = b.3.max(y);
+    }
+    b
+}
+
+/// Is `inner`'s box entirely within `outer`'s?
+fn box_within(inner: (i16, i16, i16, i16), outer: (i16, i16, i16, i16)) -> bool {
+    inner.0 >= outer.0 && inner.1 >= outer.1 && inner.2 <= outer.2 && inner.3 <= outer.3
+}
+
+/// Do two boxes share any area?
+fn boxes_meet(a: (i16, i16, i16, i16), b: (i16, i16, i16, i16)) -> bool {
+    !(a.2 < b.0 || a.0 > b.2 || a.3 < b.1 || a.1 > b.3)
+}
+
+/// Is every vertex of `inner` inside `outer`?
+///
+/// Vertex containment rather than a full geometric test. It is what distinguishes the three cases
+/// that matter — wholly inside, wholly outside, straddling — and it cannot be fooled by anything a
+/// clipped tile actually contains, because a hole that crosses its exterior has vertices on both
+/// sides by construction.
+fn strictly_inside(
+    inner: &[(i16, i16)],
+    inner_box: (i16, i16, i16, i16),
+    outer: &[(i16, i16)],
+    outer_box: (i16, i16, i16, i16),
+) -> bool {
+    // If any of `inner` lies outside `outer`'s box then that vertex is outside `outer` itself, so the
+    // exact test would say no too. This is what makes a hole belonging to a different part of the
+    // world cost four comparisons instead of a scan of the exterior.
+    if !box_within(inner_box, outer_box) {
+        return false;
+    }
+    inner.iter().all(|&point| point_in_ring(point, outer, outer_box))
 }
 
 /// Do two rings overlap? Approximated by mutual vertex containment.
@@ -216,14 +274,29 @@ fn strictly_inside(inner: &[(i16, i16)], outer: &[(i16, i16)]) -> bool {
 /// One ring having a vertex inside the other is the signature of every overlap a clipped tile
 /// produces. Two rings that merely touch at a vertex are not overlapping, and are left alone —
 /// `tess::fill` already handles a hole that touches its exterior.
-fn rings_overlap(a: &[(i16, i16)], b: &[(i16, i16)]) -> bool {
-    a.iter().filter(|&&p| point_in_ring(p, b)).count() > 1
-        || b.iter().filter(|&&p| point_in_ring(p, a)).count() > 1
+fn rings_overlap(
+    a: &[(i16, i16)],
+    a_box: (i16, i16, i16, i16),
+    b: &[(i16, i16)],
+    b_box: (i16, i16, i16, i16),
+) -> bool {
+    // Disjoint boxes cannot overlap, and most pairs of holes in a real polygon are disjoint. This is
+    // the test that takes the pairwise scan from quadratic-in-vertices to quadratic-in-holes.
+    if !boxes_meet(a_box, b_box) {
+        return false;
+    }
+    a.iter().filter(|&&p| point_in_ring(p, b, b_box)).count() > 1
+        || b.iter().filter(|&&p| point_in_ring(p, a, a_box)).count() > 1
 }
 
 /// Even-odd ray cast. On the boundary counts as outside, which is what makes `strictly_inside`
 /// strict.
-fn point_in_ring((x, y): (i16, i16), ring: &[(i16, i16)]) -> bool {
+fn point_in_ring((x, y): (i16, i16), ring: &[(i16, i16)], ring_box: (i16, i16, i16, i16)) -> bool {
+    // A point outside the box is outside the ring, for the cost of four comparisons rather than a
+    // walk of every edge.
+    if x < ring_box.0 || x > ring_box.2 || y < ring_box.1 || y > ring_box.3 {
+        return false;
+    }
     let (x, y) = (x as f64, y as f64);
     let mut inside = false;
     for pair in ring.windows(2) {
@@ -274,11 +347,13 @@ pub fn check(layer: &Layer) -> Vec<String> {
             if area >= 0.0 {
                 problems.push(format!("feature {index}'s hole {i} is not clockwise ({area})"));
             }
-            if !strictly_inside(points, exterior_points) {
+            if !strictly_inside(points, bounds(points), exterior_points, bounds(exterior_points))
+            {
                 problems.push(format!("feature {index}'s hole {i} is not inside its exterior"));
             }
             for (j, other) in holes.iter().enumerate().skip(i + 1) {
-                if rings_overlap(points, layer.points(other)) {
+                let other_points = layer.points(other);
+                if rings_overlap(points, bounds(points), other_points, bounds(other_points)) {
                     problems.push(format!("feature {index}'s holes {i} and {j} overlap"));
                 }
             }
