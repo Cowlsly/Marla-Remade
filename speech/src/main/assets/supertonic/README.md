@@ -1,16 +1,17 @@
 # Supertonic 3, bundled
 
 `SupertonicSynthesizer.inAssets` reads these six files, and `SupertonicBundle.isPresent` refuses to
-advertise the TTS engine unless they are all here. They are **not in version control** — the four
-`.maml` come to ~105 MB — so a fresh checkout has to build them:
+advertise the TTS engine unless they are all here. They are **not in version control** — see the
+entry in `/.gitignore` for why — so a fresh checkout has to build them:
 
 ```
-./scripts/ml/supertonic_fold.py duration_predictor.onnx --graph supertonic_dp  -o supertonic_dp.maml
-./scripts/ml/supertonic_fold.py text_encoder.onnx       --graph supertonic_ttl -o supertonic_ttl.maml
-./scripts/ml/supertonic_fold.py vector_estimator.onnx   --graph supertonic_ve  -o supertonic_ve.maml
-./scripts/ml/supertonic_fold.py vocoder.onnx            --graph supertonic_voc -o supertonic_voc.maml
-./scripts/ml/supertonic_bundle.py --indexer <ttl.json> --styles voice_styles/ -o .
+python scripts/ml/fetch_supertonic.py
 ```
+
+That fetches `Supertone/supertonic-3` pinned to one revision, checks all four ONNX SHA-256s, and
+runs both converters. Each converter also checks its own layer-table digest against
+`maml_convert.EXPECTED_DIGEST`, so a bundle built from a moved upstream fails loudly rather than
+producing a net that reads the right shapes holding the wrong numbers.
 
 | File | What it is |
 | :--- | :--- |
@@ -20,6 +21,16 @@ advertise the TTS engine unless they are all here. They are **not in version con
 | `supertonic_voc.maml` | ConvNeXt vocoder — latent to 44,100 Hz samples |
 | `unicode_indexer.bin` | 65,536 `int16`, one per BMP codepoint; the whole front end |
 | `style_F1.bin` … `style_M5.bin` | ten voices, ~25 KB each; two style tensors, not a model |
+
+At fp16 the four nets come to 189 MiB, which with Whisper's 74 MiB puts `:speech`'s assets at
+263 MiB. Quantising the ungrouped `1 x 1` convolutions to int8 would take the four nets to ~100 MiB;
+`Builder::conv_int8` and `conv_point_int8.comp` exist for it, but no net has been switched over yet.
+
+Verified by `library/ml/src/main/rust/tests/assets.rs`, which builds all four forward passes against
+these files and checks the codepoint table and every style is the size the runtime assumes. Those
+tests **skip** when the bundle is absent, so they pass on a fresh checkout and fail on a wrong one.
+The numbers are checked separately by `scripts/ml/onnx_parity.py`; at the pinned revision all four
+nets correlate with onnxruntime above 0.999, the vocoder better than its own fp16 bar.
 
 ## Uncompressed, and it has to stay that way
 

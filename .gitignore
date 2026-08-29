@@ -65,6 +65,18 @@ health/src/main/assets/staging.db
 # every listing image twice. Remove this ignore if you ever want
 # `validate<Variant>ScreenshotTest` to act as UI regression testing.
 **/src/screenshotTest*/reference/
+# Supertonic 3's TTS bundle - 189 MiB of fp16 .maml plus its codepoint table and ten voice
+# styles. Rebuild byte for byte with `python scripts/ml/fetch_supertonic.py`, which pins the
+# upstream revision and every ONNX SHA-256. Ignored for the same reason as the two above: it is
+# the largest asset in the tree, it is derived rather than authored, and committing it would put
+# it in history permanently - including the fp16 blobs that an int8 conversion would supersede.
+#
+# Consequence worth knowing: a fresh checkout builds a :speech APK with **no voices**, and the
+# TTS engine then advertises no languages (SupertonicBundle.isPresent is false) rather than
+# failing on the first utterance. Run the script before cutting a release.
+speech/src/main/assets/supertonic/*.maml
+speech/src/main/assets/supertonic/*.bin
+
 # Apple WPS scraping experiment (research scratch: crawler DBs, samples, artifacts)
 wtfps-experiment/
 wtfps/

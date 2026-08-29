@@ -13,7 +13,10 @@
 
 use std::path::{Path, PathBuf};
 
-use modelrunner::nets::{mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, u2netp};
+use modelrunner::nets::{
+    mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
+    supertonic_text, supertonic_vocoder, u2netp,
+};
 use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
 
@@ -212,5 +215,90 @@ fn report_the_device_memory_each_net_needs() {
             (weight_bytes + arena_bytes) / 1024,
         );
         assert!(weight_bytes + arena_bytes < 128 * 1024 * 1024);
+    }
+}
+
+/// One of Supertonic's four `.maml`, or `None` when the bundle has not been built.
+///
+/// Unlike every other asset here, Supertonic's is **not committed**: the four nets come to 189 MiB
+/// at fp16, which is more than belongs in git history for something a pinned script can rebuild
+/// byte for byte. So a fresh checkout does not have it, and this returns `None` rather than
+/// panicking — the test below then reports that it was skipped instead of failing for the one
+/// reason that is not a bug.
+///
+/// A file that is *present but wrong* is still a hard failure. That is the case worth catching:
+/// a bundle rebuilt from a moved upstream, or converted by a `supertonic_fold.py` whose layer
+/// ordering has drifted from the Rust.
+fn supertonic(name: &str, graph_id: u32) -> Option<Weights> {
+    let path = repo_root().join("speech/src/main/assets/supertonic").join(name);
+    let bytes = std::fs::read(&path).ok()?;
+    Some(
+        Weights::parse(&bytes, graph_id)
+            .unwrap_or_else(|e| panic!("{} is not a usable .maml: {e}", path.display())),
+    )
+}
+
+#[test]
+fn the_bundled_supertonic_assets_build_all_four_forward_passes() {
+    // The four hardcoded passes against the four converted files, which is the strongest automatic
+    // check that the bundle `:speech` ships is the one the Rust was written for: `Builder::finish`
+    // refuses a plan that does not read every tensor in its file, and each `build` walks its
+    // tensors through `Weights::shaped`, so a reordered or re-shaped layer fails here naming the
+    // tensor rather than producing silent nonsense on a phone.
+    //
+    // Widths are arbitrary but non-trivial: every Supertonic plan is utterance-shaped, so a build
+    // at one length exercises the shape arithmetic that `Net::rebuild` repeats per sentence.
+    let (frames, chars) = (32u32, 16u32);
+
+    let Some(duration) = supertonic("supertonic_dp.maml", graph::SUPERTONIC_DP) else {
+        println!(
+            "skipped: no bundle in speech/src/main/assets/supertonic. \
+             Run python scripts/ml/fetch_supertonic.py to build it."
+        );
+        return;
+    };
+    assert_eq!(duration.len(), supertonic_duration::TENSORS);
+    assert!(!supertonic_duration::build(&duration, chars).expect("the duration pass").ops.is_empty());
+
+    let text = supertonic("supertonic_ttl.maml", graph::SUPERTONIC_TTL).expect("the text encoder");
+    assert_eq!(text.len(), supertonic_text::TENSORS);
+    assert!(!supertonic_text::build(&text, chars).expect("the text pass").ops.is_empty());
+
+    let sampler = supertonic("supertonic_ve.maml", graph::SUPERTONIC_VE).expect("the sampler");
+    assert_eq!(sampler.len(), supertonic_sampler::TENSORS);
+    assert!(
+        !supertonic_sampler::build(&sampler, frames, chars).expect("the sampler pass").ops.is_empty()
+    );
+
+    let vocoder = supertonic("supertonic_voc.maml", graph::SUPERTONIC_VOC).expect("the vocoder");
+    assert_eq!(vocoder.len(), supertonic_vocoder::TENSORS);
+    assert!(!supertonic_vocoder::build(&vocoder, frames).expect("the vocoder pass").ops.is_empty());
+
+    let total: usize = [&duration, &text, &sampler, &vocoder].iter().map(|w| w.data().len()).sum();
+    println!("supertonic: {} MiB of weights across four nets", total / (1 << 20));
+}
+
+/// The six files `SupertonicBundle.isPresent` requires before `:speech` will advertise a voice.
+///
+/// Kotlin's check is a directory listing, so it cannot notice a file that is the right name and the
+/// wrong size. This is the counterpart that does: the codepoint table is a fixed 65,536 `int16` and
+/// each voice style a fixed 12,928 fp16, both fixed by the architecture rather than by the export,
+/// so a length check here is as strong as a digest would be.
+#[test]
+fn the_bundled_supertonic_inputs_are_the_sizes_the_runtime_assumes() {
+    let dir = repo_root().join("speech/src/main/assets/supertonic");
+    let Ok(indexer) = std::fs::read(dir.join("unicode_indexer.bin")) else {
+        println!("skipped: no bundle. Run python scripts/ml/fetch_supertonic.py to build it.");
+        return;
+    };
+    // `post::supertonic::INDEXER_ENTRIES` int16, one per BMP codepoint.
+    assert_eq!(indexer.len(), 65_536 * 2, "the codepoint table");
+
+    // `style_ttl` transposed to [256, 50] then `style_dp` flattened to 128, as fp16.
+    let style_elems = 256 * 50 + 128;
+    for voice in ["F1", "F2", "F3", "F4", "F5", "M1", "M2", "M3", "M4", "M5"] {
+        let name = format!("style_{voice}.bin");
+        let bytes = std::fs::read(dir.join(&name)).unwrap_or_else(|e| panic!("{name}: {e}"));
+        assert_eq!(bytes.len(), style_elems * 2, "{name}");
     }
 }
