@@ -62,6 +62,15 @@ PROBE = {
     # `denoised_latent`, the graph's own output. That is a whole Euler step over both guidance
     # branches, so the runtime side runs the plan twice - which is the point worth checking.
     "supertonic_ve": None,
+    # TinyCLIP is two towers in one graph, so it appears twice: the key selects which one, and the
+    # runtime side branches on the same key.
+    #
+    # The probe is each projection's **raw output**, not the graph's `image_embeds`/`text_embeds` —
+    # `CLIPModel` L2-normalises those before returning them, and comparing unit vectors would hide a
+    # uniform scale error, which per-output-channel quantisation is exactly the kind of thing to
+    # produce. `ClipEmbedder.l2Normalize` does the normalisation on the host either way.
+    "tinyclip": "/visual_projection/MatMul_output_0",
+    "tinyclip_text": "/text_projection/MatMul_output_0",
 }
 
 # Graphs whose input is a latent rather than an image, and how wide it is. One that is a
@@ -72,6 +81,21 @@ SUBGRAPH = {
     # A whole file, not a module: no `first`, so nothing is extracted. 144 latent channels.
     "supertonic_voc": {"channels": 144},
 }
+
+# TinyCLIP's fixed input side, and the two special tokens `ClipTokenizer` brackets a query with.
+# 49,406 and 49,407 are the last two entries of the 49,408-word vocabulary, which is what makes the
+# export's `ArgMax` over `input_ids` find the end-of-text position.
+TINYCLIP_IMAGE = 224
+TINYCLIP_SOT = 49_406
+TINYCLIP_EOT = 49_407
+
+
+def ramp_image(channels, height, width):
+    """A deterministic `[1, c, h, w]` input, free of transcendentals so both sides read the same
+    bytes."""
+    count = channels * height * width
+    ramp = ((np.arange(count, dtype=np.int64) * 37) % 255).astype(np.float32) / 255.0 - 0.5
+    return ramp.reshape(1, channels, height, width)
 
 
 def rounded_to_fp16(model):
@@ -216,14 +240,38 @@ def main():
         # Channel-major, which is how the runtime holds a sequence.
         np.ascontiguousarray(style.reshape(50, 256).T).tofile(os.path.join(work, "style.f32"))
         os.environ["PARITY_CHARS"] = str(chars)
+    elif args.graph in ("tinyclip", "tinyclip_text"):
+        # The export is one graph with three inputs, and every call needs all of them even though
+        # only one tower is read - which is exactly why `ClipEmbedder` passed a dummy for the other
+        # side. So both cases below feed pixels *and* ids, and differ only in which is meaningful.
+        #
+        # `attention_mask` is all ones, as `ClipEmbedder` sends: CLIP's text tower is causal and
+        # pools at the end-of-text position, so there is nothing for a padding mask to do.
+        pixels = ramp_image(3, TINYCLIP_IMAGE, TINYCLIP_IMAGE)
+        if args.graph == "tinyclip":
+            # The shortest possible prompt, so the text side is cheap and unread.
+            ids = np.array([[TINYCLIP_SOT, TINYCLIP_EOT]], dtype=np.int64)
+            x = pixels
+        else:
+            # A short query, `<|startoftext|>` then pieces then `<|endoftext|>`. The ids stop at the
+            # end-of-text token rather than padding to 77: the causal mask makes the pooled vector
+            # identical either way, and the runtime relies on that to run `eot + 1` positions.
+            rng = np.random.default_rng(20240827)
+            pieces = rng.integers(0, TINYCLIP_SOT, size=args.width, dtype=np.int64)
+            ids = np.concatenate(
+                [[TINYCLIP_SOT], pieces, [TINYCLIP_EOT]]
+            ).reshape(1, -1)
+            # The runtime reads these from `input.f32` as f32, which is exact: every id is under
+            # 49,408 and fp32 holds every integer to 2^24.
+            x = ids.astype(np.float32)
+        feed = {
+            "pixel_values": pixels,
+            "input_ids": ids,
+            "attention_mask": np.ones_like(ids),
+        }
     else:
         height = 48 if args.graph == "ppocr_rec" else args.width
-        # Deterministic and free of transcendentals, so both sides read identical bytes.
-        count = 3 * height * args.width
-        ramp = (
-            (np.arange(count, dtype=np.int64) * 37) % 255
-        ).astype(np.float32) / 255.0 - 0.5
-        x = ramp.reshape(1, 3, height, args.width)
+        x = ramp_image(3, height, args.width)
     x.tofile(os.path.join(work, "input.f32"))
 
     reference = run(model, probe, x, feed)

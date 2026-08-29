@@ -42,6 +42,30 @@ Requantising those would add a second rounding to resolution that is already gon
 reads the fp32 graph and quantises per output channel itself. Worst measured per-tensor correlation
 between the fp32 weight and `int8 * scale` is **0.99986**, over 82 quantised tensors.
 
+The fp32 file costs nothing in fidelity over any other source, and that is measured rather than
+assumed: **all 221 of its weight tensors are exactly fp16-representable**, so it was exported from
+an fp16 checkpoint and carries no information a half-precision one would not. It is also why
+`scripts/ml/onnx_parity.py` reports its "fp16 weights alone" bar as exactly zero for this graph —
+every difference the runtime shows is int8 quantisation.
+
+### Measured against the export, and against the file it replaces
+
+Cosine of the L2-normalised 512-d embeddings, on one deterministic image and one 8-token query
+(`scripts/ml/onnx_parity.py tinyclip` and `tinyclip_text`):
+
+| | this `.maml` vs fp32 | shipped `model_int8.onnx` vs fp32 | this vs shipped |
+| :--- | ---: | ---: | ---: |
+| image | **0.999864** | 0.998478 | 0.998311 |
+| text | **0.999394** | 0.982881 | 0.983471 |
+
+The port is *closer* to the fp32 reference than the file it replaces, and the text tower is where
+that gap is wide — 0.9994 against 0.9829 — because per-row int8 recovers most of what the shipped
+export threw away on the 49,408-row token table.
+
+The third column is why `ClipEmbedder.EMBEDDER_VERSION` is bumped: at 0.983 in the text tower, a
+library indexed by the old path and queried through the new one would rank noticeably worse than one
+indexed by either alone.
+
 The result is *smaller* than the file it replaces — 23,734,912 bytes against 24,281,512 — because
 the token embedding is int8 per row rather than uint8 per tensor and nothing is stored twice. The
 APK shrinks by much more than that, because `onnxruntime-android`'s ~27 MB of native `.so` leaves

@@ -78,8 +78,8 @@ pub mod graph {
     pub const SMALL100: u32 = 15;
     /// TinyCLIP-ViT-8M/16 Text-3M, both towers in one file. See [`crate::nets::tinyclip`].
     ///
-    /// One graph rather than two because the towers share a file and a [`Weights`] upload, even
-    /// though they share no weights: `Mode::Image` and `Mode::Text` are two plans over one net.
+    /// One graph rather than two because the towers share a file and a [`super::Weights`] upload,
+    /// even though they share no weights: `Mode::Image` and `Mode::Text` are two plans over one net.
     pub const TINYCLIP: u32 = 16;
 }
 

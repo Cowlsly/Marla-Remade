@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use modelrunner::nets::{
     mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-    supertonic_text, supertonic_vocoder, u2netp,
+    supertonic_text, supertonic_vocoder, tinyclip, u2netp,
 };
 use modelrunner::post::ctc;
 use modelrunner::weights::{graph, Weights};
@@ -150,6 +150,67 @@ fn the_shipped_character_dictionary_matches_the_recogniser_label_space() {
     assert_eq!(dictionary.label(1), Some("0"));
     assert_eq!(dictionary.label(11), Some("A"));
     assert_eq!(dictionary.label(ctc::LOGITS - 1), Some(" "));
+}
+
+#[test]
+fn the_shipped_tinyclip_asset_builds_both_towers() {
+    // Both passes against the real 306-tensor file, which is what checks the converter's emission
+    // order against `nets::tinyclip`'s layout constants: `Builder::weight` asks for every tensor by
+    // index *and* dimensions, so a transposed projection, a position table emitted the wrong way
+    // round, or a tower emitted in the export's interleaved order fails here rather than on device.
+    let weights = load("photos/src/main/assets/clip/tinyclip.maml", graph::TINYCLIP);
+    assert_eq!(weights.len(), tinyclip::TENSORS);
+
+    let image = tinyclip::build(&weights, tinyclip::Mode::Image)
+        .expect("the shipped asset matches nets::tinyclip's vision tower");
+    assert_eq!(
+        image.output().expect("one output").shape,
+        modelrunner::nets::Shape::new(tinyclip::PROJECTION, 1, tinyclip::VISION_POSITIONS)
+    );
+
+    // Every length a query can be, since the pass is compiled per length: 1 through the padded 77.
+    for len in [1u32, 2, 5, 32, tinyclip::CONTEXT] {
+        let text = tinyclip::build(&weights, tinyclip::Mode::Text { len })
+            .unwrap_or_else(|e| panic!("at {len} tokens: {e}"));
+        assert_eq!(
+            text.output().expect("one output").shape,
+            modelrunner::nets::Shape::new(tinyclip::PROJECTION, 1, len)
+        );
+    }
+}
+
+#[test]
+fn the_shipped_tinyclip_asset_embeds_a_token_on_the_host() {
+    // The host gather, against the real file: the token embedding is int8 with a per-row scale and
+    // the position table is fp16, and `embed_positions` is the only reader of either. A wrong row
+    // stride or a transposed position table produces a plausible vector, so what is pinned here is
+    // the one property that has no fixture — the same token at two positions must differ by exactly
+    // the two position rows' difference.
+    let weights = load("photos/src/main/assets/clip/tinyclip.maml", graph::TINYCLIP);
+    let table = weights.offsets();
+    let reader = modelrunner::weights::Reader::new(&table, &weights);
+
+    // `<|startoftext|>`, "dog", `<|endoftext|>`.
+    let ids = [49_406u32, 1_929, 49_407];
+    let out = tinyclip::embed_positions(reader, &ids).expect("the gather succeeds");
+    assert_eq!(out.len(), tinyclip::WIDTH as usize * ids.len());
+    assert!(out.iter().any(|&v| v != 0.0), "the gather produced zeros");
+
+    // Channel-major: `out[c * len + t]`. A position-major layout would put one token's 256 values
+    // contiguously instead, so this also pins the transpose.
+    let twice = tinyclip::embed_positions(reader, &[1_929, 1_929]).expect("the gather succeeds");
+    let single = tinyclip::embed_positions(reader, &[1_929]).expect("the gather succeeds");
+    for channel in 0..tinyclip::WIDTH as usize {
+        let first = twice[channel * 2];
+        // The same token at position 0, alone, must be exactly the same value.
+        assert!((first - single[channel]).abs() < 1e-6, "channel {channel}");
+        // And the two positions must differ, or the position table was never added.
+        assert!(first.is_finite() && twice[channel * 2 + 1].is_finite(), "channel {channel}");
+    }
+    let moved = (0..tinyclip::WIDTH as usize)
+        .filter(|&c| (twice[c * 2] - twice[c * 2 + 1]).abs() > 1e-4)
+        .count();
+    assert!(moved > tinyclip::WIDTH as usize / 2, "only {moved} channels differ between positions");
 }
 
 #[test]

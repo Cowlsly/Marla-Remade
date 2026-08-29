@@ -41,6 +41,7 @@ pub mod supertonic_duration;
 pub mod supertonic_sampler;
 pub mod supertonic_text;
 pub mod supertonic_vocoder;
+pub mod tinyclip;
 pub mod u2netp;
 
 /// A `1 x c x h x w` fp16 tensor. Batch is always 1; neither net is ever batched.

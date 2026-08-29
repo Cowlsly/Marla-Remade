@@ -1204,7 +1204,7 @@ fn uniform(state: &mut u32) -> f32 {
 mod tests {
     use super::super::{
         embed_lanes, mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, supertonic_duration, supertonic_sampler,
-        supertonic_text, supertonic_vocoder, u2netp, Act, Builder, EMBED_LANE,
+        supertonic_text, supertonic_vocoder, tinyclip, u2netp, Act, Builder, EMBED_LANE,
     };
     use super::*;
 
@@ -3036,6 +3036,43 @@ mod tests {
             let emb = outputs.first().expect("the conditioning output");
             write(&dir.join("reference.f32"), emb);
             println!("supertonic_ttl at {width} chars: wrote {} values", emb.len());
+            return;
+        }
+        if graph == "tinyclip" || graph == "tinyclip_text" {
+            let path = std::env::var("PARITY_MAML").expect("PARITY_MAML");
+            let bytes = std::fs::read(&path).unwrap_or_else(|e| panic!("{path}: {e}"));
+            let weights =
+                crate::weights::Weights::parse(&bytes, crate::weights::graph::TINYCLIP)
+                    .expect("the tinyclip asset parses");
+            // Both towers project every position and pool one on the host, so the comparable
+            // vector is one column of the plan's output. Which column is the whole of what
+            // `nets::tinyclip`'s module docs warn about, and it differs per tower.
+            let column = |out: &[f32], at: usize, len: usize| -> Vec<f32> {
+                (0..tinyclip::PROJECTION as usize)
+                    .map(|channel| out[channel * len + at])
+                    .collect()
+            };
+            let pooled = if graph == "tinyclip" {
+                let plan =
+                    tinyclip::build(&weights, tinyclip::Mode::Image).expect("the image tower");
+                let out = run(&plan, weights.data(), &input).expect("the image tower runs");
+                // The class token, position 0.
+                column(&out, 0, tinyclip::VISION_POSITIONS as usize)
+            } else {
+                // The ids arrive as f32, exactly as the caller's tokenizer hands them over.
+                let ids: Vec<u32> = input.iter().map(|&v| v as u32).collect();
+                let embedded = tinyclip::embed_positions(weights.reader(), &ids)
+                    .expect("the host embedding gather");
+                let len = ids.len();
+                let plan = tinyclip::build(&weights, tinyclip::Mode::Text { len: len as u32 })
+                    .expect("the text tower");
+                let out = run(&plan, weights.data(), &embedded).expect("the text tower runs");
+                // The end-of-text position, which is the last one because the caller passed
+                // `len = eot + 1` and the causal mask makes that exact.
+                column(&out, len - 1, len)
+            };
+            write(&dir.join("reference.f32"), &pooled);
+            println!("{graph}: wrote {} values", pooled.len());
             return;
         }
         if graph == "supertonic_dp" {
