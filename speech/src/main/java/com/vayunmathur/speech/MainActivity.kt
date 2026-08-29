@@ -17,10 +17,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -183,24 +181,28 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-        StepCard(
-            index = 1,
-            title = "Speech recognition model",
-            done = state.modelReady,
-        ) {
-            // The recogniser is bundled in the APK, so there is nothing to download here; the
-            // card stays as step 1 only to keep the numbering users see stable.
-            if (!state.modelReady) {
-                Text(
-                    text = "The bundled recognition model could not be read. Reinstalling the app should fix it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
+        // Only when something is actually wrong. Both models ship in the APK, so there is no step
+        // for the user to complete here — either the assets are readable or the install is broken.
+        // They were two permanently-ticked "steps" until the assets stopped being downloads.
+        if (!state.modelReady || !state.ttsModelReady) {
+            Card(modifier = Modifier.fillMaxWidth()) {
+                Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        stringResource(R.string.broken_install_title),
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                    Text(
+                        text = stringResource(R.string.broken_install_body),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
             }
         }
 
         StepCard(
-            index = 2,
+            index = 1,
             title = "Microphone access",
             done = state.hasMic,
         ) {
@@ -212,7 +214,7 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
         }
 
         StepCard(
-            index = 3,
+            index = 2,
             title = "Set as speech recognizer",
             done = state.isRecognizerDefault,
         ) {
@@ -224,35 +226,7 @@ fun SpeechSetupScreen(state: SpeechSetupUiState, actions: SpeechSetupActions) {
         TestSection(enabled = state.hasMic)
 
         StepCard(
-            index = 4,
-            title = "Text-to-speech voices",
-            done = state.ttsModelReady,
-        ) {
-            if (state.ttsModelReady) {
-                Text(
-                    text = "${state.ttsVoices.size} languages and " +
-                        "${SupertonicVoices.VOICES.size} voices, bundled with the app. " +
-                        "Nothing to download.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = state.ttsVoices.joinToString(" · ") { it.nativeName },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            } else {
-                Text(
-                    text = "The bundled voices could not be read. Reinstalling the app should fix it.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-            }
-        }
-
-        StepCard(
-            index = 5,
+            index = 3,
             title = "Set as text-to-speech engine",
             done = state.isTtsDefault,
         ) {

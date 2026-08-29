@@ -11,4 +11,6 @@
     <string name="try_the_voice">Try the voice</string>
     <string name="speak_sample">Speak sample</string>
     <string name="heard">Heard: %1$s</string>
+    <string name="broken_install_title">Install looks damaged</string>
+    <string name="broken_install_body">A bundled model could not be read. Reinstalling the app should fix it.</string>
 </resources>
