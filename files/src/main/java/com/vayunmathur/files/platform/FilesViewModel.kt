@@ -84,6 +84,13 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
     private val _zipPath = MutableStateFlow<File?>(null)
     val zipPath: StateFlow<File?> = _zipPath.asStateFlow()
 
+    /**
+     * Emitted once an archive has been confirmed readable, so that navigation happens only for a zip
+     * that actually opens. Validation is IO, so it cannot be done by the caller before navigating.
+     */
+    private val _zipOpened = MutableSharedFlow<File>(extraBufferCapacity = 4)
+    val zipOpened: SharedFlow<File> = _zipOpened.asSharedFlow()
+
     private val _zipInternalPath = MutableStateFlow("")
     val zipInternalPath: StateFlow<String> = _zipInternalPath.asStateFlow()
 
@@ -254,9 +261,6 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
     }
 
     // ---- Home screen: storage, recents, bookmarks, categories ----
-    private val _atHome = MutableStateFlow(true)
-    val atHome: StateFlow<Boolean> = _atHome.asStateFlow()
-
     private val _categoryTitle = MutableStateFlow<String?>(null)
     val categoryTitle: StateFlow<String?> = _categoryTitle.asStateFlow()
 
@@ -278,7 +282,6 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
     }
 
     override fun goHome() {
-        _atHome.value = true
         _categoryTitle.value = null
         _zipPath.value = null
         _zipInternalPath.value = ""
@@ -303,7 +306,6 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
             openBookmark(if (dl.isDirectory) dl else rootDirectory)
             return
         }
-        _atHome.value = false
         _zipPath.value = null
         _categoryTitle.value = getApplication<Application>().getString(categoryLabel(category))
         clearSelection()
@@ -601,7 +603,6 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
             _zipPath.value = null
             _zipInternalPath.value = ""
         }
-        _atHome.value = false
         _categoryTitle.value = null
         _currentDirectory.value = path
         applyDirDefaults(path)
@@ -634,34 +635,17 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
         restartObserver()
     }
 
+    /**
+     * Back within a screen, not between screens.
+     *
+     * Directory, archive and category traversal used to live here, walking the location state by
+     * hand. That is the navigation back stack's job now - one entry per level - and doing it in both
+     * places meant the predictive-back preview showed one destination while this produced another.
+     * What is left is the part that is genuinely not navigation: dismissing a selection.
+     */
     override fun handleBack(): Boolean {
         if (_selectedPaths.value.isNotEmpty()) { clearSelection(); return true }
-        if (_categoryTitle.value != null) { goHome(); return true }
-        val z = _zipPath.value
-        when {
-            z != null -> {
-                val internal = _zipInternalPath.value
-                if (internal.isEmpty()) {
-                    val parent = z.parentFile ?: rootDirectory
-                    _zipPath.value = null
-                    _currentDirectory.value = parent
-                    restartObserver()
-                } else {
-                    val parentInternal = if (internal.contains("/")) internal.substringBeforeLast("/") else ""
-                    _zipInternalPath.value = parentInternal
-                }
-                loadDirectory()
-            }
-            _currentDirectory.value.absolutePath != rootDirectory.absolutePath -> {
-                _currentDirectory.value = _currentDirectory.value.parentFile ?: _currentDirectory.value
-                applyDirDefaults(_currentDirectory.value)
-                loadDirectory()
-                restartObserver()
-            }
-            // At the storage root, Back returns to the home screen.
-            else -> goHome()
-        }
-        return true
+        return false
     }
 
     override fun rename(item: FileBrowserItem, newName: String) {
@@ -716,21 +700,32 @@ class FilesViewModel(application: Application) : AndroidViewModel(application), 
         }
     }
 
+    /**
+     * Checks the archive can be read and, if so, reports it via [zipOpened] for the navigation layer
+     * to act on. Deliberately changes no state: a corrupt archive should leave the user where they
+     * are, with a message, rather than navigate into a listing that cannot load.
+     */
     override fun openZipFile(item: FileBrowserItem) {
         val file = item.realFile ?: return
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 ZipFile(file).use { _ -> }
-                _zipPath.value = file
-                _zipInternalPath.value = ""
-                _currentDirectory.value = File("/") // placeholder not used in zip mode
-                clearSelection()
-                loadDirectory()
-                restartObserver()
+                _zipOpened.emit(file)
             } catch (e: Exception) {
                 emit(getApplication<Application>().getString(R.string.could_not_open_zip, e.localizedMessage))
             }
         }
+    }
+
+    /** Loads a location inside an archive. Called by the navigation layer for a `Route.Zip`. */
+    fun showZip(zip: File, internalPath: String) {
+        _categoryTitle.value = null
+        _zipPath.value = zip
+        _zipInternalPath.value = internalPath
+        _currentDirectory.value = File("/") // placeholder not used in zip mode
+        clearSelection()
+        loadDirectory()
+        restartObserver()
     }
 
     override fun archive(archiveName: String) {

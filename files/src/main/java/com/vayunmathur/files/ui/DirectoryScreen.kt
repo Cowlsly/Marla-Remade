@@ -252,13 +252,10 @@ fun DirectoryScreen(
         crumbs
     }
 
-    BackHandler(
-        state.currentDirectory.absolutePath != root.absolutePath ||
-            state.selectedPaths.isNotEmpty() ||
-            state.zipPath != null ||
-            state.isSearchActive ||
-            isCategory
-    ) {
+    // Only the parts of Back that are not navigation. Folder, archive and category depth are back
+    // stack entries now, so everything else has to fall through to the navigation host - swallowing
+    // it here would also swallow the predictive-back gesture and its preview.
+    BackHandler(state.isSearchActive || state.selectedPaths.isNotEmpty()) {
         itemBeingRenamed = null
         if (state.isSearchActive) actions.setSearchActive(false) else actions.handleBack()
     }

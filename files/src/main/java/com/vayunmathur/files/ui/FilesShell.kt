@@ -29,8 +29,20 @@ import kotlinx.coroutines.launch
 import java.io.File
 
 
+/**
+ * The chrome that is the same on every destination: the all-files permission gate, the notification
+ * prompt, and the navigation drawer.
+ *
+ * Wraps the nav host rather than living inside it, so the drawer is not rebuilt on every navigation
+ * and stays open across one. [content] is handed the callback that opens it, because the drawer state
+ * belongs here but the buttons that open it are on the individual screens.
+ */
 @Composable
-fun HomeDirectoryPage(viewModel: FilesViewModel) {
+fun FilesShell(
+    viewModel: FilesViewModel,
+    actions: FilesActions,
+    content: @Composable (openDrawer: () -> Unit) -> Unit,
+) {
     val context = LocalContext.current
     val isFilesGranted by viewModel.isFilesGranted.collectAsState()
     val hasPromptedNotifications by viewModel.hasPromptedNotifications.collectAsState()
@@ -99,7 +111,6 @@ fun HomeDirectoryPage(viewModel: FilesViewModel) {
                 }) { Text(stringResource(R.string.grant_all_files_access)) }
         }
     } else {
-        val atHome by viewModel.atHome.collectAsState()
         val bookmarks by viewModel.bookmarks.collectAsState()
         val drawerState = rememberDrawerState(DrawerValue.Closed)
         val scope = rememberCoroutineScope()
@@ -109,17 +120,13 @@ fun HomeDirectoryPage(viewModel: FilesViewModel) {
                 ModalDrawerSheet {
                     FilesDrawer(
                         bookmarks = bookmarks,
-                        actions = viewModel,
+                        actions = actions,
                         closeDrawer = { scope.launch { drawerState.close() } },
                     )
                 }
             },
         ) {
-            if (atHome) {
-                HomeScreenBinder(viewModel) { scope.launch { drawerState.open() } }
-            } else {
-                DirectoryPage(viewModel) { scope.launch { drawerState.open() } }
-            }
+            content { scope.launch { drawerState.open() } }
         }
     }
 }

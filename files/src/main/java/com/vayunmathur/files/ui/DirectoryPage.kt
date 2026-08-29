@@ -9,14 +9,26 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import com.vayunmathur.files.R
+import com.vayunmathur.files.platform.FilesActions
 import com.vayunmathur.files.platform.FilesUiState
 import com.vayunmathur.files.platform.FilesViewModel
 import com.vayunmathur.library.ui.SnackbarHostState
 import java.io.File
 
-/** Binds [FilesViewModel] to the stateless [DirectoryScreen]. */
+/**
+ * Binds [FilesViewModel] to the stateless [DirectoryScreen].
+ *
+ * [isCurrent] is false while this entry is animating away under a newer one. Every folder on the
+ * back stack is a separate entry sharing one view model, so without it the outgoing screen would
+ * repaint with the contents of the folder being opened just as it slides out of view.
+ */
 @Composable
-fun DirectoryPage(viewModel: FilesViewModel, onOpenDrawer: () -> Unit = {}) {
+fun DirectoryPage(
+    viewModel: FilesViewModel,
+    actions: FilesActions,
+    isCurrent: Boolean,
+    onOpenDrawer: () -> Unit = {},
+) {
     val context = LocalContext.current
     val resources = LocalResources.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -83,28 +95,32 @@ fun DirectoryPage(viewModel: FilesViewModel, onOpenDrawer: () -> Unit = {}) {
 
     val (directories, files) = entries
 
+    val liveState = FilesUiState(
+        rootDirectory = viewModel.rootDirectory,
+        rootDisplayName = Build.MODEL,
+        currentDirectory = currentDirectory,
+        zipPath = zipPath,
+        zipInternalPath = zipInternalPath,
+        directories = directories,
+        files = files,
+        selectedPaths = selectedPaths,
+        hasIncomingUris = incomingUris != null,
+        sortBy = sortBy,
+        sortAscending = sortAscending,
+        viewMode = viewMode,
+        searchQuery = searchQuery,
+        isSearchActive = isSearchActive,
+        clipboardCount = clipboard.size,
+        clipboardIsCut = clipboardIsCut,
+        showHidden = showHidden,
+        categoryTitle = categoryTitle,
+    )
+    var lastShown by remember { mutableStateOf(liveState) }
+    if (isCurrent) SideEffect { lastShown = liveState }
+
     DirectoryScreen(
-        state = FilesUiState(
-            rootDirectory = viewModel.rootDirectory,
-            rootDisplayName = Build.MODEL,
-            currentDirectory = currentDirectory,
-            zipPath = zipPath,
-            zipInternalPath = zipInternalPath,
-            directories = directories,
-            files = files,
-            selectedPaths = selectedPaths,
-            hasIncomingUris = incomingUris != null,
-            sortBy = sortBy,
-            sortAscending = sortAscending,
-            viewMode = viewMode,
-            searchQuery = searchQuery,
-            isSearchActive = isSearchActive,
-            clipboardCount = clipboard.size,
-            clipboardIsCut = clipboardIsCut,
-            showHidden = showHidden,
-            categoryTitle = categoryTitle,
-        ),
-        actions = viewModel,
+        state = if (isCurrent) liveState else lastShown,
+        actions = actions,
         snackbarHostState = snackbarHostState,
         onPickUnzipDestination = { treeLauncher.launch(null) },
         onOpenDrawer = onOpenDrawer,

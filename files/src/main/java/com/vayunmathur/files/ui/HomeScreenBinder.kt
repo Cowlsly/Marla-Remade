@@ -7,12 +7,17 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalResources
 import com.vayunmathur.files.R
+import com.vayunmathur.files.platform.FilesActions
 import com.vayunmathur.files.platform.FilesViewModel
 import com.vayunmathur.files.platform.HomeUiState
 import com.vayunmathur.library.ui.SnackbarHostState
 
 @Composable
-fun HomeScreenBinder(viewModel: FilesViewModel, onOpenDrawer: () -> Unit = {}) {
+fun HomeScreenBinder(
+    viewModel: FilesViewModel,
+    actions: FilesActions,
+    onOpenDrawer: () -> Unit = {},
+) {
     val context = LocalContext.current
     val resources = LocalResources.current
     val snackbarHostState = remember { SnackbarHostState() }
@@ -51,7 +56,7 @@ fun HomeScreenBinder(viewModel: FilesViewModel, onOpenDrawer: () -> Unit = {}) {
             recents = recents,
             bookmarks = bookmarks,
         ),
-        actions = viewModel,
+        actions = actions,
         snackbarHostState = snackbarHostState,
         onOpenDrawer = onOpenDrawer,
     )
