@@ -163,6 +163,21 @@ pub enum Mode {
     },
     /// The tied logits projection: one `[1024]` state in, two half-vocabularies out.
     Logits,
+    /// One decoder step: the token just produced in, its logits and its new K/V out.
+    ///
+    /// A step is **one query** against `cache_len + 1` keys — the `cache_len` positions already
+    /// decoded plus this one — which is causal by construction and needs no mask. The K and V for
+    /// the prefix arrive as ordinary inputs in [`Mode::DecodeStep`]'s declaration order, the step's
+    /// own K and V leave as outputs, and the host appends them for the next step.
+    ///
+    /// Position-major, so appending is one contiguous copy of `d_model` elements rather than
+    /// `d_model` scattered ones. See [`crate::nets::Kind::AttnScoresCached`].
+    DecodeStep {
+        /// Positions already in the cache, which is also the step number.
+        cache_len: u32,
+        /// Source positions the cross-attention attends over.
+        src_len: u32,
+    },
 }
 
 /// Hands out `.maml` tensor indices in the order the layers appear.
@@ -220,7 +235,130 @@ pub fn build(weights: &dyn WeightSource, mode: Mode) -> Result<Plan, String> {
     match mode {
         Mode::Encode { len } => encode(weights, len),
         Mode::Logits => logits(weights),
+        Mode::DecodeStep { cache_len, src_len } => decode_step(weights, cache_len, src_len),
     }
+}
+
+/// One decoder step.
+///
+/// # Inputs, in declaration order
+///
+/// | | shape | |
+/// | :--- | :--- | :--- |
+/// | 0 | `[1024, 1, 1]` | the current token, after [`embed_positions`] at `past = cache_len` |
+/// | 1 | `[1024, 1, src_len]` | the encoder output, channel-major as the encoder produced it |
+/// | 2, 3 | `[cache_len, 1, 1024]` | layer 0's self-attention K and V, position-major |
+/// | 4, 5 | | layer 1's |
+/// | 6, 7 | | layer 2's |
+///
+/// The cache pair is **omitted at step 0**, where there is nothing before the current token.
+///
+/// # Outputs, in declaration order
+///
+/// | | shape | |
+/// | :--- | :--- | :--- |
+/// | 0, 1 | `[64056, 1, 1]` | the two logits halves, which the host argmaxes across |
+/// | 2, 3 | `[1, 1, 1024]` | layer 0's new self-attention K and V, ready to append |
+/// | 4, 5 | | layer 1's |
+/// | 6, 7 | | layer 2's |
+///
+/// # Why the cross-attention K and V are recomputed
+///
+/// They depend only on the encoder output, so computing them once and caching them would save
+/// six 1024x1024 projections per step. They are not cached here because that would need a fourth
+/// pass and a second kind of persistence for a saving the logits projection dwarfs: the head is
+/// 131 million multiply-accumulates against the whole decoder's 50 million. Worth revisiting only
+/// after `Kind::ConvVecInt8` makes the head cheap.
+fn decode_step(weights: &dyn WeightSource, cache_len: u32, src_len: u32) -> Result<Plan, String> {
+    if src_len == 0 {
+        return Err("a decode step with no source to attend over".into());
+    }
+    if cache_len >= MAX_POSITIONS {
+        return Err(format!("a cache of {cache_len}, at the {MAX_POSITIONS}-position limit"));
+    }
+
+    let l = &mut Layers { next: DECODER };
+    let mut builder = Builder::new(weights);
+    let b = &mut builder;
+    // The decoder plus the tied head, which this pass computes in the same plan. The whole encoder
+    // belongs to `Mode::Encode`.
+    name_host_tensors(b, &[HEAD..ENCODER, DECODER..TENSORS]);
+
+    let mut x = b.input(Shape::new(D_MODEL, 1, 1));
+    let encoded = b.input(Shape::new(D_MODEL, 1, src_len));
+    // Every layer's cache pair, declared up front so the host uploads them in one block rather
+    // than interleaved with anything else.
+    //
+    // None at step 0: the only key is the token itself, and a `[0, 1, 1024]` binding would be a
+    // zero-length upload, which Vulkan refuses.
+    let caches: Vec<Option<(Id, Id)>> = (0..DECODER_LAYERS)
+        .map(|_| {
+            (cache_len > 0).then(|| {
+                let k = b.input(Shape::new(cache_len, 1, D_MODEL));
+                let v = b.input(Shape::new(cache_len, 1, D_MODEL));
+                (k, v)
+            })
+        })
+        .collect();
+
+    let mut produced: Vec<Id> = Vec::new();
+    for past in &caches {
+        // Self-attention, pre-norm, with the cache.
+        let normed = b.layer_norm(x, l.take(), EPSILON);
+        let q = point(b, l, normed, D_MODEL, Act::None);
+        let k_new = point(b, l, normed, D_MODEL, Act::None);
+        let v_new = point(b, l, normed, D_MODEL, Act::None);
+        // A projection writes `[d_model, 1, 1]`; a cache position is `[1, 1, d_model]`. The same
+        // bytes, so this is a relabelling and the append below is one contiguous copy.
+        let k_row = b.reshaped(k_new, Shape::new(1, 1, D_MODEL));
+        let v_row = b.reshaped(v_new, Shape::new(1, 1, D_MODEL));
+        let (k, v) = match *past {
+            Some((past_k, past_v)) => {
+                (b.concat(&[past_k, k_row]), b.concat(&[past_v, v_row]))
+            }
+            None => (k_row, v_row),
+        };
+        let scores = b.attn_scores_cached(q, k, HEADS);
+        let probs = b.softmax(scores);
+        let mixed = b.attn_apply_cached(probs, v, HEADS);
+        let projected = point(b, l, mixed, D_MODEL, Act::None);
+        x = b.add(x, projected);
+        produced.push(k_row);
+        produced.push(v_row);
+
+        // Cross-attention over the encoder output, which is channel-major and a different length,
+        // so it uses the ordinary pair rather than the cached one.
+        let normed = b.layer_norm(x, l.take(), EPSILON);
+        let q = point(b, l, normed, D_MODEL, Act::None);
+        let k = point(b, l, encoded, D_MODEL, Act::None);
+        let v = point(b, l, encoded, D_MODEL, Act::None);
+        let scores = b.attn_scores(q, k, HEADS);
+        let probs = b.softmax(scores);
+        let mixed = b.attn_apply(probs, v, HEADS);
+        let projected = point(b, l, mixed, D_MODEL, Act::None);
+        x = b.add(x, projected);
+
+        x = feed_forward(b, l, x);
+    }
+    if l.next != DECODER_NORM {
+        return Err(format!("the decoder claims {} tensors, not {DECODER_NORM}", l.next));
+    }
+    let state = b.layer_norm(x, l.take(), EPSILON);
+    if l.next != TENSORS {
+        return Err(format!("the decoder norm ends at {}, not {TENSORS}", l.next));
+    }
+
+    // The tied head, in the same plan: a separate `Mode::Logits` pass would mean a second
+    // `rebuild` and a round trip through the host for a `[1024]` vector.
+    let head = &mut Layers { next: HEAD };
+    let mut outputs: Vec<Id> = (0..HEAD_SPLITS)
+        .map(|_| point(b, head, state, CLASSES_PER_SPLIT, Act::None))
+        .collect();
+    if head.next != ENCODER {
+        return Err(format!("the head claims {} tensors, not {ENCODER}", head.next));
+    }
+    outputs.append(&mut produced);
+    builder.finish(&outputs)
 }
 
 /// The encoder over `len` already-embedded positions.
@@ -237,7 +375,7 @@ fn encode(weights: &dyn WeightSource, len: u32) -> Result<Plan, String> {
     let b = &mut builder;
     // The tied weight and the whole decoder belong to the other two passes. The trailing encoder
     // norm is part of this range, so it runs to `DECODER` rather than to `ENCODER_NORM`.
-    name_host_tensors(b, ENCODER..DECODER);
+    name_host_tensors(b, &[ENCODER..DECODER]);
 
     let x = b.input(Shape::new(D_MODEL, 1, len));
     let mut x = x;
@@ -266,7 +404,7 @@ fn logits(weights: &dyn WeightSource) -> Result<Plan, String> {
     let l = &mut Layers { next: HEAD };
     let mut builder = Builder::new(weights);
     let b = &mut builder;
-    name_host_tensors(b, HEAD..ENCODER);
+    name_host_tensors(b, &[HEAD..ENCODER]);
 
     let state = b.input(Shape::new(D_MODEL, 1, 1));
     let halves: Vec<Id> = (0..HEAD_SPLITS)
@@ -282,10 +420,10 @@ fn logits(weights: &dyn WeightSource) -> Result<Plan, String> {
 ///
 /// [`Builder::finish`] refuses an unread tensor, and no one of the three passes reads the whole
 /// file. Declaring the complement rather than listing it keeps the two in step: adding a layer
-/// changes the range and nothing else.
-fn name_host_tensors(b: &mut Builder, read: std::ops::Range<usize>) {
+/// changes the ranges and nothing else.
+fn name_host_tensors(b: &mut Builder, read: &[std::ops::Range<usize>]) {
     for index in 0..TENSORS {
-        if !read.contains(&index) {
+        if !read.iter().any(|range| range.contains(&index)) {
             b.host_tensor(index, &dims_of(index));
         }
     }
@@ -471,34 +609,39 @@ mod tests {
         assert!((318 << 20..319 << 20).contains(&file), "{file} bytes");
     }
 
-    /// The tensor range each pass reads on the device. Everything else it names.
+    /// The tensor ranges each pass reads on the device. Everything else it names.
     ///
     /// Stated here rather than returned by [`build`] because it is the thing under test: a pass
     /// that read the wrong range would name the right one and still be wrong.
-    fn read_by(mode: Mode) -> std::ops::Range<usize> {
+    fn read_by(mode: Mode) -> Vec<std::ops::Range<usize>> {
         match mode {
-            Mode::Encode { .. } => ENCODER..DECODER,
-            Mode::Logits => HEAD..ENCODER,
+            Mode::Encode { .. } => vec![ENCODER..DECODER],
+            Mode::Logits => vec![HEAD..ENCODER],
+            Mode::DecodeStep { .. } => vec![HEAD..ENCODER, DECODER..TENSORS],
         }
     }
 
     #[test]
-    fn the_passes_partition_the_file_and_every_one_of_them_builds() {
+    fn the_passes_cover_the_file_and_every_one_of_them_builds() {
         // `Builder::finish` only checks that a tensor is read *or* named, so this is what stops
-        // naming being used to hide a layer the device never touches. The ranges must tile
-        // `0..TENSORS` with no gap and no overlap.
+        // naming being used to hide a layer the device never touches. Together the passes must read
+        // every index.
         //
-        // The encoder's range runs to `DECODER`, so it covers the trailing encoder norm; the
-        // decoder's remaining range is `DECODER..TENSORS`, which the decode step claims.
-        let mut covered: Vec<usize> = Vec::new();
-        for mode in [Mode::Encode { len: LEN }, Mode::Logits] {
+        // Not a partition: the decode step computes the tied head itself, so it and `Mode::Logits`
+        // both read `HEAD..ENCODER`. `Mode::Logits` stays because it is the isolated case for the
+        // split head, where a device parity run has nothing else in the plan to blame.
+        let mut covered = std::collections::BTreeSet::new();
+        for mode in [
+            Mode::Encode { len: LEN },
+            Mode::Logits,
+            Mode::DecodeStep { cache_len: 0, src_len: LEN },
+            Mode::DecodeStep { cache_len: 3, src_len: LEN },
+        ] {
             let source = Shapes::new(TENSORS);
             build(&source, mode).unwrap_or_else(|e| panic!("{mode:?}: {e}"));
-            covered.extend(read_by(mode));
+            covered.extend(read_by(mode).into_iter().flatten());
         }
-        covered.extend(DECODER..TENSORS);
-        covered.sort_unstable();
-        assert_eq!(covered, (0..TENSORS).collect::<Vec<usize>>());
+        assert_eq!(covered.into_iter().collect::<Vec<_>>(), (0..TENSORS).collect::<Vec<_>>());
     }
 
     #[test]
@@ -540,6 +683,109 @@ mod tests {
                 assert_eq!((push.group, push.out_h, push.out_w), (HEADS, LEN, LEN), "{push:?}");
             }
         }
+    }
+
+    #[test]
+    fn a_decode_step_is_three_layers_of_two_attentions() {
+        let (_, plan) = plan(Mode::DecodeStep { cache_len: 3, src_len: LEN });
+        let mut counts = std::collections::BTreeMap::new();
+        for op in &plan.ops {
+            if let Op::Dispatch { kind, .. } = op {
+                *counts.entry(super::super::tests::name_of(*kind)).or_insert(0usize) += 1;
+            }
+        }
+        // Ten int8 convolutions per layer — two attentions of four plus fc1 and fc2 — and the two
+        // halves of the tied head.
+        assert_eq!(
+            counts.get("ConvInt8"),
+            Some(&(DECODER_LAYERS * 10 + HEAD_SPLITS)),
+            "{counts:?}"
+        );
+        // Three norms per layer, pre-norm, plus the trailing one.
+        assert_eq!(counts.get("LayerNorm"), Some(&(DECODER_LAYERS * 3 + 1)), "{counts:?}");
+        // Self-attention is cached and single-query; the cross-attention is not.
+        assert_eq!(counts.get("AttnScoresCached"), Some(&DECODER_LAYERS), "{counts:?}");
+        assert_eq!(counts.get("AttnApplyCached"), Some(&DECODER_LAYERS), "{counts:?}");
+        assert_eq!(counts.get("AttnScores"), Some(&DECODER_LAYERS), "{counts:?}");
+        assert_eq!(counts.get("AttnApply"), Some(&DECODER_LAYERS), "{counts:?}");
+        assert_eq!(counts.get("Softmax"), Some(&(DECODER_LAYERS * 2)), "{counts:?}");
+        // Three residuals per layer.
+        assert_eq!(counts.get("Add"), Some(&(DECODER_LAYERS * 3)), "{counts:?}");
+        assert_no_aliasing(&plan);
+    }
+
+    #[test]
+    fn a_decode_step_declares_its_cache_in_and_out() {
+        let cache_len = 5;
+        let (_, plan) = plan(Mode::DecodeStep { cache_len, src_len: LEN });
+        // The token, the encoder output, then a K/V pair per layer.
+        assert_eq!(plan.inputs.len(), 2 + DECODER_LAYERS * 2);
+        assert_eq!(plan.inputs[0].shape, Shape::new(D_MODEL, 1, 1));
+        assert_eq!(plan.inputs[1].shape, Shape::new(D_MODEL, 1, LEN));
+        for binding in &plan.inputs[2..] {
+            // Position-major: the cache's channels are the positions.
+            assert_eq!(binding.shape, Shape::new(cache_len, 1, D_MODEL));
+        }
+        // Two logits halves, then the step's own K and V per layer.
+        assert_eq!(plan.outputs.len(), HEAD_SPLITS + DECODER_LAYERS * 2);
+        for binding in &plan.outputs[..HEAD_SPLITS] {
+            assert_eq!(binding.shape, Shape::new(CLASSES_PER_SPLIT, 1, 1));
+        }
+        for binding in &plan.outputs[HEAD_SPLITS..] {
+            assert_eq!(binding.shape, Shape::new(1, 1, D_MODEL));
+        }
+    }
+
+    #[test]
+    fn the_first_step_has_no_cache_to_read() {
+        // At step 0 the only key is the token itself, so there is nothing to concatenate and no
+        // cache input. A `[0, 1, 1024]` binding would be a zero-length upload, which Vulkan
+        // refuses and which would make the first step the one special case on the device.
+        let (_, plan) = plan(Mode::DecodeStep { cache_len: 0, src_len: LEN });
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(plan.outputs.len(), HEAD_SPLITS + DECODER_LAYERS * 2);
+        // And the scores are over exactly one key.
+        for op in &plan.ops {
+            if let Op::Dispatch { kind: Kind::AttnScoresCached, push, .. } = op {
+                assert_eq!((push.group, push.out_w), (HEADS, 1), "{push:?}");
+            }
+        }
+        assert_no_aliasing(&plan);
+    }
+
+    #[test]
+    fn a_decode_step_attends_over_the_prefix_and_the_current_token() {
+        let cache_len = 7;
+        let (_, plan) = plan(Mode::DecodeStep { cache_len, src_len: LEN });
+        for op in &plan.ops {
+            match op {
+                // Self-attention: one query, `cache_len + 1` keys. An off-by-one here would drop
+                // the current token from its own attention, which is fluent and wrong.
+                Op::Dispatch { kind: Kind::AttnScoresCached, push, .. } => {
+                    assert_eq!((push.out_h, push.out_w), (1, cache_len + 1), "{push:?}");
+                }
+                Op::Dispatch { kind: Kind::AttnApplyCached, push, .. } => {
+                    assert_eq!((push.in_w, push.out_c), (cache_len + 1, D_MODEL), "{push:?}");
+                }
+                // Cross-attention: one query over the source, which is a different length.
+                Op::Dispatch { kind: Kind::AttnScores, push, .. } => {
+                    assert_eq!((push.out_h, push.out_w), (1, LEN), "{push:?}");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn a_decode_step_over_nothing_or_past_the_cache_is_refused() {
+        let source = Shapes::new(TENSORS);
+        let error = build(&source, Mode::DecodeStep { cache_len: 0, src_len: 0 })
+            .expect_err("no source");
+        assert!(error.contains("no source"), "{error}");
+        let source = Shapes::new(TENSORS);
+        let error = build(&source, Mode::DecodeStep { cache_len: MAX_POSITIONS, src_len: LEN })
+            .expect_err("cache full");
+        assert!(error.contains("position limit") || error.contains("limit"), "{error}");
     }
 
     #[test]

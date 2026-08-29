@@ -1,0 +1,62 @@
+#version 450
+//! `S[h][j] = scale * sum_d Q[h][d] * Kcache[j][h][d]`, attention scores for **one** query.
+//!
+//! # Why a second scores shader
+//!
+//! `attn_scores.comp` reads K as `[d_model, 1, T]`, the layout every projection in this runtime
+//! writes. That layout is right everywhere it is used — and wrong for a decoder's KV cache, for one
+//! reason: appending a position to `[d_model, 1, T]` means writing one element into each of
+//! `d_model` runs that are `T` apart. At `d_model` 1024 that is 1024 non-contiguous two-byte
+//! copies per tensor per layer per step, which for SMaLL-100's three layers and 128 tokens is over
+//! three quarters of a million `vkCmdCopyBuffer` calls.
+//!
+//! So a cache is **position-major**, `[T, 1, d_model]`, where appending a position is one
+//! contiguous copy of `d_model` elements. That is the only difference between this and
+//! `attn_scores.comp`, and it is why the existing shader is left alone: `attn_scores.comp`,
+//! `softmax.comp` and `attn_apply.comp` are shared by PP-OCRv5 recognition and both Supertonic
+//! encoders, so a change to any of their `Push` fields would break three shipping nets at once.
+//! This adds a shader instead and touches none of them.
+//!
+//! # One query, which is what makes a causal mask unnecessary
+//!
+//! A decode step has exactly one query — the token just produced — attending over the `j < T`
+//! positions before it plus itself. The prefix bound *is* the tensor length, so there is nothing to
+//! mask: this runtime has no additive mask and needs none. The output is `[heads, 1, keys]`, so
+//! `softmax.comp` normalises it unchanged.
+//!
+//! # The reduction is contiguous here
+//!
+//! `Kcache[j]` is a run of `d_model` elements and a head owns `head_dim` consecutive channels
+//! inside it, so the dot product walks a contiguous vector rather than `head_dim` channels a
+//! stride apart. That is strictly better than `attn_scores.comp`'s access pattern; the cost of the
+//! layout is paid in `attn_apply_cached.comp`, where V's read becomes the strided one.
+//!
+//! # Push fields
+//!
+//! `p.in0` is Q at `[d_model, 1, 1]`, so channel `c` is simply element `c`. `p.in1` is the cache.
+//! `p.in_c` is `d_model` and doubles as the cache's per-position stride, `p.group` is the head
+//! count, `p.out_w` is the key count and `p.param0_bits` is `1 / sqrt(head_dim)` as raw f32 bits —
+//! all fields that already exist, so the 26-slot push block does not grow.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[heads, 1, keys]`, so `unpack` gives head and key directly.
+    uint head, unused_row, key;
+    unpack(index, head, unused_row, key);
+    uint head_dim = p.in_c / p.group;
+    // Q is one position, so its channels are consecutive from `p.in0`.
+    uint query = p.in0 + head * head_dim;
+    // Position `key` of the cache, then this head's slice within it.
+    uint keys = p.in1 + key * p.in_c + head * head_dim;
+
+    float total = 0.0;
+    for (uint d = 0u; d < head_dim; d++) {
+        total += float(arena[query + d]) * float(arena[keys + d]);
+    }
+    arena[p.out_at + index] = float16_t(total * uintBitsToFloat(p.param0_bits));
+}

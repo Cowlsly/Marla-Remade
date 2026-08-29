@@ -54,9 +54,13 @@ const CONV_POINT_INT8: &[u8] =
 const CONSTANT: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/constant.comp.spv"));
 const ADD_BCAST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/add_bcast.comp.spv"));
 const ROTARY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/rotary.comp.spv"));
+const ATTN_SCORES_CACHED: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_cached.comp.spv"));
+const ATTN_APPLY_CACHED: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_cached.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 24] = [
+const SPIRV: [&[u8]; 26] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -81,6 +85,8 @@ const SPIRV: [&[u8]; 24] = [
     CONSTANT,
     ADD_BCAST,
     ROTARY,
+    ATTN_SCORES_CACHED,
+    ATTN_APPLY_CACHED,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -133,6 +139,8 @@ pub struct Pipelines {
     constant: vk::Pipeline,
     add_bcast: vk::Pipeline,
     rotary: vk::Pipeline,
+    attn_scores_cached: vk::Pipeline,
+    attn_apply_cached: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -346,6 +354,8 @@ impl Pipelines {
             constant,
             add_bcast,
             rotary,
+            attn_scores_cached,
+            attn_apply_cached,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -386,6 +396,8 @@ impl Pipelines {
             constant,
             add_bcast,
             rotary,
+            attn_scores_cached,
+            attn_apply_cached,
         })
     }
 
@@ -408,6 +420,8 @@ impl Pipelines {
             Kind::AttnApply => self.attn_apply,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
+            Kind::AttnScoresCached => self.attn_scores_cached,
+            Kind::AttnApplyCached => self.attn_apply_cached,
             Kind::Embed => self.embed,
             Kind::ConvInt8 => self.conv_int8,
             Kind::ConvPoint => self.conv_point,
@@ -448,6 +462,8 @@ impl Pipelines {
             self.constant,
             self.add_bcast,
             self.rotary,
+            self.attn_scores_cached,
+            self.attn_apply_cached,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

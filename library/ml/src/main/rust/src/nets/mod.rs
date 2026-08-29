@@ -255,6 +255,15 @@ pub enum Kind {
     /// [`Kind::AttnApply`] plus the value-side relative term. See
     /// [`Kind::AttnScoresRelative`].
     AttnApplyRelative,
+    /// [`AttnScores`](Kind::AttnScores) for one query against a **position-major** K cache.
+    ///
+    /// A decoder step is one query, and its keys live in a cache that a position is appended to
+    /// every step. `[d_model, 1, T]` makes that append `d_model` scattered two-byte copies, so a
+    /// cache is `[T, 1, d_model]` instead and reads through this. See
+    /// `shaders/attn_scores_cached.comp` for why the shared shaders are not extended.
+    AttnScoresCached,
+    /// [`AttnApply`](Kind::AttnApply) for one query against a **position-major** V cache.
+    AttnApplyCached,
     /// A `1 x 1` convolution as a tiled matrix multiply, staging weights through shared memory.
     ///
     /// [`Kind::Conv`] reads each output element''s weights from global memory with no reuse, which
@@ -471,7 +480,8 @@ impl Kind {
                 reads.push(WeightRead { at: elems(push.weight), field: "weight" });
             }
             // Purely elementwise or arena-only. `attn_scores`, `softmax`, `attn_apply` and
-            // `rotary` all take their second operand from the arena.
+            // `rotary` all take their second operand from the arena, and the cached attention
+            // pair take theirs from a cache in the arena too.
             Kind::MaxPool
             | Kind::AvgPool
             | Kind::Resize
@@ -483,8 +493,10 @@ impl Kind {
             | Kind::Mul
             | Kind::Affine
             | Kind::AttnScores
+            | Kind::AttnScoresCached
             | Kind::Softmax
             | Kind::AttnApply
+            | Kind::AttnApplyCached
             | Kind::Rotary => {}
         }
         if !reads.is_empty() && push.act == Act::PRelu(0).code() {
@@ -674,6 +686,21 @@ enum Node {
         out: Id,
         heads: u32,
         scale: f32,
+    },
+    /// One query against a position-major K cache. See [`Kind::AttnScoresCached`].
+    AttnScoresCached {
+        q: Id,
+        cache: Id,
+        out: Id,
+        heads: u32,
+        scale: f32,
+    },
+    /// One query against a position-major V cache. See [`Kind::AttnApplyCached`].
+    AttnApplyCached {
+        probs: Id,
+        cache: Id,
+        out: Id,
+        heads: u32,
     },
     Softmax {
         input: Id,
@@ -1281,6 +1308,80 @@ impl<'a> Builder<'a> {
     pub fn attn_scores(&mut self, q: Id, k: Id, heads: u32) -> Id {
         let (out, scale) = self.score_map(q, k, heads);
         self.nodes.push(Node::AttnScores { q, k, out, heads, scale });
+        out
+    }
+
+    /// Attention scores for one query against a **position-major** K cache.
+    ///
+    /// `q` is `[d_model, 1, 1]` and `cache` is `[keys, 1, d_model]`, giving `[heads, 1, keys]`.
+    /// The cache's axes are the other way round from every other sequence here, deliberately: see
+    /// [`Kind::AttnScoresCached`].
+    ///
+    /// One query is what makes a causal mask unnecessary — a decode step attends over exactly the
+    /// positions in the cache, so the prefix bound is the tensor's own length.
+    pub fn attn_scores_cached(&mut self, q: Id, cache: Id, heads: u32) -> Id {
+        let (sq, sc) = (self.shape_of(q), self.shape_of(cache));
+        if sq.h != 1 || sq.w != 1 {
+            self.fail(format!(
+                "a cached score map over q {sq:?}: a decode step is one query, so q is \
+                 [d_model, 1, 1]"
+            ));
+        }
+        if sc.h != 1 || sc.w != sq.c {
+            self.fail(format!(
+                "a cached score map over q {sq:?} and a cache {sc:?}: a cache is \
+                 [keys, 1, d_model], so its width is d_model and its channels are the keys"
+            ));
+        }
+        if heads == 0 || !sq.c.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sq.c));
+        }
+        let head_dim = sq.c.checked_div(heads).unwrap_or(0);
+        let scale = 1.0 / (head_dim.max(1) as f32).sqrt();
+        let out = self.tensor(Shape::new(heads, 1, sc.c));
+        self.nodes.push(Node::AttnScoresCached { q, cache, out, heads, scale });
+        out
+    }
+
+    /// One query's attention output against a **position-major** V cache.
+    ///
+    /// `probs` is `[heads, 1, keys]` and `cache` is `[keys, 1, d_model]`, giving
+    /// `[d_model, 1, 1]` — back in the channel-major layout the next projection reads, so the
+    /// cache layout is confined to the two operands that are caches.
+    pub fn attn_apply_cached(&mut self, probs: Id, cache: Id, heads: u32) -> Id {
+        let (sp, sc) = (self.shape_of(probs), self.shape_of(cache));
+        if sp.c != heads || sp.h != 1 {
+            self.fail(format!("cached attention over probs {sp:?} with {heads} heads"));
+        }
+        if sc.h != 1 || sp.w != sc.c {
+            self.fail(format!(
+                "cached attention over probs {sp:?} and a cache {sc:?}: the key counts differ"
+            ));
+        }
+        if heads == 0 || !sc.w.is_multiple_of(heads) {
+            self.fail(format!("{} channels do not split into {heads} heads", sc.w));
+        }
+        let out = self.tensor(Shape::new(sc.w, 1, 1));
+        self.nodes.push(Node::AttnApplyCached { probs, cache, out, heads });
+        out
+    }
+
+    /// The same elements under a different shape, as one contiguous copy.
+    ///
+    /// A projection writes `[d_model, 1, 1]` and a position-major cache is `[T, 1, d_model]`, so
+    /// appending the step's key means reading `d_model` elements as one *position* rather than as
+    /// `d_model` channels. Those are the same bytes in the same order, and this is the relabelling.
+    ///
+    /// A copy rather than a view for the reason [`Builder::slice_channels`] gives: a view would
+    /// have to survive the arena's last-use bookkeeping. It is `d_model` elements, and it reuses
+    /// the concatenation path exactly — one [`Op::Copy`], no shader and no new op kind.
+    pub fn reshaped(&mut self, input: Id, shape: Shape) -> Id {
+        let from = self.shape_of(input);
+        if from.len() != shape.len() {
+            self.fail(format!("reshaping {from:?} to {shape:?} changes the element count"));
+        }
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Concat { parts: vec![input], out });
         out
     }
 
@@ -1986,6 +2087,54 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
+            Node::AttnScoresCached { q, cache, out, heads, scale } => {
+                let (sq, so) = (shape(*q), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnScoresCached,
+                    push: Push {
+                        in0: at(*q)?,
+                        in1: at(*cache)?,
+                        out: at(*out)?,
+                        // `d_model`, which doubles as the cache's per-position stride: a cache is
+                        // `[keys, 1, d_model]`, so one position is `in_c` elements.
+                        in_c: sq.c,
+                        in_h: 1,
+                        in_w: 1,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        group: *heads,
+                        param0_bits: scale.to_bits(),
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
+            Node::AttnApplyCached { probs, cache, out, heads } => {
+                let (sc, so) = (shape(*cache), shape(*out));
+                ops.push(Op::Dispatch {
+                    kind: Kind::AttnApplyCached,
+                    push: Push {
+                        in0: at(*probs)?,
+                        in1: at(*cache)?,
+                        out: at(*out)?,
+                        // As above: the cache's stride is `d_model`, which is also the output's
+                        // channel count because attention preserves the width.
+                        in_c: so.c,
+                        in_h: 1,
+                        // The key count, which is the cache's *channel* count in this layout.
+                        in_w: sc.c,
+                        out_c: so.c,
+                        out_h: so.h,
+                        out_w: so.w,
+                        group: *heads,
+                        count: so.len(),
+                        ..Push::default()
+                    },
+                    invocations: so.len(),
+                });
+            }
             Node::AttnScoresRelative { q, k, out, heads, scale, table, offsets } => {
                 let (si, so) = (shape(*q), shape(*out));
                 ops.push(Op::Dispatch {
@@ -2166,6 +2315,8 @@ impl Node {
             | Node::Affine { out, .. }
             | Node::LayerNorm { out, .. }
             | Node::AttnScores { out, .. }
+            | Node::AttnScoresCached { out, .. }
+            | Node::AttnApplyCached { out, .. }
             | Node::AttnScoresRelative { out, .. }
             | Node::AttnApplyRelative { out, .. }
             | Node::Softmax { out, .. }
@@ -2195,6 +2346,8 @@ impl Node {
             Node::Binary { a, b, .. } => vec![*a, *b],
             Node::Rotary { input, angles, .. } => vec![*input, *angles],
             Node::AttnScores { q: a, k: b, .. }
+            | Node::AttnScoresCached { q: a, cache: b, .. }
+            | Node::AttnApplyCached { probs: a, cache: b, .. }
             | Node::AttnApply { probs: a, v: b, .. }
             | Node::AttnScoresRelative { q: a, k: b, .. }
             | Node::AttnApplyRelative { probs: a, v: b, .. } => {
@@ -2402,6 +2555,17 @@ pub(crate) mod tests {
                         // The score map is `[heads, queries, keys]`; V is a sequence of keys.
                         Kind::AttnApply | Kind::AttnApplyRelative => {
                             vec![(push.in0, push.group * push.out_w * push.in_w), (push.in1, dense)]
+                        }
+                        // One query against a position-major cache. Q is one position of `in_c`
+                        // channels; the cache is `out_w` positions of `in_c`. Not `dense`, whose
+                        // `in_h` and `in_w` are 1 here.
+                        Kind::AttnScoresCached => {
+                            vec![(push.in0, push.in_c), (push.in1, push.out_w * push.in_c)]
+                        }
+                        // One query's row of probabilities is `in_w` keys long, and the cache is
+                        // `in_w` positions of `in_c`.
+                        Kind::AttnApplyCached => {
+                            vec![(push.in0, push.group * push.in_w), (push.in1, push.in_w * push.in_c)]
                         }
                         // One id per position per lane, so the read is `in_c * out_w` and
                         // not `dense` - `in_w` here is the *table's* row count.

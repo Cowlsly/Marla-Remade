@@ -1,0 +1,56 @@
+#version 450
+//! `O[d] = sum_j S[h][j] * Vcache[j][d]`, attention output for **one** query.
+//!
+//! The counterpart of `attn_scores_cached.comp`, and it exists for the same reason: V is a
+//! position-major `[T, 1, d_model]` cache rather than the `[d_model, 1, T]` every projection
+//! writes, so appending a position is one contiguous copy instead of `d_model` scattered ones. See
+//! that shader for why the three shared attention shaders are left untouched.
+//!
+//! # Back into the layout the next projection reads
+//!
+//! The output is `[d_model, 1, 1]` — channel-major, one position — which is exactly what
+//! `conv_point_int8.comp` wants next. So the cache layout is confined to the two operands that are
+//! caches, and nothing else in the decoder changes shape. As in `attn_apply.comp`, the head
+//! concatenation is not an op: output channel `c` belongs to head `c / head_dim` and is written in
+//! place, which *is* the concatenated result.
+//!
+//! V needs no head arithmetic — channel `c` of V is channel `c` of the output — so the head index
+//! only picks which of `S`'s rows to read.
+//!
+//! # This is the strided side of the layout
+//!
+//! `Vcache[j][d]` for fixed `d` walks `p.in_c` apart, where `attn_apply.comp`'s read is contiguous.
+//! That is the price of the cheap append, and it is paid once per output channel per key rather
+//! than per weight tap; the projections either side of it dominate.
+//!
+//! # Precision
+//!
+//! `S` is a distribution, so every product is bounded by the corresponding `V` and the sum of a
+//! convex combination cannot exceed `V`'s range. `float` accumulation is ample and the fp16 store
+//! is the only rounding, as in `attn_apply.comp`.
+//!
+//! # Push fields
+//!
+//! `p.in0` is `S` at `[heads, 1, keys]`, `p.in1` the cache, `p.in_c` and `p.out_c` are `d_model`,
+//! `p.in_w` the key count and `p.group` the head count. No new field.
+
+#include "common.glsl"
+
+void main() {
+    uint index = global_index();
+    if (index >= p.count) {
+        return;
+    }
+    // The output is `[d_model, 1, 1]`, so the index *is* the channel.
+    uint channel = index;
+    uint keys = p.in_w;
+    uint head_dim = p.out_c / p.group;
+    // `S[head][*]`, contiguous in the key index because there is one query.
+    uint row = p.in0 + (channel / head_dim) * keys;
+
+    float total = 0.0;
+    for (uint j = 0u; j < keys; j++) {
+        total += float(arena[row + j]) * float(arena[p.in1 + j * p.in_c + channel]);
+    }
+    arena[p.out_at + channel] = float16_t(total);
+}

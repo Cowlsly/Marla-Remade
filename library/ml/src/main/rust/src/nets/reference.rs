@@ -201,6 +201,8 @@ impl Reference {
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
+                    Kind::AttnScoresCached => self.attn_scores_cached(push),
+                    Kind::AttnApplyCached => self.attn_apply_cached(push),
                     Kind::Embed => self.embed(push),
                     Kind::Constant => self.constant(push),
                     Kind::AddBroadcast => self.add_broadcast(push),
@@ -784,6 +786,52 @@ impl Reference {
                 }
                 self.store(p.out, nchw(p, channel, 0, query), total)?;
             }
+        }
+        Ok(())
+    }
+
+    /// [`Self::attn_scores`] for one query against a **position-major** K cache.
+    ///
+    /// The only difference from [`Self::attn_scores`] is the cache's indexing: a key is a run of
+    /// `in_c` elements rather than a channel every `key_stride` apart, which is what makes
+    /// appending a position one contiguous copy. `out_w` is the key count, and there is exactly one
+    /// query, so the score map is `[heads, 1, keys]` and `softmax` normalises it unchanged.
+    fn attn_scores_cached(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.in_c)?;
+        let scale = f32::from_bits(p.param0_bits);
+        for head in 0..p.group {
+            // Q is one position, so its channels are consecutive.
+            let query_base = head * head_dim;
+            for key in 0..p.out_w {
+                let key_base = key * p.in_c + head * head_dim;
+                let mut total = 0.0;
+                for d in 0..head_dim {
+                    total +=
+                        self.load(p.in0, query_base + d)? * self.load(p.in1, key_base + d)?;
+                }
+                self.store(p.out, nchw(p, head, 0, key), total * scale)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// [`Self::attn_apply`] for one query against a **position-major** V cache.
+    ///
+    /// The output is `[d_model, 1, 1]`, back in the channel-major layout the next projection
+    /// reads, so the cache layout is confined to the operand that is a cache. `in_w` is the key
+    /// count, which in this layout is the cache's channel count.
+    fn attn_apply_cached(&mut self, p: &Push) -> Result<(), String> {
+        let head_dim = heads(p, p.out_c)?;
+        let keys = p.in_w;
+        for channel in 0..p.out_c {
+            // One query, so a head's row of probabilities is `keys` long and starts here.
+            let row = (channel / head_dim) * keys;
+            let mut total = 0.0;
+            for key in 0..keys {
+                total += self.load(p.in0, row + key)?
+                    * self.load(p.in1, key * p.in_c + channel)?;
+            }
+            self.store(p.out, nchw(p, channel, 0, 0), total)?;
         }
         Ok(())
     }
@@ -1807,6 +1855,110 @@ mod tests {
                 1000.0 * scale, 1400.0 * scale, 1400.0 * scale, 2000.0 * scale,
             ],
         );
+    }
+
+    #[test]
+    fn a_cached_score_map_reads_a_position_as_a_contiguous_run() {
+        // The same numbers as `attention_scores_contract_over_channels_and_keep_the_key_axis_last`,
+        // laid out the other way round, so the two fixtures pin the layout difference and nothing
+        // else. d_model 2, one head, two keys.
+        //
+        // There, K was `[2, 1, 2]` channel-major with columns (5,7) and (6,8). Here the cache is
+        // `[2, 1, 2]` position-major, so key 0 is the run (5,6) and key 1 is (7,8) — the same
+        // vectors, contiguous. Q is one position, (1,2).
+        //
+        // S[0] = 1*5 + 2*6 = 17, S[1] = 1*7 + 2*8 = 23. A shader that read the cache
+        // channel-major would get 1*5 + 2*7 = 19 and 1*6 + 2*8 = 22 instead, which is why the
+        // fixture is deliberately not symmetric in the two axes.
+        let got = two(
+            (Shape::new(2, 1, 1), Shape::new(2, 1, 2)),
+            (&[1.0, 2.0], &[5.0, 6.0, 7.0, 8.0]),
+            |b, q, cache| b.attn_scores_cached(q, cache, 1),
+        );
+        let scale = 1.0 / 2f32.sqrt();
+        close(&got, &[17.0 * scale, 23.0 * scale]);
+    }
+
+    #[test]
+    fn a_cached_score_map_never_mixes_two_heads() {
+        // d_model 4 in two heads, so head 0 owns channels 0-1 of each position and head 1 owns
+        // 2-3. The second head's values are a decade larger, so a leak across the boundary moves
+        // head 0's scores about a hundredfold rather than subtly.
+        //
+        // Q is (1,2,10,20). The cache holds two positions of four: (1,2,10,20) and (3,4,30,40).
+        //   head 0, key 0: 1*1 + 2*2  = 5      head 0, key 1: 1*3 + 2*4   = 11
+        //   head 1, key 0: 10*10 + 20*20 = 500 head 1, key 1: 10*30 + 20*40 = 1100
+        let got = two(
+            (Shape::new(4, 1, 1), Shape::new(2, 1, 4)),
+            (&[1.0, 2.0, 10.0, 20.0], &[1.0, 2.0, 10.0, 20.0, 3.0, 4.0, 30.0, 40.0]),
+            |b, q, cache| b.attn_scores_cached(q, cache, 2),
+        );
+        // head_dim is 2, so the scale is 1/sqrt(2).
+        let scale = 1.0 / 2f32.sqrt();
+        close(&got, &[5.0 * scale, 11.0 * scale, 500.0 * scale, 1100.0 * scale]);
+    }
+
+    #[test]
+    fn a_cached_attention_output_is_channel_major_again() {
+        // probs `[1, 1, 2]` over two keys, cache `[2, 1, 3]` position-major: key 0 is (1,2,3) and
+        // key 1 is (4,5,6). At weights 0.25 and 0.75 the output is
+        // (0.25*1 + 0.75*4, 0.25*2 + 0.75*5, 0.25*3 + 0.75*6) = (3.25, 4.25, 5.25).
+        //
+        // The output is `[3, 1, 1]`, so the cache layout does not escape this op — which is the
+        // property that lets the next projection be an ordinary `conv_point_int8`.
+        let got = two(
+            (Shape::new(1, 1, 2), Shape::new(2, 1, 3)),
+            (&[0.25, 0.75], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]),
+            |b, probs, cache| b.attn_apply_cached(probs, cache, 1),
+        );
+        close(&got, &[3.25, 4.25, 5.25]);
+    }
+
+    #[test]
+    fn a_cached_attention_uses_the_head_only_to_pick_a_row_of_weights() {
+        // Two heads over d_model 4, two keys. Head 0's distribution is (1, 0) and head 1's is
+        // (0, 1), so head 0's channels come entirely from key 0 and head 1's from key 1.
+        //
+        // Cache key 0 is (1,2,3,4) and key 1 is (5,6,7,8), so the output is (1,2,7,8). A shader
+        // that indexed the probability rows the other way round would give (5,6,3,4).
+        let got = two(
+            (Shape::new(2, 1, 2), Shape::new(2, 1, 4)),
+            (&[1.0, 0.0, 0.0, 1.0], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]),
+            |b, probs, cache| b.attn_apply_cached(probs, cache, 2),
+        );
+        close(&got, &[1.0, 2.0, 7.0, 8.0]);
+    }
+
+    #[test]
+    fn a_cached_attention_averages_its_cache_when_every_score_is_equal() {
+        // The end-to-end shape of a decode step's self-attention: one query, a two-position cache,
+        // scores that are all equal because Q is zero, so softmax is uniform and the output is the
+        // mean of the cached values. Anything wrong in the chaining shows up as something other
+        // than the midpoint.
+        let cache = [1.0f32, 2.0, 5.0, 10.0];
+        let got = two(
+            (Shape::new(2, 1, 1), Shape::new(2, 1, 2)),
+            (&[0.0, 0.0], &cache),
+            |b, q, cache| {
+                let scores = b.attn_scores_cached(q, cache, 1);
+                let probs = b.softmax(scores);
+                b.attn_apply_cached(probs, cache, 1)
+            },
+        );
+        close(&got, &[3.0, 6.0]);
+    }
+
+    #[test]
+    fn a_reshape_is_one_copy_and_the_same_elements() {
+        // A projection writes `[d_model, 1, 1]` and a cache position is `[1, 1, d_model]`. Those
+        // are the same bytes, and this is the relabelling that lets the two meet.
+        let got = one(
+            Shape::new(4, 1, 1),
+            &[1.0, 2.0, 3.0, 4.0],
+            &[],
+            |b, x| b.reshaped(x, Shape::new(1, 1, 4)),
+        );
+        close(&got, &[1.0, 2.0, 3.0, 4.0]);
     }
 
     #[test]

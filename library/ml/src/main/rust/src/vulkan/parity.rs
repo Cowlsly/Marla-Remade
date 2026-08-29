@@ -197,6 +197,64 @@ fn the_cnn_spine_agrees_with_the_reference() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn cached_attention_agrees_with_the_reference() {
+    // A whole decode-step self-attention: one query against a position-major cache, through
+    // softmax and back out channel-major. `nets::reference` is the only oracle for the two new
+    // shaders, so this is what says the SPIR-V matches it on real hardware.
+    //
+    // d_model 8 in two heads, five cached positions. The cache is `[5, 1, 8]` — positions as
+    // channels — which is the layout that makes appending one position a single contiguous copy.
+    // A shader that read it channel-major would produce the right shape from the wrong vectors.
+    let query = spread(8, 0.0);
+    let cache = spread(5 * 8, 0.7);
+    agrees(
+        "cached attention",
+        &[Shape::new(8, 1, 1), Shape::new(5, 1, 8)],
+        &[&query, &cache],
+        &[],
+        |b, ids| {
+            let scores = b.attn_scores_cached(ids[0], ids[1], 2);
+            let probs = b.softmax(scores);
+            b.attn_apply_cached(probs, ids[1], 2)
+        },
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_cached_score_map_alone_agrees_with_the_reference() {
+    // The scores on their own, undivided by a softmax, so a wrong `1 / sqrt(head_dim)` or a
+    // transposed head range shows up as a value rather than as a redistribution. Four heads of
+    // two over three positions.
+    let query = spread(8, 0.2);
+    let cache = spread(3 * 8, 1.1);
+    agrees(
+        "cached scores",
+        &[Shape::new(8, 1, 1), Shape::new(3, 1, 8)],
+        &[&query, &cache],
+        &[],
+        |b, ids| b.attn_scores_cached(ids[0], ids[1], 4),
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_reshape_moves_the_same_elements_on_the_device() {
+    // The relabelling that lets a `[d_model, 1, 1]` projection become a `[1, 1, d_model]` cache
+    // position. One `vkCmdCopyBuffer`, so what is under test is that the shapes either side agree
+    // about the element count.
+    let x = spread(16, 0.3);
+    agrees(
+        "reshape",
+        &[Shape::new(16, 1, 1)],
+        &[&x],
+        &[],
+        |b, ids| b.reshaped(ids[0], Shape::new(1, 1, 16)),
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn rotary_agrees_with_the_reference() {
     // The half-split convention: `out[j] = x[j] cos - x[j + half] sin`, within each head. A
     // shader that paired adjacent channels instead — the other common convention — gets the
