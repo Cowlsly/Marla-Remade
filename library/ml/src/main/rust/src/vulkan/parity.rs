@@ -18,6 +18,23 @@
 //! cargo test -p modelrunner --lib -- --ignored vulkan::parity
 //! ```
 //!
+//! # Running them segmented
+//!
+//! [`super::segment`] windows the weights buffer when it is larger than
+//! `maxStorageBufferRange`, and on any device this runtime actually targets it never is — so the
+//! windowed path would otherwise ship as dead code. Re-running the whole suite with the range
+//! forced down exercises it against the same oracle:
+//!
+//! ```text
+//! MODELRUNNER_MAX_STORAGE_RANGE=33554432 \
+//!   cargo test -p modelrunner --lib -- --ignored vulkan::parity
+//! ```
+//!
+//! Every number must be identical to the unforced run: windowing changes which descriptor set is
+//! bound and what the three weights offsets in [`crate::nets::Push`] are measured from, and
+//! nothing else. The variable is read once, when the [`Context`] is created, which is why it is set
+//! on the command line rather than inside a test — the device here is process-wide and shared.
+//!
 //! # Tolerance
 //!
 //! Not exact equality. Both sides store activations as fp16, but a shader reduces in parallel

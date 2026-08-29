@@ -417,6 +417,85 @@ pub enum Op {
     },
 }
 
+/// One weights-buffer byte offset an [`Op::Dispatch`] reads a tensor from.
+///
+/// Exists because `vulkan::segment` has to know which region of the weights file each op
+/// touches, and the answer is a property of the *shaders* rather than of segmentation: three
+/// of [`Push`]'s fields hold weights offsets, and which of them a shader reads — and in what
+/// units — depends on the [`Kind`]. Keeping the table here means it sits beside the fields it
+/// describes and beside `tests::assert_no_aliasing`, which does the same job for the arena.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WeightRead {
+    /// Byte offset into the `.maml` data section.
+    pub at: u64,
+    /// Which [`Push`] field it came from, for error messages.
+    pub field: &'static str,
+}
+
+impl Kind {
+    /// Every weights offset this kind reads, in bytes, given one op's [`Push`].
+    ///
+    /// Read off the shaders rather than inferred: `shaders/*.comp` name `p.weight`, `p.bias` and
+    /// `p.act_weight` explicitly, and `prelu` in `common.glsl` is what makes `act_weight` a read
+    /// of any kind carrying [`Act::PRelu`] rather than only of the int8 pair.
+    ///
+    /// Bytes, not element indices, because `weight` is a **32-bit word** index for the two int8
+    /// kinds and an fp16 element index everywhere else — the one place that difference has to be
+    /// resolved rather than carried.
+    pub fn weight_reads(self, push: &Push) -> Vec<WeightRead> {
+        let elems = |at: u32| u64::from(at) * 2;
+        let words = |at: u32| u64::from(at) * 4;
+        let mut reads = Vec::new();
+        match self {
+            // A kernel, a bias, and a per-channel slope when the activation is PRelu.
+            Kind::Conv | Kind::ConvTranspose | Kind::ConvPoint => {
+                reads.push(WeightRead { at: elems(push.weight), field: "weight" });
+                reads.push(WeightRead { at: elems(push.bias), field: "bias" });
+            }
+            // As above, plus the dequantisation scale, which occupies `act_weight` and is why
+            // `Builder::conv_int8` refuses `Act::PRelu`.
+            Kind::ConvInt8 | Kind::ConvPointInt8 => {
+                reads.push(WeightRead { at: words(push.weight), field: "weight" });
+                reads.push(WeightRead { at: elems(push.bias), field: "bias" });
+                reads.push(WeightRead { at: elems(push.act_weight), field: "act_weight" });
+            }
+            // Gamma then beta, both rank-1.
+            Kind::LayerNorm => {
+                reads.push(WeightRead { at: elems(push.weight), field: "weight" });
+                reads.push(WeightRead { at: elems(push.bias), field: "bias" });
+            }
+            // One table each: the relative position table, the literal to copy out, the
+            // embedding rows.
+            Kind::AttnScoresRelative | Kind::AttnApplyRelative | Kind::Constant | Kind::Embed => {
+                reads.push(WeightRead { at: elems(push.weight), field: "weight" });
+            }
+            // Purely elementwise or arena-only. `attn_scores`, `softmax`, `attn_apply` and
+            // `rotary` all take their second operand from the arena.
+            Kind::MaxPool
+            | Kind::AvgPool
+            | Kind::Resize
+            | Kind::ResizeNearest
+            | Kind::GlobalAvgPool
+            | Kind::Add
+            | Kind::MulBroadcast
+            | Kind::AddBroadcast
+            | Kind::Mul
+            | Kind::Affine
+            | Kind::AttnScores
+            | Kind::Softmax
+            | Kind::AttnApply
+            | Kind::Rotary => {}
+        }
+        if !reads.is_empty() && push.act == Act::PRelu(0).code() {
+            let slope = WeightRead { at: elems(push.act_weight), field: "act_weight" };
+            if !reads.contains(&slope) {
+                reads.push(slope);
+            }
+        }
+        reads
+    }
+}
+
 /// Where one of a net's inputs or outputs lives, and what shape it is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Binding {

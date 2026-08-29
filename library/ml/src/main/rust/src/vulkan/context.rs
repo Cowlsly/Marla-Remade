@@ -56,6 +56,8 @@ pub struct Context {
     pub queue: vk::Queue,
     /// The family [`Context::queue`] came from.
     pub queue_family_index: u32,
+    /// The three device limits the weights buffer has to fit inside.
+    pub limits: Limits,
     /// Guards the queue above.
     ///
     /// `VkQueue` is *externally synchronised* in the Vulkan sense: the application must not
@@ -76,6 +78,69 @@ pub struct Context {
     /// shared pool would have to be locked for the whole of a net's `record`, and a lock held
     /// that long by a net being built would stall a net that is merely submitting.
     queue_lock: Mutex<()>,
+}
+
+/// The device limits the weights buffer has to fit inside, queried rather than assumed.
+///
+/// # Why this is not another `MAX_WORKGROUPS_PER_DIM`
+///
+/// [`super::pipeline::MAX_WORKGROUPS_PER_DIM`] is hardcoded to the spec's guaranteed floor and
+/// never queried, deliberately: a workgroup count can be *tiled* to fit any floor at no cost, so
+/// one code path is worth more than the headroom a query would find. That argument does not carry
+/// over. `maxStorageBufferRange`'s guaranteed minimum is 128 MiB, SMaLL-100's weights are 318 MiB,
+/// and a 125 MiB embedding cannot be made smaller — so coding unconditionally to the floor would
+/// force a descriptor set per segment on **every** device, including the ones reporting 4 GiB.
+///
+/// This is also already latent in shipped code rather than new with SMaLL-100: Supertonic's fp16
+/// sampler was 121.7 MiB, which is 95% of the guarantee.
+///
+/// # The three of them
+///
+/// * `max_storage_buffer_range` bounds one descriptor's `range`, which is what forces segmenting.
+/// * `min_storage_buffer_offset_alignment` bounds a descriptor's `offset`, and can be as coarse as
+///   256 while a `.maml` tensor is only 16-aligned. A segment base is therefore rounded **down**
+///   to it, so the segment starts slightly before its first tensor; the extra bytes overlap the
+///   previous segment, and both are read-only.
+/// * `max_memory_allocation_size` bounds the single allocation the whole file goes into. Its
+///   guaranteed minimum is 1 GiB, so 318 MiB has threefold headroom — but a device reporting less
+///   should fail with that sentence rather than with `VK_ERROR_OUT_OF_DEVICE_MEMORY`.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// `VkPhysicalDeviceLimits::maxStorageBufferRange`. Guaranteed at least 128 MiB.
+    pub max_storage_buffer_range: u64,
+    /// `VkPhysicalDeviceLimits::minStorageBufferOffsetAlignment`. A power of two, at most 256.
+    pub min_storage_buffer_offset_alignment: u64,
+    /// `VkPhysicalDeviceMaintenance3Properties::maxMemoryAllocationSize`. At least 1 GiB.
+    pub max_memory_allocation_size: u64,
+}
+
+/// Forces [`Limits::max_storage_buffer_range`] down, so the segmented path can be exercised.
+///
+/// Mali-G715 on the target device almost certainly reports a range far above anything this
+/// runtime asks for, which would ship the segmenting code as dead and unverified. Setting this to
+/// `33554432` runs **today's** nets segmented, and `vulkan::parity` does exactly that: the
+/// Supertonic sampler must produce identical numbers with and without it.
+const FORCED_RANGE: &str = "MODELRUNNER_MAX_STORAGE_RANGE";
+
+impl Limits {
+    /// Query them, applying [`FORCED_RANGE`] if it is set to a parseable non-zero value.
+    fn query(instance: &ash::Instance, physical_device: vk::PhysicalDevice) -> Limits {
+        let mut maintenance3 = vk::PhysicalDeviceMaintenance3Properties::default();
+        let mut properties =
+            vk::PhysicalDeviceProperties2::default().push_next(&mut maintenance3);
+        // SAFETY: a plain property query on a device that was just enumerated. Maintenance3 is
+        // core in Vulkan 1.1, which is this runtime's floor, so the chained struct is filled in.
+        unsafe { instance.get_physical_device_properties2(physical_device, &mut properties) };
+        let device = properties.properties.limits;
+        let forced = std::env::var(FORCED_RANGE).ok().and_then(|v| v.parse::<u64>().ok());
+        Limits {
+            max_storage_buffer_range: forced
+                .filter(|&v| v > 0)
+                .unwrap_or_else(|| u64::from(device.max_storage_buffer_range)),
+            min_storage_buffer_offset_alignment: device.min_storage_buffer_offset_alignment,
+            max_memory_allocation_size: maintenance3.max_memory_allocation_size,
+        }
+    }
 }
 
 impl Context {
@@ -145,6 +210,7 @@ impl Context {
             }
         };
         let queue = device.get_device_queue(queue_family_index, 0);
+        let limits = Limits::query(&instance, physical_device);
         Ok(Context {
             entry,
             instance,
@@ -152,6 +218,7 @@ impl Context {
             device,
             queue,
             queue_family_index,
+            limits,
             queue_lock: Mutex::new(()),
         })
     }

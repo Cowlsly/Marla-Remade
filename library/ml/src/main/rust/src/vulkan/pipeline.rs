@@ -23,6 +23,7 @@ use ash::vk;
 use crate::nets::{Kind, Push};
 
 use super::context::Context;
+use super::segment::Segment;
 
 const CONV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/conv.comp.spv"));
 const CONV_TRANSPOSE: &[u8] =
@@ -95,12 +96,17 @@ pub const WORKGROUP: u32 = 64;
 /// floor unconditionally rather than querying the device keeps one code path.
 pub const MAX_WORKGROUPS_PER_DIM: u32 = 65_535;
 
-/// Every compute pipeline, plus the layout and descriptor set they share.
+/// Every compute pipeline, plus the layout and descriptor sets they share.
 pub struct Pipelines {
     /// Shared by all of them, so a bind never invalidates push constants.
     pub layout: vk::PipelineLayout,
-    /// The one set: arena at binding 0, weights at binding 1.
-    pub descriptor_set: vk::DescriptorSet,
+    /// One set per weights segment: arena at binding 0, that segment of the weights at 1 and 2.
+    ///
+    /// Almost always exactly one. A second appears only when the weights are larger than
+    /// `maxStorageBufferRange`, which today means SMaLL-100 on a device reporting the guaranteed
+    /// minimum. Every set points at the same arena and the same weights buffer; they differ only
+    /// in the weights descriptor's `(offset, range)`. See [`super::segment`].
+    pub descriptor_sets: Vec<vk::DescriptorSet>,
     descriptor_layout: vk::DescriptorSetLayout,
     descriptor_pool: vk::DescriptorPool,
     conv: vk::Pipeline,
@@ -136,6 +142,8 @@ impl Pipelines {
     /// whole reason rebuilding beats constructing a second net. The caller must have waited for
     /// the device to go idle first — a descriptor set may not be written while a command buffer
     /// that uses it is pending.
+    ///
+    /// Every segment's set is rewritten, because they all point at the same arena.
     pub fn rebind_arena(
         &self,
         device: &ash::Device,
@@ -144,27 +152,33 @@ impl Pipelines {
     ) {
         let arena_info =
             vk::DescriptorBufferInfo::default().buffer(arena).offset(0).range(arena_size);
-        let write = vk::WriteDescriptorSet::default()
-            .dst_set(self.descriptor_set)
-            .dst_binding(0)
-            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-            .buffer_info(std::slice::from_ref(&arena_info));
-        // SAFETY: a descriptor write to a set this struct owns, against a buffer the caller
-        // keeps alive. Nothing using the set is pending, per the contract above.
-        unsafe { device.update_descriptor_sets(std::slice::from_ref(&write), &[]) };
+        let writes: Vec<_> = self
+            .descriptor_sets
+            .iter()
+            .map(|&set| {
+                vk::WriteDescriptorSet::default()
+                    .dst_set(set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(&arena_info))
+            })
+            .collect();
+        // SAFETY: descriptor writes to sets this struct owns, against a buffer the caller keeps
+        // alive. Nothing using them is pending, per the contract above.
+        unsafe { device.update_descriptor_sets(&writes, &[]) };
     }
 
-    /// Build all of them and point the descriptor set at `arena` and `weights`.
+    /// Build all of them and point one descriptor set per segment at `arena` and `weights`.
     pub fn new(
         context: &Context,
         arena: vk::Buffer,
         arena_size: vk::DeviceSize,
         weights: vk::Buffer,
-        weights_size: vk::DeviceSize,
+        segments: &[Segment],
     ) -> Result<Pipelines, String> {
         // SAFETY: every handle created below is destroyed by `Pipelines::destroy`, or on
         // the failure path here before returning.
-        unsafe { Self::create(context, arena, arena_size, weights, weights_size) }
+        unsafe { Self::create(context, arena, arena_size, weights, segments) }
     }
 
     unsafe fn create(
@@ -172,9 +186,12 @@ impl Pipelines {
         arena: vk::Buffer,
         arena_size: vk::DeviceSize,
         weights: vk::Buffer,
-        weights_size: vk::DeviceSize,
+        segments: &[Segment],
     ) -> Result<Pipelines, String> {
         let device = &context.device;
+        if segments.is_empty() {
+            return Err("a net needs at least one weights segment".into());
+        }
 
         let bindings = [
             vk::DescriptorSetLayoutBinding::default()
@@ -205,57 +222,75 @@ impl Pipelines {
         let mut cleanup = Cleanup::new(device);
         cleanup.descriptor_layout = Some(descriptor_layout);
 
+        let count = u32::try_from(segments.len()).map_err(|_| "too many weights segments")?;
         let pool_sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(3)];
+            .descriptor_count(3 * count)];
         let descriptor_pool = device
             .create_descriptor_pool(
-                &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&pool_sizes),
+                &vk::DescriptorPoolCreateInfo::default().max_sets(count).pool_sizes(&pool_sizes),
                 None,
             )
             .map_err(|e| format!("create_descriptor_pool {e:?}"))?;
         cleanup.descriptor_pool = Some(descriptor_pool);
 
-        let layouts = [descriptor_layout];
-        let sets = device
+        let layouts = vec![descriptor_layout; segments.len()];
+        let descriptor_sets = device
             .allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(descriptor_pool)
                     .set_layouts(&layouts),
             )
             .map_err(|e| format!("allocate_descriptor_sets {e:?}"))?;
-        let descriptor_set = match sets.first() {
-            Some(&s) => s,
-            None => return Err("allocate_descriptor_sets returned nothing".into()),
-        };
+        if descriptor_sets.len() != segments.len() {
+            return Err(format!(
+                "allocate_descriptor_sets returned {} sets for {} segments",
+                descriptor_sets.len(),
+                segments.len()
+            ));
+        }
 
         let arena_info = vk::DescriptorBufferInfo::default()
             .buffer(arena)
             .offset(0)
             .range(arena_size);
-        let weights_info = vk::DescriptorBufferInfo::default()
-            .buffer(weights)
-            .offset(0)
-            .range(weights_size);
-        let writes = [
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&arena_info)),
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(1)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&weights_info)),
-            // Binding 2 is the same buffer as binding 1, viewed as 32-bit words so that int8
+        // Held outside the loop so the `buffer_info` borrows stay live until the one
+        // `update_descriptor_sets` below.
+        let weight_infos: Vec<_> = segments
+            .iter()
+            .map(|segment| {
+                vk::DescriptorBufferInfo::default()
+                    .buffer(weights)
+                    .offset(segment.base)
+                    .range(segment.len)
+            })
+            .collect();
+        let mut writes = Vec::with_capacity(segments.len() * 3);
+        for (set, info) in descriptor_sets.iter().zip(&weight_infos) {
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(&arena_info)),
+            );
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info)),
+            );
+            // Binding 2 is the same range as binding 1, viewed as 32-bit words so that int8
             // tensors can be unpacked. Both are read-only, so aliasing them is safe.
-            vk::WriteDescriptorSet::default()
-                .dst_set(descriptor_set)
-                .dst_binding(2)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&weights_info)),
-        ];
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(*set)
+                    .dst_binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(std::slice::from_ref(info)),
+            );
+        }
         device.update_descriptor_sets(&writes, &[]);
 
         let push_range = vk::PushConstantRange::default()
@@ -324,7 +359,7 @@ impl Pipelines {
         cleanup.disarm();
         Ok(Pipelines {
             layout,
-            descriptor_set,
+            descriptor_sets,
             descriptor_layout,
             descriptor_pool,
             conv,

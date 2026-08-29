@@ -70,7 +70,7 @@ pub mod graph {
     pub const SUPERTONIC_TTL: u32 = 13;
     /// Supertonic 3's flow-matching sampler. See [`crate::nets::supertonic_sampler`].
     pub const SUPERTONIC_VE: u32 = 14;
-    /// SMaLL-100 translation, encoder and decoder in one file. See [`crate::nets::small100`].
+    /// SMaLL-100 translation, encoder and decoder in one file. See `crate::nets::small100`.
     ///
     /// One graph rather than two because the 128,112-row embedding is **tied**: it is the encoder's
     /// input table, the decoder's input table and the logits kernel, and two files would upload
@@ -128,6 +128,14 @@ impl Tensor {
 pub trait Blob {
     /// Bytes in the data section.
     fn data_len(&self) -> u64;
+
+    /// The tensor table, so `vulkan::segment` can find the extent of every tensor an op reads.
+    ///
+    /// Nothing about *running* a net needs the table - a [`Plan`] carries every resolved offset,
+    /// which is what makes [`Weights`] and [`Streamed`] interchangeable. Segmenting the weights
+    /// buffer does: it has to know where each tensor ends to choose a boundary that does not fall
+    /// inside one, and only the table says that.
+    fn tensors(&self) -> &[Tensor];
 
     /// Fill `into` from `offset` bytes into the data section.
     ///
@@ -384,6 +392,10 @@ impl Blob for Weights {
         self.data.len() as u64
     }
 
+    fn tensors(&self) -> &[Tensor] {
+        &self.table.tensors
+    }
+
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String> {
         let start = usize::try_from(offset).map_err(|_| "a data offset overflowed usize")?;
         let end = start
@@ -498,6 +510,10 @@ impl Streamed {
 impl Blob for Streamed {
     fn data_len(&self) -> u64 {
         self.data_len
+    }
+
+    fn tensors(&self) -> &[Tensor] {
+        &self.table.tensors
     }
 
     fn read_at(&self, offset: u64, into: &mut [u8]) -> Result<(), String> {

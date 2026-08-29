@@ -8,7 +8,9 @@
 //!   Vulkan 1.1 makes necessary.
 //! * [`buffers`] — the weights buffer, the activation arena, and the one staging buffer
 //!   both directions go through.
-//! * [`pipeline`] — the seven compute pipelines and the single descriptor set they share.
+//! * [`pipeline`] — the seven compute pipelines and the descriptor sets they share.
+//! * [`segment`] — splitting the weights buffer into descriptor-sized pieces, because
+//!   `maxStorageBufferRange` is only guaranteed to be 128 MiB and SMaLL-100's weights are 318.
 //! * [`run`] — recording a [`crate::nets::Plan`] into one command buffer, and submitting it.
 //!
 //! Nothing above this layer knows Vulkan exists: [`crate::nets`] produces a flat plan of
@@ -20,6 +22,7 @@ pub mod context;
 pub mod pipeline;
 pub mod reshape;
 pub mod run;
+pub mod segment;
 
 #[cfg(test)]
 mod parity;

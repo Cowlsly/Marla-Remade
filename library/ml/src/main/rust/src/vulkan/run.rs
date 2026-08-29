@@ -39,6 +39,7 @@ use crate::weights::Blob;
 use super::buffers::Buffer;
 use super::context::Context;
 use super::pipeline::{Pipelines, MAX_WORKGROUPS_PER_DIM, WORKGROUP};
+use super::segment::Segments;
 
 /// A compiled, recorded network ready to run.
 pub struct Net {
@@ -49,6 +50,12 @@ pub struct Net {
     arena: Buffer,
     staging: Buffer,
     pipelines: Pipelines,
+    /// Which descriptor set each op's weights are visible through.
+    ///
+    /// Almost always one window over the whole file. See [`super::segment`].
+    segments: Segments,
+    /// The `.maml` tensor table, for [`Segments::for_op`].
+    tensors: Vec<crate::weights::Tensor>,
     /// This net's own command pool, not the context's.
     ///
     /// A `VkCommandPool` is externally synchronised across *recording* as well as across
@@ -105,6 +112,14 @@ impl Net {
         // side packs its bindings end to end from offset 0, in declaration order.
         let staging_bytes = (input_elems.max(output_elems) as vk::DeviceSize) * 2;
 
+        // Before allocating anything: a file this device's descriptors cannot describe must fail
+        // here, with the limit in the message, rather than at the first dispatch that reads past
+        // a range. Windowing depends only on the length, so `rebuild` never redoes it.
+        let segments = Segments::plan(weights_bytes, &context.limits)?;
+        // A few kilobytes, kept because `record` needs each tensor's extent to know which window
+        // an op fits in, and `rebuild` installs plans this net was not constructed with.
+        let tensors = weights.tensors().to_vec();
+
         let weights_buffer = Buffer::device_local(&context, weights_bytes)?;
         let arena = Buffer::device_local(&context, arena_bytes)?;
         let staging = Buffer::staging(&context, staging_bytes)?;
@@ -114,7 +129,7 @@ impl Net {
             arena.buffer,
             arena_bytes,
             weights_buffer.buffer,
-            weights_bytes,
+            segments.all(),
         )?;
 
         // `RESET_COMMAND_BUFFER`, so a net can re-record without reallocating.
@@ -134,6 +149,8 @@ impl Net {
             arena,
             staging,
             pipelines,
+            segments,
+            tensors,
             command_pool,
             command_buffer: vk::CommandBuffer::null(),
             fence: vk::Fence::null(),
@@ -393,7 +410,7 @@ impl Net {
             }
             self.barrier(buffer);
 
-            for op in &self.plan.ops {
+            for (step, op) in self.plan.ops.iter().enumerate() {
                 match *op {
                     Op::Dispatch { kind, push, invocations } => {
                         device.cmd_bind_pipeline(
@@ -401,14 +418,24 @@ impl Net {
                             vk::PipelineBindPoint::COMPUTE,
                             self.pipelines.for_kind(kind),
                         );
+                        // The window an op's weights are visible through, and the push rebased
+                        // into it. Both are the identity unless the file was larger than one
+                        // descriptor's range, so the common case records what it always did.
+                        let segment =
+                            self.segments.for_op(step, kind, &push, &self.tensors)?.unwrap_or(0);
+                        let set = match self.pipelines.descriptor_sets.get(segment) {
+                            Some(&set) => set,
+                            None => return Err(format!("step {step} wants segment {segment}")),
+                        };
                         device.cmd_bind_descriptor_sets(
                             buffer,
                             vk::PipelineBindPoint::COMPUTE,
                             self.pipelines.layout,
                             0,
-                            &[self.pipelines.descriptor_set],
+                            &[set],
                             &[],
                         );
+                        let push = self.segments.rebase(segment, kind, &push);
                         device.cmd_push_constants(
                             buffer,
                             self.pipelines.layout,
