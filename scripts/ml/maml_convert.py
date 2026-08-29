@@ -129,7 +129,7 @@ EXPECTED_DIGEST = {
     "supertonic_voc": "5282083898554b1fae28de946bfc1a82a11e2acddf3911877f27b1b115c583aa",
     "supertonic_dp": "d9a548e1f1ed908a3b0ad27ab543dd7521858f9110b426edb1ed64ba1f1a13e4",
     "supertonic_ttl": "92d0fa8ae73d4a8a223c77fb4230e390df580744014a3fcf3211ab72a988c020",
-    "supertonic_ve": "d76f1fb13eaa9f5a16fed1f97a491d25f75325a36f00535fa3a11a7b16527951",
+    "supertonic_ve": "48ab5789e8839507ff93e099dc0f61940f25da9ba6201651784f6e68598199e2",
 }
 
 # Graphs that are one **module** of a larger export, keyed by the node-name prefix that

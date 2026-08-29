@@ -22,15 +22,27 @@ producing a net that reads the right shapes holding the wrong numbers.
 | `unicode_indexer.bin` | 65,536 `int16`, one per BMP codepoint; the whole front end |
 | `style_F1.bin` … `style_M5.bin` | ten voices, ~25 KB each; two style tensors, not a model |
 
-At fp16 the four nets come to 189 MiB, which with Whisper's 74 MiB puts `:speech`'s assets at
-263 MiB. Quantising the ungrouped `1 x 1` convolutions to int8 would take the four nets to ~100 MiB;
-`Builder::conv_int8` and `conv_point_int8.comp` exist for it, but no net has been switched over yet.
+At int8 the four nets come to 107.6 MiB, which with Whisper's 74.3 MiB puts `:speech`'s assets at
+181.9 MiB — 190.7 MB, under the 200 MB target. Every ungrouped `1 x 1` convolution is quantised in
+the sampler, the vocoder and the duration predictor; the text encoder stays fp16 on measurement, and
+each net's `INT8_CONVS` doc says exactly what is excluded and why.
+
+`onnx_parity.py` against this revision, fp16 and int8 side by side, correlation with onnxruntime:
+
+| net | fp16 | int8 | size |
+| :--- | ---: | ---: | ---: |
+| `supertonic_dp` | 0.99999975 | 0.99999250 | 1.73 → 1.44 MB |
+| `supertonic_ttl` | 0.99900006 | *not quantised* | 17.77 MB |
+| `supertonic_voc` | 0.99999858 | 0.99909061 | 50.67 → 28.70 MB |
+| `supertonic_ve` | 0.99999981 | 0.99996750 | 127.64 → 64.48 MB |
+
+**The vocoder is the one to listen to first.** 0.99909 clears the 0.999 bar the conversion was gated
+on, but it implies roughly −27 dB of error against fp16's −55 dB, and no correlation can say whether
+that is audible. Holding it at fp16 costs 21 MB and still fits the target.
 
 Verified by `library/ml/src/main/rust/tests/assets.rs`, which builds all four forward passes against
 these files and checks the codepoint table and every style is the size the runtime assumes. Those
 tests **skip** when the bundle is absent, so they pass on a fresh checkout and fail on a wrong one.
-The numbers are checked separately by `scripts/ml/onnx_parity.py`; at the pinned revision all four
-nets correlate with onnxruntime above 0.999, the vocoder better than its own fp16 bar.
 
 ## Uncompressed, and it has to stay that way
 

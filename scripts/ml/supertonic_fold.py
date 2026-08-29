@@ -384,6 +384,18 @@ class Table:
             maml_convert.Layer(len(self.layers), op, name, key, first, len(values))
         )
 
+    def quantised_conv(self, name, key, weight, bias):
+        """Add a convolution whose kernel is quantised, from arrays already in hand.
+
+        The int8 half of [`conv`], factored out because the sampler's attention projections come
+        from `MatMul` weights rather than a named `.weight` - they are transposed, and the query has
+        a scale folded in - so they cannot go through `conv` but must emit the identical
+        three-tensor layout. Two copies of that layout would be two chances to order the scale and
+        the bias differently, and they are the same length, so nothing downstream would notice.
+        """
+        quantised, kernel_scale = maml_convert.quantise_per_channel(weight)
+        self.add("ConvInt8", name, f"{key} zp=0 dtype=int8", quantised, kernel_scale, bias)
+
     def conv(self, name, out_channels, fold_scale=None, synthesise_bias=False,
              pads=(0, 0, 0, 0), kernel=(1, 1), group=1, transpose=False, scale=None,
              int8=False):
@@ -681,13 +693,12 @@ def collect_sampler(graph):
         return matmul_weights(graph, held, prefix)[name]
 
     def linear(at, prefix, name, out_channels):
-        """One `MatMul` plus its bias, as a 1x1 convolution. The weight is `[in, out]`."""
+        """One `MatMul` plus its bias, as a quantised 1x1 convolution. The weight is `[in, out]`."""
         weight = matmul(prefix, name).T
         bias = table.at(f"{at}.{name}.linear.bias")
         if weight.shape[0] != out_channels:
             raise SystemExit(f"{at}.{name} is {list(weight.shape)}, not [{out_channels}, in]")
-        table.add(
-            "Conv",
+        table.quantised_conv(
             f"{at}.{name}",
             f"Conv w={[*weight.shape, 1, 1]} b={list(bias.shape)} k={[1, 1]}"
             f" p={[0, 0, 0, 0]} g=1 pad=edge transposed",
@@ -705,8 +716,7 @@ def collect_sampler(graph):
         scale = np.sqrt(out_channels / heads) / 16.0
         weight = matmul(prefix, "W_query").T * scale
         bias = table.at(f"{at}.W_query.linear.bias") * scale
-        table.add(
-            "Conv",
+        table.quantised_conv(
             f"{at}.W_query",
             f"Conv w={[*weight.shape, 1, 1]} b={list(bias.shape)} k={[1, 1]}"
             f" p={[0, 0, 0, 0]} g=1 pad=edge transposed scaled={scale:.6f}",
@@ -714,8 +724,7 @@ def collect_sampler(graph):
             bias,
         )
 
-    table.conv(f"{VE_PREFIX}.proj_in.net", VE_CHANNELS, synthesise_bias=True)
-
+    table.conv(f"{VE_PREFIX}.proj_in.net", VE_CHANNELS, synthesise_bias=True, int8=True)
     for block in range(VE_MAIN_BLOCKS):
         base = block * 6
         for layer, dilation in enumerate(VE_LEADING):
@@ -724,10 +733,11 @@ def collect_sampler(graph):
                 VE_CHANNELS,
                 VE_INNER,
                 dilation,
+                int8=True,
             )
         # `main_blocks.{base + 1}` is the timestep `Linear`, evaluated on the host.
         table.convnext(
-            f"{VE_PREFIX}.main_blocks.{base + 2}.convnext.0", VE_CHANNELS, VE_INNER, 1
+            f"{VE_PREFIX}.main_blocks.{base + 2}.convnext.0", VE_CHANNELS, VE_INNER, 1, int8=True
         )
 
         at = f"{VE_PREFIX}.main_blocks.{base + 3}.attn"
@@ -739,7 +749,7 @@ def collect_sampler(graph):
         table.layer_norm(f"{VE_PREFIX}.main_blocks.{base + 3}.norm.norm")
 
         table.convnext(
-            f"{VE_PREFIX}.main_blocks.{base + 4}.convnext.0", VE_CHANNELS, VE_INNER, 1
+            f"{VE_PREFIX}.main_blocks.{base + 4}.convnext.0", VE_CHANNELS, VE_INNER, 1, int8=True
         )
 
         at = f"{VE_PREFIX}.main_blocks.{base + 5}.attention"
@@ -750,9 +760,10 @@ def collect_sampler(graph):
         table.layer_norm(f"{VE_PREFIX}.main_blocks.{base + 5}.norm.norm")
 
     for layer in range(VE_TRAILING):
-        table.convnext(f"{VE_PREFIX}.last_convnext.convnext.{layer}", VE_CHANNELS, VE_INNER, 1)
-
-    table.conv(f"{VE_PREFIX}.proj_out.net", VE_LATENT, synthesise_bias=True)
+        table.convnext(
+            f"{VE_PREFIX}.last_convnext.convnext.{layer}", VE_CHANNELS, VE_INNER, 1, int8=True
+        )
+    table.conv(f"{VE_PREFIX}.proj_out.net", VE_LATENT, synthesise_bias=True, int8=True)
 
     # Everything from here is read on the host. `nets::Builder::host_tensor` names each, so an
     # accidentally unread weight is still an error.

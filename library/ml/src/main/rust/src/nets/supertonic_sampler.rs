@@ -138,12 +138,28 @@ pub const FREQUENCIES: u32 = 32;
 /// The guidance scale the export bakes in: `v = 4 * conditional - 3 * unconditional`.
 pub const GUIDANCE: f32 = 4.0;
 
-/// Tensors the plan itself reads: `proj_in`, 28 ConvNeXt blocks of eight, four main blocks'
-/// conditioning, and `proj_out`.
-pub const PLAN_TENSORS: usize = 2 + BLOCKS * 8 + MAIN_BLOCKS * 18 + 2;
+/// Tensors the plan itself reads: `proj_in`, 28 ConvNeXt blocks, four main blocks' conditioning,
+/// and `proj_out`.
+///
+/// Ten per block rather than eight, and 25 per main block rather than 18, because every ungrouped
+/// `1 x 1` here is int8 and carries a scale beside its kernel. See [`INT8_CONVS`].
+pub const PLAN_TENSORS: usize = 3 + BLOCKS * 10 + MAIN_BLOCKS * 25 + 3;
 
 /// Tensors the `.maml` must hold: the plan's, then the host's eighteen.
 pub const TENSORS: usize = PLAN_TENSORS + 18;
+
+/// Convolutions read as int8 rather than fp16, each carrying a third tensor for its scale.
+///
+/// **Every `1 x 1` in this net**: both projections, both `1 x 1`s of all 28 ConvNeXt blocks, and all
+/// seven attention projections of each main block. Only the 28 depthwise convolutions stay fp16,
+/// because they are grouped and edge-padded and `conv_int8.comp` is neither.
+///
+/// That is 92% of 63.8 million parameters, and it is why the tiled int8 shader had to exist before
+/// any of this: `Node::ConvInt8` would otherwise lower to the untiled `conv_int8.comp`, and
+/// [`crate::post::supertonic::synthesise`] runs this net `2 * STEPS` = 32 times per utterance. The
+/// benchmark in `vulkan::parity` is what closed that off - the tiled int8 path measured at 0.98x of
+/// the fp16 tiled one, so quantising costs no time here.
+pub const INT8_CONVS: usize = 2 + BLOCKS * 2 + MAIN_BLOCKS * 7;
 
 /// The rotary `theta`, `[32]`. `rotary_scale * rotary_base ^ (-j / 32)`.
 pub const HOST_THETA: usize = PLAN_TENSORS;
@@ -183,11 +199,20 @@ impl Layers {
         self.next += 2;
         index
     }
+
+    /// An int8 kernel, its per-output-channel scale, and the bias after that.
+    ///
+    /// See `supertonic_duration::Layers::take3`; the order is what `Builder::conv_int8` reads.
+    fn take3(&mut self) -> usize {
+        let index = self.next;
+        self.next += 3;
+        index
+    }
 }
 
-/// A `1 x 1` convolution, which every projection here is.
+/// A `1 x 1` convolution with an int8 kernel, which is every `1 x 1` here. See [`INT8_CONVS`].
 fn point(b: &mut Builder, l: &mut Layers, x: Id, out: u32, act: Act) -> Id {
-    b.conv(x, l.take(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
+    b.conv_int8(x, l.take3(), out, (1, 1), (1, 1), (1, 1), (0, 0, 0, 0), 1, act)
 }
 
 /// One ConvNeXt block: depthwise, layer norm, widening 1x1 with a GELU, narrowing 1x1, residual.
@@ -380,10 +405,13 @@ mod tests {
             .sum();
 
         let projection = |a: u64, b: u64| a * b + a;
-        let block = 2_560 + 512 + 512 + 512 + 1_048_576 + 2_048 + 1_048_576 + 512;
-        let text_attention = projection(512, 512) * 2 + projection(512, 256) * 2 + 1_024;
+        // A quantised projection carries a third tensor: the per-output-channel scale, which is
+        // the same length as the bias. Every `1 x 1` here is one - see `INT8_CONVS`.
+        let quantised = |a: u64, b: u64| projection(a, b) + a;
+        let block = 2_560 + 512 + 512 + 512 + quantised(2_048, 512) + quantised(512, 2_048);
+        let text_attention = quantised(512, 512) * 2 + quantised(512, 256) * 2 + 1_024;
         let style_attention =
-            projection(256, 512) + projection(256, 256) + projection(512, 256) + 1_024;
+            quantised(256, 512) + quantised(256, 256) + quantised(512, 256) + 1_024;
         let host = 32 + 32
             + projection(256, 64)
             + projection(64, 256)
@@ -393,14 +421,16 @@ mod tests {
             + 12_800 * 2 * MAIN_BLOCKS as u64;
         assert_eq!(
             total,
-            projection(512, 144)
+            quantised(512, 144)
                 + block * BLOCKS as u64
                 + (text_attention + style_attention) * MAIN_BLOCKS as u64
-                + projection(144, 512)
+                + quantised(144, 512)
                 + host
         );
-        // And spelled out, so a reordering that preserved the sum would still be caught.
-        assert_eq!(total, 63_813_392);
+        // And spelled out, so a reordering that preserved the sum would still be caught. The 84,624
+        // above the fp16 total is the scales.
+        assert_eq!(total, 63_813_392 + 84_624);
+        assert_eq!(total, 63_898_016);
     }
 
     #[test]
@@ -536,9 +566,11 @@ mod tests {
             }
         }
         // Three per ConvNeXt block, four per text attention (query, key, value, output),
-        // three per style attention, plus the two projections.
+        // three per style attention, plus the two projections. Everything but the 28 depthwise
+        // convolutions is quantised - see `INT8_CONVS`.
         let convolutions = BLOCKS * 3 + MAIN_BLOCKS * (4 + 3) + 2;
-        assert_eq!(counts.get("Conv"), Some(&convolutions), "{counts:?}");
+        assert_eq!(counts.get("Conv"), Some(&(convolutions - INT8_CONVS)), "{counts:?}");
+        assert_eq!(counts.get("ConvInt8"), Some(&INT8_CONVS), "{counts:?}");
         assert_eq!(counts.get("Rotary"), Some(&(MAIN_BLOCKS * 2)), "{counts:?}");
         assert_eq!(counts.get("AttnScores"), Some(&(MAIN_BLOCKS * 2)), "{counts:?}");
         assert_eq!(counts.get("AttnApply"), Some(&(MAIN_BLOCKS * 2)), "{counts:?}");
@@ -549,7 +581,7 @@ mod tests {
         // No relative attention here: the positions are rotary.
         assert_eq!(counts.get("AttnScoresRelative"), None, "{counts:?}");
         assert_eq!(counts.get("Embed"), None, "{counts:?}");
-        assert_eq!(counts.len(), 8, "{counts:?}");
+        assert_eq!(counts.len(), 9, "{counts:?}");
     }
 
     #[test]
