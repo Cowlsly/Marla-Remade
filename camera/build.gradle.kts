@@ -46,7 +46,7 @@ dependencies {
     // On-device portrait segmentation. MediaPipe Selfie Segmentation (Apache-2.0) on our
     // own Vulkan compute runtime; see camera/src/main/assets/README.md.
     //
-    // ncnn is gone from this app entirely: PortraitSegmenter was its only user, so
-    // libncnn_android.so is no longer in the APK.
+    // ncnn is gone from the whole tree, not just this app: `:translate` was the last consumer and
+    // it now runs SMaLL-100 on `:library:ml` too, so `libncnn_android.so` is in no APK here.
     implementation(project(":library:ml"))
 }

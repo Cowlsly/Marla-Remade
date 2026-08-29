@@ -17,16 +17,18 @@ pluginManagement {
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        // Local maven first so freshly built ncnn-android:1.4.0 (Small100) resolves
-        // even when JitPack is rate-limited (429) or hasn't yet built the tag.
-        mavenLocal()
         google()
         mavenCentral()
-        // JitPack serves only the two personal forks that live there: Stockfish-Library
-        // (games:chess) and ncnn-android. Scoped to com.github.* because JitPack answers
-        // unknown coordinates with 401/429 rather than 404, and Gradle treats that as a hard
+        // JitPack serves only the personal forks that live there: Stockfish-Library
+        // (games:chess) and com.github.luben:zstd-jni. Scoped to com.github.* because JitPack
+        // answers unknown coordinates with 401/429 rather than 404, and Gradle treats that as a hard
         // failure — an unscoped JitPack breaks resolution of anything Central hasn't yet
         // propagated (e.g. a freshly published artifact).
+        //
+        // `mavenLocal()` used to come first, so that a freshly built ncnn-android resolved even
+        // when JitPack was rate-limited. Nothing is built locally now that SMaLL-100 runs on
+        // `:library:ml`, and a local repository ahead of the remotes is a supply-chain hazard of
+        // its own: any coordinate in `~/.m2` silently wins over the pinned one.
         maven("https://jitpack.io") {
             content { includeGroupByRegex("com\\.github\\..*") }
         }

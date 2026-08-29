@@ -27,8 +27,8 @@ class BokehAnalyzer(
     // Guard for the native handle and buffer fields – analyze() runs on bokehExecutor
     // while close() runs on the main composable's DisposableEffect. Without mutual
     // exclusion, close() destroys the net while the GPU is still reading the buffers it
-    // owns → the SEGV_MTESERR tagged fault this used to hit in libncnn_android.so. The
-    // model changed; the hazard did not.
+    // owns  the SEGV_MTESERR tagged fault this used to hit in libncnn_android.so. The
+    // runtime changed and ncnn has since left the tree entirely; the hazard did not.
     private val lock = Any()
     private var prevMask: FloatArray? = null
     private var blurTemp: FloatArray? = null

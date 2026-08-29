@@ -50,9 +50,6 @@ tmp/
 target/
 dist/
 
-# Small100 quantized binaries > 100MB — do not commit, fetch via quantize_small100.sh or R2
-scripts/translate/quantized/
-
 # Nutrition database asset — large binary, regenerate with scripts/generate_food_db.py
 health/src/main/assets/food.bin
 health/src/main/assets/food.bin.br
