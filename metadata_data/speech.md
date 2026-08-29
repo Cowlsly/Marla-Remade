@@ -1,10 +1,10 @@
 A fully offline speech-to-text and text-to-speech app
 
 Features:
-- Offline speech recognition using Whisper, bundled in the app
-- Offline TTS using Piper (VITS voices)
+- Offline speech recognition using whisper-base, bundled in the app
+- Offline TTS using Supertonic 3, with ten voices across 31 languages
 - Works as the system SpeechRecognizer and TTS service
-- Around 29 languages of TTS voices, fetched on demand and SHA-256 pinned
-- Runs entirely on device with no network calls once a voice is installed
+- Every model ships inside the app, so it works on a clean install with no setup
+- Runs on the GPU through a compute runtime built for this repo, not a vendor SDK
 
-Internet required only for initial asset downloads
+100% offline
