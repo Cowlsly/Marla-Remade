@@ -704,7 +704,19 @@ impl supertonic::Stages for SupertonicNets<'_> {
 
     fn vocoder(&mut self, latent: &[f32], frames: u32) -> Result<Vec<f32>, String> {
         let net = self.vocoder.at(frames)?;
-        one_output(net.infer_raw(latent)?)
+        // Two marshalling steps, both the host's job — `nets::supertonic_vocoder::build`'s own doc
+        // says the input is "reinterpreted" and the output "read transposed", and the parity path in
+        // `nets::reference` does both. Production did neither, which is what made the engine whine:
+        //
+        //  - the latent arrives `[144, frames]` and the plan reads `[24, 6 * frames]`, and that is
+        //    *not* a flat reinterpretation. Assuming one correlates with the reference at 0.009.
+        //  - the plan emits `[512, 1, T]` channel-major while a waveform is time-major. Handing that
+        //    to AudioTrack unchanged plays each channel plane as if it were consecutive samples, so
+        //    every 512th value is a real neighbour and the rest is a periodic artefact — a loud tone
+        //    at the frame rate rather than speech.
+        let unpacked = supertonic_vocoder::unpack_latent(latent, frames as usize)?;
+        let channelled = one_output(net.infer_raw(&unpacked)?)?;
+        Ok(supertonic_vocoder::interleave(&channelled))
     }
 }
 
