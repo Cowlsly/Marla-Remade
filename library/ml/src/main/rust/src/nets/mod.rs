@@ -36,6 +36,7 @@ pub mod ppocr_det;
 pub mod ppocr_rec;
 pub mod scrfd;
 pub mod selfie;
+pub mod small100;
 pub mod supertonic_duration;
 pub mod supertonic_sampler;
 pub mod supertonic_text;
@@ -1346,6 +1347,12 @@ impl<'a> Builder<'a> {
     /// evaluates those and passes the results in as plan inputs. Naming them here keeps the
     /// invariant — nothing is *accidentally* unread — and puts the list in the net module beside
     /// the code that uses it.
+    ///
+    /// It also covers one file holding **several** passes. SMaLL-100 is one `.maml` and three
+    /// plans — an encoder pass, a decode step and the logits projection — so no single one of them
+    /// reads every tensor, and each names the others' as host tensors. The invariant that nothing
+    /// is unread then has to be checked over the *union* of the plans, which is a test the net
+    /// module owes because that is where the layout is; `nets::small100` has it.
     pub fn host_tensor(&mut self, weight_index: usize, dims: &[u32]) {
         // Through `weight` so the shape is checked against the file like any other tensor.
         self.weight(weight_index, dims);
@@ -1544,13 +1551,14 @@ impl<'a> Builder<'a> {
         if outputs.is_empty() {
             return Err("a pass with no output".into());
         }
-        // Every tensor in the file must have been read. An unread one is the shape of a
-        // forward pass that stopped early or skipped a layer, which is otherwise
-        // invisible — the file loads, the pass runs, and one layer convolves with
-        // whatever its neighbour's weights happen to be.
+        // Every tensor in the file must have been read, or explicitly declared unread by this
+        // pass. An accidentally unread one is the shape of a forward pass that stopped early or
+        // skipped a layer, which is otherwise invisible — the file loads, the pass runs, and one
+        // layer convolves with whatever its neighbour's weights happen to be.
         if let Some(index) = self.read.iter().position(|&read| !read) {
             return Err(format!(
-                "the forward pass never reads tensor {index} of {}",
+                "the forward pass never reads tensor {index} of {}. If this pass is one of \
+                 several over one file, say so with `Builder::host_tensor`.",
                 self.read.len()
             ));
         }

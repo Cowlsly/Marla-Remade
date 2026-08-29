@@ -570,6 +570,49 @@ impl<'a> Reader<'a> {
             .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
             .collect())
     }
+
+    /// One row of an int8 tensor, dequantised by that row's scale.
+    ///
+    /// The counterpart of [`Reader::fp16`] for a quantised table, and it exists for one caller:
+    /// [`crate::nets::small100`] gathers rows of the tied embedding on the host rather than in a
+    /// shader. Doing so removes the need for an int8 `embed.comp`, lets `sqrt(d_model)` and the
+    /// sinusoidal position be applied in f32 before anything is rounded, and reads 1 KB per token
+    /// instead of uploading a 125 MiB table a second time.
+    ///
+    /// A row rather than the whole tensor because the whole tensor is 125 MiB. `dims[0]` is the
+    /// row count and a row is contiguous, which is a property of the `[out, in, 1, 1]` layout
+    /// `scripts/ml/maml_convert.py` writes rather than an assumption — and `shaped` checks it.
+    pub fn int8_row(
+        &self,
+        index: usize,
+        scale_index: usize,
+        dims: &[u32],
+        row: u32,
+    ) -> Result<Vec<f32>, String> {
+        let found = self.table.shaped(index, dims)?;
+        if !found.int8 {
+            return Err(format!("tensor {index} is fp16, and this dequantises int8"));
+        }
+        let rows = *dims.first().ok_or("an int8 row read needs a row count")?;
+        if row >= rows {
+            return Err(format!("row {row} of a {rows}-row tensor {index}"));
+        }
+        let stride = (found.len / rows) as usize;
+        let mut bytes = vec![0u8; stride];
+        let at = u64::from(found.offset) + u64::from(row) * stride as u64;
+        self.data.read_at(at, &mut bytes).map_err(|e| format!("tensor {index} row {row}: {e}"))?;
+
+        let scale = self.table.shaped(scale_index, &[rows])?;
+        if scale.int8 {
+            return Err(format!("tensor {scale_index} is int8, and a scale is fp16"));
+        }
+        let mut half = [0u8; 2];
+        self.data
+            .read_at(u64::from(scale.offset) + u64::from(row) * 2, &mut half)
+            .map_err(|e| format!("tensor {scale_index} row {row}: {e}"))?;
+        let scale = f16_to_f32(u16::from_le_bytes(half));
+        Ok(bytes.iter().map(|&b| f32::from(b as i8) * scale).collect())
+    }
 }
 
 /// Fill `buf` from `offset` without moving the file's cursor.
