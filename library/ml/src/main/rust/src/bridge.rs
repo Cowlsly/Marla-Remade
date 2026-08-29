@@ -35,7 +35,7 @@ use jni::JNIEnv;
 
 use crate::nets::{
     mobilefacenet, ppocr_det, ppocr_rec, scrfd, selfie, small100, supertonic_duration,
-    supertonic_sampler, supertonic_text, supertonic_vocoder, u2netp, Plan,
+    supertonic_sampler, supertonic_text, supertonic_vocoder, tinyclip, u2netp, Plan,
 };
 use crate::post::ctc::Dictionary;
 use crate::post::nms::{self, Face, Maps};
@@ -1380,6 +1380,244 @@ pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroySm
     // SAFETY: the caller guarantees this handle came from `createSmall100` and has not been
     // destroyed. `Net`'s Drop waits for the device to go idle before freeing.
     drop(unsafe { Box::from_raw(handle as *mut Small100Handle) });
+}
+
+/// TinyCLIP, as `:photos` holds it. Handed to Kotlin as an opaque `jlong`.
+///
+/// # One net, two plans
+///
+/// [`Reshaped`] keyed by [`tinyclip::Mode`], as [`Small100Handle`] is: the two towers share no
+/// weights but they do share a 22.6 MiB file, so two `Net`s would upload it twice. Switching towers
+/// is a `device_wait_idle` and a re-record — which is why an indexing run, which is `Mode::Image`
+/// throughout, pays for exactly one.
+///
+/// # The weights file stays open
+///
+/// [`tinyclip::embed_positions`] gathers a 1 KB embedding row per token out of the 12.6 MiB token
+/// table on the host, so the [`Streamed`] is retained for the same reason SMaLL-100's is.
+struct TinyclipHandle {
+    net: Reshaped<tinyclip::Mode>,
+    weights: Streamed,
+}
+
+fn tinyclip_plan(offsets: &Offsets, mode: tinyclip::Mode) -> Result<Plan, String> {
+    tinyclip::build(offsets, mode)
+}
+
+/// One column of a `[PROJECTION, 1, len]` output, which is the position both towers pool.
+///
+/// A position is a *column* in this runtime's layout, so it is strided rather than contiguous —
+/// which is why the plan projects every position and this picks one. See `nets::tinyclip`.
+fn tinyclip_column(out: &[f32], at: usize, len: usize) -> Result<Vec<f32>, String> {
+    let width = tinyclip::PROJECTION as usize;
+    if len == 0 || out.len() != width * len {
+        return Err(format!("{} values is not {width} x {len}", out.len()));
+    }
+    (0..width)
+        .map(|channel| {
+            out.get(channel * len + at).copied().ok_or_else(|| format!("column {at} of {len}"))
+        })
+        .collect()
+}
+
+/// Bring up TinyCLIP from its one `.maml`. Returns 0 on failure.
+///
+/// The descriptor is an `AssetFileDescriptor`'s, so it carries an offset and a length: the file is
+/// a *range of the APK* rather than a file of its own, which is also why the asset has to be stored
+/// uncompressed.
+///
+/// # Safety
+///
+/// Called only by the JVM, with a descriptor nothing else holds.
+#[no_mangle]
+pub extern "system" fn Java_com_vayunmathur_library_ml_MlNative_createTinyclip<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    fd: jint,
+    offset: jlong,
+    length: jlong,
+) -> jlong {
+    // The descriptor first, and adopted into an owning `File` before anything else may fail, as
+    // `createSmall100` does: the caller detached it, so a path that returns without wrapping it
+    // leaks it for the life of the process.
+    if fd < 0 {
+        log(&format!("tinyclip is unavailable: descriptor {fd} is not open"));
+        return 0;
+    }
+    // SAFETY: the caller detached the descriptor, so nothing else owns it, and `File` closes it on
+    // drop — including on every failure path below.
+    let file = unsafe { File::from_raw_fd(fd) };
+    match build_tinyclip(file, offset, length) {
+        Ok(handle) => Box::into_raw(Box::new(handle)) as jlong,
+        Err(e) => {
+            log(&format!("tinyclip is unavailable: {e}"));
+            0
+        }
+    }
+}
+
+fn build_tinyclip(file: File, offset: jlong, length: jlong) -> Result<TinyclipHandle, String> {
+    let (at, len) = match (u64::try_from(offset), u64::try_from(length)) {
+        (Ok(at), Ok(len)) => (at, len),
+        _ => return Err(format!("the graph spans {offset}+{length}")),
+    };
+    let weights = Streamed::open(file, at, len, graph::TINYCLIP)?;
+    if weights.len() != tinyclip::TENSORS {
+        return Err(format!("a file of {} tensors, not {}", weights.len(), tinyclip::TENSORS));
+    }
+    // Recorded on the image tower, which is what an indexing run uses throughout. A text query
+    // rebuilds once and rebuilds back on the next image.
+    let net = Reshaped::streamed(
+        context::shared()?,
+        weights.offsets(),
+        &weights,
+        tinyclip::Mode::Image,
+        tinyclip_plan,
+    )?;
+    Ok(TinyclipHandle { net, weights })
+}
+
+/// The 512-d image embedding for `pixels`, or null on failure.
+///
+/// `pixels` is `[3, 224, 224]` already normalised by CLIP's mean and standard deviation — the
+/// resize, the centre crop and the normalisation are `ClipEmbedder.preprocess`'s, because they are
+/// bitmap work the platform does better and they are what the tokenizer's counterpart would be.
+///
+/// The vector is **not** L2-normalised here. `ClipEmbedder.l2Normalize` does it, on both towers'
+/// output and on nothing else, so the stored BLOB format is decided in one place.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createTinyclip` that has not been destroyed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_tinyclipImage<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    pixels: JFloatArray<'l>,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: the caller guarantees the handle came from `createTinyclip` and is still live. It is
+    // `&mut` because switching towers re-records the net, and Kotlin serialises calls on one handle.
+    let handle = unsafe { &mut *(handle as *mut TinyclipHandle) };
+    let embedded = match read_float_array(&mut env, &pixels) {
+        Ok(values) => run_tinyclip_image(handle, &values),
+        Err(e) => Err(e),
+    };
+    match embedded.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("tinyclip's image tower failed: {e}"));
+            null
+        }
+    }
+}
+
+fn run_tinyclip_image(handle: &mut TinyclipHandle, pixels: &[f32]) -> Result<Vec<f32>, String> {
+    let side = tinyclip::IMAGE_SIZE as usize;
+    let expected = 3 * side * side;
+    if pixels.len() != expected {
+        return Err(format!("{} pixel values, not {expected}", pixels.len()));
+    }
+    let net = handle.net.at(tinyclip::Mode::Image)?;
+    let out = one_output(net.infer_raw_many(&[pixels])?)?;
+    // The class token, position 0. Pooling the mean, or the last position, would produce a
+    // normalised 512-d vector that is simply wrong; see `nets::tinyclip`.
+    tinyclip_column(&out, 0, tinyclip::VISION_POSITIONS as usize)
+}
+
+/// The 512-d text embedding for `ids`, or null on failure.
+///
+/// `ids` must be the query's tokens **up to and including `<|endoftext|>`**, with the tokenizer's
+/// padding trimmed off. CLIP pools at the end-of-text position, so the caller's trim decides which
+/// position is pooled — and because the tower is causal, running `ids.len()` positions instead of
+/// the padded 77 gives the identical vector for a fraction of the work.
+///
+/// Not L2-normalised, as `tinyclipImage` is not.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createTinyclip` that has not been destroyed.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_tinyclipText<'l>(
+    mut env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+    ids: JIntArray<'l>,
+) -> jfloatArray {
+    let null = std::ptr::null_mut();
+    if handle == 0 {
+        return null;
+    }
+    // SAFETY: as `tinyclipImage`.
+    let handle = unsafe { &mut *(handle as *mut TinyclipHandle) };
+    let embedded = match read_int_array(&mut env, &ids) {
+        Ok(values) => run_tinyclip_text(handle, &values),
+        Err(e) => Err(e),
+    };
+    match embedded.and_then(|values| new_float_array(&mut env, &values)) {
+        Ok(array) => array,
+        Err(e) => {
+            log(&format!("tinyclip's text tower failed: {e}"));
+            null
+        }
+    }
+}
+
+fn run_tinyclip_text(handle: &mut TinyclipHandle, ids: &[i32]) -> Result<Vec<f32>, String> {
+    let tokens: Vec<u32> = ids
+        .iter()
+        .map(|&id| u32::try_from(id).map_err(|_| format!("{id} is not a token")))
+        .collect::<Result<_, _>>()?;
+    // The embedding and the learned positions, both on the host and summed in f32. See
+    // `nets::tinyclip` for why neither is a shader.
+    let embedded = tinyclip::embed_positions(handle.weights.reader(), &tokens)?;
+    let len = u32::try_from(tokens.len()).map_err(|_| "a query longer than u32")?;
+    let net = handle.net.at(tinyclip::Mode::Text { len })?;
+    let out = one_output(net.infer_raw_many(&[&embedded])?)?;
+    // The end-of-text position, which the caller's trim made the last one.
+    tinyclip_column(&out, tokens.len() - 1, tokens.len())
+}
+
+/// Free TinyCLIP's net and its open weights file.
+///
+/// Exactly once per non-zero handle from `createTinyclip`. When it is the last user of the shared
+/// `VkDevice`, the device goes away with it.
+///
+/// # Safety
+///
+/// `handle` must be a non-zero value from `createTinyclip`, and must not be used again.
+#[no_mangle]
+pub unsafe extern "system" fn Java_com_vayunmathur_library_ml_MlNative_destroyTinyclip<'l>(
+    _env: JNIEnv<'l>,
+    _class: JClass<'l>,
+    handle: jlong,
+) {
+    if handle == 0 {
+        return;
+    }
+    // SAFETY: the caller guarantees this handle came from `createTinyclip` and has not been
+    // destroyed. `Net`'s Drop waits for the device to go idle before freeing.
+    drop(unsafe { Box::from_raw(handle as *mut TinyclipHandle) });
+}
+
+fn read_float_array(env: &mut JNIEnv, array: &JFloatArray) -> Result<Vec<f32>, String> {
+    let len = env.get_array_length(array).map_err(|e| format!("array length: {e}"))?;
+    let mut out = vec![0.0f32; len.max(0) as usize];
+    env.get_float_array_region(array, 0, &mut out)
+        .map_err(|e| format!("get_float_array_region: {e}"))?;
+    Ok(out)
+}
+
+fn read_int_array(env: &mut JNIEnv, array: &JIntArray) -> Result<Vec<i32>, String> {
+    let len = env.get_array_length(array).map_err(|e| format!("array length: {e}"))?;
+    let mut out = vec![0i32; len.max(0) as usize];
+    env.get_int_array_region(array, 0, &mut out)
+        .map_err(|e| format!("get_int_array_region: {e}"))?;
+    Ok(out)
 }
 
 fn new_float_array(env: &mut JNIEnv, values: &[f32]) -> Result<jfloatArray, String> {

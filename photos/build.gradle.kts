@@ -15,13 +15,10 @@ android {
         applicationId = "com.vayunmathur.photos"
     }
     androidResources {
-        // The TinyCLIP .onnx is read straight out of the APK by ClipEmbedder, so leave it
-        // uncompressed: int8 weights barely deflate, and a compressed asset would have to be
-        // inflated into a 24 MB heap buffer before ORT could open it.
-        noCompress += "onnx"
-        // The three .maml files are read straight out of the APK for the same reason: fp16
-        // weights barely deflate, and a compressed asset would have to be inflated into a
-        // heap buffer — 6.6 MB for the face embedder — before it could be uploaded.
+        // The four .maml files are read straight out of the APK by :library:ml, which opens them
+        // with `AssetManager.openFd` and streams them into the GPU. `openFd` throws outright for a
+        // deflated entry, so this is required rather than an optimisation — and it costs nothing on
+        // download size, since int8 and fp16 weights barely deflate.
         noCompress += "maml"
     }
 }
@@ -43,9 +40,10 @@ dependencies {
     implementation(project(":library:map"))
     implementation(project(":library:image"))
     implementation(libs.androidx.exifinterface)
-    // No ncnn anywhere in this APK. Face detection (SCRFD 500M), face embedding
-    // (MobileFaceNet), subject segmentation (U²-Net portable) and PP-OCRv5 text
-    // recognition all run on :library:ml, our own Vulkan compute runtime.
+    // No ncnn and no onnxruntime anywhere in this APK. Face detection (SCRFD 500M), face
+    // embedding (MobileFaceNet), subject segmentation (U²-Net portable), PP-OCRv5 text
+    // recognition and TinyCLIP semantic search all run on :library:ml, our own Vulkan compute
+    // runtime.
     implementation(project(":library:ml"))
 
     implementRoom(libs)
@@ -62,12 +60,4 @@ dependencies {
     implementation(project(":library:widgets"))
     implementation(project(":library:biometric"))
     implementation(project(":library:ocr"))
-
-    // Semantic photo search runs on-device again: TinyCLIP int8 ships in assets/clip/ and is
-    // executed by ClipEmbedder, so search no longer needs the OpenAssistant app installed.
-    //
-    // Reduced ORT build (10 MB native, vs 28 MB for the full one). Its operator set is
-    // generated from the bundled model_int8.onnx, so swapping in a different CLIP export can
-    // fail at session creation — regenerate the AAR rather than falling back to the full build.
-    implementation(libs.onnxruntime.reduced)
 }

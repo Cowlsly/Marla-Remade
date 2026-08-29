@@ -192,6 +192,61 @@ internal object MlNative {
     external fun destroySmall100(handle: Long)
 
     /**
+     * Bring up TinyCLIP from its one `.maml`. Returns 0 on failure.
+     *
+     * One graph, not two, for a different reason from [createSmall100]: the image and text towers
+     * share **no weights at all**, but they do share a 22.6 MiB file, so two handles would upload it
+     * twice. Native selects between them by re-recording one net, which costs a `device_wait_idle` —
+     * and an indexing run is the image tower throughout, so it pays for exactly one.
+     *
+     * The plan arrives as a **file descriptor** because it is a bundled asset: [offset] and [length]
+     * are the `AssetFileDescriptor`'s, since an asset is a *range of the APK* rather than a file of
+     * its own. `AssetManager.openFd` throws for a deflated entry, which is what `noCompress +=
+     * "maml"` in `photos/build.gradle.kts` is for.
+     *
+     * Native keeps the descriptor open for the life of the handle, because the 12.6 MiB token
+     * embedding is gathered a row at a time on the host rather than read from the upload.
+     *
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one, so a caller must not close it itself.
+     *
+     * Freed by [destroyTinyclip], not [destroy], [destroyOcr], [destroySupertonic] or
+     * [destroySmall100].
+     */
+    external fun createTinyclip(fd: Int, offset: Long, length: Long): Long
+
+    /**
+     * The 512-d image embedding for [pixels], or null on failure.
+     *
+     * [pixels] is `3 * 224 * 224` floats, NCHW and RGB, already resized to the shortest edge,
+     * centre-cropped and normalised by CLIP's mean and standard deviation. That work stays in
+     * Kotlin — see `ClipEmbedder.preprocess` — because it is bitmap handling the platform does
+     * better.
+     *
+     * **Not L2-normalised.** `ClipEmbedder.l2Normalize` does that for both towers, so the stored
+     * vector format is decided in one place.
+     */
+    external fun tinyclipImage(handle: Long, pixels: FloatArray): FloatArray?
+
+    /**
+     * The 512-d text embedding for [ids], or null on failure.
+     *
+     * [ids] must be the query's tokens **up to and including `<|endoftext|>`**, with the tokenizer's
+     * padding trimmed off. CLIP pools at the end-of-text position, so the trim is what decides which
+     * position is pooled — and because the tower is causal, the trimmed sequence gives the identical
+     * vector to the padded 77 for a fraction of the work.
+     *
+     * Not L2-normalised, as [tinyclipImage] is not.
+     */
+    external fun tinyclipText(handle: Long, ids: IntArray): FloatArray?
+
+    /**
+     * Free TinyCLIP's network and its open weights file.
+     * Exactly once per non-zero handle from [createTinyclip].
+     */
+    external fun destroyTinyclip(handle: Long)
+
+    /**
      * Detect faces in [pixels] and return them flattened, nine floats per face.
      *
      * The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,

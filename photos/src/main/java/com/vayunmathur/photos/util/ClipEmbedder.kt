@@ -1,18 +1,14 @@
 package com.vayunmathur.photos.util
 
-import ai.onnxruntime.OnnxTensor
-import ai.onnxruntime.OrtEnvironment
-import ai.onnxruntime.OrtSession
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.util.Log
+import com.vayunmathur.library.ml.ClipHandle
 import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import java.nio.LongBuffer
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 import kotlinx.coroutines.Dispatchers
@@ -24,19 +20,33 @@ import kotlinx.coroutines.withContext
  * Photos runs its own embedder again. It previously delegated to the OpenAssistant app over IPC
  * for SigLIP2 vectors, which meant semantic search only worked if a second app was installed and
  * had finished a ~452 MB model download. The model now ships in the APK
- * (`assets/clip/model_int8.onnx`, 24 MB int8) so search works on a clean install with no network.
+ * (`assets/clip/tinyclip.maml`, 22.6 MiB int8) so search works on a clean install with no network.
  *
- * The int8 quantization is close to free here: measured cosine against the fp32 export is 0.998
- * for image embeddings and 0.9995 for text, at the same latency. TinyCLIP is a plain ViT, which
- * quantizes cleanly — unlike depthwise-conv architectures where dynamic int8 collapses.
+ * # It runs on `:library:ml`, not onnxruntime
  *
- * The export is a **single combined graph**: `input_ids` + `pixel_values` + `attention_mask` are
- * all required on every call, and it returns both `image_embeds` and `text_embeds`. So each call
- * passes a cheap dummy for the side it does not need (see [DUMMY_IDS] / [dummyPixels]) and reads
- * only the output it wants. The text tower is 3M params, so the waste is small.
+ * The two towers are hardcoded forward passes in `library/ml/src/main/rust/src/nets/tinyclip.rs`,
+ * executed by our own Vulkan compute runtime through [ClipHandle]. That removed the last
+ * `onnxruntime-android` dependency from this APK — 10,466,856 bytes of arm64 `.so`, against the
+ * 779 KB `libmodelrunner.so` that was already here for face detection, segmentation and OCR.
+ *
+ * It is also *more* accurate than the ONNX path it replaces. Cosine against the fp32 export is
+ * 0.999864 for an image and 0.999394 for a query, against the int8 export's 0.998478 and 0.982881:
+ * that export quantised the 49,408-row token table per *tensor* with a zero point, and this one
+ * quantises per row. `photos/src/main/assets/clip/README.md` has the measurements.
+ *
+ * The two paths agree with each other only to 0.9983 (image) and 0.9835 (text), which is why
+ * [EMBEDDER_VERSION] is 4 and not 3 — a library indexed by the old engine and queried through this
+ * one would rank noticeably worse than one indexed by either alone.
+ *
+ * # Two towers, one handle
+ *
+ * Unlike the ONNX export, which was a single combined graph needing a dummy input for whichever
+ * side it was not reading, the two towers are separate passes over one file. An image call does no
+ * text work and a query does no vision work.
  *
  * Vectors are L2-normalised, stored on the [com.vayunmathur.photos.data.Photo] row by
- * [runClipIndexing], and compared with [cosine] at query time.
+ * [com.vayunmathur.photos.work.SyncWorker.runClipIndexing], and compared with [cosine] at query
+ * time. The stored BLOB format is unchanged from the ONNX engine: 512 little-endian floats.
  */
 object ClipEmbedder {
 
@@ -44,10 +54,14 @@ object ClipEmbedder {
     const val MODEL_ID = "onnx-community/TinyCLIP-ViT-8M-16-Text-3M-YFCC15M-ONNX"
 
     /**
-     * Bump whenever the embedding space changes so [runClipIndexing] clears every stored vector
-     * and re-indexes. 3 = TinyCLIP's 512-d space (2 was OpenAssistant's 768-d SigLIP2).
+     * Bump whenever the embedding space changes so
+     * [com.vayunmathur.photos.work.SyncWorker.runClipIndexing] clears every stored vector and
+     * re-indexes.
+     *
+     * 4 = TinyCLIP's 512-d space on `:library:ml`. 3 was the same model on onnxruntime, and the two
+     * agree only to 0.9835 on a text query — see the class docs. 2 was OpenAssistant's 768-d SigLIP2.
      */
-    const val EMBEDDER_VERSION = 3
+    const val EMBEDDER_VERSION = 4
 
     /** Whether semantic search can run at all. */
     enum class Support { READY, UNAVAILABLE }
@@ -61,22 +75,18 @@ object ClipEmbedder {
 
     private const val TAG = "ClipEmbedder"
 
-    private const val MODEL_ASSET = "clip/model_int8.onnx"
-
     /** Square RGB input side the vision tower expects (`preprocessor_config.json`). */
-    private const val IMAGE_SIZE = 224
+    private const val IMAGE_SIZE = ClipHandle.IMAGE_SIZE
 
     /** CLIP's channel normalisation, from `preprocessor_config.json`. */
     private val MEAN = floatArrayOf(0.48145466f, 0.4578275f, 0.40821073f)
     private val STD = floatArrayOf(0.26862954f, 0.26130258f, 0.27577711f)
 
-    private val env: OrtEnvironment by lazy { OrtEnvironment.getEnvironment() }
     private val lock = Any()
 
-    @Volatile private var session: OrtSession? = null
+    @Volatile private var clip: ClipHandle? = null
     @Volatile private var tokenizer: ClipTokenizer? = null
     @Volatile private var initTried = false
-    @Volatile private var cachedDim = 0
 
     /** Fast capability probe. Loads the model on first call. */
     fun embeddingSupport(context: Context): Support =
@@ -84,39 +94,33 @@ object ClipEmbedder {
 
     fun embeddingInfo(context: Context): Info {
         ensureInit(context)
-        return Info(MODEL_ID, cachedDim)
+        return Info(MODEL_ID, ClipHandle.DIMENSION)
     }
 
     private fun ensureInit(context: Context): Boolean {
-        session?.let { return true }
+        clip?.let { return true }
         synchronized(lock) {
-            session?.let { return true }
+            clip?.let { return true }
             if (initTried) return false
             initTried = true
-            return try {
-                val app = context.applicationContext
-                val tok = ClipTokenizer.load(app)
-                    ?: error("CLIP merges asset missing")
-                val opts = OrtSession.SessionOptions().apply {
-                    // Single-threaded keeps sustained CPU/battery use low during a long
-                    // indexing run; the model is only 24 MB.
-                    setIntraOpNumThreads(1)
-                    setInterOpNumThreads(1)
-                }
-                // Read from assets rather than copying 24 MB into filesDir.
-                val bytes = app.assets.open(MODEL_ASSET).use { it.readBytes() }
-                val s = env.createSession(bytes, opts)
-                cachedDim = (s.outputInfo[OUT_IMAGE]?.info as? ai.onnxruntime.TensorInfo)
-                    ?.shape?.last()?.toInt() ?: 512
-                session = s
-                tokenizer = tok
-                Log.i(TAG, "TinyCLIP embedder ready (dim=$cachedDim)")
-                true
-            } catch (t: Throwable) {
-                Log.e(TAG, "Failed to initialise TinyCLIP embedder", t)
-                closeLocked()
-                false
+            val app = context.applicationContext
+            val tok = ClipTokenizer.load(app)
+            if (tok == null) {
+                Log.e(TAG, "CLIP merges asset missing")
+                return false
             }
+            // Construction never throws: an absent, compressed or malformed asset, a missing
+            // `libmodelrunner.so` and a device without fp16 compute all come back unavailable.
+            val handle = ClipHandle.inAssets(app.assets)
+            if (!handle.isAvailable) {
+                Log.e(TAG, "cannot bring up $handle")
+                handle.close()
+                return false
+            }
+            clip = handle
+            tokenizer = tok
+            Log.i(TAG, "TinyCLIP embedder ready (dim=${ClipHandle.DIMENSION})")
+            return true
         }
     }
 
@@ -136,7 +140,11 @@ object ClipEmbedder {
             } finally {
                 bitmap.recycle()
             }
-            run(pixels, DUMMY_IDS, OUT_IMAGE)
+            // The handle re-records the network when the tower changes, so calls on it are
+            // serialised for the same reason the ORT session's were.
+            val raw = synchronized(lock) { clip?.imageEmbedding(pixels) }
+                ?: throw ImageFailedException("the vision tower failed for $uri")
+            l2Normalize(raw)
         }
 
     /** Embed [query] into an L2-normalised vector in the SAME space as [imageEmbedding]. */
@@ -144,41 +152,26 @@ object ClipEmbedder {
         withContext(Dispatchers.Default) {
             check(ensureInit(context)) { "TinyCLIP embedder unavailable" }
             val tok = tokenizer ?: error("tokenizer not loaded")
-            run(dummyPixels(), tok.tokenize(query), OUT_TEXT)
+            // The tokenizer pads to 77; the tower is causal and pools at `<|endoftext|>`, so the
+            // padding is dropped. That gives the identical vector for a quarter of the work on a
+            // typical query, and it is what tells native which position to pool.
+            val ids = trimToEnd(tok.tokenize(query))
+            val raw = synchronized(lock) { clip?.textEmbedding(ids) }
+                ?: error("the text tower failed")
+            l2Normalize(raw)
         }
 
     /**
-     * One forward pass of the combined graph, returning the L2-normalised [wanted] output.
-     * Both inputs must always be supplied even though only one side is read.
+     * A tokenizer's fixed-length output cut to end at `<|endoftext|>`.
+     *
+     * [ClipTokenizer.tokenize] always appends the end token and then zero-pads to
+     * [ClipTokenizer.CONTEXT_LENGTH], so the token is present and appears once. If it somehow is
+     * not, the whole array is passed through rather than silently pooling position 0 — which would
+     * be the `<|startoftext|>` embedding and carry no query at all.
      */
-    private fun run(pixels: FloatArray, ids: IntArray, wanted: String): FloatArray {
-        val s = session ?: error("session not loaded")
-        val longIds = LongArray(ids.size) { ids[it].toLong() }
-        // CLIP's text transformer is causal and pools at the end-of-text position, so an
-        // all-ones mask over the padded sequence matches how the model was trained.
-        val mask = LongArray(ids.size) { 1L }
-        val idShape = longArrayOf(1, ids.size.toLong())
-
-        return synchronized(lock) {
-            val tensors = LinkedHashMap<String, OnnxTensor>(3)
-            try {
-                tensors[IN_PIXELS] = OnnxTensor.createTensor(
-                    env,
-                    FloatBuffer.wrap(pixels),
-                    longArrayOf(1, 3, IMAGE_SIZE.toLong(), IMAGE_SIZE.toLong()),
-                )
-                tensors[IN_IDS] = OnnxTensor.createTensor(env, LongBuffer.wrap(longIds), idShape)
-                tensors[IN_MASK] = OnnxTensor.createTensor(env, LongBuffer.wrap(mask), idShape)
-                s.run(tensors).use { result ->
-                    val out = result.get(wanted).get() as OnnxTensor
-                    val vec = FloatArray(out.info.shape.last().toInt())
-                    out.floatBuffer.get(vec)
-                    l2Normalize(vec)
-                }
-            } finally {
-                tensors.values.forEach { runCatching { it.close() } }
-            }
-        }
+    private fun trimToEnd(ids: IntArray): IntArray {
+        val end = ids.indexOf(ClipTokenizer.END_TOKEN)
+        return if (end >= 0) ids.copyOfRange(0, end + 1) else ids
     }
 
     /** Decode [uri], downsampling during decode so a 48 MP photo never lands on the heap. */
@@ -237,18 +230,14 @@ object ClipEmbedder {
         return out
     }
 
-    /** Zeroed pixels for a text-only call; the image side of the graph is ignored. */
-    private fun dummyPixels() = FloatArray(3 * IMAGE_SIZE * IMAGE_SIZE)
-
     fun close() {
         synchronized(lock) { closeLocked() }
     }
 
     private fun closeLocked() {
-        runCatching { session?.close() }
-        session = null
+        runCatching { clip?.close() }
+        clip = null
         tokenizer = null
-        cachedDim = 0
         initTried = false
     }
 
@@ -288,17 +277,5 @@ object ClipEmbedder {
         val out = FloatArray(bytes.size / 4)
         for (i in out.indices) out[i] = buffer.float
         return out
-    }
-
-    private const val IN_PIXELS = "pixel_values"
-    private const val IN_IDS = "input_ids"
-    private const val IN_MASK = "attention_mask"
-    private const val OUT_IMAGE = "image_embeds"
-    private const val OUT_TEXT = "text_embeds"
-
-    /** Minimal `<|startoftext|><|endoftext|>` prompt for image-only calls. */
-    private val DUMMY_IDS = IntArray(ClipTokenizer.CONTEXT_LENGTH).also {
-        it[0] = ClipTokenizer.START_TOKEN
-        it[1] = ClipTokenizer.END_TOKEN
     }
 }
