@@ -239,6 +239,64 @@ fn a_cached_score_map_alone_agrees_with_the_reference() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn a_causal_softmax_agrees_with_the_reference() {
+    // `softmax_causal.comp`, the only new shader TinyCLIP needs. The CPU interpreter is the only
+    // oracle for the SPIR-V, so this is what says the two compute the same mask on real hardware.
+    //
+    // Two heads over T 5, which makes both indexing mistakes visible: the query index is
+    // `row % out_h`, so a shader taking the flat row would leave head 1 unmasked, and the bound is
+    // `query + 1`, so an off-by-one shows up as row 0 being a pair rather than a point.
+    let scores = spread(2 * 5 * 5, 0.4);
+    agrees(
+        "a causal softmax",
+        &[Shape::new(2, 5, 5)],
+        &[&scores],
+        &[],
+        |b, ids| b.softmax_causal(ids[0]),
+    );
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_causal_text_attention_agrees_with_the_reference() {
+    // The whole of TinyCLIP's text-tower attention: scores, the causal softmax and the weighted
+    // sum, in the shapes the real tower uses in miniature. `attn_apply.comp` multiplies the masked
+    // tail as well as the head, so a shader that left the tail stale rather than zeroing it is
+    // invisible in the softmax's own output and shows up here.
+    let q = spread(8 * 4, 0.1);
+    let k = spread(8 * 4, 0.9);
+    let v = spread(8 * 4, 1.6);
+    let given = Given::new(&[]).expect("no tensors");
+    let mut builder = Builder::new(&given);
+    let qi = builder.input(Shape::new(8, 1, 4));
+    let ki = builder.input(Shape::new(8, 1, 4));
+    let vi = builder.input(Shape::new(8, 1, 4));
+    let scores = builder.attn_scores(qi, ki, 2);
+    let probs = builder.softmax_causal(scores);
+    let out = builder.attn_apply(probs, vi, 2);
+    let plan = builder.finish(&[out]).expect("the fixture plan builds");
+    compare("a causal text attention", plan, given.data().to_vec(), &[&q, &k, &v]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn a_position_concat_moves_the_same_columns_on_the_device() {
+    // TinyCLIP's class token: `c * h` strided `vkCmdCopyBuffer`s rather than the one a channel
+    // concat gets away with. What is under test is the destination stride, which is the output's
+    // width and not the part's.
+    let token = spread(6, 0.5);
+    let grid = spread(6 * 4, 1.3);
+    let given = Given::new(&[]).expect("no tensors");
+    let mut builder = Builder::new(&given);
+    let t = builder.input(Shape::new(6, 1, 1));
+    let g = builder.input(Shape::new(6, 1, 4));
+    let joined = builder.concat_positions(&[t, g]);
+    let plan = builder.finish(&[joined]).expect("the fixture plan builds");
+    compare("a position concat", plan, given.data().to_vec(), &[&token, &grid]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn a_reshape_moves_the_same_elements_on_the_device() {
     // The relabelling that lets a `[d_model, 1, 1]` projection become a `[1, 1, d_model]` cache
     // position. One `vkCmdCopyBuffer`, so what is under test is that the shapes either side agree

@@ -1,0 +1,65 @@
+#version 450
+//! `softmax.comp` with the row truncated at the diagonal: a **causal** attention softmax.
+//!
+//! One use, TinyCLIP's text tower. Its three layers attend over the whole 77-token
+//! sequence at once and each query may only see itself and the keys before it, which the
+//! export spells as adding a `-inf` upper triangle to the score map before normalising.
+//!
+//! # Why a second shader rather than a flag on `softmax.comp`
+//!
+//! A `Push` field would be free to add and expensive to be wrong about: `softmax.comp` is
+//! shared by PP-OCRv5 recognition, both Supertonic encoders and SMaLL-100, so a field the
+//! bound is read from breaks four shipping nets at once if it is ever left unset. This
+//! file duplicates twenty lines instead.
+//!
+//! The other alternative was no shader at all — run the text tower one token at a time
+//! through `attn_scores_cached`, where one query needs no mask because the cache *is* the
+//! prefix. That is 77 plan rebuilds per query, each a `device_wait_idle`, for a tower that
+//! is three layers deep.
+//!
+//! # The bound is `query + 1`, and off by one in either direction is wrong
+//!
+//! The scores are `[heads, T, T]`, key innermost, so a row is contiguous and the row index
+//! is `head * out_h + query`. Query `q` may read keys `0 ..= q`, so the row is `q + 1`
+//! long. At `q = 0` that is one key and the distribution is exactly `[1, 0, ...]`; a bound
+//! of `q` would leave an empty row and divide by zero, and a bound of `q + 2` would let
+//! every position read one token of the future — a fluent, subtly wrong embedding.
+//!
+//! The masked tail is written as zero rather than left alone. `attn_apply.comp` multiplies
+//! the whole row by V, so a stale value there from a previous layer's score map would
+//! contribute; and the arena is reused, so "previous" is not even predictable.
+
+#include "common.glsl"
+
+void main() {
+    uint row = global_index();
+    if (row >= p.count) {
+        return;
+    }
+    // Rows are laid out head-major, `out_h` queries per head, so this is the query index
+    // whatever the head count is.
+    uint query = row % p.out_h;
+    uint keys = min(query + 1u, p.out_w);
+    uint at = p.in0 + row * p.out_w;
+
+    // The most negative fp16 rather than -inf, as `softmax.comp` does. `keys` is at least
+    // one, so the seed is never the answer.
+    float peak = -65504.0;
+    for (uint i = 0u; i < keys; i++) {
+        peak = max(peak, float(arena[at + i]));
+    }
+
+    float total = 0.0;
+    for (uint i = 0u; i < keys; i++) {
+        total += exp(float(arena[at + i]) - peak);
+    }
+    float inverse = 1.0 / total;
+
+    uint out_row = p.out_at + row * p.out_w;
+    for (uint i = 0u; i < keys; i++) {
+        arena[out_row + i] = float16_t(exp(float(arena[at + i]) - peak) * inverse);
+    }
+    for (uint i = keys; i < p.out_w; i++) {
+        arena[out_row + i] = float16_t(0.0);
+    }
+}

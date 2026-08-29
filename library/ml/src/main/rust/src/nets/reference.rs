@@ -197,7 +197,8 @@ impl Reference {
                     Kind::Affine => self.affine(push),
                     Kind::LayerNorm => self.layer_norm(push),
                     Kind::AttnScores => self.attn_scores(push),
-                    Kind::Softmax => self.softmax(push),
+                    Kind::Softmax => self.softmax(push, false),
+                    Kind::SoftmaxCausal => self.softmax(push, true),
                     Kind::AttnApply => self.attn_apply(push),
                     Kind::AttnScoresRelative => self.attn_scores_relative(push),
                     Kind::AttnApplyRelative => self.attn_apply_relative(push),
@@ -745,25 +746,44 @@ impl Reference {
     /// The row maximum is subtracted first, as `softmax.comp` does. That is not a
     /// refinement: without it a row containing a large score exponentiates to infinity in
     /// fp32 and every probability in it becomes a NaN.
-    fn softmax(&mut self, p: &Push) -> Result<(), String> {
+    ///
+    /// `causal` truncates each row at the diagonal, as `softmax_causal.comp` does: rows are
+    /// head-major with `out_h` queries per head, so query `row % out_h` reads `query + 1` keys and
+    /// the rest of its row is stored as zero.
+    fn softmax(&mut self, p: &Push, causal: bool) -> Result<(), String> {
         if p.out_w == 0 {
             return Err("a softmax over an empty axis".into());
         }
+        if causal && p.out_h == 0 {
+            return Err("a causal softmax over no queries".into());
+        }
         for row in 0..p.count {
             let at = row * p.out_w;
+            let keys = if causal {
+                // At query 0 this is 1, so the distribution is exactly `[1, 0, ...]` and the
+                // denominator can never be empty.
+                ((row % p.out_h.max(1)) + 1).min(p.out_w)
+            } else {
+                p.out_w
+            };
             let mut peak = -65504.0f32;
-            for i in 0..p.out_w {
+            for i in 0..keys {
                 peak = peak.max(self.load(p.in0, at + i)?);
             }
             let mut total = 0.0;
-            for i in 0..p.out_w {
+            for i in 0..keys {
                 total += (self.load(p.in0, at + i)? - peak).exp();
             }
             // The peak's own term is `exp(0)`, so this is at least 1.
             let inverse = 1.0 / total;
-            for i in 0..p.out_w {
+            for i in 0..keys {
                 let value = (self.load(p.in0, at + i)? - peak).exp() * inverse;
                 self.store(p.out, at + i, value)?;
+            }
+            // Written rather than left alone: `attn_apply` multiplies the whole row, and the
+            // arena is reused, so a stale masked value would contribute something unpredictable.
+            for i in keys..p.out_w {
+                self.store(p.out, at + i, 0.0)?;
             }
         }
         Ok(())
@@ -2016,6 +2036,88 @@ mod tests {
         assert!(got.iter().all(|v| v.is_finite()), "{got:?}");
         let expected = 1.0 / (1.0 + (-1.0f32).exp());
         close(&got, &[expected, 1.0 - expected, 0.0]);
+    }
+
+    #[test]
+    fn a_causal_softmax_gives_position_zero_a_point_distribution() {
+        // The fixture that fails if the row bound is off by one in either direction. One head,
+        // T 3, so three rows of three: query 0 sees key 0 alone, query 1 keys 0-1, query 2 all
+        // three.
+        //
+        // Row 0's scores are (0, 100, 100). Its distribution must be exactly (1, 0, 0) — a bound
+        // of `query + 2` would let the 100 in and give (0, 1, 0), and a bound of `query` would
+        // leave an empty row and divide by zero.
+        let got = one(
+            Shape::new(1, 3, 3),
+            &[
+                0.0, 100.0, 100.0, //
+                1.0, 2.0, 100.0, //
+                5.0, 5.0, 5.0,
+            ],
+            &[],
+            |b, x| b.softmax_causal(x),
+        );
+        let pair = (-1.0f32).exp() / (1.0 + (-1.0f32).exp());
+        close(
+            &got,
+            &[
+                1.0, 0.0, 0.0, //
+                pair, 1.0 - pair, 0.0, //
+                1.0 / 3.0, 1.0 / 3.0, 1.0 / 3.0,
+            ],
+        );
+        // Every row is still a distribution, masked tail and all — which is what says the divisor
+        // was the truncated sum rather than the whole row's.
+        for (row, values) in got.chunks_exact(3).enumerate() {
+            let total: f32 = values.iter().sum();
+            assert!((total - 1.0).abs() < 2e-3, "row {row} sums to {total}");
+        }
+    }
+
+    #[test]
+    fn a_causal_softmax_masks_within_each_head_rather_than_across_the_map() {
+        // Two heads, T 2, so rows are (head 0 query 0), (head 0 query 1), (head 1 query 0),
+        // (head 1 query 1). The query index is `row % out_h`, so head 1's first row must be
+        // masked exactly as head 0's was; taking the flat row index instead would leave head 1
+        // unmasked entirely.
+        let got = one(
+            Shape::new(2, 2, 2),
+            &[
+                0.0, 100.0, //
+                5.0, 5.0, //
+                0.0, 100.0, //
+                5.0, 5.0,
+            ],
+            &[],
+            |b, x| b.softmax_causal(x),
+        );
+        close(&got, &[1.0, 0.0, 0.5, 0.5, 1.0, 0.0, 0.5, 0.5]);
+    }
+
+    #[test]
+    fn a_position_concat_prepends_a_column_to_every_channel() {
+        // TinyCLIP's class token, in miniature: a `[2, 1, 1]` token in front of a `[2, 1, 3]`
+        // grid. The position axis is innermost, so this is one run per channel and not one copy —
+        // a contiguous concat would give (9, 1, 2, 3, 8, 4, 5, 6) shifted by a channel.
+        let given = Given::new(&[]).expect("no tensors");
+        let mut builder = Builder::new(&given);
+        let token = builder.input(Shape::new(2, 1, 1));
+        let grid = builder.input(Shape::new(2, 1, 3));
+        let joined = builder.concat_positions(&[token, grid]);
+        let plan = builder.finish(&[joined]).expect("the fixture plan builds");
+        // No dispatch at all: the whole op is `vkCmdCopyBuffer`, which is the reason it needs no
+        // shader and no reference arm of its own.
+        assert!(
+            plan.ops.iter().all(|op| matches!(op, crate::nets::Op::Copy { .. })),
+            "{:?}",
+            plan.ops
+        );
+        let outputs = run_multi(&plan, given.data(), &[&[9.0, 8.0], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]])
+            .expect("the fixture plan runs");
+        match outputs.as_slice() {
+            [only] => close(only, &[9.0, 1.0, 2.0, 3.0, 8.0, 4.0, 5.0, 6.0]),
+            other => panic!("{} outputs", other.len()),
+        }
     }
 
     #[test]

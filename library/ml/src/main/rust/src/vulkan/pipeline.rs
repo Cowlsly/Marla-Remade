@@ -40,6 +40,8 @@ const AFFINE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/affine.comp.spv"
 const LAYERNORM: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/layernorm.comp.spv"));
 const ATTN_SCORES: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores.comp.spv"));
 const SOFTMAX: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/softmax.comp.spv"));
+const SOFTMAX_CAUSAL: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/softmax_causal.comp.spv"));
 const ATTN_APPLY: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply.comp.spv"));
 const ATTN_SCORES_RELATIVE: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_relative.comp.spv"));
@@ -62,7 +64,7 @@ const CONV_VEC_INT8: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/conv_vec_int8.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 27] = [
+const SPIRV: [&[u8]; 28] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -90,6 +92,7 @@ const SPIRV: [&[u8]; 27] = [
     ATTN_SCORES_CACHED,
     ATTN_APPLY_CACHED,
     CONV_VEC_INT8,
+    SOFTMAX_CAUSAL,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -145,6 +148,7 @@ pub struct Pipelines {
     attn_scores_cached: vk::Pipeline,
     attn_apply_cached: vk::Pipeline,
     conv_vec_int8: vk::Pipeline,
+    softmax_causal: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -361,6 +365,7 @@ impl Pipelines {
             attn_scores_cached,
             attn_apply_cached,
             conv_vec_int8,
+            softmax_causal,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -404,6 +409,7 @@ impl Pipelines {
             attn_scores_cached,
             attn_apply_cached,
             conv_vec_int8,
+            softmax_causal,
         })
     }
 
@@ -423,6 +429,7 @@ impl Pipelines {
             Kind::LayerNorm => self.layernorm,
             Kind::AttnScores => self.attn_scores,
             Kind::Softmax => self.softmax,
+            Kind::SoftmaxCausal => self.softmax_causal,
             Kind::AttnApply => self.attn_apply,
             Kind::AttnScoresRelative => self.attn_scores_relative,
             Kind::AttnApplyRelative => self.attn_apply_relative,
@@ -472,6 +479,7 @@ impl Pipelines {
             self.attn_scores_cached,
             self.attn_apply_cached,
             self.conv_vec_int8,
+            self.softmax_causal,
         ] {
             device.destroy_pipeline(pipeline, None);
         }

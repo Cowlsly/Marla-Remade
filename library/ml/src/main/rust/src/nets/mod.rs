@@ -237,6 +237,17 @@ pub enum Kind {
     /// per-score parallelism, since a fused pass has to be one invocation per *row* to
     /// see the whole distribution it is normalising.
     Softmax,
+    /// [`Kind::Softmax`] with each row truncated at the diagonal: a **causal** mask.
+    ///
+    /// One use, TinyCLIP's text tower, whose three layers attend over all 77 tokens at once and
+    /// may not read the future. Query `q`'s row is normalised over keys `0 ..= q` and the rest of
+    /// it is written as zero, so [`Kind::AttnApply`] can multiply the whole row unchanged.
+    ///
+    /// A separate pipeline rather than a flag on [`Kind::Softmax`], because that one is shared by
+    /// PP-OCRv5 recognition, both Supertonic encoders and SMaLL-100 — a push field the bound came
+    /// from would break four shipping nets at once if it were ever left unset. See
+    /// `shaders/softmax_causal.comp`.
+    SoftmaxCausal,
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
     ///
     /// `O[h][d][i] = sum_j S[h][i][j] * V[h][d][j]`, attention's weighted sum.
@@ -505,6 +516,7 @@ impl Kind {
             | Kind::AttnScores
             | Kind::AttnScoresCached
             | Kind::Softmax
+            | Kind::SoftmaxCausal
             | Kind::AttnApply
             | Kind::AttnApplyCached
             | Kind::Rotary => {}
@@ -714,6 +726,14 @@ enum Node {
     },
     Softmax {
         input: Id,
+        out: Id,
+        /// Truncate each row at the diagonal. See [`Kind::SoftmaxCausal`].
+        causal: bool,
+    },
+    /// Concatenation along the **width** axis, one strided run per channel row. See
+    /// [`Builder::concat_positions`].
+    ConcatPositions {
+        parts: Vec<Id>,
         out: Id,
     },
     Constant {
@@ -1295,6 +1315,38 @@ impl<'a> Builder<'a> {
         out
     }
 
+    /// Concatenate along the **width** axis. Channels and height must match.
+    ///
+    /// One use, TinyCLIP's class token: prepending a single position to the `[256, 1, 196]` patch
+    /// grid to make the `[256, 1, 197]` sequence the vision transformer reads.
+    ///
+    /// Unlike [`Builder::concat`] this is not one copy. The position axis is innermost, so a
+    /// *part* is a column range of every channel rather than a contiguous run — the same fact that
+    /// forced the position-major KV cache in [`Kind::AttnScoresCached`]. It is still only
+    /// [`Op::Copy`] and needs no shader: `c * h` runs per part, recorded **once** when the plan is
+    /// built rather than per inference. For CLIP that is 512 copies in the command buffer, for a
+    /// tensor the class token is one 512-byte column of.
+    pub fn concat_positions(&mut self, parts: &[Id]) -> Id {
+        let shapes: Vec<Shape> = parts.iter().map(|&p| self.shape_of(p)).collect();
+        let first = match shapes.first() {
+            Some(&s) => s,
+            None => {
+                self.fail("a position concat of nothing".into());
+                Shape::new(0, 0, 0)
+            }
+        };
+        let mut width = 0;
+        for s in &shapes {
+            if s.c != first.c || s.h != first.h {
+                self.fail(format!("a position concat of {first:?} with {s:?}"));
+            }
+            width += s.w;
+        }
+        let out = self.tensor(Shape::new(first.c, first.h, width));
+        self.nodes.push(Node::ConcatPositions { parts: parts.to_vec(), out });
+        out
+    }
+
     /// `x * scale + shift`, elementwise with scalar parameters. See [`Kind::Affine`].
     pub fn affine(&mut self, input: Id, scale: f32, shift: f32) -> Id {
         let shape = self.shape_of(input);
@@ -1432,7 +1484,29 @@ impl<'a> Builder<'a> {
             self.fail(format!("a softmax over {shape:?}, whose last axis is empty"));
         }
         let out = self.tensor(shape);
-        self.nodes.push(Node::Softmax { input, out });
+        self.nodes.push(Node::Softmax { input, out, causal: false });
+        out
+    }
+
+    /// [`Builder::softmax`] with each query's row truncated at the diagonal.
+    ///
+    /// The input must be a square score map `[heads, T, T]`: a causal mask is a statement about
+    /// which *keys* a *query* may read, so queries and keys have to be the same sequence. A
+    /// cross-attention map is not square and masking one would be meaningless rather than merely
+    /// wrong, which is why this is refused instead of clamped.
+    pub fn softmax_causal(&mut self, input: Id) -> Id {
+        let shape = self.shape_of(input);
+        if shape.w == 0 {
+            self.fail(format!("a causal softmax over {shape:?}, whose last axis is empty"));
+        }
+        if shape.h != shape.w {
+            self.fail(format!(
+                "a causal softmax over {shape:?}: the mask is over one sequence attending to \
+                 itself, so the map is [heads, T, T]"
+            ));
+        }
+        let out = self.tensor(shape);
+        self.nodes.push(Node::Softmax { input, out, causal: true });
         out
     }
 
@@ -2252,13 +2326,13 @@ impl<'a> Builder<'a> {
                     invocations: so.len(),
                 });
             }
-            Node::Softmax { input, out } => {
+            Node::Softmax { input, out, causal } => {
                 let so = shape(*out);
                 // One invocation per row of the last axis, each normalising `out_w`
                 // contiguous elements, so the dispatch is rows rather than elements.
                 let rows = so.c * so.h;
                 ops.push(Op::Dispatch {
-                    kind: Kind::Softmax,
+                    kind: if *causal { Kind::SoftmaxCausal } else { Kind::Softmax },
                     push: Push {
                         in0: at(*input)?,
                         out: at(*out)?,
@@ -2273,6 +2347,25 @@ impl<'a> Builder<'a> {
                     },
                     invocations: rows,
                 });
+            }
+            Node::ConcatPositions { parts, out } => {
+                let so = shape(*out);
+                let base = at(*out)?;
+                let mut column = 0;
+                for &part in parts {
+                    let sp = shape(part);
+                    let src = at(part)?;
+                    // A part is a column range, so one run per channel row rather than the single
+                    // copy `Node::Concat` gets away with.
+                    for row in 0..sp.c * sp.h {
+                        ops.push(Op::Copy {
+                            src: src + row * sp.w,
+                            dst: base + row * so.w + column,
+                            elems: sp.w,
+                        });
+                    }
+                    column += sp.w;
+                }
             }
             Node::AttnApply { probs, v, out, heads } => {
                 let (sv, so) = (shape(*v), shape(*out));
@@ -2362,6 +2455,7 @@ impl Node {
             | Node::AttnApply { out, .. }
             | Node::Constant { out, .. }
             | Node::Rotary { out, .. }
+            | Node::ConcatPositions { out, .. }
             | Node::Concat { out, .. } => *out,
         }
     }
@@ -2390,6 +2484,7 @@ impl Node {
                 vec![*a, *b]
             }
             Node::Concat { parts, .. } => parts.clone(),
+            Node::ConcatPositions { parts, .. } => parts.clone(),
             // The only op with no arena input at all: it reads the weights file.
             Node::Constant { .. } => Vec::new(),
         }
