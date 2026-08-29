@@ -17,4 +17,5 @@ pub mod nms;
 pub mod sentencepiece;
 pub mod supertonic;
 pub mod translate;
+pub mod whisper;
 pub mod ocr;

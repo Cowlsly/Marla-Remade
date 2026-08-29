@@ -931,14 +931,15 @@ mod tests {
             out
         };
 
-        let mut expected: Vec<Vec<u32>> = Vec::new();
-        expected.push(vec![D_MODEL, MELS, 1, CONV_KERNEL]);
-        expected.push(vec![D_MODEL]);
-        expected.push(vec![D_MODEL]);
-        expected.push(vec![D_MODEL, D_MODEL, 1, CONV_KERNEL]);
-        expected.push(vec![D_MODEL]);
-        expected.push(vec![D_MODEL]);
-        expected.push(vec![D_MODEL, 1, SOURCE_POSITIONS]);
+        let mut expected: Vec<Vec<u32>> = vec![
+            vec![D_MODEL, MELS, 1, CONV_KERNEL],
+            vec![D_MODEL],
+            vec![D_MODEL],
+            vec![D_MODEL, D_MODEL, 1, CONV_KERNEL],
+            vec![D_MODEL],
+            vec![D_MODEL],
+            vec![D_MODEL, 1, SOURCE_POSITIONS],
+        ];
         for _ in 0..ENCODER_LAYERS {
             expected.extend(layer(false));
         }

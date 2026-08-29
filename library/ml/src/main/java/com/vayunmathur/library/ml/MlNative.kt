@@ -247,6 +247,70 @@ internal object MlNative {
     external fun destroyTinyclip(handle: Long)
 
     /**
+     * Bring up whisper-base from its one `.maml` and the ids read from `generation_config.json`.
+     * Returns 0 on failure.
+     *
+     * One graph, not two, as [createSmall100] is: the 51,865-row embedding is **tied** — the
+     * decoder's input table and the logits kernel — so an encoder file and a decoder file would
+     * upload 26.6 MB of it twice. Native selects between the encoder pass and a decode step by
+     * re-recording one net.
+     *
+     * The plan arrives as a **file descriptor** because it is a bundled asset: [offset] and [length]
+     * are the `AssetFileDescriptor`'s, since an asset is a *range of the APK* rather than a file of
+     * its own. `AssetManager.openFd` throws for a deflated entry, which is what `noCompress +=
+     * "maml"` in `speech/build.gradle.kts` is for. Native keeps the descriptor open for the life of
+     * the handle, because the tied embedding is gathered a row at a time on the host.
+     *
+     * **The descriptor must be detached.** Native takes ownership and closes it, on the failure
+     * paths as much as the successful one.
+     *
+     * The four id arrays come straight out of `generation_config.json`, because that file is the
+     * model's and hardcoding its ids here would be a second place to get them wrong:
+     * - [special] is exactly five values: `decoder_start_token_id`, `eos_token_id`,
+     *   `task_to_id.transcribe`, `no_timestamps_token_id`, `max_length`.
+     * - [languages] is the 99 `<|xx|>` ids from `lang_to_id`, used to detect a language when none is
+     *   named. The **code to id** mapping stays in Kotlin.
+     * - [suppress] is `suppress_tokens` and [suppressAtBegin] is `begin_suppress_tokens`.
+     *
+     * All four are validated here rather than per transcription, so a broken asset reports an
+     * unavailable recogniser instead of producing wrong text.
+     *
+     * Freed by [destroyWhisper], not [destroy], [destroyOcr], [destroySupertonic],
+     * [destroySmall100] or [destroyTinyclip].
+     */
+    external fun createWhisper(
+        fd: Int,
+        offset: Long,
+        length: Long,
+        special: IntArray,
+        languages: IntArray,
+        suppress: IntArray,
+        suppressAtBegin: IntArray,
+    ): Long
+
+    /**
+     * Transcribe one log-mel window into token ids, or null on failure.
+     *
+     * [mel] is `80 * 3000` floats row-major, from `WhisperFeatures.logMel` — 30 seconds at a
+     * 160-sample hop, padded or truncated. [languageToken] is a `<|xx|>` id the caller resolved from
+     * a code, or **negative** to let the model detect it.
+     *
+     * The ids come back **raw**, including any special or timestamp token the model emitted:
+     * `WhisperTokenizer` is what skips the ids at or above 50,257 that have no text form. An empty
+     * array means the window held nothing to transcribe, which is not a failure.
+     *
+     * Greedy decoding, capped at 224 tokens. Every step re-records the network, so this is slow
+     * relative to a single forward pass and must not be called concurrently on one handle.
+     */
+    external fun transcribeWhisper(handle: Long, mel: FloatArray, languageToken: Int): IntArray?
+
+    /**
+     * Free whisper's network, its open weights file and both of its caches.
+     * Exactly once per non-zero handle from [createWhisper].
+     */
+    external fun destroyWhisper(handle: Long)
+
+    /**
      * Detect faces in [pixels] and return them flattened, nine floats per face.
      *
      * The layout per face is `left, top, right, bottom, leftEyeX, leftEyeY, rightEyeX,

@@ -3,23 +3,26 @@ package com.vayunmathur.speech.util
 import android.content.Context
 
 /**
- * Asset location of the offline **Whisper-base** (multilingual, ~99 languages) recogniser.
+ * Asset location of the offline **whisper-base** (multilingual, ~99 languages) recogniser.
  *
- * These files used to be a 117 MB runtime download of the ncnn conversion. They are now the int8
- * ONNX export bundled in the APK under `assets/`[DIR] and read by [WhisperOnnxEngine], so there
- * is no download, no progress and no mirror involved — see
- * `scripts/speech/fetch_whisper_onnx.sh` for how the vendored copies are refreshed.
+ * These files used to be a 117 MB runtime download of an ncnn conversion, then two int8 ONNX exports
+ * bundled in the APK. They are now one 70.6 MiB `whisper_base.maml`, read by [WhisperEngine] through
+ * `:library:ml` — see `scripts/ml/fetch_whisper.py` for how it is rebuilt from
+ * `openai/whisper-base`'s pinned checkpoint.
  */
 object WhisperModel {
     const val DIR = "whisper-base"
 
+    /** The graph, relative to [DIR]. The two `generation_config.json`/`vocab.json` sit beside it. */
+    const val GRAPH = "whisper_base.maml"
+
     /**
-     * True if the bundled models are readable. Barring a corrupt install this is always true;
-     * it exists so the setup screen can report a broken build rather than silently failing to
+     * True if the bundled model is readable. Barring a corrupt install this is always true; it
+     * exists so the setup screen can report a broken build rather than silently failing to
      * transcribe.
      */
     fun isReady(context: Context): Boolean = try {
-        context.assets.list(DIR)?.contains("encoder_model_int8.onnx") == true
+        context.assets.list(DIR)?.contains(GRAPH) == true
     } catch (_: Throwable) {
         false
     }
