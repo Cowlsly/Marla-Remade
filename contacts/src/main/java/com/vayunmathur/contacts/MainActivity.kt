@@ -366,7 +366,7 @@ fun Navigation(viewModel: ContactViewModel, initialRoute: Route? = null, onExit:
     }
 
     MainNavigation(backStack) {
-        entry<Route.Main> {
+        entry<Route.Main>(metadata = ListPage()) {
             ContactsTabs(
                 viewModel = viewModel,
                 backStack = backStack,
