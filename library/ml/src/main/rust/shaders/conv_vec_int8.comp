@@ -1,0 +1,112 @@
+#version 450
+//! `conv_point_int8.comp` for a **single position**: a matrix-vector product, not a tiny matrix.
+//!
+//! `out[o] = act(scale[o] * sum_i W[o][i] * x[i] + bias[o])`.
+//!
+//! # Why the tiled shader is the wrong shape here
+//!
+//! `conv_point_int8.comp` tiles `16 x 16` over output channels and positions, so its workgroup
+//! count is `out_c.div_ceil(16) * positions.div_ceil(16)`. At **one** position the second factor is
+//! 1 and the tile is 16 channels by 16 positions of which 15 are padding, so:
+//!
+//! * Of 64 invocations, the 56 whose `local_col` is not 0 compute nothing that is stored. The
+//!   workgroup produces 16 outputs where it is built to produce 256.
+//! * Each staging step zero-fills 240 of the 256 `input_tile` slots, and the activation vector is
+//!   re-staged once per channel tile — 16 times over for a 256-channel output.
+//!
+//! That is roughly a 16x waste, and it lands on exactly the wrong op. A SMaLL-100 decode step is
+//! *entirely* single-position: 30 projections and the 128,112-class head, 128 times per
+//! translation, with the head alone at 131 million multiply-accumulates. Nothing else in a
+//! translation is close.
+//!
+//! # The shape that fits
+//!
+//! One workgroup per **group of [`ROWS`] output channels**, with the 64 lanes striding along the
+//! input channels:
+//!
+//! ```text
+//! for (k = lane; k < in_c; k += 64)     // lane's slice of the activation
+//!     x = arena[in0 + k]                 // read once, into a register
+//!     for (r = 0; r < ROWS; r++)         // reused by every row
+//!         acc[r] += W[channel_base + r][k] * x
+//! ```
+//!
+//! Three things fall out:
+//!
+//! * **Every lane contributes to every output.** No idle lanes and no padding.
+//! * **The weight reads are coalesced.** Lane `l` reads `W[c][k0 + l]`, which is contiguous, and
+//!   four adjacent lanes fall in one 32-bit word of the int8 view.
+//! * **The activation is read exactly once per workgroup** and reused from a register across all
+//!   `ROWS` rows, rather than staged into shared memory `out_c / 16` times over. That is why there
+//!   is no activation tile here: at one position a lane needs only the elements it strides over.
+//!
+//! What it costs is a cross-lane reduction, which the tiled shader does not need because each of
+//! its invocations owns a whole dot product. [`partial`] is the only shared memory, `ROWS * 64`
+//! floats, and lanes `0 .. ROWS` finish the sums. At 2 KB that is an eighth of the 16 KB
+//! `maxComputeSharedMemorySize` the spec guarantees.
+//!
+//! # Precision and the push block
+//!
+//! Identical to `conv_point_int8.comp`, deliberately: `nets::reference` serves all three int8 kinds
+//! from one implementation, so any difference here would be a difference from the oracle. fp32
+//! accumulation, the scale applied to the finished accumulator, then the bias, then the activation.
+//! `p.weight` is a **32-bit word** offset and `p.act_weight` the scale as an fp16 element index,
+//! which is why `Act::PRelu` cannot ride along.
+
+#include "common.glsl"
+
+/// Output channels per workgroup.
+///
+/// Eight rather than one because a workgroup per output channel would spend 64 lanes on a single
+/// dot product and reduce 64 partials for one number; eight amortises the reduction's barrier over
+/// eight outputs while keeping [`partial`] at 2 KB. It also bounds the register pressure at eight
+/// accumulators, which is what lets the activation stay in a register across the row loop.
+#define ROWS 8u
+
+/// Per-lane partial sums, one row of 64 per output channel.
+shared float partial[ROWS][64];
+
+void main() {
+    // The channel group this workgroup owns. Uniform across the workgroup, so an early return
+    // cannot strand a barrier — every invocation takes the same branch.
+    uint tile = gl_WorkGroupID.y * gl_NumWorkGroups.x + gl_WorkGroupID.x;
+    if (tile >= p.count) {
+        return;
+    }
+    uint channel_base = tile * ROWS;
+    uint lane = gl_LocalInvocationID.x;
+
+    float acc[ROWS];
+    for (uint r = 0u; r < ROWS; r++) {
+        acc[r] = 0.0;
+    }
+    // Rows past the output are accumulated anyway and discarded at the store. Skipping them would
+    // branch inside the hot loop for at most seven channels of the last workgroup.
+    for (uint k = lane; k < p.in_c; k += 64u) {
+        float x = float(arena[p.in0 + k]);
+        for (uint r = 0u; r < ROWS; r++) {
+            acc[r] += float(int8_at(p.weight, (channel_base + r) * p.in_c + k)) * x;
+        }
+    }
+    for (uint r = 0u; r < ROWS; r++) {
+        partial[r][lane] = acc[r];
+    }
+    barrier();
+
+    // One lane per row finishes its 64 partials. A log-step tree would cost six barriers to save
+    // 56 adds on eight lanes, against an inner loop that just did `in_c` of them on all 64.
+    if (lane >= ROWS) {
+        return;
+    }
+    uint channel = channel_base + lane;
+    if (channel >= p.out_c) {
+        return;
+    }
+    float total = 0.0;
+    for (uint i = 0u; i < 64u; i++) {
+        total += partial[lane][i];
+    }
+    float scale = float(weights[p.act_weight + channel]);
+    float offset = float(weights[p.bias + channel]);
+    arena[p.out_at + channel] = float16_t(activate(total * scale + offset, p.act, channel));
+}

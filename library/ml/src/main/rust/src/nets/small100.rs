@@ -795,6 +795,91 @@ mod tests {
     }
 
     #[test]
+    fn a_single_position_int8_convolution_becomes_a_gemv() {
+        // Why `Kind::ConvVecInt8` exists. A decode step is one position almost throughout, and the
+        // tiled kind's workgroup count is `out_c.div_ceil(16) * positions.div_ceil(16)` — so at one
+        // position it pads 15 of every 16 tile columns and stores from 8 of every 64 invocations.
+        let (_, plan) = plan(Mode::DecodeStep { cache_len: 3, src_len: LEN });
+        let int8: Vec<_> = plan
+            .ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::Dispatch { kind, push, invocations } => {
+                    (super::super::tests::name_of(*kind) == "ConvInt8")
+                        .then_some((*kind, *push, *invocations))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(int8.len(), DECODER_LAYERS * 10 + HEAD_SPLITS);
+
+        // The split is not "everything": the cross-attention's key and value projections read the
+        // **encoder output**, which is `src_len` positions, so they stay tiled and are the only
+        // multi-position work a decode step does. Everything else — the four self-attention
+        // projections, the cross-attention's query and output, both feed-forwards and both head
+        // halves — is one position.
+        let (vector, tiled): (Vec<_>, Vec<_>) =
+            int8.iter().partition(|(kind, _, _)| *kind == Kind::ConvVecInt8);
+        assert_eq!(vector.len(), DECODER_LAYERS * 8 + HEAD_SPLITS, "single-position");
+        assert_eq!(tiled.len(), DECODER_LAYERS * 2, "the cross-attention K and V");
+        for (kind, push, _) in &tiled {
+            assert_eq!(*kind, Kind::ConvPointInt8, "{push:?}");
+            assert_eq!(push.out_w, LEN, "{push:?}");
+        }
+        // One workgroup per group of eight output channels, 64 invocations each.
+        for (_, push, invocations) in &vector {
+            assert_eq!(push.out_h * push.out_w, 1, "{push:?}");
+            assert_eq!(push.count, push.out_c.div_ceil(8), "{push:?}");
+            assert_eq!(*invocations, push.count * 64, "{push:?}");
+        }
+    }
+
+    #[test]
+    fn the_gemv_issues_a_sixteenth_of_the_tiled_shader_s_work() {
+        // The head is where it matters: 128,112 classes over 1024 channels, 128 times per
+        // translation, at 131 million multiply-accumulates. This is the arithmetic that makes the
+        // shader worth its own file.
+        let (_, plan) = plan(Mode::DecodeStep { cache_len: 0, src_len: LEN });
+        let head = plan
+            .ops
+            .iter()
+            .find_map(|op| match op {
+                Op::Dispatch { kind: Kind::ConvVecInt8, push, .. }
+                    if push.out_c == CLASSES_PER_SPLIT =>
+                {
+                    Some(*push)
+                }
+                _ => None,
+            })
+            .expect("a head half on the gemv path");
+
+        // Useful work: one multiply-accumulate per weight.
+        let useful = u64::from(head.out_c) * u64::from(head.in_c);
+        // The gemv issues exactly that: every lane of every workgroup contributes to eight rows.
+        let gemv = u64::from(head.count) * 64 * 8 * (u64::from(head.in_c) / 64);
+        assert_eq!(gemv, useful);
+        // The tiled path issues 64 invocations x a 2x2 register block per k-step, for a tile that
+        // is 16 channels by 16 positions of which 15 are padding.
+        let tiles = head.out_c.div_ceil(16) * 1u32.div_ceil(16);
+        let issued = u64::from(tiles) * 64 * 4 * u64::from(head.in_c);
+        assert_eq!(issued / gemv, 16, "{issued} against {gemv}");
+    }
+
+    #[test]
+    fn the_encoder_stays_on_the_tiled_path() {
+        // The gemv shader is for one position only: over a sequence the tiled kind reuses a staged
+        // weight tile across 16 positions, which is the whole reason it exists.
+        let (_, plan) = plan(Mode::Encode { len: LEN });
+        for op in &plan.ops {
+            if let Op::Dispatch { kind, push, .. } = op {
+                if super::super::tests::name_of(*kind) == "ConvInt8" {
+                    assert_eq!(*kind, Kind::ConvPointInt8, "{push:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn the_head_is_two_ops_over_disjoint_class_ranges() {
         let (_, plan) = plan(Mode::Logits);
         let dispatches: Vec<_> = plan

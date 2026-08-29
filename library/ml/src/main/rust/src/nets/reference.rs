@@ -208,10 +208,12 @@ impl Reference {
                     Kind::AddBroadcast => self.add_broadcast(push),
                     Kind::Rotary => self.rotary(push),
                     Kind::ConvPoint => self.conv_point(push),
-                    // The tiled int8 lowering computes exactly what the untiled one does, and
-                    // `Builder::emit` fills the geometry fields in for both, so there is one
-                    // implementation rather than two that have to be kept agreeing.
-                    Kind::ConvInt8 | Kind::ConvPointInt8 => self.conv_int8(push),
+                    // All three int8 lowerings compute exactly what the untiled one does, and
+                    // `Builder::emit` fills the geometry fields in for every one of them, so there
+                    // is one implementation rather than three that have to be kept agreeing.
+                    Kind::ConvInt8 | Kind::ConvPointInt8 | Kind::ConvVecInt8 => {
+                        self.conv_int8(push)
+                    }
                 },
             };
             result.map_err(|e| format!("step {step} ({op:?}): {e}"))?;

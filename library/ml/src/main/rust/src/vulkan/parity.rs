@@ -255,6 +255,131 @@ fn a_reshape_moves_the_same_elements_on_the_device() {
 
 #[test]
 #[ignore = "needs a Vulkan device"]
+fn the_gemv_int8_shader_agrees_with_the_reference() {
+    // `conv_vec_int8.comp`, which every ungrouped single-position 1x1 int8 convolution lowers to.
+    // It is a decode step's whole int8 workload bar the cross-attention keys and values, and it
+    // reduces across all 64 lanes through shared memory where the other two int8 shaders give each
+    // invocation a whole dot product — so a wrong reduction, a wrong row stride or a missing barrier
+    // is invisible in the shape and shows up only here.
+    //
+    // The shape makes both ragged cases fire at once: 20 output channels is not a multiple of the
+    // shader's 8 rows, so the last workgroup accumulates three rows that must be discarded at the
+    // store; and 100 input channels is not a multiple of the 64-lane stride, so the inner loop's
+    // last pass covers 36 lanes and the other 28 must contribute zero.
+    let out_channels = 20u32;
+    let in_channels = 100u32;
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 37) % 251 - 125) as i8)
+        .collect();
+    // Distinct per channel, and each an exact multiple of a power of two so the interpreter and the
+    // device read one number rather than two roundings of one.
+    let scales: Vec<f32> = (0..out_channels).map(|c| 0.007_812_5 * (1.0 + c as f32)).collect();
+    let biases: Vec<f32> = spread(out_channels as usize, 1.9);
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+    let input = spread(in_channels as usize, 0.7);
+
+    let mut builder = Builder::new(&weights);
+    let first = builder.input(Shape::new(in_channels, 1, 1));
+    let last = builder.conv_int8(
+        first,
+        0,
+        out_channels,
+        (1, 1),
+        (1, 1),
+        (1, 1),
+        (0, 0, 0, 0),
+        1,
+        Act::Relu,
+    );
+    let plan = builder.finish(&[last]).expect("the gemv int8 fixture plan builds");
+    // The lowering is automatic, so this is also what asserts it happened.
+    assert!(
+        plan.ops.iter().any(|op| matches!(
+            op,
+            crate::nets::Op::Dispatch { kind: crate::nets::Kind::ConvVecInt8, .. }
+        )),
+        "a single-position int8 convolution must lower to the gemv shader: {:?}",
+        plan.ops,
+    );
+    compare("a gemv int8 convolution", plan, weights.data().to_vec(), &[&input]);
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
+fn the_gemv_and_tiled_int8_shaders_agree_with_each_other() {
+    // The same weights over one position and over 16. `Builder` sends the first to
+    // `conv_vec_int8.comp` and the second to `conv_point_int8.comp`, and the wide run's position 0
+    // must equal the narrow one — the strongest statement available that adding the lowering
+    // changed no numbers, and the one a device can make that the interpreter cannot, since the
+    // interpreter serves both from the same `conv_int8`.
+    let out_channels = 24u32;
+    let in_channels = 64u32;
+    let width = 16u32;
+    let kernel: Vec<i8> = (0..(out_channels * in_channels) as i32)
+        .map(|i| ((i * 53) % 241 - 120) as i8)
+        .collect();
+    let scales: Vec<f32> = (0..out_channels).map(|c| 0.015_625 * (1.0 + c as f32)).collect();
+    let biases: Vec<f32> = spread(out_channels as usize, 0.3);
+    let blob = write_mixed(
+        graph::SUPERTONIC_VE,
+        &[
+            Fixture::I8(vec![out_channels, in_channels, 1, 1], kernel),
+            Fixture::F16(vec![out_channels], scales),
+            Fixture::F16(vec![out_channels], biases),
+        ],
+    );
+    let weights = Weights::parse(&blob, graph::SUPERTONIC_VE).expect("the fixture blob parses");
+
+    let narrow = spread(in_channels as usize, 0.4);
+    // Channel-major, so position 0 of each channel is every `width`th element.
+    let mut wide = vec![0.0f32; (in_channels * width) as usize];
+    for channel in 0..in_channels as usize {
+        wide[channel * width as usize] = narrow[channel];
+    }
+
+    let run = |shape: Shape, input: &[f32]| -> Vec<f32> {
+        let mut builder = Builder::new(&weights);
+        let first = builder.input(shape);
+        let last = builder.conv_int8(
+            first,
+            0,
+            out_channels,
+            (1, 1),
+            (1, 1),
+            (1, 1),
+            (0, 0, 0, 0),
+            1,
+            Act::Relu,
+        );
+        let plan = builder.finish(&[last]).expect("the comparison plan builds");
+        let mut out = on_device(plan, weights.data().to_vec(), &[input]);
+        out.pop().expect("one output")
+    };
+    let one = run(Shape::new(in_channels, 1, 1), &narrow);
+    let many = run(Shape::new(in_channels, 1, width), &wide);
+    for channel in 0..out_channels as usize {
+        let gemv = one[channel];
+        let tiled = many[channel * width as usize];
+        // Both accumulate in fp32 and store fp16, but in a different order, so the last fp16 place
+        // can differ — the same tolerance `matches` applies.
+        let tolerance = 1e-3 * gemv.abs().max(1.0);
+        assert!(
+            (gemv - tiled).abs() <= tolerance,
+            "channel {channel}: gemv {gemv} against tiled {tiled}",
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs a Vulkan device"]
 fn rotary_agrees_with_the_reference() {
     // The half-split convention: `out[j] = x[j] cos - x[j + half] sin`, within each head. A
     // shader that paired adjacent channels instead — the other common convention — gets the

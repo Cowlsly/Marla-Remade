@@ -304,6 +304,16 @@ pub enum Kind {
     /// id lane would silently land on a neighbouring row — Supertonic has 8,322 symbols and
     /// SMaLL-100 has 128,112. Those arrive **split across two lanes**, `id = lo + 2048 * hi`,
     /// as a `[2, 1, T]` tensor; [`Push::in_c`] carries the lane count. See [`embed_lanes`].
+    /// [`Kind::ConvPointInt8`] for a single position: a matrix-vector product.
+    ///
+    /// The tiled kind's workgroup count is `out_c.div_ceil(16) * positions.div_ceil(16)`, so at one
+    /// position 15 of every 16 tile columns are padding and 56 of every 64 invocations store
+    /// nothing. A SMaLL-100 decode step is entirely single-position — 30 projections and a
+    /// 128,112-class head, 128 times per translation — so that waste lands on the dominant cost.
+    /// See `shaders/conv_vec_int8.comp`.
+    ///
+    /// Chosen automatically by [`Builder`]; no net asks for it.
+    ConvVecInt8,
     Embed,
     /// `out[i] = weights[i]`, a learned tensor copied into the arena.
     ///
@@ -464,7 +474,7 @@ impl Kind {
             }
             // As above, plus the dequantisation scale, which occupies `act_weight` and is why
             // `Builder::conv_int8` refuses `Act::PRelu`.
-            Kind::ConvInt8 | Kind::ConvPointInt8 => {
+            Kind::ConvInt8 | Kind::ConvPointInt8 | Kind::ConvVecInt8 => {
                 reads.push(WeightRead { at: words(push.weight), field: "weight" });
                 reads.push(WeightRead { at: elems(push.bias), field: "bias" });
                 reads.push(WeightRead { at: elems(push.act_weight), field: "act_weight" });
@@ -792,6 +802,12 @@ const ALIGN_ELEMS: u32 = 8;
 /// this to compute [`Push::count`]. Shared by the two so the fp16 and int8 lowerings cannot
 /// drift apart.
 const CONV_POINT_TILE: u32 = 16;
+
+/// `ROWS` in `shaders/conv_vec_int8.comp`: output channels per workgroup.
+///
+/// That shader is dispatched one workgroup per group of this many channels, so [`Builder::emit`]
+/// has to know it to compute [`Push::count`], exactly as it does for [`CONV_POINT_TILE`].
+const CONV_VEC_ROWS: u32 = 8;
 
 /// `erf`, to about 1.5e-7 — Abramowitz and Stegun 7.1.26.
 ///
@@ -1777,9 +1793,25 @@ impl<'a> Builder<'a> {
                     && si.h == so.h
                     && si.w == so.w;
                 let positions = so.h * so.w;
+                // At one position the tiled shader pads 15 of every 16 columns and stores from 8 of
+                // every 64 invocations, so a single-position pointwise convolution goes to the gemv
+                // shader instead. It is the whole of a SMaLL-100 decode step.
+                let vector = tiled && positions == 1;
                 let tiles = so.c.div_ceil(CONV_POINT_TILE) * positions.div_ceil(CONV_POINT_TILE);
+                let rows = so.c.div_ceil(CONV_VEC_ROWS);
+                let kind = match (tiled, vector) {
+                    (_, true) => Kind::ConvVecInt8,
+                    (true, false) => Kind::ConvPointInt8,
+                    (false, false) => Kind::ConvInt8,
+                };
+                // Workgroups for the two staged kinds, output elements for the untiled one.
+                let count = match kind {
+                    Kind::ConvVecInt8 => rows,
+                    Kind::ConvPointInt8 => tiles,
+                    _ => so.len(),
+                };
                 ops.push(Op::Dispatch {
-                    kind: if tiled { Kind::ConvPointInt8 } else { Kind::ConvInt8 },
+                    kind,
                     push: Push {
                         in0: at(*input)?,
                         out: at(*out)?,
@@ -1796,9 +1828,9 @@ impl<'a> Builder<'a> {
                         out_c: so.c,
                         out_h: so.h,
                         out_w: so.w,
-                        // `conv_point_int8.comp` reads none of these, unlike `Kind::ConvPoint`'s
-                        // push block, which leaves them at zero. They are filled in either way so
-                        // that `nets::reference` can serve both kinds from one `conv_int8`, whose
+                        // Neither staged shader reads these, unlike `Kind::ConvPoint`'s push block,
+                        // which leaves them at zero. They are filled in either way so that
+                        // `nets::reference` can serve all three kinds from one `conv_int8`, whose
                         // arithmetic is identical once the geometry above holds.
                         kh: kernel.0,
                         kw: kernel.1,
@@ -1810,11 +1842,15 @@ impl<'a> Builder<'a> {
                         pad_l: pad.1,
                         group: *group,
                         act: act.code(),
-                        // Tiles for the tiled kind, one workgroup each; output elements otherwise.
-                        count: if tiled { tiles } else { so.len() },
+                        count,
                         ..Push::default()
                     },
-                    invocations: if tiled { tiles * 64 } else { so.len() },
+                    // One workgroup of 64 per unit for the two staged shaders; one invocation per
+                    // output element for the untiled one.
+                    invocations: match kind {
+                        Kind::ConvVecInt8 | Kind::ConvPointInt8 => count * 64,
+                        _ => count,
+                    },
                 });
             }
             Node::Conv {
@@ -2500,7 +2536,9 @@ pub(crate) mod tests {
     pub fn name_of(kind: super::Kind) -> String {
         match kind {
             super::Kind::ConvPoint => "Conv".to_string(),
-            super::Kind::ConvPointInt8 => "ConvInt8".to_string(),
+            // Both staged int8 lowerings are the same graph op as the untiled one. Which shader
+            // serves a `1 x 1` is a lowering decision the op-inventory tests should not see.
+            super::Kind::ConvPointInt8 | super::Kind::ConvVecInt8 => "ConvInt8".to_string(),
             other => format!("{other:?}"),
         }
     }
@@ -2572,8 +2610,11 @@ pub(crate) mod tests {
                         Kind::Embed => vec![(push.in0, push.in_c * push.out_w)],
                         // As `Conv`: the whole input plane, whatever the kernel touches.
                         Kind::ConvInt8 => vec![(push.in0, dense)],
-                        // count is tiles here, so the read span is the input plane.
-                        Kind::ConvPoint | Kind::ConvPointInt8 => vec![(push.in0, dense)],
+                        // count is tiles or channel groups here, so the read span is the input
+                        // plane. `ConvVecInt8`'s is one position of it.
+                        Kind::ConvPoint | Kind::ConvPointInt8 | Kind::ConvVecInt8 => {
+                            vec![(push.in0, dense)]
+                        }
                         _ => vec![(push.in0, dense)],
                     };
                     ((push.out, written), reads)

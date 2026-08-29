@@ -58,9 +58,11 @@ const ATTN_SCORES_CACHED: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_scores_cached.comp.spv"));
 const ATTN_APPLY_CACHED: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/attn_apply_cached.comp.spv"));
+const CONV_VEC_INT8: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/conv_vec_int8.comp.spv"));
 
 /// Every shader, in the order [`Pipelines::create`] destructures them.
-const SPIRV: [&[u8]; 26] = [
+const SPIRV: [&[u8]; 27] = [
     CONV,
     CONV_TRANSPOSE,
     MAXPOOL,
@@ -87,6 +89,7 @@ const SPIRV: [&[u8]; 26] = [
     ROTARY,
     ATTN_SCORES_CACHED,
     ATTN_APPLY_CACHED,
+    CONV_VEC_INT8,
 ];
 
 /// `local_size_x` in `shaders/common.glsl`. A dispatch covers `ceil(invocations / this)`
@@ -141,6 +144,7 @@ pub struct Pipelines {
     rotary: vk::Pipeline,
     attn_scores_cached: vk::Pipeline,
     attn_apply_cached: vk::Pipeline,
+    conv_vec_int8: vk::Pipeline,
 }
 
 impl Pipelines {
@@ -356,6 +360,7 @@ impl Pipelines {
             rotary,
             attn_scores_cached,
             attn_apply_cached,
+            conv_vec_int8,
         ] = match <[vk::Pipeline; SPIRV.len()]>::try_from(built) {
             Ok(all) => all,
             Err(built) => {
@@ -398,6 +403,7 @@ impl Pipelines {
             rotary,
             attn_scores_cached,
             attn_apply_cached,
+            conv_vec_int8,
         })
     }
 
@@ -426,6 +432,7 @@ impl Pipelines {
             Kind::ConvInt8 => self.conv_int8,
             Kind::ConvPoint => self.conv_point,
             Kind::ConvPointInt8 => self.conv_point_int8,
+            Kind::ConvVecInt8 => self.conv_vec_int8,
             Kind::Mul => self.mul,
             Kind::Constant => self.constant,
             Kind::AddBroadcast => self.add_bcast,
@@ -464,6 +471,7 @@ impl Pipelines {
             self.rotary,
             self.attn_scores_cached,
             self.attn_apply_cached,
+            self.conv_vec_int8,
         ] {
             device.destroy_pipeline(pipeline, None);
         }
