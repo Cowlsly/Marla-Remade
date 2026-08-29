@@ -6,4 +6,9 @@
     <string name="all">Tutti</string>
     <string name="new_folder">Nuova cartella</string>
     <string name="create">Crea</string>
+    <string name="delete">Elimina</string>
+    <string name="cancel">Annulla</string>
+    <string name="save">Salva</string>
+    <string name="name">Nome</string>
+    <string name="preview">Anteprima</string>
 </resources>
